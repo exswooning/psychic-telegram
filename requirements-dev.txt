@@ -1,0 +1,9 @@
+-r requirements.txt
+
+# Test suite
+pytest>=8.0.0
+pytest-cov>=5.0.0
+
+# Static checks (optional but recommended in CI)
+ruff>=0.5.0
+mypy>=1.10.0

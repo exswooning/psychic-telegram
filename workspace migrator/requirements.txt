@@ -1,0 +1,15 @@
+# Core Google API stack
+google-api-python-client>=2.130.0
+google-auth>=2.30.0
+google-auth-httplib2>=0.2.0
+
+# httplib2 is not thread-safe; each worker thread builds its own http object.
+httplib2>=0.22.0
+
+# CLI / UX
+tqdm>=4.66.0
+
+# NOTE: sqlite3 ships with CPython; no dependency required.
+
+# TUI dashboard: `curses` ships with CPython on Linux/macOS. Windows needs this.
+windows-curses>=2.3.2; sys_platform == "win32"

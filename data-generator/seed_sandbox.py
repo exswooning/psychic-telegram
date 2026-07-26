@@ -1,0 +1,647 @@
+"""
+tools/seed_sandbox.py
+=====================
+Seeds a **sandbox** source tenant with a realistic five-user organisation:
+department trees, project folders, an archive, personal folders, a cross-user
+sharing graph, mail between the users, and shared calendar meetings.
+
+Then tears it all down again, so the rehearsal is repeatable.
+
+The sharing graph is the point
+------------------------------
+Every user owns their own department and project and shares outward. So the five
+users collectively *see* far more than they collectively *own*, and the union of
+what they own equals the corpus exactly once. With `OWNED_ONLY=true` (the
+default), a correct migration reproduces that union — no more.
+
+    total files across 5 target users == total files OWNED across 5 source users
+
+If the target ends up larger, the engine is duplicating shared-in files once per
+recipient, which on a real tenant means paying to store the same deck four times
+and confusing everyone about which copy is authoritative.
+`tools/rehearsal.py` asserts this equality.
+
+Credentials — read this before running
+--------------------------------------
+The production source service account is **read-only by design** (see
+`config.SOURCE_SCOPES`). Seeding writes, so it needs a different grant. That
+friction is deliberate: it makes seeding a production tenant structurally
+impossible.
+
+Set `SEED_SA_KEY` to a service account whose client ID has been granted the
+write scopes below **in the sandbox source tenant only**.
+
+Safety rails (all three required)
+---------------------------------
+  1. `--confirm-domain` must exactly match `SOURCE_DOMAIN`
+  2. `SANDBOX_MODE=true` must be set
+  3. The domain must not appear in `PROTECTED_DOMAINS`
+
+Usage
+-----
+    export SANDBOX_MODE=true PROTECTED_DOMAINS=yourcompany.com
+    python tools/seed_sandbox.py --confirm-domain sandbox-src.example \\
+        --scale medium --external-email you@gmail.com
+    python tools/seed_sandbox.py --confirm-domain sandbox-src.example --reset
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import concurrent.futures as futures
+import io
+import json
+import os
+import random
+import sys
+import time
+from datetime import datetime, timedelta, timezone
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from config import Settings  # noqa: E402
+from resilience import retry_on_google_error  # noqa: E402
+from tools.corpus import ORG, SCALES, CorpusBuilder  # noqa: E402
+
+SEED_SCOPES = [
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/gmail.insert",
+    "https://www.googleapis.com/auth/gmail.labels",
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/calendar",
+]
+
+
+# ======================================================================
+# Safety
+# ======================================================================
+def assert_sandbox(settings: Settings, confirm_domain: str) -> None:
+    protected = {
+        d.strip().lower()
+        for d in os.getenv("PROTECTED_DOMAINS", "").split(",") if d.strip()
+    }
+    domain = settings.source_domain.lower()
+
+    if os.getenv("SANDBOX_MODE", "").lower() != "true":
+        sys.exit("REFUSING: set SANDBOX_MODE=true to run destructive seeding.")
+    if confirm_domain.lower() != domain:
+        sys.exit(
+            f"REFUSING: --confirm-domain '{confirm_domain}' does not match "
+            f"SOURCE_DOMAIN '{settings.source_domain}'."
+        )
+    if domain in protected:
+        sys.exit(f"REFUSING: {domain} is listed in PROTECTED_DOMAINS.")
+    print(f"Sandbox guard passed for {domain}.")
+
+
+# ======================================================================
+# Media + retry helpers (module level so tests can substitute them)
+# ======================================================================
+def _media(data: bytes, mimetype: str):
+    from googleapiclient.http import MediaIoBaseUpload
+
+    return MediaIoBaseUpload(io.BytesIO(data), mimetype=mimetype,
+                             resumable=len(data) > 5 * 1024 * 1024)
+
+
+def _retry_factory(settings: Settings):
+    def wrap(fn):
+        return retry_on_google_error(
+            max_retries=settings.max_retries,
+            base_delay=settings.base_backoff,
+            max_delay=settings.max_backoff,
+        )(fn)
+
+    return wrap
+
+
+def _iso(days_ago: int) -> str:
+    return (datetime.now(timezone.utc) - timedelta(days=days_ago)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+
+# ======================================================================
+# Gmail — mail between the five users
+# ======================================================================
+def _rfc822(subject: str, sender: str, to: str, days_ago: int,
+            body: str = "", msg_id: str = "", in_reply_to: str = "",
+            cc: str = "", attachment_kb: int = 0) -> bytes:
+    date = (datetime.now(timezone.utc) - timedelta(days=days_ago)).strftime(
+        "%a, %d %b %Y %H:%M:%S +0000"
+    )
+    headers = [
+        f"Message-ID: <{msg_id or abs(hash(subject + sender))}@seed.test>",
+        f"From: {sender}", f"To: {to}", f"Date: {date}",
+        f"Subject: {subject}", "MIME-Version: 1.0",
+    ]
+    if cc:
+        headers.append(f"Cc: {cc}")
+    if in_reply_to:
+        headers += [f"In-Reply-To: <{in_reply_to}@seed.test>",
+                    f"References: <{in_reply_to}@seed.test>"]
+
+    body = body or "Recorded for audit. See the linked document for detail."
+    if attachment_kb:
+        b = "----seedboundary"
+        blob = base64.b64encode(os.urandom(attachment_kb * 1024)).decode()
+        headers.append(f'Content-Type: multipart/mixed; boundary="{b}"')
+        parts = [f"--{b}", "Content-Type: text/plain; charset=UTF-8", "", body,
+                 f"--{b}", "Content-Type: application/octet-stream",
+                 'Content-Disposition: attachment; filename="payload.bin"',
+                 "Content-Transfer-Encoding: base64", "", blob, f"--{b}--", ""]
+        return ("\r\n".join(headers + [""] + parts)).encode()
+
+    headers.append("Content-Type: text/plain; charset=UTF-8")
+    return ("\r\n".join(headers + ["", body, ""])).encode()
+
+
+SUBJECTS = [
+    "Q{q} budget review", "Deploy window for {p}", "Vendor contract — {a}",
+    "Headcount plan FY{y}", "Incident postmortem {n}", "Offsite logistics",
+    "Renewal for {a}", "Design review: {p}", "Policy update — expenses",
+    "Weekly status {p}", "Invoice query {a}", "Interview debrief",
+]
+
+
+def seed_gmail(gmail, settings: Settings, user: str, peers: list[str],
+               external: str, count: int) -> dict:
+    """Seed a mailbox with mail from the other four users, in every state."""
+    retry = _retry_factory(settings)
+    rng = random.Random(hash(user) & 0xFFFF)
+    m = {"messages": 0, "unread": 0, "starred": 0, "in_spam": 0, "in_trash": 0,
+         "with_attachment": 0, "labels": [], "thread_size": 3}
+
+    def make_label(name):
+        return retry(lambda: gmail.users().labels().create(
+            userId="me",
+            body={"name": name, "labelListVisibility": "labelShow",
+                  "messageListVisibility": "show"},
+        ).execute())()
+
+    def insert(raw: bytes, labels: list[str]):
+        return retry(lambda: gmail.users().messages().insert(
+            userId="me",
+            body={"raw": base64.urlsafe_b64encode(raw).decode(),
+                  "labelIds": labels},
+            internalDateSource="dateHeader",
+        ).execute())()
+
+    label_ids = {}
+    for name in ["Clients", "Clients/Acme", "Clients/Acme/2024",
+                 "Projects", "Projects/Apollo", "Archive", "Receipts"]:
+        try:
+            label_ids[name] = make_label(name)["id"]
+            m["labels"].append(name)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ! label {name}: {exc}")
+
+    user_labels = [v for k, v in label_ids.items() if "/" in k]
+
+    for i in range(count):
+        sender = rng.choice(peers + [external])
+        subj = rng.choice(SUBJECTS).format(
+            q=rng.randint(1, 4), y=2023 + rng.randint(0, 2),
+            p=rng.choice(["Apollo", "Borealis", "Cygnus", "Draco"]),
+            a=rng.choice(["Acme Corp", "Globex", "Initech", "Umbrella"]),
+            n=f"{rng.randint(100, 999)}",
+        )
+        labels = ["INBOX"]
+        r = rng.random()
+        if r < 0.30:
+            labels.append("UNREAD")
+        if r > 0.88:
+            labels.append("STARRED")
+        if rng.random() < 0.25 and user_labels:
+            labels.append(rng.choice(user_labels))
+        if rng.random() < 0.04:
+            labels = ["SPAM"]
+        elif rng.random() < 0.04:
+            labels = ["TRASH"]
+        elif rng.random() < 0.12:
+            labels = ["SENT"]
+
+        att = 2048 if rng.random() < 0.05 else 0
+        raw = _rfc822(subj, sender, user, rng.randint(1, 2000),
+                      cc=rng.choice(peers) if rng.random() < 0.3 else "",
+                      attachment_kb=att)
+        try:
+            insert(raw, labels)
+            m["messages"] += 1
+            m["unread"] += "UNREAD" in labels
+            m["starred"] += "STARRED" in labels
+            m["in_spam"] += "SPAM" in labels
+            m["in_trash"] += "TRASH" in labels
+            m["with_attachment"] += bool(att)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ! message: {exc}")
+
+    # A deterministic three-message thread, so threading can be checked by hand.
+    root_id = f"thread-root-{user.split('@')[0]}"
+    for i, (subj, sender, reply_to) in enumerate([
+        ("Q2 numbers", peers[0], ""),
+        ("Re: Q2 numbers", user, root_id),
+        ("Re: Q2 numbers", peers[0], root_id),
+    ]):
+        raw = _rfc822(subj, sender, user, 60 - i,
+                      msg_id=root_id if i == 0 else f"{root_id}-{i}",
+                      in_reply_to=reply_to)
+        try:
+            insert(raw, ["INBOX"])
+            m["messages"] += 1
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ! thread message {i}: {exc}")
+
+    return m
+
+
+# ======================================================================
+# Calendar — meetings across the org
+# ======================================================================
+def seed_calendar(cal, settings: Settings, user: str, peers: list[str],
+                  external: str, count: int) -> dict:
+    """Seed events using import (not insert), so seeding is itself silent."""
+    retry = _retry_factory(settings)
+    rng = random.Random(hash(user) & 0xFFFF)
+    m = {"events": 0, "recurring": 0, "with_external": 0, "all_day": 0}
+
+    def imp(body):
+        return retry(lambda: cal.events().import_(
+            calendarId="primary", body=body, conferenceDataVersion=0
+        ).execute())()
+
+    def window(days_ago: int, hour: int):
+        d = (datetime.now(timezone.utc) - timedelta(days=days_ago)).replace(
+            hour=hour, minute=0, second=0, microsecond=0
+        )
+        return (d.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                (d + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+
+    titles = ["Weekly sync", "Design review", "Budget check-in", "1:1",
+              "Sprint planning", "Customer call", "Retro", "All-hands prep"]
+
+    for i in range(count):
+        days = rng.randint(1, 700)
+        start, end = window(days, rng.randint(8, 17))
+        attendees = [{"email": p, "responseStatus": rng.choice(
+            ["accepted", "tentative", "declined", "needsAction"])}
+            for p in rng.sample(peers, rng.randint(1, min(3, len(peers))))]
+        has_ext = rng.random() < 0.15
+        if has_ext:
+            attendees.append({"email": external, "responseStatus": "tentative"})
+
+        body = {
+            "iCalUID": f"seed-{user.split('@')[0]}-{i}@seed.test",
+            "summary": f"{rng.choice(titles)} #{i+1}",
+            "description": "Seeded by seed_sandbox.py",
+            "location": f"Room {rng.randint(1, 9)}{rng.choice('ABC')}",
+            "start": {"dateTime": start, "timeZone": "UTC"},
+            "end": {"dateTime": end, "timeZone": "UTC"},
+            "organizer": {"email": user, "self": True},
+            "attendees": attendees,
+            "reminders": {"useDefault": True},
+        }
+        if rng.random() < 0.12:
+            body["recurrence"] = ["RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=12"]
+            m["recurring"] += 1
+        try:
+            imp(body)
+            m["events"] += 1
+            m["with_external"] += has_ext
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ! event {i}: {exc}")
+
+    # One recurring series with a stable UID, for the hand-edited exception.
+    start, end = window(30, 10)
+    try:
+        imp({
+            "iCalUID": f"weekly-team-sync-{user.split('@')[0]}@seed.test",
+            "summary": "Weekly team sync",
+            "start": {"dateTime": start, "timeZone": "UTC"},
+            "end": {"dateTime": end, "timeZone": "UTC"},
+            "organizer": {"email": user, "self": True},
+            "attendees": [{"email": p, "responseStatus": "accepted"}
+                          for p in peers],
+            "recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=20"],
+        })
+        m["events"] += 1
+        m["recurring"] += 1
+    except Exception as exc:  # noqa: BLE001
+        print(f"  ! weekly series: {exc}")
+
+    day = (datetime.now(timezone.utc) - timedelta(days=45)).strftime("%Y-%m-%d")
+    nxt = (datetime.now(timezone.utc) - timedelta(days=44)).strftime("%Y-%m-%d")
+    try:
+        imp({
+            "iCalUID": f"offsite-{user.split('@')[0]}@seed.test",
+            "summary": "All-day offsite",
+            "start": {"date": day}, "end": {"date": nxt},
+            "organizer": {"email": user, "self": True},
+        })
+        m["events"] += 1
+        m["all_day"] += 1
+    except Exception as exc:  # noqa: BLE001
+        print(f"  ! all-day event: {exc}")
+
+    return m
+
+
+# ======================================================================
+# Reset
+# ======================================================================
+def reset_drive(drive, settings: Settings) -> int:
+    retry = _retry_factory(settings)
+    deleted = 0
+    while True:
+        resp = retry(lambda: drive.files().list(
+            q="'me' in owners and trashed = false", pageSize=200,
+            fields="files(id)", spaces="drive",
+        ).execute())()
+        files = resp.get("files", [])
+        if not files:
+            break
+        for f in files:
+            try:
+                retry(lambda fid=f["id"]: drive.files().delete(
+                    fileId=fid, supportsAllDrives=True).execute())()
+                deleted += 1
+            except Exception:  # noqa: BLE001 - child already removed with parent
+                pass
+    try:
+        drive.files().emptyTrash().execute()
+    except Exception:  # noqa: BLE001
+        pass
+    return deleted
+
+
+def reset_gmail(gmail, settings: Settings) -> int:
+    retry = _retry_factory(settings)
+    deleted = 0
+    while True:
+        resp = retry(lambda: gmail.users().messages().list(
+            userId="me", maxResults=500, includeSpamTrash=True).execute())()
+        msgs = resp.get("messages", [])
+        if not msgs:
+            break
+        ids = [x["id"] for x in msgs]
+        retry(lambda: gmail.users().messages().batchDelete(
+            userId="me", body={"ids": ids}).execute())()
+        deleted += len(ids)
+    return deleted
+
+
+def reset_calendar(cal, settings: Settings) -> int:
+    retry = _retry_factory(settings)
+    deleted = 0
+    while True:
+        resp = retry(lambda: cal.events().list(
+            calendarId="primary", maxResults=2500, singleEvents=False
+        ).execute())()
+        items = resp.get("items", [])
+        if not items:
+            break
+        for ev in items:
+            try:
+                retry(lambda eid=ev["id"]: cal.events().delete(
+                    calendarId="primary", eventId=eid, sendUpdates="none"
+                ).execute())()
+                deleted += 1
+            except Exception:  # noqa: BLE001
+                pass
+        if len(items) < 2500:
+            break
+    return deleted
+
+
+# ======================================================================
+# Service construction
+# ======================================================================
+def build_services(settings: Settings, user: str):
+    """Delegated clients with WRITE scopes against the sandbox source tenant."""
+    import google_auth_httplib2
+    import httplib2
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+
+    key = os.getenv("SEED_SA_KEY", settings.source_sa_key)
+    creds = service_account.Credentials.from_service_account_file(
+        key, scopes=SEED_SCOPES
+    ).with_subject(user)
+
+    def svc(api, version):
+        http = google_auth_httplib2.AuthorizedHttp(
+            creds, http=httplib2.Http(timeout=300)
+        )
+        return build(api, version, http=http, cache_discovery=False)
+
+    return svc("drive", "v3"), svc("gmail", "v1"), svc("calendar", "v3")
+
+
+# ======================================================================
+# Per-user worker
+# ======================================================================
+def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
+                  external: str, scale: str, mail_count: int,
+                  event_count: int, edge_cases: bool) -> dict:
+    user = entry["email"]
+    peers = [u for u in all_users if u != user]
+    t0 = time.time()
+    print(f"  [{user}] starting ({entry['dept']}, {entry['project']})")
+
+    drive, gmail, cal = build_services(settings, user)
+    retry = _retry_factory(settings)
+
+    builder = CorpusBuilder(drive, settings, user, peers, external, scale,
+                            _media, retry)
+    drive_m = builder.build(entry["dept"], entry["project"], edge_cases)
+    gmail_m = seed_gmail(gmail, settings, user, peers, external, mail_count)
+    cal_m = seed_calendar(cal, settings, user, peers, external, event_count)
+
+    elapsed = round(time.time() - t0, 1)
+    print(f"  [{user}] done in {elapsed}s: {drive_m['total_files']} files, "
+          f"{drive_m['folders']} folders, {gmail_m['messages']} messages, "
+          f"{cal_m['events']} events")
+    return {"user": user, "dept": entry["dept"], "project": entry["project"],
+            "drive": drive_m, "gmail": gmail_m, "calendar": cal_m,
+            "elapsed_sec": elapsed}
+
+
+def reset_one_user(settings: Settings, user: str) -> dict:
+    drive, gmail, cal = build_services(settings, user)
+    return {
+        "user": user,
+        "drive": reset_drive(drive, settings),
+        "gmail": reset_gmail(gmail, settings),
+        "calendar": reset_calendar(cal, settings),
+    }
+
+
+# ======================================================================
+# CLI
+# ======================================================================
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        description="Seed or reset a five-user sandbox organisation."
+    )
+    ap.add_argument("--confirm-domain", required=True)
+    ap.add_argument("--users", help="comma-separated localparts "
+                                    "(default: alice,bob,carol,dave,erin)")
+    ap.add_argument("--scale", default="medium", choices=list(SCALES))
+    ap.add_argument("--external-email", default="external.tester@example.com")
+    ap.add_argument("--mail", type=int, help="messages per user "
+                                             "(default scales with --scale)")
+    ap.add_argument("--events", type=int, help="events per user")
+    ap.add_argument("--workers", type=int, default=5)
+    ap.add_argument("--manifest", default="sandbox_manifest.json")
+    ap.add_argument("--identities-out", default="identities.csv")
+    ap.add_argument("--edge-cases", default="first",
+                    choices=["first", "all", "none"],
+                    help="full edge-case set on user 1, on everyone, or nobody")
+    ap.add_argument("--reset", action="store_true", help="DELETE everything")
+    args = ap.parse_args(argv)
+
+    settings = Settings()
+    assert_sandbox(settings, args.confirm_domain)
+
+    locals_ = ([u.strip() for u in args.users.split(",")] if args.users
+               else [e["local"] for e in ORG])
+    entries = []
+    for i, lp in enumerate(locals_):
+        template = ORG[i % len(ORG)]
+        entries.append({
+            "local": lp, "email": f"{lp}@{settings.source_domain}",
+            "dept": template["dept"], "project": template["project"],
+        })
+    all_users = [e["email"] for e in entries]
+
+    # --- Reset -----------------------------------------------------------
+    if args.reset:
+        print(f"About to DELETE all Drive files, mail and events for:")
+        for u in all_users:
+            print(f"    {u}")
+        if input(f"Type the domain to confirm: ").strip() != settings.source_domain:
+            print("Aborted.")
+            return 1
+        with futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
+            for r in pool.map(lambda u: reset_one_user(settings, u), all_users):
+                print(f"  {r['user']}: {r['drive']} files, {r['gmail']} "
+                      f"messages, {r['calendar']} events deleted")
+        for f in (args.manifest,):
+            if os.path.exists(f):
+                os.remove(f)
+        return 0
+
+    # --- Seed ------------------------------------------------------------
+    cfg = SCALES[args.scale]
+    mail_count = args.mail if args.mail is not None else cfg["per_leaf"] * 12
+    event_count = args.events if args.events is not None else cfg["per_leaf"] * 4
+
+    print(f"\nSeeding {len(entries)} users in {settings.source_domain} "
+          f"at scale '{args.scale}'")
+    print(f"  external collaborator: {args.external_email}")
+    print(f"  ~{mail_count} messages and ~{event_count} events per user")
+
+    # Rough forecast so nobody starts a 'huge' run expecting it to take a
+    # minute. Drive sustains roughly 7 successful writes/sec/user in practice.
+    est_files = cfg["per_leaf"] * 60 + cfg["wide"] + cfg["archive_years"] * 4 * (
+        cfg["per_leaf"] // 3 or 1)
+    est_calls = (est_files + mail_count + event_count) * len(entries)
+    est_min = est_calls / (min(args.workers, len(entries)) * 7) / 60
+    print(f"  estimated ~{est_calls:,} API writes, roughly {est_min:.0f} minute(s) "
+          f"at {args.workers} parallel users\n")
+    if est_min > 5:
+        if input("This is a long run. Continue? [y/N] ").strip().lower() != "y":
+            print("Aborted.")
+            return 1
+
+    t0 = time.time()
+    results = []
+    with futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
+        jobs = {
+            pool.submit(
+                seed_one_user, settings, e, all_users, args.external_email,
+                args.scale, mail_count, event_count,
+                args.edge_cases == "all" or (args.edge_cases == "first" and i == 0),
+            ): e["email"]
+            for i, e in enumerate(entries)
+        }
+        for fut in futures.as_completed(jobs):
+            try:
+                results.append(fut.result())
+            except Exception as exc:  # noqa: BLE001
+                print(f"  ! {jobs[fut]} FAILED: {exc}")
+                results.append({"user": jobs[fut], "error": str(exc)})
+
+    ok = [r for r in results if "error" not in r]
+    totals = {
+        "users": len(ok),
+        "owned_files": sum(r["drive"]["total_files"] for r in ok),
+        "folders": sum(r["drive"]["folders"] for r in ok),
+        "docs": sum(r["drive"]["docs"] for r in ok),
+        "sheets": sum(r["drive"]["sheets"] for r in ok),
+        "slides": sum(r["drive"]["slides"] for r in ok),
+        "binaries": sum(r["drive"]["binaries"] for r in ok),
+        "shortcuts": sum(r["drive"]["shortcuts"] for r in ok),
+        "messages": sum(r["gmail"]["messages"] for r in ok),
+        "events": sum(r["calendar"]["events"] for r in ok),
+        "grants_user": sum(r["drive"]["grants"]["user"] for r in ok),
+        "grants_domain": sum(r["drive"]["grants"]["domain"] for r in ok),
+        "grants_anyone": sum(r["drive"]["grants"]["anyone"] for r in ok),
+        "grants_external": sum(r["drive"]["grants"]["external"] for r in ok),
+    }
+    rejected = sorted({x for r in ok for x in r["drive"]["grants_rejected"]})
+
+    manifest = {
+        "seeded_at": datetime.now(timezone.utc).isoformat(),
+        "domain": settings.source_domain,
+        "scale": args.scale,
+        "external": args.external_email,
+        "users": all_users,
+        "totals": totals,
+        "grants_rejected": rejected,
+        "per_user": results,
+        "elapsed_sec": round(time.time() - t0, 1),
+    }
+    with open(args.manifest, "w", encoding="utf-8") as fh:
+        json.dump(manifest, fh, indent=2)
+
+    # Write the identity map so `main.py init-db` can consume it directly.
+    with open(args.identities_out, "w", encoding="utf-8") as fh:
+        fh.write("source_email,target_email,entity_type\n")
+        for e in entries:
+            fh.write(f"{e['email']},{e['local']}@{settings.target_domain},user\n")
+
+    print(f"\n{'='*66}")
+    print(f"Seeded {totals['users']} users in {manifest['elapsed_sec']}s")
+    print(f"  OWNED files : {totals['owned_files']:,}  "
+          f"(docs {totals['docs']:,}, sheets {totals['sheets']:,}, "
+          f"slides {totals['slides']:,}, binaries {totals['binaries']:,})")
+    print(f"  Folders     : {totals['folders']:,}")
+    print(f"  Messages    : {totals['messages']:,}")
+    print(f"  Events      : {totals['events']:,}")
+    print(f"  ACL grants  : {totals['grants_user']:,} user, "
+          f"{totals['grants_domain']:,} domain, "
+          f"{totals['grants_external']:,} external, "
+          f"{totals['grants_anyone']:,} anyone")
+    print(f"{'='*66}")
+    print(f"Manifest   -> {args.manifest}")
+    print(f"Identities -> {args.identities_out}")
+
+    if rejected:
+        print(f"\nNOTE: the tenant rejected some grants: {rejected}")
+        print("That is a real finding. Check Admin Console > Drive > Sharing "
+              "settings before blaming the migration for missing permissions.")
+
+    print("\nBy hand before rehearsing:")
+    print("  1. Open 'Weekly team sync' in the Calendar UI and move ONE "
+          "instance (the API cannot cleanly seed a recurrence exception).")
+    print("  2. Create one Google Form, to confirm it is skipped not crashed.")
+    print("\nNext:")
+    print(f"  python main.py init-db --identities {args.identities_out}")
+    print(f"  python tools/rehearsal.py")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
