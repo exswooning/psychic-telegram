@@ -205,26 +205,44 @@ def verify_user(auth: AuthManager, db: MigrationDB, settings: Settings,
         src_gmail = auth.source_gmail(source_user)
         tgt_gmail = auth.target_gmail(target_user)
 
-        @retry_on_google_error(max_retries=settings.max_retries)
-        def _sprof():
-            return src_gmail.users().getProfile(userId="me").execute()
+        def _count_messages(svc) -> int:
+            """
+            Count every message the mailbox holds, Spam and Trash included.
 
-        @retry_on_google_error(max_retries=settings.max_retries)
-        def _tprof():
-            return tgt_gmail.users().getProfile(userId="me").execute()
+            Deliberately NOT getProfile().messagesTotal: that figure excludes
+            Spam and Trash, while the migration copies them (the engine lists
+            with includeSpamTrash=True). Comparing the two makes every correct
+            migration look short by exactly the spam+trash count -- which is
+            what this check used to do.
+            """
+            total, token = 0, None
+            while True:
+                @retry_on_google_error(max_retries=settings.max_retries)
+                def _page(t=token):
+                    return svc.users().messages().list(
+                        userId="me", maxResults=500, pageToken=t,
+                        includeSpamTrash=True,
+                    ).execute()
 
-        s_msgs = _sprof().get("messagesTotal", 0)
-        t_msgs = _tprof().get("messagesTotal", 0)
+                resp = _page()
+                total += len(resp.get("messages", []))
+                token = resp.get("nextPageToken")
+                if not token:
+                    return total
+
+        s_msgs = _count_messages(src_gmail)
+        t_msgs = _count_messages(tgt_gmail)
         migrated = db.conn.execute(
             """SELECT COUNT(*) c FROM id_mapping
                WHERE source_user=? AND type='message'""",
             (source_user,),
         ).fetchone()["c"]
-        # Target may legitimately hold more (pre-existing mail), never fewer
-        # than what we recorded inserting.
+        # Target may legitimately hold more (mail that was already in the
+        # account, e.g. Workspace's own welcome messages), never fewer than
+        # what we recorded inserting.
         rep.add("gmail.count", t_msgs >= migrated,
-                f"source {s_msgs}, inserted {migrated}, target {t_msgs}",
-                s_msgs, t_msgs)
+                f"source {s_msgs} (incl. spam/trash), inserted {migrated}, "
+                f"target {t_msgs}", s_msgs, t_msgs)
 
         # Unread-state sample: a migration that marks everything unread is the
         # single most-complained-about failure mode.

@@ -316,6 +316,22 @@ def test_unmapped_internal_identity_is_dropped_and_logged(migrator, auth, db):
     assert row is not None and row["status"] == "SKIPPED_UNMAPPED_IDENTITY"
 
 
+def test_permission_with_no_email_is_skipped_not_sent_empty(migrator, auth, db):
+    """A dangling grant left behind after the grantee's account was deleted
+    surfaces as a 'user' permission with no emailAddress at all. Sending that
+    straight to the API produces a confusing 400; it should be skipped."""
+    src = auth.source_drive(SRC_USER)
+    fid = src.add_binary("stale-grant.pdf")
+    src.add_permission(fid, "user", "reader")  # no email= at all
+
+    migrator.run()
+    assert _target_perms(auth, "stale-grant.pdf") == []
+    row = db.get_audit(SRC_USER, f"{fid}:(no-email)", "acl")
+    assert row is not None and row["status"] == "SKIPPED_UNMAPPED_IDENTITY"
+    # The file itself must still migrate -- a stale ACL is not the file's fault.
+    assert auth.target_drive(TGT_USER).by_name("stale-grant.pdf")
+
+
 def test_external_collaborator_is_preserved_verbatim(migrator, auth):
     src = auth.source_drive(SRC_USER)
     fid = src.add_binary("vendor.pdf")
@@ -382,6 +398,56 @@ def test_permissions_never_send_notification_email(migrator, auth, db):
     assert all(c["sendNotificationEmail"] is False for c in creates)
 
 
+def test_modified_time_survives_acl_application(migrator, auth, db):
+    """
+    Granting a permission bumps modifiedTime to now (real Drive behaviour,
+    verified live). ACLs are applied after the copy, so without a re-assert
+    every *shared* file would show the migration date -- silently breaking
+    "sort by last modified" for exactly the files people collaborate on.
+    """
+    from db import bulk_seed_identities
+
+    bulk_seed_identities(db, [("bob@tenanta.com", "bob@tenantb.com")])
+    src = auth.source_drive(SRC_USER)
+    fid = src.add_binary("shared.pdf", mtime="2019-03-04T05:06:07Z")
+    src.add_permission(fid, "user", "reader", email="bob@tenanta.com")
+
+    migrator.run()
+
+    tgt = auth.target_drive(TGT_USER)
+    copied = tgt.by_name("shared.pdf")[0]
+    assert tgt.perms[copied["id"]], "precondition: a grant was actually applied"
+    assert copied["modifiedTime"] == "2019-03-04T05:06:07Z"
+
+
+def test_modified_time_survives_acls_on_folders_too(migrator, auth, db):
+    from db import bulk_seed_identities
+
+    bulk_seed_identities(db, [("bob@tenanta.com", "bob@tenantb.com")])
+    src = auth.source_drive(SRC_USER)
+    folder = src.add_folder("Shared Reports", mtime="2020-07-08T09:10:11Z")
+    src.add_permission(folder, "user", "writer", email="bob@tenanta.com")
+
+    migrator.run()
+
+    tgt = auth.target_drive(TGT_USER)
+    copied = tgt.by_name("Shared Reports")[0]
+    assert copied["modifiedTime"] == "2020-07-08T09:10:11Z"
+
+
+def test_unshared_file_needs_no_extra_update_call(migrator, auth):
+    """The re-assert only fires when a grant was actually applied -- an
+    unshared file must not cost an extra API round trip per item."""
+    src = auth.source_drive(SRC_USER)
+    src.add_binary("private.pdf", mtime="2021-01-02T03:04:05Z")
+
+    migrator.run()
+
+    tgt = auth.target_drive(TGT_USER)
+    assert tgt.by_name("private.pdf")[0]["modifiedTime"] == "2021-01-02T03:04:05Z"
+    assert tgt.call_count("files.update") == 0
+
+
 def test_acl_failure_does_not_lose_the_file(migrator, auth, db):
     from db import bulk_seed_identities
 
@@ -397,6 +463,293 @@ def test_acl_failure_does_not_lose_the_file(migrator, auth, db):
     # The bytes landed; only the ACL failed.
     assert db.get_audit(SRC_USER, fid, "file")["status"] == "SUCCESS"
     assert auth.target_drive(TGT_USER).by_name("policy-blocked.pdf")
+
+
+# ======================================================================
+# Drive comments (MIGRATE_COMMENTS)
+# ======================================================================
+def test_comments_are_migrated_when_enabled(auth, db, settings, identity, quota):
+    import drive_engine
+
+    settings.migrate_comments = True
+    src = auth.source_drive(SRC_USER)
+    fid = src.add_binary("reviewed.pdf")
+    src.add_comment(fid, "Needs a second look", author="Bob Johnson",
+                    created="2023-05-06T00:00:00Z")
+
+    drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota).run()
+
+    tgt = auth.target_drive(TGT_USER)
+    copied = tgt.by_name("reviewed.pdf")[0]
+    comments = tgt.comment_store[copied["id"]]
+    assert len(comments) == 1
+    # The API cannot author a comment as someone else, so attribution is
+    # carried in the text rather than silently reassigned.
+    assert "Bob Johnson" in comments[0]["content"]
+    assert "Needs a second look" in comments[0]["content"]
+
+
+def test_comment_replies_are_migrated(auth, db, settings, identity, quota):
+    import drive_engine
+
+    settings.migrate_comments = True
+    src = auth.source_drive(SRC_USER)
+    fid = src.add_binary("thread.pdf")
+    src.add_comment(fid, "Top level", author="Alice",
+                    replies=[{"id": "r1", "content": "Agreed",
+                             "author": {"displayName": "Carol"},
+                             "createdTime": "2023-05-07T00:00:00Z"}])
+
+    drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota).run()
+
+    tgt = auth.target_drive(TGT_USER)
+    copied = tgt.by_name("thread.pdf")[0]
+    replies = tgt.comment_store[copied["id"]][0]["replies"]
+    assert len(replies) == 1
+    assert "Carol" in replies[0]["content"]
+
+
+def test_comments_are_skipped_unless_enabled(auth, db, settings, identity, quota):
+    import drive_engine
+
+    settings.migrate_comments = False
+    src = auth.source_drive(SRC_USER)
+    fid = src.add_binary("quiet.pdf")
+    src.add_comment(fid, "should not travel")
+
+    drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota).run()
+    assert src.call_count("comments.list") == 0
+
+
+def test_comments_are_not_duplicated_on_rerun(auth, db, settings, identity, quota):
+    import drive_engine
+
+    settings.migrate_comments = True
+    src = auth.source_drive(SRC_USER)
+    fid = src.add_binary("once.pdf")
+    src.add_comment(fid, "only once")
+
+    drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota).run()
+    tgt = auth.target_drive(TGT_USER)
+    copied = tgt.by_name("once.pdf")[0]
+    assert len(tgt.comment_store[copied["id"]]) == 1
+
+    drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota).run()
+    assert len(tgt.comment_store[copied["id"]]) == 1
+
+
+# ======================================================================
+# Server-side copy mode (TRANSFER_MODE=server_side)
+# ======================================================================
+def _server_side(settings):
+    settings.transfer_mode = "server_side"
+    return settings
+
+
+def test_server_side_copies_without_streaming_bytes(auth, db, settings, identity, quota):
+    """The whole point: no download/upload through this host at all."""
+    import drive_engine
+
+    _server_side(settings)
+    src = auth.source_drive(SRC_USER)
+    src.add_binary("big.bin", data=b"x" * 4096)
+
+    drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota).run()
+
+    assert src.call_count("files.copy") == 1
+    assert src.call_count("files.get_media") == 0
+    assert src.call_count("files.export_media") == 0
+    assert auth.target_drive(TGT_USER).by_name("big.bin")
+
+
+def test_server_side_keeps_native_docs_native(auth, db, settings, identity, quota):
+    """No OOXML round trip means no fidelity loss and no 10 MB export ceiling."""
+    import drive_engine
+
+    _server_side(settings)
+    settings.export_size_limit = 10          # would reject any export
+    src = auth.source_drive(SRC_USER)
+    src.add_native("Huge Strategy", kind="document", export_bytes=b"y" * 5000)
+
+    drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota).run()
+
+    tgt = auth.target_drive(TGT_USER)
+    doc = tgt.by_name("Huge Strategy")[0]
+    assert doc["mimeType"] == NATIVE_DOC
+    # Export never happened, so the size ceiling never applied.
+    assert src.call_count("files.export_media") == 0
+    assert db.get_audit(SRC_USER, src.by_name("Huge Strategy")[0]["id"],
+                        "file")["status"] == "SUCCESS"
+
+
+def test_server_side_file_lands_in_target_my_drive_not_staging(auth, db, settings,
+                                                               identity, quota):
+    import drive_engine
+
+    _server_side(settings)
+    src = auth.source_drive(SRC_USER)
+    folder = src.add_folder("Reports")
+    src.add_binary("q1.pdf", parent=folder)
+
+    drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota).run()
+
+    tgt = auth.target_drive(TGT_USER)
+    copied = tgt.by_name("q1.pdf")[0]
+    tgt_folder = tgt.by_name("Reports")[0]
+    # Reparented out of staging and into the mirrored folder.
+    assert copied["parents"] == [tgt_folder["id"]]
+    assert copied.get("driveId") is None
+    assert copied["owners"] == [{"emailAddress": TGT_USER}]
+
+
+def test_server_side_staging_drive_is_cleaned_up(auth, db, settings, identity, quota):
+    import drive_engine
+
+    _server_side(settings)
+    auth.source_drive(SRC_USER).add_binary("a.pdf")
+    drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota).run()
+    # Everything moved out, so the empty staging drive is removed.
+    assert auth.target_drive(TGT_USER).shared_drives == {}
+
+
+def test_server_side_keeps_staging_drive_when_a_file_is_stranded(auth, db, settings,
+                                                                 identity, quota):
+    """A copy that lands but fails to move must not be deleted along with the
+    staging drive -- losing bytes is worse than leaving a drive behind."""
+    import drive_engine
+
+    _server_side(settings)
+    auth.source_drive(SRC_USER).add_binary("stranded.pdf")
+    tgt = auth.target_drive(TGT_USER)
+    tgt.fail_next("files.update", status=403, reason="insufficientPermissions",
+                  times=9)
+
+    m = drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota)
+    m.run()
+
+    assert m.stats["failed"] == 1
+    assert tgt.shared_drives, "staging drive must survive so the copy isn't lost"
+
+
+def test_server_side_reuses_existing_staging_drive_on_resume(auth, db, settings,
+                                                            identity, quota):
+    import drive_engine
+
+    _server_side(settings)
+    src = auth.source_drive(SRC_USER)
+    src.add_binary("one.pdf")
+    tgt = auth.target_drive(TGT_USER)
+    tgt.fail_next("files.update", status=403, reason="insufficientPermissions",
+                  times=9)
+    drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota).run()
+    drives_after_first = dict(tgt.shared_drives)
+    assert len(drives_after_first) == 1
+
+    tgt._faults.clear()
+    tgt.reset_calls()
+    src.add_binary("two.pdf")
+    drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota).run()
+
+    # No second staging drive was created for the same user pair.
+    assert tgt.call_count("drives.create") == 0
+
+
+def test_server_side_rerun_is_still_idempotent(auth, db, settings, identity, quota):
+    import drive_engine
+
+    _server_side(settings)
+    src = auth.source_drive(SRC_USER)
+    f = src.add_folder("Docs")
+    src.add_binary("a.pdf", parent=f)
+    src.add_native("Notes", parent=f)
+
+    drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota).run()
+    tgt = auth.target_drive(TGT_USER)
+    after_first = tgt.count()
+
+    second = drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota)
+    second.run()
+    assert tgt.count() == after_first
+    assert second.stats["files"] == 0
+    assert second.stats["skipped"] == 2
+
+
+def test_server_side_dry_run_writes_nothing(auth, db, settings, identity, quota):
+    import drive_engine
+
+    _server_side(settings)
+    settings.dry_run = True
+    src = auth.source_drive(SRC_USER)
+    src.add_binary("a.pdf")
+
+    drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota).run()
+    tgt = auth.target_drive(TGT_USER)
+    assert tgt.count() == 0
+    assert src.call_count("files.copy") == 0
+    assert tgt.shared_drives == {}, "dry run must not even create a staging drive"
+
+
+def test_server_side_still_resolves_shortcuts(auth, db, settings, identity, quota):
+    import drive_engine
+
+    _server_side(settings)
+    src = auth.source_drive(SRC_USER)
+    target_file = src.add_binary("real.pdf")
+    src.add_shortcut("link-to-real", target_id=target_file)
+
+    drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota).run()
+
+    tgt = auth.target_drive(TGT_USER)
+    sc = tgt.by_name("link-to-real")
+    assert sc, "shortcut fixup must run in server_side mode too"
+    assert sc[0]["shortcutDetails"]["targetId"] == tgt.by_name("real.pdf")[0]["id"]
+
+
+def test_server_side_delta_updates_in_place_via_upload(auth, db, settings,
+                                                       identity, quota):
+    """
+    A changed file is updated in place rather than re-copied, so the target
+    file ID and the ACLs already hanging off it survive. That path streams
+    bytes even in server_side mode -- deliberate: delete-and-recopy would
+    change the ID and drop every existing share.
+    """
+    import drive_engine
+
+    _server_side(settings)
+    src = auth.source_drive(SRC_USER)
+    fid = src.add_binary("edited.pdf", data=b"v1", mtime="2024-01-01T00:00:00Z")
+    drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota).run()
+
+    tgt = auth.target_drive(TGT_USER)
+    original_target_id = db.get_target_id(SRC_USER, fid, "file")
+    tgt.reset_calls()
+
+    src.touch(fid, mtime="2025-06-01T00:00:00Z", data=b"v2-longer")
+    delta = drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota)
+    delta.run(delta=True)
+
+    assert delta.stats["files"] == 1
+    assert db.get_target_id(SRC_USER, fid, "file") == original_target_id
+    assert tgt.content[original_target_id] == b"v2-longer"
+
+
+def test_server_side_acls_are_still_translated(auth, db, settings, identity, quota):
+    import drive_engine
+    from db import bulk_seed_identities
+
+    _server_side(settings)
+    bulk_seed_identities(db, [("bob@tenanta.com", "robert@tenantb.com")])
+    src = auth.source_drive(SRC_USER)
+    fid = src.add_binary("shared.pdf")
+    src.add_permission(fid, "user", "writer", email="bob@tenanta.com")
+
+    drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota).run()
+
+    tgt = auth.target_drive(TGT_USER)
+    copied = tgt.by_name("shared.pdf")[0]
+    emails = {p.get("emailAddress") for p in tgt.perms[copied["id"]]}
+    assert "robert@tenantb.com" in emails
+    assert not any((e or "").endswith("tenanta.com") for e in emails)
 
 
 # ======================================================================
