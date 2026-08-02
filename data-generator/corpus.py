@@ -171,6 +171,7 @@ class CorpusBuilder:
             "shortcuts": 0, "grants": {"user": 0, "domain": 0, "anyone": 0,
                                        "external": 0},
             "grants_rejected": [], "oversized_native": 0, "items": {},
+            "comments": 0,
         }
 
     # -- primitives ------------------------------------------------------
@@ -246,6 +247,38 @@ class CorpusBuilder:
             body["modifiedTime"] = _iso(days_ago)
         self.m["binaries"] += 1
         return self._create(body, media=self._media(data, mime))["id"]
+
+    def comment(self, file_id: str, content: str,
+                replies: tuple[str, ...] = ()) -> None:
+        """
+        Attach a comment thread to a file.
+
+        Comments are the one Drive feature that cannot be migrated with the
+        original author intact -- the API has no way to write a comment *as*
+        somebody else -- so seeding them is what makes that fidelity loss
+        visible in a rehearsal rather than a surprise after cutover.
+        """
+        try:
+            fn = self._retry(
+                lambda: self.drive.comments().create(
+                    fileId=file_id, body={"content": content}, fields="id",
+                ).execute()
+            )
+            created = fn()
+            self.m["comments"] += 1
+            for r in replies:
+                try:
+                    self._retry(lambda body=r, cid=created["id"]:
+                                self.drive.replies().create(
+                                    fileId=file_id, commentId=cid,
+                                    body={"content": body}, fields="id",
+                                ).execute())()
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception as exc:  # noqa: BLE001
+            label = f"comment:{type(exc).__name__}"
+            if label not in self.m["grants_rejected"]:
+                self.m["grants_rejected"].append(label)
 
     # -- sharing helpers --------------------------------------------------
     def share_domain(self, file_id: str, role: str = "reader") -> None:
@@ -336,6 +369,22 @@ class CorpusBuilder:
             fid = self.binary(f"{sub} asset {i+1:03d}.{kind[0]}", parent,
                               os.urandom(self.rng.randint(5_000, 250_000)),
                               kind[1], days_ago=age)
+
+        # ~12% of files carry a comment thread. Real Drives are full of
+        # them, and they are the clearest example of a migration that
+        # "succeeds" while quietly losing something users care about.
+        if self.rng.random() < 0.12:
+            self.comment(
+                fid,
+                self.rng.choice([
+                    "Can we get sign-off on this before Friday?",
+                    "Numbers in row 12 look off to me.",
+                    "Superseded by the Q3 version — keeping for reference.",
+                    "Approved. Nice work.",
+                ]),
+                replies=(("Agreed, updating now.",)
+                        if self.rng.random() < 0.5 else ()),
+            )
 
         # ~18% of individual files carry their own grant on top of whatever
         # they inherit — the messy reality that inherited-ACL logic must handle.
@@ -437,11 +486,24 @@ class CorpusBuilder:
         self.binary("just-over-chunk.bin", sizes, os.urandom(17 * 1024 * 1024),
                     "application/octet-stream")
 
-        # The 10 MB files.export ceiling
+        # A large native Doc, for exercising the export/import round trip.
+        #
+        # NOT the 10 MB files.export ceiling: Google's plain-text-to-Docs
+        # import conversion hard-fails (400 Bad Request) somewhere between
+        # ~1.3 MB and ~2 MB of source text -- confirmed empirically -- which
+        # is well below the 10 MB the resulting export would need to exceed
+        # to trigger SKIPPED_EXPORT_TOO_LARGE. The two constraints can't both
+        # be hit through a single plain-text upload; 460_000 repetitions
+        # (~12.9 MB source) reliably crashed the whole build with an
+        # unhandled 400. 50_000 reps (~1.3 MB) is comfortably inside the
+        # import limit. Actually exceeding the export ceiling would need
+        # building the doc incrementally via the Docs API (batchUpdate),
+        # which needs a separate `documents` OAuth scope this tool doesn't
+        # request.
         if cfg["big_native"]:
             self._create(
                 {"name": "Oversized Doc", "parents": [edge], "mimeType": DOC_MIME},
-                media=self._media(b"Lorem ipsum dolor sit amet.\n" * 460_000,
+                media=self._media(b"Lorem ipsum dolor sit amet.\n" * 50_000,
                                   "text/plain"),
             )
             self.m["docs"] += 1

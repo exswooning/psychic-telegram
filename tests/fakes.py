@@ -44,6 +44,10 @@ from googleapiclient.errors import HttpError
 
 FOLDER_MIME = "application/vnd.google-apps.folder"
 
+# Stands in for "now" when a permission grant bumps a file's modifiedTime.
+# A fixed, obviously-wrong value so a test failure reads unambiguously.
+PERMISSION_BUMP_TIME = "2099-12-31T23:59:59Z"
+
 
 # ======================================================================
 # Error plumbing
@@ -131,6 +135,11 @@ class FakeDrive(FakeService):
         self.content: dict[str, bytes] = {}     # binary payloads
         self.exports: dict[str, bytes] = {}     # native-doc export payloads
         self.perms: dict[str, list[dict]] = defaultdict(list)
+        self.comment_store: dict[str, list[dict]] = defaultdict(list)
+        self.shared_drives: dict[str, dict] = {}
+        # Server-side copy crosses tenants, so the fake needs a way to reach
+        # the other side's store. FakeAuth wires this up.
+        self.peer: Optional["FakeDrive"] = None
         self.root_id = f"root-{tenant}"
         self.store[self.root_id] = {
             "id": self.root_id, "name": "My Drive", "mimeType": FOLDER_MIME,
@@ -245,6 +254,27 @@ class FakeDrive(FakeService):
     def about(self):
         return _DriveAbout(self)
 
+    def drives(self):
+        return _DriveDrives(self)
+
+    def comments(self):
+        return _DriveComments(self)
+
+    def replies(self):
+        return _DriveReplies(self)
+
+    def add_comment(self, file_id: str, content: str, author: str = "Someone",
+                    created: str = "2024-03-04T05:06:07Z",
+                    replies: Optional[list[dict]] = None) -> str:
+        cid = self._new_id("cmt")
+        self.comment_store[file_id].append({
+            "id": cid, "content": content,
+            "author": {"displayName": author},
+            "createdTime": created, "resolved": False,
+            "replies": replies or [],
+        })
+        return cid
+
 
 class _DriveFiles:
     def __init__(self, svc: FakeDrive):
@@ -254,8 +284,14 @@ class _DriveFiles:
         return _Call(self.s, "files.list", self._list, kw)
 
     def _list(self, q: str = "", pageSize: int = 100,
-              pageToken: Optional[str] = None, **_):
+              pageToken: Optional[str] = None, corpora: str = "",
+              driveId: str = "", **_):
         rows = [f for f in self.s.store.values() if f["id"] != self.s.root_id]
+        # Enumerating a shared drive's contents (used to check a staging drive
+        # is empty before deleting it).
+        if corpora == "drive" and driveId:
+            rows = [f for f in rows if driveId in (f.get("parents") or [])]
+            return {"files": [copy.deepcopy(f) for f in rows[:pageSize]]}
         m = _Q_PARENT.search(q or "")
         if m:
             rows = [f for f in rows if m.group(1) in (f.get("parents") or [])]
@@ -306,11 +342,15 @@ class _DriveFiles:
     def _create(self, body: dict, media_body=None, fields: str = "",
                 **_):
         fid = self.s._new_id("new")
+        # "root" is a real-API alias for the impersonated user's My Drive;
+        # resolve it to the concrete id so parent-scoped queries still match.
+        parents = [self.s.root_id if p == "root" else p
+                  for p in (body.get("parents") or [])]
         meta = {
             "id": fid,
             "name": body.get("name", "Untitled"),
             "mimeType": body.get("mimeType"),
-            "parents": list(body.get("parents") or []),
+            "parents": parents,
             "modifiedTime": body.get("modifiedTime"),
             "description": body.get("description"),
             "starred": body.get("starred", False),
@@ -337,20 +377,90 @@ class _DriveFiles:
                 meta["md5Checksum"] = hashlib.md5(data).hexdigest()
                 result["md5Checksum"] = meta["md5Checksum"]
                 result["size"] = meta["size"]
+        elif str(meta.get("mimeType") or "").startswith("application/vnd.google-apps."):
+            # A native file created with no media body (e.g. a blank Slides
+            # deck) is still a real, exportable Google file — just empty.
+            self.s.exports[fid] = b""
         self.s.store[fid] = meta
+        return result
+
+    def copy(self, **kw):
+        return _Call(self.s, "files.copy", self._copy, kw)
+
+    def _copy(self, fileId: str, body: Optional[dict] = None, **_):
+        """
+        Server-side copy. The real API can copy across a tenant boundary into
+        a shared drive the caller organises, so the fake resolves the
+        destination through `peer` when the parent isn't local.
+        """
+        body = body or {}
+        src = self.s
+        if fileId not in src.store:
+            raise http_error(404, "notFound", fileId)
+        meta = src.store[fileId]
+
+        parents = list(body.get("parents") or [])
+        dest = src
+        if parents and src.peer is not None:
+            # A staging-drive parent lives on the peer (target) side.
+            if parents[0] in src.peer.shared_drives:
+                dest = src.peer
+
+        new_id = dest._new_id("copy")
+        new_meta = {
+            "id": new_id,
+            "name": body.get("name", meta.get("name")),
+            "mimeType": meta.get("mimeType"),
+            "parents": parents,
+            "modifiedTime": body.get("modifiedTime") or meta.get("modifiedTime"),
+            "description": body.get("description") or meta.get("description"),
+            "trashed": False,
+            # Files inside a shared drive have no individual owner.
+            "owners": [],
+            "driveId": parents[0] if parents and parents[0] in dest.shared_drives else None,
+            "capabilities": {"canDownload": True},
+        }
+        result = {"id": new_id}
+        if fileId in src.content:
+            data = src.content[fileId]
+            dest.content[new_id] = data
+            new_meta["size"] = str(len(data))
+            new_meta["md5Checksum"] = hashlib.md5(data).hexdigest()
+            result["md5Checksum"] = new_meta["md5Checksum"]
+        if fileId in src.exports:
+            # Native stays native -- no OOXML round trip.
+            dest.exports[new_id] = src.exports[fileId]
+        dest.store[new_id] = new_meta
         return result
 
     def update(self, **kw):
         return _Call(self.s, "files.update", self._update, kw)
 
     def _update(self, fileId: str, body: Optional[dict] = None,
-                media_body=None, **_):
+                media_body=None, addParents: str = "",
+                removeParents: str = "", **_):
         if fileId not in self.s.store:
             raise http_error(404, "notFound", fileId)
         meta = self.s.store[fileId]
         for k in ("name", "modifiedTime", "description", "starred"):
             if body and k in body:
                 meta[k] = body[k]
+
+        # Re-parenting. Moving out of a shared drive is what confers real
+        # ownership on the impersonated user, so mirror that here.
+        if addParents or removeParents:
+            parents = list(meta.get("parents") or [])
+            for p in (removeParents or "").split(","):
+                if p and p in parents:
+                    parents.remove(p)
+            for p in (addParents or "").split(","):
+                if p and p not in parents:
+                    parents.append(p)
+            meta["parents"] = parents
+            if removeParents and removeParents in self.s.shared_drives:
+                meta["driveId"] = None
+                meta["owners"] = [{"emailAddress": self.s.owner}]
+
         result = {"id": fileId}
         if media_body is not None:
             data = media_body.read_all()
@@ -384,7 +494,90 @@ class _DrivePermissions:
         p = dict(body)
         p["id"] = self.s._new_id("perm")
         self.s.perms[fileId].append(p)
+        # Real Drive bumps modifiedTime to "now" whenever a grant is applied
+        # (verified live). Mirroring that here is what makes the engine's
+        # re-assert-after-ACL step testable at all -- without it the fake
+        # would happily report a timestamp the real API would have discarded.
+        meta = self.s.store.get(fileId)
+        if meta is not None:
+            meta["modifiedTime"] = PERMISSION_BUMP_TIME
         return {"id": p["id"]}
+
+
+class _DriveComments:
+    def __init__(self, svc: FakeDrive):
+        self.s = svc
+
+    def list(self, **kw):
+        return _Call(self.s, "comments.list", self._list, kw)
+
+    def _list(self, fileId: str, **_):
+        return {"comments": copy.deepcopy(self.s.comment_store.get(fileId, []))}
+
+    def create(self, **kw):
+        return _Call(self.s, "comments.create", self._create, kw)
+
+    def _create(self, fileId: str, body: dict, **_):
+        cid = self.s._new_id("cmt")
+        entry = {"id": cid, "content": body.get("content", ""),
+                "author": {"displayName": self.s.owner}, "replies": []}
+        self.s.comment_store[fileId].append(entry)
+        return {"id": cid}
+
+
+class _DriveReplies:
+    def __init__(self, svc: FakeDrive):
+        self.s = svc
+
+    def create(self, **kw):
+        return _Call(self.s, "replies.create", self._create, kw)
+
+    def _create(self, fileId: str, commentId: str, body: dict, **_):
+        rid = self.s._new_id("rply")
+        for c in self.s.comment_store.get(fileId, []):
+            if c["id"] == commentId:
+                c.setdefault("replies", []).append(
+                    {"id": rid, "content": body.get("content", "")}
+                )
+        return {"id": rid}
+
+
+class _DriveDrives:
+    def __init__(self, svc: FakeDrive):
+        self.s = svc
+
+    def list(self, **kw):
+        return _Call(self.s, "drives.list", self._list, kw)
+
+    def _list(self, q: str = "", **_):
+        rows = list(self.s.shared_drives.values())
+        m = re.search(r"name\s*=\s*'([^']+)'", q or "")
+        if m:
+            rows = [d for d in rows if d.get("name") == m.group(1)]
+        return {"drives": copy.deepcopy(rows)}
+
+    def create(self, **kw):
+        return _Call(self.s, "drives.create", self._create, kw)
+
+    def _create(self, body: dict, requestId: str = "", **_):
+        did = self.s._new_id("sdrive")
+        self.s.shared_drives[did] = {"id": did, "name": body.get("name")}
+        return {"id": did, "name": body.get("name")}
+
+    def delete(self, **kw):
+        return _Call(self.s, "drives.delete", self._delete, kw)
+
+    def _delete(self, driveId: str, **_):
+        # The real API refuses to delete a non-empty shared drive; mirroring
+        # that keeps the engine's "never delete a drive with files in it"
+        # guarantee honest under test.
+        contents = [f for f in self.s.store.values()
+                   if driveId in (f.get("parents") or [])]
+        if contents:
+            raise http_error(400, "cannotDeleteResource",
+                            "cannot delete a non-empty shared drive")
+        self.s.shared_drives.pop(driveId, None)
+        return {}
 
 
 class _DriveAbout:
@@ -410,6 +603,12 @@ class FakeGmail(FakeService):
     def __init__(self, owner: str, tenant: str):
         super().__init__(owner, tenant)
         self.messages: dict[str, dict] = {}
+        self.drafts: dict[str, dict] = {}
+        self.filters: list[dict] = []
+        # Every mailbox has a primary send-as entry for its own address.
+        self.send_as: list[dict] = [
+            {"sendAsEmail": owner, "isPrimary": True, "signature": ""}
+        ]
         self.labels: list[dict] = [
             {"id": n, "name": n, "type": "system"} for n in SYSTEM_LABELS
         ]
@@ -424,6 +623,43 @@ class FakeGmail(FakeService):
             "labelIds": list(labels or ["INBOX"]),
         }
         return mid
+
+    def add_draft(self, raw: bytes, draft_id: Optional[str] = None) -> str:
+        did = draft_id or self._new_id("draft")
+        self.drafts[did] = {
+            "id": did,
+            "message": {"id": did,
+                       "raw": base64.urlsafe_b64encode(raw).decode("ascii"),
+                       "labelIds": ["DRAFT"]},
+        }
+        return did
+
+    def set_signature(self, html: str, email: Optional[str] = None) -> None:
+        """Set the signature on a send-as entry (defaults to the primary)."""
+        target = (email or self.owner).lower()
+        for e in self.send_as:
+            if (e.get("sendAsEmail") or "").lower() == target:
+                e["signature"] = html
+                return
+        self.send_as.append({"sendAsEmail": email, "isPrimary": False,
+                            "signature": html})
+
+    def add_send_as_alias(self, email: str, signature: str = "") -> None:
+        self.send_as.append({"sendAsEmail": email, "isPrimary": False,
+                            "signature": signature})
+
+    def signature_for(self, email: Optional[str] = None) -> str:
+        target = (email or self.owner).lower()
+        for e in self.send_as:
+            if (e.get("sendAsEmail") or "").lower() == target:
+                return e.get("signature", "")
+        return ""
+
+    def add_filter(self, criteria: dict, action: dict,
+                   filter_id: Optional[str] = None) -> str:
+        fid = filter_id or self._new_id("filt")
+        self.filters.append({"id": fid, "criteria": criteria, "action": action})
+        return fid
 
     def add_user_label(self, name: str, color: Optional[dict] = None) -> str:
         lid = self._new_id("lbl")
@@ -459,6 +695,12 @@ class _GmailUsers:
 
     def labels(self):
         return _GmailLabels(self.s)
+
+    def drafts(self):
+        return _GmailDrafts(self.s)
+
+    def settings(self):
+        return _GmailSettings(self.s)
 
 
 class _GmailMessages:
@@ -531,6 +773,97 @@ class _GmailLabels:
         return {"id": lid, "name": name}
 
 
+class _GmailDrafts:
+    def __init__(self, svc: FakeGmail):
+        self.s = svc
+
+    def list(self, **kw):
+        return _Call(self.s, "drafts.list", self._list, kw)
+
+    def _list(self, maxResults: int = 100, pageToken: Optional[str] = None, **_):
+        ids = sorted(self.s.drafts)
+        start = int(pageToken or 0)
+        page = ids[start: start + maxResults]
+        out: dict[str, Any] = {"drafts": [{"id": i, "message": {"id": i}} for i in page]}
+        if start + maxResults < len(ids):
+            out["nextPageToken"] = str(start + maxResults)
+        return out
+
+    def get(self, **kw):
+        return _Call(self.s, "drafts.get", self._get, kw)
+
+    def _get(self, id: str, **_):
+        if id not in self.s.drafts:
+            raise http_error(404, "notFound", id)
+        return copy.deepcopy(self.s.drafts[id])
+
+    def create(self, **kw):
+        return _Call(self.s, "drafts.create", self._create, kw)
+
+    def _create(self, body: dict, media_body=None, **_):
+        did = self.s._new_id("draft")
+        raw = (body.get("message") or {}).get("raw")
+        if raw is None and media_body is not None:
+            raw = base64.urlsafe_b64encode(media_body.read_all()).decode("ascii")
+        self.s.drafts[did] = {
+            "id": did, "message": {"id": did, "raw": raw, "labelIds": ["DRAFT"]},
+        }
+        return {"id": did, "message": {"id": did}}
+
+
+class _GmailSettings:
+    def __init__(self, svc: FakeGmail):
+        self.s = svc
+
+    def filters(self):
+        return _GmailFilters(self.s)
+
+    def sendAs(self):
+        return _GmailSendAs(self.s)
+
+
+class _GmailSendAs:
+    def __init__(self, svc: FakeGmail):
+        self.s = svc
+
+    def list(self, **kw):
+        return _Call(self.s, "sendAs.list", self._list, kw)
+
+    def _list(self, **_):
+        return {"sendAs": copy.deepcopy(self.s.send_as)}
+
+    def patch(self, **kw):
+        return _Call(self.s, "sendAs.patch", self._patch, kw)
+
+    def _patch(self, sendAsEmail: str, body: dict, **_):
+        for e in self.s.send_as:
+            if (e.get("sendAsEmail") or "").lower() == sendAsEmail.lower():
+                e.update(body)
+                return copy.deepcopy(e)
+        raise http_error(404, "notFound", f"no send-as entry for {sendAsEmail}")
+
+
+class _GmailFilters:
+    def __init__(self, svc: FakeGmail):
+        self.s = svc
+
+    def list(self, **kw):
+        return _Call(self.s, "filters.list", self._list, kw)
+
+    def _list(self, **_):
+        return {"filter": copy.deepcopy(self.s.filters)}
+
+    def create(self, **kw):
+        return _Call(self.s, "filters.create", self._create, kw)
+
+    def _create(self, body: dict, **_):
+        fid = self.s._new_id("filt")
+        f = dict(body)
+        f["id"] = fid
+        self.s.filters.append(f)
+        return f
+
+
 # ======================================================================
 # CALENDAR
 # ======================================================================
@@ -540,6 +873,51 @@ class FakeCalendar(FakeService):
         # NB: named `store`, not `events` — an attribute called `events`
         # would shadow the events() builder method below.
         self.store: dict[str, dict] = {}
+        # NB: `calendar_store`, not `calendars` -- an attribute named
+        # `calendars` would shadow the calendars() builder method, the same
+        # trap `store` avoids for events().
+        self.calendar_store: dict[str, dict] = {}
+        self.cal_events: dict[str, dict[str, dict]] = defaultdict(dict)
+        self.acls: dict[str, list[dict]] = defaultdict(list)
+
+    def add_calendar(self, summary: str, cal_id: Optional[str] = None,
+                     access_role: str = "owner", primary: bool = False) -> str:
+        cid = cal_id or self._new_id("cal")
+        self.calendar_store[cid] = {
+            "id": cid, "summary": summary, "accessRole": access_role,
+            "primary": primary, "timeZone": "UTC",
+        }
+        return cid
+
+    def add_event_to(self, cal_id: str, summary: str, ical: str,
+                     organizer: Optional[str] = None) -> str:
+        """Seed an event into a *secondary* calendar."""
+        eid = self._new_id("sevt")
+        self.cal_events[cal_id][eid] = {
+            "id": eid, "iCalUID": ical, "summary": summary, "status": "confirmed",
+            "updated": "2024-01-01T00:00:00Z",
+            "start": {"dateTime": "2024-06-01T09:00:00Z"},
+            "end": {"dateTime": "2024-06-01T10:00:00Z"},
+            "organizer": {"email": organizer or self.owner},
+        }
+        return eid
+
+    def add_acl_rule(self, cal_id: str, scope_type: str, role: str,
+                     value: Optional[str] = None) -> None:
+        scope = {"type": scope_type}
+        if value:
+            scope["value"] = value
+        self.acls[cal_id].append({"id": self._new_id("aclrule"),
+                                 "scope": scope, "role": role})
+
+    def calendarList(self):
+        return _CalList(self)
+
+    def calendars(self):
+        return _Calendars(self)
+
+    def acl(self):
+        return _CalAcl(self)
 
     def add_event(self, summary: str, ical: Optional[str] = None,
                   organizer: Optional[str] = None,
@@ -586,6 +964,71 @@ class FakeCalendar(FakeService):
         return _CalEvents(self)
 
 
+class _CalList:
+    def __init__(self, svc: FakeCalendar):
+        self.s = svc
+
+    def list(self, **kw):
+        return _Call(self.s, "calendarList.list", self._list, kw)
+
+    def _list(self, minAccessRole: str = "", **_):
+        rows = list(self.s.calendar_store.values())
+        if minAccessRole == "owner":
+            rows = [c for c in rows if c.get("accessRole") == "owner"]
+        return {"items": copy.deepcopy(rows)}
+
+
+class _Calendars:
+    def __init__(self, svc: FakeCalendar):
+        self.s = svc
+
+    def get(self, **kw):
+        return _Call(self.s, "calendars.get", self._get, kw)
+
+    def _get(self, calendarId: str, **_):
+        return copy.deepcopy(self.s.calendar_store.get(calendarId, {"id": calendarId}))
+
+    def insert(self, **kw):
+        return _Call(self.s, "calendars.insert", self._insert, kw)
+
+    def _insert(self, body: dict, **_):
+        cid = self.s._new_id("cal")
+        self.s.calendar_store[cid] = {
+            "id": cid, "summary": body.get("summary"),
+            "description": body.get("description"),
+            "timeZone": body.get("timeZone", "UTC"),
+            "accessRole": "owner", "primary": False,
+        }
+        return {"id": cid, "summary": body.get("summary")}
+
+
+class _CalAcl:
+    def __init__(self, svc: FakeCalendar):
+        self.s = svc
+
+    def list(self, **kw):
+        return _Call(self.s, "acl.list", self._list, kw)
+
+    def _list(self, calendarId: str, **_):
+        return {"items": copy.deepcopy(self.s.acls.get(calendarId, []))}
+
+    def insert(self, **kw):
+        return _Call(self.s, "acl.insert", self._insert, kw)
+
+    def _insert(self, calendarId: str, body: dict, sendNotifications=None, **_):
+        # Mirrors the engine's own guarantee: never notify on a migration.
+        if sendNotifications not in (False, None):
+            raise AssertionError(
+                "calendar acl.insert during migration must pass "
+                "sendNotifications=False"
+            )
+        rid = self.s._new_id("aclrule")
+        entry = dict(body)
+        entry["id"] = rid
+        self.s.acls[calendarId].append(entry)
+        return entry
+
+
 class _CalEvents:
     def __init__(self, svc: FakeCalendar):
         self.s = svc
@@ -593,9 +1036,14 @@ class _CalEvents:
     def list(self, **kw):
         return _Call(self.s, "events.list", self._list, kw)
 
-    def _list(self, maxResults: int = 250, pageToken: Optional[str] = None,
-              showDeleted: bool = False, updatedMin: Optional[str] = None, **_):
-        rows = list(self.s.store.values())
+    def _list(self, calendarId: str = "primary", maxResults: int = 250,
+              pageToken: Optional[str] = None, showDeleted: bool = False,
+              updatedMin: Optional[str] = None, **_):
+        # `store` is the primary calendar; secondary calendars keep their own
+        # event dicts, so existing single-calendar tests are unaffected.
+        source = (self.s.store if calendarId == "primary"
+                 else self.s.cal_events[calendarId])
+        rows = list(source.values())
         if not showDeleted:
             rows = [e for e in rows if e.get("status") != "cancelled"]
         if updatedMin:
@@ -619,7 +1067,7 @@ class _CalEvents:
     def import_(self, **kw):
         return _Call(self.s, "events.import", self._import, kw)
 
-    def _import(self, body: dict, **_):
+    def _import(self, body: dict, calendarId: str = "primary", **_):
         if "iCalUID" not in body:
             raise http_error(400, "required", "iCalUID is required for import")
         if "organizer" not in body:
@@ -627,6 +1075,11 @@ class _CalEvents:
         if "start" not in body or "end" not in body:
             raise http_error(400, "required", "start and end are required")
         eid = self.s._new_id("imp")
+        if calendarId != "primary":
+            ev = copy.deepcopy(body)
+            ev["id"] = eid
+            self.s.cal_events[calendarId][eid] = ev
+            return {"id": eid, "iCalUID": body["iCalUID"]}
         ev = copy.deepcopy(body)
         ev["id"] = eid
         self.s.store[eid] = ev
@@ -715,9 +1168,26 @@ class FakeAuth:
         key = (tenant, api, user)
         if key not in self._svcs:
             cls = {"drive": FakeDrive, "gmail": FakeGmail,
-                   "calendar": FakeCalendar}[api]
+                   "calendar": FakeCalendar, "chat": FakeChat}[api]
             self._svcs[key] = cls(user, tenant)
+            if api == "drive":
+                self._link_drive_peers()
         return self._svcs[key]
+
+    def _link_drive_peers(self) -> None:
+        """
+        Point every source Drive at a target Drive and vice versa, so the
+        fake's server-side copy can cross the tenant boundary the way the
+        real API does. Tests only ever exercise one user pair at a time, so
+        a single peer link each way is enough.
+        """
+        drives = {k: v for k, v in self._svcs.items() if k[1] == "drive"}
+        sources = [v for k, v in drives.items() if k[0] == "source"]
+        targets = [v for k, v in drives.items() if k[0] == "target"]
+        for s in sources:
+            for t in targets:
+                s.peer = t          # type: ignore[attr-defined]
+                t.peer = s          # type: ignore[attr-defined]
 
     # Explicit accessors mirroring AuthManager's shorthands.
     def source_drive(self, user: str) -> FakeDrive:
@@ -738,7 +1208,171 @@ class FakeAuth:
     def target_calendar(self, user: str) -> FakeCalendar:
         return self._get("target", "calendar", user)       # type: ignore[return-value]
 
+    def source_chat(self, user: str) -> "FakeChat":
+        return self._get("source", "chat", user)       # type: ignore[return-value]
+
+    def target_chat(self, user: str) -> "FakeChat":
+        return self._get("target", "chat", user)       # type: ignore[return-value]
+
+    def source_directory(self):
+        """Resolves the users/{id} -> email lookup chat_engine needs."""
+        return _FakeDirectory(self)
+
     def verify_delegation(self, tenant: str, user: str) -> tuple[bool, str]:
         if (tenant, user) in self.delegation_failures:
             return False, "unauthorized_client"
         return True, "ok"
+
+
+# ======================================================================
+# CHAT
+# ======================================================================
+class FakeChat(FakeService):
+    """
+    Chat differs from the other services in two ways the fake has to model:
+    a space carries an `importMode` flag that must be cleared by
+    completeImport, and a message is attributed to whoever posted it -- which
+    is the whole reason the engine impersonates each original sender.
+    """
+
+    # Chat is a single shared service, not a per-user silo: every user in an
+    # organisation sees the same spaces. Instances therefore share one backing
+    # store per tenant, or a message posted by one impersonated user would be
+    # invisible (and 404) to another -- which is exactly how the engine
+    # replays a conversation as its several original senders.
+    _SHARED: dict[str, dict] = {}
+
+    def __init__(self, owner: str, tenant: str):
+        super().__init__(owner, tenant)
+        shared = FakeChat._SHARED.setdefault(tenant, {
+            "spaces": {}, "messages": defaultdict(list), "directory": {},
+        })
+        self.space_store: dict[str, dict] = shared["spaces"]
+        self.message_store: dict[str, list[dict]] = shared["messages"]
+        self.directory: dict[str, str] = shared["directory"]
+
+    @classmethod
+    def reset_shared(cls) -> None:
+        cls._SHARED.clear()
+
+    # -- seeding --------------------------------------------------------
+    def add_space(self, display_name: str, space_type: str = "SPACE",
+                  name: Optional[str] = None) -> str:
+        sid = name or f"spaces/{self._new_id('sp')}"
+        self.space_store[sid] = {"name": sid, "displayName": display_name,
+                                 "spaceType": space_type, "importMode": False}
+        return sid
+
+    def add_chat_message(self, space: str, text: str, sender_email: str,
+                         create_time: str = "2024-01-01T00:00:00Z") -> str:
+        uid = f"users/{abs(hash(sender_email)) % 10**12}"
+        self.directory[uid] = sender_email
+        mid = f"{space}/messages/{self._new_id('msg')}"
+        self.message_store[space].append({
+            "name": mid, "text": text, "createTime": create_time,
+            "sender": {"name": uid, "type": "HUMAN"},
+        })
+        return mid
+
+    def spaces(self):
+        return _ChatSpaces(self)
+
+
+class _ChatSpaces:
+    def __init__(self, svc: FakeChat):
+        self.s = svc
+
+    def list(self, **kw):
+        return _Call(self.s, "spaces.list", self._list, kw)
+
+    def _list(self, **_):
+        return {"spaces": [copy.deepcopy(v) for v in self.s.space_store.values()]}
+
+    def create(self, **kw):
+        return _Call(self.s, "spaces.create", self._create, kw)
+
+    def _create(self, body: dict, **_):
+        sid = f"spaces/{self.s._new_id('sp')}"
+        self.s.space_store[sid] = {
+            "name": sid, "displayName": body.get("displayName"),
+            "spaceType": body.get("spaceType", "SPACE"),
+            "importMode": bool(body.get("importMode")),
+        }
+        return {"name": sid, "importMode": bool(body.get("importMode"))}
+
+    def completeImport(self, **kw):
+        return _Call(self.s, "spaces.completeImport", self._complete, kw)
+
+    def _complete(self, name: str, **_):
+        sp = self.s.space_store.get(name)
+        if not sp:
+            raise http_error(404, "notFound", name)
+        if not sp.get("importMode"):
+            raise http_error(400, "failedPrecondition",
+                            "space is not in import mode")
+        sp["importMode"] = False
+        return {"name": name}
+
+    def delete(self, **kw):
+        return _Call(self.s, "spaces.delete", self._delete, kw)
+
+    def _delete(self, name: str, **_):
+        self.s.space_store.pop(name, None)
+        return {}
+
+    def messages(self):
+        return _ChatMessages(self.s)
+
+
+class _ChatMessages:
+    def __init__(self, svc: FakeChat):
+        self.s = svc
+
+    def list(self, **kw):
+        return _Call(self.s, "messages.list", self._list, kw)
+
+    def _list(self, parent: str, **_):
+        return {"messages": copy.deepcopy(self.s.message_store.get(parent, []))}
+
+    def create(self, **kw):
+        return _Call(self.s, "chat.messages.create", self._create, kw)
+
+    def _create(self, parent: str, body: dict, **_):
+        if parent not in self.s.space_store:
+            raise http_error(404, "notFound", parent)
+        # Real Chat rejects a historical createTime under user auth; mirroring
+        # that keeps the engine honest about what it can actually preserve.
+        if "createTime" in body:
+            raise http_error(400, "invalidArgument",
+                            "createTime requires app authentication")
+        mid = f"{parent}/messages/{self.s._new_id('m')}"
+        entry = {"name": mid, "text": body.get("text"),
+                 # attributed to whoever is posting -- i.e. this service's owner
+                 "sender": {"name": f"users/{self.s.owner}", "type": "HUMAN"}}
+        self.s.message_store[parent].append(entry)
+        return entry
+
+
+class _FakeDirectory:
+    """Directory API double: only the users().get() chat_engine relies on."""
+
+    def __init__(self, auth: "FakeAuth"):
+        self.auth = auth
+
+    def users(self):
+        return self
+
+    def get(self, userKey: str = "", **kw):
+        directory: dict[str, str] = {}
+        for (tenant, api, _user), svc in self.auth._svcs.items():
+            if api == "chat" and tenant == "source":
+                directory.update(getattr(svc, "directory", {}))
+
+        class _Req:
+            def execute(self_inner, num_retries: int = 0):
+                email = directory.get(f"users/{userKey}")
+                if not email:
+                    raise http_error(404, "notFound", userKey)
+                return {"primaryEmail": email}
+
+        return _Req()

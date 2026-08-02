@@ -169,6 +169,185 @@ def test_permanent_failure_is_recorded_per_message(gmail_migrator, auth, db):
 
 
 # ======================================================================
+# GMAIL — drafts
+# ======================================================================
+def test_drafts_are_migrated(gmail_migrator, auth):
+    draft_raw = b"Subject: unsent thought\r\n\r\nStill drafting this.\r\n"
+    auth.source_gmail(SRC_USER).add_draft(draft_raw)
+    gmail_migrator.run()
+
+    tgt = auth.target_gmail(TGT_USER)
+    assert len(tgt.drafts) == 1
+    stored = next(iter(tgt.drafts.values()))
+    assert base64.urlsafe_b64decode(stored["message"]["raw"].encode()) == draft_raw
+    assert gmail_migrator.stats["drafts_inserted"] == 1
+
+
+def test_draft_is_not_migrated_twice_as_message_and_draft(gmail_migrator, auth, db):
+    """
+    Gmail returns draft messages from messages.list as well, so a naive run
+    inserts each draft once as a message (which Gmail turns back into a draft)
+    and once via the drafts pass -- silently doubling every draft.
+    """
+    src = auth.source_gmail(SRC_USER)
+    raw = b"Subject: unsent\r\n\r\nhalf-written\r\n"
+    # the same item as Gmail actually presents it: a draft, and a message
+    # carrying the DRAFT label
+    src.add_draft(raw)
+    mid = src.add_message(raw, ["DRAFT"])
+
+    gmail_migrator.run()
+
+    tgt = auth.target_gmail(TGT_USER)
+    assert len(tgt.drafts) == 1, "the draft must not be created twice"
+    assert db.get_audit(SRC_USER, mid, "message")["status"] == "SKIPPED_IS_DRAFT"
+    assert gmail_migrator.stats["drafts_inserted"] == 1
+
+
+def test_drafts_are_never_double_created_on_resume(gmail_migrator, auth, db, settings):
+    import gmail_engine
+
+    auth.source_gmail(SRC_USER).add_draft(b"Subject: x\r\n\r\nbody\r\n")
+    gmail_migrator.run()
+    assert len(auth.target_gmail(TGT_USER).drafts) == 1
+
+    second = gmail_engine.GmailMigrator(auth, db, settings, SRC_USER, TGT_USER)
+    second.run()
+    assert len(auth.target_gmail(TGT_USER).drafts) == 1
+    assert second.stats["drafts_inserted"] == 0
+    assert second.stats["drafts_skipped"] == 1
+
+
+# ======================================================================
+# GMAIL — filters
+# ======================================================================
+def test_filters_are_migrated(gmail_migrator, auth, settings):
+    settings.migrate_gmail_settings = True
+    auth.source_gmail(SRC_USER).add_filter(
+        criteria={"from": "billing@vendor.com"},
+        action={"addLabelIds": ["IMPORTANT"], "removeLabelIds": ["INBOX"]},
+    )
+    gmail_migrator.run()
+
+    tgt_filters = auth.target_gmail(TGT_USER).filters
+    assert len(tgt_filters) == 1
+    assert tgt_filters[0]["criteria"] == {"from": "billing@vendor.com"}
+    assert gmail_migrator.stats["filters_inserted"] == 1
+
+
+def test_filter_user_label_actions_are_remapped(gmail_migrator, auth, settings):
+    settings.migrate_gmail_settings = True
+    src = auth.source_gmail(SRC_USER)
+    lid = src.add_user_label("Clients/Acme")
+    src.add_filter(criteria={"from": "acme@example.com"}, action={"addLabelIds": [lid]})
+    gmail_migrator.run()
+
+    tgt = auth.target_gmail(TGT_USER)
+    target_label_id = next(l["id"] for l in tgt.labels if l["name"] == "Clients/Acme")
+    stored_action = tgt.filters[0]["action"]
+    assert stored_action["addLabelIds"] == [target_label_id]
+    assert lid not in stored_action["addLabelIds"]
+
+
+def test_filters_are_never_duplicated_on_resume(gmail_migrator, auth, db, settings):
+    import gmail_engine
+
+    settings.migrate_gmail_settings = True
+    auth.source_gmail(SRC_USER).add_filter(
+        criteria={"subject": "invoice"}, action={"addLabelIds": ["STARRED"]}
+    )
+    gmail_migrator.run()
+    assert len(auth.target_gmail(TGT_USER).filters) == 1
+
+    second = gmail_engine.GmailMigrator(auth, db, settings, SRC_USER, TGT_USER)
+    second.run()
+    assert len(auth.target_gmail(TGT_USER).filters) == 1
+    assert second.stats["filters_inserted"] == 0
+    assert second.stats["filters_skipped"] == 1
+
+
+# ======================================================================
+# GMAIL — signatures
+# ======================================================================
+def test_signature_is_migrated(gmail_migrator, auth, settings):
+    settings.migrate_gmail_settings = True
+    auth.source_gmail(SRC_USER).set_signature(
+        "<div>Alice Brown<br>Head of Engineering</div>"
+    )
+    gmail_migrator.run()
+
+    tgt = auth.target_gmail(TGT_USER)
+    assert "Head of Engineering" in tgt.signature_for()
+    assert gmail_migrator.stats["signatures"] == 1
+
+
+def test_signature_rewrites_mapped_addresses(gmail_migrator, auth, settings, db):
+    """A signature carrying the user's own old address would otherwise tell
+    everyone to write to a mailbox on the tenant being decommissioned."""
+    from db import bulk_seed_identities
+
+    settings.migrate_gmail_settings = True
+    bulk_seed_identities(db, [("bob@tenanta.com", "robert@tenantb.com")])
+    auth.source_gmail(SRC_USER).set_signature(
+        f'<a href="mailto:{SRC_USER}">{SRC_USER}</a> | bob@tenanta.com'
+    )
+    gmail_migrator.run()
+
+    sig = auth.target_gmail(TGT_USER).signature_for()
+    assert TGT_USER in sig
+    assert SRC_USER not in sig
+    assert "robert@tenantb.com" in sig
+    assert "bob@tenanta.com" not in sig
+
+
+def test_signature_leaves_unmapped_addresses_alone(gmail_migrator, auth, settings):
+    """Only addresses with an explicit mapping are rewritten -- a customer or
+    support address that merely mentions the domain must survive verbatim."""
+    settings.migrate_gmail_settings = True
+    auth.source_gmail(SRC_USER).set_signature(
+        "Contact support@vendor.example or visit https://one.anupam.example/help"
+    )
+    gmail_migrator.run()
+
+    sig = auth.target_gmail(TGT_USER).signature_for()
+    assert "support@vendor.example" in sig
+    assert "https://one.anupam.example/help" in sig
+
+
+def test_signature_for_unverified_alias_is_skipped_not_failed(gmail_migrator, auth,
+                                                              settings, db):
+    """A send-as alias needs owner verification before it exists on the target,
+    so its signature is reported as skipped rather than counted as an error."""
+    settings.migrate_gmail_settings = True
+    src = auth.source_gmail(SRC_USER)
+    src.add_send_as_alias("press@tenanta.com", signature="<div>Press desk</div>")
+    gmail_migrator.run()
+
+    row = db.get_audit(SRC_USER, "sendas:press@tenanta.com", "signature")
+    assert row is not None
+    assert row["status"] == "SKIPPED_ALIAS_NOT_ON_TARGET"
+    assert gmail_migrator.stats.get("signatures_failed", 0) == 0
+
+
+def test_signatures_skipped_without_the_opt_in(gmail_migrator, auth, settings):
+    settings.migrate_gmail_settings = False
+    auth.source_gmail(SRC_USER).set_signature("<div>should not travel</div>")
+    gmail_migrator.run()
+    assert auth.target_gmail(TGT_USER).signature_for() == ""
+
+
+def test_filters_are_skipped_entirely_without_the_opt_in(gmail_migrator, auth, settings):
+    """Without gmail.settings.basic granted, the pass must not even be tried."""
+    settings.migrate_gmail_settings = False
+    auth.source_gmail(SRC_USER).add_filter(
+        criteria={"from": "x@y.com"}, action={"addLabelIds": ["STARRED"]}
+    )
+    gmail_migrator.run()
+    assert auth.target_gmail(TGT_USER).filters == []
+    assert auth.source_gmail(SRC_USER).call_count("filters.list") == 0
+
+
+# ======================================================================
 # CALENDAR
 # ======================================================================
 def test_calendar_uses_import_never_insert(cal_migrator, auth):
@@ -327,6 +506,132 @@ def test_drive_attachment_is_remapped_when_file_migrated(cal_migrator, auth, db)
     cal_migrator.run()
     body = auth.target_calendar(TGT_USER).calls_to("events.import")[0]["body"]
     assert body["attachments"][0]["fileId"] == "tgt-file-9"
+
+
+# ======================================================================
+# CALENDAR — secondary calendars and sharing ACLs
+# ======================================================================
+def test_secondary_calendars_are_migrated_when_enabled(cal_migrator, auth, settings, db):
+    settings.migrate_secondary_calendars = True
+    src = auth.source_calendar(SRC_USER)
+    cal_id = src.add_calendar("Team Roadmap")
+    src.add_event_to(cal_id, "Roadmap review", ical="road-1@tenanta.com")
+
+    cal_migrator.run()
+
+    tgt = auth.target_calendar(TGT_USER)
+    created = [c for c in tgt.calendar_store.values() if c["summary"] == "Team Roadmap"]
+    assert len(created) == 1
+    new_cal_id = created[0]["id"]
+    # The event landed in the NEW calendar, not merged into primary.
+    assert len(tgt.cal_events[new_cal_id]) == 1
+    assert db.get_target_id(SRC_USER, cal_id, "calendar") == new_cal_id
+
+
+def test_secondary_calendars_skipped_unless_enabled(cal_migrator, auth, settings):
+    settings.migrate_secondary_calendars = False
+    src = auth.source_calendar(SRC_USER)
+    cal_id = src.add_calendar("Team Roadmap")
+    src.add_event_to(cal_id, "Roadmap review", ical="road-1@tenanta.com")
+
+    cal_migrator.run()
+    assert auth.target_calendar(TGT_USER).calendar_store == {}
+
+
+def test_secondary_calendar_import_keeps_the_original_organizer(cal_migrator, auth,
+                                                                settings, db):
+    """
+    Google refuses an import into a secondary calendar unless that calendar is
+    the organizer or an attendee. Adding it as an *attendee* satisfies that
+    while keeping the real organizer -- making it the organizer instead would
+    silently rewrite who owned every meeting.
+    """
+    from db import bulk_seed_identities
+
+    settings.migrate_secondary_calendars = True
+    bulk_seed_identities(db, [("bob@tenanta.com", "robert@tenantb.com")])
+    src = auth.source_calendar(SRC_USER)
+    cal_id = src.add_calendar("Ops")
+    src.add_event_to(cal_id, "Standup", ical="ops-1@tenanta.com",
+                     organizer="bob@tenanta.com")
+
+    cal_migrator.run()
+
+    tgt = auth.target_calendar(TGT_USER)
+    new_cal_id = next(c["id"] for c in tgt.calendar_store.values()
+                     if c["summary"] == "Ops")
+    imported = list(tgt.cal_events[new_cal_id].values())[0]
+    assert imported["organizer"]["email"] == "robert@tenantb.com"
+    assert any(a["email"] == new_cal_id for a in imported.get("attendees", [])), \
+        "target calendar must be an attendee or the import is rejected"
+
+
+def test_subscribed_calendars_are_not_forked(cal_migrator, auth, settings):
+    """A calendar owned by someone else must be re-subscribed, not copied."""
+    settings.migrate_secondary_calendars = True
+    src = auth.source_calendar(SRC_USER)
+    src.add_calendar("Someone Else's", access_role="reader")
+
+    cal_migrator.run()
+    assert auth.target_calendar(TGT_USER).calendar_store == {}
+
+
+def test_secondary_calendar_is_not_recreated_on_rerun(cal_migrator, auth, settings, db):
+    import calendar_engine
+
+    settings.migrate_secondary_calendars = True
+    src = auth.source_calendar(SRC_USER)
+    cal_id = src.add_calendar("Ops")
+    src.add_event_to(cal_id, "Standup", ical="ops-1@tenanta.com")
+
+    cal_migrator.run()
+    tgt = auth.target_calendar(TGT_USER)
+    assert len(tgt.calendar_store) == 1
+
+    second = calendar_engine.CalendarMigrator(auth, db, settings, SRC_USER, TGT_USER)
+    second.run()
+    assert len(tgt.calendar_store) == 1, "resume must not fork a second calendar"
+
+
+def test_calendar_acl_is_identity_mapped(cal_migrator, auth, settings, db):
+    from db import bulk_seed_identities
+
+    settings.migrate_secondary_calendars = True
+    settings.migrate_calendar_acls = True
+    bulk_seed_identities(db, [("bob@tenanta.com", "robert@tenantb.com")])
+    src = auth.source_calendar(SRC_USER)
+    cal_id = src.add_calendar("Shared Ops")
+    src.add_acl_rule(cal_id, "user", "reader", value="bob@tenanta.com")
+    src.add_acl_rule(cal_id, "domain", "reader", value="tenanta.com")
+
+    cal_migrator.run()
+
+    tgt = auth.target_calendar(TGT_USER)
+    new_cal_id = next(c["id"] for c in tgt.calendar_store.values()
+                     if c["summary"] == "Shared Ops")
+    rules = tgt.acls[new_cal_id]
+    values = {(r["scope"].get("type"), r["scope"].get("value")) for r in rules}
+    assert ("user", "robert@tenantb.com") in values
+    assert ("domain", "tenantb.com") in values
+    assert not any(v and "tenanta.com" in str(v) for _, v in values)
+
+
+def test_unmapped_calendar_acl_is_dropped(cal_migrator, auth, settings, db):
+    settings.migrate_secondary_calendars = True
+    settings.migrate_calendar_acls = True
+    src = auth.source_calendar(SRC_USER)
+    cal_id = src.add_calendar("Private Ops")
+    src.add_acl_rule(cal_id, "user", "reader", value="ghost@tenanta.com")
+
+    cal_migrator.run()
+
+    tgt = auth.target_calendar(TGT_USER)
+    new_cal_id = next(c["id"] for c in tgt.calendar_store.values()
+                     if c["summary"] == "Private Ops")
+    emails = {r["scope"].get("value") for r in tgt.acls[new_cal_id]}
+    assert "ghost@tenanta.com" not in emails
+    row = db.get_audit(SRC_USER, f"{cal_id}:ghost@tenanta.com", "calendar_acl")
+    assert row is not None and row["status"] == "SKIPPED_UNMAPPED_IDENTITY"
 
 
 def test_attachment_for_unmigrated_file_is_dropped(cal_migrator, auth):

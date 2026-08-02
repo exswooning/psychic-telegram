@@ -62,7 +62,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import Settings  # noqa: E402
 from resilience import retry_on_google_error  # noqa: E402
-from tools.corpus import ORG, SCALES, CorpusBuilder  # noqa: E402
+from corpus import ORG, SCALES, CorpusBuilder  # noqa: E402
 
 SEED_SCOPES = [
     "https://www.googleapis.com/auth/drive",
@@ -257,6 +257,49 @@ def seed_gmail(gmail, settings: Settings, user: str, peers: list[str],
 
 
 # ======================================================================
+# Gmail — drafts
+# ======================================================================
+def seed_drafts(gmail, settings: Settings, user: str, peers: list[str],
+                count: int = 4) -> dict:
+    """
+    Unsent drafts.
+
+    Worth seeding because drafts live outside the ordinary message list --
+    a migration that copies every message can still silently drop everything
+    a user had half-written, and nobody notices until they go looking for it.
+    """
+    retry = _retry_factory(settings)
+    rng = random.Random((hash(user) & 0xFFFF) + 7)
+    m = {"drafts": 0}
+    subjects = ["Re: budget question (WIP)", "Draft — team update",
+                "Notes for Monday", "Reply to vendor — needs review",
+                "Half-finished handover doc"]
+    for i in range(count):
+        raw = _rfc822(rng.choice(subjects), user, rng.choice(peers),
+                      rng.randint(1, 400),
+                      body="Still drafting this. Not sent yet.\n")
+        try:
+            retry(lambda r=raw: gmail.users().drafts().create(
+                userId="me",
+                body={"message": {"raw": base64.urlsafe_b64encode(r).decode()}},
+            ).execute())()
+            m["drafts"] += 1
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ! draft {i}: {exc}")
+    return m
+
+
+# ======================================================================
+# Google Chat — deliberately not seeded
+# ======================================================================
+# Gmail rejects CHAT as a label on messages.insert ("400 Invalid label:
+# CHAT"), so chat history cannot be written into a mailbox even for testing,
+# and the Chat API needs its own scopes plus an app configured for import
+# mode. Chat is therefore untestable here AND unmigratable by this engine --
+# it stays on the NONE list in scope.py rather than being faked.
+
+
+# ======================================================================
 # Calendar — meetings across the org
 # ======================================================================
 def seed_calendar(cal, settings: Settings, user: str, peers: list[str],
@@ -348,52 +391,170 @@ def seed_calendar(cal, settings: Settings, user: str, peers: list[str],
 
 
 # ======================================================================
+# Calendar — secondary calendars
+# ======================================================================
+def seed_secondary_calendars(cal, settings: Settings, user: str,
+                             peers: list[str], count: int = 2) -> dict:
+    """
+    Calendars beyond 'primary'.
+
+    Note the attendee trick: importing into a secondary calendar is refused
+    unless that calendar is the organizer or an attendee ("The owner of the
+    calendar must either be the organizer or an attendee"). Adding it as an
+    attendee satisfies Google while leaving the real organizer intact --
+    making it the organizer instead also works, but rewrites who owned the
+    meeting, which is exactly the fidelity loss this corpus exists to catch.
+    """
+    retry = _retry_factory(settings)
+    rng = random.Random((hash(user) & 0xFFFF) + 13)
+    m = {"calendars": 0, "calendar_events": 0}
+    names = ["Team Roadmap", "On-Call Rota", "Recruiting Pipeline",
+             "Release Schedule", "Budget Reviews"]
+
+    for i in range(count):
+        name = f"{rng.choice(names)} ({user.split('@')[0]})"
+        try:
+            cal_id = retry(lambda n=name: cal.calendars().insert(
+                body={"summary": n, "timeZone": "UTC"},
+            ).execute())()["id"]
+            m["calendars"] += 1
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ! secondary calendar {i}: {exc}")
+            continue
+
+        # A sharing rule, so calendar-ACL translation has something to chew on.
+        try:
+            retry(lambda c=cal_id: cal.acl().insert(
+                calendarId=c, sendNotifications=False,
+                body={"scope": {"type": "user", "value": rng.choice(peers)},
+                      "role": "reader"},
+            ).execute())()
+        except Exception:  # noqa: BLE001
+            pass
+
+        for j in range(3):
+            days = rng.randint(1, 500)
+            start, end = _cal_window(days, rng.randint(9, 16))
+            try:
+                retry(lambda c=cal_id, jj=j, st=start, en=end: cal.events().import_(
+                    calendarId=c, conferenceDataVersion=0,
+                    body={
+                        "iCalUID": f"sec-{user.split('@')[0]}-{i}-{jj}@seed.test",
+                        "summary": f"{name} item {jj+1}",
+                        "start": {"dateTime": st, "timeZone": "UTC"},
+                        "end": {"dateTime": en, "timeZone": "UTC"},
+                        "organizer": {"email": user},
+                        # required, see docstring
+                        "attendees": [{"email": c, "responseStatus": "accepted"}],
+                    },
+                ).execute())()
+                m["calendar_events"] += 1
+            except Exception as exc:  # noqa: BLE001
+                print(f"  ! secondary event {i}/{j}: {exc}")
+    return m
+
+
+def _cal_window(days_ago: int, hour: int):
+    d = (datetime.now(timezone.utc) - timedelta(days=days_ago)).replace(
+        hour=hour, minute=0, second=0, microsecond=0)
+    return (d.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            (d + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+
+
+# ======================================================================
 # Reset
 # ======================================================================
 def reset_drive(drive, settings: Settings) -> int:
+    """
+    Delete the seeded corpus -- and only that.
+
+    Deliberately NOT "everything this user owns". A tenant nominally set aside
+    for testing can still hold real content (an admin account reused as a test
+    user, a folder someone actually cares about), and a reset that takes it
+    out is unrecoverable. Everything the seeder creates lives under a
+    MIGRATION-TEST root, so removing those roots removes exactly the corpus
+    and nothing else.
+    """
     retry = _retry_factory(settings)
     deleted = 0
     while True:
         resp = retry(lambda: drive.files().list(
-            q="'me' in owners and trashed = false", pageSize=200,
-            fields="files(id)", spaces="drive",
+            q=("'root' in parents and 'me' in owners and trashed = false "
+               "and name = 'MIGRATION-TEST'"),
+            pageSize=100, fields="files(id,name)", spaces="drive",
         ).execute())()
-        files = resp.get("files", [])
-        if not files:
+        roots = resp.get("files", [])
+        if not roots:
             break
-        for f in files:
+        for f in roots:
             try:
                 retry(lambda fid=f["id"]: drive.files().delete(
                     fileId=fid, supportsAllDrives=True).execute())()
                 deleted += 1
-            except Exception:  # noqa: BLE001 - child already removed with parent
+            except Exception:  # noqa: BLE001
                 pass
-    try:
-        drive.files().emptyTrash().execute()
-    except Exception:  # noqa: BLE001
-        pass
     return deleted
 
 
 def reset_gmail(gmail, settings: Settings) -> int:
+    """
+    Trash only the mail this seeder inserted.
+
+    Every seeded message carries a Message-ID ending in `@seed.test`, so the
+    seeded set is identifiable without guessing. Real mail in the mailbox is
+    left alone -- the previous behaviour (batchDelete over the entire
+    mailbox) would empty an account that happened to have any.
+
+    trash(), not delete(): permanent deletion needs the full
+    https://mail.google.com/ scope, while the seeder only asks for
+    gmail.modify. Gmail purges Trash after 30 days.
+    """
     retry = _retry_factory(settings)
     deleted = 0
+    token = None
     while True:
-        resp = retry(lambda: gmail.users().messages().list(
-            userId="me", maxResults=500, includeSpamTrash=True).execute())()
+        resp = retry(lambda t=token: gmail.users().messages().list(
+            userId="me", maxResults=500, pageToken=t,
+            includeSpamTrash=True).execute())()
         msgs = resp.get("messages", [])
-        if not msgs:
-            break
-        ids = [x["id"] for x in msgs]
-        retry(lambda: gmail.users().messages().batchDelete(
-            userId="me", body={"ids": ids}).execute())()
-        deleted += len(ids)
-    return deleted
+        for m in msgs:
+            try:
+                meta = retry(lambda mid=m["id"]: gmail.users().messages().get(
+                    userId="me", id=mid, format="metadata",
+                    metadataHeaders=["Message-ID"]).execute())()
+                headers = {h["name"].lower(): h["value"]
+                          for h in (meta.get("payload") or {}).get("headers", [])}
+                if "@seed.test" not in headers.get("message-id", ""):
+                    continue
+                retry(lambda mid=m["id"]: gmail.users().messages().trash(
+                    userId="me", id=mid).execute())()
+                deleted += 1
+            except Exception:  # noqa: BLE001
+                pass
+        token = resp.get("nextPageToken")
+        if not token:
+            return deleted
 
 
 def reset_calendar(cal, settings: Settings) -> int:
     retry = _retry_factory(settings)
     deleted = 0
+
+    # Secondary calendars first -- deleting the calendar takes its events
+    # with it, and leaving them behind makes every re-seed accumulate more.
+    try:
+        for entry in retry(lambda: cal.calendarList().list(
+                minAccessRole="owner").execute())().get("items", []):
+            if entry.get("primary"):
+                continue
+            try:
+                retry(lambda c=entry["id"]: cal.calendars().delete(
+                    calendarId=c).execute())()
+                deleted += 1
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception:  # noqa: BLE001
+        pass
     while True:
         resp = retry(lambda: cal.events().list(
             calendarId="primary", maxResults=2500, singleEvents=False
@@ -402,6 +563,10 @@ def reset_calendar(cal, settings: Settings) -> int:
         if not items:
             break
         for ev in items:
+            # Same principle as Drive and Gmail: seeded events carry a
+            # @seed.test iCalUID, so a real meeting in the calendar survives.
+            if "seed.test" not in (ev.get("iCalUID") or ""):
+                continue
             try:
                 retry(lambda eid=ev["id"]: cal.events().delete(
                     calendarId="primary", eventId=eid, sendUpdates="none"
@@ -456,12 +621,16 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
                             _media, retry)
     drive_m = builder.build(entry["dept"], entry["project"], edge_cases)
     gmail_m = seed_gmail(gmail, settings, user, peers, external, mail_count)
+    gmail_m.update(seed_drafts(gmail, settings, user, peers))
     cal_m = seed_calendar(cal, settings, user, peers, external, event_count)
+    cal_m.update(seed_secondary_calendars(cal, settings, user, peers))
 
     elapsed = round(time.time() - t0, 1)
     print(f"  [{user}] done in {elapsed}s: {drive_m['total_files']} files, "
-          f"{drive_m['folders']} folders, {gmail_m['messages']} messages, "
-          f"{cal_m['events']} events")
+          f"{drive_m['folders']} folders, {drive_m.get('comments', 0)} comments, "
+          f"{gmail_m['messages']} messages, {gmail_m.get('drafts', 0)} drafts, "
+          f"{cal_m['events']} events, "
+          f"{cal_m.get('calendars', 0)} secondary calendars")
     return {"user": user, "dept": entry["dept"], "project": entry["project"],
             "drive": drive_m, "gmail": gmail_m, "calendar": cal_m,
             "elapsed_sec": elapsed}
@@ -498,6 +667,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--edge-cases", default="first",
                     choices=["first", "all", "none"],
                     help="full edge-case set on user 1, on everyone, or nobody")
+    ap.add_argument("--create-users", action="store_true",
+                    help="create the test accounts first if they do not exist "
+                         "(needs admin.directory.user granted to SEED_SA_KEY)")
     ap.add_argument("--reset", action="store_true", help="DELETE everything")
     args = ap.parse_args(argv)
 
@@ -514,6 +686,36 @@ def main(argv: list[str] | None = None) -> int:
             "dept": template["dept"], "project": template["project"],
         })
     all_users = [e["email"] for e in entries]
+
+    # --- Optionally create the accounts first ----------------------------
+    if args.create_users and not args.reset:
+        import provision
+        from google.oauth2 import service_account
+        import google_auth_httplib2, httplib2
+        from googleapiclient.discovery import build
+
+        admin = os.getenv("SOURCE_ADMIN")
+        if not admin:
+            sys.exit("SOURCE_ADMIN must be set to a super admin of "
+                     f"{settings.source_domain} to create accounts.")
+        creds = service_account.Credentials.from_service_account_file(
+            os.getenv("SEED_SA_KEY", settings.source_sa_key),
+            scopes=SEED_SCOPES + [provision.DIRECTORY_WRITE_SCOPE],
+        ).with_subject(admin)
+        directory = build(
+            "admin", "directory_v1",
+            http=google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=120)),
+            cache_discovery=False,
+        )
+        print(f"\nEnsuring {len(all_users)} account(s) exist in "
+              f"{settings.source_domain} ...")
+        res = provision.ensure_users(directory, all_users)
+        provision.report(res)
+        if res["failed"]:
+            sys.exit("Some accounts could not be created; not seeding.")
+        # Freshly created accounts take a moment before delegation works.
+        print("\nWaiting 20s for new accounts to become usable ...")
+        time.sleep(20)
 
     # --- Reset -----------------------------------------------------------
     if args.reset:
@@ -584,7 +786,10 @@ def main(argv: list[str] | None = None) -> int:
         "binaries": sum(r["drive"]["binaries"] for r in ok),
         "shortcuts": sum(r["drive"]["shortcuts"] for r in ok),
         "messages": sum(r["gmail"]["messages"] for r in ok),
+        "drafts": sum(r["gmail"].get("drafts", 0) for r in ok),
+        "comments": sum(r["drive"].get("comments", 0) for r in ok),
         "events": sum(r["calendar"]["events"] for r in ok),
+        "secondary_calendars": sum(r["calendar"].get("calendars", 0) for r in ok),
         "grants_user": sum(r["drive"]["grants"]["user"] for r in ok),
         "grants_domain": sum(r["drive"]["grants"]["domain"] for r in ok),
         "grants_anyone": sum(r["drive"]["grants"]["anyone"] for r in ok),
@@ -618,8 +823,11 @@ def main(argv: list[str] | None = None) -> int:
           f"(docs {totals['docs']:,}, sheets {totals['sheets']:,}, "
           f"slides {totals['slides']:,}, binaries {totals['binaries']:,})")
     print(f"  Folders     : {totals['folders']:,}")
-    print(f"  Messages    : {totals['messages']:,}")
-    print(f"  Events      : {totals['events']:,}")
+    print(f"  Messages    : {totals['messages']:,}  "
+          f"(+{totals['drafts']:,} drafts)")
+    print(f"  Comments    : {totals['comments']:,}")
+    print(f"  Events      : {totals['events']:,}  "
+          f"(+{totals['secondary_calendars']:,} secondary calendars)")
     print(f"  ACL grants  : {totals['grants_user']:,} user, "
           f"{totals['grants_domain']:,} domain, "
           f"{totals['grants_external']:,} external, "

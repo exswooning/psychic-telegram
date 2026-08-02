@@ -334,6 +334,41 @@ def test_source_scopes_are_read_only():
         assert s.endswith(".readonly"), f"{s} is not read-only"
 
 
+def test_default_settings_do_not_widen_the_source_grant():
+    """
+    Adding a scope the Admin Console hasn't authorised breaks *every* call
+    with unauthorized_client, so an optional feature must never widen the
+    baseline grant a working deployment depends on.
+    """
+    from config import Settings, source_scopes, target_scopes
+
+    s = Settings()
+    assert source_scopes(s) == scope_mod.oauth_scopes()["source"]
+    assert target_scopes(s) == scope_mod.oauth_scopes()["target"]
+
+
+def test_server_side_mode_swaps_in_the_drive_write_scope():
+    from config import Settings, source_scopes
+
+    s = Settings()
+    s.transfer_mode = "server_side"
+    scopes = source_scopes(s)
+    assert "https://www.googleapis.com/auth/drive" in scopes
+    assert "https://www.googleapis.com/auth/drive.readonly" not in scopes
+
+
+def test_gmail_settings_scope_only_when_opted_in():
+    from config import GMAIL_SETTINGS_SCOPE, Settings, source_scopes, target_scopes
+
+    s = Settings()
+    assert GMAIL_SETTINGS_SCOPE not in source_scopes(s)
+    assert GMAIL_SETTINGS_SCOPE not in target_scopes(s)
+
+    s.migrate_gmail_settings = True
+    assert GMAIL_SETTINGS_SCOPE in source_scopes(s)
+    assert GMAIL_SETTINGS_SCOPE in target_scopes(s)
+
+
 def test_scope_filters():
     only_none = scope_mod.filter_scope(statuses=["NONE"])
     assert only_none and all(i.status == "NONE" for i in only_none)

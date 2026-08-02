@@ -60,6 +60,17 @@ def identity(db):
     return db
 
 
+@pytest.fixture(autouse=True)
+def _reset_chat_shared_state():
+    """FakeChat shares one store per tenant (as real Chat does), so it has to
+    be cleared between tests or spaces leak across them."""
+    from tests.fakes import FakeChat
+
+    FakeChat.reset_shared()
+    yield
+    FakeChat.reset_shared()
+
+
 @pytest.fixture
 def auth(settings, monkeypatch) -> FakeAuth:
     """

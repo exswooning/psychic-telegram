@@ -55,16 +55,21 @@ DRIVE_SCOPE = [
     ScopeItem("drive", "modifiedTime on files and folders", FULL,
               "Set explicitly so 'sort by modified' stays meaningful"),
     ScopeItem("drive", "Google Docs / Sheets / Slides / Drawings", PARTIAL,
-              "Round-tripped via OOXML export/import. Content and formatting "
-              "survive; comments, suggestions and revision history do not"),
-    ScopeItem("drive", "Native Docs larger than 10 MB", NONE,
-              "files.export hard-fails at 10 MB. Logged "
-              "SKIPPED_EXPORT_TOO_LARGE; needs PDF fallback or manual handling"),
+              "download_upload mode round-trips these through OOXML: content "
+              "and formatting survive, comments and revision history do not. "
+              "TRANSFER_MODE=server_side copies them natively instead, with no "
+              "round trip and no format degradation at all"),
+    ScopeItem("drive", "Native Docs larger than 10 MB", PARTIAL,
+              "files.export hard-fails at 10 MB, so download_upload logs "
+              "SKIPPED_EXPORT_TOO_LARGE. TRANSFER_MODE=server_side never "
+              "exports, so the ceiling does not apply and these migrate fully"),
     ScopeItem("drive", "Revision / version history", NONE,
               "No API to write revisions. Target files start at revision 1"),
-    ScopeItem("drive", "Comments, replies, suggestions", NONE,
-              "Lost in the export round trip. Drive Comments API could migrate "
-              "these as a separate pass if the business requires it"),
+    ScopeItem("drive", "Comments, replies, suggestions", PARTIAL,
+              "Migrated when MIGRATE_COMMENTS=true. The API cannot author a "
+              "comment as someone else, so every migrated comment is written "
+              "by the target user with the original author and date prefixed "
+              "into the text. Suggestions (tracked changes) are not covered"),
     ScopeItem("drive", "Shortcuts", FULL,
               "Two-pass: deferred until the shortcut's target has migrated"),
     ScopeItem("drive", "Direct ACLs (reader / commenter / writer / organizer)", FULL,
@@ -82,11 +87,20 @@ DRIVE_SCOPE = [
               "usually means an incomplete identity_map, not a real change"),
     ScopeItem("drive", "Inherited (folder-derived) permissions", FULL,
               "Not copied per-file; re-derived from the migrated parent folder"),
-    ScopeItem("drive", "File ownership", NONE,
-              "Everything is owned by the impersonated target user. "
-              "Cross-domain ownership transfer is blocked by policy in most tenants"),
-    ScopeItem("drive", "Google Forms, Sites, Jamboard, Maps, Fusion Tables", NONE,
-              "No export representation. Logged SKIPPED_UNEXPORTABLE"),
+    ScopeItem("drive", "File ownership", PARTIAL,
+              "The target user genuinely owns everything that lands, in both "
+              "modes. What is NOT possible is transferring the *original* "
+              "file object across tenants — Drive refuses to move a file "
+              "between organisations in either direction (verified directly: "
+              "403 insufficientFilePermissions), so target files are new "
+              "objects with new IDs. Any link to the old file ID stays "
+              "pointed at the source tenant"),
+    ScopeItem("drive", "Google Forms, Sites, Jamboard, Maps, Fusion Tables", PARTIAL,
+              "No export representation, so download_upload logs "
+              "SKIPPED_UNEXPORTABLE. TRANSFER_MODE=server_side copies them "
+              "server-side instead, which does work — verified against live "
+              "tenants for Forms. Linked response sheets and site publishing "
+              "state still need checking by hand after cutover"),
     ScopeItem("drive", "Apps Script projects", PARTIAL,
               "Exported as JSON only. Container-bound scripts lose their binding"),
     ScopeItem("drive", "Shared Drives (Team Drives)", NONE,
@@ -133,15 +147,35 @@ GMAIL_SCOPE = [
     ScopeItem("gmail", "Spam re-classification avoided", FULL,
               "messages.insert bypasses the delivery pipeline entirely — no "
               "spam scoring, no filters firing, no forwarding rules"),
-    ScopeItem("gmail", "Drafts", NONE,
-              "Not insertable via messages.insert. Would need a separate "
-              "users.drafts.create pass"),
-    ScopeItem("gmail", "Google Chat / Hangouts history", NONE,
-              "CHAT-labelled records are not insertable. Logged SKIPPED_CHAT"),
-    ScopeItem("gmail", "Filters and rules", NONE,
-              "settings.filters API not implemented — add as a settings pass"),
-    ScopeItem("gmail", "Signatures, vacation responder, send-as aliases", NONE,
-              "gmail.settings.* scopes not requested"),
+    ScopeItem("gmail", "Drafts", FULL,
+              "Migrated via users.drafts, same raw-copy approach as messages. "
+              "Needs no scope beyond the baseline"),
+    ScopeItem("gmail", "Google Chat history via Gmail", NONE,
+              "Gmail rejects CHAT as a label on messages.insert (verified: "
+              "400 Invalid label). Chat is migrated through the Chat API "
+              "instead -- see the 'other' section"),
+    ScopeItem("gmail", "Filters and rules", PARTIAL,
+              "Criteria (from/to/subject/query) copied verbatim, not identity- "
+              "mapped — a criteria string can combine conditions in ways that "
+              "aren't safe to pattern-match and rewrite. Label add/remove "
+              "actions are remapped the same way message labels are"),
+    ScopeItem("gmail", "Signatures", PARTIAL,
+              "Migrated when MIGRATE_GMAIL_SETTINGS=true. Addresses inside the "
+              "signature that have an identity_map entry are rewritten to their "
+              "target equivalents, so a signature no longer advertises a "
+              "mailbox on the tenant being decommissioned; addresses without a "
+              "mapping are left verbatim rather than guessed at. Signatures on "
+              "send-as aliases that do not exist on the target are logged "
+              "SKIPPED_ALIAS_NOT_ON_TARGET"),
+    ScopeItem("gmail", "Send-as aliases themselves", NONE,
+              "Google requires the owner to confirm an alias by email before "
+              "it can be used, which a migration cannot do on their behalf. "
+              "Recreate aliases in the target tenant, then re-run with "
+              "MIGRATE_GMAIL_SETTINGS=true to attach their signatures"),
+    ScopeItem("gmail", "Vacation responder", NONE,
+              "settings.vacation pass not implemented; the scope it needs "
+              "(gmail.settings.basic) is already covered by "
+              "MIGRATE_GMAIL_SETTINGS if this is added later"),
     ScopeItem("gmail", "Delegates and forwarding addresses", NONE,
               "Must be reconfigured in the target tenant"),
     ScopeItem("gmail", "POP / IMAP settings", NONE, "Not implemented"),
@@ -174,13 +208,20 @@ CALENDAR_SCOPE = [
     ScopeItem("calendar", "Drive attachments on events", PARTIAL,
               "Remapped through id_mapping. Dropped if the underlying file has "
               "not migrated — a dead link is worse than none. Migrate Drive first"),
-    ScopeItem("calendar", "Secondary calendars owned by the user", NONE,
-              "Only 'primary' is traversed. Needs a calendarList pass plus "
-              "calendar creation on the target"),
+    ScopeItem("calendar", "Secondary calendars owned by the user", FULL,
+              "Migrated when MIGRATE_SECONDARY_CALENDARS=true: each owned "
+              "calendar is recreated on the target and its events imported "
+              "into it. Only calendars the user OWNS -- a subscribed calendar "
+              "belongs to someone else and is left to be re-subscribed"),
     ScopeItem("calendar", "Subscribed / shared calendars", NONE,
               "Belong to another principal; re-subscribe post-cutover"),
-    ScopeItem("calendar", "Calendar sharing ACLs", NONE,
-              "Acl.list/insert not implemented"),
+    ScopeItem("calendar", "Calendar sharing ACLs", PARTIAL,
+              "Migrated when MIGRATE_CALENDAR_ACLS=true, identity-mapped the "
+              "same way Drive ACLs are and inserted with "
+              "sendNotifications=false; unmapped internal users are dropped "
+              "and logged rather than leaked. Costs read-only-ness on the "
+              "source: acl.list is rejected under calendar.readonly, so this "
+              "flag upgrades the source grant to the full calendar scope"),
     ScopeItem("calendar", "Room and equipment resources", NONE,
               "Resource addresses are tenant-specific. Dropped from attendee "
               "lists; migrate calendar resources separately and re-book"),
@@ -221,8 +262,18 @@ OTHER_SCOPE = [
               "People API pass not implemented"),
     ScopeItem("other", "Google Tasks", NONE, "Tasks API pass not implemented"),
     ScopeItem("other", "Google Keep", NONE, "Keep API is admin-export only"),
-    ScopeItem("other", "Google Chat spaces and messages", NONE,
-              "Chat API import mode requires separate app configuration"),
+    ScopeItem("other", "Google Chat spaces and messages", PARTIAL,
+              "Migrated when MIGRATE_CHAT=true. Named spaces are recreated in "
+              "import mode and each message is replayed as its ORIGINAL "
+              "sender, so a group conversation stays attributable rather than "
+              "collapsing into one voice. What is lost is timestamps: a "
+              "historical createTime needs app authentication with "
+              "chat.import, which is rejected at token-mint (verified), so "
+              "every message is stamped at migration time. Order is "
+              "preserved, dates are not. Direct messages are skipped (a DM is "
+              "its participants, not a name), as are card/attachment-only "
+              "messages. Needs the Chat service switched ON for both "
+              "organisations plus a configured Chat app in each project"),
     ScopeItem("other", "Google Vault holds, exports, retention rules", NONE,
               "Legal-hold obligations need their own export path. Confirm with "
               "counsel before decommissioning the source tenant"),
@@ -264,9 +315,18 @@ def counts() -> dict[str, dict[str, int]]:
     return out
 
 
-def oauth_scopes() -> dict[str, list[str]]:
-    """The OAuth scopes each tenant's service account must be granted."""
-    return {"source": list(SOURCE_SCOPES), "target": list(TARGET_SCOPES)}
+def oauth_scopes(settings=None) -> dict[str, list[str]]:
+    """
+    The OAuth scopes each tenant's service account must be granted.
+
+    Pass a Settings to see what the *current configuration* actually needs --
+    server_side transfer mode and the optional Gmail-settings pass each widen
+    the grant. With no argument this reports the baseline.
+    """
+    if settings is None:
+        return {"source": list(SOURCE_SCOPES), "target": list(TARGET_SCOPES)}
+    from config import source_scopes, target_scopes
+    return {"source": source_scopes(settings), "target": target_scopes(settings)}
 
 
 def as_text(services: Optional[Iterable[str]] = None,

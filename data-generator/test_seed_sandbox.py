@@ -21,7 +21,7 @@ import pytest
 
 from config import FOLDER_MIME, Settings
 from tests.fakes import FakeAuth, FakeCalendar, FakeDrive, FakeGmail
-from tools.corpus import ORG, SCALES, CorpusBuilder
+from corpus import ORG, SCALES, CorpusBuilder
 
 SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
 DOC_MIME = "application/vnd.google-apps.document"
@@ -46,7 +46,7 @@ def _retry(fn):
 
 @pytest.fixture
 def seed(monkeypatch):
-    import tools.seed_sandbox as s
+    import seed_sandbox as s
 
     monkeypatch.setattr(s, "_media", _media)
     monkeypatch.setattr(s, "_retry_factory", lambda settings: _retry)
@@ -220,8 +220,32 @@ def test_full_edge_cases_cover_the_known_hazards(settings):
     assert m["oversized_native"] == 1
     assert len(m["items"]["delta_files"]) == 3
 
+    # "Oversized Doc" no longer exceeds the 10 MB files.export ceiling, and
+    # cannot: Google's plain-text-to-Docs *import* hard-fails somewhere
+    # between ~1.3 MB and ~2 MB of source text (measured against live
+    # tenants), well below the export limit. Seeding the old ~12.9 MB version
+    # returned 400 and killed the whole build. It stays as a large-native
+    # round-trip case; the export ceiling itself is not reachable this way.
     big = next(f for f in drive.store.values() if f["name"] == "Oversized Doc")
-    assert len(drive.exports[big["id"]]) > 10 * 1024 * 1024
+    size = len(drive.exports[big["id"]])
+    assert 1_000_000 < size < 2 * 1024 * 1024, (
+        f"expected a large-but-importable native doc, got {size} bytes"
+    )
+
+
+def test_corpus_seeds_drive_comments(settings):
+    """Comments are the clearest case of a migration that "succeeds" while
+    losing something users notice, so the corpus has to contain some."""
+    drive = FakeDrive("alice@tenanta.com", "source")
+    b = _builder(drive, settings, "alice@tenanta.com",
+                 ["bob@tenanta.com"] * 4, scale="medium")
+    m = b.build("Engineering", "PRJ-001-Apollo", edge_cases=True)
+
+    assert m["comments"] > 0, "corpus produced no comments to migrate"
+    commented = [fid for fid, cs in drive.comment_store.items() if cs]
+    assert commented
+    assert any(c.get("replies") for cs in drive.comment_store.values()
+               for c in cs), "no comment thread has a reply"
 
 
 def test_light_edge_cases_still_give_every_user_delta_targets(settings):

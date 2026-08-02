@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# sync_vps.sh
+# ===========
+# Push the current working tree to an existing deployment and RESTART its UI.
+#
+# The restart is the point. An rsync alone updates the files while the running
+# server keeps serving the page it already has in memory -- so the browser
+# shows old code and every "I deployed the fix" is wrong. That happened: a
+# render fix was rsynced to the VPS, the process was left running, and the bug
+# appeared entirely unfixed through the tunnel.
+#
+#   ./sync_vps.sh root@203.0.113.10 /root/workspace-migrator [ssh-key] [port]
+
+set -uo pipefail
+TARGET="${1:?usage: ./sync_vps.sh user@host /remote/dir [key] [port]}"
+DEST="${2:?missing remote directory}"
+KEY="${3:-}"; PORT="${4:-22}"
+
+SSH=(ssh -p "$PORT" -o BatchMode=yes -o StrictHostKeyChecking=accept-new)
+[[ -n "$KEY" ]] && SSH+=(-i "$KEY")
+
+# Same exclusions as deploy_remote.py: never overwrite the remote's own
+# credentials or its resume ledger with whatever happens to be local.
+rsync -az -e "${SSH[*]}" \
+  --exclude '.git/' --exclude '__pycache__/' --exclude '.pytest_cache/' \
+  --exclude '.venv/' --exclude 'scratch/' --exclude 'migration.db*' \
+  --exclude '*.log' --exclude 'sandbox_manifest*.json' --exclude 'identities*.csv' \
+  --exclude 'keys/' --exclude 'oauth/' --exclude 'env.sh' \
+  "$(cd "$(dirname "$0")" && pwd)/" "$TARGET:$DEST/" || exit 1
+echo "  synced to $TARGET:$DEST"
+
+# Restart, then PROVE the restart happened.
+#
+# Two failure modes, both of which report success:
+#
+#  * Killing by PID file misses an instance started some other way. The new
+#    process then cannot bind the port and dies, while curl still gets 200
+#    from the old one -- so a stale server looks like a fresh deploy. Kill
+#    whatever holds the port instead; that is the thing serving the browser.
+#  * `pkill -f webui` cannot be used at all here: ssh passes this whole string
+#    as one argument, so the remote shell's own command line contains the
+#    pattern and pkill kills the command running it.
+#
+# The final check compares the listening PID against the one just started. If
+# they differ, something else owns the port and the deploy did not take.
+PORT_UI=8080
+"${SSH[@]}" "$TARGET" "set -u; cd $DEST; \
+  OLD=\$(ss -ltnp 'sport = :$PORT_UI' 2>/dev/null | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2); \
+  if [ -n \"\${OLD:-}\" ]; then kill \"\$OLD\" 2>/dev/null; fi; \
+  for i in 1 2 3 4 5 6 7 8 9 10; do \
+    ss -ltn 'sport = :$PORT_UI' 2>/dev/null | grep -q LISTEN || break; sleep 1; done; \
+  nohup .venv/bin/python webui.py --port $PORT_UI > webui.log 2>&1 & \
+  NEW=\$!; echo \$NEW > webui.pid; sleep 4; \
+  LIVE=\$(ss -ltnp 'sport = :$PORT_UI' 2>/dev/null | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2); \
+  CODE=\$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:$PORT_UI/); \
+  if [ \"\${LIVE:-}\" = \"\$NEW\" ] && [ \"\$CODE\" = 200 ]; then \
+    echo \"  restarted: pid \$NEW serving HTTP 200\"; \
+  else \
+    echo \"  RESTART DID NOT TAKE: started \$NEW but pid \${LIVE:-none} owns the port (HTTP \$CODE)\"; \
+    tail -5 webui.log; exit 1; \
+  fi"
