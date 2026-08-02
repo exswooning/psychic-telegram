@@ -828,14 +828,35 @@ def main(argv: list[str] | None = None) -> int:
         print("\nWaiting 20s for new accounts to become usable ...")
         time.sleep(20)
 
+    # Resolve the pool size before either branch. --workers 0 means "size it
+    # to this machine"; the reset path used to run before that resolution and
+    # died with max_workers must be greater than 0.
+    if not args.workers:
+        try:
+            import resources
+            rec = resources.recommend()
+            args.workers = rec["seed_workers"]
+            print(f"Workers: {args.workers} ({rec['reason']})")
+        except Exception:  # noqa: BLE001
+            args.workers = 3
+
     # --- Reset -----------------------------------------------------------
     if args.reset:
         print(f"About to DELETE all Drive files, mail, events and Chat for:")
         for u in all_users:
             print(f"    {u}")
-        if input(f"Type the domain to confirm: ").strip() != settings.source_domain:
-            print("Aborted.")
-            return 1
+        # --yes satisfies this because --confirm-domain is already a typed
+        # match against SOURCE_DOMAIN, checked by assert_sandbox before we get
+        # here. Without this, an unattended reset blocks forever on input()
+        # with no terminal to type into -- and a hung wipe looks identical to
+        # a slow one.
+        if not args.yes:
+            if input("Type the domain to confirm: ").strip() != settings.source_domain:
+                print("Aborted.")
+                return 1
+        else:
+            print(f"  (--yes, and --confirm-domain already matched "
+                  f"{settings.source_domain})")
         with futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
             for r in pool.map(lambda u: reset_one_user(settings, u), all_users):
                 print(f"  {r['user']}: {r['drive']} files, {r['gmail']} "
@@ -847,15 +868,6 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     # --- Seed ------------------------------------------------------------
-    if not args.workers:
-        try:
-            import resources
-            rec = resources.recommend()
-            args.workers = rec["seed_workers"]
-            print(f"Workers: {args.workers} ({rec['reason']})")
-        except Exception:  # noqa: BLE001
-            args.workers = 3
-
     cfg = SCALES[args.scale]
     mail_count = args.mail if args.mail is not None else cfg["per_leaf"] * 12
     event_count = args.events if args.events is not None else cfg["per_leaf"] * 4
