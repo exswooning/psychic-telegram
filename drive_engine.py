@@ -674,7 +674,15 @@ class DriveMigrator:
             if p.get("role") == "owner":
                 continue
             details = p.get("permissionDetails") or []
-            if any(d.get("inherited") for d in details):
+            # An inherited grant is really the parent folder's permission, so
+            # preserving the copy tree already keeps the access. Recreating it
+            # on the target file lets the doc carry its own share access even
+            # if the folder is later moved or unshared -- the per-file model
+            # the corpus shares in. Off for very large tenants, where that
+            # specificity costs a permissions.create per inherited grantee
+            # per file.
+            if any(d.get("inherited") for d in details) \
+                    and not self.settings.recreate_inherited_acls:
                 continue
 
             body: dict = {"type": p["type"], "role": p["role"]}

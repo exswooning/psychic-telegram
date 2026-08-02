@@ -20,7 +20,7 @@ import base64
 import pytest
 
 from config import FOLDER_MIME, Settings
-from tests.fakes import FakeAuth, FakeCalendar, FakeDrive, FakeGmail
+from tests.fakes import FakeAuth, FakeCalendar, FakeChat, FakeDrive, FakeGmail
 from corpus import ORG, SCALES, CorpusBuilder
 
 SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
@@ -312,6 +312,45 @@ def test_calendar_meetings_span_the_org_and_use_import(seed, settings):
         for a in c["body"].get("attendees", []):
             attendee_emails.add(a["email"])
     assert len(attendee_emails & set(peers)) >= 3
+
+
+def test_chat_seed_creates_room_spaces_with_messages(seed, settings):
+    FakeChat.reset_shared()
+    chat = FakeChat("alice@tenuta.com", "source")
+    m = seed.seed_chat(chat, settings, "alice@tenuta.com",
+                       ["bob@tenuta.com"], "ext@example.com", local="alice")
+    assert m["spaces"] == 2
+    assert m["messages"] == 10
+    assert chat.call_count("spaces.create") == 2
+    assert chat.call_count("chat.messages.create") == 10
+    names = [s["displayName"] for s in chat.space_store.values()]
+    assert "alice team" in names and "alice standup" in names
+
+
+def test_chat_seed_failure_is_best_effort_not_fatal(seed):
+    class Bogus:
+        def spaces(self):
+            return self
+
+        def create(self, **kw):
+            raise RuntimeError("chat not enabled")
+
+    FakeChat.reset_shared()
+    m = seed.seed_chat(Bogus(), None, "alice@tenute.com",
+                       ["bob@flight.com"], "x", local="alice")
+    assert m["spaces"] == 0 and m["messages"] == 0 and m["note"]
+
+
+def test_chat_reset_deletes_only_seeded_rooms(seed, settings):
+    FakeChat.reset_shared()
+    chat = FakeChat("alice@tenuta.com", "source")
+    seed.seed_chat(chat, settings, "alice@tenuta.com",
+                   ["bob@tenuta.com"], "ext@example.com", local="alice")
+    chat.add_space("Real Room")          # must be left alone
+    deleted = seed.reset_chat(chat, settings, local="alice")
+    assert deleted == 2
+    remaining = {s["displayName"] for s in chat.space_store.values()}
+    assert remaining == {"Real Room"}
 
 
 # ======================================================================

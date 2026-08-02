@@ -231,9 +231,22 @@ class TestWizardPayload:
         """
         import webui
 
-        assert 7 not in webui.STEP_ACTIONS
         for name, spec in webui.ACTIONS.items():
             assert "seed_sandbox" not in " ".join(spec["argv"]), name
+
+        # Step 7 (seeding) may only carry read-only diagnostics as buttons --
+        # never anything that writes to a tenant.
+        for key in webui.STEP_ACTIONS.get(7, []):
+            spec = webui.ACTIONS[key]
+            assert spec["argv"][1].endswith("check_seed.py"), key
+            assert not spec.get("destructive"), key
+
+    def test_seed_step_offers_the_read_only_checks(self):
+        import webui
+
+        keys = webui.STEP_ACTIONS.get(7, [])
+        assert "check_seed_accounts" in keys
+        assert "check_seed_scopes" in keys
 
     def test_destructive_actions_all_carry_a_confirmation_phrase(self):
         import webui
@@ -241,6 +254,16 @@ class TestWizardPayload:
         for name, spec in webui.ACTIONS.items():
             if spec.get("destructive"):
                 assert spec.get("confirm"), f"{name} is destructive with no phrase"
+
+    def test_provision_always_passes_yes(self):
+        """provision-users asks 'Type the domain to confirm' on stdin. Fired
+        from a button, stdin is DEVNULL, so that input() would hang the job
+        mid-run -- the same failure as the seeder's prompt. --yes must be in
+        the argv so the button never reaches an unanswerable prompt."""
+        import webui
+
+        spec = webui.ACTIONS["provision"]
+        assert "--yes" in spec["argv"]
 
     def test_actions_never_build_a_shell_string(self):
         import webui

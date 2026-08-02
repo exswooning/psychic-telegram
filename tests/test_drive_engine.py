@@ -373,7 +373,38 @@ def test_owner_permission_is_never_reapplied(migrator, auth):
     assert all(p["role"] != "owner" for p in _target_perms(auth, "mine.pdf"))
 
 
-def test_inherited_permissions_are_not_duplicated_per_file(migrator, auth):
+def test_inherited_permissions_are_recreated_per_file(migrator, auth, db):
+    """A grant a document gets through its parent folder is made explicit on
+    the migrated document itself, so the share access does not depend on the
+    file staying put in the tree."""
+    from db import bulk_seed_identities
+
+    bulk_seed_identities(db, [("bob@tenanta.com", "bob@tenantb.com")])
+    src = auth.source_drive(SRC_USER)
+    fid = src.add_binary("child.pdf")
+    src.add_permission(fid, "user", "reader", email="bob@tenanta.com",
+                       inherited=True)
+    migrator.run()
+    perms = _target_perms(auth, "child.pdf")
+    assert any(p["emailAddress"] == "bob@tenantb.com"
+               and p["role"] == "reader" for p in perms)
+
+
+def test_inherited_permission_default_is_on():
+    from config import Settings
+
+    s = Settings()
+    assert s.recreate_inherited_acls is True
+
+
+def test_inherited_permissions_can_stay_folder_derived(
+        migrator, auth, db, settings):
+    """MIGRATE_INHERITED_ACLS=false returns to folder-derived sharing: no
+    per-file grant is recreated, only the parent folder's."""
+    from db import bulk_seed_identities
+
+    settings.recreate_inherited_acls = False
+    bulk_seed_identities(db, [("bob@tenanta.com", "bob@tenantb.com")])
     src = auth.source_drive(SRC_USER)
     fid = src.add_binary("child.pdf")
     src.add_permission(fid, "user", "reader", email="bob@tenanta.com",

@@ -73,10 +73,26 @@ ACTIONS: dict[str, dict] = {
         "blurb": "What migrates, and the exact scopes this config needs.",
         "argv": [PY, "main.py", "scope"],
     },
+    "export_scope": {
+        "label": "Export SCOPE.md",
+        "blurb": "Write the scope matrix to SCOPE.md for the approval ticket.",
+        "argv": [PY, "main.py", "scope", "--format", "markdown", "--out", "SCOPE.md"],
+    },
     "discover": {
         "label": "Discover",
         "blurb": "Read-only scan: counts, depth, size, duration estimate.",
         "argv": [PY, "main.py", "discover", "--include-mail"],
+    },
+    "check_seed_accounts": {
+        "label": "Check seed accounts",
+        "blurb": "Verify alice/bob/carol/dave/erin exist in the source tenant.",
+        "argv": [PY, "check_seed.py", "accounts"],
+    },
+    "check_seed_scopes": {
+        "label": "Check seed scopes",
+        "blurb": "Verify the seeder's write scopes are authorised "
+                 "(incl. admin.directory.user).",
+        "argv": [PY, "check_seed.py", "scopes"],
     },
     "init_db": {
         "label": "Create database + load identities",
@@ -96,7 +112,7 @@ ACTIONS: dict[str, dict] = {
     "provision": {
         "label": "Create the missing target accounts",
         "blurb": "Only ever creates; existing addresses are left untouched.",
-        "argv": [PY, "main.py", "provision-users", "--tenant", "target"],
+        "argv": [PY, "main.py", "provision-users", "--tenant", "target", "--yes"],
         "destructive": True,
         "confirm": "CREATE",
     },
@@ -176,6 +192,10 @@ class Job:
             try:
                 self.proc = subprocess.Popen(
                     argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    # A child must never block on a hidden interactive prompt:
+                    # input() against the server's terminal hangs the job with
+                    # no output, which reads as a stalled migration.
+                    stdin=subprocess.DEVNULL,
                     text=True, bufsize=1, env=env,
                     cwd=cwd or os.path.dirname(os.path.abspath(__file__)),
                 )
@@ -334,6 +354,7 @@ STEP_ACTIONS: dict[int, list[str]] = {
     4: ["init_db", "init_db_auto"],
     5: ["preflight"],
     6: ["provision_dry", "provision"],
+    7: ["check_seed_accounts", "check_seed_scopes"],
     8: ["discover", "migrate_dry", "migrate"],
     9: ["verify", "report"],
 }
@@ -793,6 +814,11 @@ def seed_argv(body: dict) -> tuple[list[str], dict, str]:
         return [], {}, f"unknown scale {scale!r}"
 
     argv = [PY, "seed_sandbox.py", "--confirm-domain", domain, "--scale", scale]
+    # --yes skips the seeder's interactive "long run?" prompt. In this subprocess
+    # stdin is inherited (or DEVNULL, see Job.start), so input() would block
+    # forever and the run would seed nothing. The typed-domain gate above is the
+    # safety this replaces; the CLI keeps its prompt for terminal use.
+    argv.append("--yes")
     if body.get("create_users"):
         argv.append("--create-users")
     if body.get("reset"):
@@ -856,6 +882,21 @@ def dwd_payload() -> dict:
             "scopes": ",".join(scopes),
             "scope_list": scopes,
         })
+
+    # Provisioning a target account needs admin.directory.user (write), which
+    # the migration target set deliberately does not carry. The Admin Console
+    # REPLACES the scope line, so a target you intend to provision needs one
+    # line carrying both -- paste the migration set alone and provisioning
+    # fails with unauthorized_client, exactly as it just did.
+    try:
+        from config import DIRECTORY_WRITE_SCOPE
+        combined = sorted(set(target_scopes(st)) | {DIRECTORY_WRITE_SCOPE})
+        out["target_provision"] = {
+            "scopes": ",".join(combined),
+            "scope_list": combined,
+        }
+    except Exception:  # noqa: BLE001 - provisioning is optional; never break /api/dwd
+        out["target_provision"] = {}
 
     # Seeding writes; migrating (on the source) reads. The Admin Console's
     # delegation editor REPLACES the scope line rather than adding to it, so a
@@ -989,6 +1030,180 @@ def _status_uncached() -> dict:
 
 
 # ----------------------------------------------------------------------
+# Operator dashboard — the same data the TUI reads, served to the page.
+# migration.db is opened read-only (mode=ro), exactly like tui.py does.
+# The only mutation state here is the launch toggles below.
+# ----------------------------------------------------------------------
+
+# dry-run + which services "Migrate"/"Delta" run. Mirrors the TUI's
+# d/t/s keys so the web buttons behave identically to the keyboard.
+_RUN_STATE: dict = {
+    "dry_run": False,
+    "services": {"drive": True, "gmail": True, "calendar": True, "chat": False},
+}
+
+# Actions whose argv follow the launch toggles (everything else uses its
+# fixed ACTIONS argv verbatim).
+_LAUNCH_KEYS = ("migrate", "delta")
+
+
+def _db_conn():
+    """A read-only connection to the resume ledger, or None."""
+    import sqlite3
+
+    from config import Settings
+
+    path = Settings().db_path
+    if not os.path.exists(path):
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        return conn
+    except sqlite3.Error:
+        return None
+
+
+def _serialize_snapshot(snap) -> dict:
+    return {
+        "users": [{
+            "source": u.source, "target": u.target, "status": u.status,
+            "drive_done": u.drive_done, "drive_failed": u.drive_failed,
+            "drive_skipped": u.drive_skipped,
+            "mail_done": u.mail_done, "mail_failed": u.mail_failed,
+            "mail_skipped": u.mail_skipped,
+            "cal_done": u.cal_done, "cal_failed": u.cal_failed,
+            "acl_failed": u.acl_failed, "bytes_moved": u.bytes_moved,
+            "exp_drive": u.exp_drive, "exp_mail": u.exp_mail,
+            "gb_today": u.gb_today,
+            "done": u.done, "failed": u.failed,
+            "expected": u.expected, "fraction": u.fraction,
+        } for u in snap.users],
+        "failures": snap.failures,
+        "totals": snap.totals,
+        "collected_at": snap.collected_at,
+        "error": snap.error,
+    }
+
+
+def snapshot_payload() -> dict:
+    """The TUI snapshot plus the launch toggles, for the page's poll loop."""
+    import sqlite3
+
+    import tui
+    from config import Settings
+
+    conn = _db_conn()
+    if conn is None:
+        return {"error": "no database yet — run init-db or create identities.csv",
+                "toggles": dict(_RUN_STATE), "snapshot": None}
+    try:
+        snap = tui.collect_snapshot(conn, Settings().effective_upload_cap())
+    except sqlite3.Error as exc:
+        return {"error": f"db read error: {exc}",
+                "toggles": dict(_RUN_STATE), "snapshot": None}
+    finally:
+        conn.close()
+    return {"error": "", "toggles": dict(_RUN_STATE),
+            "snapshot": _serialize_snapshot(snap)}
+
+
+def scope_payload() -> dict:
+    """The scope matrix plus discovered volume, rendered server-side."""
+    import scope as scope_mod
+
+    conn = _db_conn()
+    volume = {}
+    if conn is not None:
+        try:
+
+            class _Shim:
+                conn = conn
+
+            volume = scope_mod.planned_volume(_Shim())
+        except Exception:  # noqa: BLE001
+            volume = {}
+        finally:
+            conn.close()
+
+    tally = scope_mod.counts()
+    lines = [
+        "MIGRATION SCOPE — what this engine moves",
+        "",
+        "  [+] FULL     high fidelity",
+        "  [~] PARTIAL  migrated with a named fidelity loss",
+        "  [-] NONE     not migrated by this engine",
+        "",
+    ]
+    for svc in scope_mod.SERVICES:
+        t = tally.get(svc, {})
+        lines.append(f"  {svc:<10} full {t.get('FULL', 0):>2}   "
+                     f"partial {t.get('PARTIAL', 0):>2}   none {t.get('NONE', 0):>2}")
+    if volume.get("users"):
+        lines += ["",
+                  f"  Discovered volume: {volume['files']:,} files, "
+                  f"{volume['folders']:,} folders, {volume['native']:,} native docs, "
+                  f"{_human_bytes(volume['bytes'])}, {volume['messages']:,} messages, "
+                  f"max depth {volume['max_depth']}"]
+    else:
+        lines += ["", "  Discovered volume: run 'discover' to populate."]
+    lines += scope_mod.as_text(width=100)
+    return {"lines": lines, "totals": tally, "volume": volume}
+
+
+def _human_bytes(n: int) -> str:
+    n = int(n or 0)
+    for unit in ("B", "KB", "MB", "GB", "TB", "PB"):
+        if n < 1024 or unit == "PB":
+            return f"{n:.1f} {unit}" if unit != "B" else f"{n} B"
+        n /= 1024
+    return f"{n:.1f} PB"
+
+
+def logs_payload() -> dict:
+    """Tail of the engine's own log file (what main.py writes)."""
+    from config import Settings
+
+    path = Settings().log_file
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return {"path": path, "lines": ["(no log file yet)"]}
+    return {"path": path, "lines": lines[-600:]}
+
+
+def set_toggles(body: dict) -> dict:
+    """Apply the launch toggles sent by the toolbar."""
+    dry = body.get("dry_run")
+    if dry is not None:
+        _RUN_STATE["dry_run"] = bool(dry)
+    svcs = body.get("services")
+    if isinstance(svcs, dict):
+        for k in _RUN_STATE["services"]:
+            if k in svcs:
+                _RUN_STATE["services"][k] = bool(svcs[k])
+    return {"ok": True, "toggles": dict(_RUN_STATE)}
+
+
+def _action_argv(name: str) -> list:
+    """Fixed argv for most actions; migrate/delta follow the launch toggles
+    (dry-run + selected services), exactly like the TUI's m/x keys."""
+    spec = ACTIONS[name]
+    if name not in _LAUNCH_KEYS:
+        return list(spec["argv"])
+    chosen = [k for k, v in _RUN_STATE["services"].items() if v]
+    argv = [PY, "main.py", "migrate" if name == "migrate" else "delta"]
+    if chosen:
+        argv += ["--services", ",".join(chosen)]
+    if name == "delta":
+        argv += ["--days", "2"]
+    if _RUN_STATE["dry_run"]:
+        argv.insert(2, "--dry-run")
+    return argv
+
+
+# ----------------------------------------------------------------------
 PAGE = """<!doctype html>
 <html><head><meta charset="utf-8"><title>Workspace Migration</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1080,13 +1295,76 @@ font:12px/1.55 ui-monospace,Menlo,monospace;white-space:pre-wrap;word-break:brea
 border-radius:0 8px 8px 0;margin:14px 0}
 .okbox{border-left:3px solid var(--ok);padding:10px 14px;background:var(--panel);
 border-radius:0 8px 8px 0;margin:14px 0}
+
+/* ---- command toolbar: every ACTIONS command, always one click away ---- */
+.toolbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;
+padding:10px 22px;border-bottom:1px solid var(--line);background:var(--panel)}
+.toolbar button{font-size:12px;padding:6px 10px}
+.toolbar .sep{width:1px;height:22px;background:var(--line);margin:0 4px}
+.chk{display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--dim)}
+.chk input{width:auto;margin:0}
+
+/* ---- operator tabs: dashboard / users / failures / scope / logs ---- */
+.tabs{display:flex;gap:2px;padding:0 22px;border-bottom:1px solid var(--line);
+background:var(--panel);overflow-x:auto}
+.tabs button{border:none;border-bottom:2px solid transparent;border-radius:0;
+background:none;padding:10px 14px;font-size:13px;color:var(--dim);cursor:pointer}
+.tabs button.on{border-bottom-color:var(--accent);color:var(--fg)}
+.tabs button:hover{color:var(--fg)}
+.view{display:none;padding:18px 22px;max-width:1200px}
+.view.on{display:block}
+.view h2{font-size:16px;margin:0 0 12px;font-weight:600}
+.view table{width:100%;border-collapse:collapse;font-size:13px}
+.view th,.view td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line)}
+.view th{color:var(--dim);font-size:11px;text-transform:uppercase;
+letter-spacing:.05em;position:sticky;top:0;background:var(--panel)}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+.mono{font:12px/1.55 ui-monospace,Menlo,monospace;white-space:pre-wrap;word-break:break-word}
+.scroll{max-height:60vh;overflow:auto}
+.gbar{height:6px;background:var(--line);border-radius:99px;overflow:hidden}
+.gbar>i{display:block;height:100%;background:var(--accent);transition:width .4s ease}
+.hdprog{display:flex;align-items:center;gap:12px;padding:7px 22px;
+border-bottom:1px solid var(--line);background:var(--panel)}
+.hdprog .gbar{flex:1;height:8px}
+.hdprog b{min-width:44px;text-align:right}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));
+gap:10px;margin:0 0 14px}
+.stat{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px}
+.stat b{display:block;font-size:18px} .stat span{color:var(--dim);font-size:11px}
+.outwrap{border-top:1px solid var(--line);background:var(--panel);padding:10px 22px}
+pre.out{height:230px}
+.feedbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px}
+.feedbar .sp{margin-left:auto}
+.feedbar button{padding:5px 9px;font-size:12px}
 </style></head><body>
 <header>
   <h1>Workspace Migration</h1>
   <span class="muted" id="route"></span>
-  <span class="muted" style="margin-left:auto">127.0.0.1 only &middot; SSH tunnel</span>
+    <span class="muted" style="margin-left:auto;display:flex;gap:8px;align-items:center"
+    title="127.0.0.1 only · SSH tunnel">
+    <span class="dot" id="dot"></span><b id="jname">idle</b>
+    <span id="jmeta"></span></span>
 </header>
-<div class="wrap">
+
+<div class="hdprog">
+  <div class="gbar"><i id="progi" style="width:0%"></i></div>
+  <b class="muted" id="progpct">0%</b>
+  <span class="muted" id="progtxt">no migration yet</span>
+</div>
+
+<div class="toolbar" id="tb">Loading commands&hellip;</div>
+
+<div class="tabs" id="tabs">
+  <button data-tab="setup" class="on">Setup</button>
+  <button data-tab="dashboard">Dashboard</button>
+  <button data-tab="users">Users</button>
+  <button data-tab="failures">Failures</button>
+  <button data-tab="scope">Scope</button>
+  <button data-tab="logs">Logs</button>
+  <button data-tab="output">Output</button>
+</div>
+
+<div class="wrap" id="setup">
   <div class="rail">
     <div class="bar" style="margin-top:0"><i id="pbar" style="width:0"></i></div>
     <div class="muted" style="margin:0 16px 12px" id="pnum">&ndash;</div>
@@ -1094,15 +1372,49 @@ border-radius:0 8px 8px 0;margin:14px 0}
   </div>
   <div class="main" id="main"><div class="muted">Loading&hellip;</div></div>
 </div>
+
+<div class="view" id="view-dashboard"><div class="muted">Loading&hellip;</div></div>
+<div class="view" id="view-users"></div>
+<div class="view" id="view-failures"></div>
+<div class="view" id="view-scope"></div>
+<div class="view" id="view-logs"></div>
+<div class="view" id="view-output"></div>
+
+<div class="outwrap">
+  <div class="feedbar">
+    <b>Live feed</b>
+    <span class="dot" id="jdot"></span>
+    <b id="jobname">idle</b>
+    <span class="pill" id="jstatus">idle</span>
+    <span class="muted" id="jobmeta"></span>
+    <span class="sp"></span>
+    <label class="chk"><input type="checkbox" id="follow-out" checked
+      onchange="followOut=this.checked"> follow</label>
+    <button onclick="clearOut()">Clear</button>
+    <button id="stop" disabled>Interrupt</button>
+  </div>
+  <pre class="out" id="out">Nothing has run yet in this session.
+
+Long jobs keep running if you close the tab &mdash; reopen and the output
+picks up where it left off.</pre>
+</div>
 <script>
 let seen=0, acts={}, S=null, cur=null, dwd=null, oauth=null, cfg=null, follow=true;
 let lastSig='', ups=null, authMode=null, authModes=null, upMsg={},
     seedScales=null, seedMsg=null, runMode=null, runModes=null,
     dep={user:'root',port:'22',open:false};
+let tab='setup', snap=null, scopeLines=[], logLines=[], logPath='';
+let followOut=true;
 const $=i=>document.getElementById(i);
 const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const MARK={done:'\\u2713',manual:'!',active:'\\u25b8',todo:'',skip:'\\u2013'};
+const MARK={done:'\u2713',manual:'!',active:'\u25b8',todo:'',skip:'\u2013'};
+const hb=n=>{ n=+n||0; const u=['B','KB','MB','GB','TB','PB']; let i=0;
+  while(n>=1024&&i<u.length-1){n/=1024;i++} return (i===0?n.toFixed(0):n.toFixed(1))+' '+u[i]; };
+const hc=n=>(+n||0).toLocaleString();
+const JSTATUS={DONE:'var(--ok)',RUNNING:'var(--accent)',FAILED:'var(--bad)',
+  PAUSED_QUOTA:'var(--warn)',INTERRUPTED:'var(--warn)'};
+const jc=s=>JSTATUS[s]||'';
 
 function copy(txt,btn){
   navigator.clipboard.writeText(txt).then(()=>{
@@ -1156,6 +1468,26 @@ function stepBody(x){
     h+=`</div><div class="muted">Grants usually propagate in about 2 minutes,
       occasionally 30. This page re-checks on its own \\u2014 the step turns green
       when a real token mint succeeds, not when you say it is done.</div>`;
+
+    /* Provisioning the target (step 6) needs admin.directory.user (write),
+       which the target's migration line deliberately omits. Same REPLACE-not-
+       append rule as seeding, so show the combined line right here. */
+    if(dwd.target_provision&&dwd.target_provision.scope_list&&dwd.target_provision.scope_list.length){
+      h+=`<div class="card" style="background:var(--bg);margin-top:14px">
+        <h3>Also creating target accounts (provision-users)</h3>
+        <div class="muted">Creating the target accounts on step 6 needs
+          <code>admin.directory.user</code> (write) added to the target grant.
+          The target's line above does not carry it. If you intend to
+          provision, paste this combined line into the target Admin Console
+          \\u2014 it replaces the current one.</div>
+        <div class="cprow"><b>Target scopes: migrate + provision</b>
+          <button onclick="copy(${esc(JSON.stringify(dwd.target_provision.scopes))},this)">Copy</button>
+          <span class="muted">${dwd.target_provision.scope_list.length} scopes</span></div>
+        <pre class="copy">${esc(dwd.target_provision.scopes)}</pre></div>`;
+    }
+    h+=`<div style="margin-top:16px"><button class="primary" onclick="recheckDWD(this)">
+      Re-check Delegation Status<small>Mints tokens to test Domain-Wide Delegation immediately</small></button>
+      <span id="dwdmsg" class="muted" style="margin-left:10px"></span></div>`;
   }
 
   /* Step 3: choose how this authenticates, then supply whatever that needs.
@@ -1496,16 +1828,7 @@ function draw(force){
       ${S.failed?`<span class="muted" style="color:var(--bad);margin-left:auto">
         ${S.failed} item(s) FAILED</span>`:''}
     </div>
-    <div class="card"><h3>Output</h3>
-      <div class="run"><span class="dot" id="dot"></span>
-        <b id="jname">idle</b><span class="muted" id="jmeta"></span>
-        <button id="stop" style="margin-left:auto" disabled>Interrupt</button></div>
-      <pre class="out" id="out">Nothing has run yet in this session.
-
-Long jobs keep running if you close the tab \\u2014 reopen and the output
-picks up where it left off.</pre>
-    </div>
-    <div class="stats">
+    <div class="stats" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr))">
       <div class="stat"><b id="s-mig">${(S.migrated||0).toLocaleString()}</b><span>items migrated</span></div>
       <div class="stat"><b id="s-fail" style="${S.failed?'color:var(--bad)':''}">${S.failed||0}</b><span>failed</span></div>
       <div class="stat"><b id="s-users">${S.users_done||0}/${S.users_total||0}</b><span>users done</span></div>
@@ -1515,8 +1838,6 @@ picks up where it left off.</pre>
   $('next').onclick=()=>{follow=false;cur=S.steps[i+1].n;draw(true);};
   $('fol').onchange=e=>{follow=e.target.checked;if(follow)draw(true);};
   $('stop').onclick=async()=>{await fetch('/api/stop',{method:'POST'});};
-  if(window._out){ $('out').textContent=window._out;
-    $('out').scrollTop=$('out').scrollHeight; }
   restoreForm();
   drawRail();
   paintJob();
@@ -1555,7 +1876,30 @@ async function run(name){
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({action:name,confirm:a.confirm||''})})).json();
   if(!r.ok){ alert(r.error); return; }
-  seen=0; window._out=''; if($('out')) $('out').textContent='';
+  clearOut();
+}
+
+async function recheckDWD(btn){
+  btn.disabled=true;
+  const o=btn.innerHTML;
+  btn.innerHTML='Checking delegation...';
+  if($('dwdmsg')) $('dwdmsg').textContent='Minting tokens...';
+  try{
+    const r=await fetch('/api/check_dwd',{method:'POST'});
+    const d=await r.json();
+    btn.disabled=false;
+    btn.innerHTML=o;
+    if(d.ok){
+      if($('dwdmsg')) $('dwdmsg').textContent='Check complete!';
+      poll();
+    }else{
+      if($('dwdmsg')) $('dwdmsg').textContent=d.error||'Check failed';
+    }
+  }catch(e){
+    btn.disabled=false;
+    btn.innerHTML=o;
+    if($('dwdmsg')) $('dwdmsg').textContent='Error: '+e;
+  }
 }
 
 function cfgFields(){
@@ -1578,7 +1922,7 @@ async function runSetup(keyless){
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({keyless:!!keyless})})).json();
   if(!r.ok){ alert(r.error); return; }
-  seen=0; window._out=''; if($('out')) $('out').textContent='';
+  clearOut();
 }
 async function deploy(){
   const creds=$('d-creds').checked;
@@ -1595,7 +1939,7 @@ async function deploy(){
       port:$('d-port').value,key:$('d-key').value,
       include_credentials:creds,confirm:confirmPhrase})})).json();
   if(!r.ok){ alert(r.error); return; }
-  seen=0; window._out=''; if($('out')) $('out').textContent='';
+  clearOut();
 }
 
 async function runSeed(){
@@ -1610,7 +1954,7 @@ async function runSeed(){
     body:JSON.stringify({confirm_domain:typed, scale:$('seed-scale').value,
       create_users:$('seed-create').checked, reset:reset})})).json();
   seedMsg={ok:!!r.ok, text: r.ok ? ('seeding '+src+' \\u2014 output below') : r.error};
-  if(r.ok){ seen=0; window._out=''; if($('out')) $('out').textContent=''; }
+  if(r.ok){ clearOut(); }
   await refresh(true);
 }
 
@@ -1684,13 +2028,26 @@ async function oauthDrop(t){
 
 let job={};
 function paintJob(){
-  if(!$('dot')) return;
-  $('dot').className='dot'+(job.running?' on':'');
-  $('jname').textContent=job.name||'idle';
-  $('jmeta').textContent=job.running?job.elapsed+'s elapsed'
-    :(job.rc===null||job.rc===undefined?'':'exit '+job.rc+' \\u00b7 '+job.elapsed+'s');
-  $('stop').disabled=!job.running;
-  document.querySelectorAll('.acts button').forEach(b=>b.disabled=job.running);
+  const r=job.running;
+  const set=(id,v)=>{const e=$(id); if(e&&e.textContent!==v) e.textContent=v;};
+  if($('dot')) $('dot').className='dot'+(r?' on':'');
+  if($('jdot')) $('jdot').className='dot'+(r?' on':'');
+  const meta=r?job.elapsed+'s elapsed'
+    :(job.rc===null||job.rc===undefined?'':'exit '+job.rc+' \u00b7 '+job.elapsed+'s');
+  const statusTxt=r?'running'
+    :(job.rc===null||job.rc===undefined?'idle'
+      :(job.rc===0?'done':'exit '+job.rc));
+  set('jname',job.name||'idle'); set('jmeta',meta);
+  set('jobname',job.name||'idle'); set('jobmeta',meta);
+  set('of-name',job.name||'idle'); set('of-meta',meta);
+  const st=$('jstatus'); if(st){ st.textContent=statusTxt;
+    st.style.color=r?'var(--accent)':(job.rc===0?'var(--ok)':(job.rc?'var(--bad)':'')); }
+  const ofs=$('of-status'); if(ofs){ ofs.textContent=statusTxt;
+    ofs.style.color=r?'var(--accent)':(job.rc===0?'var(--ok)':(job.rc?'var(--bad)':'')); }
+  const ofd=$('of-dot'); if(ofd) ofd.className='dot'+(r?' on':'');
+  if($('stop')) $('stop').disabled=!r;
+  document.querySelectorAll('#tb button').forEach(b=>b.disabled=r);
+  document.querySelectorAll('.acts button').forEach(b=>b.disabled=r);
 }
 
 async function refresh(force){
@@ -1723,8 +2080,12 @@ async function pollJob(){
     if(j.lines.length){
       window._out=(window._out||'')+j.lines.join('\\n')+'\\n';
       seen=j.total;
-      if($('out')){ $('out').textContent=window._out;
-        $('out').scrollTop=$('out').scrollHeight; }
+      const pre=$('out'); if(pre){
+        pre.textContent=window._out;
+        if(followOut) pre.scrollTop=pre.scrollHeight; }
+      const pre2=$('out2'); if(pre2){
+        pre2.textContent=window._out;
+        if(followOut) pre2.scrollTop=pre2.scrollHeight; }
     }
     const was=job.running; job=j; paintJob();
     if(was&&!j.running) refresh(true);   // a finished job usually changes step state
@@ -1732,10 +2093,269 @@ async function pollJob(){
   setTimeout(pollJob,1200);
 }
 
-fetch('/api/actions').then(r=>r.json()).then(a=>{acts=a;refresh();pollJob();});
+function clearOut(){
+  window._out=''; seen=0;
+  const pre=$('out'); if(pre) pre.textContent='';
+  const pre2=$('out2'); if(pre2) pre2.textContent='';
+}
+
+/* ---------------- command toolbar + operator tabs ---------------- */
+function drawToolbar(){
+  const tb=$('tb'); if(!tb||!Object.keys(acts).length) return;
+  tb.innerHTML=Object.keys(acts).map(k=>{
+    const a=acts[k];
+    return `<button class="${a.destructive?'danger':''}" onclick="run('${k}')"
+      title="${esc(a.blurb)}">${esc(a.label)}</button>`;
+  }).join('')+`<span class="sep"></span>
+    <button onclick="goSeed()" title="Seed the source tenant (wizard step 7)">Seed</button>
+    <span class="sep"></span>
+    <label class="chk"><input type="checkbox" id="tog-dry" class="tb-toggle"
+      onchange="toggleChange()"> dry-run</label>
+    <label class="chk"><input type="checkbox" id="tog-drive" class="tb-toggle" checked
+      onchange="toggleChange()"> drive</label>
+    <label class="chk"><input type="checkbox" id="tog-gmail" class="tb-toggle" checked
+      onchange="toggleChange()"> gmail</label>
+    <label class="chk"><input type="checkbox" id="tog-calendar" class="tb-toggle" checked
+      onchange="toggleChange()"> calendar</label>
+    <label class="chk"><input type="checkbox" id="tog-chat" class="tb-toggle"
+      onchange="toggleChange()"> chat</label>`;
+  paintJob();
+}
+
+async function toggleChange(){
+  const svcs={};
+  ['drive','gmail','calendar','chat'].forEach(k=>{const c=$('tog-'+k); if(c) svcs[k]=c.checked;});
+  const dry=$('tog-dry');
+  await fetch('/api/toggles',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({dry_run:dry&&dry.checked,services:svcs})});
+}
+
+function applyToggles(tg){
+  if(!tg) return;
+  const a=document.activeElement;
+  if(a&&a.classList&&a.classList.contains('tb-toggle')) return;
+  const dry=$('tog-dry'); if(dry) dry.checked=!!tg.dry_run;
+  ['drive','gmail','calendar','chat'].forEach(k=>{
+    const c=$('tog-'+k); if(c&&tg.services) c.checked=!!tg.services[k]; });
+}
+
+function goSeed(){ cur=7; follow=false; setTab('setup'); }
+
+function setTab(t){
+  tab=t;
+  document.querySelectorAll('.tabs button').forEach(b=>
+    b.classList.toggle('on',b.dataset.tab===t));
+  const views={setup:$('setup'),dashboard:$('view-dashboard'),users:$('view-users'),
+    failures:$('view-failures'),scope:$('view-scope'),logs:$('view-logs'),
+    output:$('view-output')};
+  Object.keys(views).forEach(k=>{ const el=views[k]; if(!el) return;
+    el.style.display=(k===t)?(k==='setup'?'grid':'block'):'none'; });
+  if(t!=='setup'){
+    if(!S) refresh();
+    if(t==='scope'&&!scopeLines.length) fetchScope();
+    if(t==='logs'&&!logLines.length) fetchLogs();
+    drawView();
+  }else{
+    draw(true);
+  }
+}
+
+function drawView(){
+  if(tab==='setup') return;
+  const el=$('view-'+tab); if(!el) return;
+  let h='';
+  if(tab==='dashboard') h=dashboardHTML();
+  else if(tab==='users') h=usersHTML();
+  else if(tab==='failures') h=failuresHTML();
+  else if(tab==='scope') h=scopeHTML();
+  else if(tab==='logs') h=logsHTML();
+  else if(tab==='output') h=outputHTML();
+  if(h!==el.innerHTML){
+    el.innerHTML=h;
+    if(tab==='logs'){ const p=el.querySelector('pre'); if(p) p.scrollTop=p.scrollHeight; }
+    if(tab==='output'){ const p=el.querySelector('pre');
+      if(p){ p.textContent=window._out||''; if(followOut) p.scrollTop=p.scrollHeight; } }
+  }
+}
+
+/* The full, large live feed of whatever job is running. */
+function outputHTML(){
+  return `<h2>Live feed</h2>
+    <div class="feedbar">
+      <span class="dot" id="of-dot"></span>
+      <b id="of-name">idle</b>
+      <span class="pill" id="of-status">idle</span>
+      <span class="muted" id="of-meta"></span>
+      <span class="sp"></span>
+      <label class="chk"><input type="checkbox" id="follow-out2" checked
+        onchange="followOut=this.checked"> follow</label>
+      <button onclick="clearOut()">Clear</button>
+    </div>
+    <pre class="out" id="out2" style="height:calc(100vh - 250px)"></pre>`;
+}
+
+/* The snapshot the TUI shows: totals, per-service bars, active users and
+   the most recent failures, all read from migration.db on the server. */
+function dashboardHTML(){
+  if(!snap||!snap.snapshot)
+    return `<h2>Dashboard</h2><div class="warnbox">${
+      esc(snap&&snap.error||'no data yet')}</div>`;
+  const t=snap.snapshot.totals, us=snap.snapshot.users||[], fs=snap.snapshot.failures||[];
+  const frac=t.fraction;
+  const svc=[['Drive',us.reduce((a,u)=>a+u.drive_done,0),
+      us.reduce((a,u)=>a+u.drive_failed,0),us.reduce((a,u)=>a+u.drive_skipped,0),
+      us.reduce((a,u)=>a+u.exp_drive,0)],
+    ['Gmail',us.reduce((a,u)=>a+u.mail_done,0),
+      us.reduce((a,u)=>a+u.mail_failed,0),us.reduce((a,u)=>a+u.mail_skipped,0),
+      us.reduce((a,u)=>a+u.exp_mail,0)],
+    ['Calendar',us.reduce((a,u)=>a+u.cal_done,0),
+      us.reduce((a,u)=>a+u.cal_failed,0),0,0]];
+  const svcRows=svc.map(r=>{
+    const [name,done,failed,skipped,exp]=r;
+    const w=exp?Math.round(100*Math.min(1,done/exp)):0;
+    return `<tr><td><b>${name}</b></td><td style="min-width:170px">
+      <div class="gbar"><i style="width:${w}%"></i></div></td>
+      <td class="num">${hc(done)}</td><td class="num">${hc(skipped)}</td>
+      <td class="num" style="${failed?'color:var(--bad)':''}">${hc(failed)}</td></tr>`;
+  }).join('');
+  const active=us.filter(u=>u.status==='RUNNING'||u.status==='PAUSED_QUOTA')
+    .sort((a,b)=>b.done-a.done).slice(0,8);
+  const activeRows=active.map(u=>`<tr><td>${esc(u.source)}</td>
+    <td style="min-width:150px"><div class="gbar"><i style="width:${Math.round(100*(u.fraction||0))}%"></i></div></td>
+    <td class="num">${hc(u.done)}</td><td class="num">${hb(u.bytes_moved)}</td>
+    <td style="${jc(u.status)?'color:'+jc(u.status):''}">${u.status}</td></tr>`).join('');
+  const failRows=fs.slice(0,6).map(f=>`<tr>
+    <td class="muted">${esc(f.timestamp||'')}</td><td>${esc(f.item_type||'')}</td>
+    <td>${esc(f.source_user||'')}</td>
+    <td style="color:var(--bad)">${esc(f.error_message||'')}</td></tr>`).join('');
+  return `<h2>Dashboard</h2>
+    <div class="stats">
+      <div class="stat"><b>${hc(t.items_done)} / ${t.items_expected?hc(t.items_expected):'?'}</b><span>items moved</span></div>
+      <div class="stat"><b style="${t.items_failed?'color:var(--bad)':''}">${hc(t.items_failed)}</b><span>failed</span></div>
+      <div class="stat"><b>${hc(t.items_skipped)}</b><span>skipped</span></div>
+      <div class="stat"><b>${hb(t.bytes_moved)}</b><span>moved</span></div>
+      <div class="stat"><b>${t.users_done}/${t.users}</b><span>users done</span></div>
+      <div class="stat"><b>${t.users_running}</b><span>running</span></div>
+      <div class="stat"><b>${(t.gb_today||0).toFixed(0)}/${(t.cap_gb_total||0).toFixed(0)}GB</b><span>24h quota</span></div>
+    </div>
+    <div class="card" style="margin-top:0"><h3>Overall progress</h3>
+      <div class="gbar" style="height:10px"><i style="width:${frac==null?0:Math.round(frac*100)}%"></i></div>
+      <div class="muted" style="margin-top:4px">${frac==null?'n/a':(frac*100).toFixed(1)+'%'}
+        &middot; ${t.users_done} done / ${t.users_running} running /
+        ${t.users_failed} failed / ${t.users_paused} quota-paused of ${t.users}</div></div>
+    <div class="card"><h3>Service progress</h3>
+      <table><tr><th>Service</th><th></th><th class="num">OK</th>
+      <th class="num">Skipped</th><th class="num">Failed</th></tr>${svcRows}</table></div>
+    <div class="card"><h3>Active users</h3>
+      ${active.length?`<table><tr><th>User</th><th>Progress</th><th class="num">Items</th>
+      <th class="num">Moved</th><th>Status</th></tr>${activeRows}</table>`
+      :'<div class="muted">none &mdash; press Migrate in the toolbar to start</div>'}</div>
+    <div class="card"><h3>Recent failures</h3>
+      ${failRows?`<table><tr><th>Time</th><th>Type</th><th>User</th>
+      <th>Error</th></tr>${failRows}</table>`
+      :'<div class="muted">none</div>'}</div>`;
+}
+
+function usersHTML(){
+  if(!snap||!snap.snapshot)
+    return `<h2>Users</h2><div class="warnbox">${
+      esc(snap&&snap.error||'no data yet')}</div>`;
+  const us=snap.snapshot.users||[];
+  if(!us.length) return `<h2>Users</h2>
+    <div class="warnbox">No identities loaded yet &mdash; run init-db on the Setup tab.</div>`;
+  const rows=us.map(u=>`<tr>
+    <td>${esc(u.source)}</td>
+    <td style="${jc(u.status)?'color:'+jc(u.status):''}">${u.status}</td>
+    <td class="num">${hc(u.drive_done)}</td><td class="num">${hc(u.mail_done)}</td>
+    <td class="num">${hc(u.cal_done)}</td>
+    <td class="num" style="${u.failed?'color:var(--bad)':''}">${hc(u.failed)}</td>
+    <td class="num">${hb(u.bytes_moved)}</td>
+    <td><div class="gbar" style="width:140px"><i style="width:${Math.round(100*(u.fraction||0))}%"></i></div></td>
+    </tr>`).join('');
+  return `<h2>Users (${us.length})</h2><div class="scroll"><table>
+    <tr><th>Source</th><th>Status</th><th class="num">Drive</th>
+    <th class="num">Mail</th><th class="num">Cal</th><th class="num">Failed</th>
+    <th class="num">Moved</th><th>Progress</th></tr>${rows}</table></div>`;
+}
+
+function failuresHTML(){
+  if(!snap||!snap.snapshot)
+    return `<h2>Failures</h2><div class="warnbox">${
+      esc(snap&&snap.error||'no data yet')}</div>`;
+  const fs=snap.snapshot.failures||[];
+  if(!fs.length) return `<h2>Failures</h2><div class="okbox">No failures recorded.</div>`;
+  const rows=fs.map(f=>`<tr>
+    <td class="muted">${esc(f.timestamp||'')}</td><td>${esc(f.item_type||'')}</td>
+    <td>${esc(f.source_user||'')}</td><td class="mono">${esc(f.item_id||'')}</td>
+    <td style="color:var(--bad)">${esc(f.error_message||'')}</td></tr>`).join('');
+  return `<h2>Failures (${hc(fs.length)})</h2><div class="scroll"><table>
+    <tr><th>Time</th><th>Type</th><th>User</th><th>Item</th><th>Error</th></tr>
+    ${rows}</table></div>`;
+}
+
+function scopeHTML(){
+  return `<h2>Migration scope</h2>
+    <div style="display:flex;gap:8px;margin-bottom:10px">
+      <button onclick="fetchScope()">Refresh</button>
+      <button onclick="run('export_scope')">Export SCOPE.md</button></div>
+    <pre class="mono scroll" style="margin:0">${esc(scopeLines.join('\\n'))}</pre>`;
+}
+
+function logsHTML(){
+  return `<h2>Logs</h2>
+    <div class="muted" style="margin-bottom:6px">${esc(logPath)}</div>
+    <pre class="mono scroll" style="margin:0">${esc(logLines.join('\\n'))}</pre>`;
+}
+
+async function fetchScope(){
+  try{
+    const r=await (await fetch('/api/scope')).json();
+    if(r.lines){ scopeLines=r.lines; drawView(); }
+  }catch(e){}
+}
+async function fetchLogs(){
+  try{
+    const r=await (await fetch('/api/logs')).json();
+    if(r.lines){ logLines=r.lines; logPath=r.path; drawView(); }
+  }catch(e){}
+}
+
+async function pollSnap(){
+  try{
+    const r=await (await fetch('/api/snapshot')).json();
+    snap=r;
+    applyToggles(r.toggles);
+    paintProg();
+    drawView();
+  }catch(e){}
+  setTimeout(pollSnap,2000);
+}
+
+/* The slim always-visible strip under the header: overall migration
+   progress + the headline numbers, updated with every snapshot. */
+function paintProg(){
+  const bar=$('progi'); if(!bar) return;
+  const pct=$('progpct'), txt=$('progtxt');
+  const t=snap&&snap.snapshot&&snap.snapshot.totals;
+  if(!t){ bar.style.width='0%'; if(pct) pct.textContent='0%';
+    if(txt) txt.textContent='no migration yet'; return; }
+  const frac=Math.max(0,Math.min(1,t.fraction||0));
+  bar.style.width=Math.round(frac*100)+'%';
+  if(pct) pct.textContent=Math.round(frac*100)+'%';
+  if(txt) txt.textContent=`${hc(t.items_done)} / ${t.items_expected?hc(t.items_expected):'?'} items`
+    +` \u00b7 ${t.users_done}/${t.users} users \u00b7 ${hb(t.bytes_moved)} moved`;
+}
+
+fetch('/api/actions').then(r=>r.json()).then(a=>{
+  acts=a; drawToolbar(); setTab('setup'); refresh(); pollJob(); pollSnap();
+});
+document.querySelectorAll('.tabs button').forEach(b=>
+  b.onclick=()=>setTab(b.dataset.tab));
 /* Chained, not setInterval: a slow /api/status used to let polls overlap,
    stacking concurrent work on the server and the page. */
 (function loop(){ setTimeout(async()=>{ await refresh(); loop(); }, 6000); })();
+(function sco(){ setTimeout(async()=>{ if(tab==='scope') await fetchScope(); sco(); },15000); })();
+(function logp(){ setTimeout(async()=>{ if(tab==='logs') await fetchLogs(); logp(); },3000); })();
 </script></body></html>"""
 
 
@@ -1766,6 +2386,12 @@ class Handler(BaseHTTPRequestHandler):
                             "destructive": v.get("destructive", False),
                             "confirm": v.get("confirm", "")}
                         for k, v in ACTIONS.items()})
+        elif path == "/api/snapshot":
+            self._json(snapshot_payload())
+        elif path == "/api/scope":
+            self._json(scope_payload())
+        elif path == "/api/logs":
+            self._json(logs_payload())
         elif path == "/api/oauth/status":
             self._json(oauth_status())
         elif path == "/api/dwd":
@@ -1853,8 +2479,20 @@ class Handler(BaseHTTPRequestHandler):
             self._json(live_check(body.get("kind", "")))
             return
 
+        if self.path == "/api/check_dwd":
+            invalidate_status()
+            _refresh_snapshot()
+            with _snap_lock:
+                data = _snap["data"] or {}
+            self._json({"ok": True, "status": data})
+            return
+
         if self.path == "/api/runmode":
             self._json(set_run_mode(body.get("mode", "")))
+            return
+
+        if self.path == "/api/toggles":
+            self._json(set_toggles(body))
             return
 
         if self.path == "/api/authmode":
@@ -1949,7 +2587,7 @@ class Handler(BaseHTTPRequestHandler):
                         "error": f"{spec['label']} needs confirmation"}, 400)
             return
 
-        ok, msg = JOB.start(spec["label"], spec["argv"], env=gcloud_env())
+        ok, msg = JOB.start(spec["label"], _action_argv(name), env=gcloud_env())
         self._json({"ok": ok, "error": None if ok else msg})
 
 

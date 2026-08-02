@@ -154,3 +154,34 @@ def test_historical_timestamps_are_not_attempted(chat_migrator, auth, db):
     for kw in auth.target_chat(TGT_USER).calls_to("chat.messages.create"):
         assert "createTime" not in (kw.get("body") or {})
     assert chat_migrator.stats["failed"] == 0
+
+
+def test_selecting_chat_opts_the_run_in(monkeypatch):
+    """'chat' is a first-class service: asking for it must switch on the
+    engine's import pass, which is what actually grants the scopes."""
+    import types
+
+    import main
+    from config import Settings
+
+    settings = Settings()
+    settings.migrate_chat = False
+    args = types.SimpleNamespace(services="drive,chat", user=None)
+    ran = {}
+
+    def fake_run_batch(auth, db, settings, services, delta, delta_days, only):
+        ran["services"] = services
+        ran["migrate_chat"] = settings.migrate_chat
+        return []
+
+    monkeypatch.setattr(main, "run_batch", fake_run_batch)
+    monkeypatch.setattr(main, "_print_batch_summary", lambda r: None)
+    main.cmd_migrate(args, settings, None, None)
+    assert ran["services"] == {"drive", "chat"}
+    assert ran["migrate_chat"] is True
+
+    settings.migrate_chat = False
+    args_d = types.SimpleNamespace(services="chat", user=None, days=2)
+    main.cmd_delta(args_d, settings, None, None)
+    assert ran["migrate_chat"] is True
+    assert ran["services"] == {"chat"}

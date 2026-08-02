@@ -231,6 +231,16 @@ class Settings:
     migrate_comments: bool = field(
         default_factory=lambda: _env_bool("MIGRATE_COMMENTS", False)
     )
+    # When a file is shared through its parent folder, Drive reports the grant
+    # as inherited. Preserving the folder hierarchy already preserves that
+    # access -- but it survives only so long as the file stays in that folder.
+    # Setting this recreates the grant explicitly on the target file itself,
+    # so every document carries its own share access independent of the tree.
+    # The cost is one permissions.create per inherited grantee per file; turn
+    # it off to go back to folder-derived sharing on very large tenants.
+    recreate_inherited_acls: bool = field(
+        default_factory=lambda: _env_bool("MIGRATE_INHERITED_ACLS", True)
+    )
     # Google Chat. Needs chat.spaces/chat.messages on BOTH tenants, plus the
     # Chat service switched on for each organisation and a Chat app configured
     # in the Cloud console. Original message timestamps cannot be preserved --
@@ -261,3 +271,11 @@ class Settings:
     def effective_upload_cap(self) -> int:
         """The per-target-user daily upload ceiling, in bytes."""
         return int(self.daily_upload_cap_gb * 1024**3)
+
+    def __post_init__(self) -> None:
+        root = os.path.dirname(os.path.abspath(__file__))
+        for attr in ("source_sa_key", "target_sa_key", "db_path", "scratch_dir", "log_file", "oauth_client_secrets", "oauth_token_dir"):
+            val = getattr(self, attr)
+            if val and not os.path.isabs(val):
+                setattr(self, attr, os.path.abspath(os.path.join(root, val)))
+

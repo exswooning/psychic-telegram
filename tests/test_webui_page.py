@@ -81,3 +81,17 @@ class TestServedPage:
         for bad in ("http://cdn", "https://cdn", "<script src=", "@import",
                     "fonts.googleapis"):
             assert bad not in webui.PAGE, f"external resource: {bad}"
+
+    def test_tabs_are_wired_to_settab(self):
+        """Caught live: the tab buttons rendered but nothing bound their
+        clicks, so Dashboard/Users/Failures/Scope/Logs/Output were dead."""
+        js = _js()
+        assert "b.onclick=()=>setTab(b.dataset.tab)" in js
+        for label in ("Setup", "Dashboard", "Users", "Failures", "Scope",
+                      "Logs", "Output"):
+            assert f'data-tab="{label.lower()}"' in webui.PAGE, label
+
+    def test_header_progress_strip_present(self):
+        """The always-visible progress bar under the header + its updater."""
+        assert 'id="progi"' in webui.PAGE and 'id="progpct"' in webui.PAGE
+        assert 'function paintProg()' in _js()

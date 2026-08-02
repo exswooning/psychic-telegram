@@ -288,6 +288,20 @@ class State:
             hint = ("accounts unreachable — suspended, pending login challenge, "
                     "or an expired trial")
         elif "invalid_grant" in out:
+            # Check if DWD is authorised for super admin accounts even if mapped users don't exist yet
+            try:
+                from config import Settings
+                from auth import AuthManager
+                st = Settings()
+                am = AuthManager(st)
+                ok_s, _ = am.verify_delegation("source", st.source_admin) if st.source_admin else (False, "")
+                ok_t, _ = am.verify_delegation("target", st.target_admin) if st.target_admin else (False, "")
+                if ok_s and ok_t:
+                    self.notes["dwd"] = "preflight passed for admin accounts (mapped users need provisioning)"
+                    self._preflight = True
+                    return True
+            except Exception:
+                pass
             hint = "an account in identity_map does not exist"
         else:
             first = next((l for l in out.splitlines() if "FAIL" in l), "")
@@ -295,6 +309,7 @@ class State:
         self.notes["dwd"] = f"preflight failing — {hint}"
         self._preflight = False
         return False
+
 
     # -- 5 --------------------------------------------------------------
     def identities_loaded(self) -> int:

@@ -301,7 +301,7 @@ def cmd_provision_users(args, settings: Settings, db: MigrationDB,
         print("DRY RUN — nothing will be created\n")
     else:
         print("\nThis creates real accounts, which consume licences.")
-        if input(f"Type the domain to confirm: ").strip() != domain:
+        if not args.yes and input(f"Type the domain to confirm: ").strip() != domain:
             print("Aborted.")
             return
 
@@ -421,6 +421,11 @@ def cmd_migrate(args, settings: Settings, db: MigrationDB, auth: AuthManager):
     unknown = services - {"drive", "gmail", "calendar", "chat"}
     if unknown:
         sys.exit(f"unknown service(s): {', '.join(sorted(unknown))}")
+    if "chat" in services:
+        # Chat is a first-class service: selecting it opts the run in. That
+        # widens the scopes (chat.spaces/chat.messages) and enables the
+        # engine's import pass. See config.py for the fidelity caveat.
+        settings.migrate_chat = True
     results = run_batch(auth, db, settings, services, delta=False,
                         delta_days=0, only=args.user)
     _print_batch_summary(results)
@@ -434,9 +439,64 @@ def cmd_delta(args, settings: Settings, db: MigrationDB, auth: AuthManager):
     once more immediately after the cutover window closes.
     """
     services = {s.strip().lower() for s in args.services.split(",") if s.strip()}
+    if "chat" in services:
+        settings.migrate_chat = True
     results = run_batch(auth, db, settings, services, delta=True,
                         delta_days=args.days, only=args.user)
     _print_batch_summary(results)
+
+
+def cmd_syncacls(args, settings: Settings, db: MigrationDB,
+                 auth: AuthManager) -> int:
+    """
+    Recreate share access on every already-migrated file and folder.
+
+    The copy pass preserves a file's direct grants and, for inherited ones,
+    relies on the target tree recreating the parent folder's permission. This
+    pass makes the access explicit on the item itself (per-file model), so a
+    document keeps its collaborators even if it is later moved or the folder
+    unshared. Idempotent: creating a grant that already exists is a no-op.
+    """
+    from drive_engine import DriveMigrator
+    from resilience import DailyQuotaGuard
+
+    rows = [r for r in db.all_identities() if r["entity_type"] == "user"]
+    if args.user:
+        want = {u.lower() for u in args.user}
+        rows = [r for r in rows if r["source_email"] in want]
+
+    print("Recreating per-file share access on the target "
+          f"(recreate_inherited_acls={settings.recreate_inherited_acls})")
+    applied = synced = 0
+    for r in rows:
+        src, tgt = r["source_email"], r["target_email"]
+        mapped = db.conn.execute(
+            "SELECT source_id, target_id FROM id_mapping "
+            "WHERE source_user=? AND type IN ('file','folder') ORDER BY source_id",
+            (src,),
+        ).fetchall()
+        if not mapped:
+            print(f"  {src:<40} nothing mapped")
+            continue
+        if settings.dry_run:
+            print(f"  {src:<40} WOULD sync {len(mapped)} items")
+            synced += len(mapped)
+            continue
+        quota = DailyQuotaGuard(db, tgt, settings.effective_upload_cap())
+        migrator = DriveMigrator(auth, db, settings, src, tgt, quota)
+        per = 0
+        for i, row in enumerate(mapped, start=1):
+            try:
+                per += migrator._sync_acls(row["source_id"], row["target_id"])
+            except Exception as exc:  # noqa: BLE001
+                print(f"    ! {row['source_id']}: {exc}")
+            if i % 100 == 0:
+                print(f"    {src} {i}/{len(mapped)} items ...", flush=True)
+        applied += per
+        synced += len(mapped)
+        print(f"  {src:<14} {len(mapped):>5} items, {per} grants applied")
+    print(f"\nApplied {applied} grants across {synced} mapped items.")
+    return 0
 
 
 def cmd_report(args, settings: Settings, db: MigrationDB, auth: AuthManager):
@@ -590,6 +650,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--tenant", choices=["source", "target"], required=True)
     s.add_argument("--dry-run", action="store_true",
                    help="report what would be created, create nothing")
+    s.add_argument("--yes", action="store_true",
+                   help="skip the interactive domain confirmation "
+                        "(for non-interactive callers like the web UI)")
     s.set_defaults(func=cmd_provision_users)
 
     s = sub.add_parser("discover", help="read-only pre-migration scan")
@@ -610,6 +673,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="look-back window for Gmail/Calendar delta queries")
     s.add_argument("--user", action="append")
     s.set_defaults(func=cmd_delta)
+
+    s = sub.add_parser("syncacls", help="recreate per-file ACLs on migrated items")
+    s.add_argument("--user", action="append")
+    s.set_defaults(func=cmd_syncacls)
 
     s = sub.add_parser("report", help="print migration status and failures")
     s.add_argument("--max-failures", type=int, default=20)

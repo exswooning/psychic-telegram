@@ -749,7 +749,15 @@ class TestSeedFromTheUI:
         assert err == ""
         assert argv[argv.index("--confirm-domain") + 1] == "sandbox-src.example"
         assert argv[argv.index("--scale") + 1] == "small"
+        assert "--yes" in argv
         assert env["SANDBOX_MODE"] == "true"
+
+    def test_yes_is_always_passed(self):
+        """Without --yes the seeder's 'long run?' input() blocks on the web
+        server's stdin and nothing gets seeded -- the job looks alive while
+        doing no work."""
+        argv, _, _ = webui.seed_argv({"confirm_domain": "sandbox-src.example"})
+        assert "--yes" in argv
 
     def test_nothing_typed_is_refused(self):
         _, _, err = webui.seed_argv({"scale": "medium"})
@@ -874,6 +882,19 @@ class TestSeedScopesDiffer:
         payload = webui.dwd_payload()
         assert payload["seed"] == {}
         assert payload["tenants"]          # the rest still works
+
+    def test_target_provision_line_carries_the_write_scope(self):
+        """provision-users creates accounts, which needs admin.directory.user
+        (write) -- a scope the target migration line deliberately omits. The
+        UI must hand the user a target line that carries both, or the Create
+        the missing target accounts button dies with unauthorized_client."""
+        from config import Settings, target_scopes
+
+        payload = webui.dwd_payload()
+        line = set(payload["target_provision"]["scope_list"])
+
+        assert "https://www.googleapis.com/auth/admin.directory.user" in line
+        assert set(target_scopes(Settings())) <= line  # migration scopes survive
 
 
 class TestEnvironmentFailuresAreNotCredentialFailures:
