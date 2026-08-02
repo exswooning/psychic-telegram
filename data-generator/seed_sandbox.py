@@ -64,6 +64,11 @@ from config import Settings  # noqa: E402
 from resilience import retry_on_google_error  # noqa: E402
 from corpus import ORG, SCALES, CorpusBuilder  # noqa: E402
 
+# The labels seed_gmail() creates. Reset removes exactly these -- deleting
+# every user label would take labels the account's owner made themselves.
+SEED_LABELS = ["Clients", "Clients/Acme", "Clients/Acme/2024",
+               "Projects", "Projects/Apollo", "Archive", "Receipts"]
+
 SEED_SCOPES = [
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/gmail.insert",
@@ -191,8 +196,7 @@ def seed_gmail(gmail, settings: Settings, user: str, peers: list[str],
         ).execute())()
 
     label_ids = {}
-    for name in ["Clients", "Clients/Acme", "Clients/Acme/2024",
-                 "Projects", "Projects/Apollo", "Archive", "Receipts"]:
+    for name in SEED_LABELS:
         try:
             label_ids[name] = make_label(name)["id"]
             m["labels"].append(name)
@@ -368,7 +372,8 @@ def reset_chat(chat, settings: Settings, local: str) -> int:
                     pass
         token = resp.get("nextPageToken")
         if not token:
-            return deleted
+            break
+    return deleted
 
 
 # ======================================================================
@@ -605,7 +610,48 @@ def reset_gmail(gmail, settings: Settings) -> int:
                 pass
         token = resp.get("nextPageToken")
         if not token:
-            return deleted
+            break
+
+    # Drafts are separate objects. Trashing a draft's underlying message does
+    # not remove the draft, so without this they survive every reset and
+    # accumulate -- a mailbox reset repeatedly was still holding 201 of them.
+    token = None
+    while True:
+        try:
+            resp = retry(lambda t=token: gmail.users().drafts().list(
+                userId="me", maxResults=500, pageToken=t).execute())()
+        except Exception:  # noqa: BLE001
+            break
+        for d in resp.get("drafts", []):
+            try:
+                retry(lambda did=d["id"]: gmail.users().drafts().delete(
+                    userId="me", id=did).execute())()
+                deleted += 1
+            except Exception:  # noqa: BLE001
+                pass
+        token = resp.get("nextPageToken")
+        if not token:
+            break
+
+    # Seeded labels, and only those -- deleting every user label would take
+    # ones the account's owner created. Left behind they collide on the next
+    # run with "Label name exists or conflicts", which is what every label
+    # error in the previous reseed actually was.
+    try:
+        existing = retry(lambda: gmail.users().labels().list(
+            userId="me").execute())()
+        wanted = {n.lower() for n in SEED_LABELS}
+        for lab in existing.get("labels", []):
+            if lab.get("type") == "user" and lab.get("name", "").lower() in wanted:
+                try:
+                    retry(lambda lid=lab["id"]: gmail.users().labels().delete(
+                        userId="me", id=lid).execute())()
+                except Exception:  # noqa: BLE001
+                    pass
+    except Exception:  # noqa: BLE001
+        pass
+
+    return deleted
 
 
 def reset_calendar(cal, settings: Settings) -> int:

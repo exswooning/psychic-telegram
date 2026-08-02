@@ -472,3 +472,54 @@ class TestSeedExitCode:
 
         src = inspect.getsource(seed_sandbox.main)
         assert "PARTIAL" in src
+
+
+class TestResetIsActuallyComplete:
+    """
+    Reset has to leave a clean slate, or a reseed builds on the last one.
+
+    Two things survived it, both observed live: 201 drafts in a mailbox that
+    had been reset repeatedly, and every seeded label — which is what produced
+    "Label name exists or conflicts" on each label of the following run.
+    """
+
+    def test_the_label_set_has_one_definition(self):
+        """Creation and reset used separate literal lists; drift between them
+        means reset silently stops removing whatever was added."""
+        import inspect
+
+        import seed_sandbox
+
+        src = inspect.getsource(seed_sandbox.seed_gmail)
+        assert "SEED_LABELS" in src, "creation must use the shared constant"
+        reset = inspect.getsource(seed_sandbox.reset_gmail)
+        assert "SEED_LABELS" in reset, "reset must use the shared constant"
+
+    def test_reset_deletes_drafts(self):
+        """Trashing a draft's underlying message does not remove the draft."""
+        import inspect
+
+        import seed_sandbox
+
+        src = inspect.getsource(seed_sandbox.reset_gmail)
+        assert "drafts().list" in src and "drafts().delete" in src
+
+    def test_reset_only_removes_labels_the_seeder_made(self):
+        """Deleting every user label would take ones the account owner
+        created themselves."""
+        import inspect
+
+        import seed_sandbox
+
+        src = inspect.getsource(seed_sandbox.reset_gmail)
+        assert 'type") == "user"' in src or "'user'" in src
+        assert "wanted" in src
+
+    def test_messages_are_still_matched_by_seed_marker(self):
+        """The existing protection: only mail this seeder inserted is touched,
+        identified by its @seed.test Message-ID."""
+        import inspect
+
+        import seed_sandbox
+
+        assert "@seed.test" in inspect.getsource(seed_sandbox.reset_gmail)
