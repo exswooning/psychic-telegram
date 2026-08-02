@@ -140,14 +140,18 @@ def tally(auth: AuthManager, settings: Settings, phase: str,
     """Sum one service across every mapped user on one side."""
     counter, src_attr, tgt_attr = COUNTERS[phase]
     attr = src_attr if side == "source" else tgt_attr
-    total: dict = {}
+    total: dict = {"_counted": 0, "_failed": 0, "_notes": []}
     for src, tgt in pairs:
         user = src if side == "source" else tgt
         try:
             got = counter(getattr(auth, attr)(user))
         except Exception as exc:  # noqa: BLE001 - one user must not lose the rest
             log.warning("  ! %s (%s): %s", user, side, str(exc)[:100])
+            total["_failed"] += 1
             continue
+        total["_counted"] += 1
+        if got.get("unavailable"):
+            total["_notes"].append(got["unavailable"])
         for k, v in got.items():
             if isinstance(v, int):
                 total[k] = total.get(k, 0) + v
@@ -165,6 +169,25 @@ def compare(phase: str, before: dict, after: dict) -> tuple[bool, str]:
     keys = {"drive": ("files", "bytes"), "gmail": ("messages",),
             "calendar": ("events",), "chat": ("messages",)}[phase]
 
+    # A phase where counting itself failed must never read as success. With
+    # both sides empty every comparison is trivially satisfied -- "0 of 0" --
+    # so a totally broken API run reported OK on the one check whose entire
+    # job is catching loss.
+    src_seen = before.get("_counted")
+    tgt_seen = after.get("_counted")
+    if src_seen == 0 and tgt_seen == 0:
+        return False, ("could not count either side — no user could be read, "
+                       "so this is not a pass")
+    if src_seen == 0:
+        return False, "could not count the source; nothing to compare against"
+    if tgt_seen == 0:
+        return False, "could not count the target; migration state unknown"
+    if after.get("_failed"):
+        return False, (f"{after['_failed']} target user(s) could not be counted; "
+                       f"the totals below are incomplete")
+    if after.get("_notes"):
+        return False, f"service unavailable on the target: {after['_notes'][0]}"
+
     gaps = []
     for k in keys:
         s, t = before.get(k, 0), after.get(k, 0)
@@ -180,14 +203,17 @@ def compare(phase: str, before: dict, after: dict) -> tuple[bool, str]:
 
 
 def fmt(phase: str, d: dict) -> str:
+    # A key present with value None reaches the arithmetic and crashes; `or 0`
+    # covers both "absent" and "explicitly null".
+    g = lambda k: d.get(k) or 0  # noqa: E731
     if phase == "drive":
-        return (f"{d.get('files', 0):,} files, {d.get('folders', 0):,} folders, "
-                f"{d.get('bytes', 0) / 1024**3:.2f} GB")
+        return (f"{g('files'):,} files, {g('folders'):,} folders, "
+                f"{g('bytes') / 1024**3:.2f} GB")
     if phase == "gmail":
-        return f"{d.get('messages', 0):,} messages, {d.get('threads', 0):,} threads"
+        return f"{g('messages'):,} messages, {g('threads'):,} threads"
     if phase == "calendar":
-        return f"{d.get('events', 0):,} events in {d.get('calendars', 0)} calendars"
-    return f"{d.get('messages', 0):,} messages in {d.get('spaces', 0)} spaces"
+        return f"{g('events'):,} events in {g('calendars')} calendars"
+    return f"{g('messages'):,} messages in {g('spaces')} spaces"
 
 
 def run_phase(phase: str, settings: Settings, extra: list[str]) -> int:

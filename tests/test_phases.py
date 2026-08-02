@@ -75,3 +75,63 @@ class TestFormatting:
 
     def test_counts_are_thousands_separated(self):
         assert "4,013" in phases.fmt("gmail", {"messages": 4013, "threads": 10})
+
+
+class TestCountingFailureIsNeverASuccess:
+    """
+    The dangerous case: counting itself fails.
+
+    With both sides empty every comparison is trivially satisfied — "0 of 0" —
+    so a run where every API call raised reported OK on the one check whose
+    entire purpose is catching data loss. Found by probing compare() with the
+    shapes tally() actually produces when things go wrong.
+    """
+
+    def test_neither_side_countable_is_a_failure(self):
+        ok, detail = phases.compare(
+            "gmail", {"_counted": 0, "_failed": 5}, {"_counted": 0, "_failed": 5})
+        assert not ok
+        assert "not a pass" in detail
+
+    def test_uncountable_target_is_a_failure(self):
+        """The source read fine, the target did not — migration state unknown,
+        which is not the same as verified."""
+        ok, detail = phases.compare(
+            "gmail", {"_counted": 5, "messages": 100}, {"_counted": 0, "_failed": 5})
+        assert not ok and "target" in detail
+
+    def test_uncountable_source_is_a_failure(self):
+        ok, detail = phases.compare(
+            "gmail", {"_counted": 0, "_failed": 5}, {"_counted": 5, "messages": 100})
+        assert not ok and "source" in detail
+
+    def test_partial_target_coverage_is_a_failure(self):
+        """Three of five users counted means the totals are incomplete, so a
+        matching number proves nothing."""
+        ok, detail = phases.compare(
+            "gmail", {"_counted": 5, "messages": 100},
+            {"_counted": 3, "_failed": 2, "messages": 100})
+        assert not ok and "incomplete" in detail
+
+    def test_an_unavailable_service_is_named_rather_than_shown_as_a_shortfall(self):
+        """Chat switched off is a configuration answer, not a data-loss one."""
+        ok, detail = phases.compare(
+            "chat", {"_counted": 5, "messages": 88},
+            {"_counted": 5, "_notes": ["Chat API not enabled"], "messages": 0})
+        assert not ok and "unavailable" in detail
+
+    def test_full_coverage_and_matching_counts_still_passes(self):
+        ok, _ = phases.compare(
+            "gmail", {"_counted": 5, "messages": 100},
+            {"_counted": 5, "_failed": 0, "messages": 100})
+        assert ok
+
+
+class TestFormattingIsCrashProof:
+    def test_a_null_byte_count_does_not_crash(self):
+        """A key present but null reaches the arithmetic; absent does not."""
+        assert "0.00 GB" in phases.fmt("drive", {"bytes": None})
+
+    def test_every_phase_formats_an_empty_dict(self):
+        for phase in phases.PHASES:
+            assert phases.fmt(phase, {})

@@ -71,8 +71,13 @@ CREATE INDEX IF NOT EXISTS idx_acl_backup_state ON acl_backup(state);
 
 
 def ensure_schema(db: MigrationDB) -> None:
-    with db._connect() as con:          # noqa: SLF001 - same package contract
-        con.executescript(SCHEMA)
+    # Statement by statement, not executescript(): executescript issues its own
+    # implicit COMMIT, which ends the transaction db.write() opened and makes
+    # its COMMIT fail with "no transaction is active".
+    with db.write() as con:
+        for stmt in (s.strip() for s in SCHEMA.split(";")):
+            if stmt:
+                con.execute(stmt)
 
 
 def save_acl(db: MigrationDB, user: str, file_id: str, name: str,
@@ -80,7 +85,7 @@ def save_acl(db: MigrationDB, user: str, file_id: str, name: str,
     """Record the real ACL. Must succeed before anything is made public."""
     from datetime import datetime, timezone
 
-    with db._connect() as con:          # noqa: SLF001
+    with db.write() as con:
         con.execute(
             "INSERT OR REPLACE INTO acl_backup "
             "(source_user, file_id, file_name, permissions, state, saved_at) "
@@ -90,7 +95,7 @@ def save_acl(db: MigrationDB, user: str, file_id: str, name: str,
 
 
 def mark_flipped(db: MigrationDB, user: str, file_id: str, perm_id: str) -> None:
-    with db._connect() as con:          # noqa: SLF001
+    with db.write() as con:
         con.execute("UPDATE acl_backup SET state='FLIPPED', public_perm=? "
                     "WHERE source_user=? AND file_id=?",
                     (perm_id, user, file_id))
@@ -100,7 +105,7 @@ def mark_restored(db: MigrationDB, user: str, file_id: str, ok: bool,
                   note: str = "") -> None:
     from datetime import datetime, timezone
 
-    with db._connect() as con:          # noqa: SLF001
+    with db.write() as con:
         con.execute(
             "UPDATE acl_backup SET state=?, restored_at=? "
             "WHERE source_user=? AND file_id=?",
@@ -110,11 +115,18 @@ def mark_restored(db: MigrationDB, user: str, file_id: str, ok: bool,
 
 
 def outstanding(db: MigrationDB) -> list[dict]:
-    """Files left public. Non-empty here means something is exposed now."""
-    with db._connect() as con:          # noqa: SLF001
-        rows = con.execute(
-            "SELECT source_user, file_id, file_name, public_perm, saved_at "
-            "FROM acl_backup WHERE state='FLIPPED' ORDER BY saved_at").fetchall()
+    """
+    Files still public: never restored, or attempted and failed.
+
+    RESTORE_FAILED belongs here. Listing only FLIPPED meant a file whose
+    restore errored -- and which is therefore still readable by anyone with
+    the link -- silently dropped out of the audit. That is the precise
+    opposite of what this list is for.
+    """
+    rows = db.conn.execute(
+        "SELECT source_user, file_id, file_name, public_perm, state, saved_at "
+        "FROM acl_backup WHERE state IN ('FLIPPED','RESTORE_FAILED') "
+        "ORDER BY saved_at").fetchall()
     return [dict(r) for r in rows]
 
 
@@ -134,6 +146,14 @@ def flip_to_public(drive, db: MigrationDB, user: str, item: dict) -> str:
 
     save_acl(db, user, item["id"], item.get("name", ""), perms)
 
+    # Drive keeps a single `anyone` permission per file. If the file was
+    # already link-shared, "creating" one returns that same permission -- and
+    # deleting it on restore would strip sharing the owner had deliberately
+    # set. Record that we added nothing, so restore leaves it alone.
+    if any(p.get("type") == "anyone" for p in perms):
+        mark_flipped(db, user, item["id"], "")
+        return ""
+
     created = drive.permissions().create(
         fileId=item["id"], supportsAllDrives=True, sendNotificationEmail=False,
         body={"type": "anyone", "role": "reader", "allowFileDiscovery": False},
@@ -152,11 +172,9 @@ def restore_one(drive, db: MigrationDB, row: dict) -> tuple[bool, str]:
     can open, and the row stays FLIPPED so a later pass retries it.
     """
     file_id = row["file_id"]
-    with db._connect() as con:          # noqa: SLF001
-        saved = con.execute(
-            "SELECT permissions FROM acl_backup "
-            "WHERE source_user=? AND file_id=?",
-            (row["source_user"], file_id)).fetchone()
+    saved = db.conn.execute(
+        "SELECT permissions FROM acl_backup WHERE source_user=? AND file_id=?",
+        (row["source_user"], file_id)).fetchone()
     if not saved:
         return False, "no saved ACL"
 
