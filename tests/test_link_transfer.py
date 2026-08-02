@@ -206,3 +206,99 @@ class TestAuditSurface:
         for key in ("source_user", "file_id", "file_name", "public_perm",
                     "state", "saved_at"):
             assert key in row
+
+
+class TestTransferModeIsValidated:
+    """
+    An unrecognised TRANSFER_MODE used to be accepted and then behave as
+    download_upload, because every check in the engine was `== "server_side"`.
+
+    So `TRANSFER_MODE=link_flip` -- a mode that was documented -- silently did
+    nothing, and a typo like `server_sied` streamed every byte through the
+    migration host. That is precisely what someone setting the variable is
+    usually trying to avoid, and nothing said otherwise.
+    """
+
+    def test_the_three_real_modes_are_accepted(self, monkeypatch):
+        from config import Settings
+
+        for mode in ("download_upload", "server_side", "link_flip"):
+            monkeypatch.setenv("TRANSFER_MODE", mode)
+            assert Settings().transfer_mode == mode
+
+    def test_a_typo_is_rejected_rather_than_silently_downgraded(self, monkeypatch):
+        from config import Settings
+
+        monkeypatch.setenv("TRANSFER_MODE", "server_sied")
+        with pytest.raises(ValueError, match="not recognised"):
+            Settings()
+
+    def test_the_error_lists_what_is_valid(self, monkeypatch):
+        from config import Settings
+
+        monkeypatch.setenv("TRANSFER_MODE", "nonsense")
+        with pytest.raises(ValueError) as exc:
+            Settings()
+        for mode in ("download_upload", "server_side", "link_flip"):
+            assert mode in str(exc.value)
+
+    def test_an_empty_value_is_rejected(self, monkeypatch):
+        from config import Settings
+
+        monkeypatch.setenv("TRANSFER_MODE", "")
+        with pytest.raises(ValueError):
+            Settings()
+
+
+class TestLinkFlipIsWired:
+    def test_link_flip_takes_the_staging_drive_path(self, monkeypatch):
+        """It copies server-side; the flip is an addition, not a replacement."""
+        import drive_engine
+        from config import Settings
+
+        monkeypatch.setenv("TRANSFER_MODE", "link_flip")
+        s = Settings()
+        mig = drive_engine.DriveMigrator.__new__(drive_engine.DriveMigrator)
+        mig.settings = s
+        assert mig.server_side is True
+        assert mig.link_flip is True
+
+    def test_server_side_alone_never_flips(self, monkeypatch):
+        """The safe mode must not start exposing files."""
+        import drive_engine
+        from config import Settings
+
+        monkeypatch.setenv("TRANSFER_MODE", "server_side")
+        mig = drive_engine.DriveMigrator.__new__(drive_engine.DriveMigrator)
+        mig.settings = Settings()
+        assert mig.server_side is True
+        assert mig.link_flip is False
+
+    def test_link_flip_requires_the_drive_write_scope_on_the_source(self, monkeypatch):
+        """It rewrites source permissions, which read-only cannot do."""
+        from config import DRIVE_READONLY_SCOPE, DRIVE_WRITE_SCOPE, Settings, source_scopes
+
+        monkeypatch.setenv("TRANSFER_MODE", "link_flip")
+        scopes = source_scopes(Settings())
+        assert DRIVE_WRITE_SCOPE in scopes
+        assert DRIVE_READONLY_SCOPE not in scopes
+
+    def test_the_restore_runs_in_a_finally(self):
+        """A failed copy must not leave the file public."""
+        import inspect
+
+        import drive_engine
+
+        src = inspect.getsource(drive_engine.DriveMigrator._sync_server_side)
+        flip_at = src.index("flip_to_public")
+        finally_at = src.index("finally:")
+        restore_at = src.index("restore_one")
+        assert flip_at < finally_at < restore_at
+
+    def test_an_unrecordable_acl_fails_the_item_without_exposing_it(self):
+        import inspect
+
+        import drive_engine
+
+        src = inspect.getsource(drive_engine.DriveMigrator._sync_server_side)
+        assert "could not record the ACL" in src

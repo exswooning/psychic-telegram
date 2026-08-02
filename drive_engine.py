@@ -99,7 +99,17 @@ class DriveMigrator:
 
     @property
     def server_side(self) -> bool:
-        return self.settings.transfer_mode == "server_side"
+        """Both staging-drive modes take the server-side path."""
+        return self.settings.transfer_mode in ("server_side", "link_flip")
+
+    @property
+    def link_flip(self) -> bool:
+        """
+        Publish each file to "anyone with the link" for the duration of the
+        copy, then restore its real sharing. Opt-in; see link_transfer.py for
+        why the ACL is persisted before anything is exposed.
+        """
+        return self.settings.transfer_mode == "link_flip"
 
     # -- staging shared drive (server_side mode only) --------------------------
     def _staging_drive_name(self) -> str:
@@ -321,6 +331,32 @@ class DriveMigrator:
         if item.get("description"):
             body["description"] = item["description"]
 
+        # link_flip: publish the source file for the duration of the copy.
+        #
+        # The ACL is read and written to the ledger before anything is exposed
+        # (link_transfer.save_acl), so a crash between here and the restore
+        # below is recoverable with `link_transfer.py --restore` from a later
+        # process. Without that ordering the file would be left public with no
+        # record of what its sharing had been.
+        flipped = False
+        if self.link_flip and not self.settings.dry_run:
+            try:
+                import link_transfer
+
+                link_transfer.ensure_schema(self.db)
+                link_transfer.flip_to_public(self.src, self.db,
+                                             self.source_user, item)
+                flipped = True
+            except Exception as exc:  # noqa: BLE001
+                # Could not record the ACL, so the file was not exposed. Fail
+                # this item rather than proceeding without a way back.
+                self.db.log_audit(self.source_user, item["id"], "file", "FAILED",
+                                  f"link_flip could not record the ACL: {exc}")
+                self.stats["failed"] += 1
+                if size:
+                    self.quota.refund(size)
+                return
+
         try:
             copied = self._retry(lambda: self.src.files().copy(
                 fileId=item["id"], body=body, supportsAllDrives=True,
@@ -333,6 +369,22 @@ class DriveMigrator:
                               f"server-side copy failed: {exc}")
             self.stats["failed"] += 1
             return
+        finally:
+            # Restore in a finally: a failed copy must not leave the file
+            # public. Anything that cannot be restored stays in the audit list
+            # rather than being forgotten.
+            if flipped:
+                try:
+                    import link_transfer
+
+                    for row in link_transfer.outstanding(self.db):
+                        if row["file_id"] == item["id"]:
+                            link_transfer.restore_one(self.src, self.db, row)
+                            break
+                except Exception as exc:  # noqa: BLE001
+                    log.error("[%s] link_flip restore failed for %s: %s — run "
+                              "link_transfer.py --restore",
+                              self.source_user, item["id"], exc)
 
         copy_id = copied["id"]
 

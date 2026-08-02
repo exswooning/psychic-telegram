@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 # ======================================================================
 # MIME constants
 # ======================================================================
+TRANSFER_MODES = ("download_upload", "server_side", "link_flip")
+
 FOLDER_MIME = "application/vnd.google-apps.folder"
 SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
 
@@ -93,9 +95,11 @@ CHAT_SCOPES = [
 def source_scopes(settings: "Settings") -> list[str]:
     """Scopes the source service account actually needs for this run."""
     scopes = list(SOURCE_SCOPES)
-    if settings.transfer_mode == "server_side":
+    if settings.transfer_mode in ("server_side", "link_flip"):
         # files.copy is a create call, so read-only will not do. This is the
         # trade the mode asks for, and it is why it is not the default.
+        # link_flip additionally rewrites permissions on the source, which the
+        # same write scope covers.
         scopes = [DRIVE_WRITE_SCOPE if s == DRIVE_READONLY_SCOPE else s
                  for s in scopes]
     if settings.migrate_gmail_settings:
@@ -306,6 +310,16 @@ class Settings:
         return int(self.daily_upload_cap_gb * 1024**3)
 
     def __post_init__(self) -> None:
+        # An unrecognised transfer mode used to be accepted and silently behave
+        # as download_upload, because every check was `== "server_side"`. So a
+        # typo, or a mode that is documented but not yet wired, quietly
+        # streamed every byte through this host -- the exact behaviour someone
+        # setting TRANSFER_MODE is usually trying to avoid.
+        if self.transfer_mode not in TRANSFER_MODES:
+            raise ValueError(
+                f"TRANSFER_MODE={self.transfer_mode!r} is not recognised. "
+                f"Valid modes: {', '.join(TRANSFER_MODES)}"
+            )
         root = os.path.dirname(os.path.abspath(__file__))
         for attr in ("source_sa_key", "target_sa_key", "db_path", "scratch_dir", "log_file", "oauth_client_secrets", "oauth_token_dir"):
             val = getattr(self, attr)
