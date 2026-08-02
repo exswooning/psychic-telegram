@@ -148,12 +148,45 @@ class ChatMigrator:
                                   f"spaceType={space.get('spaceType')}")
                 self.stats["skipped"] += 1
                 continue
-            if self.db.get_target_id(self.source_user, name, "chat_space"):
-                self.stats["skipped"] += 1
+            mapped = self.db.get_target_id(self.source_user, name, "chat_space")
+            if mapped:
+                # A space already mapped is usually done. But one whose
+                # completeImport failed is mapped AND unusable -- it stays in
+                # import mode, invisible to every member -- and skipping it
+                # here meant no re-run could ever finish it. Retry just the
+                # completion rather than recreating the space and duplicating
+                # its messages.
+                if self._import_incomplete(name):
+                    self._finish_import(name, mapped)
+                else:
+                    self.stats["skipped"] += 1
                 continue
             self._migrate_space(space)
 
         return dict(self.stats)
+
+    def _import_incomplete(self, source_space: str) -> bool:
+        """Did this space get created but never leave import mode?"""
+        row = self.db.get_audit(self.source_user, source_space, "chat_space")
+        status = (row["status"] if row else "") or ""
+        return status.startswith("FAILED")
+
+    def _finish_import(self, source_space: str, target_space: str) -> None:
+        """Complete an import left half-done by an earlier run."""
+        tgt = self.auth.target_chat(self.target_user)
+        try:
+            self._retry(lambda: tgt.spaces().completeImport(
+                name=target_space).execute())
+        except OPTIONAL_PASS_ERRORS as exc:
+            self.db.log_audit(self.source_user, source_space, "chat_space",
+                              "FAILED", f"completeImport retry failed: {exc}")
+            self.stats["failed"] += 1
+            return
+        self.db.log_audit(self.source_user, source_space, "chat_space",
+                          "SUCCESS", "completed an import left half-done")
+        self.stats["spaces"] += 1
+        log.info("[%s] finished a space left in import mode: %s",
+                 self.source_user, target_space)
 
     def _migrate_space(self, space: dict) -> None:
         name = space.get("name")

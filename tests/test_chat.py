@@ -185,3 +185,98 @@ def test_selecting_chat_opts_the_run_in(monkeypatch):
     main.cmd_delta(args_d, settings, None, None)
     assert ran["migrate_chat"] is True
     assert ran["services"] == {"chat"}
+
+
+class TestHalfImportedSpacesCanBeFinished:
+    """
+    A Chat space is created with importMode=True and only becomes visible to
+    its members when completeImport succeeds.
+
+    The mapping was recorded before that call, so a space whose completeImport
+    failed was both *mapped* and *unusable* — and the next run's idempotency
+    check found the mapping and skipped it. The space stayed in import mode
+    permanently, invisible to everyone, with no run able to finish it. The
+    module's own docstring says a partial import must be finished or dropped;
+    the code did neither.
+
+    Found by reading the module before its first live execution.
+    """
+
+    def test_a_failed_import_is_detected_as_incomplete(self, chat_migrator, db):
+        db.log_audit(SRC_USER, "spaces/S1", "chat_space",
+                     "FAILED", "completeImport failed: boom")
+        assert chat_migrator._import_incomplete("spaces/S1") is True
+
+    def test_a_successful_space_is_not_retried(self, chat_migrator, db):
+        db.log_audit(SRC_USER, "spaces/S1", "chat_space", "SUCCESS")
+        assert chat_migrator._import_incomplete("spaces/S1") is False
+
+    def test_an_unknown_space_is_not_treated_as_incomplete(self, chat_migrator):
+        assert chat_migrator._import_incomplete("spaces/never-seen") is False
+
+    def test_finishing_retries_only_the_completion(self, chat_migrator, auth, db):
+        """It must not recreate the space — that would duplicate every
+        message already imported into it."""
+        db.log_audit(SRC_USER, "spaces/S1", "chat_space",
+                     "FAILED", "completeImport failed")
+
+        chat = auth.target_chat(TGT_USER)
+        called = {"complete": 0, "create": 0}
+        real_complete = chat.spaces().completeImport
+
+        class Spaces:
+            def completeImport(self, name):
+                called["complete"] += 1
+                return real_complete(name=name)
+
+            def create(self, body):
+                called["create"] += 1
+                raise AssertionError("must not recreate an existing space")
+
+        chat.spaces = lambda: Spaces()
+        chat_migrator.auth.target_chat = lambda u: chat
+
+        chat_migrator._finish_import("spaces/S1", "spaces/T1")
+
+        assert called["complete"] == 1
+        assert called["create"] == 0
+
+    def test_a_finished_space_is_recorded_as_success(self, chat_migrator, auth, db):
+        db.log_audit(SRC_USER, "spaces/S1", "chat_space", "FAILED", "x")
+
+        # completeImport has to actually succeed for this to say anything; the
+        # fake rejects an unknown space, which is correct of it.
+        chat = auth.target_chat(TGT_USER)
+
+        class Ok:
+            def completeImport(self, name):
+                class R:
+                    def execute(self_inner):
+                        return {}
+                return R()
+
+        chat.spaces = lambda: Ok()
+        chat_migrator.auth.target_chat = lambda u: chat
+
+        chat_migrator._finish_import("spaces/S1", "spaces/T1")
+
+        row = db.get_audit(SRC_USER, "spaces/S1", "chat_space")
+        assert row["status"] == "SUCCESS"
+        assert chat_migrator._import_incomplete("spaces/S1") is False
+
+    def test_a_second_failure_stays_failed_and_retryable(self, chat_migrator, auth, db):
+        db.log_audit(SRC_USER, "spaces/S1", "chat_space", "FAILED", "x")
+
+        chat = auth.target_chat(TGT_USER)
+
+        class Boom:
+            def completeImport(self, name):
+                raise RuntimeError("still cannot complete")
+
+        chat.spaces = lambda: Boom()
+        chat_migrator.auth.target_chat = lambda u: chat
+
+        chat_migrator._finish_import("spaces/S1", "spaces/T1")
+
+        assert chat_migrator._import_incomplete("spaces/S1") is True
+        assert chat_migrator.stats["failed"] >= 1
