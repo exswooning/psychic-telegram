@@ -91,8 +91,11 @@ def check_scopes(settings: Settings) -> bool:
     try:
         _build("drive", "v3", SEED_SCOPES, settings.source_admin
                ).about().get(fields="user").execute()
-        print(f"  OK   seed write scopes ({len(SEED_SCOPES)}): drive, "
-              f"gmail.insert/labels/modify, calendar")
+        # Name what was actually requested rather than a hand-written list:
+        # SEED_SCOPES grew chat.spaces/chat.messages and the description did
+        # not follow, so the count and the names disagreed.
+        short = ", ".join(sc.rsplit("/", 1)[-1] for sc in SEED_SCOPES)
+        print(f"  OK   seed write scopes ({len(SEED_SCOPES)}): {short}")
     except Exception as exc:  # noqa: BLE001
         print(f"  FAIL seed write scopes  -> {_short(exc)}")
         ok = False
