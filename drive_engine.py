@@ -701,8 +701,14 @@ class DriveMigrator:
                                     fileId=target_id, commentId=cid, body=b,
                                     fields="id",
                                 ).execute())
-                except (PermanentAPIError, RuntimeError):
-                    pass
+                except (PermanentAPIError, RuntimeError) as exc:
+                    # Was silent. A reply that cannot be recreated simply
+                    # vanished -- no audit row, no counter -- so the comment
+                    # thread came out shorter on the target with nothing
+                    # anywhere saying so.
+                    self.db.log_audit(
+                        self.source_user, f"{source_id}:reply", "comment",
+                        "FAILED", f"reply not recreated: {exc}")
 
     # -- ACL translation -----------------------------------------------------------
     def _sync_acls(self, source_id: str, target_id: str) -> int:
@@ -716,8 +722,16 @@ class DriveMigrator:
                 supportsAllDrives=True,
             ).execute()).get("permissions", [])
         except (PermanentAPIError, RuntimeError) as exc:
+            # Record it, do not merely warn. A warning scrolls past and leaves
+            # nothing for `report` or resolve_failures to act on, so a file
+            # whose sharing never transferred looked identical to one with no
+            # sharing at all.
             log.warning("[%s] could not list permissions on %s: %s",
                        self.source_user, source_id, exc)
+            self.db.log_audit(self.source_user, f"{source_id}:(list-failed)",
+                              "acl", "FAILED",
+                              f"could not read source permissions: {exc}")
+            self.stats["acl_failed"] = self.stats.get("acl_failed", 0) + 1
             return 0
 
         applied = 0

@@ -874,3 +874,50 @@ def test_dry_run_writes_nothing(auth, db, settings, identity, quota):
     tgt = auth.target_drive(TGT_USER)
     assert tgt.count() == 0
     assert tgt.call_count("files.create") == 0
+
+
+# ----------------------------------------------------------------------
+# Failures that used to leave no trace.
+#
+# Both of these logged nothing at all: a `log.warning` at most, which scrolls
+# past and gives `report` and resolve_failures nothing to act on. A file whose
+# sharing never transferred looked identical to one that had no sharing.
+# ----------------------------------------------------------------------
+def test_unreadable_source_acl_is_recorded_not_just_warned(migrator, auth, db):
+    """The root cause behind resolve_failures erasing ACL failures: _sync_acls
+    returned 0 on error without writing an audit row, so the retry tool
+    deleted the old FAILED row and found nothing to replace it with."""
+    class Exploding:
+        def permissions(self):
+            return self
+
+        def list(self, **kw):
+            raise RuntimeError("permission denied listing permissions")
+
+    # Replace the migrator's own client: auth.source_drive() hands back a fresh
+    # fake each call, so patching that would not touch the captured one.
+    migrator.src = Exploding()
+
+    applied = migrator._sync_acls("src-file", "tgt-file")
+
+    assert applied == 0
+    rows = db.conn.execute(
+        "SELECT item_id, item_type, status FROM audit_log "
+        "WHERE source_user=? AND item_type='acl'",
+        ("alice@tenanta.com",)).fetchall()
+    assert rows, "an unreadable source ACL left no record at all"
+    assert rows[0]["status"].startswith("FAILED")
+    assert migrator.stats["acl_failed"] >= 1
+
+
+def test_a_dropped_comment_reply_is_recorded(migrator):
+    """A reply that could not be recreated simply vanished, so the thread came
+    out shorter on the target with nothing anywhere saying so."""
+    import inspect
+
+    src = inspect.getsource(migrator.__class__)
+    # the reply handler must record, not `pass`
+    reply_bit = src[src.index("replies().create"):]
+    handler = reply_bit[:reply_bit.index("# -- ACL translation")]
+    assert "log_audit" in handler
+    assert "reply not recreated" in handler
