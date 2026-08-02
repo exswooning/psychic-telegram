@@ -964,6 +964,39 @@ def _refresh_snapshot() -> None:
         _snap_busy.clear()
 
 
+def check_step(n: int) -> dict:
+    """
+    Re-evaluate one step, now, and say whether it is satisfied.
+
+    Deliberately synchronous and uncached: this is the operator asking "did
+    what I just did work?", and the answer has to reflect the last thirty
+    seconds, not a snapshot taken before they went to the Admin Console.
+    """
+    invalidate_status()
+    try:
+        data = _compute_status()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"could not evaluate: {exc}"}
+    if data.get("error"):
+        return {"ok": False, "error": data["error"]}
+
+    step = next((s for s in data["steps"] if s["n"] == n), None)
+    if not step:
+        return {"ok": False, "error": f"no step {n}"}
+
+    state = step["state"]
+    satisfied = state in ("done", "skip")
+    return {
+        "ok": satisfied,
+        "state": state,
+        "title": step["title"],
+        "detail": step.get("note") or "",
+        "msg": ("satisfied" if state == "done" else
+                "not needed for this run" if state == "skip" else
+                "still outstanding"),
+    }
+
+
 def invalidate_status() -> None:
     """
     Drop the cached snapshot so the next poll recomputes.
@@ -999,7 +1032,8 @@ def status_payload() -> dict:
 def _RUN_MODES() -> dict:
     from wizard import RUN_MODES
 
-    return {k: {"label": v["label"], "blurb": v["blurb"]}
+    return {k: {"label": v["label"], "blurb": v["blurb"],
+                "setup": v.get("setup", [])}
             for k, v in RUN_MODES.items()}
 
 
@@ -1401,7 +1435,7 @@ picks up where it left off.</pre>
 <script>
 let seen=0, acts={}, S=null, cur=null, dwd=null, oauth=null, cfg=null, follow=true;
 let lastSig='', ups=null, authMode=null, authModes=null, upMsg={},
-    seedScales=null, seedMsg=null, runMode=null, runModes=null,
+    seedScales=null, seedMsg=null, runMode=null, runModes=null, stepChk=null,
     dep={user:'root',port:'22',open:false};
 let tab='setup', snap=null, scopeLines=[], logLines=[], logPath='';
 let followOut=true;
@@ -1488,6 +1522,20 @@ function stepBody(x){
     h+=`<div style="margin-top:16px"><button class="primary" onclick="recheckDWD(this)">
       Re-check Delegation Status<small>Mints tokens to test Domain-Wide Delegation immediately</small></button>
       <span id="dwdmsg" class="muted" style="margin-left:10px"></span></div>`;
+  }
+
+  /* Step 1 is where someone lands first, so the whole shape of the job
+     belongs here -- what this route needs before any of it will work. */
+  if(x.n===1 && runModes && runModes[runMode] && runModes[runMode].setup){
+    const m=runModes[runMode];
+    h+=`<div class="card" style="border-color:var(--accent)">
+      <h3>What &ldquo;${esc(m.label)}&rdquo; needs before you start</h3>
+      <ol style="margin:8px 0 0 18px;padding:0;line-height:1.7">
+        ${m.setup.map(t=>`<li>${esc(t)}</li>`).join('')}
+      </ol>
+      <div class="muted" style="margin-top:10px">Change the route on step 2.
+        Each step below re-checks itself, and every page has a
+        <b>Check step</b> button.</div></div>`;
   }
 
   /* Step 3: choose how this authenticates, then supply whatever that needs.
@@ -1819,6 +1867,18 @@ function draw(force){
        skip:'Not needed'}[x.state]}</span>
     ${x.note?`<div class="note">${esc(x.note)}</div>`:''}
     ${stepBody(x)}
+    <div class="card" style="border-color:var(--accent)">
+      <h3>Have I finished this step?</h3>
+      <div class="muted">Re-checks this step against the live tenants right
+        now, rather than the cached status.</div>
+      <div style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <button class="primary" onclick="checkStep(${x.n},this)">
+          Check step ${x.n}</button>
+        <span id="stepchk" class="muted">${
+          stepChk && stepChk.n===x.n
+            ? (stepChk.ok?'\u2713 ':'\u2715 ')+esc(stepChk.text) : ''}</span>
+      </div>
+    </div>
     <div class="nav">
       <button id="prev" ${i===0?'disabled':''}>&larr; Back</button>
       <button id="next" class="primary" ${i===S.steps.length-1?'disabled':''}>
@@ -1970,6 +2030,24 @@ async function checkCred(kind, btn){
              box.style.color=r.ok?'var(--ok)':'var(--bad)'; }
   }catch(e){ if(box){ box.textContent='check failed: '+e; } }
   btn.disabled=false; btn.innerHTML=label;
+}
+
+async function checkStep(n, btn){
+  const box=$('stepchk'); const label=btn.textContent;
+  btn.disabled=true; btn.textContent='Checking\u2026';
+  if(box){ box.textContent='re-reading live state\u2026'; box.style.color=''; }
+  try{
+    const r=await (await fetch('/api/checkstep',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({step:n})})).json();
+    stepChk={n:n, ok:!!r.ok, text:(r.msg||r.error)+(r.detail?' \u2014 '+r.detail:'')};
+    if(box){ box.textContent=(r.ok?'\u2713 ':'\u2715 ')+stepChk.text.slice(2)||'';
+             box.textContent=(r.ok?'\u2713 ':'\u2715 ')+(r.msg||r.error)+
+               (r.detail?' \u2014 '+r.detail:'');
+             box.style.color=r.ok?'var(--ok)':'var(--bad)'; }
+  }catch(e){ if(box) box.textContent='check failed: '+e; }
+  btn.disabled=false; btn.textContent=label;
+  refresh(true);
 }
 
 async function setRunMode(mode){
@@ -2485,6 +2563,15 @@ class Handler(BaseHTTPRequestHandler):
             with _snap_lock:
                 data = _snap["data"] or {}
             self._json({"ok": True, "status": data})
+            return
+
+        if self.path == "/api/checkstep":
+            try:
+                n = int(body.get("step", 0))
+            except (TypeError, ValueError):
+                self._json({"ok": False, "error": "step must be a number"}, 400)
+                return
+            self._json(check_step(n))
             return
 
         if self.path == "/api/runmode":
