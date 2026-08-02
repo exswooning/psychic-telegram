@@ -139,7 +139,9 @@ def scan_drive(drive, settings: Settings, user: str) -> dict:
                 kinds["other_native"] += 1
             else:
                 kinds["binaries"] += 1
-                total_bytes += int(f.get("size") or 0)
+                # max(0, ...): a malformed or negative size would otherwise be
+                # summed straight into the total and quietly shrink it.
+                total_bytes += max(0, int(f.get("size") or 0))
 
             if mime in UNEXPORTABLE:
                 unexportable += 1

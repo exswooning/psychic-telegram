@@ -73,7 +73,7 @@ def count_drive(drive) -> dict:
                 folders += 1
             else:
                 files += 1
-                total += int(f.get("size") or 0)
+                total += max(0, int(f.get("size") or 0))
         token = resp.get("nextPageToken")
         if not token:
             break
