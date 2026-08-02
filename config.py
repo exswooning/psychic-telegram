@@ -131,6 +131,16 @@ def _env_bool(name: str, default: bool) -> bool:
     return val.strip().lower() in ("1", "true", "yes", "on")
 
 
+
+def _auto(key: str, fallback):
+    """Machine-sized default from resources.py, with a safe fallback."""
+    try:
+        import resources
+        return resources.recommend()[key]
+    except Exception:  # noqa: BLE001 - probing must never break startup
+        return fallback
+
+
 @dataclass
 class Settings:
     """Every tunable the engine needs, defaulted from the environment."""
@@ -182,8 +192,17 @@ class Settings:
     log_level: str = field(default_factory=lambda: os.getenv("LOG_LEVEL", "INFO"))
 
     # -- concurrency / pacing ------------------------------------------------
-    user_workers: int = field(default_factory=lambda: int(os.getenv("USER_WORKERS", "6")))
-    per_user_qps: float = field(default_factory=lambda: float(os.getenv("PER_USER_QPS", "4.0")))
+    # Sized to the machine actually running the job unless explicitly set.
+    # A fixed default is how five workers ended up on an 8 GB laptop with 85%
+    # of its swap already in use: the workers stalled on swap long enough for
+    # the sockets to time out, which reads as a network fault and sends you
+    # debugging the wrong system. See resources.py.
+    user_workers: int = field(
+        default_factory=lambda: int(os.getenv("USER_WORKERS", "0")) or _auto("user_workers", 6)
+    )
+    per_user_qps: float = field(
+        default_factory=lambda: float(os.getenv("PER_USER_QPS", "0")) or _auto("per_user_qps", 4.0)
+    )
 
     # -- retry / backoff -----------------------------------------------------
     max_retries: int = 6

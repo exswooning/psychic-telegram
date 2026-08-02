@@ -764,7 +764,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--mail", type=int, help="messages per user "
                                              "(default scales with --scale)")
     ap.add_argument("--events", type=int, help="events per user")
-    ap.add_argument("--workers", type=int, default=5)
+    ap.add_argument("--workers", type=int, default=0,
+                    help="0 (default) sizes the pool to this machine; "
+                         "see resources.py")
     ap.add_argument("--manifest", default="sandbox_manifest.json")
     ap.add_argument("--identities-out", default="identities.csv")
     ap.add_argument("--edge-cases", default="first",
@@ -845,6 +847,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     # --- Seed ------------------------------------------------------------
+    if not args.workers:
+        try:
+            import resources
+            rec = resources.recommend()
+            args.workers = rec["seed_workers"]
+            print(f"Workers: {args.workers} ({rec['reason']})")
+        except Exception:  # noqa: BLE001
+            args.workers = 3
+
     cfg = SCALES[args.scale]
     mail_count = args.mail if args.mail is not None else cfg["per_leaf"] * 12
     event_count = args.events if args.events is not None else cfg["per_leaf"] * 4
@@ -962,6 +973,20 @@ def main(argv: list[str] | None = None) -> int:
     print("\nNext:")
     print(f"  python main.py init-db --identities {args.identities_out}")
     print(f"  python tools/rehearsal.py")
+
+    # A run that seeded nobody is a failure, and it has to say so in the exit
+    # code. It previously returned 0 whatever happened: five users timing out
+    # for thirty minutes rendered in the web UI as a green "exit 0" beside a
+    # run that had accomplished precisely nothing.
+    attempted = len(entries)
+    seeded = totals["users"]
+    if seeded == 0:
+        print(f"\nFAILED: 0 of {attempted} users seeded. Nothing was written.")
+        return 1
+    if seeded < attempted:
+        print(f"\nPARTIAL: {seeded} of {attempted} users seeded; "
+              f"{attempted - seeded} failed (see the '!' lines above).")
+        return 2
     return 0
 
 

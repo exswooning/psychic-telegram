@@ -436,3 +436,39 @@ def test_five_user_org_migrates_without_duplicating_shared_files(
         drive_engine.DriveMigrator(auth, db, settings, src, tgt, quota).run()
     after = {t: auth.target_drive(t).count() for t in tgt_users}
     assert before == after, "second run duplicated content"
+
+
+class TestSeedExitCode:
+    """
+    A run that seeded nothing must not report success.
+
+    It returned 0 unconditionally. Five users timing out for thirty minutes
+    rendered in the web UI as a green "exit 0" next to a run that wrote
+    nothing at all — the single most misleading outcome the seeder can produce,
+    because it looks exactly like the good one.
+    """
+
+    def test_exit_codes_are_distinct(self):
+        import inspect
+
+        import seed_sandbox
+
+        src = inspect.getsource(seed_sandbox.main)
+        assert "return 1" in src, "total failure must exit non-zero"
+        assert "return 2" in src, "partial failure needs its own code"
+
+    def test_total_failure_is_named_in_the_output(self):
+        import inspect
+
+        import seed_sandbox
+
+        src = inspect.getsource(seed_sandbox.main)
+        assert "0 of" in src and "Nothing was written" in src
+
+    def test_partial_failure_is_distinguished_from_success(self):
+        import inspect
+
+        import seed_sandbox
+
+        src = inspect.getsource(seed_sandbox.main)
+        assert "PARTIAL" in src
