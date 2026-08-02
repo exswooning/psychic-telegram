@@ -107,9 +107,10 @@ def resolve_for_user(auth: AuthManager, db: MigrationDB, settings: Settings,
                 # Clear the mapping first: a FAILED file may still hold a
                 # stale id_mapping row from a partial attempt, which would
                 # make the copy skip itself.
-                db.conn.execute(
-                    "DELETE FROM id_mapping WHERE source_user=? AND source_id=? "
-                    "AND type='file'", (source_user, item_id))
+                with db.write() as conn:
+                    conn.execute(
+                        "DELETE FROM id_mapping WHERE source_user=? AND "
+                        "source_id=? AND type='file'", (source_user, item_id))
                 migrator._sync_file(meta, parent_target)
                 if migrator.stats["files"] > before:
                     print(f"    re-copied {meta.get('name')!r}")
@@ -131,13 +132,33 @@ def resolve_for_user(auth: AuthManager, db: MigrationDB, settings: Settings,
                     stats["acl_recleared"] += 1
                     continue
 
-                # Drop the stale FAILED row, then let the fixed ACL sync
-                # write whatever the correct outcome actually is.
-                db.conn.execute(
-                    "DELETE FROM audit_log WHERE source_user=? AND item_id=? "
-                    "AND item_type='acl'", (source_user, item_id))
-                migrator._sync_acls(source_file, target_file)
-                stats["acl_recleared"] += 1
+                # Re-run FIRST, and clear the FAILED row only if grants were
+                # actually applied.
+                #
+                # The previous order deleted the row and then counted the item
+                # as resolved regardless of the outcome. _sync_acls does not
+                # record its own failures -- it logs a warning and returns 0 --
+                # so a permanently failing ACL had its failure record erased
+                # and was reported as recleared. The migration then looked
+                # clean while those grants were still missing.
+                #
+                # Applying nothing is treated as still-failing rather than
+                # success. That over-reports the case where the source grant
+                # was legitimately removed, which is the safe direction: a
+                # visible failure that turns out to be fine costs a look, an
+                # invisible one costs the grant.
+                applied = migrator._sync_acls(source_file, target_file)
+                if applied > 0:
+                    with db.write() as conn:
+                        conn.execute(
+                            "DELETE FROM audit_log WHERE source_user=? AND "
+                            "item_id=? AND item_type='acl'",
+                            (source_user, item_id))
+                    print(f"    re-applied {applied} grant(s) for {source_file}")
+                    stats["acl_recleared"] += 1
+                else:
+                    print(f"    still failing: no grants applied for {source_file}")
+                    stats["acl_still_failing"] += 1
     finally:
         if migrator.server_side and not dry_run:
             migrator._teardown_staging_drive()
