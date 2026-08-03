@@ -212,6 +212,32 @@ class AuthManager:
         http = google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=300))
         return build("admin", "directory_v1", http=http, cache_discovery=False)
 
+    def target_directory(self):
+        """Directory API as the target admin. Needed to resolve an SSO
+        assignment's org unit or group on the receiving side, where the ids
+        from the source tenant mean nothing."""
+        creds = self._credentials("target", self.settings.target_admin)
+        http = google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=300))
+        return build("admin", "directory_v1", http=http, cache_discovery=False)
+
+    def cloud_identity(self, tenant: str):
+        """
+        Cloud Identity as that tenant's admin.
+
+        SSO is org-level configuration, not per-user data, so unlike every
+        other service here this is called once per tenant as the admin rather
+        than impersonated per mailbox.
+        """
+        admin = (self.settings.source_admin if tenant == "source"
+                 else self.settings.target_admin)
+        if not admin:
+            raise RuntimeError(
+                f"{tenant.upper()}_ADMIN is not set; Cloud Identity has to be "
+                f"called as a super admin of that domain")
+        creds = self._credentials(tenant, admin)
+        http = google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=300))
+        return build("cloudidentity", "v1", http=http, cache_discovery=False)
+
     def verify_delegation(self, tenant: str, user: str) -> tuple[bool, str]:
         """Mint a token and make one trivial call. Cheap way to catch a DWD
         misconfiguration in seconds instead of four hours into a batch."""
