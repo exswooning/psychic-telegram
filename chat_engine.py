@@ -77,11 +77,12 @@ class ChatMigrator:
                       "failed": 0, "unmapped_senders": 0}
         self._email_cache: dict[str, str] = {}
 
-    def _retry(self, fn):
+    def _retry(self, fn, label=None):
         return retry_on_google_error(
             max_retries=self.settings.max_retries,
             base_delay=self.settings.base_backoff,
             max_delay=self.settings.max_backoff,
+            label=label or "chat",
         )(fn)()
 
     # -- identity resolution ------------------------------------------------

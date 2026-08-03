@@ -49,11 +49,12 @@ class CalendarMigrator:
         self.limiter = RateLimiter(settings.per_user_qps)
         self.stats = {"events": 0, "exceptions": 0, "failed": 0, "skipped": 0}
 
-    def _retry(self, fn):
+    def _retry(self, fn, label=None):
         return retry_on_google_error(
             max_retries=self.settings.max_retries,
             base_delay=self.settings.base_backoff,
             max_delay=self.settings.max_backoff,
+            label=label or "calendar",
         )(fn)()
 
     # -- listing ----------------------------------------------------------------

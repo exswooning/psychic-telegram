@@ -608,3 +608,100 @@ class TestTheRetryHookCannotBecomeANewFailure:
     # are whether insert spam-filters (measured: it does not) and whether the
     # lookup can see a message a previous run left in Trash. Neither is
     # answerable from inside the suite, so both moved to contract_probe.py.
+
+
+class TestMetrics:
+    """
+    Instrumentation, which lands before the concurrency work rather than with
+    it. Every performance estimate in this engine has rested on a round-trip
+    time nobody measured -- the serial-Gmail ceiling came from a guessed
+    200 ms -- and an adaptive controller cannot ramp on a signal that is not
+    collected.
+    """
+
+    def _fresh(self):
+        from metrics import Metrics
+
+        return Metrics()
+
+    def test_a_successful_call_is_timed(self):
+        from resilience import retry_on_google_error
+        import metrics
+
+        m = self._fresh()
+        old, metrics.METRICS = metrics.METRICS, m
+        import resilience
+        resilience.METRICS = m
+        try:
+            retry_on_google_error(label="x")(lambda: "ok")()
+        finally:
+            metrics.METRICS = old
+            resilience.METRICS = old
+
+        s = m.snapshot()
+        assert s["calls"] == 1
+        assert s["by_label"]["x"]["calls"] == 1
+
+    def test_a_failed_call_is_still_timed(self):
+        """A call that fails is still a round trip, and excluding failures
+        would flatter the latency distribution exactly when things are worst."""
+        import metrics
+        import resilience
+        from resilience import retry_on_google_error
+        from tests.fakes import http_error
+
+        m = self._fresh()
+        old, metrics.METRICS = metrics.METRICS, m
+        resilience.METRICS = m
+        try:
+            with pytest.raises(Exception):
+                retry_on_google_error(max_retries=1, base_delay=0.001,
+                                      max_delay=0.002, label="y")(
+                    lambda: (_ for _ in ()).throw(http_error(500, "internalError")))()
+        finally:
+            metrics.METRICS = old
+            resilience.METRICS = old
+
+        s = m.snapshot()
+        assert s["calls"] >= 1
+        assert s["failures"] >= 1
+
+    def test_percentiles_are_ordered(self):
+        m = self._fresh()
+        for i in range(100):
+            m.record("z", i / 1000.0)
+        s = m.snapshot()
+        assert s["p50"] <= s["p95"] <= s["p99"]
+
+    def test_memory_is_bounded_over_a_long_run(self):
+        """A migration runs for hours; nothing here may grow without bound."""
+        from metrics import RESERVOIR
+
+        m = self._fresh()
+        for i in range(RESERVOIR * 5):
+            m.record("z", 0.01)
+        assert len(m._lat["z"].samples) == RESERVOIR
+        assert m.snapshot()["calls"] == RESERVOIR * 5, "count must stay exact"
+
+    def test_requests_per_second_per_worker_is_reported(self):
+        """The diagnostic metric this analysis kept quoting without collecting."""
+        m = self._fresh()
+        m.record("z", 0.01)
+        assert "requests_per_sec_per_worker" in m.snapshot()
+
+    def test_recording_is_thread_safe(self):
+        import threading
+
+        m = self._fresh()
+
+        def worker():
+            for _ in range(500):
+                m.record("z", 0.001)
+
+        ts = [threading.Thread(target=worker) for _ in range(4)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+
+        assert m.snapshot()["calls"] == 2000

@@ -139,6 +139,17 @@ class MigrationDB:
         # record_mapping.
         self._mapping_cache: dict[str, dict[tuple[str, str], str]] = {}
         self._mapping_cached_users: set[str] = set()
+        # Guards structural changes to the caches above.
+        #
+        # A single `d[k] = v` is atomic under CPython's GIL, and PEP 703's
+        # free-threaded build keeps per-dict operations atomic too -- but
+        # preload does setdefault-then-merge, which is a read-modify-write and
+        # is atomic under neither. Relying on interpreter internals for that
+        # would be a bet rather than a decision, and this CI matrix already
+        # runs 3.14. The lock is uncontended in practice: preload happens once
+        # per user per engine, and the write-through holds it for one
+        # assignment.
+        self._cache_lock = threading.Lock()
         # identity_map is written before a run and never during one, so a
         # straight snapshot is safe here in a way it is not for id_mapping.
         # Invalidated by the few commands that do write it.
@@ -364,11 +375,17 @@ class MigrationDB:
         # above and this assignment would otherwise be dropped from the cache
         # while remaining in the database -- the one state that would make the
         # cache staler than the ledger.
-        existing = self._mapping_cache.setdefault(source_user, {})
-        loaded.update(existing)
-        existing.update(loaded)
-        self._mapping_cached_users.add(source_user)
-        return len(existing)
+        with self._cache_lock:
+            existing = self._mapping_cache.setdefault(source_user, {})
+            # Merge, not replace. A mapping recorded between the SELECT above
+            # and this block would otherwise vanish from the cache while
+            # remaining in the database -- the one state that makes the cache
+            # staler than the ledger, and the one that produces duplicate work
+            # rather than an error.
+            loaded.update(existing)
+            existing.update(loaded)
+            self._mapping_cached_users.add(source_user)
+            return len(existing)
 
     def get_target_id(self, source_user: str, source_id: str,
                       item_type: str) -> Optional[str]:
@@ -403,9 +420,10 @@ class MigrationDB:
         # cache updated before the commit would answer "already migrated" for
         # work that a crash then rolled back. Dict assignment is atomic under
         # the GIL, so this needs no lock of its own.
-        cache = self._mapping_cache.get(source_user)
-        if cache is not None:
-            cache[(source_id, item_type)] = target_id
+        with self._cache_lock:
+            cache = self._mapping_cache.get(source_user)
+            if cache is not None:
+                cache[(source_id, item_type)] = target_id
 
     # -- audit_log -----------------------------------------------------------
     def log_audit(self, source_user: str, item_id: str, item_type: str,

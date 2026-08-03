@@ -61,11 +61,12 @@ class DriveMigrator:
         self.target_drive_id: str | None = None
 
     # -- plumbing -----------------------------------------------------------
-    def _retry(self, fn):
+    def _retry(self, fn, label=None):
         return retry_on_google_error(
             max_retries=self.settings.max_retries,
             base_delay=self.settings.base_backoff,
             max_delay=self.settings.max_backoff,
+            label=label or "drive",
         )(fn)()
 
     def _scratch_path(self) -> str:
@@ -265,7 +266,7 @@ class DriveMigrator:
                        "capabilities(canDownload),shortcutDetails,description,"
                        "starred)",
                 spaces="drive", supportsAllDrives=True, **extra,
-            ).execute())
+            ).execute(), label="drive.files.list")
             for f in resp.get("files", []):
                 yield f
             token = resp.get("nextPageToken")
@@ -502,7 +503,7 @@ class DriveMigrator:
             result = self._retry(lambda: self.tgt.files().create(
                 body=body, media_body=media, fields="id,md5Checksum",
                 supportsAllDrives=True,
-            ).execute())
+            ).execute(), label="drive.files.create")
         except (PermanentAPIError, RuntimeError) as exc:
             self.quota.refund(size)
             self.db.log_audit(self.source_user, item["id"], "file", "FAILED", str(exc))
@@ -804,7 +805,7 @@ class DriveMigrator:
                 fields="permissions(id,type,role,emailAddress,domain,"
                        "allowFileDiscovery,permissionDetails)",
                 supportsAllDrives=True,
-            ).execute()).get("permissions", [])
+            ).execute(), label="drive.permissions.list").get("permissions", [])
         except (PermanentAPIError, RuntimeError) as exc:
             # Record it, do not merely warn. A warning scrolls past and leaves
             # nothing for `report` or resolve_failures to act on, so a file

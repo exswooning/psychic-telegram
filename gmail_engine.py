@@ -64,12 +64,13 @@ class GmailMigrator:
             "filters_inserted": 0, "filters_failed": 0, "filters_skipped": 0,
         }
 
-    def _retry(self, fn, before_retry=None):
+    def _retry(self, fn, before_retry=None, label=None):
         return retry_on_google_error(
             max_retries=self.settings.max_retries,
             base_delay=self.settings.base_backoff,
             max_delay=self.settings.max_backoff,
             before_retry=before_retry,
+            label=label or "gmail",
         )(fn)()
 
     # -- labels: created parent-first so 'Clients/Acme/2024' resolves ----------
@@ -227,7 +228,8 @@ class GmailMigrator:
             userId="me", body=body, media_body=media,
             internalDateSource="dateHeader").execute()
         try:
-            return self._retry(insert, before_retry=adopt_if_already_delivered)
+            return self._retry(insert, before_retry=adopt_if_already_delivered,
+                               label="gmail.messages.insert")
         except TransportExhausted:
             # Every attempt failed, so most likely nothing landed -- but the
             # last failure gets no before_retry call, so check once more
@@ -268,7 +270,7 @@ class GmailMigrator:
             try:
                 full = self._retry(lambda m=mid: self.src.users().messages().get(
                     userId="me", id=m, format="raw",
-                ).execute())
+                ).execute(), label="gmail.messages.get")
             except (PermanentAPIError, RuntimeError) as exc:
                 self.db.log_audit(self.source_user, mid, "message", "FAILED", str(exc))
                 self.stats["failed"] += 1

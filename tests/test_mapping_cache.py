@@ -75,17 +75,55 @@ class TestItIsAReadThroughCacheNotASnapshot:
         assert missing == [], f"{len(missing)} mappings invisible after write"
 
     def test_a_preload_racing_a_write_does_not_lose_it(self, ledger):
-        """preload merges rather than replaces: a mapping recorded between the
-        SELECT and the assignment would otherwise vanish from the cache while
-        remaining in the database -- the one state that makes the cache
-        staler than the ledger."""
-        ledger.record_mapping(USER, "early", "tgt-early", "file")
-        ledger.preload_mappings(USER)
-        ledger.record_mapping(USER, "late", "tgt-late", "file")
-        ledger.preload_mappings(USER)      # a second preload must not drop it
+        """
+        The actual race, not a sequential imitation of it.
 
-        assert ledger.get_target_id(USER, "early", "file") == "tgt-early"
-        assert ledger.get_target_id(USER, "late", "file") == "tgt-late"
+        A record_mapping landing between preload's SELECT and its assignment
+        into the cache must survive. The earlier version of this test called
+        record and preload alternately on one thread, which passes against a
+        wholesale `self._mapping_cache[user] = rows` -- the losing
+        implementation -- because no write is ever in flight. Verified: it did
+        pass against exactly that.
+
+        So one thread writes continuously while another preloads repeatedly,
+        and afterwards every write must be visible through the cache.
+        """
+        # The writer sets the duration and the preloader spins for as long as
+        # it runs, rather than the other way round: a fixed number of preloads
+        # finishes before the writer starts, and the race never happens. The
+        # first version of this did exactly that and reported one write.
+        WRITES = 300
+        written: list[str] = []
+        errors: list[BaseException] = []
+        done = threading.Event()
+
+        def writer():
+            try:
+                for i in range(WRITES):
+                    key = f"race-{i}"
+                    ledger.record_mapping(USER, key, f"tgt-{i}", "file")
+                    written.append(key)
+            except BaseException as exc:      # noqa: BLE001
+                errors.append(exc)
+            finally:
+                done.set()
+
+        t = threading.Thread(target=writer)
+        t.start()
+        preloads = 0
+        while not done.is_set():
+            ledger.preload_mappings(USER)
+            preloads += 1
+        t.join(timeout=30)
+
+        assert not errors, f"writer died: {errors[0]!r}"
+        assert len(written) == WRITES
+        assert preloads > 5, f"only {preloads} preloads overlapped the writer"
+        missing = [k for k in written
+                   if ledger.get_target_id(USER, k, "file") is None]
+        assert missing == [], (
+            f"{len(missing)} of {len(written)} mappings were lost from the "
+            f"cache by a concurrent preload, e.g. {missing[:3]}")
 
     def test_the_cache_never_answers_for_an_unpreloaded_user(self, ledger):
         """A miss is only meaningful when the map is known complete."""

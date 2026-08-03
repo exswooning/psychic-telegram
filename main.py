@@ -731,6 +731,15 @@ def _print_batch_summary(results: list[dict]) -> None:
         for svc, st in (r.get("services") or {}).items():
             print(f"      {svc}: {st}")
 
+    # Latency and throughput, from the run that just happened. Printed
+    # unconditionally because it is the first thing anyone asks when a
+    # migration is slower than expected, and reproducing a six-hour run to
+    # collect it is not an option.
+    from metrics import METRICS
+
+    print("\n=== API timing ===")
+    print(METRICS.report())
+
 
 # ======================================================================
 # CLI

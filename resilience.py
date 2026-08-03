@@ -35,6 +35,8 @@ import ssl
 
 from googleapiclient.errors import HttpError
 
+from metrics import METRICS
+
 # Transient failures that are not HttpError. Every one of these was observed
 # permanently failing an item on a multi-hour run, because the retry decorator
 # only ever caught HttpError.
@@ -163,6 +165,7 @@ def _ask_hook(before_retry):
 def retry_on_google_error(
     max_retries: int = 6, base_delay: float = 1.0, max_delay: float = 60.0,
     before_retry: Callable[[], T | None] | None = None,
+    label: str | None = None,
 ) -> Callable[[Callable[..., T]], Callable[..., T]]:
     """
     Decorator: retry transient Google API failures with full-jitter exponential
@@ -198,9 +201,20 @@ def retry_on_google_error(
         def wrapper(*args, **kwargs) -> T:
             attempt = 0
             while True:
+                # Timed here because every Google call in the engine passes
+                # through this decorator, so instrumenting it needs no change
+                # at any call site -- and a call site that forgot to
+                # instrument itself would silently skew the distribution the
+                # concurrency work is going to be sized against.
+                started = time.monotonic()
                 try:
-                    return fn(*args, **kwargs)
+                    result = fn(*args, **kwargs)
+                    METRICS.record(label or "api", time.monotonic() - started,
+                                   ok=True, retried=attempt > 0)
+                    return result
                 except HttpError as exc:
+                    METRICS.record(label or "api", time.monotonic() - started,
+                                   ok=False)
                     status = _status_of(exc)
                     reason = _extract_reason(exc)
                     if _is_permanent(status, reason):
@@ -235,6 +249,8 @@ def retry_on_google_error(
                             return adopted
 
                 except TRANSPORT_ERRORS as exc:
+                    METRICS.record(label or "api", time.monotonic() - started,
+                                   ok=False)
                     # A multi-hour migration reliably sees connections reset,
                     # sockets time out and TLS renegotiate. None of these are
                     # HttpError, so every one of them used to permanently fail
