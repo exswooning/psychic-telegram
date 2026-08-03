@@ -1130,3 +1130,49 @@ class TestRunModeEndpoint:
 
         with webui._snap_lock:
             assert webui._snap["at"] == 0.0
+
+
+class TestEnvIsRewrittenForTheRemoteHost:
+    """
+    env.sh holds absolute paths from whichever machine wrote it, and rsync
+    ships them verbatim.
+
+    Observed live: a Mac's MIGRATION_DB=/Users/aryan/Repos/calude-workspace/
+    migration.db was recreated *literally* on a Linux VPS — the directory tree
+    and all. The migration ran correctly against it, which is the problem: a
+    working system with its ledger somewhere nobody would ever look, outside
+    the deployment directory and invisible to anything that inspects it.
+    """
+
+    def test_machine_specific_paths_are_stripped_on_deploy(self):
+        import inspect
+
+        src = inspect.getsource(deploy_remote.deploy)
+        for var in ("MIGRATION_DB", "SCRATCH_DIR", "SOURCE_SA_KEY",
+                    "TARGET_SA_KEY", "OAUTH_TOKEN_DIR"):
+            assert var in src, f"{var} is still shipped verbatim"
+
+    def test_tenant_settings_are_not_stripped(self):
+        """Domains and admin addresses are machine-independent and are the
+        whole point of shipping env.sh at all."""
+        import inspect
+
+        src = inspect.getsource(deploy_remote.deploy)
+        strip_line = [l for l in src.splitlines() if "strip = " in l]
+        assert strip_line, "no strip list found"
+        joined = " ".join(strip_line)
+        for keep in ("SOURCE_DOMAIN", "TARGET_DOMAIN", "SOURCE_ADMIN",
+                     "TARGET_ADMIN", "AUTH_MODE", "RUN_MODE"):
+            assert keep not in joined, f"{keep} must survive the deploy"
+
+    def test_the_rewrite_only_runs_when_credentials_are_shipped(self):
+        """A code-only deploy never sends env.sh, so there is nothing to fix."""
+        import inspect
+
+        src = inspect.getsource(deploy_remote.deploy)
+        lines = src.splitlines()
+        rewrite_line = next(i for i, l in enumerate(lines)
+                            if "rewriting env.sh" in l)
+        # the nearest preceding conditional must be the credentials guard
+        guards = [l.strip() for l in lines[:rewrite_line] if l.strip().startswith("if ")]
+        assert guards[-1] == "if include_credentials:", guards[-1]
