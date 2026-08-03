@@ -153,6 +153,8 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
         status = "INTERRUPTED" if SHUTDOWN.is_set() else "DONE"
         if track_status:
             db.set_identity_status(source_user, status)
+            if status == "DONE":
+                db.mark_services_done(source_user, result["services"].keys())
         result["status"] = status
 
     except Exception as exc:  # noqa: BLE001 - worker must not propagate
@@ -174,12 +176,30 @@ def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
               only: list[str] | None = None) -> list[dict]:
     """Fan out across users with a bounded thread pool."""
     rows = [r for r in db.all_identities() if r["entity_type"] == "user"]
-    # On a full run, skip users already marked DONE so restarts are cheap.
-    # On a delta run, every user is a candidate — that is the point of the pass.
+
+    def _already_done(r) -> bool:
+        """
+        Has this user finished *the services being asked for*?
+
+        `status` is per-user, not per-service. A phased run that completed
+        Drive marked every user DONE, so the Gmail phase that followed skipped
+        all of them -- migrating nothing, recording nothing, and reporting a
+        98.8% shortfall it could not explain. Restarts still need to be cheap,
+        so the check is now per-service rather than removed.
+        """
+        if r["status"] != "DONE":
+            return False
+        done = db.services_done(r["source_email"])
+        # A ledger written before services_done existed has an empty set; fall
+        # back to the old behaviour rather than re-migrating everything.
+        if not done:
+            return True
+        return set(services) <= done
+
     pairs = [
         (r["source_email"], r["target_email"])
         for r in rows
-        if delta or r["status"] != "DONE"
+        if delta or not _already_done(r)
     ]
 
     if only:

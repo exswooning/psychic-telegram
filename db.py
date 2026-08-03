@@ -175,6 +175,13 @@ class MigrationDB:
         migration tool must never destroy the ledger that makes it idempotent.
         """
         upgrades = {
+            # Which services have completed for this user. `status` alone is
+            # per-user, so a phased run that finished Drive marked everyone
+            # DONE and every later phase skipped them entirely -- migrating
+            # nothing while reporting a gap it could not explain.
+            "identity_map": [
+                ("services_done", "TEXT NOT NULL DEFAULT ''"),
+            ],
             "discovery": [
                 ("messages_total", "INTEGER NOT NULL DEFAULT 0"),
                 ("threads_total", "INTEGER NOT NULL DEFAULT 0"),
@@ -254,6 +261,27 @@ class MigrationDB:
             args = (status,)
         q += " ORDER BY source_email"
         return self.conn.execute(q, args).fetchall()
+
+    def mark_services_done(self, source_email: str, services) -> None:
+        """Union the given services into this user's completed set."""
+        with self.write() as conn:
+            row = conn.execute(
+                "SELECT services_done FROM identity_map WHERE source_email=?",
+                (source_email,)).fetchone()
+            have = set((row["services_done"] or "").split(",")) if row else set()
+            have.discard("")
+            have |= {s for s in services if s}
+            conn.execute(
+                "UPDATE identity_map SET services_done=? WHERE source_email=?",
+                (",".join(sorted(have)), source_email))
+
+    def services_done(self, source_email: str) -> set:
+        row = self.conn.execute(
+            "SELECT services_done FROM identity_map WHERE source_email=?",
+            (source_email,)).fetchone()
+        if not row or not row["services_done"]:
+            return set()
+        return {s for s in row["services_done"].split(",") if s}
 
     def set_identity_status(self, source_email: str, status: str,
                             notes: str = "") -> None:
