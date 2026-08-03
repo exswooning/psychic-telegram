@@ -242,3 +242,146 @@ class TestDownloadChunking:
         migrator._download_via(lambda: object())
 
         assert seen["chunksize"] == 4 * 1024 * 1024
+
+
+class TestGmailInsertIsSafeToRetry:
+    """
+    Widening the retry set to transport errors bought reliability at a cost,
+    and the cost is not uniform. A retried files.create leaves a Drive orphan
+    that verify sees as a surplus; events.import is idempotent through
+    iCalUID; messages.insert produces a second copy of an email a user will
+    actually see -- and the retry's fresh id then gets written to id_mapping
+    as canonical, so the ledger records the duplicate as the real thing.
+    """
+
+    RAW_HEADERS = (b"Message-ID: <abc123@source.example>\r\n"
+                   b"From: a@source.example\r\n"
+                   b"Subject: hello\r\n\r\nbody text")
+
+    def _encoded(self):
+        import base64
+
+        return base64.urlsafe_b64encode(self.RAW_HEADERS).decode()
+
+    def _migrator(self, auth, db, settings):
+        import gmail_engine
+        from tests.conftest import SRC_USER, TGT_USER
+
+        return gmail_engine.GmailMigrator(auth, db, settings, SRC_USER, TGT_USER)
+
+    def test_the_message_id_is_read_out_of_the_raw_payload(self, auth, db,
+                                                            settings, identity):
+        """format='raw' returns no parsed headers, so reading payload.headers
+        would return None for every message and silently disable the guard."""
+        m = self._migrator(auth, db, settings)
+        assert m._message_id_header(self._encoded()) == "<abc123@source.example>"
+
+    def test_only_a_prefix_of_a_huge_message_is_decoded(self, auth, db,
+                                                        settings, identity):
+        """This runs on a failure path; decoding a 25 MB attachment to read one
+        header would be a poor trade."""
+        import base64
+
+        big = self.RAW_HEADERS + b"x" * (2 * 1024 * 1024)
+        m = self._migrator(auth, db, settings)
+        got = m._message_id_header(base64.urlsafe_b64encode(big).decode())
+        assert got == "<abc123@source.example>"
+
+    def test_a_message_with_no_message_id_returns_none(self, auth, db, settings,
+                                                       identity):
+        import base64
+
+        m = self._migrator(auth, db, settings)
+        raw = base64.urlsafe_b64encode(b"Subject: no id\r\n\r\nbody").decode()
+        assert m._message_id_header(raw) is None
+
+    def test_an_already_delivered_message_is_adopted_not_duplicated(
+            self, auth, db, settings, identity, monkeypatch):
+        """The whole point: the insert died in transport but the message did
+        land, so we take the existing id instead of writing a second copy."""
+        from resilience import TransportExhausted
+
+        m = self._migrator(auth, db, settings)
+        monkeypatch.setattr(m, "_retry",
+                            lambda fn: (_ for _ in ()).throw(
+                                TransportExhausted("connection reset")))
+        monkeypatch.setattr(m, "_find_by_message_id", lambda msgid: "tgt-existing")
+
+        result = m._insert_once({"raw": self._encoded()}, None, self._encoded())
+
+        assert result["id"] == "tgt-existing"
+        assert result.get("adopted") is True
+
+    def test_a_message_that_never_landed_still_raises(self, auth, db, settings,
+                                                      identity, monkeypatch):
+        """Adoption must not swallow a genuine failure -- that would record a
+        message as migrated when it is not there."""
+        from resilience import TransportExhausted
+
+        m = self._migrator(auth, db, settings)
+        monkeypatch.setattr(m, "_retry",
+                            lambda fn: (_ for _ in ()).throw(
+                                TransportExhausted("connection reset")))
+        monkeypatch.setattr(m, "_find_by_message_id", lambda msgid: None)
+
+        with pytest.raises(TransportExhausted):
+            m._insert_once({"raw": self._encoded()}, None, self._encoded())
+
+    def test_an_api_refusal_is_not_treated_as_uncertainty(self, auth, db,
+                                                          settings, identity,
+                                                          monkeypatch):
+        """A plain RuntimeError means the API told us it refused. Only a
+        transport failure leaves us genuinely unsure, and only that should
+        cost an extra lookup."""
+        m = self._migrator(auth, db, settings)
+        looked = {"n": 0}
+        monkeypatch.setattr(m, "_retry",
+                            lambda fn: (_ for _ in ()).throw(
+                                RuntimeError("exhausted 6 retries on HTTP 500")))
+        monkeypatch.setattr(m, "_find_by_message_id",
+                            lambda msgid: looked.__setitem__("n", looked["n"] + 1))
+
+        with pytest.raises(RuntimeError):
+            m._insert_once({"raw": self._encoded()}, None, self._encoded())
+        assert looked["n"] == 0
+
+    def test_the_happy_path_costs_no_extra_call(self, auth, db, settings,
+                                                identity, monkeypatch):
+        """The guard must be free when nothing goes wrong."""
+        m = self._migrator(auth, db, settings)
+        looked = {"n": 0}
+        monkeypatch.setattr(m, "_retry", lambda fn: {"id": "tgt-1"})
+        monkeypatch.setattr(m, "_find_by_message_id",
+                            lambda msgid: looked.__setitem__("n", looked["n"] + 1))
+
+        assert m._insert_once({"raw": self._encoded()}, None,
+                              self._encoded())["id"] == "tgt-1"
+        assert looked["n"] == 0
+
+
+class TestTransportExhaustedIsDistinguishable:
+    def test_it_is_still_a_runtime_error(self):
+        """Every existing `except RuntimeError` must keep working."""
+        from resilience import TransportExhausted
+
+        assert issubclass(TransportExhausted, RuntimeError)
+
+    def test_transport_failures_raise_it_and_api_failures_do_not(self):
+        from googleapiclient.errors import HttpError
+
+        from resilience import TransportExhausted, retry_on_google_error
+        from tests.fakes import http_error
+
+        @retry_on_google_error(max_retries=1, base_delay=0.001, max_delay=0.002)
+        def transport():
+            raise ConnectionResetError("reset")
+
+        @retry_on_google_error(max_retries=1, base_delay=0.001, max_delay=0.002)
+        def api():
+            raise http_error(500, "internalError")
+
+        with pytest.raises(TransportExhausted):
+            transport()
+        with pytest.raises(RuntimeError) as caught:
+            api()
+        assert not isinstance(caught.value, TransportExhausted)

@@ -67,6 +67,21 @@ class PermanentAPIError(Exception):
     """Raised for errors retrying will never fix. Callers should give up."""
 
 
+class TransportExhausted(RuntimeError):
+    """
+    The connection failed repeatedly and we stopped trying.
+
+    Distinct from a plain RuntimeError because the *uncertainty* differs. An
+    API that returned 500 five times told us five times that it did not do the
+    thing. A socket that reset mid-write told us nothing: the write may have
+    landed and only the response was lost. Anything whose duplicate a user
+    would see -- a second copy of an email, most obviously -- needs to check
+    before assuming it can simply try again.
+
+    Subclasses RuntimeError so every existing handler keeps working unchanged.
+    """
+
+
 class QuotaExhausted(Exception):
     """Raised when a reservation would exceed the daily per-user upload cap."""
 
@@ -182,7 +197,14 @@ def retry_on_google_error(
                     # there.
                     attempt += 1
                     if attempt > max_retries:
-                        raise RuntimeError(
+                        # A distinct type, subclassing RuntimeError so every
+                        # existing `except RuntimeError` still catches it.
+                        # Callers that need to tell "the network died, and the
+                        # write may or may not have landed" apart from "the
+                        # API refused this" can now do so -- gmail_engine uses
+                        # it to check whether a message arrived before
+                        # retrying and duplicating it.
+                        raise TransportExhausted(
                             f"exhausted {max_retries} retries on "
                             f"{type(exc).__name__}: {exc}"
                         ) from exc

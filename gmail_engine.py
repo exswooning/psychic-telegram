@@ -27,7 +27,8 @@ from google.auth.exceptions import RefreshError
 from googleapiclient.http import MediaFileUpload  # noqa: F401
 
 from config import Settings
-from resilience import PermanentAPIError, RateLimiter, retry_on_google_error
+from resilience import (PermanentAPIError, RateLimiter, TransportExhausted,
+                        retry_on_google_error)
 
 # An un-granted scope surfaces as a RefreshError at token-mint time, not as an
 # HttpError, so the retry decorator never sees it. Optional passes catch it so
@@ -117,6 +118,90 @@ class GmailMigrator:
                 out.append(label_map[lid])
         return out
 
+    # -- insert, made safe to retry -------------------------------------------
+    @staticmethod
+    def _message_id_header(raw: str) -> str | None:
+        """
+        The RFC822 Message-ID, pulled out of the base64 payload.
+
+        It has to come from `raw` rather than from `payload.headers`, because
+        the fetch uses `format="raw"` and that response carries no parsed
+        headers at all -- a lookup against `payload` would silently return
+        None for every message and quietly disable the guard below.
+
+        Only a prefix is decoded. Headers sit at the top of the message, and
+        this runs on a failure path where decoding a 25 MB attachment to read
+        one header would be a poor trade.
+        """
+        window = raw[: (8192 // 3) * 4]
+        window = window[: len(window) - (len(window) % 4)]   # base64 needs 4s
+        if not window:
+            return None
+        try:
+            text = base64.urlsafe_b64decode(window).decode("utf-8", "replace")
+        except (ValueError, TypeError):
+            return None
+        match = re.search(r"^message-id:\s*(<[^>]+>)", text, re.IGNORECASE | re.MULTILINE)
+        return match.group(1) if match else None
+
+    def _find_by_message_id(self, msgid: str) -> str | None:
+        """Has this exact message already landed on the target?"""
+        query = f"rfc822msgid:{msgid}"
+        try:
+            self.limiter.acquire()
+            resp = self._retry(lambda: self.tgt.users().messages().list(
+                userId="me", q=query, maxResults=1,
+                includeSpamTrash=True).execute())
+        except (PermanentAPIError, RuntimeError):
+            # Cannot tell -- fall through and let the caller insert. A possible
+            # duplicate beats refusing to migrate the message at all.
+            return None
+        found = resp.get("messages") or []
+        return found[0]["id"] if found else None
+
+    def _insert_once(self, body: dict, media, raw: str) -> dict:
+        """
+        Insert a message, tolerating a transport failure without duplicating it.
+
+        Widening the retry set to transport errors bought reliability at the
+        cost of a specific risk, and the risk is not uniform across services.
+        A retried `files.create` leaves an orphan in Drive that `verify` sees
+        as a surplus; `events.import` is genuinely idempotent through
+        iCalUID; but `messages.insert` produces **a second copy of an email a
+        user will actually see**, and the retry returns a fresh id which then
+        gets written to id_mapping as canonical -- so the ledger records the
+        duplicate as the real thing and no later pass can find the first copy.
+        "An extra item beats a missing one" is defensible for a Drive orphan.
+        It is much weaker for mail.
+
+        So on a transport failure we ask the target whether the message is
+        already there, keyed on the RFC822 Message-ID, which is carried
+        verbatim by the copy. One extra call on a rare path, and it turns a
+        probabilistic duplicate into a deterministic resume.
+
+        Nothing here changes the first attempt: the common path is unchanged
+        and costs nothing extra.
+        """
+        insert = lambda: self.tgt.users().messages().insert(   # noqa: E731
+            userId="me", body=body, media_body=media,
+            internalDateSource="dateHeader").execute()
+        try:
+            return self._retry(insert)
+        except TransportExhausted:
+            # The retry decorator exhausted its attempts, and any of them may
+            # have succeeded with only the response lost in transit. A plain
+            # RuntimeError would mean the API told us it refused; this means
+            # we genuinely do not know.
+            msgid = self._message_id_header(raw)
+            if msgid:
+                existing = self._find_by_message_id(msgid)
+                if existing:
+                    log.info("[%s] adopting message already on the target "
+                             "after a transport failure (%s)",
+                             self.source_user, msgid)
+                    return {"id": existing, "adopted": True}
+            raise
+
     # -- messages --------------------------------------------------------------
     def _iter_messages(self, query: str):
         token = None
@@ -199,9 +284,7 @@ class GmailMigrator:
                 body["raw"] = raw
 
             try:
-                result = self._retry(lambda b=body, md=media: self.tgt.users().messages().insert(
-                    userId="me", body=b, media_body=md, internalDateSource="dateHeader",
-                ).execute())
+                result = self._insert_once(body, media, raw)
             except (PermanentAPIError, RuntimeError) as exc:
                 self.db.log_audit(self.source_user, mid, "message", "FAILED", str(exc))
                 self.stats["failed"] += 1
