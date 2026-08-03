@@ -83,3 +83,42 @@ class TestItReusesTheSeedersReset:
     def test_one_failing_service_does_not_abort_the_rest(self):
         src = inspect.getsource(reset_target.reset_one)
         assert src.count("except Exception") >= 2
+
+
+class TestItDoesNotShadowTheRealVerify:
+    """
+    data-generator/ holds its own verify.py. Putting that directory on
+    sys.path -- as this module first did, to import the seeder -- shadowed the
+    real one for the rest of the process, and the shadowed copy has none of
+    the cutover-gate guards.
+
+    Caught by the suite rather than in isolation: these tests passed alone and
+    failed together, because merely importing reset_target made
+    `verify.UserReport([]).ok` return True again. That is the exact false-pass
+    those guards exist to prevent, reintroduced by an import side effect.
+    """
+
+    def test_importing_this_module_leaves_verify_intact(self):
+        import verify
+
+        assert verify.UserReport(source="a", target="b").ok is False
+
+    def test_the_real_verify_is_the_one_loaded(self):
+        import os
+
+        import verify
+
+        assert os.path.basename(os.path.dirname(verify.__file__)) != "data-generator"
+
+    def test_data_generator_is_not_on_the_path(self):
+        import sys
+
+        assert not any(p.endswith("data-generator") for p in sys.path), \
+            "data-generator on sys.path shadows verify.py for the whole process"
+
+    def test_the_seeder_is_loaded_by_file_path(self):
+        """Appending rather than prepending would still shadow later imports;
+        loading by path shadows nothing."""
+        src = inspect.getsource(reset_target._load_seeder)
+        assert "spec_from_file_location" in src
+        assert "sys.path.remove" in src

@@ -39,12 +39,39 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "data-generator"))
 
 from auth import AuthManager        # noqa: E402
 from config import Settings         # noqa: E402
 from db import MigrationDB          # noqa: E402
+
+
+def _load_seeder():
+    """
+    Import seed_sandbox without putting data-generator on sys.path.
+
+    data-generator/ contains its own verify.py, which shadows the real one for
+    the rest of the process the moment that directory goes on the path -- and
+    the shadowed copy has none of the cutover-gate guards. Caught by the test
+    suite: importing this module made `verify.UserReport([]).ok` return True
+    again, which is the exact false-pass those guards exist to prevent.
+
+    Appending rather than prepending would still shadow anything imported
+    later. Loading by file path shadows nothing at all.
+    """
+    import importlib.util
+
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "data-generator", "seed_sandbox.py")
+    spec = importlib.util.spec_from_file_location("_seed_sandbox", path)
+    module = importlib.util.module_from_spec(spec)
+    # seed_sandbox imports corpus, which lives beside it.
+    gen_dir = os.path.dirname(path)
+    sys.path.insert(0, gen_dir)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.remove(gen_dir)
+    return module
 
 
 def assert_sandbox(settings: Settings, confirm_domain: str) -> None:
@@ -68,7 +95,7 @@ def assert_sandbox(settings: Settings, confirm_domain: str) -> None:
 
 
 def reset_one(settings: Settings, auth: AuthManager, user: str) -> dict:
-    import seed_sandbox as seed
+    seed = _load_seeder()
 
     local = user.split("@")[0]
     out = {"user": user, "drive": 0, "gmail": 0, "calendar": 0, "chat": 0}
