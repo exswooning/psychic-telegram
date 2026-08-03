@@ -107,6 +107,13 @@ class DriveMigrator:
     # -- entry point ----------------------------------------------------------
     def run(self, delta: bool = False) -> dict:
         self.delta = delta
+        # One query instead of one per item. get_target_id runs before every
+        # create -- and again for every deferred shortcut at the end of the
+        # run -- so on a resume it is the most frequent query in the engine.
+        loaded = self.db.preload_mappings(self.source_user)
+        if loaded:
+            log.info("[%s] resuming against %d known mapping(s)",
+                     self.source_user, loaded)
         if self.shared_drive:
             # A shared drive's id doubles as the id of its root folder, so it
             # substitutes directly for the My Drive root on both sides.

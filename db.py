@@ -132,6 +132,17 @@ class MigrationDB:
         os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
         self._local = threading.local()
         self._write_lock = threading.RLock()
+        # Shared across threads on purpose: under intra-user concurrency every
+        # worker on a user must see what the others have already recorded, so
+        # a thread-local cache would reintroduce the duplication it exists to
+        # prevent. Populated by preload_mappings, kept current by
+        # record_mapping.
+        self._mapping_cache: dict[str, dict[tuple[str, str], str]] = {}
+        self._mapping_cached_users: set[str] = set()
+        # identity_map is written before a run and never during one, so a
+        # straight snapshot is safe here in a way it is not for id_mapping.
+        # Invalidated by the few commands that do write it.
+        self._identity_cache: dict[str, str] | None = None
         self.init_schema()
 
     # -- connection plumbing -------------------------------------------------
@@ -239,6 +250,7 @@ class MigrationDB:
 
         with self.write() as conn:
             conn.executemany(
+                # Membership changed, so the snapshot is stale.
                 """INSERT INTO identity_map (source_email, target_email, entity_type)
                    VALUES (?,?,?)
                    ON CONFLICT(source_email) DO UPDATE SET
@@ -246,6 +258,7 @@ class MigrationDB:
                        entity_type=excluded.entity_type""",
                 rows,
             )
+        self._identity_cache = None      # membership changed
         log.info("Loaded %d identity mappings from %s", len(rows), csv_path)
         return len(rows)
 
@@ -258,14 +271,23 @@ class MigrationDB:
              j.smith@tenantA.com -> john.smith@tenantB.com).
           2. Naive domain swap for same-localpart accounts.
           3. None -> caller decides whether to drop the ACL or leave it external.
+
+        Cached in full rather than read through, and unlike the id_mapping
+        cache a plain snapshot is correct here: identity_map is written by
+        init-db and provision-users before a migration starts, and nothing in
+        a run adds to it. `_sync_acls` calls this once per grantee per file --
+        1,823 times on the measured corpus -- so it is the second hottest
+        query in the engine and the one with the smallest set behind it.
         """
         if not source_email:
             return None
         email = source_email.strip().lower()
-        row = self.conn.execute(
-            "SELECT target_email FROM identity_map WHERE source_email=?", (email,)
-        ).fetchone()
-        return row["target_email"] if row else None
+        if self._identity_cache is None:
+            self._identity_cache = {
+                r["source_email"]: r["target_email"] for r in self.conn.execute(
+                    "SELECT source_email, target_email FROM identity_map")
+            }
+        return self._identity_cache.get(email)
 
     def all_identities(self, status: Optional[str] = None) -> list[sqlite3.Row]:
         q = "SELECT * FROM identity_map"
@@ -306,8 +328,54 @@ class MigrationDB:
             )
 
     # -- id_mapping ----------------------------------------------------------
+    # -- the resume cache ----------------------------------------------------
+    def preload_mappings(self, source_user: str) -> int:
+        """
+        Pull this user's whole id_mapping into memory, once.
+
+        `get_target_id` runs before every mutating call -- once per file, once
+        per message, once per event, and again for every deferred shortcut --
+        so on a resumed run it is the single most frequent query in the
+        system, and each one goes through a connection that the process-wide
+        write lock is contending on.
+
+        This is a read-*through* cache, not a snapshot, and the distinction is
+        load-bearing rather than stylistic. Today one thread owns a user, so a
+        snapshot taken at start would happen to stay correct. Under intra-user
+        concurrency it would not: workers would insert mappings the snapshot
+        never learns about, `get_target_id` would answer None for work that
+        was already done, and the result presents as duplicated items rather
+        than as a crash. `record_mapping` therefore writes through to the
+        cache, which costs one dict assignment and saves rewriting this later.
+
+        A second consumer makes the same point today: `_fixup_shortcuts`
+        resolves deferred targets at end of run, and those lookups are for
+        items migrated much earlier in the same run. A start-of-run snapshot
+        misses every one of them.
+
+        Returns the number of mappings loaded.
+        """
+        rows = self.conn.execute(
+            "SELECT source_id, type, target_id FROM id_mapping WHERE source_user=?",
+            (source_user,),
+        ).fetchall()
+        loaded = {(r["source_id"], r["type"]): r["target_id"] for r in rows}
+        # Merge rather than replace: a mapping recorded between the SELECT
+        # above and this assignment would otherwise be dropped from the cache
+        # while remaining in the database -- the one state that would make the
+        # cache staler than the ledger.
+        existing = self._mapping_cache.setdefault(source_user, {})
+        loaded.update(existing)
+        existing.update(loaded)
+        self._mapping_cached_users.add(source_user)
+        return len(existing)
+
     def get_target_id(self, source_user: str, source_id: str,
                       item_type: str) -> Optional[str]:
+        # A cached user's map is complete, so a miss means "not migrated" and
+        # needs no query to confirm it.
+        if source_user in self._mapping_cached_users:
+            return self._mapping_cache[source_user].get((source_id, item_type))
         row = self.conn.execute(
             """SELECT target_id FROM id_mapping
                WHERE source_user=? AND source_id=? AND type=?""",
@@ -331,6 +399,13 @@ class MigrationDB:
                 (source_user, source_id, target_id, item_type,
                  parent_target_id, source_name),
             )
+        # Write through, after the transaction commits. Ordering matters: a
+        # cache updated before the commit would answer "already migrated" for
+        # work that a crash then rolled back. Dict assignment is atomic under
+        # the GIL, so this needs no lock of its own.
+        cache = self._mapping_cache.get(source_user)
+        if cache is not None:
+            cache[(source_id, item_type)] = target_id
 
     # -- audit_log -----------------------------------------------------------
     def log_audit(self, source_user: str, item_id: str, item_type: str,
@@ -466,3 +541,4 @@ def bulk_seed_identities(db: MigrationDB, pairs: Iterable[tuple[str, str]]) -> N
                    target_email=excluded.target_email""",
             [(a.lower(), b.lower()) for a, b in pairs],
         )
+    db._identity_cache = None            # membership changed

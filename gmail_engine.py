@@ -253,6 +253,9 @@ class GmailMigrator:
                 return
 
     def run(self, delta: bool = False, since_epoch_days: int = 0) -> dict:
+        # A mailbox is the largest item count in the system, and every message
+        # costs a get_target_id before anything else happens.
+        self.db.preload_mappings(self.source_user)
         self.sync_labels()
         query = f"newer_than:{since_epoch_days}d" if delta and since_epoch_days else ""
 
