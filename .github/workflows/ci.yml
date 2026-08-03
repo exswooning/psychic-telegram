@@ -1,0 +1,91 @@
+# CI for the migration engine.
+#
+# This tool writes into production Workspace tenants, and the suite is the only
+# thing standing between a hot-path change and a tenant. Until this existed,
+# 572 tests ran only when someone remembered to run them.
+#
+# Matrix note: 3.10 is what the VPS runs (deploy_remote.py builds the venv from
+# the host python) and 3.14 is what the current dev machine runs. Both are
+# tested because the gap between them is where the suite would silently rot --
+# the engine already carries one bug class from a version difference nobody was
+# checking.
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # A newer push makes an in-flight run irrelevant; don't queue behind it.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Tests
+        # pytest.ini sets filterwarnings = error::DeprecationWarning; a
+        # dependency deprecation must fail here rather than three hours into a
+        # migration.
+        run: pytest
+
+      - name: The suite must not shrink
+        # Guards against the failure mode where a test file stops being
+        # collected -- deleted fixture, renamed module, import error swallowed
+        # by a conftest -- and the run still reports green on far fewer tests.
+        run: |
+          # `-q` prints per-file counts and no total, so sum them. Parsing a
+          # total line would silently yield empty on a pytest that formats it
+          # differently, and `[ "" -lt 560 ]` would then error rather than pass
+          # -- but summing is stable across versions and reads as the intent.
+          COUNT=$(pytest --collect-only -q 2>/dev/null | awk -F': ' '/: [0-9]+$/ {s+=$2} END {print s+0}')
+          echo "collected $COUNT tests"
+          if [ "$COUNT" -lt 560 ]; then
+            echo "::error::only $COUNT tests collected; expected at least 560."
+            echo "If tests were deliberately removed, lower the floor in this workflow."
+            exit 1
+          fi
+
+  types:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install mypy
+
+      - name: Type check
+        # Not blocking yet. The codebase is thoroughly annotated but has never
+        # been checked, so the first run will surface a backlog; failing CI on
+        # it now would just train everyone to ignore a red build. Tighten to a
+        # hard failure once the baseline is clean -- see mypy.ini.
+        continue-on-error: true
+        run: mypy . 2>&1 | tail -40

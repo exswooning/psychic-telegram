@@ -180,13 +180,65 @@ class TestDownloadChunking:
 
         assert Settings().download_chunk_bytes <= 32 * 1024 * 1024
 
-    def test_the_rate_limiter_is_not_charged_per_chunk(self, migrator, auth):
-        """The bucket is sized for API requests. A large file draining through
-        it spent its tokens on byte transfer and throttled every other call."""
-        import inspect
+    def test_the_rate_limiter_is_charged_once_per_call_not_per_chunk(
+            self, migrator, monkeypatch):
+        """
+        The bucket is sized for API requests per second. A large file draining
+        through it spent those tokens on byte transfer, throttling every other
+        call the same user had to make.
 
-        src = inspect.getsource(migrator._download_via)
-        before_loop = src.split("while not done")[0]
-        after_loop = src.split("while not done")[1]
-        assert "limiter.acquire" in before_loop
-        assert "limiter.acquire" not in after_loop
+        Asserted behaviourally: a download that takes five chunks must still
+        cost exactly one token. The earlier version of this test compared
+        source text either side of the `while` loop, which broke on any
+        refactor and passed for a wrong implementation phrased differently.
+        """
+        class CountingLimiter:
+            def __init__(self):
+                self.acquired = 0
+
+            def acquire(self):
+                self.acquired += 1
+
+        class ChunkedDownloader:
+            """Five chunks, like MediaIoBaseDownload on a file 5x the chunk size."""
+
+            def __init__(self, fh, request, chunksize=None):
+                self.fh = fh
+                self.chunksize = chunksize
+                self.remaining = 5
+
+            def next_chunk(self):
+                self.remaining -= 1
+                self.fh.write(b"x" * 16)
+                return None, self.remaining == 0
+
+        limiter = CountingLimiter()
+        migrator.limiter = limiter
+        monkeypatch.setattr("drive_engine.MediaIoBaseDownload", ChunkedDownloader)
+
+        path, size = migrator._download_via(lambda: object())
+
+        assert size == 5 * 16, "the fake downloader did not run to completion"
+        assert limiter.acquired == 1, (
+            f"charged {limiter.acquired} tokens for one download; the request "
+            f"limiter must not be paid per chunk")
+
+    def test_the_configured_chunk_size_reaches_the_downloader(
+            self, migrator, monkeypatch):
+        """Setting it in config is only useful if it is actually passed on --
+        the library default of 100 MB applies whenever it is not."""
+        seen = {}
+
+        class RecordingDownloader:
+            def __init__(self, fh, request, chunksize=None):
+                seen["chunksize"] = chunksize
+
+            def next_chunk(self):
+                return None, True
+
+        migrator.settings.download_chunk_bytes = 4 * 1024 * 1024
+        monkeypatch.setattr("drive_engine.MediaIoBaseDownload", RecordingDownloader)
+
+        migrator._download_via(lambda: object())
+
+        assert seen["chunksize"] == 4 * 1024 * 1024
