@@ -192,7 +192,18 @@ def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
         done = db.services_done(r["source_email"])
         # A ledger written before services_done existed has an empty set; fall
         # back to the old behaviour rather than re-migrating everything.
+        #
+        # Say so, loudly. This fallback silently skipped all five users of a
+        # Gmail/Calendar/Chat run against a ledger the Drive A/B had left
+        # DONE, and the run reported a clean batch summary having migrated
+        # nothing at all. Skipping on an assumption is defensible; skipping
+        # without saying which assumption is not.
         if not done:
+            log.warning(
+                "%s is DONE in a ledger with no per-service record — assuming "
+                "%s already ran and skipping. If they did not, run "
+                "`backfill-services` or reset this user to PENDING.",
+                r["source_email"], ",".join(sorted(services)))
             return True
         return set(services) <= done
 
@@ -548,6 +559,45 @@ def cmd_report(args, settings: Settings, db: MigrationDB, auth: AuthManager):
     print(f"\nTotal failed items: {total_failed}")
 
 
+def cmd_backfill_services(args, settings: Settings, db: MigrationDB,
+                          auth: AuthManager):
+    """
+    Record which services a pre-`services_done` ledger actually completed.
+
+    Needed because `status` used to be per-user: a ledger left DONE by a
+    Drive-only run cannot say so, and the per-service skip check then has to
+    assume *everything* ran. Stating the truth once here unblocks the services
+    that genuinely have not run, without re-migrating the one that has.
+
+    Verified against the ledger rather than trusted: a service is only
+    backfilled for a user who has SUCCESS rows of the matching item types, so
+    a wrong --services cannot mark work done that never happened.
+    """
+    evidence = {
+        "drive": ("file", "folder"),
+        "gmail": ("message", "label", "draft"),
+        "calendar": ("event", "calendar"),
+        "chat": ("space", "chat_message"),
+    }
+    changed = skipped = 0
+    for r in db.all_identities():
+        if r["entity_type"] != "user" or r["status"] != "DONE":
+            continue
+        have = db.summary(r["source_email"]) or {}
+        confirmed = [s for s in args.services
+                     if any(t in have for t in evidence.get(s, ()))]
+        missing = sorted(set(args.services) - set(confirmed))
+        if missing:
+            print(f"  {r['source_email']}: no ledger evidence for "
+                  f"{','.join(missing)} — not backfilled")
+            skipped += 1
+        if confirmed:
+            db.mark_services_done(r["source_email"], confirmed)
+            print(f"  {r['source_email']}: recorded {','.join(sorted(confirmed))}")
+            changed += 1
+    print(f"\nBackfilled {changed} user(s); {skipped} had gaps left alone.")
+
+
 def cmd_scope(args, settings: Settings, db: MigrationDB, auth: AuthManager):
     """Print the migration scope manifest — what moves and what does not."""
     import scope as scope_mod
@@ -701,6 +751,13 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("report", help="print migration status and failures")
     s.add_argument("--max-failures", type=int, default=20)
     s.set_defaults(func=cmd_report)
+
+    s = sub.add_parser("backfill-services",
+                       help="record which services an older ledger completed")
+    s.add_argument("--services", required=True,
+                   type=lambda v: [x.strip() for x in v.split(",") if x.strip()],
+                   help="comma-separated, e.g. drive")
+    s.set_defaults(func=cmd_backfill_services)
 
     s = sub.add_parser("scope", help="print exactly what will and will not migrate")
     s.add_argument("--service", action="append",
