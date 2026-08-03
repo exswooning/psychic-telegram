@@ -28,7 +28,7 @@ from config import Settings, source_scopes, target_scopes
 log = logging.getLogger(__name__)
 
 _API_VERSIONS = {"drive": "v3", "gmail": "v1", "calendar": "v3",
-                 "chat": "v1"}
+                 "chat": "v1", "people": "v1", "tasks": "v1"}
 
 
 class AuthManager:
@@ -212,6 +212,44 @@ class AuthManager:
         http = google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=300))
         return build("admin", "directory_v1", http=http, cache_discovery=False)
 
+    def source_people(self, user: str):
+        return self._service("source", "people", user)
+
+    def target_people(self, user: str):
+        return self._service("target", "people", user)
+
+    def source_tasks(self, user: str):
+        return self._service("source", "tasks", user)
+
+    def target_tasks(self, user: str):
+        return self._service("target", "tasks", user)
+
+    def target_directory(self):
+        """Directory API as the target admin. Needed to resolve an SSO
+        assignment's org unit or group on the receiving side, where the ids
+        from the source tenant mean nothing."""
+        creds = self._credentials("target", self.settings.target_admin)
+        http = google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=300))
+        return build("admin", "directory_v1", http=http, cache_discovery=False)
+
+    def cloud_identity(self, tenant: str):
+        """
+        Cloud Identity as that tenant's admin.
+
+        SSO is org-level configuration, not per-user data, so unlike every
+        other service here this is called once per tenant as the admin rather
+        than impersonated per mailbox.
+        """
+        admin = (self.settings.source_admin if tenant == "source"
+                 else self.settings.target_admin)
+        if not admin:
+            raise RuntimeError(
+                f"{tenant.upper()}_ADMIN is not set; Cloud Identity has to be "
+                f"called as a super admin of that domain")
+        creds = self._credentials(tenant, admin)
+        http = google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=300))
+        return build("cloudidentity", "v1", http=http, cache_discovery=False)
+
     def verify_delegation(self, tenant: str, user: str) -> tuple[bool, str]:
         """Mint a token and make one trivial call. Cheap way to catch a DWD
         misconfiguration in seconds instead of four hours into a batch."""
@@ -220,7 +258,21 @@ class AuthManager:
             drive.about().get(fields="user").execute()
             return True, "ok"
         except Exception as exc:  # noqa: BLE001 - surfaced to the operator verbatim
-            return False, str(exc)
+            msg = str(exc)
+            # One credential carries every scope this run needs, so a scope the
+            # Admin Console has not authorised fails the token exchange itself
+            # -- here, on a Drive call, with no hint that Chat is the reason.
+            # Print the exact list to paste, because the console's editor
+            # *replaces* the scope line rather than appending to it, and a
+            # half-remembered list silently drops whatever is left out.
+            if "unauthorized_client" in msg or "invalid_scope" in msg:
+                wanted = ",".join(self._scopes(tenant))
+                msg += (f"\n\n  The {tenant} client ID is not authorised for "
+                        f"every scope this run needs. Paste this exact list "
+                        f"into Admin Console > Security > API controls > "
+                        f"Domain-wide delegation (it replaces the line, so "
+                        f"partial lists lose scopes):\n\n  {wanted}")
+            return False, msg
 
 
 def list_domain_users(auth: AuthManager, tenant: str, domain: str) -> list[str]:

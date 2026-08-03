@@ -47,6 +47,11 @@ FOLDER_MIME = "application/vnd.google-apps.folder"
 # Stands in for "now" when a permission grant bumps a file's modifiedTime.
 # A fixed, obviously-wrong value so a test failure reads unambiguously.
 PERMISSION_BUMP_TIME = "2099-12-31T23:59:59Z"
+# Distinct from the permission bump so a failing assertion says *which* write
+# left the timestamp wrong. Modelling only the permission bump is how the
+# comment-ordering bug got past the whole suite: the engine restored the
+# timestamp after ACLs, then wrote comments, and the fake never noticed.
+COMMENT_BUMP_TIME = "2098-11-30T22:58:58Z"
 
 
 # ======================================================================
@@ -522,6 +527,9 @@ class _DriveComments:
         entry = {"id": cid, "content": body.get("content", ""),
                 "author": {"displayName": self.s.owner}, "replies": []}
         self.s.comment_store[fileId].append(entry)
+        meta = self.s.store.get(fileId)
+        if meta is not None:
+            meta["modifiedTime"] = COMMENT_BUMP_TIME
         return {"id": cid}
 
 
@@ -534,6 +542,9 @@ class _DriveReplies:
 
     def _create(self, fileId: str, commentId: str, body: dict, **_):
         rid = self.s._new_id("rply")
+        meta = self.s.store.get(fileId)
+        if meta is not None:
+            meta["modifiedTime"] = COMMENT_BUMP_TIME
         for c in self.s.comment_store.get(fileId, []):
             if c["id"] == commentId:
                 c.setdefault("replies", []).append(
@@ -1168,7 +1179,8 @@ class FakeAuth:
         key = (tenant, api, user)
         if key not in self._svcs:
             cls = {"drive": FakeDrive, "gmail": FakeGmail,
-                   "calendar": FakeCalendar, "chat": FakeChat}[api]
+                   "calendar": FakeCalendar, "chat": FakeChat,
+                   "people": FakePeople, "tasks": FakeTasks}[api]
             self._svcs[key] = cls(user, tenant)
             if api == "drive":
                 self._link_drive_peers()
@@ -1214,6 +1226,18 @@ class FakeAuth:
     def target_chat(self, user: str) -> "FakeChat":
         return self._get("target", "chat", user)       # type: ignore[return-value]
 
+    def source_people(self, user: str) -> "FakePeople":
+        return self._get("source", "people", user)     # type: ignore[return-value]
+
+    def target_people(self, user: str) -> "FakePeople":
+        return self._get("target", "people", user)     # type: ignore[return-value]
+
+    def source_tasks(self, user: str) -> "FakeTasks":
+        return self._get("source", "tasks", user)      # type: ignore[return-value]
+
+    def target_tasks(self, user: str) -> "FakeTasks":
+        return self._get("target", "tasks", user)      # type: ignore[return-value]
+
     def source_directory(self):
         """Resolves the users/{id} -> email lookup chat_engine needs."""
         return _FakeDirectory(self)
@@ -1246,10 +1270,12 @@ class FakeChat(FakeService):
         super().__init__(owner, tenant)
         shared = FakeChat._SHARED.setdefault(tenant, {
             "spaces": {}, "messages": defaultdict(list), "directory": {},
+            "members": defaultdict(list),
         })
         self.space_store: dict[str, dict] = shared["spaces"]
         self.message_store: dict[str, list[dict]] = shared["messages"]
         self.directory: dict[str, str] = shared["directory"]
+        self.member_store: dict[str, list[dict]] = shared["members"]
 
     @classmethod
     def reset_shared(cls) -> None:
@@ -1257,10 +1283,17 @@ class FakeChat(FakeService):
 
     # -- seeding --------------------------------------------------------
     def add_space(self, display_name: str, space_type: str = "SPACE",
-                  name: Optional[str] = None) -> str:
+                  name: Optional[str] = None,
+                  members: Optional[list[str]] = None) -> str:
         sid = name or f"spaces/{self._new_id('sp')}"
         self.space_store[sid] = {"name": sid, "displayName": display_name,
                                  "spaceType": space_type, "importMode": False}
+        for email in (members or []):
+            uid = f"users/{abs(hash(email)) % 10**12}"
+            self.directory[uid] = email
+            self.member_store[sid].append(
+                {"name": f"{sid}/members/{self._new_id('mem')}",
+                 "member": {"name": uid, "type": "HUMAN"}})
         return sid
 
     def add_chat_message(self, space: str, text: str, sender_email: str,
@@ -1323,6 +1356,46 @@ class _ChatSpaces:
     def messages(self):
         return _ChatMessages(self.s)
 
+    def members(self):
+        return _ChatMembers(self.s)
+
+
+class _ChatMembers:
+    """
+    Membership, modelled because `direct` mode depends on it being real: a
+    user who is not in a space cannot post to it, so a fake that accepted
+    every post regardless would show attribution working when live Chat would
+    have refused it.
+    """
+
+    def __init__(self, svc: FakeChat):
+        self.s = svc
+
+    def list(self, **kw):
+        return _Call(self.s, "members.list", self._list, kw)
+
+    def _list(self, parent: str, **_):
+        return {"memberships": copy.deepcopy(self.s.member_store.get(parent, []))}
+
+    def create(self, **kw):
+        return _Call(self.s, "members.create", self._create, kw)
+
+    def _create(self, parent: str, body: dict, **_):
+        if parent not in self.s.space_store:
+            raise http_error(404, "notFound", parent)
+        member = (body.get("member") or {})
+        email = (member.get("name") or "").split("/")[-1].lower()
+        existing = {(m.get("member") or {}).get("name", "").split("/")[-1].lower()
+                    for m in self.s.member_store.get(parent, [])}
+        if email in existing:
+            raise http_error(409, "ALREADY_EXISTS", f"{email} is already a member")
+        uid = f"users/{email}"
+        self.s.directory[uid] = email
+        self.s.member_store[parent].append(
+            {"name": f"{parent}/members/{self.s._new_id('mem')}",
+             "member": {"name": uid, "type": member.get("type", "HUMAN")}})
+        return {"name": f"{parent}/members/{email}"}
+
 
 class _ChatMessages:
     def __init__(self, svc: FakeChat):
@@ -1376,3 +1449,190 @@ class _FakeDirectory:
                 return {"primaryEmail": email}
 
         return _Req()
+
+
+# ======================================================================
+# People (contacts) and Tasks
+# ======================================================================
+class FakePeople(FakeService):
+    """
+    Contacts. Models the two rules the engine has to respect: a group must
+    exist before a contact can be put in it, and createContact rejects a body
+    with no writable fields.
+    """
+
+    def __init__(self, owner: str, tenant: str):
+        super().__init__(owner, tenant)
+        self.contacts: dict[str, dict] = {}
+        self.groups: dict[str, dict] = {}
+        self.group_members: dict[str, list[str]] = defaultdict(list)
+
+    def add_contact(self, given: str, email: Optional[str] = None,
+                    groups: Optional[list[str]] = None) -> str:
+        rid = f"people/{self._new_id('c')}"
+        self.contacts[rid] = {
+            "resourceName": rid,
+            "names": [{"givenName": given, "displayName": given}],
+            "emailAddresses": [{"value": email}] if email else [],
+            "memberships": [
+                {"contactGroupMembership": {"contactGroupResourceName": g}}
+                for g in (groups or [])],
+        }
+        return rid
+
+    def add_group(self, name: str) -> str:
+        rid = f"contactGroups/{self._new_id('g')}"
+        self.groups[rid] = {"resourceName": rid, "name": name,
+                            "groupType": "USER_CONTACT_GROUP"}
+        return rid
+
+    def people(self):
+        return _PeoplePeople(self)
+
+    def contactGroups(self):
+        return _PeopleGroups(self)
+
+
+class _PeoplePeople:
+    def __init__(self, svc):
+        self.s = svc
+
+    def connections(self):
+        return self
+
+    def list(self, **kw):
+        return _Call(self.s, "people.connections.list", self._list, kw)
+
+    def _list(self, **_):
+        return {"connections": [copy.deepcopy(v) for v in self.s.contacts.values()]}
+
+    def createContact(self, **kw):
+        return _Call(self.s, "people.createContact", self._create, kw)
+
+    def _create(self, body: dict, **_):
+        if not body:
+            raise http_error(400, "invalidArgument", "person has no fields")
+        rid = f"people/{self.s._new_id('c')}"
+        rec = dict(body)
+        rec["resourceName"] = rid
+        self.s.contacts[rid] = rec
+        return rec
+
+
+class _PeopleGroups:
+    def __init__(self, svc):
+        self.s = svc
+
+    def list(self, **kw):
+        return _Call(self.s, "contactGroups.list", self._list, kw)
+
+    def _list(self, **_):
+        return {"contactGroups": [copy.deepcopy(v) for v in self.s.groups.values()]}
+
+    def create(self, **kw):
+        return _Call(self.s, "contactGroups.create", self._create, kw)
+
+    def _create(self, body: dict, **_):
+        name = (body.get("contactGroup") or {}).get("name") or "unnamed"
+        rid = f"contactGroups/{self.s._new_id('g')}"
+        self.s.groups[rid] = {"resourceName": rid, "name": name,
+                              "groupType": "USER_CONTACT_GROUP"}
+        return self.s.groups[rid]
+
+    def members(self):
+        return self
+
+    def modify(self, **kw):
+        return _Call(self.s, "contactGroups.members.modify", self._modify, kw)
+
+    def _modify(self, resourceName: str, body: dict, **_):
+        if resourceName not in self.s.groups:
+            raise http_error(404, "notFound", resourceName)
+        for rn in body.get("resourceNamesToAdd", []):
+            self.s.group_members[resourceName].append(rn)
+        return {}
+
+
+class FakeTasks(FakeService):
+    """Task lists and tasks, including the parent/child link that decides
+    whether a checklist keeps its structure."""
+
+    def __init__(self, owner: str, tenant: str):
+        super().__init__(owner, tenant)
+        self.lists: dict[str, dict] = {}
+        # Not `self.tasks`: that name belongs to the resource accessor
+        # `tasks()`, exactly as it does on the real client.
+        self.task_store: dict[str, list[dict]] = defaultdict(list)
+
+    def add_list(self, title: str) -> str:
+        lid = self._new_id("tl")
+        self.lists[lid] = {"id": lid, "title": title}
+        return lid
+
+    def add_task(self, list_id: str, title: str, parent: Optional[str] = None,
+                 status: str = "needsAction", due: Optional[str] = None) -> str:
+        tid = self._new_id("tk")
+        rec = {"id": tid, "title": title, "status": status}
+        if parent:
+            rec["parent"] = parent
+        if due:
+            rec["due"] = due
+        self.task_store[list_id].append(rec)
+        return tid
+
+    def tasklists(self):
+        return _TaskLists(self)
+
+    def tasks(self):
+        return _Tasks(self)
+
+
+class _TaskLists:
+    def __init__(self, svc):
+        self.s = svc
+
+    def list(self, **kw):
+        return _Call(self.s, "tasklists.list", self._list, kw)
+
+    def _list(self, **_):
+        return {"items": [copy.deepcopy(v) for v in self.s.lists.values()]}
+
+    def insert(self, **kw):
+        return _Call(self.s, "tasklists.insert", self._insert, kw)
+
+    def _insert(self, body: dict, **_):
+        lid = self.s._new_id("tl")
+        self.s.lists[lid] = {"id": lid, "title": body.get("title", "")}
+        return self.s.lists[lid]
+
+
+class _Tasks:
+    def __init__(self, svc):
+        self.s = svc
+
+    def list(self, **kw):
+        return _Call(self.s, "tasks.list", self._list, kw)
+
+    def _list(self, tasklist: str, **_):
+        return {"items": copy.deepcopy(self.s.task_store.get(tasklist, []))}
+
+    def insert(self, **kw):
+        return _Call(self.s, "tasks.insert", self._insert, kw)
+
+    def _insert(self, tasklist: str, body: dict, parent: Optional[str] = None, **_):
+        if tasklist not in self.s.lists:
+            raise http_error(404, "notFound", tasklist)
+        if not body.get("title"):
+            raise http_error(400, "invalidArgument", "title is required")
+        if parent is not None and not any(
+                t["id"] == parent for t in self.s.task_store.get(tasklist, [])):
+            # The real API rejects a parent that is not in this list, which is
+            # what makes ordering load-bearing rather than cosmetic.
+            raise http_error(400, "invalidArgument", f"unknown parent {parent}")
+        tid = self.s._new_id("tk")
+        rec = dict(body)
+        rec["id"] = tid
+        if parent:
+            rec["parent"] = parent
+        self.s.task_store[tasklist].append(rec)
+        return rec

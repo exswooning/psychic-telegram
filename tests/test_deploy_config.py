@@ -749,7 +749,15 @@ class TestSeedFromTheUI:
         assert err == ""
         assert argv[argv.index("--confirm-domain") + 1] == "sandbox-src.example"
         assert argv[argv.index("--scale") + 1] == "small"
+        assert "--yes" in argv
         assert env["SANDBOX_MODE"] == "true"
+
+    def test_yes_is_always_passed(self):
+        """Without --yes the seeder's 'long run?' input() blocks on the web
+        server's stdin and nothing gets seeded -- the job looks alive while
+        doing no work."""
+        argv, _, _ = webui.seed_argv({"confirm_domain": "sandbox-src.example"})
+        assert "--yes" in argv
 
     def test_nothing_typed_is_refused(self):
         _, _, err = webui.seed_argv({"scale": "medium"})
@@ -874,6 +882,19 @@ class TestSeedScopesDiffer:
         payload = webui.dwd_payload()
         assert payload["seed"] == {}
         assert payload["tenants"]          # the rest still works
+
+    def test_target_provision_line_carries_the_write_scope(self):
+        """provision-users creates accounts, which needs admin.directory.user
+        (write) -- a scope the target migration line deliberately omits. The
+        UI must hand the user a target line that carries both, or the Create
+        the missing target accounts button dies with unauthorized_client."""
+        from config import Settings, target_scopes
+
+        payload = webui.dwd_payload()
+        line = set(payload["target_provision"]["scope_list"])
+
+        assert "https://www.googleapis.com/auth/admin.directory.user" in line
+        assert set(target_scopes(Settings())) <= line  # migration scopes survive
 
 
 class TestEnvironmentFailuresAreNotCredentialFailures:
@@ -1109,3 +1130,85 @@ class TestRunModeEndpoint:
 
         with webui._snap_lock:
             assert webui._snap["at"] == 0.0
+
+
+class TestEnvIsRewrittenForTheRemoteHost:
+    """
+    env.sh holds absolute paths from whichever machine wrote it, and rsync
+    ships them verbatim.
+
+    Observed live: a Mac's MIGRATION_DB=/Users/aryan/Repos/calude-workspace/
+    migration.db was recreated *literally* on a Linux VPS — the directory tree
+    and all. The migration ran correctly against it, which is the problem: a
+    working system with its ledger somewhere nobody would ever look, outside
+    the deployment directory and invisible to anything that inspects it.
+    """
+
+    def test_machine_specific_paths_are_stripped_on_deploy(self):
+        import inspect
+
+        src = inspect.getsource(deploy_remote.deploy)
+        for var in ("MIGRATION_DB", "SCRATCH_DIR", "SOURCE_SA_KEY",
+                    "TARGET_SA_KEY", "OAUTH_TOKEN_DIR"):
+            assert var in src, f"{var} is still shipped verbatim"
+
+    def test_tenant_settings_are_not_stripped(self):
+        """Domains and admin addresses are machine-independent and are the
+        whole point of shipping env.sh at all."""
+        import inspect
+
+        src = inspect.getsource(deploy_remote.deploy)
+        strip_line = [l for l in src.splitlines() if "strip = " in l]
+        assert strip_line, "no strip list found"
+        joined = " ".join(strip_line)
+        for keep in ("SOURCE_DOMAIN", "TARGET_DOMAIN", "SOURCE_ADMIN",
+                     "TARGET_ADMIN", "AUTH_MODE", "RUN_MODE"):
+            assert keep not in joined, f"{keep} must survive the deploy"
+
+    def test_the_rewrite_only_runs_when_credentials_are_shipped(self):
+        """A code-only deploy never sends env.sh, so there is nothing to fix."""
+        import inspect
+
+        src = inspect.getsource(deploy_remote.deploy)
+        lines = src.splitlines()
+        rewrite_line = next(i for i, l in enumerate(lines)
+                            if "rewriting env.sh" in l)
+        # the nearest preceding conditional must be the credentials guard
+        guards = [l.strip() for l in lines[:rewrite_line] if l.strip().startswith("if ")]
+        assert guards[-1] == "if include_credentials:", guards[-1]
+
+
+class TestChatImportScope:
+    """
+    Chat creates every space with importMode=True, which Google gates behind
+    a scope the tool never requested. All 12 spaces of a live run failed with
+    "Creating a space in import mode requires the chat.import authorization
+    scope", and because it arrived as a per-space 403 it looked like twelve
+    item failures rather than one configuration error.
+    """
+
+    def _settings(self, **kw):
+        from config import Settings
+
+        s = Settings()
+        for k, v in kw.items():
+            setattr(s, k, v)
+        return s
+
+    def test_target_requests_chat_import_when_chat_is_on(self):
+        from config import CHAT_IMPORT_SCOPE, target_scopes
+
+        assert CHAT_IMPORT_SCOPE in target_scopes(self._settings(migrate_chat=True))
+
+    def test_no_chat_scopes_at_all_when_chat_is_off(self):
+        from config import CHAT_IMPORT_SCOPE, target_scopes
+
+        assert CHAT_IMPORT_SCOPE not in target_scopes(self._settings(migrate_chat=False))
+
+    def test_the_source_is_not_widened_by_chat_import(self):
+        """The source only reads spaces. Granting it the ability to create
+        them in import mode widens a deliberately read-only credential for
+        no reason."""
+        from config import CHAT_IMPORT_SCOPE, source_scopes
+
+        assert CHAT_IMPORT_SCOPE not in source_scopes(self._settings(migrate_chat=True))

@@ -73,10 +73,26 @@ ACTIONS: dict[str, dict] = {
         "blurb": "What migrates, and the exact scopes this config needs.",
         "argv": [PY, "main.py", "scope"],
     },
+    "export_scope": {
+        "label": "Export SCOPE.md",
+        "blurb": "Write the scope matrix to SCOPE.md for the approval ticket.",
+        "argv": [PY, "main.py", "scope", "--format", "markdown", "--out", "SCOPE.md"],
+    },
     "discover": {
         "label": "Discover",
         "blurb": "Read-only scan: counts, depth, size, duration estimate.",
         "argv": [PY, "main.py", "discover", "--include-mail"],
+    },
+    "check_seed_accounts": {
+        "label": "Check seed accounts",
+        "blurb": "Verify alice/bob/carol/dave/erin exist in the source tenant.",
+        "argv": [PY, "check_seed.py", "accounts"],
+    },
+    "check_seed_scopes": {
+        "label": "Check seed scopes",
+        "blurb": "Verify the seeder's write scopes are authorised "
+                 "(incl. admin.directory.user).",
+        "argv": [PY, "check_seed.py", "scopes"],
     },
     "init_db": {
         "label": "Create database + load identities",
@@ -96,7 +112,7 @@ ACTIONS: dict[str, dict] = {
     "provision": {
         "label": "Create the missing target accounts",
         "blurb": "Only ever creates; existing addresses are left untouched.",
-        "argv": [PY, "main.py", "provision-users", "--tenant", "target"],
+        "argv": [PY, "main.py", "provision-users", "--tenant", "target", "--yes"],
         "destructive": True,
         "confirm": "CREATE",
     },
@@ -176,6 +192,10 @@ class Job:
             try:
                 self.proc = subprocess.Popen(
                     argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    # A child must never block on a hidden interactive prompt:
+                    # input() against the server's terminal hangs the job with
+                    # no output, which reads as a stalled migration.
+                    stdin=subprocess.DEVNULL,
                     text=True, bufsize=1, env=env,
                     cwd=cwd or os.path.dirname(os.path.abspath(__file__)),
                 )
@@ -334,6 +354,7 @@ STEP_ACTIONS: dict[int, list[str]] = {
     4: ["init_db", "init_db_auto"],
     5: ["preflight"],
     6: ["provision_dry", "provision"],
+    7: ["check_seed_accounts", "check_seed_scopes"],
     8: ["discover", "migrate_dry", "migrate"],
     9: ["verify", "report"],
 }
@@ -793,6 +814,11 @@ def seed_argv(body: dict) -> tuple[list[str], dict, str]:
         return [], {}, f"unknown scale {scale!r}"
 
     argv = [PY, "seed_sandbox.py", "--confirm-domain", domain, "--scale", scale]
+    # --yes skips the seeder's interactive "long run?" prompt. In this subprocess
+    # stdin is inherited (or DEVNULL, see Job.start), so input() would block
+    # forever and the run would seed nothing. The typed-domain gate above is the
+    # safety this replaces; the CLI keeps its prompt for terminal use.
+    argv.append("--yes")
     if body.get("create_users"):
         argv.append("--create-users")
     if body.get("reset"):
@@ -856,6 +882,21 @@ def dwd_payload() -> dict:
             "scopes": ",".join(scopes),
             "scope_list": scopes,
         })
+
+    # Provisioning a target account needs admin.directory.user (write), which
+    # the migration target set deliberately does not carry. The Admin Console
+    # REPLACES the scope line, so a target you intend to provision needs one
+    # line carrying both -- paste the migration set alone and provisioning
+    # fails with unauthorized_client, exactly as it just did.
+    try:
+        from config import DIRECTORY_WRITE_SCOPE
+        combined = sorted(set(target_scopes(st)) | {DIRECTORY_WRITE_SCOPE})
+        out["target_provision"] = {
+            "scopes": ",".join(combined),
+            "scope_list": combined,
+        }
+    except Exception:  # noqa: BLE001 - provisioning is optional; never break /api/dwd
+        out["target_provision"] = {}
 
     # Seeding writes; migrating (on the source) reads. The Admin Console's
     # delegation editor REPLACES the scope line rather than adding to it, so a
@@ -923,6 +964,39 @@ def _refresh_snapshot() -> None:
         _snap_busy.clear()
 
 
+def check_step(n: int) -> dict:
+    """
+    Re-evaluate one step, now, and say whether it is satisfied.
+
+    Deliberately synchronous and uncached: this is the operator asking "did
+    what I just did work?", and the answer has to reflect the last thirty
+    seconds, not a snapshot taken before they went to the Admin Console.
+    """
+    invalidate_status()
+    try:
+        data = _compute_status()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"could not evaluate: {exc}"}
+    if data.get("error"):
+        return {"ok": False, "error": data["error"]}
+
+    step = next((s for s in data["steps"] if s["n"] == n), None)
+    if not step:
+        return {"ok": False, "error": f"no step {n}"}
+
+    state = step["state"]
+    satisfied = state in ("done", "skip")
+    return {
+        "ok": satisfied,
+        "state": state,
+        "title": step["title"],
+        "detail": step.get("note") or "",
+        "msg": ("satisfied" if state == "done" else
+                "not needed for this run" if state == "skip" else
+                "still outstanding"),
+    }
+
+
 def invalidate_status() -> None:
     """
     Drop the cached snapshot so the next poll recomputes.
@@ -958,7 +1032,10 @@ def status_payload() -> dict:
 def _RUN_MODES() -> dict:
     from wizard import RUN_MODES
 
-    return {k: {"label": v["label"], "blurb": v["blurb"]}
+    return {k: {"label": v["label"], "blurb": v["blurb"],
+                "setup": v.get("setup", []),
+                "requires": v.get("requires", []),
+                "runs": v.get("runs", [])}
             for k, v in RUN_MODES.items()}
 
 
@@ -986,6 +1063,180 @@ def _status_uncached() -> dict:
         "migrated": ok, "failed": failed,
         "users_done": users_done, "users_total": st.identities_loaded(),
     }
+
+
+# ----------------------------------------------------------------------
+# Operator dashboard — the same data the TUI reads, served to the page.
+# migration.db is opened read-only (mode=ro), exactly like tui.py does.
+# The only mutation state here is the launch toggles below.
+# ----------------------------------------------------------------------
+
+# dry-run + which services "Migrate"/"Delta" run. Mirrors the TUI's
+# d/t/s keys so the web buttons behave identically to the keyboard.
+_RUN_STATE: dict = {
+    "dry_run": False,
+    "services": {"drive": True, "gmail": True, "calendar": True, "chat": False},
+}
+
+# Actions whose argv follow the launch toggles (everything else uses its
+# fixed ACTIONS argv verbatim).
+_LAUNCH_KEYS = ("migrate", "delta")
+
+
+def _db_conn():
+    """A read-only connection to the resume ledger, or None."""
+    import sqlite3
+
+    from config import Settings
+
+    path = Settings().db_path
+    if not os.path.exists(path):
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        return conn
+    except sqlite3.Error:
+        return None
+
+
+def _serialize_snapshot(snap) -> dict:
+    return {
+        "users": [{
+            "source": u.source, "target": u.target, "status": u.status,
+            "drive_done": u.drive_done, "drive_failed": u.drive_failed,
+            "drive_skipped": u.drive_skipped,
+            "mail_done": u.mail_done, "mail_failed": u.mail_failed,
+            "mail_skipped": u.mail_skipped,
+            "cal_done": u.cal_done, "cal_failed": u.cal_failed,
+            "acl_failed": u.acl_failed, "bytes_moved": u.bytes_moved,
+            "exp_drive": u.exp_drive, "exp_mail": u.exp_mail,
+            "gb_today": u.gb_today,
+            "done": u.done, "failed": u.failed,
+            "expected": u.expected, "fraction": u.fraction,
+        } for u in snap.users],
+        "failures": snap.failures,
+        "totals": snap.totals,
+        "collected_at": snap.collected_at,
+        "error": snap.error,
+    }
+
+
+def snapshot_payload() -> dict:
+    """The TUI snapshot plus the launch toggles, for the page's poll loop."""
+    import sqlite3
+
+    import tui
+    from config import Settings
+
+    conn = _db_conn()
+    if conn is None:
+        return {"error": "no database yet — run init-db or create identities.csv",
+                "toggles": dict(_RUN_STATE), "snapshot": None}
+    try:
+        snap = tui.collect_snapshot(conn, Settings().effective_upload_cap())
+    except sqlite3.Error as exc:
+        return {"error": f"db read error: {exc}",
+                "toggles": dict(_RUN_STATE), "snapshot": None}
+    finally:
+        conn.close()
+    return {"error": "", "toggles": dict(_RUN_STATE),
+            "snapshot": _serialize_snapshot(snap)}
+
+
+def scope_payload() -> dict:
+    """The scope matrix plus discovered volume, rendered server-side."""
+    import scope as scope_mod
+
+    conn = _db_conn()
+    volume = {}
+    if conn is not None:
+        try:
+
+            class _Shim:
+                conn = conn
+
+            volume = scope_mod.planned_volume(_Shim())
+        except Exception:  # noqa: BLE001
+            volume = {}
+        finally:
+            conn.close()
+
+    tally = scope_mod.counts()
+    lines = [
+        "MIGRATION SCOPE — what this engine moves",
+        "",
+        "  [+] FULL     high fidelity",
+        "  [~] PARTIAL  migrated with a named fidelity loss",
+        "  [-] NONE     not migrated by this engine",
+        "",
+    ]
+    for svc in scope_mod.SERVICES:
+        t = tally.get(svc, {})
+        lines.append(f"  {svc:<10} full {t.get('FULL', 0):>2}   "
+                     f"partial {t.get('PARTIAL', 0):>2}   none {t.get('NONE', 0):>2}")
+    if volume.get("users"):
+        lines += ["",
+                  f"  Discovered volume: {volume['files']:,} files, "
+                  f"{volume['folders']:,} folders, {volume['native']:,} native docs, "
+                  f"{_human_bytes(volume['bytes'])}, {volume['messages']:,} messages, "
+                  f"max depth {volume['max_depth']}"]
+    else:
+        lines += ["", "  Discovered volume: run 'discover' to populate."]
+    lines += scope_mod.as_text(width=100)
+    return {"lines": lines, "totals": tally, "volume": volume}
+
+
+def _human_bytes(n: int) -> str:
+    n = int(n or 0)
+    for unit in ("B", "KB", "MB", "GB", "TB", "PB"):
+        if n < 1024 or unit == "PB":
+            return f"{n:.1f} {unit}" if unit != "B" else f"{n} B"
+        n /= 1024
+    return f"{n:.1f} PB"
+
+
+def logs_payload() -> dict:
+    """Tail of the engine's own log file (what main.py writes)."""
+    from config import Settings
+
+    path = Settings().log_file
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return {"path": path, "lines": ["(no log file yet)"]}
+    return {"path": path, "lines": lines[-600:]}
+
+
+def set_toggles(body: dict) -> dict:
+    """Apply the launch toggles sent by the toolbar."""
+    dry = body.get("dry_run")
+    if dry is not None:
+        _RUN_STATE["dry_run"] = bool(dry)
+    svcs = body.get("services")
+    if isinstance(svcs, dict):
+        for k in _RUN_STATE["services"]:
+            if k in svcs:
+                _RUN_STATE["services"][k] = bool(svcs[k])
+    return {"ok": True, "toggles": dict(_RUN_STATE)}
+
+
+def _action_argv(name: str) -> list:
+    """Fixed argv for most actions; migrate/delta follow the launch toggles
+    (dry-run + selected services), exactly like the TUI's m/x keys."""
+    spec = ACTIONS[name]
+    if name not in _LAUNCH_KEYS:
+        return list(spec["argv"])
+    chosen = [k for k, v in _RUN_STATE["services"].items() if v]
+    argv = [PY, "main.py", "migrate" if name == "migrate" else "delta"]
+    if chosen:
+        argv += ["--services", ",".join(chosen)]
+    if name == "delta":
+        argv += ["--days", "2"]
+    if _RUN_STATE["dry_run"]:
+        argv.insert(2, "--dry-run")
+    return argv
 
 
 # ----------------------------------------------------------------------
@@ -1080,13 +1331,76 @@ font:12px/1.55 ui-monospace,Menlo,monospace;white-space:pre-wrap;word-break:brea
 border-radius:0 8px 8px 0;margin:14px 0}
 .okbox{border-left:3px solid var(--ok);padding:10px 14px;background:var(--panel);
 border-radius:0 8px 8px 0;margin:14px 0}
+
+/* ---- command toolbar: every ACTIONS command, always one click away ---- */
+.toolbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;
+padding:10px 22px;border-bottom:1px solid var(--line);background:var(--panel)}
+.toolbar button{font-size:12px;padding:6px 10px}
+.toolbar .sep{width:1px;height:22px;background:var(--line);margin:0 4px}
+.chk{display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--dim)}
+.chk input{width:auto;margin:0}
+
+/* ---- operator tabs: dashboard / users / failures / scope / logs ---- */
+.tabs{display:flex;gap:2px;padding:0 22px;border-bottom:1px solid var(--line);
+background:var(--panel);overflow-x:auto}
+.tabs button{border:none;border-bottom:2px solid transparent;border-radius:0;
+background:none;padding:10px 14px;font-size:13px;color:var(--dim);cursor:pointer}
+.tabs button.on{border-bottom-color:var(--accent);color:var(--fg)}
+.tabs button:hover{color:var(--fg)}
+.view{display:none;padding:18px 22px;max-width:1200px}
+.view.on{display:block}
+.view h2{font-size:16px;margin:0 0 12px;font-weight:600}
+.view table{width:100%;border-collapse:collapse;font-size:13px}
+.view th,.view td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line)}
+.view th{color:var(--dim);font-size:11px;text-transform:uppercase;
+letter-spacing:.05em;position:sticky;top:0;background:var(--panel)}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+.mono{font:12px/1.55 ui-monospace,Menlo,monospace;white-space:pre-wrap;word-break:break-word}
+.scroll{max-height:60vh;overflow:auto}
+.gbar{height:6px;background:var(--line);border-radius:99px;overflow:hidden}
+.gbar>i{display:block;height:100%;background:var(--accent);transition:width .4s ease}
+.hdprog{display:flex;align-items:center;gap:12px;padding:7px 22px;
+border-bottom:1px solid var(--line);background:var(--panel)}
+.hdprog .gbar{flex:1;height:8px}
+.hdprog b{min-width:44px;text-align:right}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));
+gap:10px;margin:0 0 14px}
+.stat{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px}
+.stat b{display:block;font-size:18px} .stat span{color:var(--dim);font-size:11px}
+.outwrap{border-top:1px solid var(--line);background:var(--panel);padding:10px 22px}
+pre.out{height:230px}
+.feedbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px}
+.feedbar .sp{margin-left:auto}
+.feedbar button{padding:5px 9px;font-size:12px}
 </style></head><body>
 <header>
   <h1>Workspace Migration</h1>
   <span class="muted" id="route"></span>
-  <span class="muted" style="margin-left:auto">127.0.0.1 only &middot; SSH tunnel</span>
+    <span class="muted" style="margin-left:auto;display:flex;gap:8px;align-items:center"
+    title="127.0.0.1 only · SSH tunnel">
+    <span class="dot" id="dot"></span><b id="jname">idle</b>
+    <span id="jmeta"></span></span>
 </header>
-<div class="wrap">
+
+<div class="hdprog">
+  <div class="gbar"><i id="progi" style="width:0%"></i></div>
+  <b class="muted" id="progpct">0%</b>
+  <span class="muted" id="progtxt">no migration yet</span>
+</div>
+
+<div class="toolbar" id="tb">Loading commands&hellip;</div>
+
+<div class="tabs" id="tabs">
+  <button data-tab="setup" class="on">Setup</button>
+  <button data-tab="dashboard">Dashboard</button>
+  <button data-tab="users">Users</button>
+  <button data-tab="failures">Failures</button>
+  <button data-tab="scope">Scope</button>
+  <button data-tab="logs">Logs</button>
+  <button data-tab="output">Output</button>
+</div>
+
+<div class="wrap" id="setup">
   <div class="rail">
     <div class="bar" style="margin-top:0"><i id="pbar" style="width:0"></i></div>
     <div class="muted" style="margin:0 16px 12px" id="pnum">&ndash;</div>
@@ -1094,15 +1408,50 @@ border-radius:0 8px 8px 0;margin:14px 0}
   </div>
   <div class="main" id="main"><div class="muted">Loading&hellip;</div></div>
 </div>
+
+<div class="view" id="view-dashboard"><div class="muted">Loading&hellip;</div></div>
+<div class="view" id="view-users"></div>
+<div class="view" id="view-failures"></div>
+<div class="view" id="view-scope"></div>
+<div class="view" id="view-logs"></div>
+<div class="view" id="view-output"></div>
+
+<div class="outwrap">
+  <div class="feedbar">
+    <b>Live feed</b>
+    <span class="dot" id="jdot"></span>
+    <b id="jobname">idle</b>
+    <span class="pill" id="jstatus">idle</span>
+    <span class="muted" id="jobmeta"></span>
+    <span class="sp"></span>
+    <label class="chk"><input type="checkbox" id="follow-out" checked
+      onchange="followOut=this.checked"> follow</label>
+    <button onclick="clearOut()">Clear</button>
+    <button id="stop" disabled>Interrupt</button>
+  </div>
+  <pre class="out" id="out">Nothing has run yet in this session.
+
+Long jobs keep running if you close the tab &mdash; reopen and the output
+picks up where it left off.</pre>
+</div>
 <script>
 let seen=0, acts={}, S=null, cur=null, dwd=null, oauth=null, cfg=null, follow=true;
 let lastSig='', ups=null, authMode=null, authModes=null, upMsg={},
-    seedScales=null, seedMsg=null, runMode=null, runModes=null,
+    seedScales=null, seedMsg=null, runMode=null, runModes=null, stepChk=null,
+    view='path', seedOpen=false,
     dep={user:'root',port:'22',open:false};
+let tab='setup', snap=null, scopeLines=[], logLines=[], logPath='';
+let followOut=true;
 const $=i=>document.getElementById(i);
 const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const MARK={done:'\\u2713',manual:'!',active:'\\u25b8',todo:'',skip:'\\u2013'};
+const MARK={done:'\u2713',manual:'!',active:'\u25b8',todo:'',skip:'\u2013'};
+const hb=n=>{ n=+n||0; const u=['B','KB','MB','GB','TB','PB']; let i=0;
+  while(n>=1024&&i<u.length-1){n/=1024;i++} return (i===0?n.toFixed(0):n.toFixed(1))+' '+u[i]; };
+const hc=n=>(+n||0).toLocaleString();
+const JSTATUS={DONE:'var(--ok)',RUNNING:'var(--accent)',FAILED:'var(--bad)',
+  PAUSED_QUOTA:'var(--warn)',INTERRUPTED:'var(--warn)'};
+const jc=s=>JSTATUS[s]||'';
 
 function copy(txt,btn){
   navigator.clipboard.writeText(txt).then(()=>{
@@ -1124,298 +1473,6 @@ function drawRail(){
 }
 
 /* ---------------- the one visible step ---------------- */
-function stepBody(x){
-  let h='';
-
-  /* Step 5 is the only step no software can do. Give the exact strings. */
-  if(x.n===5 && dwd){
-    h+=`<div class="warnbox"><b>This step needs a person.</b><br>
-      Google provides no API for domain-wide delegation \\u2014 deliberately.
-      It is the grant that lets a credential act as every user in the domain,
-      so a super admin must give it in a browser.</div>`;
-    h+=`<div class="card"><h3>Paste these into each Admin Console</h3>
-      <div class="muted">admin.google.com &rarr; Security &rarr; Access and data
-      control &rarr; API controls &rarr; Manage Domain Wide Delegation &rarr; Add new</div>`;
-    dwd.tenants.forEach(t=>{
-      h+=`<div style="margin-top:16px"><b>${esc(t.domain||t.side)}</b>
-        <span class="muted">sign in as ${esc(t.admin||'a super admin')}</span>`;
-      if(!t.client_id){
-        h+=`<div class="muted" style="margin-top:6px">No key file yet for this
-          tenant, so there is no Client ID to show. Finish step 3 first.</div>`;
-      }else{
-        h+=`<div class="cprow"><b>Client ID</b>
-          <button onclick="copy('${esc(t.client_id)}',this)">Copy</button></div>
-          <pre class="copy">${esc(t.client_id)}</pre>`;
-      }
-      h+=`<div class="cprow"><b>OAuth scopes</b>
-        <button onclick="copy(${esc(JSON.stringify(t.scopes))},this)">Copy</button>
-        <span class="muted">${t.scope_list.length} scopes \\u2014 paste the whole
-        line, that editor replaces rather than appends</span></div>
-        <pre class="copy">${esc(t.scopes)}</pre></div>`;
-    });
-    h+=`</div><div class="muted">Grants usually propagate in about 2 minutes,
-      occasionally 30. This page re-checks on its own \\u2014 the step turns green
-      when a real token mint succeeds, not when you say it is done.</div>`;
-  }
-
-  /* Step 3: choose how this authenticates, then supply whatever that needs.
-     The mode used to come from an AUTH_MODE environment variable, which meant
-     the service-account path was invisible to anyone who had not set it
-     before launching -- exactly the wrong place for the decision. */
-  if(x.n===3){
-    const u=(ups||{}), modes=authModes||{}, mode=authMode||'key';
-    h+=`<div class="card"><h3>How should this authenticate?</h3>
-      <div class="acts">`;
-    Object.keys(modes).forEach(k=>{
-      const m=modes[k], on=(k===mode);
-      h+=`<button onclick="setMode('${k}')" class="${on?'primary':''}">
-        ${on?'\u25cf ':'\u25cb '}${esc(m.label)}
-        <small>${esc(m.blurb)}</small></button>`;
-    });
-    h+=`</div><div id="modemsg" class="muted" style="margin-top:8px"></div></div>`;
-
-    const need=(modes[mode]&&modes[mode].needs)||[];
-    const WHERE={
-      oauth_client:['OAuth client ID',
-        'APIs &amp; Services \u2192 Credentials \u2192 Create credentials '+
-        '\u2192 OAuth client ID \u2192 Desktop app \u2192 Download JSON'],
-      source_key:['Source service-account key',
-        'IAM &amp; Admin \u2192 Service Accounts \u2192 Keys \u2192 Add key '+
-        '\u2192 Create new key \u2192 JSON \u2014 in the SOURCE tenant\u2019s project'],
-      target_key:['Target service-account key',
-        'The same, in the TARGET tenant\u2019s project'],
-    };
-    if(!need.length){
-      h+=`<div class="okbox">This mode needs no credential file. Your own
-        <code>gcloud</code> identity mints tokens for the service accounts, so
-        there is nothing to download, leak or rotate \u2014 and no
-        <code>disableServiceAccountKeyCreation</code> policy to fight.</div>`;
-    }else{
-      h+=`<div class="card"><h3>Upload credential files</h3>`;
-      need.forEach(kind=>{
-        const st=u[kind]||{}, w=WHERE[kind]||[kind,''], d=st.detail||{};
-        /* three states, not two: missing, present-but-wrong, and good */
-        const mark = !st.present ? ['\u25cb','var(--dim)','not uploaded']
-                   : st.valid    ? ['\u2713','var(--ok)','looks good']
-                                 : ['\u2715','var(--bad)','file is present but not usable'];
-        h+=`<div style="margin-bottom:16px">
-          <div><span style="color:${mark[1]}">${mark[0]}</span> <b>${w[0]}</b>
-            <span class="muted">${mark[2]}</span></div>
-          <div class="muted" style="margin:2px 0 6px">${w[1]}<br>
-            saved to <code>${esc(st.path||'')}</code> mode 0600</div>`;
-        if(st.present && !st.valid)
-          h+=`<div class="warnbox" style="margin:6px 0">${esc(st.error||'')}</div>`;
-        if(st.warning)
-          h+=`<div class="warnbox" style="margin:6px 0">${esc(st.warning)}</div>`;
-        if(st.valid && d.client_email){
-          /* The delegation grant is what makes this key usable, and its
-             absence surfaces *here* as unauthorized_client -- so the exact
-             strings to paste belong here too, not only on step 5. */
-          const side = kind==='source_key' ? 'source' : 'target';
-          const t = (dwd&&dwd.tenants||[]).find(x=>x.side===side) || {};
-          h+=`<div class="muted">service account <code>${esc(d.client_email)}</code>
-              &middot; project <code>${esc(d.project_id||'?')}</code></div>
-            <div class="card" style="margin:8px 0;background:var(--bg)">
-              <h3>Authorise this key in the ${side} Admin Console</h3>
-              <div class="muted" style="margin-bottom:8px">
-                admin.google.com${t.admin?` (sign in as <b>${esc(t.admin)}</b>)`:''}
-                &rarr; Security &rarr; Access and data control &rarr; API controls
-                &rarr; Manage Domain Wide Delegation &rarr; Add new</div>
-              <div class="cprow"><b>Client ID</b>
-                <button onclick="copy(${esc(JSON.stringify(d.client_id||''))},this)">Copy</button></div>
-              <pre class="copy">${esc(d.client_id||'')}</pre>
-              <div class="cprow"><b>OAuth scopes</b>
-                <button onclick="copy(${esc(JSON.stringify(t.scopes||''))},this)">Copy</button>
-                <span class="muted">${(t.scope_list||[]).length} scopes &mdash; paste the
-                whole line, that editor replaces rather than appends</span></div>
-              <pre class="copy">${esc(t.scopes||'(set the domains in step 2 first)')}</pre>
-              <div class="muted">Grants take ~2 minutes to propagate, occasionally 30.
-                Re-run the test below; it turns green on its own once it lands.</div>
-            </div>`;
-        }
-        if(st.valid && !d.client_email && d.client_id)
-          h+=`<div class="muted">client <code>${esc(d.client_id)}</code>
-              (${esc(d.type||'')})</div>`;
-        h+=`<div style="margin-top:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-            <input type="file" accept=".json,application/json"
-              onchange="upload('${kind}',this)" style="flex:1;min-width:200px">
-            ${kind!=='oauth_client'?`<button onclick="checkCred('${kind}',this)"
-              ${st.valid?'':'disabled'}>Test this key
-              <small>Mints a real token</small></button>`:''}
-          </div>
-          <div class="muted" id="chk-${kind}" style="margin-top:6px">${
-            upMsg[kind] ? (upMsg[kind].ok?'\u2713 ':'\u2715 ')+esc(upMsg[kind].text) : ''
-          }</div>
-        </div>`;
-      });
-      h+=`<div id="upmsg" class="muted"></div></div>`;
-    }
-  }
-
-  /* OAuth connect, shown on the credentials step when in oauth mode */
-  if(x.n===3 && authMode==='oauth'){
-    h+=`<div class="card"><h3>Connect tenants</h3>`;
-    if(!oauth.configured){
-      h+=`<div class="muted">No OAuth client configured yet. Create one OAuth
-        client ID in any GCP project and save it to
-        <code>${esc(oauth.client_secrets_path)}</code>. You do this once
-        \\u2014 tenant admins never touch the Cloud console.</div>`;
-    }else{
-      ['source','target'].forEach(t=>{
-        const c=oauth[t];
-        h+=`<div style="margin-bottom:12px">
-          <div><span style="color:${c.connected?'var(--ok)':'var(--dim)'}">
-            ${c.connected?'\\u2713':'\\u25cb'}</span>
-            <b style="text-transform:capitalize">${t}</b>
-            <span class="muted">${esc(c.connected?c.account:'not connected')}</span></div>
-          <div style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap">
-          <button onclick="oauthGo('${t}')">${c.connected?'Reconnect':'Connect'} ${t}
-            <small>Opens Google sign-in</small></button>
-          ${c.connected?`<button onclick="oauthDrop('${t}')">Disconnect
-            <small>Forgets the token here only</small></button>`:''}
-          </div></div>`;
-      });
-    }
-    h+='</div>';
-  }
-
-  /* Step 2 collects what setup.sh needs, so nobody has to type a command
-     with <PLACEHOLDERS> into a shell -- where <SRC> is redirection syntax
-     and the shell rejects the line before the script ever sees it. */
-  if(x.n===2){
-    const c=(cfg||{});
-    const rm=runModes||{}, cur_rm=runMode||'migrate_only';
-    h+=`<div class="card"><h3>What is this run for?</h3>
-      <div class="acts">${Object.keys(rm).map(k=>{
-        const m=rm[k], on=(k===cur_rm);
-        return `<button onclick="setRunMode('${k}')" class="${on?'primary':''}">
-          ${on?'\u25cf ':'\u25cb '}${esc(m.label)}
-          <small>${esc(m.blurb)}</small></button>`;}).join('')}</div>
-      <div class="muted" style="margin-top:8px">Steps that do not apply are
-        marked <b>&ndash; not needed</b> rather than left outstanding.</div>
-      <div id="runmsg" class="muted" style="margin-top:6px"></div></div>`;
-    h+=`<div class="card"><h3>Your two domains</h3>
-      <div class="grid2">
-        <label>Source domain<input id="f-sd" placeholder="c.example.com"
-          value="${esc(c.source_domain||'')}"></label>
-        <label>Target domain<input id="f-td" placeholder="a.example.com"
-          value="${esc(c.target_domain||'')}"></label>
-        <label>Source admin<input id="f-sa" placeholder="info@c.example.com"
-          value="${esc(c.source_admin||'')}"></label>
-        <label>Target admin<input id="f-ta" placeholder="info@a.example.com"
-          value="${esc(c.target_admin||'')}"></label>
-      </div>
-      <div class="muted" style="margin-top:8px">Each admin must be a super
-        admin <i>in the domain it administers</i>. Saving writes
-        <code>env.sh</code>.</div>
-      <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
-        <button class="primary" onclick="saveCfg()">Save</button>
-        <button onclick="runSetup(false)">Save &amp; run setup
-          <small>Creates both GCP projects, service accounts and keys</small></button>
-        <button onclick="runSetup(true)">Save &amp; run setup (keyless)
-          <small>If key downloads are blocked by org policy</small></button>
-      </div>
-      <div id="cfgmsg" class="muted" style="margin-top:8px"></div></div>`;
-
-    h+=`<div class="card"><h3>Where should the migration run?</h3>
-      <div class="muted">A migration runs for hours. On a laptop, sleeping or
-      changing networks interrupts it \u2014 recoverable, but you will be
-      nursing it. A VPS just stays up.</div>
-      <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
-        <button onclick="dep.open=true;document.getElementById('vps').style.display=''">
-          Run on a VPS instead<small>Copies this tool there and starts its UI</small></button>
-      </div>
-      <div id="vps" style="display:none;margin-top:12px">
-        <div class="grid2">
-          <label>Host<input id="d-host" placeholder="203.0.113.10"></label>
-          <label>User<input id="d-user" value="root"></label>
-          <label>SSH port<input id="d-port" value="22"></label>
-          <label>Private key<input id="d-key" placeholder="~/.ssh/id_ed25519"></label>
-        </div>
-        <label style="display:block;margin-top:10px">
-          <input type="checkbox" id="d-creds"> also copy credentials
-          (<code>keys/</code>, <code>oauth/</code>, <code>env.sh</code>)</label>
-        <div class="muted">Those files can read every mailbox in both tenants.
-          Copying them to another machine asks for a typed confirmation.</div>
-        <button class="primary" style="margin-top:10px" onclick="deploy()">
-          Deploy to this host</button>
-      </div></div>`;
-  }
-
-  if(x.skipped){
-    h+=`<div class="okbox"><b>Not needed for this run.</b> You chose
-      &ldquo;${esc((runModes&&runModes[runMode]&&runModes[runMode].label)||runMode)}&rdquo;
-      on step 2. Change that there if this step should apply after all.</div>`;
-  }
-
-  if(x.help && x.help.length)
-    h+=`<div class="help">${esc(x.help.join('\\n'))}</div>`;
-
-  if(x.auto && !x.actions.length)
-    h+=`<div class="cprow"><b>Run this</b>
-      <button onclick="copy(${esc(JSON.stringify(x.auto))},this)">Copy</button></div>
-      <pre class="copy">${esc(x.auto)}</pre>`;
-
-  if(x.actions && x.actions.length && !x.skipped){
-    h+=`<div class="card"><h3>Do it from here</h3><div class="acts">`;
-    x.actions.forEach(k=>{const a=acts[k]; if(!a) return;
-      h+=`<button class="${a.destructive?'danger':''}" onclick="run('${k}')">
-        ${esc(a.label)}<small>${esc(a.blurb)}</small></button>`;});
-    h+='</div></div>';
-  }
-
-  if(x.n===7 && !x.skipped){
-    const src=(cfg&&cfg.source_domain)||'';
-    h+=`<div class="warnbox"><b>This writes fabricated data into a live
-      tenant.</b> Skip it entirely for a real migration \\u2014 it exists to
-      build a test corpus in a throwaway sandbox. It only ever targets the
-      <b>source</b> domain.</div>
-      ${(dwd&&dwd.seed&&dwd.seed.combined)?`<div class="card"
-        style="background:var(--bg)">
-        <h3>Seeding needs wider scopes than migrating</h3>
-        <div class="muted">The seeder <b>writes</b> to the source tenant; the
-          migration only <b>reads</b> it. The Admin Console's delegation editor
-          <b>replaces</b> the scope line rather than adding to it, so if you
-          intend to seed <i>and</i> migrate this domain, paste this combined
-          line \\u2014 the migration-only line will make seeding fail with
-          <code>unauthorized_client</code>, and vice versa.</div>
-        <div class="cprow"><b>Source scopes: seed + migrate</b>
-          <button onclick="copy(${esc(JSON.stringify(dwd.seed.combined))},this)">Copy</button>
-          <span class="muted">${dwd.seed.combined_list.length} scopes</span></div>
-        <pre class="copy">${esc(dwd.seed.combined)}</pre>
-        <div class="muted">Includes
-          <code>admin.directory.user</code> (write), which
-          <b>&ldquo;create the five user accounts&rdquo;</b> below needs.</div>
-      </div>`:''}
-      <div class="card"><h3>Seed the source tenant</h3>
-      <div class="muted">Builds a five-user organisation with a cross-user
-        sharing graph, mail, calendars, comments, drafts and the edge cases
-        that have broken migrations before.</div>
-      <div class="grid2" style="margin-top:12px">
-        <label>Scale
-          <select id="seed-scale">${(seedScales||['medium']).map(v=>
-            `<option${v==='medium'?' selected':''}>${v}</option>`).join('')}</select>
-        </label>
-        <label>Type the source domain to confirm
-          <input id="seed-confirm" placeholder="${esc(src||'set step 2 first')}"></label>
-      </div>
-      <label style="display:block;margin-top:10px">
-        <input type="checkbox" id="seed-create"> also create the five user
-        accounts if they do not exist</label>
-      <label style="display:block;margin-top:6px">
-        <input type="checkbox" id="seed-reset"> <b style="color:var(--bad)">reset
-        first</b> \\u2014 DELETES all existing data for those users</label>
-      <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
-        <button class="danger" onclick="runSeed()">Run the seeder
-          <small>Targets ${esc(src||'(no source domain set)')}</small></button>
-      </div>
-      <div id="seedmsg" class="muted" style="margin-top:8px">${
-        seedMsg ? (seedMsg.ok?'\\u2713 ':'\\u2715 ')+esc(seedMsg.text) : ''}</div>
-      </div>`;
-  }
-
-  return h;
-}
 
 /* Values currently typed into the step-2 forms. The poll below must never
    swallow a keystroke, so anything on screen is captured before a re-render
@@ -1460,70 +1517,175 @@ function signature(){
 }
 
 function draw(force){
-  /* Only show the error panel when there has never been a good one. A
-     transient failure used to blow the step away -- and with it anything
-     typed into the form. */
   if(!S||S.error){
     if(!lastSig){ $('main').innerHTML=
       `<div class="warnbox">${esc(S?S.error:'no status')}</div>`; }
     return; }
-  if(cur===null||follow){
-    const nxt=S.steps.find(s=>s.state!=='done');
-    cur=nxt?nxt.n:S.steps[S.steps.length-1].n;
-  }
   captureForm();
-  const sig=signature();
+  const sig=signature()+'|'+view;
   if(!force && sig===lastSig){ paintLive(); return; }
   lastSig=sig;
 
-  const x=S.steps.find(s=>s.n===cur)||S.steps[0];
-  const i=S.steps.indexOf(x);
+  if(view==='path')          $('main').innerHTML=screenPath();
+  else if(view==='require')  $('main').innerHTML=screenRequire();
+  else                       $('main').innerHTML=screenRun();
 
-  $('main').innerHTML=`
-    <div class="eyebrow">Step ${x.n} of ${S.total}</div>
-    <h2 class="title">${esc(x.title)}</h2>
-    <span class="pill ${x.state}">${
-      {done:'Done',manual:'Needs you',active:'In progress',todo:'Not started',
-       skip:'Not needed'}[x.state]}</span>
-    ${x.note?`<div class="note">${esc(x.note)}</div>`:''}
-    ${stepBody(x)}
-    <div class="nav">
-      <button id="prev" ${i===0?'disabled':''}>&larr; Back</button>
-      <button id="next" class="primary" ${i===S.steps.length-1?'disabled':''}>
-        ${x.state==='done'?'Next step \\u2192':'Skip ahead \\u2192'}</button>
-      <label class="muted" style="margin-left:8px">
-        <input type="checkbox" id="fol" ${follow?'checked':''}> follow current step</label>
-      ${S.failed?`<span class="muted" style="color:var(--bad);margin-left:auto">
-        ${S.failed} item(s) FAILED</span>`:''}
+  wireCommon();
+  restoreForm();
+  drawRail();
+  paintJob();
+}
+
+/* ---------- screen 1: which of the three jobs is this? ---------- */
+function screenPath(){
+  const m=runModes||{};
+  return `
+    <div class="eyebrow">Step 1 of 3</div>
+    <h2 class="title">What do you want to do?</h2>
+    <div class="note">Each path asks only for what it needs, then runs and
+      shows you the log. Nothing else is in your way.</div>
+    <div class="acts" style="margin-top:20px;grid-template-columns:1fr">
+      ${Object.keys(m).map(k=>{
+        const x=m[k], on=(k===runMode);
+        return `<button onclick="pickPath('${k}')" class="${on?'primary':''}"
+            style="padding:16px">
+          <span style="font-size:15px">${on?'\u25cf ':'\u25cb '}${esc(x.label)}</span>
+          <small style="font-size:12px;margin-top:4px">${esc(x.blurb)}</small>
+          <small style="font-size:11px;margin-top:6px;opacity:.8">
+            needs ${(x.requires||[]).length} thing(s) &middot;
+            runs: ${(x.runs||[]).join(' \u2192 ')}</small>
+        </button>`;}).join('')}
     </div>
-    <div class="card"><h3>Output</h3>
-      <div class="run"><span class="dot" id="dot"></span>
-        <b id="jname">idle</b><span class="muted" id="jmeta"></span>
-        <button id="stop" style="margin-left:auto" disabled>Interrupt</button></div>
-      <pre class="out" id="out">Nothing has run yet in this session.
+    <div class="nav">
+      <button class="primary" onclick="go('require')"
+        ${runMode?'':'disabled'}>Continue \u2192</button>
+      <span class="muted">${runMode?('selected: '+esc((m[runMode]||{}).label||runMode)):'pick one to continue'}</span>
+    </div>`;
+}
 
-Long jobs keep running if you close the tab \\u2014 reopen and the output
-picks up where it left off.</pre>
+/* ---------- screen 2: everything this path requires ---------- */
+function screenRequire(){
+  const m=(runModes||{})[runMode]||{};
+  const need=(m.requires||[]);
+  const steps=(S.steps||[]).filter(s=>need.indexOf(s.n)>=0);
+  const done=steps.filter(s=>s.state==='done').length;
+  const ready=(done===steps.length && steps.length>0);
+
+  let h=`
+    <div class="eyebrow">Step 2 of 3 &middot; ${esc(m.label||'')}</div>
+    <h2 class="title">What this needs</h2>
+    <div class="bar" style="margin:12px 0"><i style="width:${
+      steps.length?100*done/steps.length:0}%"></i></div>
+    <div class="note">${done} of ${steps.length} ready. Each re-checks itself
+      against the live tenants.</div>`;
+
+  steps.forEach(st=>{
+    const good=st.state==='done';
+    h+=`<div class="card" style="border-left:3px solid ${
+        good?'var(--ok)':st.state==='manual'?'var(--warn)':'var(--line)'}">
+      <div style="display:flex;gap:10px;align-items:baseline">
+        <span style="color:${good?'var(--ok)':'var(--dim)'};font-weight:700">
+          ${good?'\u2713':'\u25cb'}</span>
+        <div style="flex:1">
+          <b>${esc(st.title)}</b>
+          <div class="muted">${esc(st.note||'')}</div>
+        </div>
+        <button onclick="checkStep(${st.n},this)">Re-check</button>
+      </div>
+      ${good?'':requirementBody(st)}
+    </div>`;
+  });
+
+  h+=`<div class="nav">
+      <button onclick="go('path')">&larr; Back</button>
+      <button class="primary" onclick="go('run')" ${ready?'':'disabled'}>
+        ${ready?'Everything ready \u2014 continue \u2192':'Finish the items above'}</button>
+      <span id="stepchk" class="muted"></span>
+    </div>`;
+  return h;
+}
+
+/* The controls that satisfy one requirement, inline where it is asked for. */
+function requirementBody(st){
+  let h='';
+  if(st.n===2) h+=configForm();
+  if(st.n===3) h+=credentialsBody();
+  if(st.n===5) h+=delegationBody();
+  if(st.n===4 && st.actions && st.actions.length) h+=actionButtons(st.actions);
+  if(st.help && st.help.length && st.n!==2)
+    h+=`<div class="help" style="margin-top:10px">${esc(st.help.join('\\n'))}</div>`;
+  return h;
+}
+
+/* ---------- screen 3: run it, and watch ---------- */
+function screenRun(){
+  const m=(runModes||{})[runMode]||{};
+  const runs=(m.runs||[]);
+  let h=`
+    <div class="eyebrow">Step 3 of 3 &middot; ${esc(m.label||'')}</div>
+    <h2 class="title">Run it</h2>
+    <div class="note">${esc(m.blurb||'')}</div>
+    <div class="card"><h3>Steps in this path</h3><div class="acts">`;
+  runs.forEach(k=>{
+    if(k==='seed'){
+      h+=`<button class="danger" onclick="go('seedform')">Seed the source tenant
+        <small>Writes fabricated data \u2014 asks you to type the domain</small></button>`;
+      return;
+    }
+    const a=acts[k]; if(!a) return;
+    h+=`<button class="${a.destructive?'danger':''}" onclick="run('${k}')">
+      ${esc(a.label)}<small>${esc(a.blurb)}</small></button>`;
+  });
+  h+=`</div></div>`;
+  if(view==='seedform' || seedOpen) h+=seedForm();
+  h+=logPanel();
+  h+=`<div class="nav">
+      <button onclick="go('require')">&larr; Back</button>
+      <label class="muted"><input type="checkbox" id="fol" ${
+        follow?'checked':''}> follow current step</label>
+    </div>`;
+  return h;
+}
+
+function logPanel(){
+  return `<div class="card"><h3>Live output</h3>
+    <div class="run"><span class="dot" id="dot"></span>
+      <b id="jname">idle</b><span class="muted" id="jmeta"></span>
+      <button id="stop" style="margin-left:auto" disabled>Interrupt</button></div>
+    <pre class="out" id="out">Nothing running yet.
+
+Long jobs keep going if you close this tab \u2014 reopen and the output picks
+up where it left off.</pre>
     </div>
     <div class="stats">
       <div class="stat"><b id="s-mig">${(S.migrated||0).toLocaleString()}</b><span>items migrated</span></div>
       <div class="stat"><b id="s-fail" style="${S.failed?'color:var(--bad)':''}">${S.failed||0}</b><span>failed</span></div>
       <div class="stat"><b id="s-users">${S.users_done||0}/${S.users_total||0}</b><span>users done</span></div>
     </div>`;
-
-  $('prev').onclick=()=>{follow=false;cur=S.steps[i-1].n;draw(true);};
-  $('next').onclick=()=>{follow=false;cur=S.steps[i+1].n;draw(true);};
-  $('fol').onchange=e=>{follow=e.target.checked;if(follow)draw(true);};
-  $('stop').onclick=async()=>{await fetch('/api/stop',{method:'POST'});};
-  if(window._out){ $('out').textContent=window._out;
-    $('out').scrollTop=$('out').scrollHeight; }
-  restoreForm();
-  drawRail();
-  paintJob();
 }
 
-/* Put back whatever was typed before the re-render, including the caret, so
-   an unavoidable redraw is invisible to someone mid-sentence. */
+function wireCommon(){
+  const f=$('fol'); if(f) f.onchange=e=>{follow=e.target.checked;};
+  const st=$('stop'); if(st) st.onclick=async()=>{await fetch('/api/stop',{method:'POST'});};
+  if(window._out && $('out')){ $('out').textContent=window._out;
+    $('out').scrollTop=$('out').scrollHeight; }
+}
+
+function go(v){ if(v==='seedform'){ seedOpen=true; view='run'; }
+                else { seedOpen=(v==='run')?seedOpen:false; view=v; }
+                draw(true); }
+
+async function pickPath(k){
+  const r=await (await fetch('/api/runmode',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({mode:k})})).json();
+  if(r.ok) runMode=r.run_mode;
+  await refresh(true);
+}
+
+
+/* Put back whatever was typed before a re-render, caret included, so a
+   redraw is invisible to someone mid-sentence. */
 function restoreForm(){
   const a=document.activeElement, aid=a?a.id:'';
   const start=a&&a.selectionStart, end=a&&a.selectionEnd;
@@ -1533,7 +1695,6 @@ function restoreForm(){
     put('f-sa',cfg.source_admin);  put('f-ta',cfg.target_admin);
   }
   if($('d-host')){
-    if(dep.open){ const v=$('vps'); if(v) v.style.display=''; }
     put('d-host',dep.host); put('d-user',dep.user);
     put('d-port',dep.port); put('d-key',dep.key);
     const c=$('d-creds'); if(c&&dep.creds!=null) c.checked=dep.creds;
@@ -1542,6 +1703,140 @@ function restoreForm(){
     const e=$(aid); e.focus();
     try{ e.setSelectionRange(start,end); }catch(_){}
   }
+}
+
+/* ---------- reusable requirement bodies ---------- */
+function configForm(){
+  const c=(cfg||{});
+  return `<div class="grid2" style="margin-top:12px">
+      <label>Source domain<input id="f-sd" placeholder="c.example.com"
+        value="${esc(c.source_domain||'')}"></label>
+      <label>Target domain<input id="f-td" placeholder="a.example.com"
+        value="${esc(c.target_domain||'')}"></label>
+      <label>Source admin<input id="f-sa" placeholder="info@c.example.com"
+        value="${esc(c.source_admin||'')}"></label>
+      <label>Target admin<input id="f-ta" placeholder="info@a.example.com"
+        value="${esc(c.target_admin||'')}"></label>
+    </div>
+    <div class="muted" style="margin-top:8px">Each admin must be a super admin
+      <i>in the domain it administers</i>.</div>
+    <button class="primary" style="margin-top:10px" onclick="saveCfg()">Save</button>
+    <span id="cfgmsg" class="muted" style="margin-left:8px"></span>`;
+}
+
+function credentialsBody(){
+  const u=(ups||{}), modes=authModes||{}, mode=authMode||'key';
+  let h=`<div style="margin-top:12px"><b style="font-size:12px">How to authenticate</b>
+    <div class="acts" style="margin-top:6px">`;
+  Object.keys(modes).forEach(k=>{
+    const m=modes[k], on=(k===mode);
+    h+=`<button onclick="setMode('${k}')" class="${on?'primary':''}">
+      ${on?'\u25cf ':'\u25cb '}${esc(m.label)}<small>${esc(m.blurb)}</small></button>`;
+  });
+  h+=`</div><div id="modemsg" class="muted" style="margin-top:6px"></div>`;
+  const need=(modes[mode]&&modes[mode].needs)||[];
+  const WHERE={
+    oauth_client:['OAuth client ID','APIs &amp; Services \u2192 Credentials \u2192 OAuth client ID \u2192 Desktop app'],
+    source_key:['Source service-account key','IAM &amp; Admin \u2192 Service Accounts \u2192 Keys \u2192 JSON, in the SOURCE project'],
+    target_key:['Target service-account key','The same, in the TARGET project'],
+  };
+  if(!need.length){
+    h+=`<div class="okbox">This mode needs no credential file at all.</div>`;
+  }else{
+    need.forEach(kind=>{
+      const st=u[kind]||{}, w=WHERE[kind]||[kind,''], d=st.detail||{};
+      const mark = !st.present ? ['\u25cb','var(--dim)','not uploaded']
+                 : st.valid    ? ['\u2713','var(--ok)','looks good']
+                               : ['\u2715','var(--bad)','present but not usable'];
+      h+=`<div style="margin-top:12px">
+        <div><span style="color:${mark[1]}">${mark[0]}</span> <b>${w[0]}</b>
+          <span class="muted">${mark[2]}</span></div>
+        <div class="muted">${w[1]}</div>`;
+      if(st.present && !st.valid)
+        h+=`<div class="warnbox" style="margin:6px 0">${esc(st.error||'')}</div>`;
+      if(st.warning) h+=`<div class="warnbox" style="margin:6px 0">${esc(st.warning)}</div>`;
+      if(st.valid && d.client_email)
+        h+=`<div class="muted">${esc(d.client_email)} &middot; project
+            <code>${esc(d.project_id||'?')}</code></div>`;
+      h+=`<div style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap">
+          <input type="file" accept=".json,application/json"
+            onchange="upload('${kind}',this)" style="flex:1;min-width:200px">
+          ${kind!=='oauth_client'?`<button onclick="checkCred('${kind}',this)"
+            ${st.valid?'':'disabled'}>Test<small>Mints a real token</small></button>`:''}
+        </div>
+        <div class="muted" id="chk-${kind}" style="margin-top:6px">${
+          upMsg[kind]?(upMsg[kind].ok?'\u2713 ':'\u2715 ')+esc(upMsg[kind].text):''
+        }</div></div>`;
+    });
+  }
+  return h+`</div>`;
+}
+
+function delegationBody(){
+  if(!dwd || !dwd.tenants) return '';
+  const seedPath = (runMode==='seed_only'||runMode==='seed_and_migrate');
+  let h=`<div class="warnbox" style="margin-top:12px">
+      <b>This step needs a person.</b> Google provides no API for domain-wide
+      delegation \u2014 a super admin must grant it in a browser.</div>
+    <div class="muted" style="margin:8px 0">admin.google.com \u2192 Security
+      \u2192 Access and data control \u2192 API controls \u2192 Manage Domain
+      Wide Delegation \u2192 Add new</div>`;
+  dwd.tenants.forEach(t=>{
+    const isSource = t.side==='source';
+    // A seeding path needs the WRITE scopes on the source; the editor replaces
+    // rather than appends, so the line shown must be the whole grant.
+    const line = (isSource && seedPath && dwd.seed && dwd.seed.combined)
+                 ? dwd.seed.combined : t.scopes;
+    const count = (isSource && seedPath && dwd.seed && dwd.seed.combined_list)
+                 ? dwd.seed.combined_list.length : (t.scope_list||[]).length;
+    h+=`<div class="card" style="background:var(--bg);margin-top:10px">
+      <b style="text-transform:capitalize">${t.side}</b>
+      <span class="muted">${esc(t.domain||'')} \u2014 sign in as
+        ${esc(t.admin||'a super admin')}</span>
+      <div class="cprow"><b>Client ID</b>
+        <button onclick="copy('${esc(t.client_id||'')}',this)">Copy</button></div>
+      <pre class="copy">${esc(t.client_id||'(upload the key first)')}</pre>
+      <div class="cprow"><b>OAuth scopes</b>
+        <button onclick="copy(${esc(JSON.stringify(line||''))},this)">Copy</button>
+        <span class="muted">${count} scopes \u2014 paste the whole line, that
+          editor replaces rather than appends</span></div>
+      <pre class="copy">${esc(line||'(set the domains first)')}</pre>
+    </div>`;
+  });
+  return h+`<div class="muted">Grants take ~2 minutes to propagate, sometimes 30.
+    Use <b>Re-check</b> above; it goes green when a real token mint succeeds.</div>`;
+}
+
+function actionButtons(keys){
+  let h=`<div class="acts" style="margin-top:12px">`;
+  keys.forEach(k=>{const a=acts[k]; if(!a) return;
+    h+=`<button class="${a.destructive?'danger':''}" onclick="run('${k}')">
+      ${esc(a.label)}<small>${esc(a.blurb)}</small></button>`;});
+  return h+`</div>`;
+}
+
+function seedForm(){
+  const src=(cfg&&cfg.source_domain)||'';
+  return `<div class="card" style="border-color:var(--bad)">
+    <h3>Seed the source tenant</h3>
+    <div class="warnbox">This writes fabricated data into a live tenant. It
+      only ever targets the <b>source</b> domain, and only after you type it.</div>
+    <div class="grid2" style="margin-top:12px">
+      <label>Scale<select id="seed-scale">${(seedScales||['medium']).map(v=>
+        `<option${v==='medium'?' selected':''}>${v}</option>`).join('')}</select></label>
+      <label>Type the source domain to confirm
+        <input id="seed-confirm" placeholder="${esc(src||'set the domains first')}"></label>
+    </div>
+    <label style="display:block;margin-top:10px">
+      <input type="checkbox" id="seed-create"> also create the five accounts</label>
+    <label style="display:block;margin-top:6px">
+      <input type="checkbox" id="seed-reset"> <b style="color:var(--bad)">reset
+      first</b> \u2014 DELETES existing data for those users</label>
+    <button class="danger" style="margin-top:12px" onclick="runSeed()">
+      Run the seeder<small>Targets ${esc(src||'(no source domain)')}</small></button>
+    <div id="seedmsg" class="muted" style="margin-top:8px">${
+      seedMsg?(seedMsg.ok?'\u2713 ':'\u2715 ')+esc(seedMsg.text):''}</div>
+  </div>`;
 }
 
 /* ---------------- actions ---------------- */
@@ -1555,7 +1850,30 @@ async function run(name){
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({action:name,confirm:a.confirm||''})})).json();
   if(!r.ok){ alert(r.error); return; }
-  seen=0; window._out=''; if($('out')) $('out').textContent='';
+  clearOut();
+}
+
+async function recheckDWD(btn){
+  btn.disabled=true;
+  const o=btn.innerHTML;
+  btn.innerHTML='Checking delegation...';
+  if($('dwdmsg')) $('dwdmsg').textContent='Minting tokens...';
+  try{
+    const r=await fetch('/api/check_dwd',{method:'POST'});
+    const d=await r.json();
+    btn.disabled=false;
+    btn.innerHTML=o;
+    if(d.ok){
+      if($('dwdmsg')) $('dwdmsg').textContent='Check complete!';
+      poll();
+    }else{
+      if($('dwdmsg')) $('dwdmsg').textContent=d.error||'Check failed';
+    }
+  }catch(e){
+    btn.disabled=false;
+    btn.innerHTML=o;
+    if($('dwdmsg')) $('dwdmsg').textContent='Error: '+e;
+  }
 }
 
 function cfgFields(){
@@ -1578,7 +1896,7 @@ async function runSetup(keyless){
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({keyless:!!keyless})})).json();
   if(!r.ok){ alert(r.error); return; }
-  seen=0; window._out=''; if($('out')) $('out').textContent='';
+  clearOut();
 }
 async function deploy(){
   const creds=$('d-creds').checked;
@@ -1595,7 +1913,7 @@ async function deploy(){
       port:$('d-port').value,key:$('d-key').value,
       include_credentials:creds,confirm:confirmPhrase})})).json();
   if(!r.ok){ alert(r.error); return; }
-  seen=0; window._out=''; if($('out')) $('out').textContent='';
+  clearOut();
 }
 
 async function runSeed(){
@@ -1610,7 +1928,7 @@ async function runSeed(){
     body:JSON.stringify({confirm_domain:typed, scale:$('seed-scale').value,
       create_users:$('seed-create').checked, reset:reset})})).json();
   seedMsg={ok:!!r.ok, text: r.ok ? ('seeding '+src+' \\u2014 output below') : r.error};
-  if(r.ok){ seen=0; window._out=''; if($('out')) $('out').textContent=''; }
+  if(r.ok){ clearOut(); }
   await refresh(true);
 }
 
@@ -1626,6 +1944,24 @@ async function checkCred(kind, btn){
              box.style.color=r.ok?'var(--ok)':'var(--bad)'; }
   }catch(e){ if(box){ box.textContent='check failed: '+e; } }
   btn.disabled=false; btn.innerHTML=label;
+}
+
+async function checkStep(n, btn){
+  const box=$('stepchk'); const label=btn.textContent;
+  btn.disabled=true; btn.textContent='Checking\u2026';
+  if(box){ box.textContent='re-reading live state\u2026'; box.style.color=''; }
+  try{
+    const r=await (await fetch('/api/checkstep',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({step:n})})).json();
+    stepChk={n:n, ok:!!r.ok, text:(r.msg||r.error)+(r.detail?' \u2014 '+r.detail:'')};
+    if(box){ box.textContent=(r.ok?'\u2713 ':'\u2715 ')+stepChk.text.slice(2)||'';
+             box.textContent=(r.ok?'\u2713 ':'\u2715 ')+(r.msg||r.error)+
+               (r.detail?' \u2014 '+r.detail:'');
+             box.style.color=r.ok?'var(--ok)':'var(--bad)'; }
+  }catch(e){ if(box) box.textContent='check failed: '+e; }
+  btn.disabled=false; btn.textContent=label;
+  refresh(true);
 }
 
 async function setRunMode(mode){
@@ -1684,13 +2020,26 @@ async function oauthDrop(t){
 
 let job={};
 function paintJob(){
-  if(!$('dot')) return;
-  $('dot').className='dot'+(job.running?' on':'');
-  $('jname').textContent=job.name||'idle';
-  $('jmeta').textContent=job.running?job.elapsed+'s elapsed'
-    :(job.rc===null||job.rc===undefined?'':'exit '+job.rc+' \\u00b7 '+job.elapsed+'s');
-  $('stop').disabled=!job.running;
-  document.querySelectorAll('.acts button').forEach(b=>b.disabled=job.running);
+  const r=job.running;
+  const set=(id,v)=>{const e=$(id); if(e&&e.textContent!==v) e.textContent=v;};
+  if($('dot')) $('dot').className='dot'+(r?' on':'');
+  if($('jdot')) $('jdot').className='dot'+(r?' on':'');
+  const meta=r?job.elapsed+'s elapsed'
+    :(job.rc===null||job.rc===undefined?'':'exit '+job.rc+' \u00b7 '+job.elapsed+'s');
+  const statusTxt=r?'running'
+    :(job.rc===null||job.rc===undefined?'idle'
+      :(job.rc===0?'done':'exit '+job.rc));
+  set('jname',job.name||'idle'); set('jmeta',meta);
+  set('jobname',job.name||'idle'); set('jobmeta',meta);
+  set('of-name',job.name||'idle'); set('of-meta',meta);
+  const st=$('jstatus'); if(st){ st.textContent=statusTxt;
+    st.style.color=r?'var(--accent)':(job.rc===0?'var(--ok)':(job.rc?'var(--bad)':'')); }
+  const ofs=$('of-status'); if(ofs){ ofs.textContent=statusTxt;
+    ofs.style.color=r?'var(--accent)':(job.rc===0?'var(--ok)':(job.rc?'var(--bad)':'')); }
+  const ofd=$('of-dot'); if(ofd) ofd.className='dot'+(r?' on':'');
+  if($('stop')) $('stop').disabled=!r;
+  document.querySelectorAll('#tb button').forEach(b=>b.disabled=r);
+  document.querySelectorAll('.acts button').forEach(b=>b.disabled=r);
 }
 
 async function refresh(force){
@@ -1723,8 +2072,12 @@ async function pollJob(){
     if(j.lines.length){
       window._out=(window._out||'')+j.lines.join('\\n')+'\\n';
       seen=j.total;
-      if($('out')){ $('out').textContent=window._out;
-        $('out').scrollTop=$('out').scrollHeight; }
+      const pre=$('out'); if(pre){
+        pre.textContent=window._out;
+        if(followOut) pre.scrollTop=pre.scrollHeight; }
+      const pre2=$('out2'); if(pre2){
+        pre2.textContent=window._out;
+        if(followOut) pre2.scrollTop=pre2.scrollHeight; }
     }
     const was=job.running; job=j; paintJob();
     if(was&&!j.running) refresh(true);   // a finished job usually changes step state
@@ -1732,10 +2085,269 @@ async function pollJob(){
   setTimeout(pollJob,1200);
 }
 
-fetch('/api/actions').then(r=>r.json()).then(a=>{acts=a;refresh();pollJob();});
+function clearOut(){
+  window._out=''; seen=0;
+  const pre=$('out'); if(pre) pre.textContent='';
+  const pre2=$('out2'); if(pre2) pre2.textContent='';
+}
+
+/* ---------------- command toolbar + operator tabs ---------------- */
+function drawToolbar(){
+  const tb=$('tb'); if(!tb||!Object.keys(acts).length) return;
+  tb.innerHTML=Object.keys(acts).map(k=>{
+    const a=acts[k];
+    return `<button class="${a.destructive?'danger':''}" onclick="run('${k}')"
+      title="${esc(a.blurb)}">${esc(a.label)}</button>`;
+  }).join('')+`<span class="sep"></span>
+    <button onclick="goSeed()" title="Seed the source tenant (wizard step 7)">Seed</button>
+    <span class="sep"></span>
+    <label class="chk"><input type="checkbox" id="tog-dry" class="tb-toggle"
+      onchange="toggleChange()"> dry-run</label>
+    <label class="chk"><input type="checkbox" id="tog-drive" class="tb-toggle" checked
+      onchange="toggleChange()"> drive</label>
+    <label class="chk"><input type="checkbox" id="tog-gmail" class="tb-toggle" checked
+      onchange="toggleChange()"> gmail</label>
+    <label class="chk"><input type="checkbox" id="tog-calendar" class="tb-toggle" checked
+      onchange="toggleChange()"> calendar</label>
+    <label class="chk"><input type="checkbox" id="tog-chat" class="tb-toggle"
+      onchange="toggleChange()"> chat</label>`;
+  paintJob();
+}
+
+async function toggleChange(){
+  const svcs={};
+  ['drive','gmail','calendar','chat'].forEach(k=>{const c=$('tog-'+k); if(c) svcs[k]=c.checked;});
+  const dry=$('tog-dry');
+  await fetch('/api/toggles',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({dry_run:dry&&dry.checked,services:svcs})});
+}
+
+function applyToggles(tg){
+  if(!tg) return;
+  const a=document.activeElement;
+  if(a&&a.classList&&a.classList.contains('tb-toggle')) return;
+  const dry=$('tog-dry'); if(dry) dry.checked=!!tg.dry_run;
+  ['drive','gmail','calendar','chat'].forEach(k=>{
+    const c=$('tog-'+k); if(c&&tg.services) c.checked=!!tg.services[k]; });
+}
+
+function goSeed(){ cur=7; follow=false; setTab('setup'); }
+
+function setTab(t){
+  tab=t;
+  document.querySelectorAll('.tabs button').forEach(b=>
+    b.classList.toggle('on',b.dataset.tab===t));
+  const views={setup:$('setup'),dashboard:$('view-dashboard'),users:$('view-users'),
+    failures:$('view-failures'),scope:$('view-scope'),logs:$('view-logs'),
+    output:$('view-output')};
+  Object.keys(views).forEach(k=>{ const el=views[k]; if(!el) return;
+    el.style.display=(k===t)?(k==='setup'?'grid':'block'):'none'; });
+  if(t!=='setup'){
+    if(!S) refresh();
+    if(t==='scope'&&!scopeLines.length) fetchScope();
+    if(t==='logs'&&!logLines.length) fetchLogs();
+    drawView();
+  }else{
+    draw(true);
+  }
+}
+
+function drawView(){
+  if(tab==='setup') return;
+  const el=$('view-'+tab); if(!el) return;
+  let h='';
+  if(tab==='dashboard') h=dashboardHTML();
+  else if(tab==='users') h=usersHTML();
+  else if(tab==='failures') h=failuresHTML();
+  else if(tab==='scope') h=scopeHTML();
+  else if(tab==='logs') h=logsHTML();
+  else if(tab==='output') h=outputHTML();
+  if(h!==el.innerHTML){
+    el.innerHTML=h;
+    if(tab==='logs'){ const p=el.querySelector('pre'); if(p) p.scrollTop=p.scrollHeight; }
+    if(tab==='output'){ const p=el.querySelector('pre');
+      if(p){ p.textContent=window._out||''; if(followOut) p.scrollTop=p.scrollHeight; } }
+  }
+}
+
+/* The full, large live feed of whatever job is running. */
+function outputHTML(){
+  return `<h2>Live feed</h2>
+    <div class="feedbar">
+      <span class="dot" id="of-dot"></span>
+      <b id="of-name">idle</b>
+      <span class="pill" id="of-status">idle</span>
+      <span class="muted" id="of-meta"></span>
+      <span class="sp"></span>
+      <label class="chk"><input type="checkbox" id="follow-out2" checked
+        onchange="followOut=this.checked"> follow</label>
+      <button onclick="clearOut()">Clear</button>
+    </div>
+    <pre class="out" id="out2" style="height:calc(100vh - 250px)"></pre>`;
+}
+
+/* The snapshot the TUI shows: totals, per-service bars, active users and
+   the most recent failures, all read from migration.db on the server. */
+function dashboardHTML(){
+  if(!snap||!snap.snapshot)
+    return `<h2>Dashboard</h2><div class="warnbox">${
+      esc(snap&&snap.error||'no data yet')}</div>`;
+  const t=snap.snapshot.totals, us=snap.snapshot.users||[], fs=snap.snapshot.failures||[];
+  const frac=t.fraction;
+  const svc=[['Drive',us.reduce((a,u)=>a+u.drive_done,0),
+      us.reduce((a,u)=>a+u.drive_failed,0),us.reduce((a,u)=>a+u.drive_skipped,0),
+      us.reduce((a,u)=>a+u.exp_drive,0)],
+    ['Gmail',us.reduce((a,u)=>a+u.mail_done,0),
+      us.reduce((a,u)=>a+u.mail_failed,0),us.reduce((a,u)=>a+u.mail_skipped,0),
+      us.reduce((a,u)=>a+u.exp_mail,0)],
+    ['Calendar',us.reduce((a,u)=>a+u.cal_done,0),
+      us.reduce((a,u)=>a+u.cal_failed,0),0,0]];
+  const svcRows=svc.map(r=>{
+    const [name,done,failed,skipped,exp]=r;
+    const w=exp?Math.round(100*Math.min(1,done/exp)):0;
+    return `<tr><td><b>${name}</b></td><td style="min-width:170px">
+      <div class="gbar"><i style="width:${w}%"></i></div></td>
+      <td class="num">${hc(done)}</td><td class="num">${hc(skipped)}</td>
+      <td class="num" style="${failed?'color:var(--bad)':''}">${hc(failed)}</td></tr>`;
+  }).join('');
+  const active=us.filter(u=>u.status==='RUNNING'||u.status==='PAUSED_QUOTA')
+    .sort((a,b)=>b.done-a.done).slice(0,8);
+  const activeRows=active.map(u=>`<tr><td>${esc(u.source)}</td>
+    <td style="min-width:150px"><div class="gbar"><i style="width:${Math.round(100*(u.fraction||0))}%"></i></div></td>
+    <td class="num">${hc(u.done)}</td><td class="num">${hb(u.bytes_moved)}</td>
+    <td style="${jc(u.status)?'color:'+jc(u.status):''}">${u.status}</td></tr>`).join('');
+  const failRows=fs.slice(0,6).map(f=>`<tr>
+    <td class="muted">${esc(f.timestamp||'')}</td><td>${esc(f.item_type||'')}</td>
+    <td>${esc(f.source_user||'')}</td>
+    <td style="color:var(--bad)">${esc(f.error_message||'')}</td></tr>`).join('');
+  return `<h2>Dashboard</h2>
+    <div class="stats">
+      <div class="stat"><b>${hc(t.items_done)} / ${t.items_expected?hc(t.items_expected):'?'}</b><span>items moved</span></div>
+      <div class="stat"><b style="${t.items_failed?'color:var(--bad)':''}">${hc(t.items_failed)}</b><span>failed</span></div>
+      <div class="stat"><b>${hc(t.items_skipped)}</b><span>skipped</span></div>
+      <div class="stat"><b>${hb(t.bytes_moved)}</b><span>moved</span></div>
+      <div class="stat"><b>${t.users_done}/${t.users}</b><span>users done</span></div>
+      <div class="stat"><b>${t.users_running}</b><span>running</span></div>
+      <div class="stat"><b>${(t.gb_today||0).toFixed(0)}/${(t.cap_gb_total||0).toFixed(0)}GB</b><span>24h quota</span></div>
+    </div>
+    <div class="card" style="margin-top:0"><h3>Overall progress</h3>
+      <div class="gbar" style="height:10px"><i style="width:${frac==null?0:Math.round(frac*100)}%"></i></div>
+      <div class="muted" style="margin-top:4px">${frac==null?'n/a':(frac*100).toFixed(1)+'%'}
+        &middot; ${t.users_done} done / ${t.users_running} running /
+        ${t.users_failed} failed / ${t.users_paused} quota-paused of ${t.users}</div></div>
+    <div class="card"><h3>Service progress</h3>
+      <table><tr><th>Service</th><th></th><th class="num">OK</th>
+      <th class="num">Skipped</th><th class="num">Failed</th></tr>${svcRows}</table></div>
+    <div class="card"><h3>Active users</h3>
+      ${active.length?`<table><tr><th>User</th><th>Progress</th><th class="num">Items</th>
+      <th class="num">Moved</th><th>Status</th></tr>${activeRows}</table>`
+      :'<div class="muted">none &mdash; press Migrate in the toolbar to start</div>'}</div>
+    <div class="card"><h3>Recent failures</h3>
+      ${failRows?`<table><tr><th>Time</th><th>Type</th><th>User</th>
+      <th>Error</th></tr>${failRows}</table>`
+      :'<div class="muted">none</div>'}</div>`;
+}
+
+function usersHTML(){
+  if(!snap||!snap.snapshot)
+    return `<h2>Users</h2><div class="warnbox">${
+      esc(snap&&snap.error||'no data yet')}</div>`;
+  const us=snap.snapshot.users||[];
+  if(!us.length) return `<h2>Users</h2>
+    <div class="warnbox">No identities loaded yet &mdash; run init-db on the Setup tab.</div>`;
+  const rows=us.map(u=>`<tr>
+    <td>${esc(u.source)}</td>
+    <td style="${jc(u.status)?'color:'+jc(u.status):''}">${u.status}</td>
+    <td class="num">${hc(u.drive_done)}</td><td class="num">${hc(u.mail_done)}</td>
+    <td class="num">${hc(u.cal_done)}</td>
+    <td class="num" style="${u.failed?'color:var(--bad)':''}">${hc(u.failed)}</td>
+    <td class="num">${hb(u.bytes_moved)}</td>
+    <td><div class="gbar" style="width:140px"><i style="width:${Math.round(100*(u.fraction||0))}%"></i></div></td>
+    </tr>`).join('');
+  return `<h2>Users (${us.length})</h2><div class="scroll"><table>
+    <tr><th>Source</th><th>Status</th><th class="num">Drive</th>
+    <th class="num">Mail</th><th class="num">Cal</th><th class="num">Failed</th>
+    <th class="num">Moved</th><th>Progress</th></tr>${rows}</table></div>`;
+}
+
+function failuresHTML(){
+  if(!snap||!snap.snapshot)
+    return `<h2>Failures</h2><div class="warnbox">${
+      esc(snap&&snap.error||'no data yet')}</div>`;
+  const fs=snap.snapshot.failures||[];
+  if(!fs.length) return `<h2>Failures</h2><div class="okbox">No failures recorded.</div>`;
+  const rows=fs.map(f=>`<tr>
+    <td class="muted">${esc(f.timestamp||'')}</td><td>${esc(f.item_type||'')}</td>
+    <td>${esc(f.source_user||'')}</td><td class="mono">${esc(f.item_id||'')}</td>
+    <td style="color:var(--bad)">${esc(f.error_message||'')}</td></tr>`).join('');
+  return `<h2>Failures (${hc(fs.length)})</h2><div class="scroll"><table>
+    <tr><th>Time</th><th>Type</th><th>User</th><th>Item</th><th>Error</th></tr>
+    ${rows}</table></div>`;
+}
+
+function scopeHTML(){
+  return `<h2>Migration scope</h2>
+    <div style="display:flex;gap:8px;margin-bottom:10px">
+      <button onclick="fetchScope()">Refresh</button>
+      <button onclick="run('export_scope')">Export SCOPE.md</button></div>
+    <pre class="mono scroll" style="margin:0">${esc(scopeLines.join('\\n'))}</pre>`;
+}
+
+function logsHTML(){
+  return `<h2>Logs</h2>
+    <div class="muted" style="margin-bottom:6px">${esc(logPath)}</div>
+    <pre class="mono scroll" style="margin:0">${esc(logLines.join('\\n'))}</pre>`;
+}
+
+async function fetchScope(){
+  try{
+    const r=await (await fetch('/api/scope')).json();
+    if(r.lines){ scopeLines=r.lines; drawView(); }
+  }catch(e){}
+}
+async function fetchLogs(){
+  try{
+    const r=await (await fetch('/api/logs')).json();
+    if(r.lines){ logLines=r.lines; logPath=r.path; drawView(); }
+  }catch(e){}
+}
+
+async function pollSnap(){
+  try{
+    const r=await (await fetch('/api/snapshot')).json();
+    snap=r;
+    applyToggles(r.toggles);
+    paintProg();
+    drawView();
+  }catch(e){}
+  setTimeout(pollSnap,2000);
+}
+
+/* The slim always-visible strip under the header: overall migration
+   progress + the headline numbers, updated with every snapshot. */
+function paintProg(){
+  const bar=$('progi'); if(!bar) return;
+  const pct=$('progpct'), txt=$('progtxt');
+  const t=snap&&snap.snapshot&&snap.snapshot.totals;
+  if(!t){ bar.style.width='0%'; if(pct) pct.textContent='0%';
+    if(txt) txt.textContent='no migration yet'; return; }
+  const frac=Math.max(0,Math.min(1,t.fraction||0));
+  bar.style.width=Math.round(frac*100)+'%';
+  if(pct) pct.textContent=Math.round(frac*100)+'%';
+  if(txt) txt.textContent=`${hc(t.items_done)} / ${t.items_expected?hc(t.items_expected):'?'} items`
+    +` \u00b7 ${t.users_done}/${t.users} users \u00b7 ${hb(t.bytes_moved)} moved`;
+}
+
+fetch('/api/actions').then(r=>r.json()).then(a=>{
+  acts=a; drawToolbar(); setTab('setup'); refresh(); pollJob(); pollSnap();
+});
+document.querySelectorAll('.tabs button').forEach(b=>
+  b.onclick=()=>setTab(b.dataset.tab));
 /* Chained, not setInterval: a slow /api/status used to let polls overlap,
    stacking concurrent work on the server and the page. */
 (function loop(){ setTimeout(async()=>{ await refresh(); loop(); }, 6000); })();
+(function sco(){ setTimeout(async()=>{ if(tab==='scope') await fetchScope(); sco(); },15000); })();
+(function logp(){ setTimeout(async()=>{ if(tab==='logs') await fetchLogs(); logp(); },3000); })();
 </script></body></html>"""
 
 
@@ -1766,6 +2378,12 @@ class Handler(BaseHTTPRequestHandler):
                             "destructive": v.get("destructive", False),
                             "confirm": v.get("confirm", "")}
                         for k, v in ACTIONS.items()})
+        elif path == "/api/snapshot":
+            self._json(snapshot_payload())
+        elif path == "/api/scope":
+            self._json(scope_payload())
+        elif path == "/api/logs":
+            self._json(logs_payload())
         elif path == "/api/oauth/status":
             self._json(oauth_status())
         elif path == "/api/dwd":
@@ -1853,8 +2471,29 @@ class Handler(BaseHTTPRequestHandler):
             self._json(live_check(body.get("kind", "")))
             return
 
+        if self.path == "/api/check_dwd":
+            invalidate_status()
+            _refresh_snapshot()
+            with _snap_lock:
+                data = _snap["data"] or {}
+            self._json({"ok": True, "status": data})
+            return
+
+        if self.path == "/api/checkstep":
+            try:
+                n = int(body.get("step", 0))
+            except (TypeError, ValueError):
+                self._json({"ok": False, "error": "step must be a number"}, 400)
+                return
+            self._json(check_step(n))
+            return
+
         if self.path == "/api/runmode":
             self._json(set_run_mode(body.get("mode", "")))
+            return
+
+        if self.path == "/api/toggles":
+            self._json(set_toggles(body))
             return
 
         if self.path == "/api/authmode":
@@ -1949,7 +2588,7 @@ class Handler(BaseHTTPRequestHandler):
                         "error": f"{spec['label']} needs confirmation"}, 400)
             return
 
-        ok, msg = JOB.start(spec["label"], spec["argv"], env=gcloud_env())
+        ok, msg = JOB.start(spec["label"], _action_argv(name), env=gcloud_env())
         self._json({"ok": ok, "error": None if ok else msg})
 
 

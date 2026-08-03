@@ -52,6 +52,13 @@ class DriveMigrator:
                       "acl_failed": 0}
         self._pending_shortcuts: list[tuple[dict, str]] = []
         self._staging_drive_id: str | None = None
+        # Set by shared_drives.py to point this engine at a shared drive
+        # instead of the user's My Drive. Everything downstream -- the walk,
+        # all three transfer modes, ACLs, comments, the modifiedTime restore
+        # -- is identical, so a shared drive reuses this engine rather than
+        # getting a parallel one that would need every fix applied twice.
+        self.shared_drive: str | None = None
+        self.target_drive_id: str | None = None
 
     # -- plumbing -----------------------------------------------------------
     def _retry(self, fn):
@@ -80,12 +87,17 @@ class DriveMigrator:
     # -- entry point ----------------------------------------------------------
     def run(self, delta: bool = False) -> dict:
         self.delta = delta
-        src_root = self._retry(
-            lambda: self.src.files().get(fileId="root", fields="id").execute()
-        )["id"]
-        tgt_root = self._retry(
-            lambda: self.tgt.files().get(fileId="root", fields="id").execute()
-        )["id"]
+        if self.shared_drive:
+            # A shared drive's id doubles as the id of its root folder, so it
+            # substitutes directly for the My Drive root on both sides.
+            src_root, tgt_root = self.shared_drive, self.target_drive_id
+        else:
+            src_root = self._retry(
+                lambda: self.src.files().get(fileId="root", fields="id").execute()
+            )["id"]
+            tgt_root = self._retry(
+                lambda: self.tgt.files().get(fileId="root", fields="id").execute()
+            )["id"]
 
         if self.server_side and not self.settings.dry_run:
             self._ensure_staging_drive()
@@ -99,7 +111,17 @@ class DriveMigrator:
 
     @property
     def server_side(self) -> bool:
-        return self.settings.transfer_mode == "server_side"
+        """Both staging-drive modes take the server-side path."""
+        return self.settings.transfer_mode in ("server_side", "link_flip")
+
+    @property
+    def link_flip(self) -> bool:
+        """
+        Publish each file to "anyone with the link" for the duration of the
+        copy, then restore its real sharing. Opt-in; see link_transfer.py for
+        why the ACL is persisted before anything is exposed.
+        """
+        return self.settings.transfer_mode == "link_flip"
 
     # -- staging shared drive (server_side mode only) --------------------------
     def _staging_drive_name(self) -> str:
@@ -194,9 +216,18 @@ class DriveMigrator:
     # -- traversal ------------------------------------------------------------
     def _list_children(self, parent_id: str):
         q_parts = [f"'{parent_id}' in parents", "trashed = false"]
-        if self.settings.owned_only:
+        # owned_only exists to stop a file shared with four colleagues being
+        # copied five times. It is meaningless inside a shared drive, where
+        # every file is owned by the drive and no user is in `owners` -- and
+        # applying it there matches nothing at all, silently migrating an
+        # empty drive.
+        if self.settings.owned_only and not self.shared_drive:
             q_parts.append("'me' in owners")
         q = " and ".join(q_parts)
+        extra = {}
+        if self.shared_drive:
+            extra = {"corpora": "drive", "driveId": self.shared_drive,
+                     "includeItemsFromAllDrives": True}
         token = None
         while True:
             self.limiter.acquire()
@@ -206,7 +237,7 @@ class DriveMigrator:
                        "modifiedTime,size,md5Checksum,owners,"
                        "capabilities(canDownload),shortcutDetails,description,"
                        "starred)",
-                spaces="drive", supportsAllDrives=True,
+                spaces="drive", supportsAllDrives=True, **extra,
             ).execute())
             for f in resp.get("files", []):
                 yield f
@@ -321,6 +352,32 @@ class DriveMigrator:
         if item.get("description"):
             body["description"] = item["description"]
 
+        # link_flip: publish the source file for the duration of the copy.
+        #
+        # The ACL is read and written to the ledger before anything is exposed
+        # (link_transfer.save_acl), so a crash between here and the restore
+        # below is recoverable with `link_transfer.py --restore` from a later
+        # process. Without that ordering the file would be left public with no
+        # record of what its sharing had been.
+        flipped = False
+        if self.link_flip and not self.settings.dry_run:
+            try:
+                import link_transfer
+
+                link_transfer.ensure_schema(self.db)
+                link_transfer.flip_to_public(self.src, self.db,
+                                             self.source_user, item)
+                flipped = True
+            except Exception as exc:  # noqa: BLE001
+                # Could not record the ACL, so the file was not exposed. Fail
+                # this item rather than proceeding without a way back.
+                self.db.log_audit(self.source_user, item["id"], "file", "FAILED",
+                                  f"link_flip could not record the ACL: {exc}")
+                self.stats["failed"] += 1
+                if size:
+                    self.quota.refund(size)
+                return
+
         try:
             copied = self._retry(lambda: self.src.files().copy(
                 fileId=item["id"], body=body, supportsAllDrives=True,
@@ -333,6 +390,22 @@ class DriveMigrator:
                               f"server-side copy failed: {exc}")
             self.stats["failed"] += 1
             return
+        finally:
+            # Restore in a finally: a failed copy must not leave the file
+            # public. Anything that cannot be restored stays in the audit list
+            # rather than being forgotten.
+            if flipped:
+                try:
+                    import link_transfer
+
+                    for row in link_transfer.outstanding(self.db):
+                        if row["file_id"] == item["id"]:
+                            link_transfer.restore_one(self.src, self.db, row)
+                            break
+                except Exception as exc:  # noqa: BLE001
+                    log.error("[%s] link_flip restore failed for %s: %s — run "
+                              "link_transfer.py --restore",
+                              self.source_user, item["id"], exc)
 
         copy_id = copied["id"]
 
@@ -372,9 +445,10 @@ class DriveMigrator:
         self.db.log_audit(self.source_user, item["id"], "file", "SUCCESS",
                           modified_time=item.get("modifiedTime"), bytes_moved=size)
         self.stats["files"] += 1
-        self._restore_modified_time(copy_id, item, self._sync_acls(item["id"], copy_id))
+        touched = self._sync_acls(item["id"], copy_id)
         if self.settings.migrate_comments:
-            self._sync_comments(item["id"], copy_id)
+            touched += self._sync_comments(item["id"], copy_id)
+        self._restore_modified_time(copy_id, item, touched)
 
     def _sync_binary(self, item: dict, tgt_parent: str) -> None:
         size = int(item.get("size") or 0)
@@ -423,9 +497,10 @@ class DriveMigrator:
         self.db.log_audit(self.source_user, item["id"], "file", "SUCCESS",
                           modified_time=item.get("modifiedTime"), bytes_moved=size)
         self.stats["files"] += 1
-        self._restore_modified_time(tgt_id, item, self._sync_acls(item["id"], tgt_id))
+        touched = self._sync_acls(item["id"], tgt_id)
         if self.settings.migrate_comments:
-            self._sync_comments(item["id"], tgt_id)
+            touched += self._sync_comments(item["id"], tgt_id)
+        self._restore_modified_time(tgt_id, item, touched)
 
     def _sync_native(self, item: dict, tgt_parent: str) -> None:
         export_mime, _ext = EXPORT_MIME_MAP.get(item["mimeType"], (None, None))
@@ -474,9 +549,10 @@ class DriveMigrator:
         self.db.log_audit(self.source_user, item["id"], "file", "SUCCESS",
                           modified_time=item.get("modifiedTime"), bytes_moved=size)
         self.stats["files"] += 1
-        self._restore_modified_time(tgt_id, item, self._sync_acls(item["id"], tgt_id))
+        touched = self._sync_acls(item["id"], tgt_id)
         if self.settings.migrate_comments:
-            self._sync_comments(item["id"], tgt_id)
+            touched += self._sync_comments(item["id"], tgt_id)
+        self._restore_modified_time(tgt_id, item, touched)
 
     @staticmethod
     def _cleanup(path: str) -> None:
@@ -598,9 +674,10 @@ class DriveMigrator:
             self.stats["files"] += 1
 
     # -- comments ---------------------------------------------------------------
-    def _sync_comments(self, source_id: str, target_id: str) -> None:
+    def _sync_comments(self, source_id: str, target_id: str) -> int:
         """
-        Copy a file's comment threads.
+        Copy a file's comment threads. Returns how many writes landed, because
+        each one bumps modifiedTime and the caller has to undo that afterwards.
 
         The unavoidable caveat: the Drive API has no way to write a comment
         *as* another person, so every migrated comment is authored by the
@@ -609,6 +686,7 @@ class DriveMigrator:
         honest -- silently reattributing a colleague's comment to whoever ran
         the migration is worse.
         """
+        written = 0
         try:
             resp = self._retry(lambda: self.src.comments().list(
                 fileId=source_id, pageSize=100,
@@ -618,7 +696,7 @@ class DriveMigrator:
         except (PermanentAPIError, RuntimeError) as exc:
             log.debug("[%s] comments unavailable on %s: %s",
                      self.source_user, source_id, exc)
-            return
+            return written
 
         for c in resp.get("comments", []):
             if self.db.get_target_id(self.source_user, c["id"], "comment"):
@@ -638,6 +716,7 @@ class DriveMigrator:
             self.db.record_mapping(self.source_user, c["id"], created["id"], "comment")
             self.db.log_audit(self.source_user, c["id"], "comment", "SUCCESS")
             self.stats["comments"] = self.stats.get("comments", 0) + 1
+            written += 1
 
             for r in (c.get("replies") or []):
                 r_author = (r.get("author") or {}).get("displayName") or "unknown"
@@ -649,8 +728,17 @@ class DriveMigrator:
                                     fileId=target_id, commentId=cid, body=b,
                                     fields="id",
                                 ).execute())
-                except (PermanentAPIError, RuntimeError):
-                    pass
+                except (PermanentAPIError, RuntimeError) as exc:
+                    # Was silent. A reply that cannot be recreated simply
+                    # vanished -- no audit row, no counter -- so the comment
+                    # thread came out shorter on the target with nothing
+                    # anywhere saying so.
+                    self.db.log_audit(
+                        self.source_user, f"{source_id}:reply", "comment",
+                        "FAILED", f"reply not recreated: {exc}")
+                else:
+                    written += 1
+        return written
 
     # -- ACL translation -----------------------------------------------------------
     def _sync_acls(self, source_id: str, target_id: str) -> int:
@@ -664,8 +752,16 @@ class DriveMigrator:
                 supportsAllDrives=True,
             ).execute()).get("permissions", [])
         except (PermanentAPIError, RuntimeError) as exc:
+            # Record it, do not merely warn. A warning scrolls past and leaves
+            # nothing for `report` or resolve_failures to act on, so a file
+            # whose sharing never transferred looked identical to one with no
+            # sharing at all.
             log.warning("[%s] could not list permissions on %s: %s",
                        self.source_user, source_id, exc)
+            self.db.log_audit(self.source_user, f"{source_id}:(list-failed)",
+                              "acl", "FAILED",
+                              f"could not read source permissions: {exc}")
+            self.stats["acl_failed"] = self.stats.get("acl_failed", 0) + 1
             return 0
 
         applied = 0
@@ -674,7 +770,15 @@ class DriveMigrator:
             if p.get("role") == "owner":
                 continue
             details = p.get("permissionDetails") or []
-            if any(d.get("inherited") for d in details):
+            # An inherited grant is really the parent folder's permission, so
+            # preserving the copy tree already keeps the access. Recreating it
+            # on the target file lets the doc carry its own share access even
+            # if the folder is later moved or unshared -- the per-file model
+            # the corpus shares in. Off for very large tenants, where that
+            # specificity costs a permissions.create per inherited grantee
+            # per file.
+            if any(d.get("inherited") for d in details) \
+                    and not self.settings.recreate_inherited_acls:
                 continue
 
             body: dict = {"type": p["type"], "role": p["role"]}
@@ -730,9 +834,9 @@ class DriveMigrator:
         return applied
 
     def _restore_modified_time(self, target_id: str, item: dict,
-                               grants_applied: int) -> None:
+                               writes_applied: int) -> None:
         """
-        Re-assert modifiedTime after ACLs.
+        Re-assert modifiedTime after every post-create write.
 
         Granting a permission bumps the file's modifiedTime to now -- verified
         directly against Drive: a file created with modifiedTime=2019 reads
@@ -740,9 +844,17 @@ class DriveMigrator:
         applied after the copy, every shared file would otherwise show the
         migration date, which quietly breaks "sort by last modified" for
         exactly the files people collaborate on most.
+
+        Writing a comment bumps it the same way, and this originally ran
+        *before* comments rather than after -- so the restore was immediately
+        undone by the first comment insert. The A/B measured the damage: 97
+        files drifted, every one of them native and commented, in both
+        transfer modes. Anything that writes to the file after creation has to
+        be counted here, which is why the argument is a total and not a
+        grant count.
         """
         mtime = item.get("modifiedTime")
-        if not grants_applied or not mtime or self.settings.dry_run:
+        if not writes_applied or not mtime or self.settings.dry_run:
             return
         try:
             self._retry(lambda: self.tgt.files().update(

@@ -183,6 +183,25 @@ def deploy(host: str, user: str, port: int, key: str, dest: str,
         return 1
     say(f"   copied to {target}:{dest}")
 
+    if include_credentials:
+        # env.sh carries absolute paths from the machine that wrote it, and
+        # rsync ships them verbatim. Observed: a Mac's
+        # /Users/aryan/Repos/calude-workspace/migration.db was recreated
+        # literally on a Linux VPS -- the migration worked, against a ledger
+        # nobody would ever think to look for. Strip the path variables so the
+        # remote falls back to its own repo-relative defaults; the tenant and
+        # credential settings, which are machine-independent, stay.
+        say("== rewriting env.sh for this host")
+        strip = "MIGRATION_DB|SCRATCH_DIR|LOG_FILE|SOURCE_SA_KEY|TARGET_SA_KEY|" \
+                "OAUTH_TOKEN_DIR|OAUTH_CLIENT_SECRETS"
+        rc, out = run(ssh + [target,
+                             f"cd {dest} && [ -f env.sh ] && "
+                             f"grep -vE '^export ({strip})=' env.sh > env.sh.tmp "
+                             f"&& mv env.sh.tmp env.sh && "
+                             f"echo '  dropped machine-specific paths'"],
+                      timeout=60)
+        say(out.strip() or "   (no env.sh to rewrite)")
+
     say("== preparing the remote environment")
     # One command, but a fixed string we wrote -- no client input reaches it.
     setup_cmd = (

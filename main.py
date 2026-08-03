@@ -46,11 +46,13 @@ from datetime import datetime, timedelta, timezone
 from auth import AuthManager, list_domain_users
 from calendar_engine import CalendarMigrator
 from chat_engine import ChatMigrator
+from contacts_engine import ContactsMigrator
 from config import Settings
 from db import MigrationDB
 from discovery import print_report, scan_user
 from drive_engine import DriveMigrator
 from gmail_engine import GmailMigrator
+from tasks_engine import TasksMigrator
 from resilience import DailyQuotaGuard, QuotaExhausted
 
 log = logging.getLogger("migrate")
@@ -150,9 +152,20 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
             cm = ChatMigrator(auth, db, settings, source_user, target_user)
             result["services"]["chat"] = cm.run()
 
+        if ("contacts" in services and settings.migrate_contacts
+                and not SHUTDOWN.is_set()):
+            com = ContactsMigrator(auth, db, settings, source_user, target_user)
+            result["services"]["contacts"] = com.run()
+
+        if "tasks" in services and settings.migrate_tasks and not SHUTDOWN.is_set():
+            tm = TasksMigrator(auth, db, settings, source_user, target_user)
+            result["services"]["tasks"] = tm.run()
+
         status = "INTERRUPTED" if SHUTDOWN.is_set() else "DONE"
         if track_status:
             db.set_identity_status(source_user, status)
+            if status == "DONE":
+                db.mark_services_done(source_user, result["services"].keys())
         result["status"] = status
 
     except Exception as exc:  # noqa: BLE001 - worker must not propagate
@@ -174,12 +187,41 @@ def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
               only: list[str] | None = None) -> list[dict]:
     """Fan out across users with a bounded thread pool."""
     rows = [r for r in db.all_identities() if r["entity_type"] == "user"]
-    # On a full run, skip users already marked DONE so restarts are cheap.
-    # On a delta run, every user is a candidate — that is the point of the pass.
+
+    def _already_done(r) -> bool:
+        """
+        Has this user finished *the services being asked for*?
+
+        `status` is per-user, not per-service. A phased run that completed
+        Drive marked every user DONE, so the Gmail phase that followed skipped
+        all of them -- migrating nothing, recording nothing, and reporting a
+        98.8% shortfall it could not explain. Restarts still need to be cheap,
+        so the check is now per-service rather than removed.
+        """
+        if r["status"] != "DONE":
+            return False
+        done = db.services_done(r["source_email"])
+        # A ledger written before services_done existed has an empty set; fall
+        # back to the old behaviour rather than re-migrating everything.
+        #
+        # Say so, loudly. This fallback silently skipped all five users of a
+        # Gmail/Calendar/Chat run against a ledger the Drive A/B had left
+        # DONE, and the run reported a clean batch summary having migrated
+        # nothing at all. Skipping on an assumption is defensible; skipping
+        # without saying which assumption is not.
+        if not done:
+            log.warning(
+                "%s is DONE in a ledger with no per-service record — assuming "
+                "%s already ran and skipping. If they did not, run "
+                "`backfill-services` or reset this user to PENDING.",
+                r["source_email"], ",".join(sorted(services)))
+            return True
+        return set(services) <= done
+
     pairs = [
         (r["source_email"], r["target_email"])
         for r in rows
-        if delta or r["status"] != "DONE"
+        if delta or not _already_done(r)
     ]
 
     if only:
@@ -301,7 +343,7 @@ def cmd_provision_users(args, settings: Settings, db: MigrationDB,
         print("DRY RUN — nothing will be created\n")
     else:
         print("\nThis creates real accounts, which consume licences.")
-        if input(f"Type the domain to confirm: ").strip() != domain:
+        if not args.yes and input(f"Type the domain to confirm: ").strip() != domain:
             print("Aborted.")
             return
 
@@ -416,11 +458,44 @@ def cmd_discover(args, settings: Settings, db: MigrationDB, auth: AuthManager):
           f"~{days:.1f} day(s) at {settings.user_workers} concurrent users")
 
 
-def cmd_migrate(args, settings: Settings, db: MigrationDB, auth: AuthManager):
-    services = {s.strip().lower() for s in args.services.split(",") if s.strip()}
-    unknown = services - {"drive", "gmail", "calendar", "chat"}
+# Everything `migrate` can run per user. Shared Drives are absent on purpose:
+# they belong to no user, are driven as an admin, and are run by
+# shared_drives.py -- putting them here would make them run 141 times.
+PER_USER_SERVICES = ("drive", "gmail", "calendar", "chat", "contacts", "tasks")
+
+
+def resolve_services(raw: str) -> set[str]:
+    """
+    Parse --services, expanding `all`.
+
+    `all` means every per-user service, and selecting a service turns its
+    feature flag on. That is the point: someone asking for the full scope
+    should not then discover that two of the six silently did nothing because
+    a MIGRATE_* variable was unset. The scopes still have to be granted, and
+    preflight says so by name when they are not.
+    """
+    services = {s.strip().lower() for s in raw.split(",") if s.strip()}
+    if "all" in services:
+        services.discard("all")
+        services |= set(PER_USER_SERVICES)
+    unknown = services - set(PER_USER_SERVICES)
     if unknown:
-        sys.exit(f"unknown service(s): {', '.join(sorted(unknown))}")
+        sys.exit(f"unknown service(s): {', '.join(sorted(unknown))}. "
+                 f"Valid: {', '.join(PER_USER_SERVICES)}, or 'all'.")
+    return services
+
+
+def cmd_migrate(args, settings: Settings, db: MigrationDB, auth: AuthManager):
+    services = resolve_services(args.services)
+    if "chat" in services:
+        # Chat is a first-class service: selecting it opts the run in. That
+        # widens the scopes (chat.spaces/chat.messages) and enables the
+        # engine's import pass. See config.py for the fidelity caveat.
+        settings.migrate_chat = True
+    if "contacts" in services:
+        settings.migrate_contacts = True
+    if "tasks" in services:
+        settings.migrate_tasks = True
     results = run_batch(auth, db, settings, services, delta=False,
                         delta_days=0, only=args.user)
     _print_batch_summary(results)
@@ -434,9 +509,64 @@ def cmd_delta(args, settings: Settings, db: MigrationDB, auth: AuthManager):
     once more immediately after the cutover window closes.
     """
     services = {s.strip().lower() for s in args.services.split(",") if s.strip()}
+    if "chat" in services:
+        settings.migrate_chat = True
     results = run_batch(auth, db, settings, services, delta=True,
                         delta_days=args.days, only=args.user)
     _print_batch_summary(results)
+
+
+def cmd_syncacls(args, settings: Settings, db: MigrationDB,
+                 auth: AuthManager) -> int:
+    """
+    Recreate share access on every already-migrated file and folder.
+
+    The copy pass preserves a file's direct grants and, for inherited ones,
+    relies on the target tree recreating the parent folder's permission. This
+    pass makes the access explicit on the item itself (per-file model), so a
+    document keeps its collaborators even if it is later moved or the folder
+    unshared. Idempotent: creating a grant that already exists is a no-op.
+    """
+    from drive_engine import DriveMigrator
+    from resilience import DailyQuotaGuard
+
+    rows = [r for r in db.all_identities() if r["entity_type"] == "user"]
+    if args.user:
+        want = {u.lower() for u in args.user}
+        rows = [r for r in rows if r["source_email"] in want]
+
+    print("Recreating per-file share access on the target "
+          f"(recreate_inherited_acls={settings.recreate_inherited_acls})")
+    applied = synced = 0
+    for r in rows:
+        src, tgt = r["source_email"], r["target_email"]
+        mapped = db.conn.execute(
+            "SELECT source_id, target_id FROM id_mapping "
+            "WHERE source_user=? AND type IN ('file','folder') ORDER BY source_id",
+            (src,),
+        ).fetchall()
+        if not mapped:
+            print(f"  {src:<40} nothing mapped")
+            continue
+        if settings.dry_run:
+            print(f"  {src:<40} WOULD sync {len(mapped)} items")
+            synced += len(mapped)
+            continue
+        quota = DailyQuotaGuard(db, tgt, settings.effective_upload_cap())
+        migrator = DriveMigrator(auth, db, settings, src, tgt, quota)
+        per = 0
+        for i, row in enumerate(mapped, start=1):
+            try:
+                per += migrator._sync_acls(row["source_id"], row["target_id"])
+            except Exception as exc:  # noqa: BLE001
+                print(f"    ! {row['source_id']}: {exc}")
+            if i % 100 == 0:
+                print(f"    {src} {i}/{len(mapped)} items ...", flush=True)
+        applied += per
+        synced += len(mapped)
+        print(f"  {src:<14} {len(mapped):>5} items, {per} grants applied")
+    print(f"\nApplied {applied} grants across {synced} mapped items.")
+    return 0
 
 
 def cmd_report(args, settings: Settings, db: MigrationDB, auth: AuthManager):
@@ -466,6 +596,50 @@ def cmd_report(args, settings: Settings, db: MigrationDB, auth: AuthManager):
             print(f"  ... and {len(fails) - args.max_failures} more for "
                   f"{r['source_email']}")
     print(f"\nTotal failed items: {total_failed}")
+
+
+def cmd_backfill_services(args, settings: Settings, db: MigrationDB,
+                          auth: AuthManager):
+    """
+    Record which services a pre-`services_done` ledger actually completed.
+
+    Needed because `status` used to be per-user: a ledger left DONE by a
+    Drive-only run cannot say so, and the per-service skip check then has to
+    assume *everything* ran. Stating the truth once here unblocks the services
+    that genuinely have not run, without re-migrating the one that has.
+
+    Verified against the ledger rather than trusted: a service is only
+    backfilled for a user who has SUCCESS rows of the matching item types, so
+    a wrong --services cannot mark work done that never happened.
+    """
+    evidence = {
+        "drive": ("file", "folder"),
+        "gmail": ("message", "label", "draft"),
+        "calendar": ("event", "calendar"),
+        "chat": ("space", "chat_message"),
+    }
+    changed = skipped = 0
+    for r in db.all_identities():
+        if r["entity_type"] != "user" or r["status"] != "DONE":
+            continue
+        # summary() keys are "<item_type>:<status>", so a bare item type never
+        # matches. Only SUCCESS counts as evidence -- a user whose entire Drive
+        # phase failed must not be recorded as having completed it.
+        have = db.summary(r["source_email"]) or {}
+        done_types = {k.split(":", 1)[0] for k, v in have.items()
+                      if k.endswith(":SUCCESS") and v["count"] > 0}
+        confirmed = [s for s in args.services
+                     if done_types & set(evidence.get(s, ()))]
+        missing = sorted(set(args.services) - set(confirmed))
+        if missing:
+            print(f"  {r['source_email']}: no ledger evidence for "
+                  f"{','.join(missing)} — not backfilled")
+            skipped += 1
+        if confirmed:
+            db.mark_services_done(r["source_email"], confirmed)
+            print(f"  {r['source_email']}: recorded {','.join(sorted(confirmed))}")
+            changed += 1
+    print(f"\nBackfilled {changed} user(s); {skipped} had gaps left alone.")
 
 
 def cmd_scope(args, settings: Settings, db: MigrationDB, auth: AuthManager):
@@ -590,6 +764,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--tenant", choices=["source", "target"], required=True)
     s.add_argument("--dry-run", action="store_true",
                    help="report what would be created, create nothing")
+    s.add_argument("--yes", action="store_true",
+                   help="skip the interactive domain confirmation "
+                        "(for non-interactive callers like the web UI)")
     s.set_defaults(func=cmd_provision_users)
 
     s = sub.add_parser("discover", help="read-only pre-migration scan")
@@ -599,8 +776,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("migrate", help="run the full bulk copy")
     s.add_argument("--services", default="drive,gmail,calendar",
-                   help="drive,gmail,calendar,chat (chat also needs "
-                        "MIGRATE_CHAT=true)")
+                   help="drive,gmail,calendar,chat,contacts,tasks — or 'all' "
+                        "for every per-user service. Shared Drives are not a "
+                        "per-user service; run shared_drives.py, or use "
+                        "phases.py which sequences both.")
     s.add_argument("--user", action="append", help="limit to specific user(s)")
     s.set_defaults(func=cmd_migrate)
 
@@ -611,9 +790,20 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--user", action="append")
     s.set_defaults(func=cmd_delta)
 
+    s = sub.add_parser("syncacls", help="recreate per-file ACLs on migrated items")
+    s.add_argument("--user", action="append")
+    s.set_defaults(func=cmd_syncacls)
+
     s = sub.add_parser("report", help="print migration status and failures")
     s.add_argument("--max-failures", type=int, default=20)
     s.set_defaults(func=cmd_report)
+
+    s = sub.add_parser("backfill-services",
+                       help="record which services an older ledger completed")
+    s.add_argument("--services", required=True,
+                   type=lambda v: [x.strip() for x in v.split(",") if x.strip()],
+                   help="comma-separated, e.g. drive")
+    s.set_defaults(func=cmd_backfill_services)
 
     s = sub.add_parser("scope", help="print exactly what will and will not migrate")
     s.add_argument("--service", action="append",

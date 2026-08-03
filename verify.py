@@ -67,6 +67,11 @@ class UserReport:
 
     @property
     def ok(self) -> bool:
+        # A report with no checks is not a pass. all([]) is True, so a user
+        # whose every check errored out came back "verified" -- and this is
+        # the command the runbook uses to gate a cutover.
+        if not self.checks:
+            return False
         return all(c.ok for c in self.checks)
 
     def add(self, name: str, ok: bool, detail: str = "",
@@ -359,6 +364,12 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  - {r.source}")
 
     db.close()
+    # Likewise for the run as a whole: no reports means nothing was verified,
+    # which must not exit 0 into `verify.py || HOLD CUTOVER`.
+    if not reports:
+        print("\nNothing was verified — no user could be checked. "
+              "This is not a pass.")
+        return 1
     return 1 if any(not r.ok for r in reports) else 0
 
 

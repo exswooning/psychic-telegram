@@ -20,7 +20,7 @@ import base64
 import pytest
 
 from config import FOLDER_MIME, Settings
-from tests.fakes import FakeAuth, FakeCalendar, FakeDrive, FakeGmail
+from tests.fakes import FakeAuth, FakeCalendar, FakeChat, FakeDrive, FakeGmail
 from corpus import ORG, SCALES, CorpusBuilder
 
 SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
@@ -314,6 +314,45 @@ def test_calendar_meetings_span_the_org_and_use_import(seed, settings):
     assert len(attendee_emails & set(peers)) >= 3
 
 
+def test_chat_seed_creates_room_spaces_with_messages(seed, settings):
+    FakeChat.reset_shared()
+    chat = FakeChat("alice@tenuta.com", "source")
+    m = seed.seed_chat(chat, settings, "alice@tenuta.com",
+                       ["bob@tenuta.com"], "ext@example.com", local="alice")
+    assert m["spaces"] == 2
+    assert m["messages"] == 10
+    assert chat.call_count("spaces.create") == 2
+    assert chat.call_count("chat.messages.create") == 10
+    names = [s["displayName"] for s in chat.space_store.values()]
+    assert "alice team" in names and "alice standup" in names
+
+
+def test_chat_seed_failure_is_best_effort_not_fatal(seed):
+    class Bogus:
+        def spaces(self):
+            return self
+
+        def create(self, **kw):
+            raise RuntimeError("chat not enabled")
+
+    FakeChat.reset_shared()
+    m = seed.seed_chat(Bogus(), None, "alice@tenute.com",
+                       ["bob@flight.com"], "x", local="alice")
+    assert m["spaces"] == 0 and m["messages"] == 0 and m["note"]
+
+
+def test_chat_reset_deletes_only_seeded_rooms(seed, settings):
+    FakeChat.reset_shared()
+    chat = FakeChat("alice@tenuta.com", "source")
+    seed.seed_chat(chat, settings, "alice@tenuta.com",
+                   ["bob@tenuta.com"], "ext@example.com", local="alice")
+    chat.add_space("Real Room")          # must be left alone
+    deleted = seed.reset_chat(chat, settings, local="alice")
+    assert deleted == 2
+    remaining = {s["displayName"] for s in chat.space_store.values()}
+    assert remaining == {"Real Room"}
+
+
 # ======================================================================
 # The one that matters: five users, shared files, real migration
 # ======================================================================
@@ -397,3 +436,90 @@ def test_five_user_org_migrates_without_duplicating_shared_files(
         drive_engine.DriveMigrator(auth, db, settings, src, tgt, quota).run()
     after = {t: auth.target_drive(t).count() for t in tgt_users}
     assert before == after, "second run duplicated content"
+
+
+class TestSeedExitCode:
+    """
+    A run that seeded nothing must not report success.
+
+    It returned 0 unconditionally. Five users timing out for thirty minutes
+    rendered in the web UI as a green "exit 0" next to a run that wrote
+    nothing at all — the single most misleading outcome the seeder can produce,
+    because it looks exactly like the good one.
+    """
+
+    def test_exit_codes_are_distinct(self):
+        import inspect
+
+        import seed_sandbox
+
+        src = inspect.getsource(seed_sandbox.main)
+        assert "return 1" in src, "total failure must exit non-zero"
+        assert "return 2" in src, "partial failure needs its own code"
+
+    def test_total_failure_is_named_in_the_output(self):
+        import inspect
+
+        import seed_sandbox
+
+        src = inspect.getsource(seed_sandbox.main)
+        assert "0 of" in src and "Nothing was written" in src
+
+    def test_partial_failure_is_distinguished_from_success(self):
+        import inspect
+
+        import seed_sandbox
+
+        src = inspect.getsource(seed_sandbox.main)
+        assert "PARTIAL" in src
+
+
+class TestResetIsActuallyComplete:
+    """
+    Reset has to leave a clean slate, or a reseed builds on the last one.
+
+    Two things survived it, both observed live: 201 drafts in a mailbox that
+    had been reset repeatedly, and every seeded label — which is what produced
+    "Label name exists or conflicts" on each label of the following run.
+    """
+
+    def test_the_label_set_has_one_definition(self):
+        """Creation and reset used separate literal lists; drift between them
+        means reset silently stops removing whatever was added."""
+        import inspect
+
+        import seed_sandbox
+
+        src = inspect.getsource(seed_sandbox.seed_gmail)
+        assert "SEED_LABELS" in src, "creation must use the shared constant"
+        reset = inspect.getsource(seed_sandbox.reset_gmail)
+        assert "SEED_LABELS" in reset, "reset must use the shared constant"
+
+    def test_reset_deletes_drafts(self):
+        """Trashing a draft's underlying message does not remove the draft."""
+        import inspect
+
+        import seed_sandbox
+
+        src = inspect.getsource(seed_sandbox.reset_gmail)
+        assert "drafts().list" in src and "drafts().delete" in src
+
+    def test_reset_only_removes_labels_the_seeder_made(self):
+        """Deleting every user label would take ones the account owner
+        created themselves."""
+        import inspect
+
+        import seed_sandbox
+
+        src = inspect.getsource(seed_sandbox.reset_gmail)
+        assert 'type") == "user"' in src or "'user'" in src
+        assert "wanted" in src
+
+    def test_messages_are_still_matched_by_seed_marker(self):
+        """The existing protection: only mail this seeder inserted is touched,
+        identified by its @seed.test Message-ID."""
+        import inspect
+
+        import seed_sandbox
+
+        assert "@seed.test" in inspect.getsource(seed_sandbox.reset_gmail)

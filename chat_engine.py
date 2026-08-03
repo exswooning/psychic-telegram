@@ -1,14 +1,30 @@
 """
 chat_engine.py
 ===============
-Google Chat migration, via the Chat API's import mode.
+Google Chat migration.
+
+Two ways to build a space on the target, chosen with `CHAT_SPACE_MODE`:
+
+  import  (default)  created with importMode=True, filled, then released with
+                     completeImport. Members never see a half-built space and
+                     no notification fires for a three-year-old message.
+                     Requires the chat.import scope.
+  direct             an ordinary space, created and posted into live. Needs
+                     no chat.import, which is the entire point: that scope is
+                     the one most often refused, and without this mode a
+                     tenant that will not grant it cannot migrate Chat at all.
+                     The cost is real -- members are added before the
+                     backfill (they must be, or they cannot post), so every
+                     replayed message notifies them. Fine for a handful of
+                     spaces, unkind across a whole tenant.
 
 This module does not follow the same shape as the Drive/Gmail/Calendar
 engines, because Chat does not allow it:
 
-* A space must be created with `importMode=True` **from the start**. History
-  cannot be added to an existing space, so there is no "resume into what is
-  already there" -- a partially imported space has to be finished or dropped.
+* Under `import`, a space must be created with `importMode=True` **from the
+  start**. History cannot be added to an existing space, so there is no
+  "resume into what is already there" -- a partially imported space has to be
+  finished or dropped.
 * Messages are attributed to whoever calls the API. Posting a whole
   conversation as one impersonated user turns a group thread into a monologue,
   so each message is replayed **as its own original sender**, which means
@@ -57,8 +73,8 @@ class ChatMigrator:
         self.source_user = source_user
         self.target_user = target_user
         self.limiter = RateLimiter(settings.per_user_qps)
-        self.stats = {"spaces": 0, "messages": 0, "skipped": 0, "failed": 0,
-                      "unmapped_senders": 0}
+        self.stats = {"spaces": 0, "messages": 0, "members": 0, "skipped": 0,
+                      "failed": 0, "unmapped_senders": 0}
         self._email_cache: dict[str, str] = {}
 
     def _retry(self, fn):
@@ -148,12 +164,54 @@ class ChatMigrator:
                                   f"spaceType={space.get('spaceType')}")
                 self.stats["skipped"] += 1
                 continue
-            if self.db.get_target_id(self.source_user, name, "chat_space"):
-                self.stats["skipped"] += 1
+            mapped = self.db.get_target_id(self.source_user, name, "chat_space")
+            if mapped:
+                # A space already mapped is usually done. But one whose
+                # completeImport failed is mapped AND unusable -- it stays in
+                # import mode, invisible to every member -- and skipping it
+                # here meant no re-run could ever finish it. Retry just the
+                # completion rather than recreating the space and duplicating
+                # its messages.
+                if self._import_incomplete(name):
+                    self._finish_import(name, mapped)
+                else:
+                    self.stats["skipped"] += 1
                 continue
             self._migrate_space(space)
 
         return dict(self.stats)
+
+    def _import_incomplete(self, source_space: str) -> bool:
+        """
+        Did this space get created but never leave import mode?
+
+        Only ever true under `import`. A direct-mode space is live from the
+        moment it is created, so there is no completion to retry -- calling
+        completeImport on one is rejected, and treating that rejection as a
+        failure would mark a perfectly good space broken on every re-run.
+        """
+        if self.settings.chat_space_mode != "import":
+            return False
+        row = self.db.get_audit(self.source_user, source_space, "chat_space")
+        status = (row["status"] if row else "") or ""
+        return status.startswith("FAILED")
+
+    def _finish_import(self, source_space: str, target_space: str) -> None:
+        """Complete an import left half-done by an earlier run."""
+        tgt = self.auth.target_chat(self.target_user)
+        try:
+            self._retry(lambda: tgt.spaces().completeImport(
+                name=target_space).execute())
+        except OPTIONAL_PASS_ERRORS as exc:
+            self.db.log_audit(self.source_user, source_space, "chat_space",
+                              "FAILED", f"completeImport retry failed: {exc}")
+            self.stats["failed"] += 1
+            return
+        self.db.log_audit(self.source_user, source_space, "chat_space",
+                          "SUCCESS", "completed an import left half-done")
+        self.stats["spaces"] += 1
+        log.info("[%s] finished a space left in import mode: %s",
+                 self.source_user, target_space)
 
     def _migrate_space(self, space: dict) -> None:
         name = space.get("name")
@@ -164,13 +222,14 @@ class ChatMigrator:
             self.stats["spaces"] += 1
             return
 
+        import_mode = self.settings.chat_space_mode == "import"
         tgt = self.auth.target_chat(self.target_user)
+        body = {"spaceType": "SPACE", "displayName": f"{display}"}
+        if import_mode:
+            body["importMode"] = True
         try:
-            created = self._retry(lambda: tgt.spaces().create(body={
-                "spaceType": "SPACE",
-                "displayName": f"{display}",
-                "importMode": True,
-            }).execute())
+            created = self._retry(lambda b=body: tgt.spaces().create(
+                body=b).execute())
         except OPTIONAL_PASS_ERRORS as exc:
             self.db.log_audit(self.source_user, name, "chat_space", "FAILED",
                               str(exc))
@@ -181,7 +240,19 @@ class ChatMigrator:
         self.db.record_mapping(self.source_user, name, target_space,
                                "chat_space", source_name=display)
 
+        # Before the messages, not after. Under `direct` a user cannot post
+        # into a space they are not a member of, so a late join would send
+        # every one of their messages down the unattributed fallback path.
+        self._sync_members(name, target_space)
+
         replayed = self._replay_messages(name, target_space)
+
+        if not import_mode:
+            # Nothing to complete: the space has been live since it was made.
+            self.db.log_audit(self.source_user, name, "chat_space", "SUCCESS",
+                              f"direct mode, {replayed} message(s)")
+            self.stats["spaces"] += 1
+            return
 
         # Until completeImport lands, the space stays invisible to members.
         # A space left in import mode is worse than one never created.
@@ -197,6 +268,72 @@ class ChatMigrator:
 
         self.db.log_audit(self.source_user, name, "chat_space", "SUCCESS")
         self.stats["spaces"] += 1
+
+    # -- membership -----------------------------------------------------------
+    def _sync_members(self, source_space: str, target_space: str) -> int:
+        """
+        Recreate the space's human members, mapped to their target addresses.
+
+        Only mapped users are added. An unmapped member has no account on the
+        target, and inventing one is not this tool's decision to make -- the
+        omission is recorded instead so it shows up in the audit rather than
+        being discovered by whoever cannot find their conversation.
+        """
+        added = 0
+        try:
+            members = self._iter_members(source_space)
+        except OPTIONAL_PASS_ERRORS as exc:
+            self.db.log_audit(self.source_user, source_space, "chat_member",
+                              "FAILED", f"could not list members: {exc}")
+            return 0
+
+        tgt = self.auth.target_chat(self.target_user)
+        for m in members:
+            member = m.get("member") or {}
+            if member.get("type") != "HUMAN":
+                continue
+            email = self._sender_email(member.get("name", ""))
+            mapped = self.db.resolve_identity(email) if email else None
+            if not mapped:
+                self.db.log_audit(
+                    self.source_user, member.get("name", "?"), "chat_member",
+                    "SKIPPED_UNMAPPED",
+                    f"no target account for {email or 'unresolved user'}")
+                self.stats["unmapped_senders"] += 1
+                continue
+            if mapped == self.target_user:
+                continue          # the creator is already in the space
+            try:
+                self.limiter.acquire()
+                self._retry(lambda e=mapped: tgt.spaces().members().create(
+                    parent=target_space,
+                    body={"member": {"name": f"users/{e}", "type": "HUMAN"}},
+                ).execute())
+            except OPTIONAL_PASS_ERRORS as exc:
+                # Already-a-member is the common case on a re-run, and is not
+                # a failure worth counting.
+                if "ALREADY_EXISTS" in str(exc) or "already a member" in str(exc):
+                    continue
+                self.db.log_audit(self.source_user, mapped, "chat_member",
+                                  "FAILED", str(exc))
+                self.stats["failed"] += 1
+                continue
+            added += 1
+        self.stats["members"] = self.stats.get("members", 0) + added
+        return added
+
+    def _iter_members(self, space_name: str):
+        out, token = [], None
+        while True:
+            self.limiter.acquire()
+            resp = self._retry(lambda t=token: self.auth.source_chat(
+                self.source_user
+            ).spaces().members().list(
+                parent=space_name, pageSize=100, pageToken=t).execute())
+            out.extend(resp.get("memberships", []))
+            token = resp.get("nextPageToken")
+            if not token:
+                return out
 
     def _replay_messages(self, source_space: str, target_space: str) -> int:
         replayed = 0

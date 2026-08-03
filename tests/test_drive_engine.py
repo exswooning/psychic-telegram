@@ -373,7 +373,38 @@ def test_owner_permission_is_never_reapplied(migrator, auth):
     assert all(p["role"] != "owner" for p in _target_perms(auth, "mine.pdf"))
 
 
-def test_inherited_permissions_are_not_duplicated_per_file(migrator, auth):
+def test_inherited_permissions_are_recreated_per_file(migrator, auth, db):
+    """A grant a document gets through its parent folder is made explicit on
+    the migrated document itself, so the share access does not depend on the
+    file staying put in the tree."""
+    from db import bulk_seed_identities
+
+    bulk_seed_identities(db, [("bob@tenanta.com", "bob@tenantb.com")])
+    src = auth.source_drive(SRC_USER)
+    fid = src.add_binary("child.pdf")
+    src.add_permission(fid, "user", "reader", email="bob@tenanta.com",
+                       inherited=True)
+    migrator.run()
+    perms = _target_perms(auth, "child.pdf")
+    assert any(p["emailAddress"] == "bob@tenantb.com"
+               and p["role"] == "reader" for p in perms)
+
+
+def test_inherited_permission_default_is_on():
+    from config import Settings
+
+    s = Settings()
+    assert s.recreate_inherited_acls is True
+
+
+def test_inherited_permissions_can_stay_folder_derived(
+        migrator, auth, db, settings):
+    """MIGRATE_INHERITED_ACLS=false returns to folder-derived sharing: no
+    per-file grant is recreated, only the parent folder's."""
+    from db import bulk_seed_identities
+
+    settings.recreate_inherited_acls = False
+    bulk_seed_identities(db, [("bob@tenanta.com", "bob@tenantb.com")])
     src = auth.source_drive(SRC_USER)
     fid = src.add_binary("child.pdf")
     src.add_permission(fid, "user", "reader", email="bob@tenanta.com",
@@ -843,3 +874,145 @@ def test_dry_run_writes_nothing(auth, db, settings, identity, quota):
     tgt = auth.target_drive(TGT_USER)
     assert tgt.count() == 0
     assert tgt.call_count("files.create") == 0
+
+
+# ----------------------------------------------------------------------
+# Failures that used to leave no trace.
+#
+# Both of these logged nothing at all: a `log.warning` at most, which scrolls
+# past and gives `report` and resolve_failures nothing to act on. A file whose
+# sharing never transferred looked identical to one that had no sharing.
+# ----------------------------------------------------------------------
+def test_unreadable_source_acl_is_recorded_not_just_warned(migrator, auth, db):
+    """The root cause behind resolve_failures erasing ACL failures: _sync_acls
+    returned 0 on error without writing an audit row, so the retry tool
+    deleted the old FAILED row and found nothing to replace it with."""
+    class Exploding:
+        def permissions(self):
+            return self
+
+        def list(self, **kw):
+            raise RuntimeError("permission denied listing permissions")
+
+    # Replace the migrator's own client: auth.source_drive() hands back a fresh
+    # fake each call, so patching that would not touch the captured one.
+    migrator.src = Exploding()
+
+    applied = migrator._sync_acls("src-file", "tgt-file")
+
+    assert applied == 0
+    rows = db.conn.execute(
+        "SELECT item_id, item_type, status FROM audit_log "
+        "WHERE source_user=? AND item_type='acl'",
+        ("alice@tenanta.com",)).fetchall()
+    assert rows, "an unreadable source ACL left no record at all"
+    assert rows[0]["status"].startswith("FAILED")
+    assert migrator.stats["acl_failed"] >= 1
+
+
+def test_a_dropped_comment_reply_is_recorded(migrator):
+    """A reply that could not be recreated simply vanished, so the thread came
+    out shorter on the target with nothing anywhere saying so."""
+    import inspect
+
+    src = inspect.getsource(migrator.__class__)
+    # the reply handler must record, not `pass`
+    reply_bit = src[src.index("replies().create"):]
+    handler = reply_bit[:reply_bit.index("# -- ACL translation")]
+    assert "log_audit" in handler
+    assert "reply not recreated" in handler
+
+
+# ----------------------------------------------------------------------
+# modifiedTime survives *every* post-create write, not just the first kind.
+#
+# Found by measurement, not by review: an A/B across 1,342 real files showed
+# 97 with a drifted modifiedTime in both transfer modes, and every one of the
+# 97 was native and carried comments. The engine restored the timestamp after
+# ACLs and then wrote comments, undoing the restore it had just made. The
+# suite could not see it because the fake modelled the permission bump but
+# not the comment bump -- so the fix is in two places, and this test fails
+# against the old ordering.
+# ----------------------------------------------------------------------
+def test_modified_time_survives_comments_not_just_acls(auth, db, settings,
+                                                       identity, quota):
+    """A commented, shared file must still read back with its own timestamp."""
+    import drive_engine
+
+    settings.migrate_comments = True
+    src = auth.source_drive(SRC_USER)
+    doc = src.add_native("Design — Project note 006", mtime="2024-03-01T09:00:00Z")
+    src.add_comment(doc, "does this still apply?", author="Bob")
+    # Shared, so the ACL path runs too and the two restores cannot be confused.
+    src.perms[doc].append({"id": "p1", "type": "user", "role": "writer",
+                           "emailAddress": "bob@tenanta.com"})
+
+    drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER,
+                               quota).run()
+
+    tgt = auth.target_drive(TGT_USER)
+    got = tgt.by_name("Design — Project note 006")
+    assert got, "the document did not arrive at all"
+    assert got[0]["modifiedTime"] == "2024-03-01T09:00:00Z", (
+        "modifiedTime was left at the value the last write stamped on it "
+        f"({got[0]['modifiedTime']}) instead of the source's")
+
+
+# ----------------------------------------------------------------------
+# owned_only: the invariant that stops a shared file being copied once per
+# recipient. Default True, applied in both discovery and the engine, and
+# until now untested.
+#
+# The seeder builds a cross-user sharing graph precisely so this can be
+# checked: five users collectively *see* far more than they collectively
+# *own*, and a correct migration reproduces the union of what they own
+# exactly once. Without this filter, a deck shared with four colleagues is
+# stored five times in the target -- paid for five times, and nobody can say
+# which copy is authoritative.
+# ----------------------------------------------------------------------
+def test_a_file_shared_in_from_a_colleague_is_not_migrated(migrator, auth, db):
+    """It belongs to its owner's migration, not to everyone who can see it."""
+    src = auth.source_drive(SRC_USER)
+    mine = src.add_binary("my-deck.pptx")
+    theirs = src.add_binary("their-deck.pptx")
+    # reassign ownership: this one is shared in, not owned
+    src.store[theirs]["owners"] = [{"emailAddress": "colleague@tenanta.com"}]
+
+    migrator.run()
+
+    assert db.get_target_id(SRC_USER, mine, "file"), "own file must migrate"
+    assert not db.get_target_id(SRC_USER, theirs, "file"), \
+        "a shared-in file was copied, so every recipient stores their own copy"
+
+
+def test_owned_only_is_on_by_default(monkeypatch):
+    monkeypatch.delenv("OWNED_ONLY", raising=False)
+    from config import Settings
+
+    assert Settings().owned_only is True
+
+
+def test_turning_it_off_migrates_shared_in_files_too(migrator, auth, db, settings):
+    """The escape hatch exists for a single-user rescue, where 'everything
+    this account can see' is the point."""
+    settings.owned_only = False
+    src = auth.source_drive(SRC_USER)
+    theirs = src.add_binary("their-deck.pptx")
+    src.store[theirs]["owners"] = [{"emailAddress": "colleague@tenanta.com"}]
+
+    migrator.run()
+
+    assert db.get_target_id(SRC_USER, theirs, "file")
+
+
+def test_the_filter_reaches_the_query_not_just_the_results(migrator):
+    """Filtering after listing would still pay to enumerate every shared-in
+    file on every user -- on a real tenant that is the bulk of the listing."""
+    import inspect
+
+    # It belongs in the listing query, not in _walk: filtering after the fact
+    # would still pay to enumerate every shared-in file on every user, which
+    # on a real tenant is the bulk of the listing.
+    src = inspect.getsource(migrator.__class__._list_children)
+    assert "'me' in owners" in src
+    assert "owned_only" in src

@@ -345,7 +345,8 @@ class Dashboard:
         self.started = time.time()
         self.last_collect = 0.0
 
-        self.services = {"drive": True, "gmail": True, "calendar": True}
+        self.services = {"drive": True, "gmail": True, "calendar": True,
+                         "chat": False}
         self.dry_run = False
 
         workdir = os.path.dirname(os.path.abspath(__file__))
@@ -735,7 +736,7 @@ class Dashboard:
             self._put(h - 2, 1, truncate(self.message, w - 2),
                       self._c(C_WARN, True))
         keys = ("q quit  1-5 view  d discover  p preflight  m migrate  "
-                "x delta  k stop  t dry-run  s/g/c services  e export  r refresh")
+                "x delta  k stop  t dry-run  s/g/c/h services  e export  r refresh")
         self._put(h - 1, 0, " " * (w - 1), self._c(C_HEAD))
         self._put(h - 1, 1, keys, self._c(C_HEAD))
 
@@ -826,6 +827,8 @@ class Dashboard:
             self.services["gmail"] = not self.services["gmail"]
         elif ch == ord("c"):
             self.services["calendar"] = not self.services["calendar"]
+        elif ch == ord("h"):
+            self.services["chat"] = not self.services["chat"]
 
         elif ch == ord("p"):
             self._launch(["preflight"])

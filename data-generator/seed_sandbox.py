@@ -64,12 +64,19 @@ from config import Settings  # noqa: E402
 from resilience import retry_on_google_error  # noqa: E402
 from corpus import ORG, SCALES, CorpusBuilder  # noqa: E402
 
+# The labels seed_gmail() creates. Reset removes exactly these -- deleting
+# every user label would take labels the account's owner made themselves.
+SEED_LABELS = ["Clients", "Clients/Acme", "Clients/Acme/2024",
+               "Projects", "Projects/Apollo", "Archive", "Receipts"]
+
 SEED_SCOPES = [
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/gmail.insert",
     "https://www.googleapis.com/auth/gmail.labels",
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/chat.spaces",
+    "https://www.googleapis.com/auth/chat.messages",
 ]
 
 
@@ -189,8 +196,7 @@ def seed_gmail(gmail, settings: Settings, user: str, peers: list[str],
         ).execute())()
 
     label_ids = {}
-    for name in ["Clients", "Clients/Acme", "Clients/Acme/2024",
-                 "Projects", "Projects/Apollo", "Archive", "Receipts"]:
+    for name in SEED_LABELS:
         try:
             label_ids[name] = make_label(name)["id"]
             m["labels"].append(name)
@@ -290,13 +296,84 @@ def seed_drafts(gmail, settings: Settings, user: str, peers: list[str],
 
 
 # ======================================================================
-# Google Chat — deliberately not seeded
+# Google Chat — SPACE-type rooms for the migrator to import
 # ======================================================================
-# Gmail rejects CHAT as a label on messages.insert ("400 Invalid label:
-# CHAT"), so chat history cannot be written into a mailbox even for testing,
-# and the Chat API needs its own scopes plus an app configured for import
-# mode. Chat is therefore untestable here AND unmigratable by this engine --
-# it stays on the NONE list in scope.py rather than being faked.
+# Uses only 'SPACE' (group) rooms: Direct Messages are defined by their two
+# participants rather than a display name, and recreating one as a named
+# space silently changes what it is, so chat_engine.py deliberately skips
+# them. Each seeded space is posted to as the impersonated user -- a single
+# author, but enough to exercise the import-space path end to end.
+#
+# Needs chat.spaces/chat.messages on the source service account, plus the
+# Chat service switched on for the org. Seeding is best-effort: an org that
+# has not enabled Chat fails the first spaces.create, and seeding must not
+# take the rest of the corpus down with it, so the failure is surfaced as a
+# printed note while Drive/Gmail/Calendar continue.
+CHAT_SEED_NAMES = ("team", "standup")
+
+
+def _chat_names(local: str) -> list[str]:
+    return [f"{local} {n}" for n in CHAT_SEED_NAMES]
+
+
+def seed_chat(chat, settings: Settings, user: str, peers: list[str],
+              external: str, local: str) -> dict:
+    retry = _retry_factory(settings)
+    m = {"spaces": 0, "messages": 0, "note": ""}
+    lines = [
+        "Morning — where did that land?",
+        "Shipped it. Track is on the keyclients note.",
+        "Raising this with the platform team today.",
+        f"Can we pull in {peers[0] if peers else 'the team'} on Monday?",
+        "Closing. Thanks everyone.",
+        f"Tagging {external} on the contract.",
+        "Reviewed at standup — looks good to go.",
+    ]
+    try:
+        for name in _chat_names(local):
+            created = retry(lambda n=name: chat.spaces().create(
+                body={"spaceType": "SPACE", "displayName": n}
+            ).execute())()
+            space = created["name"]
+            m["spaces"] += 1
+            for text in lines[:5]:
+                body = {"text": text}
+                retry(lambda s=space, b=body: chat.spaces().messages()
+                      .create(parent=s, body=b).execute())()
+                m["messages"] += 1
+    except Exception as exc:  # noqa: BLE001
+        m["note"] = f"chat failed (Chat switched on? scopes granted?): {exc}"
+        print(f"  ! chat for {user}: {exc}")
+    return m
+
+
+def reset_chat(chat, settings: Settings, local: str) -> int:
+    """Delete only the SPACE rooms this seeder created for this user.
+
+    Matched by display name (the same rule that makes reset_drive delete
+    only the MIGRATION-TEST tree), so real spaces are left untouched."""
+    retry = _retry_factory(settings)
+    wanted = set(_chat_names(local))
+    deleted = 0
+    token = None
+    while True:
+        try:
+            resp = retry(lambda t=token: chat.spaces().list(
+                pageSize=100, pageToken=t).execute())()
+        except Exception:  # noqa: BLE001
+            return deleted
+        for sp in resp.get("spaces", []):
+            if (sp.get("displayName") or "") in wanted:
+                try:
+                    retry(lambda n=sp["name"]: chat.spaces().delete(
+                        name=n).execute())()
+                    deleted += 1
+                except Exception:  # noqa: BLE001
+                    pass
+        token = resp.get("nextPageToken")
+        if not token:
+            break
+    return deleted
 
 
 # ======================================================================
@@ -533,7 +610,48 @@ def reset_gmail(gmail, settings: Settings) -> int:
                 pass
         token = resp.get("nextPageToken")
         if not token:
-            return deleted
+            break
+
+    # Drafts are separate objects. Trashing a draft's underlying message does
+    # not remove the draft, so without this they survive every reset and
+    # accumulate -- a mailbox reset repeatedly was still holding 201 of them.
+    token = None
+    while True:
+        try:
+            resp = retry(lambda t=token: gmail.users().drafts().list(
+                userId="me", maxResults=500, pageToken=t).execute())()
+        except Exception:  # noqa: BLE001
+            break
+        for d in resp.get("drafts", []):
+            try:
+                retry(lambda did=d["id"]: gmail.users().drafts().delete(
+                    userId="me", id=did).execute())()
+                deleted += 1
+            except Exception:  # noqa: BLE001
+                pass
+        token = resp.get("nextPageToken")
+        if not token:
+            break
+
+    # Seeded labels, and only those -- deleting every user label would take
+    # ones the account's owner created. Left behind they collide on the next
+    # run with "Label name exists or conflicts", which is what every label
+    # error in the previous reseed actually was.
+    try:
+        existing = retry(lambda: gmail.users().labels().list(
+            userId="me").execute())()
+        wanted = {n.lower() for n in SEED_LABELS}
+        for lab in existing.get("labels", []):
+            if lab.get("type") == "user" and lab.get("name", "").lower() in wanted:
+                try:
+                    retry(lambda lid=lab["id"]: gmail.users().labels().delete(
+                        userId="me", id=lid).execute())()
+                except Exception:  # noqa: BLE001
+                    pass
+    except Exception:  # noqa: BLE001
+        pass
+
+    return deleted
 
 
 def reset_calendar(cal, settings: Settings) -> int:
@@ -582,6 +700,14 @@ def reset_calendar(cal, settings: Settings) -> int:
 # ======================================================================
 # Service construction
 # ======================================================================
+def _resolve_key_path(settings: Settings) -> str:
+    key = os.getenv("SEED_SA_KEY", settings.source_sa_key)
+    if key and not os.path.isabs(key):
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        key = os.path.abspath(os.path.join(repo_root, key))
+    return key
+
+
 def build_services(settings: Settings, user: str):
     """Delegated clients with WRITE scopes against the sandbox source tenant."""
     import google_auth_httplib2
@@ -589,7 +715,7 @@ def build_services(settings: Settings, user: str):
     from google.oauth2 import service_account
     from googleapiclient.discovery import build
 
-    key = os.getenv("SEED_SA_KEY", settings.source_sa_key)
+    key = _resolve_key_path(settings)
     creds = service_account.Credentials.from_service_account_file(
         key, scopes=SEED_SCOPES
     ).with_subject(user)
@@ -601,6 +727,22 @@ def build_services(settings: Settings, user: str):
         return build(api, version, http=http, cache_discovery=False)
 
     return svc("drive", "v3"), svc("gmail", "v1"), svc("calendar", "v3")
+
+
+def build_chat(settings: Settings, user: str):
+    """A delegated Chat client with the seed scopes, for the sandbox source."""
+    import google_auth_httplib2
+    import httplib2
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+
+    creds = service_account.Credentials.from_service_account_file(
+        _resolve_key_path(settings), scopes=SEED_SCOPES
+    ).with_subject(user)
+    http = google_auth_httplib2.AuthorizedHttp(
+        creds, http=httplib2.Http(timeout=300)
+    )
+    return build("chat", "v1", http=http, cache_discovery=False)
 
 
 # ======================================================================
@@ -615,6 +757,7 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
     print(f"  [{user}] starting ({entry['dept']}, {entry['project']})")
 
     drive, gmail, cal = build_services(settings, user)
+    chat = build_chat(settings, user)
     retry = _retry_factory(settings)
 
     builder = CorpusBuilder(drive, settings, user, peers, external, scale,
@@ -624,25 +767,31 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
     gmail_m.update(seed_drafts(gmail, settings, user, peers))
     cal_m = seed_calendar(cal, settings, user, peers, external, event_count)
     cal_m.update(seed_secondary_calendars(cal, settings, user, peers))
+    chat_m = seed_chat(chat, settings, user, peers, external,
+                       user.split("@")[0])
 
     elapsed = round(time.time() - t0, 1)
     print(f"  [{user}] done in {elapsed}s: {drive_m['total_files']} files, "
           f"{drive_m['folders']} folders, {drive_m.get('comments', 0)} comments, "
           f"{gmail_m['messages']} messages, {gmail_m.get('drafts', 0)} drafts, "
           f"{cal_m['events']} events, "
-          f"{cal_m.get('calendars', 0)} secondary calendars")
+          f"{cal_m.get('calendars', 0)} secondary calendars, "
+          f"{chat_m['messages']} chat messages in {chat_m['spaces']} spaces"
+          + (f" ({chat_m['note']})" if chat_m["note"] else ""))
     return {"user": user, "dept": entry["dept"], "project": entry["project"],
             "drive": drive_m, "gmail": gmail_m, "calendar": cal_m,
-            "elapsed_sec": elapsed}
+            "chat": chat_m, "elapsed_sec": elapsed}
 
 
 def reset_one_user(settings: Settings, user: str) -> dict:
     drive, gmail, cal = build_services(settings, user)
+    chat = build_chat(settings, user)
     return {
         "user": user,
         "drive": reset_drive(drive, settings),
         "gmail": reset_gmail(gmail, settings),
         "calendar": reset_calendar(cal, settings),
+        "chat": reset_chat(chat, settings, user.split("@")[0]),
     }
 
 
@@ -661,12 +810,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--mail", type=int, help="messages per user "
                                              "(default scales with --scale)")
     ap.add_argument("--events", type=int, help="events per user")
-    ap.add_argument("--workers", type=int, default=5)
+    ap.add_argument("--workers", type=int, default=0,
+                    help="0 (default) sizes the pool to this machine; "
+                         "see resources.py")
     ap.add_argument("--manifest", default="sandbox_manifest.json")
     ap.add_argument("--identities-out", default="identities.csv")
     ap.add_argument("--edge-cases", default="first",
                     choices=["first", "all", "none"],
                     help="full edge-case set on user 1, on everyone, or nobody")
+    ap.add_argument("--yes", action="store_true",
+                    help="skip the interactive 'long run?' confirmation. Meant "
+                         "for callers that already enforce their own safety "
+                         "gates (the web UI requires the source domain typed "
+                         "back) -- without it, a non-interactive stdin makes "
+                         "input() hang or EOF, and nothing gets seeded.")
     ap.add_argument("--create-users", action="store_true",
                     help="create the test accounts first if they do not exist "
                          "(needs admin.directory.user granted to SEED_SA_KEY)")
@@ -699,7 +856,7 @@ def main(argv: list[str] | None = None) -> int:
             sys.exit("SOURCE_ADMIN must be set to a super admin of "
                      f"{settings.source_domain} to create accounts.")
         creds = service_account.Credentials.from_service_account_file(
-            os.getenv("SEED_SA_KEY", settings.source_sa_key),
+            _resolve_key_path(settings),
             scopes=SEED_SCOPES + [provision.DIRECTORY_WRITE_SCOPE],
         ).with_subject(admin)
         directory = build(
@@ -717,18 +874,40 @@ def main(argv: list[str] | None = None) -> int:
         print("\nWaiting 20s for new accounts to become usable ...")
         time.sleep(20)
 
+    # Resolve the pool size before either branch. --workers 0 means "size it
+    # to this machine"; the reset path used to run before that resolution and
+    # died with max_workers must be greater than 0.
+    if not args.workers:
+        try:
+            import resources
+            rec = resources.recommend()
+            args.workers = rec["seed_workers"]
+            print(f"Workers: {args.workers} ({rec['reason']})")
+        except Exception:  # noqa: BLE001
+            args.workers = 3
+
     # --- Reset -----------------------------------------------------------
     if args.reset:
-        print(f"About to DELETE all Drive files, mail and events for:")
+        print(f"About to DELETE all Drive files, mail, events and Chat for:")
         for u in all_users:
             print(f"    {u}")
-        if input(f"Type the domain to confirm: ").strip() != settings.source_domain:
-            print("Aborted.")
-            return 1
+        # --yes satisfies this because --confirm-domain is already a typed
+        # match against SOURCE_DOMAIN, checked by assert_sandbox before we get
+        # here. Without this, an unattended reset blocks forever on input()
+        # with no terminal to type into -- and a hung wipe looks identical to
+        # a slow one.
+        if not args.yes:
+            if input("Type the domain to confirm: ").strip() != settings.source_domain:
+                print("Aborted.")
+                return 1
+        else:
+            print(f"  (--yes, and --confirm-domain already matched "
+                  f"{settings.source_domain})")
         with futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
             for r in pool.map(lambda u: reset_one_user(settings, u), all_users):
                 print(f"  {r['user']}: {r['drive']} files, {r['gmail']} "
-                      f"messages, {r['calendar']} events deleted")
+                      f"messages, {r['calendar']} events, "
+                      f"{r['chat']} chat spaces deleted")
         for f in (args.manifest,):
             if os.path.exists(f):
                 os.remove(f)
@@ -752,7 +931,7 @@ def main(argv: list[str] | None = None) -> int:
     est_min = est_calls / (min(args.workers, len(entries)) * 7) / 60
     print(f"  estimated ~{est_calls:,} API writes, roughly {est_min:.0f} minute(s) "
           f"at {args.workers} parallel users\n")
-    if est_min > 5:
+    if est_min > 5 and not args.yes:
         if input("This is a long run. Continue? [y/N] ").strip().lower() != "y":
             print("Aborted.")
             return 1
@@ -790,6 +969,8 @@ def main(argv: list[str] | None = None) -> int:
         "comments": sum(r["drive"].get("comments", 0) for r in ok),
         "events": sum(r["calendar"]["events"] for r in ok),
         "secondary_calendars": sum(r["calendar"].get("calendars", 0) for r in ok),
+        "chat_spaces": sum(r["chat"].get("spaces", 0) for r in ok),
+        "chat_messages": sum(r["chat"].get("messages", 0) for r in ok),
         "grants_user": sum(r["drive"]["grants"]["user"] for r in ok),
         "grants_domain": sum(r["drive"]["grants"]["domain"] for r in ok),
         "grants_anyone": sum(r["drive"]["grants"]["anyone"] for r in ok),
@@ -828,6 +1009,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  Comments    : {totals['comments']:,}")
     print(f"  Events      : {totals['events']:,}  "
           f"(+{totals['secondary_calendars']:,} secondary calendars)")
+    print(f"  Chat        : {totals['chat_messages']:,} messages "
+          f"in {totals['chat_spaces']:,} spaces")
     print(f"  ACL grants  : {totals['grants_user']:,} user, "
           f"{totals['grants_domain']:,} domain, "
           f"{totals['grants_external']:,} external, "
@@ -848,6 +1031,20 @@ def main(argv: list[str] | None = None) -> int:
     print("\nNext:")
     print(f"  python main.py init-db --identities {args.identities_out}")
     print(f"  python tools/rehearsal.py")
+
+    # A run that seeded nobody is a failure, and it has to say so in the exit
+    # code. It previously returned 0 whatever happened: five users timing out
+    # for thirty minutes rendered in the web UI as a green "exit 0" beside a
+    # run that had accomplished precisely nothing.
+    attempted = len(entries)
+    seeded = totals["users"]
+    if seeded == 0:
+        print(f"\nFAILED: 0 of {attempted} users seeded. Nothing was written.")
+        return 1
+    if seeded < attempted:
+        print(f"\nPARTIAL: {seeded} of {attempted} users seeded; "
+              f"{attempted - seeded} failed (see the '!' lines above).")
+        return 2
     return 0
 
 

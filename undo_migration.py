@@ -166,14 +166,26 @@ def main(argv: list[str] | None = None) -> int:
           f"({totals['already_gone']} already gone, {totals['failed']} failed)")
 
     if args.reset_db and not args.dry_run:
+        # Scoped to the users actually undone. Clearing the whole ledger after
+        # a --user run left every OTHER user's migrated data sitting in the
+        # target with no record of it: a re-run would copy it all again, and
+        # undo could never find it to remove. The blast radius of the reset has
+        # to match the blast radius of the deletion.
+        src = [r["source_email"] for r in rows]
+        tgt = [r["target_email"] for r in rows]
+        ph_s = ",".join("?" * len(src))
+        ph_t = ",".join("?" * len(tgt))
         with db.write() as conn:
-            conn.execute("DELETE FROM id_mapping")
-            conn.execute("DELETE FROM audit_log")
-            conn.execute("DELETE FROM label_map")
-            conn.execute("DELETE FROM upload_ledger")
-            conn.execute("UPDATE identity_map SET status='PENDING', notes=NULL")
-        print("Ledger reset: id_mapping, audit_log, label_map and upload_ledger "
-              "cleared; identity_map back to PENDING.")
+            conn.execute(f"DELETE FROM id_mapping WHERE source_user IN ({ph_s})", src)
+            conn.execute(f"DELETE FROM audit_log WHERE source_user IN ({ph_s})", src)
+            conn.execute(f"DELETE FROM label_map WHERE source_user IN ({ph_s})", src)
+            conn.execute(f"DELETE FROM upload_ledger WHERE target_user IN ({ph_t})", tgt)
+            conn.execute(
+                f"UPDATE identity_map SET status='PENDING', notes=NULL "
+                f"WHERE source_email IN ({ph_s})", src)
+        scope = "all users" if not args.user else f"{len(src)} selected user(s)"
+        print(f"Ledger reset for {scope}: id_mapping, audit_log, label_map and "
+              f"upload_ledger cleared; identity_map back to PENDING.")
 
     db.close()
     return 1 if totals["failed"] else 0

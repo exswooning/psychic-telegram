@@ -59,10 +59,15 @@ class TestServedPage:
         """Cheap structural guard for machines with no node: the handlers the
         buttons call must exist, or the step renders with dead controls."""
         js = _js()
-        for fn in ("function draw(", "function drawRail(", "function stepBody(",
-                   "async function saveCfg(", "async function runSetup(",
-                   "async function deploy(", "async function run(",
-                   "async function refresh(", "async function pollJob("):
+        # The three-screen flow: pick a path, satisfy its requirements, run it.
+        for fn in ("function draw(", "function drawRail(",
+                   "function screenPath(", "function screenRequire(",
+                   "function screenRun(", "function requirementBody(",
+                   "function delegationBody(", "function credentialsBody(",
+                   "function configForm(", "function restoreForm(",
+                   "async function saveCfg(", "async function runSeed(",
+                   "async function run(", "async function refresh(",
+                   "async function pollJob("):
             assert fn in js, f"missing {fn}"
 
     def test_every_onclick_names_a_function_that_exists(self):
@@ -81,3 +86,17 @@ class TestServedPage:
         for bad in ("http://cdn", "https://cdn", "<script src=", "@import",
                     "fonts.googleapis"):
             assert bad not in webui.PAGE, f"external resource: {bad}"
+
+    def test_tabs_are_wired_to_settab(self):
+        """Caught live: the tab buttons rendered but nothing bound their
+        clicks, so Dashboard/Users/Failures/Scope/Logs/Output were dead."""
+        js = _js()
+        assert "b.onclick=()=>setTab(b.dataset.tab)" in js
+        for label in ("Setup", "Dashboard", "Users", "Failures", "Scope",
+                      "Logs", "Output"):
+            assert f'data-tab="{label.lower()}"' in webui.PAGE, label
+
+    def test_header_progress_strip_present(self):
+        """The always-visible progress bar under the header + its updater."""
+        assert 'id="progi"' in webui.PAGE and 'id="progpct"' in webui.PAGE
+        assert 'function paintProg()' in _js()

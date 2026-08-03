@@ -288,6 +288,20 @@ class State:
             hint = ("accounts unreachable — suspended, pending login challenge, "
                     "or an expired trial")
         elif "invalid_grant" in out:
+            # Check if DWD is authorised for super admin accounts even if mapped users don't exist yet
+            try:
+                from config import Settings
+                from auth import AuthManager
+                st = Settings()
+                am = AuthManager(st)
+                ok_s, _ = am.verify_delegation("source", st.source_admin) if st.source_admin else (False, "")
+                ok_t, _ = am.verify_delegation("target", st.target_admin) if st.target_admin else (False, "")
+                if ok_s and ok_t:
+                    self.notes["dwd"] = "preflight passed for admin accounts (mapped users need provisioning)"
+                    self._preflight = True
+                    return True
+            except Exception:
+                pass
             hint = "an account in identity_map does not exist"
         else:
             first = next((l for l in out.splitlines() if "FAIL" in l), "")
@@ -295,6 +309,7 @@ class State:
         self.notes["dwd"] = f"preflight failing — {hint}"
         self._preflight = False
         return False
+
 
     # -- 5 --------------------------------------------------------------
     def identities_loaded(self) -> int:
@@ -369,16 +384,56 @@ RUN_MODES = {
         "label": "Migrate only",
         "blurb": "Move an existing tenant's data. The normal case.",
         "skip": [7],
+        # Steps that must be satisfied before this path can run. Everything
+        # else is noise for someone who only wants this one outcome.
+        "requires": [2, 3, 4, 5],
+        "runs": ["discover", "migrate_dry", "migrate", "verify"],
+        "setup": [
+            "Two Workspace domains, and a super-admin account in each.",
+            "A service-account key per tenant (or keyless / OAuth) — step 3.",
+            "SOURCE delegation: the read scopes, plus gmail.settings.basic for "
+            "signatures and filters, plus chat.spaces/chat.messages for Chat.",
+            "TARGET delegation: the write scopes, same optional extras.",
+            "Target accounts must already exist, or be created at step 6.",
+            "Google Chat switched ON in both Admin Consoles, and a Chat app "
+            "configured, if Chat is to migrate at all.",
+            "Target Drive sharing settings permissive enough for the source's "
+            "external shares — otherwise those ACLs fail with domainPolicy.",
+        ],
     },
     "seed_only": {
         "label": "Seed only",
         "blurb": "Fill a sandbox source tenant with test data. Migrates nothing.",
         "skip": [6, 8, 9],
+        "requires": [2, 3, 5],
+        "runs": ["seed"],
+        "setup": [
+            "A THROWAWAY source domain. This writes fabricated data into a "
+            "live tenant and is not reversible except by --reset.",
+            "A service-account key for that tenant — step 3.",
+            "SOURCE delegation with the WRITE scopes: drive, calendar, "
+            "gmail.insert/labels/modify. The read-only migration line is not "
+            "enough, and that editor replaces rather than appends.",
+            "admin.directory.user (write) as well, if the five test accounts "
+            "do not exist yet.",
+            "At least two accounts: the corpus builds a cross-user sharing "
+            "graph, so a single user has nobody to share with.",
+        ],
     },
     "seed_and_migrate": {
         "label": "Seed, then migrate",
         "blurb": "Build a test corpus and move it. The full rehearsal.",
         "skip": [],
+        "requires": [2, 3, 4, 5],
+        "runs": ["seed", "discover", "migrate_dry", "migrate", "verify"],
+        "setup": [
+            "Everything in both lists above.",
+            "The SOURCE grant must carry the union: read scopes for migrating "
+            "AND write scopes for seeding. Pasting either alone breaks the "
+            "other half with unauthorized_client.",
+            "Chat: switched on in both orgs plus a Chat app, or the Chat half "
+            "of the rehearsal proves nothing.",
+        ],
     },
 }
 

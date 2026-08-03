@@ -17,6 +17,20 @@ from dataclasses import dataclass, field
 # ======================================================================
 # MIME constants
 # ======================================================================
+TRANSFER_MODES = ("download_upload", "server_side", "link_flip")
+
+# How a Chat space gets built on the target.
+#
+#   import   the space is created with importMode=True, filled, then released
+#            with completeImport. Members never see a half-built space, and
+#            no notification fires for a three-year-old message. Needs the
+#            chat.import scope.
+#   direct   an ordinary space, created and posted into live. Works without
+#            chat.import, which is the point -- but members are added before
+#            the backfill, so every replayed message notifies them. Fine for
+#            a handful of spaces, unkind across a tenant.
+CHAT_SPACE_MODES = ("import", "direct")
+
 FOLDER_MIME = "application/vnd.google-apps.folder"
 SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
 
@@ -89,13 +103,54 @@ CHAT_SCOPES = [
     "https://www.googleapis.com/auth/chat.messages",
 ]
 
+# Contacts and Tasks. Both have a readonly variant, so the source keeps its
+# read-only property; the target needs the write scope to create anything.
+CONTACTS_READONLY_SCOPE = "https://www.googleapis.com/auth/contacts.readonly"
+CONTACTS_WRITE_SCOPE = "https://www.googleapis.com/auth/contacts"
+TASKS_READONLY_SCOPE = "https://www.googleapis.com/auth/tasks.readonly"
+TASKS_WRITE_SCOPE = "https://www.googleapis.com/auth/tasks"
+
+# SSO. Read on the source, write on the target -- the source tenant's login
+# configuration is the last thing that should be editable by a migration.
+SSO_READONLY_SCOPE = (
+    "https://www.googleapis.com/auth/cloud-identity.inboundsso.readonly")
+SSO_WRITE_SCOPE = "https://www.googleapis.com/auth/cloud-identity.inboundsso"
+# Listing which third-party apps a user has authorised. Read-only by nature:
+# there is no counterpart that creates a grant, because a grant is a person
+# consenting and an API that could forge one would be a vulnerability.
+TOKENS_READONLY_SCOPE = (
+    "https://www.googleapis.com/auth/admin.directory.user.security")
+
+# Adding the original participants to a recreated space. Needed by both space
+# modes, for different reasons: under `direct` a user cannot post into a space
+# they are not in, so without this every message would fall back to the
+# migrating user; under `import` the space would otherwise arrive correct in
+# content and empty of everyone who was in the conversation.
+CHAT_MEMBERSHIP_SCOPE = "https://www.googleapis.com/auth/chat.memberships"
+# The source only ever reads the participant list, and unlike the other Chat
+# scopes this one does have a read-only variant -- so the source credential
+# keeps its read-only property instead of gaining the ability to add people
+# to spaces in the tenant being migrated away from.
+CHAT_MEMBERSHIP_READONLY_SCOPE = (
+    "https://www.googleapis.com/auth/chat.memberships.readonly")
+
+# Target-only, and not optional: every space is created with importMode=True,
+# and Chat rejects that outright without this scope --
+#   "Creating a space in import mode requires the chat.import authorization
+#    scope"  (HTTP 403, observed on all 12 spaces of a live run)
+# The source never creates anything, so granting it there would widen the
+# read-only source credential for no reason.
+CHAT_IMPORT_SCOPE = "https://www.googleapis.com/auth/chat.import"
+
 
 def source_scopes(settings: "Settings") -> list[str]:
     """Scopes the source service account actually needs for this run."""
     scopes = list(SOURCE_SCOPES)
-    if settings.transfer_mode == "server_side":
+    if settings.transfer_mode in ("server_side", "link_flip"):
         # files.copy is a create call, so read-only will not do. This is the
         # trade the mode asks for, and it is why it is not the default.
+        # link_flip additionally rewrites permissions on the source, which the
+        # same write scope covers.
         scopes = [DRIVE_WRITE_SCOPE if s == DRIVE_READONLY_SCOPE else s
                  for s in scopes]
     if settings.migrate_gmail_settings:
@@ -105,6 +160,13 @@ def source_scopes(settings: "Settings") -> list[str]:
     if settings.migrate_chat:
         # No read-only variant exists for either scope.
         scopes.extend(CHAT_SCOPES)
+        scopes.append(CHAT_MEMBERSHIP_READONLY_SCOPE)
+    if settings.migrate_contacts:
+        scopes.append(CONTACTS_READONLY_SCOPE)
+    if settings.migrate_tasks:
+        scopes.append(TASKS_READONLY_SCOPE)
+    if settings.migrate_sso:
+        scopes.extend([SSO_READONLY_SCOPE, TOKENS_READONLY_SCOPE])
     if settings.migrate_calendar_acls:
         # acl.list is rejected under calendar.readonly (verified: 403
         # insufficient authentication scopes), so reading sharing rules
@@ -121,6 +183,17 @@ def target_scopes(settings: "Settings") -> list[str]:
         scopes.append(GMAIL_SETTINGS_SCOPE)
     if settings.migrate_chat:
         scopes.extend(CHAT_SCOPES)
+        scopes.append(CHAT_MEMBERSHIP_SCOPE)
+        # Only `import` needs it, and it is the scope most likely to be
+        # refused, so `direct` exists precisely to not ask for it.
+        if settings.chat_space_mode == "import":
+            scopes.append(CHAT_IMPORT_SCOPE)
+    if settings.migrate_contacts:
+        scopes.append(CONTACTS_WRITE_SCOPE)
+    if settings.migrate_tasks:
+        scopes.append(TASKS_WRITE_SCOPE)
+    if settings.migrate_sso:
+        scopes.append(SSO_WRITE_SCOPE)
     return scopes
 
 
@@ -129,6 +202,16 @@ def _env_bool(name: str, default: bool) -> bool:
     if val is None:
         return default
     return val.strip().lower() in ("1", "true", "yes", "on")
+
+
+
+def _auto(key: str, fallback):
+    """Machine-sized default from resources.py, with a safe fallback."""
+    try:
+        import resources
+        return resources.recommend()[key]
+    except Exception:  # noqa: BLE001 - probing must never break startup
+        return fallback
 
 
 @dataclass
@@ -182,8 +265,17 @@ class Settings:
     log_level: str = field(default_factory=lambda: os.getenv("LOG_LEVEL", "INFO"))
 
     # -- concurrency / pacing ------------------------------------------------
-    user_workers: int = field(default_factory=lambda: int(os.getenv("USER_WORKERS", "6")))
-    per_user_qps: float = field(default_factory=lambda: float(os.getenv("PER_USER_QPS", "4.0")))
+    # Sized to the machine actually running the job unless explicitly set.
+    # A fixed default is how five workers ended up on an 8 GB laptop with 85%
+    # of its swap already in use: the workers stalled on swap long enough for
+    # the sockets to time out, which reads as a network fault and sends you
+    # debugging the wrong system. See resources.py.
+    user_workers: int = field(
+        default_factory=lambda: int(os.getenv("USER_WORKERS", "0")) or _auto("user_workers", 6)
+    )
+    per_user_qps: float = field(
+        default_factory=lambda: float(os.getenv("PER_USER_QPS", "0")) or _auto("per_user_qps", 4.0)
+    )
 
     # -- retry / backoff -----------------------------------------------------
     max_retries: int = 6
@@ -213,6 +305,20 @@ class Settings:
     #                   `drive.readonly`. That gives up the structural guarantee
     #                   that a source credential cannot write to the source
     #                   tenant. Opt in deliberately.
+    # download_upload : bytes stream through this host. The default, and the
+    #                   only mode that needs no extra scope -- but it is also
+    #                   what makes a memory-constrained host stall until the
+    #                   sockets time out.
+    # server_side     : files.copy into a staging shared drive in the target
+    #                   org, then move out to the target user's My Drive.
+    #                   Google moves the bytes; nothing touches this machine.
+    #                   Needs the write Drive scope on the source.
+    # link_flip       : server_side, but each file is first published to
+    #                   "anyone with the link" and restored afterwards. For
+    #                   the cross-org cases server_side alone cannot read.
+    #                   NOT a default and should not become one: every file in
+    #                   flight is publicly reachable until it is restored.
+    #                   See link_transfer.py.
     transfer_mode: str = field(
         default_factory=lambda: os.getenv("TRANSFER_MODE", "download_upload")
     )
@@ -231,12 +337,42 @@ class Settings:
     migrate_comments: bool = field(
         default_factory=lambda: _env_bool("MIGRATE_COMMENTS", False)
     )
+    # When a file is shared through its parent folder, Drive reports the grant
+    # as inherited. Preserving the folder hierarchy already preserves that
+    # access -- but it survives only so long as the file stays in that folder.
+    # Setting this recreates the grant explicitly on the target file itself,
+    # so every document carries its own share access independent of the tree.
+    # The cost is one permissions.create per inherited grantee per file; turn
+    # it off to go back to folder-derived sharing on very large tenants.
+    recreate_inherited_acls: bool = field(
+        default_factory=lambda: _env_bool("MIGRATE_INHERITED_ACLS", True)
+    )
     # Google Chat. Needs chat.spaces/chat.messages on BOTH tenants, plus the
     # Chat service switched on for each organisation and a Chat app configured
     # in the Cloud console. Original message timestamps cannot be preserved --
     # see chat_engine.py -- so this is a deliberate, documented trade.
     migrate_chat: bool = field(
         default_factory=lambda: _env_bool("MIGRATE_CHAT", False)
+    )
+    chat_space_mode: str = field(
+        default_factory=lambda: os.getenv("CHAT_SPACE_MODE", "import").strip().lower()
+    )
+    # Off by default, despite both being cheap and worth having. Turning them
+    # on adds scopes, and a scope the Admin Console has not authorised makes
+    # *every* call fail with unauthorized_client -- so defaulting these to True
+    # would break existing deployments on upgrade, for a feature nobody asked
+    # for. Enable them deliberately, alongside the scope grant.
+    migrate_contacts: bool = field(
+        default_factory=lambda: _env_bool("MIGRATE_CONTACTS", False)
+    )
+    migrate_tasks: bool = field(
+        default_factory=lambda: _env_bool("MIGRATE_TASKS", False)
+    )
+    # Off by default and deliberately separate from the per-user services:
+    # writing an SSO profile changes how *everyone* signs in, including the
+    # admin running the migration, and a mistake locks the tenant out.
+    migrate_sso: bool = field(
+        default_factory=lambda: _env_bool("MIGRATE_SSO", False)
     )
     # Secondary calendars: everything beyond 'primary'. Works with the
     # read-only baseline grant.
@@ -261,3 +397,29 @@ class Settings:
     def effective_upload_cap(self) -> int:
         """The per-target-user daily upload ceiling, in bytes."""
         return int(self.daily_upload_cap_gb * 1024**3)
+
+    def __post_init__(self) -> None:
+        # An unrecognised transfer mode used to be accepted and silently behave
+        # as download_upload, because every check was `== "server_side"`. So a
+        # typo, or a mode that is documented but not yet wired, quietly
+        # streamed every byte through this host -- the exact behaviour someone
+        # setting TRANSFER_MODE is usually trying to avoid.
+        if self.transfer_mode not in TRANSFER_MODES:
+            raise ValueError(
+                f"TRANSFER_MODE={self.transfer_mode!r} is not recognised. "
+                f"Valid modes: {', '.join(TRANSFER_MODES)}"
+            )
+        # Same reasoning as above: falling back to the default would silently
+        # request chat.import for someone who set CHAT_SPACE_MODE to avoid it,
+        # and the run would then fail preflight for a reason they just fixed.
+        if self.chat_space_mode not in CHAT_SPACE_MODES:
+            raise ValueError(
+                f"CHAT_SPACE_MODE={self.chat_space_mode!r} is not recognised. "
+                f"Valid modes: {', '.join(CHAT_SPACE_MODES)}"
+            )
+        root = os.path.dirname(os.path.abspath(__file__))
+        for attr in ("source_sa_key", "target_sa_key", "db_path", "scratch_dir", "log_file", "oauth_client_secrets", "oauth_token_dir"):
+            val = getattr(self, attr)
+            if val and not os.path.isabs(val):
+                setattr(self, attr, os.path.abspath(os.path.join(root, val)))
+
