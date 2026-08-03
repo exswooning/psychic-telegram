@@ -110,11 +110,19 @@ class TestItDoesNotShadowTheRealVerify:
 
         assert os.path.basename(os.path.dirname(verify.__file__)) != "data-generator"
 
-    def test_data_generator_is_not_on_the_path(self):
+    def test_reset_target_itself_adds_nothing_to_the_path(self):
+        """pytest puts data-generator on sys.path itself when it collects the
+        tests living there, so the suite-wide state is not this module's to
+        assert. What is this module's business is not adding it."""
         import sys
 
-        assert not any(p.endswith("data-generator") for p in sys.path), \
-            "data-generator on sys.path shadows verify.py for the whole process"
+        # seed_sandbox inserts the repo root itself at module level, which is
+        # a harmless duplicate. The entry that must not survive is
+        # data-generator, because that is the one which shadows verify.py.
+        gen = [p for p in sys.path if p.endswith("data-generator")]
+        reset_target._load_seeder()
+        after = [p for p in sys.path if p.endswith("data-generator")]
+        assert after == gen, "the seeder loader left data-generator on sys.path"
 
     def test_the_seeder_is_loaded_by_file_path(self):
         """Appending rather than prepending would still shadow later imports;
