@@ -35,7 +35,12 @@ import ssl
 
 from googleapiclient.errors import HttpError
 
-from metrics import METRICS
+# Imported as a module, not `from metrics import METRICS`. A by-value
+# binding means a test (or anything else) that swaps the collector has to
+# patch this module's global as well as metrics' own -- and the next
+# module to import it silently measures into the old collector if anyone
+# forgets. One indirection removes a whole class of that.
+import metrics
 
 # Transient failures that are not HttpError. Every one of these was observed
 # permanently failing an item on a multi-hour run, because the retry decorator
@@ -209,11 +214,11 @@ def retry_on_google_error(
                 started = time.monotonic()
                 try:
                     result = fn(*args, **kwargs)
-                    METRICS.record(label or "api", time.monotonic() - started,
+                    metrics.METRICS.record(label or "api", time.monotonic() - started,
                                    ok=True, retried=attempt > 0)
                     return result
                 except HttpError as exc:
-                    METRICS.record(label or "api", time.monotonic() - started,
+                    metrics.METRICS.record(label or "api", time.monotonic() - started,
                                    ok=False)
                     status = _status_of(exc)
                     reason = _extract_reason(exc)
@@ -249,7 +254,7 @@ def retry_on_google_error(
                             return adopted
 
                 except TRANSPORT_ERRORS as exc:
-                    METRICS.record(label or "api", time.monotonic() - started,
+                    metrics.METRICS.record(label or "api", time.monotonic() - started,
                                    ok=False)
                     # A multi-hour migration reliably sees connections reset,
                     # sockets time out and TLS renegotiate. None of these are

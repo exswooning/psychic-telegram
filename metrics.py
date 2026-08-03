@@ -34,10 +34,25 @@ from __future__ import annotations
 import random
 import threading
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 
 # Per label. 4,000 samples is enough for a stable p95 and costs ~32 KB.
 RESERVOIR = 4000
+
+# The control window, in samples per label.
+#
+# A uniform reservoir answers "what was p95 over the whole run", which is the
+# right statistic for a report and the wrong one for a controller. After
+# 100,000 calls a latency inflection in the last two minutes moves it by
+# almost nothing -- so an AIMD loop steering on it would be blind to exactly
+# the signal it exists to detect, while showing a number that is real, stable,
+# and useless. The controller reads this instead: the most recent N samples,
+# where a change in conditions shows up within N calls rather than being
+# averaged into eight hours of history.
+#
+# 200 is roughly a minute of one worker's calls at the measured 284 ms p50,
+# so it reacts inside the time a human would notice a stall.
+RECENT = 200
 
 
 class _Reservoir:
@@ -66,6 +81,11 @@ class Metrics:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._lat: dict[str, _Reservoir] = defaultdict(_Reservoir)
+        # The control signal, kept separately from the report signal because
+        # they answer different questions. deque with maxlen is O(1) and
+        # self-trimming, so this costs nothing over a long run.
+        self._recent: dict[str, deque[float]] = defaultdict(
+            lambda: deque(maxlen=RECENT))
         self._calls: dict[str, int] = defaultdict(int)
         self._retries: dict[str, int] = defaultdict(int)
         self._failures: dict[str, int] = defaultdict(int)
@@ -79,6 +99,7 @@ class Metrics:
             return
         with self._lock:
             self._lat[label].add(seconds)
+            self._recent[label].append(seconds)
             self._calls[label] += 1
             if retried:
                 self._retries[label] += 1
@@ -86,9 +107,33 @@ class Metrics:
                 self._failures[label] += 1
             self._threads.add(threading.current_thread().name)
 
+    def recent(self, label: str | None = None) -> dict:
+        """
+        Latency over the last RECENT samples -- the controller's steering
+        signal.
+
+        Deliberately separate from snapshot(): that one reports the run, this
+        one reports now. A controller polling snapshot() would ramp against a
+        number that cannot move.
+        """
+        with self._lock:
+            if label is not None:
+                values = list(self._recent.get(label, ()))
+            else:
+                values = [v for d in self._recent.values() for v in d]
+        # Sorted outside the lock: every record() contends on it, and a
+        # controller polling once a second would otherwise stall every worker
+        # while it sorts.
+        return {
+            "n": len(values),
+            "p50": self._pct(values, 50),
+            "p95": self._pct(values, 95),
+        }
+
     def reset(self) -> None:
         with self._lock:
             self._lat.clear()
+            self._recent.clear()
             self._calls.clear()
             self._retries.clear()
             self._failures.clear()
@@ -105,34 +150,42 @@ class Metrics:
         return ordered[k]
 
     def snapshot(self) -> dict:
+        # Copy under the lock, sort outside it. Percentiles sort every
+        # reservoir, and record() takes the same lock on every API call -- so
+        # computing in here would block every worker on fourteen sorted
+        # arrays each time anything asked for a reading.
         with self._lock:
             elapsed = max(time.monotonic() - self._started, 1e-6)
             total = sum(self._calls.values())
             workers = max(len(self._threads), 1)
-            all_lat = [v for r in self._lat.values() for v in r.samples]
-            per_label = {}
-            for label, res in self._lat.items():
-                per_label[label] = {
-                    "calls": self._calls[label],
-                    "retries": self._retries[label],
-                    "failures": self._failures[label],
-                    "p50": self._pct(res.samples, 50),
-                    "p95": self._pct(res.samples, 95),
-                }
-            return {
-                "elapsed_sec": elapsed,
-                "calls": total,
-                "workers": workers,
-                "requests_per_sec": total / elapsed,
-                # The metric this analysis kept quoting without collecting.
-                "requests_per_sec_per_worker": total / elapsed / workers,
-                "p50": self._pct(all_lat, 50),
-                "p95": self._pct(all_lat, 95),
-                "p99": self._pct(all_lat, 99),
-                "retries": sum(self._retries.values()),
-                "failures": sum(self._failures.values()),
-                "by_label": per_label,
+            raw = {label: (list(res.samples), self._calls[label],
+                           self._retries[label], self._failures[label])
+                   for label, res in self._lat.items()}
+
+        all_lat = [v for samples, *_ in raw.values() for v in samples]
+        per_label = {}
+        for label, (samples, calls, retries, failures) in raw.items():
+            per_label[label] = {
+                "calls": calls,
+                "retries": retries,
+                "failures": failures,
+                "p50": self._pct(samples, 50),
+                "p95": self._pct(samples, 95),
             }
+        return {
+            "elapsed_sec": elapsed,
+            "calls": total,
+            "workers": workers,
+            "requests_per_sec": total / elapsed,
+            # The metric this analysis kept quoting without collecting.
+            "requests_per_sec_per_worker": total / elapsed / workers,
+            "p50": self._pct(all_lat, 50),
+            "p95": self._pct(all_lat, 95),
+            "p99": self._pct(all_lat, 99),
+            "retries": sum(self._retries.values()),
+            "failures": sum(self._failures.values()),
+            "by_label": per_label,
+        }
 
     def report(self) -> str:
         s = self.snapshot()

@@ -25,6 +25,8 @@ import os
 import time
 import uuid
 
+import metrics
+
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload  # noqa: F401
 
 from config import EXPORT_MIME_MAP, FOLDER_MIME, SHORTCUT_MIME, Settings
@@ -97,12 +99,26 @@ class DriveMigrator:
         path = self._scratch_path()
         request = request_factory()
         self.limiter.acquire()
+        started = time.monotonic()
         with open(path, "wb") as fh:
             downloader = MediaIoBaseDownload(
                 fh, request, chunksize=self.settings.download_chunk_bytes)
             done = False
             while not done:
-                _, done = self._retry(lambda: downloader.next_chunk())
+                # Chunks get their own label so they do not mix with logical
+                # operations. Left as-is, a download recorded one sample per
+                # chunk while an upload recorded one sample for the entire
+                # resumable dance inside a single .execute() -- so the read
+                # side counted round trips and the write side counted
+                # operations, and the two were being compared. Immaterial on a
+                # corpus where 2 of 1,342 files exceed the resumable threshold;
+                # badly misleading on one where they do not.
+                _, done = self._retry(lambda: downloader.next_chunk(),
+                                      label="drive.get_media.chunk")
+        # One sample for the whole download, matching how files.create is
+        # measured on the other side.
+        metrics.METRICS.record("drive.files.get_media",
+                               time.monotonic() - started)
         return path, os.path.getsize(path)
 
     # -- entry point ----------------------------------------------------------
@@ -880,7 +896,7 @@ class DriveMigrator:
                 self._retry(lambda b=body: self.tgt.permissions().create(
                     fileId=target_id, body=b, sendNotificationEmail=False,
                     supportsAllDrives=True, fields="id",
-                ).execute())
+                ).execute(), label="drive.permissions.create")
                 applied += 1
             except (PermanentAPIError, RuntimeError) as exc:
                 self.db.log_audit(self.source_user, audit_key, "acl", "FAILED", str(exc))
@@ -915,7 +931,7 @@ class DriveMigrator:
             self._retry(lambda: self.tgt.files().update(
                 fileId=target_id, body={"modifiedTime": mtime},
                 supportsAllDrives=True, fields="id",
-            ).execute())
+            ).execute(), label="drive.files.update.mtime")
         except (PermanentAPIError, RuntimeError) as exc:
             log.warning("[%s] could not restore modifiedTime on %s: %s",
                        self.source_user, target_id, exc)

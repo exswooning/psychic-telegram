@@ -524,7 +524,8 @@ class TestUnsharedFilesSkipTheAclCall:
         true and could not fail.
         """
         calls = []
-        migrator._retry = lambda fn: calls.append("would have called") or None
+        migrator._retry = (lambda fn, **kw:
+                           calls.append("would have called") or None)
         migrator._restore_modified_time(
             "tgt-1", {"modifiedTime": "2024-03-01T09:00:00Z"}, 0)
         assert calls == [], "restore ran with zero writes applied"
@@ -705,3 +706,101 @@ class TestMetrics:
             t.join()
 
         assert m.snapshot()["calls"] == 2000
+
+
+class TestTheControlSignalCanActuallyMove:
+    """
+    A uniform reservoir answers "p95 over the whole run", which is right for a
+    report and useless for a controller: after 100k calls, an inflection in
+    the last two minutes moves it by almost nothing. An AIMD loop steering on
+    it would be blind to precisely the signal it exists to detect, while
+    displaying a number that is real and stable.
+    """
+
+    def test_a_recent_inflection_moves_the_control_signal(self):
+        from metrics import Metrics
+
+        m = Metrics()
+        for _ in range(5000):
+            m.record("x", 0.010)
+        for _ in range(50):
+            m.record("x", 0.400)
+
+        assert m.snapshot()["p95"] < 0.05, "run-long p95 should be dominated by history"
+        assert m.recent("x")["p95"] > 0.3, (
+            "the control signal did not see a 40x latency jump in the last "
+            "50 calls -- a controller reading it would never back off")
+
+    def test_the_control_window_is_bounded(self):
+        from metrics import RECENT, Metrics
+
+        m = Metrics()
+        for _ in range(RECENT * 10):
+            m.record("x", 0.01)
+        assert len(m._recent["x"]) == RECENT
+
+    def test_the_report_still_sees_the_whole_run(self):
+        """The two statistics answer different questions and both are needed."""
+        from metrics import Metrics
+
+        m = Metrics()
+        for _ in range(1000):
+            m.record("x", 0.010)
+        for _ in range(1000):
+            m.record("x", 0.020)
+        assert m.snapshot()["calls"] == 2000
+
+    def test_reading_does_not_hold_the_lock_while_sorting(self):
+        """
+        A controller polling once a second must not stall every worker while
+        it sorts fourteen reservoirs.
+
+        Asserted by observing the lock rather than by reading the source: the
+        percentile function checks whether the collector's lock is held at the
+        moment it runs, which is the actual property and survives any
+        refactor that preserves it.
+        """
+        from metrics import Metrics
+
+        held_during_sort = []
+        original = Metrics._pct
+
+        def watching_pct(values, p):
+            held_during_sort.append(m._lock.locked())
+            return original(values, p)
+
+        m = Metrics()
+        for _ in range(500):
+            m.record("x", 0.01)
+
+        Metrics._pct = staticmethod(watching_pct)
+        try:
+            m.snapshot()
+            m.recent("x")
+        finally:
+            Metrics._pct = staticmethod(original)
+
+        assert held_during_sort, "the percentile function never ran"
+        assert not any(held_during_sort), (
+            "percentiles were computed while holding the lock that every "
+            "record() call contends on")
+
+
+class TestMetricsIsBoundByReference:
+    def test_resilience_reaches_the_live_collector(self):
+        """`from metrics import METRICS` binds by value, so swapping the
+        collector needs every importing module patched too -- and the next one
+        that forgets measures into an orphan."""
+        import metrics
+        import resilience
+        from metrics import Metrics
+
+        replacement = Metrics()
+        old, metrics.METRICS = metrics.METRICS, replacement
+        try:
+            resilience.retry_on_google_error(label="probe")(lambda: "ok")()
+        finally:
+            metrics.METRICS = old
+
+        assert replacement.snapshot()["calls"] == 1, (
+            "resilience recorded into a stale collector")
