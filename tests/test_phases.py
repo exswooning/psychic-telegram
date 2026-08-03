@@ -58,10 +58,30 @@ class TestCompare:
 
 
 class TestPhaseOrdering:
-    def test_all_four_services_are_covered(self):
-        assert set(phases.PHASES) == {"drive", "gmail", "calendar", "chat"}
+    def test_every_service_is_covered(self):
+        assert set(phases.PHASES) == {"drive", "shared_drives", "gmail",
+                                      "calendar", "contacts", "tasks", "chat"}
+
+    def test_no_phase_can_run_unreconciled(self):
+        """The invariant, rather than the count: a phase needs either a
+        per-user counter or a tenant-wide one. One that has neither would
+        migrate and then report nothing about whether it worked."""
         for p in phases.PHASES:
-            assert p in phases.COUNTERS
+            assert p in phases.COUNTERS or p in phases.TENANT_PHASES, p
+
+    def test_a_tenant_phase_is_not_also_a_per_user_one(self):
+        """Shared Drives belong to no user. Counting them per user would
+        multiply one tenant-wide total by 141."""
+        assert not (set(phases.TENANT_PHASES) & set(phases.COUNTERS))
+
+    def test_drive_runs_before_shared_drives(self):
+        """A tenant-wide pass must not mask a per-user one that failed."""
+        order = list(phases.PHASES)
+        assert order.index("drive") < order.index("shared_drives")
+
+    def test_chat_runs_last(self):
+        """It is the only phase that can leave a half-built artefact."""
+        assert list(phases.PHASES)[-1] == "chat"
 
     def test_every_counter_names_both_tenant_accessors(self):
         for phase, (_fn, src, tgt) in phases.COUNTERS.items():
@@ -135,3 +155,68 @@ class TestFormattingIsCrashProof:
     def test_every_phase_formats_an_empty_dict(self):
         for phase in phases.PHASES:
             assert phases.fmt(phase, {})
+
+
+class TestFullScopeReconciliation:
+    """
+    Every service the migrator can run must be able to say whether it worked.
+    These pin the parts of that which are easy to get wrong when a phase is
+    added.
+    """
+
+    def test_contacts_and_tasks_compare_on_the_item_not_the_container(self):
+        """A target with the same number of lists and none of the tasks has
+        plainly lost data, so the container count must not be the verdict."""
+        ok, detail = phases.compare("tasks",
+                                    {"_counted": 1, "task_lists": 3, "tasks": 90},
+                                    {"_counted": 1, "task_lists": 3, "tasks": 12})
+        assert not ok and "tasks" in detail
+
+        ok, _ = phases.compare("contacts",
+                               {"_counted": 1, "contacts": 500},
+                               {"_counted": 1, "contacts": 500})
+        assert ok
+
+    def test_shared_drives_compare_on_files_not_drive_count(self):
+        ok, detail = phases.compare("shared_drives",
+                                    {"_counted": 1, "drives": 4, "files": 8000},
+                                    {"_counted": 1, "drives": 4, "files": 12})
+        assert not ok and "files" in detail
+
+    def test_an_uncountable_shared_drive_pass_is_not_a_pass(self):
+        """Same trap as everywhere else: 0 of 0 satisfies every comparison."""
+        ok, detail = phases.compare("shared_drives",
+                                    {"_counted": 0}, {"_counted": 0})
+        assert not ok
+        assert "not a pass" in detail
+
+    def test_a_disabled_service_is_named_rather_than_vanishing(self):
+        """A phase that disappears silently is how a run reports success
+        having migrated nothing."""
+        import inspect
+
+        src = inspect.getsource(phases.main)
+        assert "GATES" in src
+        for flag in ("MIGRATE_CHAT", "MIGRATE_CONTACTS", "MIGRATE_TASKS"):
+            assert flag in src
+
+
+class TestServiceResolution:
+    def test_all_expands_to_every_per_user_service(self):
+        import main
+
+        assert main.resolve_services("all") == set(main.PER_USER_SERVICES)
+
+    def test_shared_drives_is_not_a_per_user_service(self):
+        """Listing it per user would run a tenant-wide pass 141 times."""
+        import main
+
+        assert "shared_drives" not in main.PER_USER_SERVICES
+        with pytest.raises(SystemExit):
+            main.resolve_services("shared_drives")
+
+    def test_an_unknown_service_is_refused(self):
+        import main
+
+        with pytest.raises(SystemExit):
+            main.resolve_services("drive,emails")

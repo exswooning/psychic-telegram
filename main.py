@@ -458,16 +458,44 @@ def cmd_discover(args, settings: Settings, db: MigrationDB, auth: AuthManager):
           f"~{days:.1f} day(s) at {settings.user_workers} concurrent users")
 
 
-def cmd_migrate(args, settings: Settings, db: MigrationDB, auth: AuthManager):
-    services = {s.strip().lower() for s in args.services.split(",") if s.strip()}
-    unknown = services - {"drive", "gmail", "calendar", "chat"}
+# Everything `migrate` can run per user. Shared Drives are absent on purpose:
+# they belong to no user, are driven as an admin, and are run by
+# shared_drives.py -- putting them here would make them run 141 times.
+PER_USER_SERVICES = ("drive", "gmail", "calendar", "chat", "contacts", "tasks")
+
+
+def resolve_services(raw: str) -> set[str]:
+    """
+    Parse --services, expanding `all`.
+
+    `all` means every per-user service, and selecting a service turns its
+    feature flag on. That is the point: someone asking for the full scope
+    should not then discover that two of the six silently did nothing because
+    a MIGRATE_* variable was unset. The scopes still have to be granted, and
+    preflight says so by name when they are not.
+    """
+    services = {s.strip().lower() for s in raw.split(",") if s.strip()}
+    if "all" in services:
+        services.discard("all")
+        services |= set(PER_USER_SERVICES)
+    unknown = services - set(PER_USER_SERVICES)
     if unknown:
-        sys.exit(f"unknown service(s): {', '.join(sorted(unknown))}")
+        sys.exit(f"unknown service(s): {', '.join(sorted(unknown))}. "
+                 f"Valid: {', '.join(PER_USER_SERVICES)}, or 'all'.")
+    return services
+
+
+def cmd_migrate(args, settings: Settings, db: MigrationDB, auth: AuthManager):
+    services = resolve_services(args.services)
     if "chat" in services:
         # Chat is a first-class service: selecting it opts the run in. That
         # widens the scopes (chat.spaces/chat.messages) and enables the
         # engine's import pass. See config.py for the fidelity caveat.
         settings.migrate_chat = True
+    if "contacts" in services:
+        settings.migrate_contacts = True
+    if "tasks" in services:
+        settings.migrate_tasks = True
     results = run_batch(auth, db, settings, services, delta=False,
                         delta_days=0, only=args.user)
     _print_batch_summary(results)
@@ -748,8 +776,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("migrate", help="run the full bulk copy")
     s.add_argument("--services", default="drive,gmail,calendar",
-                   help="drive,gmail,calendar,chat (chat also needs "
-                        "MIGRATE_CHAT=true)")
+                   help="drive,gmail,calendar,chat,contacts,tasks — or 'all' "
+                        "for every per-user service. Shared Drives are not a "
+                        "per-user service; run shared_drives.py, or use "
+                        "phases.py which sequences both.")
     s.add_argument("--user", action="append", help="limit to specific user(s)")
     s.set_defaults(func=cmd_migrate)
 

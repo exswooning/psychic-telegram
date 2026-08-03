@@ -50,7 +50,17 @@ log = logging.getLogger("phases")
 PY = sys.executable
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-PHASES = ("drive", "gmail", "calendar", "chat")
+# Order matters. Drive first because everything else is smaller and a Drive
+# failure is the one worth discovering early; shared drives after per-user
+# Drive so a tenant-wide pass cannot mask a per-user one; Chat last because
+# it is the only phase that can leave a half-built artefact behind.
+PHASES = ("drive", "shared_drives", "gmail", "calendar", "contacts", "tasks",
+          "chat")
+
+# Phases that run once for the whole tenant rather than once per user. They
+# are driven by their own script instead of `main.py migrate`, and reconciled
+# tenant-wide rather than summed across identity_map.
+TENANT_PHASES = {"shared_drives"}
 
 
 # ----------------------------------------------------------------------
@@ -127,8 +137,54 @@ def count_chat(chat) -> dict:
     return {"spaces": spaces, "messages": messages}
 
 
+def count_contacts(people) -> dict:
+    contacts = groups = 0
+    token = None
+    while True:
+        r = people.people().connections().list(
+            resourceName="people/me", pageSize=200, pageToken=token,
+            personFields="names,emailAddresses").execute()
+        contacts += len(r.get("connections", []))
+        token = r.get("nextPageToken")
+        if not token:
+            break
+    token = None
+    while True:
+        r = people.contactGroups().list(pageSize=100, pageToken=token).execute()
+        groups += len([g for g in r.get("contactGroups", [])
+                       if g.get("groupType") == "USER_CONTACT_GROUP"])
+        token = r.get("nextPageToken")
+        if not token:
+            break
+    return {"contacts": contacts, "contact_groups": groups}
+
+
+def count_tasks(tasks) -> dict:
+    lists = items = 0
+    token = None
+    while True:
+        r = tasks.tasklists().list(maxResults=100, pageToken=token).execute()
+        for tl in r.get("items", []):
+            lists += 1
+            t2 = None
+            while True:
+                tr = tasks.tasks().list(
+                    tasklist=tl["id"], maxResults=100, pageToken=t2,
+                    showCompleted=True, showHidden=True).execute()
+                items += len(tr.get("items", []))
+                t2 = tr.get("nextPageToken")
+                if not t2:
+                    break
+        token = r.get("nextPageToken")
+        if not token:
+            break
+    return {"task_lists": lists, "tasks": items}
+
+
 COUNTERS = {
     "drive": (count_drive, "source_drive", "target_drive"),
+    "contacts": (count_contacts, "source_people", "target_people"),
+    "tasks": (count_tasks, "source_tasks", "target_tasks"),
     "gmail": (count_gmail, "source_gmail", "target_gmail"),
     "calendar": (count_calendar, "source_calendar", "target_calendar"),
     "chat": (count_chat, "source_chat", "target_chat"),
@@ -167,7 +223,13 @@ def compare(phase: str, before: dict, after: dict) -> tuple[bool, str]:
     that differs is not evidence of loss.
     """
     keys = {"drive": ("files", "bytes"), "gmail": ("messages",),
-            "calendar": ("events",), "chat": ("messages",)}[phase]
+            "calendar": ("events",), "chat": ("messages",),
+            "contacts": ("contacts",), "tasks": ("tasks",),
+            # Files, not drives: a target with the same number of drives and
+            # a fraction of the files has plainly lost data. bytes is left out
+            # because a native Doc re-created on the target reports a
+            # different size, which is not loss.
+            "shared_drives": ("files",)}[phase]
 
     # A phase where counting itself failed must never read as success. With
     # both sides empty every comparison is trivially satisfied -- "0 of 0" --
@@ -213,11 +275,97 @@ def fmt(phase: str, d: dict) -> str:
         return f"{g('messages'):,} messages, {g('threads'):,} threads"
     if phase == "calendar":
         return f"{g('events'):,} events in {g('calendars')} calendars"
+    if phase == "contacts":
+        return f"{g('contacts'):,} contacts in {g('contact_groups')} group(s)"
+    if phase == "tasks":
+        return f"{g('tasks'):,} tasks in {g('task_lists')} list(s)"
+    if phase == "shared_drives":
+        return (f"{g('files'):,} files in {g('drives')} drive(s), "
+                f"{g('bytes') / 1024**3:.2f} GB")
     return f"{g('messages'):,} messages in {g('spaces')} spaces"
 
 
+def tally_tenant(auth: AuthManager, settings: Settings, phase: str,
+                 side: str) -> dict:
+    """
+    Count a tenant-wide phase, which has no per-user sum to take.
+
+    `_counted` is still set, because compare() refuses a verdict when nothing
+    was counted -- a shared-drive pass that could not enumerate anything must
+    not reconcile as a clean zero.
+    """
+    import shared_drives
+
+    admin = settings.source_admin if side == "source" else settings.target_admin
+    mig = shared_drives.SharedDriveMigrator(
+        auth, MigrationDB(settings.db_path), settings,
+        settings.source_admin, settings.target_admin)
+    svc = mig.src if side == "source" else mig.tgt
+    total = {"_counted": 0, "_failed": 0, "_notes": [],
+             "drives": 0, "files": 0, "bytes": 0}
+    try:
+        drives = mig.list_source_drives(True) if side == "source" else \
+            _list_target_drives(svc)
+    except Exception as exc:  # noqa: BLE001
+        total["_failed"] += 1
+        total["_notes"].append(f"{admin}: {str(exc)[:110]}")
+        return total
+    total["_counted"] = 1
+    total["drives"] = len(drives)
+    for d in drives:
+        try:
+            got = mig.count_drive(d["id"]) if side == "source" else \
+                _count_target_drive(svc, d["id"])
+        except Exception as exc:  # noqa: BLE001
+            total["_failed"] += 1
+            total["_notes"].append(str(exc)[:110])
+            continue
+        total["files"] += got["files"]
+        total["bytes"] += got["bytes"]
+    return total
+
+
+def _list_target_drives(svc) -> list[dict]:
+    out, token = [], None
+    while True:
+        r = svc.drives().list(pageSize=100, pageToken=token,
+                              useDomainAdminAccess=True,
+                              fields="nextPageToken,drives(id,name)").execute()
+        out.extend(r.get("drives", []))
+        token = r.get("nextPageToken")
+        if not token:
+            return out
+
+
+def _count_target_drive(svc, drive_id: str) -> dict:
+    files = folders = size = 0
+    token = None
+    while True:
+        r = svc.files().list(
+            q="trashed = false", corpora="drive", driveId=drive_id,
+            includeItemsFromAllDrives=True, supportsAllDrives=True,
+            pageSize=1000, pageToken=token,
+            fields="nextPageToken,files(id,mimeType,size)").execute()
+        for f in r.get("files", []):
+            if f.get("mimeType") == FOLDER_MIME:
+                folders += 1
+            else:
+                files += 1
+                size += int(f.get("size") or 0)
+        token = r.get("nextPageToken")
+        if not token:
+            return {"files": files, "folders": folders, "bytes": size}
+
+
 def run_phase(phase: str, settings: Settings, extra: list[str]) -> int:
-    """Hand off to main.py for the actual work; this module only orchestrates."""
+    """Hand off to the script that does the work; this module orchestrates."""
+    if phase in TENANT_PHASES:
+        # Tenant-wide, and driven as an admin rather than per user -- so
+        # `--user` filters do not apply and are deliberately not passed on.
+        argv = [PY, os.path.join(HERE, "shared_drives.py"), "--migrate",
+                "--all-drives"]
+        log.info("  running: shared_drives --migrate --all-drives")
+        return subprocess.run(argv, cwd=HERE).returncode
     argv = [PY, os.path.join(HERE, "main.py"), "migrate", "--services", phase] + extra
     log.info("  running: migrate --services %s", phase)
     return subprocess.run(argv, cwd=HERE).returncode
@@ -249,10 +397,23 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     phases = args.phase or list(PHASES)
-    if "chat" in phases and not settings.migrate_chat:
-        print("  note: chat phase requested but MIGRATE_CHAT is off — skipping.\n"
-              "        Set MIGRATE_CHAT=true and grant chat.spaces/chat.messages.")
-        phases = [p for p in phases if p != "chat"]
+    # Every optional phase says why it is not running. A phase that vanishes
+    # silently is how a run reports success having migrated nothing -- the
+    # shape of bug this tool has produced more than any other.
+    GATES = {
+        "chat": (settings.migrate_chat, "MIGRATE_CHAT",
+                 "chat.spaces, chat.messages, chat.memberships and either "
+                 "chat.import or CHAT_SPACE_MODE=direct"),
+        "contacts": (settings.migrate_contacts, "MIGRATE_CONTACTS",
+                     "contacts.readonly on the source, contacts on the target"),
+        "tasks": (settings.migrate_tasks, "MIGRATE_TASKS",
+                  "tasks.readonly on the source, tasks on the target"),
+    }
+    for phase, (enabled, flag, needs) in GATES.items():
+        if phase in phases and not enabled:
+            print(f"  note: {phase} requested but {flag} is off — skipping.\n"
+                  f"        Set {flag}=true and grant {needs}.")
+            phases = [p for p in phases if p != phase]
 
     extra = []
     for u in args.user or []:
@@ -264,7 +425,11 @@ def main(argv: list[str] | None = None) -> int:
 
     for phase in phases:
         print(f"\n  [{phase.upper()}]")
-        before = tally(auth, settings, phase, pairs, "source")
+        counter = tally_tenant if phase in TENANT_PHASES else tally
+        args_for = ((auth, settings, phase, "source")
+                    if phase in TENANT_PHASES
+                    else (auth, settings, phase, pairs, "source"))
+        before = counter(*args_for)
         print(f"    source  {fmt(phase, before)}")
 
         if not args.count_only:
@@ -272,7 +437,9 @@ def main(argv: list[str] | None = None) -> int:
             rc = run_phase(phase, settings, extra)
             print(f"    ran in  {time.time() - started:.0f}s (exit {rc})")
 
-        after = tally(auth, settings, phase, pairs, "target")
+        after = (tally_tenant(auth, settings, phase, "target")
+                 if phase in TENANT_PHASES
+                 else tally(auth, settings, phase, pairs, "target"))
         print(f"    target  {fmt(phase, after)}")
 
         ok, detail = compare(phase, before, after)
