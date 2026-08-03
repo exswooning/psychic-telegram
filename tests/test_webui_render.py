@@ -90,8 +90,8 @@ draw(true);                   out.after_force = RENDERS['main']||0;
 S.migrated = 4571; S.failed = 3;
 draw();                       out.after_counter_change = RENDERS['main']||0;
 
-// step 3 must carry the delegation strings, not just point at step 5
-cur = 3;
+// The requirements screen must carry the delegation strings for whichever
+// path was chosen -- that grant is the one step no software can perform.
 ups = {source_key:{present:true,valid:true,path:'./keys/source-sa.json',
         detail:{client_email:'src-sa@p.iam.gserviceaccount.com',
                 client_id:'114344169573197353518',project_id:'p'}},
@@ -99,15 +99,31 @@ ups = {source_key:{present:true,valid:true,path:'./keys/source-sa.json',
        oauth_client:{present:false,valid:false}};
 authMode='key';
 authModes={key:{label:'Service-account key',blurb:'b',needs:['source_key','target_key']}};
+runMode='migrate_only';
+runModes={migrate_only:{label:'Migrate only',blurb:'b',
+                        requires:[2,3,4,5],runs:['migrate']}};
 dwd={tenants:[{side:'source',domain:'c.example.com',admin:'info@c.example.com',
                client_id:'114344169573197353518',
                scopes:'https://www.googleapis.com/auth/drive.readonly,https://www.googleapis.com/auth/gmail.readonly',
                scope_list:['a','b']},
               {side:'target',domain:'a.example.com',admin:'info@a.example.com',
-               client_id:'9',scopes:'https://www.googleapis.com/auth/drive',scope_list:['a']}]};
+               client_id:'9',scopes:'https://www.googleapis.com/auth/drive',scope_list:['a']}],
+      seed:{combined:'https://www.googleapis.com/auth/drive,https://www.googleapis.com/auth/gmail.insert',
+            combined_list:['a','b']}};
+// step 5 outstanding, so its body renders
+S.steps[4].state='manual';
+view='require'; draw(true);
+out.requirements = document.getElementById('main').innerHTML;
+
+// and the seeding path must show the WIDER source line, not the read-only one
+runMode='seed_and_migrate';
+runModes.seed_and_migrate={label:'Seed, then migrate',blurb:'b',
+                           requires:[2,3,4,5],runs:['seed','migrate']};
 draw(true);
-out.step3 = document.getElementById('main').innerHTML;
-cur = 5;
+out.requirements_seed = document.getElementById('main').innerHTML;
+view='run'; draw(true);
+out.runscreen = document.getElementById('main').innerHTML;
+view='path'; draw(true);
 
 // a transient bad poll must not blow the panel away
 const good = S;
@@ -177,20 +193,28 @@ class TestRenderThrottling:
         assert r["after_transient_error"] == r["before_error"], (
             "a failed poll rebuilt (and cleared) the panel")
 
-    def test_step_three_carries_the_delegation_strings(self, r):
-        """The grant is what makes an uploaded key usable, and its absence
-        surfaces on step 3 as unauthorized_client -- so the Client ID and the
-        scope line have to be there, not one screen away."""
-        html = r["step3"]
+    def test_the_requirements_screen_carries_the_delegation_strings(self, r):
+        """That grant is the one step no software can perform, so the Client ID
+        and the exact scope line belong where it is asked for."""
+        html = " ".join(r["requirements"].split())
         assert "114344169573197353518" in html
         assert "Manage Domain Wide Delegation" in html
         assert "drive.readonly" in html
         assert "info@c.example.com" in html          # which admin to sign in as
 
-    def test_step_three_shows_the_scopes_for_the_matching_tenant(self, r):
-        """source_key must not be handed the target's scope line -- pasting
-        write scopes into the source console is worse than useless."""
-        html = r["step3"]
+    def test_a_seeding_path_is_shown_the_wider_source_line(self, r):
+        """Seeding writes; migrating reads. The console editor replaces rather
+        than appends, so a seed path shown the read-only line would paste a
+        grant that cannot seed."""
+        assert "gmail.insert" in r["requirements_seed"]
+
+    def test_the_run_screen_offers_the_paths_own_steps(self, r):
+        assert "Live output" in r["runscreen"]
+
+    def test_requirements_show_the_scopes_for_the_matching_tenant(self, r):
+        """source must not be handed the target's scope line -- pasting write
+        scopes into the source console is worse than useless."""
+        html = " ".join(r["requirements"].split())
         assert "gmail.readonly" in html              # source set
         assert "gmail.insert" not in html            # target-only scope
 

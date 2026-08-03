@@ -384,6 +384,10 @@ RUN_MODES = {
         "label": "Migrate only",
         "blurb": "Move an existing tenant's data. The normal case.",
         "skip": [7],
+        # Steps that must be satisfied before this path can run. Everything
+        # else is noise for someone who only wants this one outcome.
+        "requires": [2, 3, 4, 5],
+        "runs": ["discover", "migrate_dry", "migrate", "verify"],
         "setup": [
             "Two Workspace domains, and a super-admin account in each.",
             "A service-account key per tenant (or keyless / OAuth) — step 3.",
@@ -401,6 +405,8 @@ RUN_MODES = {
         "label": "Seed only",
         "blurb": "Fill a sandbox source tenant with test data. Migrates nothing.",
         "skip": [6, 8, 9],
+        "requires": [2, 3, 5],
+        "runs": ["seed"],
         "setup": [
             "A THROWAWAY source domain. This writes fabricated data into a "
             "live tenant and is not reversible except by --reset.",
@@ -418,6 +424,8 @@ RUN_MODES = {
         "label": "Seed, then migrate",
         "blurb": "Build a test corpus and move it. The full rehearsal.",
         "skip": [],
+        "requires": [2, 3, 4, 5],
+        "runs": ["seed", "discover", "migrate_dry", "migrate", "verify"],
         "setup": [
             "Everything in both lists above.",
             "The SOURCE grant must carry the union: read scopes for migrating "

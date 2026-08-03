@@ -59,10 +59,15 @@ class TestServedPage:
         """Cheap structural guard for machines with no node: the handlers the
         buttons call must exist, or the step renders with dead controls."""
         js = _js()
-        for fn in ("function draw(", "function drawRail(", "function stepBody(",
-                   "async function saveCfg(", "async function runSetup(",
-                   "async function deploy(", "async function run(",
-                   "async function refresh(", "async function pollJob("):
+        # The three-screen flow: pick a path, satisfy its requirements, run it.
+        for fn in ("function draw(", "function drawRail(",
+                   "function screenPath(", "function screenRequire(",
+                   "function screenRun(", "function requirementBody(",
+                   "function delegationBody(", "function credentialsBody(",
+                   "function configForm(", "function restoreForm(",
+                   "async function saveCfg(", "async function runSeed(",
+                   "async function run(", "async function refresh(",
+                   "async function pollJob("):
             assert fn in js, f"missing {fn}"
 
     def test_every_onclick_names_a_function_that_exists(self):

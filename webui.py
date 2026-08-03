@@ -1033,7 +1033,9 @@ def _RUN_MODES() -> dict:
     from wizard import RUN_MODES
 
     return {k: {"label": v["label"], "blurb": v["blurb"],
-                "setup": v.get("setup", [])}
+                "setup": v.get("setup", []),
+                "requires": v.get("requires", []),
+                "runs": v.get("runs", [])}
             for k, v in RUN_MODES.items()}
 
 
@@ -1436,6 +1438,7 @@ picks up where it left off.</pre>
 let seen=0, acts={}, S=null, cur=null, dwd=null, oauth=null, cfg=null, follow=true;
 let lastSig='', ups=null, authMode=null, authModes=null, upMsg={},
     seedScales=null, seedMsg=null, runMode=null, runModes=null, stepChk=null,
+    view='path', seedOpen=false,
     dep={user:'root',port:'22',open:false};
 let tab='setup', snap=null, scopeLines=[], logLines=[], logPath='';
 let followOut=true;
@@ -1470,332 +1473,6 @@ function drawRail(){
 }
 
 /* ---------------- the one visible step ---------------- */
-function stepBody(x){
-  let h='';
-
-  /* Step 5 is the only step no software can do. Give the exact strings. */
-  if(x.n===5 && dwd){
-    h+=`<div class="warnbox"><b>This step needs a person.</b><br>
-      Google provides no API for domain-wide delegation \\u2014 deliberately.
-      It is the grant that lets a credential act as every user in the domain,
-      so a super admin must give it in a browser.</div>`;
-    h+=`<div class="card"><h3>Paste these into each Admin Console</h3>
-      <div class="muted">admin.google.com &rarr; Security &rarr; Access and data
-      control &rarr; API controls &rarr; Manage Domain Wide Delegation &rarr; Add new</div>`;
-    dwd.tenants.forEach(t=>{
-      h+=`<div style="margin-top:16px"><b>${esc(t.domain||t.side)}</b>
-        <span class="muted">sign in as ${esc(t.admin||'a super admin')}</span>`;
-      if(!t.client_id){
-        h+=`<div class="muted" style="margin-top:6px">No key file yet for this
-          tenant, so there is no Client ID to show. Finish step 3 first.</div>`;
-      }else{
-        h+=`<div class="cprow"><b>Client ID</b>
-          <button onclick="copy('${esc(t.client_id)}',this)">Copy</button></div>
-          <pre class="copy">${esc(t.client_id)}</pre>`;
-      }
-      h+=`<div class="cprow"><b>OAuth scopes</b>
-        <button onclick="copy(${esc(JSON.stringify(t.scopes))},this)">Copy</button>
-        <span class="muted">${t.scope_list.length} scopes \\u2014 paste the whole
-        line, that editor replaces rather than appends</span></div>
-        <pre class="copy">${esc(t.scopes)}</pre></div>`;
-    });
-    h+=`</div><div class="muted">Grants usually propagate in about 2 minutes,
-      occasionally 30. This page re-checks on its own \\u2014 the step turns green
-      when a real token mint succeeds, not when you say it is done.</div>`;
-
-    /* Provisioning the target (step 6) needs admin.directory.user (write),
-       which the target's migration line deliberately omits. Same REPLACE-not-
-       append rule as seeding, so show the combined line right here. */
-    if(dwd.target_provision&&dwd.target_provision.scope_list&&dwd.target_provision.scope_list.length){
-      h+=`<div class="card" style="background:var(--bg);margin-top:14px">
-        <h3>Also creating target accounts (provision-users)</h3>
-        <div class="muted">Creating the target accounts on step 6 needs
-          <code>admin.directory.user</code> (write) added to the target grant.
-          The target's line above does not carry it. If you intend to
-          provision, paste this combined line into the target Admin Console
-          \\u2014 it replaces the current one.</div>
-        <div class="cprow"><b>Target scopes: migrate + provision</b>
-          <button onclick="copy(${esc(JSON.stringify(dwd.target_provision.scopes))},this)">Copy</button>
-          <span class="muted">${dwd.target_provision.scope_list.length} scopes</span></div>
-        <pre class="copy">${esc(dwd.target_provision.scopes)}</pre></div>`;
-    }
-    h+=`<div style="margin-top:16px"><button class="primary" onclick="recheckDWD(this)">
-      Re-check Delegation Status<small>Mints tokens to test Domain-Wide Delegation immediately</small></button>
-      <span id="dwdmsg" class="muted" style="margin-left:10px"></span></div>`;
-  }
-
-  /* Step 1 is where someone lands first, so the whole shape of the job
-     belongs here -- what this route needs before any of it will work. */
-  if(x.n===1 && runModes && runModes[runMode] && runModes[runMode].setup){
-    const m=runModes[runMode];
-    h+=`<div class="card" style="border-color:var(--accent)">
-      <h3>What &ldquo;${esc(m.label)}&rdquo; needs before you start</h3>
-      <ol style="margin:8px 0 0 18px;padding:0;line-height:1.7">
-        ${m.setup.map(t=>`<li>${esc(t)}</li>`).join('')}
-      </ol>
-      <div class="muted" style="margin-top:10px">Change the route on step 2.
-        Each step below re-checks itself, and every page has a
-        <b>Check step</b> button.</div></div>`;
-  }
-
-  /* Step 3: choose how this authenticates, then supply whatever that needs.
-     The mode used to come from an AUTH_MODE environment variable, which meant
-     the service-account path was invisible to anyone who had not set it
-     before launching -- exactly the wrong place for the decision. */
-  if(x.n===3){
-    const u=(ups||{}), modes=authModes||{}, mode=authMode||'key';
-    h+=`<div class="card"><h3>How should this authenticate?</h3>
-      <div class="acts">`;
-    Object.keys(modes).forEach(k=>{
-      const m=modes[k], on=(k===mode);
-      h+=`<button onclick="setMode('${k}')" class="${on?'primary':''}">
-        ${on?'\u25cf ':'\u25cb '}${esc(m.label)}
-        <small>${esc(m.blurb)}</small></button>`;
-    });
-    h+=`</div><div id="modemsg" class="muted" style="margin-top:8px"></div></div>`;
-
-    const need=(modes[mode]&&modes[mode].needs)||[];
-    const WHERE={
-      oauth_client:['OAuth client ID',
-        'APIs &amp; Services \u2192 Credentials \u2192 Create credentials '+
-        '\u2192 OAuth client ID \u2192 Desktop app \u2192 Download JSON'],
-      source_key:['Source service-account key',
-        'IAM &amp; Admin \u2192 Service Accounts \u2192 Keys \u2192 Add key '+
-        '\u2192 Create new key \u2192 JSON \u2014 in the SOURCE tenant\u2019s project'],
-      target_key:['Target service-account key',
-        'The same, in the TARGET tenant\u2019s project'],
-    };
-    if(!need.length){
-      h+=`<div class="okbox">This mode needs no credential file. Your own
-        <code>gcloud</code> identity mints tokens for the service accounts, so
-        there is nothing to download, leak or rotate \u2014 and no
-        <code>disableServiceAccountKeyCreation</code> policy to fight.</div>`;
-    }else{
-      h+=`<div class="card"><h3>Upload credential files</h3>`;
-      need.forEach(kind=>{
-        const st=u[kind]||{}, w=WHERE[kind]||[kind,''], d=st.detail||{};
-        /* three states, not two: missing, present-but-wrong, and good */
-        const mark = !st.present ? ['\u25cb','var(--dim)','not uploaded']
-                   : st.valid    ? ['\u2713','var(--ok)','looks good']
-                                 : ['\u2715','var(--bad)','file is present but not usable'];
-        h+=`<div style="margin-bottom:16px">
-          <div><span style="color:${mark[1]}">${mark[0]}</span> <b>${w[0]}</b>
-            <span class="muted">${mark[2]}</span></div>
-          <div class="muted" style="margin:2px 0 6px">${w[1]}<br>
-            saved to <code>${esc(st.path||'')}</code> mode 0600</div>`;
-        if(st.present && !st.valid)
-          h+=`<div class="warnbox" style="margin:6px 0">${esc(st.error||'')}</div>`;
-        if(st.warning)
-          h+=`<div class="warnbox" style="margin:6px 0">${esc(st.warning)}</div>`;
-        if(st.valid && d.client_email){
-          /* The delegation grant is what makes this key usable, and its
-             absence surfaces *here* as unauthorized_client -- so the exact
-             strings to paste belong here too, not only on step 5. */
-          const side = kind==='source_key' ? 'source' : 'target';
-          const t = (dwd&&dwd.tenants||[]).find(x=>x.side===side) || {};
-          h+=`<div class="muted">service account <code>${esc(d.client_email)}</code>
-              &middot; project <code>${esc(d.project_id||'?')}</code></div>
-            <div class="card" style="margin:8px 0;background:var(--bg)">
-              <h3>Authorise this key in the ${side} Admin Console</h3>
-              <div class="muted" style="margin-bottom:8px">
-                admin.google.com${t.admin?` (sign in as <b>${esc(t.admin)}</b>)`:''}
-                &rarr; Security &rarr; Access and data control &rarr; API controls
-                &rarr; Manage Domain Wide Delegation &rarr; Add new</div>
-              <div class="cprow"><b>Client ID</b>
-                <button onclick="copy(${esc(JSON.stringify(d.client_id||''))},this)">Copy</button></div>
-              <pre class="copy">${esc(d.client_id||'')}</pre>
-              <div class="cprow"><b>OAuth scopes</b>
-                <button onclick="copy(${esc(JSON.stringify(t.scopes||''))},this)">Copy</button>
-                <span class="muted">${(t.scope_list||[]).length} scopes &mdash; paste the
-                whole line, that editor replaces rather than appends</span></div>
-              <pre class="copy">${esc(t.scopes||'(set the domains in step 2 first)')}</pre>
-              <div class="muted">Grants take ~2 minutes to propagate, occasionally 30.
-                Re-run the test below; it turns green on its own once it lands.</div>
-            </div>`;
-        }
-        if(st.valid && !d.client_email && d.client_id)
-          h+=`<div class="muted">client <code>${esc(d.client_id)}</code>
-              (${esc(d.type||'')})</div>`;
-        h+=`<div style="margin-top:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-            <input type="file" accept=".json,application/json"
-              onchange="upload('${kind}',this)" style="flex:1;min-width:200px">
-            ${kind!=='oauth_client'?`<button onclick="checkCred('${kind}',this)"
-              ${st.valid?'':'disabled'}>Test this key
-              <small>Mints a real token</small></button>`:''}
-          </div>
-          <div class="muted" id="chk-${kind}" style="margin-top:6px">${
-            upMsg[kind] ? (upMsg[kind].ok?'\u2713 ':'\u2715 ')+esc(upMsg[kind].text) : ''
-          }</div>
-        </div>`;
-      });
-      h+=`<div id="upmsg" class="muted"></div></div>`;
-    }
-  }
-
-  /* OAuth connect, shown on the credentials step when in oauth mode */
-  if(x.n===3 && authMode==='oauth'){
-    h+=`<div class="card"><h3>Connect tenants</h3>`;
-    if(!oauth.configured){
-      h+=`<div class="muted">No OAuth client configured yet. Create one OAuth
-        client ID in any GCP project and save it to
-        <code>${esc(oauth.client_secrets_path)}</code>. You do this once
-        \\u2014 tenant admins never touch the Cloud console.</div>`;
-    }else{
-      ['source','target'].forEach(t=>{
-        const c=oauth[t];
-        h+=`<div style="margin-bottom:12px">
-          <div><span style="color:${c.connected?'var(--ok)':'var(--dim)'}">
-            ${c.connected?'\\u2713':'\\u25cb'}</span>
-            <b style="text-transform:capitalize">${t}</b>
-            <span class="muted">${esc(c.connected?c.account:'not connected')}</span></div>
-          <div style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap">
-          <button onclick="oauthGo('${t}')">${c.connected?'Reconnect':'Connect'} ${t}
-            <small>Opens Google sign-in</small></button>
-          ${c.connected?`<button onclick="oauthDrop('${t}')">Disconnect
-            <small>Forgets the token here only</small></button>`:''}
-          </div></div>`;
-      });
-    }
-    h+='</div>';
-  }
-
-  /* Step 2 collects what setup.sh needs, so nobody has to type a command
-     with <PLACEHOLDERS> into a shell -- where <SRC> is redirection syntax
-     and the shell rejects the line before the script ever sees it. */
-  if(x.n===2){
-    const c=(cfg||{});
-    const rm=runModes||{}, cur_rm=runMode||'migrate_only';
-    h+=`<div class="card"><h3>What is this run for?</h3>
-      <div class="acts">${Object.keys(rm).map(k=>{
-        const m=rm[k], on=(k===cur_rm);
-        return `<button onclick="setRunMode('${k}')" class="${on?'primary':''}">
-          ${on?'\u25cf ':'\u25cb '}${esc(m.label)}
-          <small>${esc(m.blurb)}</small></button>`;}).join('')}</div>
-      <div class="muted" style="margin-top:8px">Steps that do not apply are
-        marked <b>&ndash; not needed</b> rather than left outstanding.</div>
-      <div id="runmsg" class="muted" style="margin-top:6px"></div></div>`;
-    h+=`<div class="card"><h3>Your two domains</h3>
-      <div class="grid2">
-        <label>Source domain<input id="f-sd" placeholder="c.example.com"
-          value="${esc(c.source_domain||'')}"></label>
-        <label>Target domain<input id="f-td" placeholder="a.example.com"
-          value="${esc(c.target_domain||'')}"></label>
-        <label>Source admin<input id="f-sa" placeholder="info@c.example.com"
-          value="${esc(c.source_admin||'')}"></label>
-        <label>Target admin<input id="f-ta" placeholder="info@a.example.com"
-          value="${esc(c.target_admin||'')}"></label>
-      </div>
-      <div class="muted" style="margin-top:8px">Each admin must be a super
-        admin <i>in the domain it administers</i>. Saving writes
-        <code>env.sh</code>.</div>
-      <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
-        <button class="primary" onclick="saveCfg()">Save</button>
-        <button onclick="runSetup(false)">Save &amp; run setup
-          <small>Creates both GCP projects, service accounts and keys</small></button>
-        <button onclick="runSetup(true)">Save &amp; run setup (keyless)
-          <small>If key downloads are blocked by org policy</small></button>
-      </div>
-      <div id="cfgmsg" class="muted" style="margin-top:8px"></div></div>`;
-
-    h+=`<div class="card"><h3>Where should the migration run?</h3>
-      <div class="muted">A migration runs for hours. On a laptop, sleeping or
-      changing networks interrupts it \u2014 recoverable, but you will be
-      nursing it. A VPS just stays up.</div>
-      <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
-        <button onclick="dep.open=true;document.getElementById('vps').style.display=''">
-          Run on a VPS instead<small>Copies this tool there and starts its UI</small></button>
-      </div>
-      <div id="vps" style="display:none;margin-top:12px">
-        <div class="grid2">
-          <label>Host<input id="d-host" placeholder="203.0.113.10"></label>
-          <label>User<input id="d-user" value="root"></label>
-          <label>SSH port<input id="d-port" value="22"></label>
-          <label>Private key<input id="d-key" placeholder="~/.ssh/id_ed25519"></label>
-        </div>
-        <label style="display:block;margin-top:10px">
-          <input type="checkbox" id="d-creds"> also copy credentials
-          (<code>keys/</code>, <code>oauth/</code>, <code>env.sh</code>)</label>
-        <div class="muted">Those files can read every mailbox in both tenants.
-          Copying them to another machine asks for a typed confirmation.</div>
-        <button class="primary" style="margin-top:10px" onclick="deploy()">
-          Deploy to this host</button>
-      </div></div>`;
-  }
-
-  if(x.skipped){
-    h+=`<div class="okbox"><b>Not needed for this run.</b> You chose
-      &ldquo;${esc((runModes&&runModes[runMode]&&runModes[runMode].label)||runMode)}&rdquo;
-      on step 2. Change that there if this step should apply after all.</div>`;
-  }
-
-  if(x.help && x.help.length)
-    h+=`<div class="help">${esc(x.help.join('\\n'))}</div>`;
-
-  if(x.auto && !x.actions.length)
-    h+=`<div class="cprow"><b>Run this</b>
-      <button onclick="copy(${esc(JSON.stringify(x.auto))},this)">Copy</button></div>
-      <pre class="copy">${esc(x.auto)}</pre>`;
-
-  if(x.actions && x.actions.length && !x.skipped){
-    h+=`<div class="card"><h3>Do it from here</h3><div class="acts">`;
-    x.actions.forEach(k=>{const a=acts[k]; if(!a) return;
-      h+=`<button class="${a.destructive?'danger':''}" onclick="run('${k}')">
-        ${esc(a.label)}<small>${esc(a.blurb)}</small></button>`;});
-    h+='</div></div>';
-  }
-
-  if(x.n===7 && !x.skipped){
-    const src=(cfg&&cfg.source_domain)||'';
-    h+=`<div class="warnbox"><b>This writes fabricated data into a live
-      tenant.</b> Skip it entirely for a real migration \\u2014 it exists to
-      build a test corpus in a throwaway sandbox. It only ever targets the
-      <b>source</b> domain.</div>
-      ${(dwd&&dwd.seed&&dwd.seed.combined)?`<div class="card"
-        style="background:var(--bg)">
-        <h3>Seeding needs wider scopes than migrating</h3>
-        <div class="muted">The seeder <b>writes</b> to the source tenant; the
-          migration only <b>reads</b> it. The Admin Console's delegation editor
-          <b>replaces</b> the scope line rather than adding to it, so if you
-          intend to seed <i>and</i> migrate this domain, paste this combined
-          line \\u2014 the migration-only line will make seeding fail with
-          <code>unauthorized_client</code>, and vice versa.</div>
-        <div class="cprow"><b>Source scopes: seed + migrate</b>
-          <button onclick="copy(${esc(JSON.stringify(dwd.seed.combined))},this)">Copy</button>
-          <span class="muted">${dwd.seed.combined_list.length} scopes</span></div>
-        <pre class="copy">${esc(dwd.seed.combined)}</pre>
-        <div class="muted">Includes
-          <code>admin.directory.user</code> (write), which
-          <b>&ldquo;create the five user accounts&rdquo;</b> below needs.</div>
-      </div>`:''}
-      <div class="card"><h3>Seed the source tenant</h3>
-      <div class="muted">Builds a five-user organisation with a cross-user
-        sharing graph, mail, calendars, comments, drafts and the edge cases
-        that have broken migrations before.</div>
-      <div class="grid2" style="margin-top:12px">
-        <label>Scale
-          <select id="seed-scale">${(seedScales||['medium']).map(v=>
-            `<option${v==='medium'?' selected':''}>${v}</option>`).join('')}</select>
-        </label>
-        <label>Type the source domain to confirm
-          <input id="seed-confirm" placeholder="${esc(src||'set step 2 first')}"></label>
-      </div>
-      <label style="display:block;margin-top:10px">
-        <input type="checkbox" id="seed-create"> also create the five user
-        accounts if they do not exist</label>
-      <label style="display:block;margin-top:6px">
-        <input type="checkbox" id="seed-reset"> <b style="color:var(--bad)">reset
-        first</b> \\u2014 DELETES all existing data for those users</label>
-      <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
-        <button class="danger" onclick="runSeed()">Run the seeder
-          <small>Targets ${esc(src||'(no source domain set)')}</small></button>
-      </div>
-      <div id="seedmsg" class="muted" style="margin-top:8px">${
-        seedMsg ? (seedMsg.ok?'\\u2713 ':'\\u2715 ')+esc(seedMsg.text) : ''}</div>
-      </div>`;
-  }
-
-  return h;
-}
 
 /* Values currently typed into the step-2 forms. The poll below must never
    swallow a keystroke, so anything on screen is captured before a re-render
@@ -1840,71 +1517,175 @@ function signature(){
 }
 
 function draw(force){
-  /* Only show the error panel when there has never been a good one. A
-     transient failure used to blow the step away -- and with it anything
-     typed into the form. */
   if(!S||S.error){
     if(!lastSig){ $('main').innerHTML=
       `<div class="warnbox">${esc(S?S.error:'no status')}</div>`; }
     return; }
-  if(cur===null||follow){
-    const nxt=S.steps.find(s=>s.state!=='done');
-    cur=nxt?nxt.n:S.steps[S.steps.length-1].n;
-  }
   captureForm();
-  const sig=signature();
+  const sig=signature()+'|'+view;
   if(!force && sig===lastSig){ paintLive(); return; }
   lastSig=sig;
 
-  const x=S.steps.find(s=>s.n===cur)||S.steps[0];
-  const i=S.steps.indexOf(x);
+  if(view==='path')          $('main').innerHTML=screenPath();
+  else if(view==='require')  $('main').innerHTML=screenRequire();
+  else                       $('main').innerHTML=screenRun();
 
-  $('main').innerHTML=`
-    <div class="eyebrow">Step ${x.n} of ${S.total}</div>
-    <h2 class="title">${esc(x.title)}</h2>
-    <span class="pill ${x.state}">${
-      {done:'Done',manual:'Needs you',active:'In progress',todo:'Not started',
-       skip:'Not needed'}[x.state]}</span>
-    ${x.note?`<div class="note">${esc(x.note)}</div>`:''}
-    ${stepBody(x)}
-    <div class="card" style="border-color:var(--accent)">
-      <h3>Have I finished this step?</h3>
-      <div class="muted">Re-checks this step against the live tenants right
-        now, rather than the cached status.</div>
-      <div style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-        <button class="primary" onclick="checkStep(${x.n},this)">
-          Check step ${x.n}</button>
-        <span id="stepchk" class="muted">${
-          stepChk && stepChk.n===x.n
-            ? (stepChk.ok?'\u2713 ':'\u2715 ')+esc(stepChk.text) : ''}</span>
-      </div>
-    </div>
-    <div class="nav">
-      <button id="prev" ${i===0?'disabled':''}>&larr; Back</button>
-      <button id="next" class="primary" ${i===S.steps.length-1?'disabled':''}>
-        ${x.state==='done'?'Next step \\u2192':'Skip ahead \\u2192'}</button>
-      <label class="muted" style="margin-left:8px">
-        <input type="checkbox" id="fol" ${follow?'checked':''}> follow current step</label>
-      ${S.failed?`<span class="muted" style="color:var(--bad);margin-left:auto">
-        ${S.failed} item(s) FAILED</span>`:''}
-    </div>
-    <div class="stats" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr))">
-      <div class="stat"><b id="s-mig">${(S.migrated||0).toLocaleString()}</b><span>items migrated</span></div>
-      <div class="stat"><b id="s-fail" style="${S.failed?'color:var(--bad)':''}">${S.failed||0}</b><span>failed</span></div>
-      <div class="stat"><b id="s-users">${S.users_done||0}/${S.users_total||0}</b><span>users done</span></div>
-    </div>`;
-
-  $('prev').onclick=()=>{follow=false;cur=S.steps[i-1].n;draw(true);};
-  $('next').onclick=()=>{follow=false;cur=S.steps[i+1].n;draw(true);};
-  $('fol').onchange=e=>{follow=e.target.checked;if(follow)draw(true);};
-  $('stop').onclick=async()=>{await fetch('/api/stop',{method:'POST'});};
+  wireCommon();
   restoreForm();
   drawRail();
   paintJob();
 }
 
-/* Put back whatever was typed before the re-render, including the caret, so
-   an unavoidable redraw is invisible to someone mid-sentence. */
+/* ---------- screen 1: which of the three jobs is this? ---------- */
+function screenPath(){
+  const m=runModes||{};
+  return `
+    <div class="eyebrow">Step 1 of 3</div>
+    <h2 class="title">What do you want to do?</h2>
+    <div class="note">Each path asks only for what it needs, then runs and
+      shows you the log. Nothing else is in your way.</div>
+    <div class="acts" style="margin-top:20px;grid-template-columns:1fr">
+      ${Object.keys(m).map(k=>{
+        const x=m[k], on=(k===runMode);
+        return `<button onclick="pickPath('${k}')" class="${on?'primary':''}"
+            style="padding:16px">
+          <span style="font-size:15px">${on?'\u25cf ':'\u25cb '}${esc(x.label)}</span>
+          <small style="font-size:12px;margin-top:4px">${esc(x.blurb)}</small>
+          <small style="font-size:11px;margin-top:6px;opacity:.8">
+            needs ${(x.requires||[]).length} thing(s) &middot;
+            runs: ${(x.runs||[]).join(' \u2192 ')}</small>
+        </button>`;}).join('')}
+    </div>
+    <div class="nav">
+      <button class="primary" onclick="go('require')"
+        ${runMode?'':'disabled'}>Continue \u2192</button>
+      <span class="muted">${runMode?('selected: '+esc((m[runMode]||{}).label||runMode)):'pick one to continue'}</span>
+    </div>`;
+}
+
+/* ---------- screen 2: everything this path requires ---------- */
+function screenRequire(){
+  const m=(runModes||{})[runMode]||{};
+  const need=(m.requires||[]);
+  const steps=(S.steps||[]).filter(s=>need.indexOf(s.n)>=0);
+  const done=steps.filter(s=>s.state==='done').length;
+  const ready=(done===steps.length && steps.length>0);
+
+  let h=`
+    <div class="eyebrow">Step 2 of 3 &middot; ${esc(m.label||'')}</div>
+    <h2 class="title">What this needs</h2>
+    <div class="bar" style="margin:12px 0"><i style="width:${
+      steps.length?100*done/steps.length:0}%"></i></div>
+    <div class="note">${done} of ${steps.length} ready. Each re-checks itself
+      against the live tenants.</div>`;
+
+  steps.forEach(st=>{
+    const good=st.state==='done';
+    h+=`<div class="card" style="border-left:3px solid ${
+        good?'var(--ok)':st.state==='manual'?'var(--warn)':'var(--line)'}">
+      <div style="display:flex;gap:10px;align-items:baseline">
+        <span style="color:${good?'var(--ok)':'var(--dim)'};font-weight:700">
+          ${good?'\u2713':'\u25cb'}</span>
+        <div style="flex:1">
+          <b>${esc(st.title)}</b>
+          <div class="muted">${esc(st.note||'')}</div>
+        </div>
+        <button onclick="checkStep(${st.n},this)">Re-check</button>
+      </div>
+      ${good?'':requirementBody(st)}
+    </div>`;
+  });
+
+  h+=`<div class="nav">
+      <button onclick="go('path')">&larr; Back</button>
+      <button class="primary" onclick="go('run')" ${ready?'':'disabled'}>
+        ${ready?'Everything ready \u2014 continue \u2192':'Finish the items above'}</button>
+      <span id="stepchk" class="muted"></span>
+    </div>`;
+  return h;
+}
+
+/* The controls that satisfy one requirement, inline where it is asked for. */
+function requirementBody(st){
+  let h='';
+  if(st.n===2) h+=configForm();
+  if(st.n===3) h+=credentialsBody();
+  if(st.n===5) h+=delegationBody();
+  if(st.n===4 && st.actions && st.actions.length) h+=actionButtons(st.actions);
+  if(st.help && st.help.length && st.n!==2)
+    h+=`<div class="help" style="margin-top:10px">${esc(st.help.join('\\n'))}</div>`;
+  return h;
+}
+
+/* ---------- screen 3: run it, and watch ---------- */
+function screenRun(){
+  const m=(runModes||{})[runMode]||{};
+  const runs=(m.runs||[]);
+  let h=`
+    <div class="eyebrow">Step 3 of 3 &middot; ${esc(m.label||'')}</div>
+    <h2 class="title">Run it</h2>
+    <div class="note">${esc(m.blurb||'')}</div>
+    <div class="card"><h3>Steps in this path</h3><div class="acts">`;
+  runs.forEach(k=>{
+    if(k==='seed'){
+      h+=`<button class="danger" onclick="go('seedform')">Seed the source tenant
+        <small>Writes fabricated data \u2014 asks you to type the domain</small></button>`;
+      return;
+    }
+    const a=acts[k]; if(!a) return;
+    h+=`<button class="${a.destructive?'danger':''}" onclick="run('${k}')">
+      ${esc(a.label)}<small>${esc(a.blurb)}</small></button>`;
+  });
+  h+=`</div></div>`;
+  if(view==='seedform' || seedOpen) h+=seedForm();
+  h+=logPanel();
+  h+=`<div class="nav">
+      <button onclick="go('require')">&larr; Back</button>
+      <label class="muted"><input type="checkbox" id="fol" ${
+        follow?'checked':''}> follow current step</label>
+    </div>`;
+  return h;
+}
+
+function logPanel(){
+  return `<div class="card"><h3>Live output</h3>
+    <div class="run"><span class="dot" id="dot"></span>
+      <b id="jname">idle</b><span class="muted" id="jmeta"></span>
+      <button id="stop" style="margin-left:auto" disabled>Interrupt</button></div>
+    <pre class="out" id="out">Nothing running yet.
+
+Long jobs keep going if you close this tab \u2014 reopen and the output picks
+up where it left off.</pre>
+    </div>
+    <div class="stats">
+      <div class="stat"><b id="s-mig">${(S.migrated||0).toLocaleString()}</b><span>items migrated</span></div>
+      <div class="stat"><b id="s-fail" style="${S.failed?'color:var(--bad)':''}">${S.failed||0}</b><span>failed</span></div>
+      <div class="stat"><b id="s-users">${S.users_done||0}/${S.users_total||0}</b><span>users done</span></div>
+    </div>`;
+}
+
+function wireCommon(){
+  const f=$('fol'); if(f) f.onchange=e=>{follow=e.target.checked;};
+  const st=$('stop'); if(st) st.onclick=async()=>{await fetch('/api/stop',{method:'POST'});};
+  if(window._out && $('out')){ $('out').textContent=window._out;
+    $('out').scrollTop=$('out').scrollHeight; }
+}
+
+function go(v){ if(v==='seedform'){ seedOpen=true; view='run'; }
+                else { seedOpen=(v==='run')?seedOpen:false; view=v; }
+                draw(true); }
+
+async function pickPath(k){
+  const r=await (await fetch('/api/runmode',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({mode:k})})).json();
+  if(r.ok) runMode=r.run_mode;
+  await refresh(true);
+}
+
+
+/* Put back whatever was typed before a re-render, caret included, so a
+   redraw is invisible to someone mid-sentence. */
 function restoreForm(){
   const a=document.activeElement, aid=a?a.id:'';
   const start=a&&a.selectionStart, end=a&&a.selectionEnd;
@@ -1914,7 +1695,6 @@ function restoreForm(){
     put('f-sa',cfg.source_admin);  put('f-ta',cfg.target_admin);
   }
   if($('d-host')){
-    if(dep.open){ const v=$('vps'); if(v) v.style.display=''; }
     put('d-host',dep.host); put('d-user',dep.user);
     put('d-port',dep.port); put('d-key',dep.key);
     const c=$('d-creds'); if(c&&dep.creds!=null) c.checked=dep.creds;
@@ -1923,6 +1703,140 @@ function restoreForm(){
     const e=$(aid); e.focus();
     try{ e.setSelectionRange(start,end); }catch(_){}
   }
+}
+
+/* ---------- reusable requirement bodies ---------- */
+function configForm(){
+  const c=(cfg||{});
+  return `<div class="grid2" style="margin-top:12px">
+      <label>Source domain<input id="f-sd" placeholder="c.example.com"
+        value="${esc(c.source_domain||'')}"></label>
+      <label>Target domain<input id="f-td" placeholder="a.example.com"
+        value="${esc(c.target_domain||'')}"></label>
+      <label>Source admin<input id="f-sa" placeholder="info@c.example.com"
+        value="${esc(c.source_admin||'')}"></label>
+      <label>Target admin<input id="f-ta" placeholder="info@a.example.com"
+        value="${esc(c.target_admin||'')}"></label>
+    </div>
+    <div class="muted" style="margin-top:8px">Each admin must be a super admin
+      <i>in the domain it administers</i>.</div>
+    <button class="primary" style="margin-top:10px" onclick="saveCfg()">Save</button>
+    <span id="cfgmsg" class="muted" style="margin-left:8px"></span>`;
+}
+
+function credentialsBody(){
+  const u=(ups||{}), modes=authModes||{}, mode=authMode||'key';
+  let h=`<div style="margin-top:12px"><b style="font-size:12px">How to authenticate</b>
+    <div class="acts" style="margin-top:6px">`;
+  Object.keys(modes).forEach(k=>{
+    const m=modes[k], on=(k===mode);
+    h+=`<button onclick="setMode('${k}')" class="${on?'primary':''}">
+      ${on?'\u25cf ':'\u25cb '}${esc(m.label)}<small>${esc(m.blurb)}</small></button>`;
+  });
+  h+=`</div><div id="modemsg" class="muted" style="margin-top:6px"></div>`;
+  const need=(modes[mode]&&modes[mode].needs)||[];
+  const WHERE={
+    oauth_client:['OAuth client ID','APIs &amp; Services \u2192 Credentials \u2192 OAuth client ID \u2192 Desktop app'],
+    source_key:['Source service-account key','IAM &amp; Admin \u2192 Service Accounts \u2192 Keys \u2192 JSON, in the SOURCE project'],
+    target_key:['Target service-account key','The same, in the TARGET project'],
+  };
+  if(!need.length){
+    h+=`<div class="okbox">This mode needs no credential file at all.</div>`;
+  }else{
+    need.forEach(kind=>{
+      const st=u[kind]||{}, w=WHERE[kind]||[kind,''], d=st.detail||{};
+      const mark = !st.present ? ['\u25cb','var(--dim)','not uploaded']
+                 : st.valid    ? ['\u2713','var(--ok)','looks good']
+                               : ['\u2715','var(--bad)','present but not usable'];
+      h+=`<div style="margin-top:12px">
+        <div><span style="color:${mark[1]}">${mark[0]}</span> <b>${w[0]}</b>
+          <span class="muted">${mark[2]}</span></div>
+        <div class="muted">${w[1]}</div>`;
+      if(st.present && !st.valid)
+        h+=`<div class="warnbox" style="margin:6px 0">${esc(st.error||'')}</div>`;
+      if(st.warning) h+=`<div class="warnbox" style="margin:6px 0">${esc(st.warning)}</div>`;
+      if(st.valid && d.client_email)
+        h+=`<div class="muted">${esc(d.client_email)} &middot; project
+            <code>${esc(d.project_id||'?')}</code></div>`;
+      h+=`<div style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap">
+          <input type="file" accept=".json,application/json"
+            onchange="upload('${kind}',this)" style="flex:1;min-width:200px">
+          ${kind!=='oauth_client'?`<button onclick="checkCred('${kind}',this)"
+            ${st.valid?'':'disabled'}>Test<small>Mints a real token</small></button>`:''}
+        </div>
+        <div class="muted" id="chk-${kind}" style="margin-top:6px">${
+          upMsg[kind]?(upMsg[kind].ok?'\u2713 ':'\u2715 ')+esc(upMsg[kind].text):''
+        }</div></div>`;
+    });
+  }
+  return h+`</div>`;
+}
+
+function delegationBody(){
+  if(!dwd || !dwd.tenants) return '';
+  const seedPath = (runMode==='seed_only'||runMode==='seed_and_migrate');
+  let h=`<div class="warnbox" style="margin-top:12px">
+      <b>This step needs a person.</b> Google provides no API for domain-wide
+      delegation \u2014 a super admin must grant it in a browser.</div>
+    <div class="muted" style="margin:8px 0">admin.google.com \u2192 Security
+      \u2192 Access and data control \u2192 API controls \u2192 Manage Domain
+      Wide Delegation \u2192 Add new</div>`;
+  dwd.tenants.forEach(t=>{
+    const isSource = t.side==='source';
+    // A seeding path needs the WRITE scopes on the source; the editor replaces
+    // rather than appends, so the line shown must be the whole grant.
+    const line = (isSource && seedPath && dwd.seed && dwd.seed.combined)
+                 ? dwd.seed.combined : t.scopes;
+    const count = (isSource && seedPath && dwd.seed && dwd.seed.combined_list)
+                 ? dwd.seed.combined_list.length : (t.scope_list||[]).length;
+    h+=`<div class="card" style="background:var(--bg);margin-top:10px">
+      <b style="text-transform:capitalize">${t.side}</b>
+      <span class="muted">${esc(t.domain||'')} \u2014 sign in as
+        ${esc(t.admin||'a super admin')}</span>
+      <div class="cprow"><b>Client ID</b>
+        <button onclick="copy('${esc(t.client_id||'')}',this)">Copy</button></div>
+      <pre class="copy">${esc(t.client_id||'(upload the key first)')}</pre>
+      <div class="cprow"><b>OAuth scopes</b>
+        <button onclick="copy(${esc(JSON.stringify(line||''))},this)">Copy</button>
+        <span class="muted">${count} scopes \u2014 paste the whole line, that
+          editor replaces rather than appends</span></div>
+      <pre class="copy">${esc(line||'(set the domains first)')}</pre>
+    </div>`;
+  });
+  return h+`<div class="muted">Grants take ~2 minutes to propagate, sometimes 30.
+    Use <b>Re-check</b> above; it goes green when a real token mint succeeds.</div>`;
+}
+
+function actionButtons(keys){
+  let h=`<div class="acts" style="margin-top:12px">`;
+  keys.forEach(k=>{const a=acts[k]; if(!a) return;
+    h+=`<button class="${a.destructive?'danger':''}" onclick="run('${k}')">
+      ${esc(a.label)}<small>${esc(a.blurb)}</small></button>`;});
+  return h+`</div>`;
+}
+
+function seedForm(){
+  const src=(cfg&&cfg.source_domain)||'';
+  return `<div class="card" style="border-color:var(--bad)">
+    <h3>Seed the source tenant</h3>
+    <div class="warnbox">This writes fabricated data into a live tenant. It
+      only ever targets the <b>source</b> domain, and only after you type it.</div>
+    <div class="grid2" style="margin-top:12px">
+      <label>Scale<select id="seed-scale">${(seedScales||['medium']).map(v=>
+        `<option${v==='medium'?' selected':''}>${v}</option>`).join('')}</select></label>
+      <label>Type the source domain to confirm
+        <input id="seed-confirm" placeholder="${esc(src||'set the domains first')}"></label>
+    </div>
+    <label style="display:block;margin-top:10px">
+      <input type="checkbox" id="seed-create"> also create the five accounts</label>
+    <label style="display:block;margin-top:6px">
+      <input type="checkbox" id="seed-reset"> <b style="color:var(--bad)">reset
+      first</b> \u2014 DELETES existing data for those users</label>
+    <button class="danger" style="margin-top:12px" onclick="runSeed()">
+      Run the seeder<small>Targets ${esc(src||'(no source domain)')}</small></button>
+    <div id="seedmsg" class="muted" style="margin-top:8px">${
+      seedMsg?(seedMsg.ok?'\u2713 ':'\u2715 ')+esc(seedMsg.text):''}</div>
+  </div>`;
 }
 
 /* ---------------- actions ---------------- */
