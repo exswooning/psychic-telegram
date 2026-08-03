@@ -459,8 +459,16 @@ class TestUnsharedFilesSkipTheAclCall:
         the owner, which _sync_acls skips anyway
       * so the call can only ever return nothing to do
 
-    Skipping it also skips the modifiedTime restore behind it, which fires
-    only when a grant was applied. Two round trips on three files in four.
+    The saving is ONE round trip per unshared file, not two. The modifiedTime
+    restore already short-circuited on writes_applied == 0, so an unshared
+    file never paid for it -- the first version of this docstring claimed two
+    and a test that "proved" it passed identically with the skip removed.
+
+    On the measured corpus that is ~372 of ~1,982 Drive calls: 55 list, 1,008
+    transfer (get_media + create), 504 permissions.list, 284
+    permissions.create, 132 restores. About 19% of Drive requests, which is
+    worth shipping and is not the same claim as "two round trips on three
+    files in four".
 
     Deliberately NOT adopting inline permissions, which Drive does return and
     which do match permissions.list exactly: it does not populate
@@ -469,6 +477,15 @@ class TestUnsharedFilesSkipTheAclCall:
     _sync_acls reads that flag to honour recreate_inherited_acls, so the
     inline list would silently ignore the setting rather than fail.
     """
+
+    def test_the_skip_does_not_apply_inside_a_shared_drive(self, migrator):
+        """Every measurement behind this was taken over 'me' in owners -- pure
+        My Drive. A shared drive grants access through membership, so whether
+        `shared` means the same thing there is unverified, and guessing would
+        drop real per-file grants silently."""
+        migrator.shared_drive = "drv-1"
+        migrator._sync_acls("src-1", "tgt-1", False)
+        assert migrator.src.call_count("permissions.list") == 1
 
     def test_an_unshared_file_costs_no_permissions_list(self, migrator, auth, db):
         src = auth.source_drive(migrator.source_user)
@@ -495,18 +512,26 @@ class TestUnsharedFilesSkipTheAclCall:
         tgt = auth.target_drive(migrator.target_user)
         assert tgt.call_count("permissions.create") == 1
 
-    def test_the_modified_time_restore_is_skipped_too(self, migrator, auth):
-        """It only fires when a grant was applied, so an unshared file should
-        not pay for it either."""
-        src = auth.source_drive(migrator.source_user)
-        src.add_binary("private.pdf", mtime="2024-03-01T09:00:00Z")
+    def test_the_restore_was_already_conditional_so_it_is_not_a_second_saving(
+            self, migrator, auth):
+        """
+        Pins the correction rather than the claim it replaced.
 
-        migrator.run()
+        _restore_modified_time fires only when a write was applied, so an
+        unshared file never paid for it either before or after the skip. This
+        asserts the short-circuit exists -- which is what makes the saving one
+        call and not two -- instead of asserting an absence that was already
+        true and could not fail.
+        """
+        calls = []
+        migrator._retry = lambda fn: calls.append("would have called") or None
+        migrator._restore_modified_time(
+            "tgt-1", {"modifiedTime": "2024-03-01T09:00:00Z"}, 0)
+        assert calls == [], "restore ran with zero writes applied"
 
-        tgt = auth.target_drive(migrator.target_user)
-        updates = [kw for kw in tgt.calls_to("files.update")
-                   if "modifiedTime" in (kw.get("body") or {})]
-        assert updates == []
+        migrator._restore_modified_time(
+            "tgt-1", {"modifiedTime": "2024-03-01T09:00:00Z"}, 1)
+        assert calls == ["would have called"], "restore skipped a real write"
 
     def test_an_absent_shared_field_still_lists(self, migrator, auth):
         """None means the caller did not ask for the field. Guessing there
@@ -518,3 +543,75 @@ class TestUnsharedFilesSkipTheAclCall:
     def test_only_an_explicit_false_skips(self, migrator):
         migrator._sync_acls("src-1", "tgt-1", False)
         assert migrator.src.call_count("permissions.list") == 0
+
+
+class TestTheRetryHookCannotBecomeANewFailure:
+    """
+    before_retry makes an API call from inside an exception handler, at the
+    moment the network is known to be unwell -- which is the state that got us
+    there. An unguarded call lets a second failure propagate out of the
+    handler and kill the whole retry, and it does so precisely when a copy of
+    the work may already exist on the server: the case the hook exists to make
+    safer.
+    """
+
+    def _fn_failing_once(self):
+        state = {"n": 0}
+
+        def fn():
+            state["n"] += 1
+            if state["n"] == 1:
+                raise ConnectionResetError("reset")
+            return "second attempt"
+
+        return fn, state
+
+    def test_a_raising_hook_does_not_kill_the_retry(self):
+        from resilience import retry_on_google_error
+
+        fn, state = self._fn_failing_once()
+
+        def exploding_hook():
+            raise ConnectionResetError("the lookup failed too")
+
+        wrapped = retry_on_google_error(
+            max_retries=3, base_delay=0.001, max_delay=0.002,
+            before_retry=exploding_hook)(fn)
+
+        assert wrapped() == "second attempt"
+        assert state["n"] == 2
+
+    def test_a_hook_returning_none_falls_through_to_the_retry(self):
+        from resilience import retry_on_google_error
+
+        fn, state = self._fn_failing_once()
+        wrapped = retry_on_google_error(
+            max_retries=3, base_delay=0.001, max_delay=0.002,
+            before_retry=lambda: None)(fn)
+
+        assert wrapped() == "second attempt"
+
+    def test_a_hook_returning_a_value_short_circuits(self):
+        from resilience import retry_on_google_error
+
+        fn, state = self._fn_failing_once()
+        wrapped = retry_on_google_error(
+            max_retries=3, base_delay=0.001, max_delay=0.002,
+            before_retry=lambda: {"id": "already-there"})(fn)
+
+        assert wrapped() == {"id": "already-there"}
+        assert state["n"] == 1, "re-executed despite adopting existing work"
+
+    def test_the_lookup_asks_spam_and_trash_too(self, auth, db, settings,
+                                                identity):
+        """An inserted message can land in Spam, and a lookup that cannot see
+        it there concludes nothing arrived and inserts a second copy."""
+        import gmail_engine
+        from tests.conftest import SRC_USER, TGT_USER
+
+        m = gmail_engine.GmailMigrator(auth, db, settings, SRC_USER, TGT_USER)
+        m._find_by_message_id("<x@y>")
+
+        listed = auth.target_gmail(TGT_USER).calls_to("messages.list")
+        assert listed, "no lookup was issued"
+        assert listed[0].get("includeSpamTrash") is True

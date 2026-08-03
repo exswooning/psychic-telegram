@@ -1,0 +1,82 @@
+# The contract probe, on a schedule.
+#
+# tests/fakes.py encodes beliefs about Google's APIs, and the suite cannot
+# falsify them: every assertion is checked against a double written to agree.
+# contract_probe.py asks Google instead -- but a probe that only ran the
+# afternoon it was written is a snapshot, not a contract. Google changes
+# behaviour without changing a version number, and the failure mode is a green
+# suite over an engine that no longer matches the API.
+#
+# This needs live credentials, so it cannot run on a fork or a PR from one.
+# It is deliberately not part of the `test` workflow: that must stay runnable
+# by anyone with a checkout and no secrets.
+name: Contract probe
+
+on:
+  schedule:
+    # Weekly. The assumptions here are structural rather than volatile, and a
+    # daily run against a real tenant is cost without information.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      include_writes:
+        description: "Also run the write probes (creates and cleans up one file and one message)"
+        type: boolean
+        default: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    # Absent secrets, skip loudly rather than failing: a fork should not see a
+    # permanently red workflow it cannot fix.
+    if: github.repository_owner != ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Credentials
+        id: creds
+        env:
+          SA_KEY: ${{ secrets.SOURCE_SA_KEY_JSON }}
+        run: |
+          if [ -z "$SA_KEY" ]; then
+            echo "no credentials configured; skipping the probe" >&2
+            echo "have=false" >> "$GITHUB_OUTPUT"
+          else
+            mkdir -p keys
+            printf '%s' "$SA_KEY" > keys/source-sa.json
+            printf '%s' '${{ secrets.TARGET_SA_KEY_JSON }}' > keys/target-sa.json
+            echo "have=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Probe
+        if: steps.creds.outputs.have == 'true'
+        env:
+          SOURCE_DOMAIN: ${{ secrets.SOURCE_DOMAIN }}
+          TARGET_DOMAIN: ${{ secrets.TARGET_DOMAIN }}
+          SOURCE_ADMIN: ${{ secrets.SOURCE_ADMIN }}
+          TARGET_ADMIN: ${{ secrets.TARGET_ADMIN }}
+          SOURCE_SA_KEY: keys/source-sa.json
+          TARGET_SA_KEY: keys/target-sa.json
+          SANDBOX_MODE: "true"
+        # Exits non-zero on FAIL or UNEXP, so a changed API surfaces as a
+        # failed run rather than as output nobody reads.
+        run: |
+          if [ "${{ inputs.include_writes }}" = "true" ]; then
+            python contract_probe.py --include-writes
+          else
+            python contract_probe.py
+          fi
+
+      - name: Remove credentials
+        if: always()
+        run: rm -rf keys

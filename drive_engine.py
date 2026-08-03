@@ -770,16 +770,26 @@ class DriveMigrator:
         `shared` comes from the file listing and lets the whole call be
         skipped. A file Drive reports as unshared carries no permission but
         the owner's, and the loop below skips owner rows, so listing them can
-        only ever return nothing to do. Measured on a live tenant: 372 of 504
-        files were unshared, so this drops two round trips -- this call and
-        the modifiedTime restore that only fires when a grant was applied --
-        on about three files in four.
+        only ever return nothing to do.
+
+        Worth one round trip per unshared file, not two: the modifiedTime
+        restore already short-circuits on zero writes applied, so an unshared
+        file never paid for it either way. Measured on a live tenant, 372 of
+        504 files were unshared -- about 19% of that corpus's Drive calls.
 
         Only an explicit False skips. `None` means the caller did not ask for
         the field, and guessing there would trade a round trip for silently
         dropped ACLs.
+
+        Not applied inside a shared drive. Every measurement behind this was
+        taken over `'me' in owners` -- pure My Drive -- and a shared drive
+        grants access through membership rather than per-file permissions, so
+        whether Drive reports `shared` the same way there is unverified. If it
+        said False on an item that still carried a real per-file grant, the
+        skip would drop it silently. One round trip per file is a cheap price
+        for not guessing; lift this once contract_probe covers a shared drive.
         """
-        if shared is False:
+        if shared is False and self.shared_drive is None:
             return 0
         try:
             perms = self._retry(lambda: self.src.permissions().list(

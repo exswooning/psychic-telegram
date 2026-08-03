@@ -135,6 +135,31 @@ def _retry_after_seconds(exc: HttpError) -> float | None:
         return None
 
 
+def _ask_hook(before_retry):
+    """
+    Run a before_retry hook without letting it become a new failure mode.
+
+    The hook makes an API call, and it is invoked from inside an exception
+    handler at the exact moment the network is known to be unwell -- which is
+    the state that got us here. An unguarded call would let a second failure
+    propagate out of the handler and kill the whole retry, and it would do so
+    precisely when a copy of the work may already exist on the server: the
+    case the hook was added to make safer.
+
+    So a failing hook degrades to "we could not check", and the retry proceeds
+    on the original terms. That accepts the duplicate risk rather than
+    converting it into a certain hard failure, which is the trade this
+    codebase makes everywhere else.
+    """
+    if before_retry is None:
+        return None
+    try:
+        return before_retry()
+    except Exception as exc:  # noqa: BLE001 - a hook must never fail the retry
+        log.debug("before_retry hook failed, proceeding with the retry: %s", exc)
+        return None
+
+
 def retry_on_google_error(
     max_retries: int = 6, base_delay: float = 1.0, max_delay: float = 60.0,
     before_retry: Callable[[], T | None] | None = None,
@@ -204,8 +229,8 @@ def retry_on_google_error(
                     time.sleep(delay)
                     # A 5xx may have been processed before the error was
                     # generated; a 429 was rejected before it was.
-                    if before_retry is not None and status is not None and status >= 500:
-                        adopted = before_retry()
+                    if status is not None and status >= 500:
+                        adopted = _ask_hook(before_retry)
                         if adopted is not None:
                             return adopted
 
@@ -244,10 +269,9 @@ def retry_on_google_error(
                     log.debug("retrying after %s: attempt %d/%d in %.2fs",
                               type(exc).__name__, attempt, max_retries, delay)
                     time.sleep(delay)
-                    if before_retry is not None:
-                        adopted = before_retry()
-                        if adopted is not None:
-                            return adopted
+                    adopted = _ask_hook(before_retry)
+                    if adopted is not None:
+                        return adopted
 
         return wrapper
 
