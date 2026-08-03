@@ -362,6 +362,13 @@ class Settings:
     # *every* call fail with unauthorized_client -- so defaulting these to True
     # would break existing deployments on upgrade, for a feature nobody asked
     # for. Enable them deliberately, alongside the scope grant.
+    # Explicit, because the library default is 100 MB and that is the number
+    # resources.py has to budget against per worker. 8 MB keeps per-worker peak
+    # buffer predictable without making small-file transfers chatty.
+    download_chunk_bytes: int = field(
+        default_factory=lambda: int(os.getenv("DOWNLOAD_CHUNK_BYTES",
+                                              str(8 * 1024 * 1024)))
+    )
     migrate_contacts: bool = field(
         default_factory=lambda: _env_bool("MIGRATE_CONTACTS", False)
     )

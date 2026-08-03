@@ -73,14 +73,34 @@ class DriveMigrator:
         return os.path.join(self.settings.scratch_dir, uuid.uuid4().hex)
 
     def _download_via(self, request_factory) -> tuple[str, int]:
-        """Drain a Drive request (get_media or export_media) to a scratch file."""
+        """
+        Drain a Drive request (get_media or export_media) to a scratch file.
+
+        Two things here were costing more than they looked.
+
+        The chunk size was the library default, which is 100 MB. With N
+        workers the worst-case resident set is N x 100 MB of buffer for files
+        that may be a few kilobytes -- on a codebase whose resources.py exists
+        precisely because an 8 GB laptop swap-stalled into socket timeouts.
+        An explicit size makes per-worker peak memory a known quantity, which
+        is what lets resources.py derive a worker count instead of guessing
+        one.
+
+        And the limiter was acquired per *chunk*. The bucket is sized for API
+        requests per second; a large file draining through it spent its tokens
+        on byte transfer, throttling every other call this user had to make.
+        Byte movement is bounded by bandwidth, not by the request quota, so the
+        request token is taken once for the call and the chunks then run at
+        whatever the link allows.
+        """
         path = self._scratch_path()
         request = request_factory()
+        self.limiter.acquire()
         with open(path, "wb") as fh:
-            downloader = MediaIoBaseDownload(fh, request)
+            downloader = MediaIoBaseDownload(
+                fh, request, chunksize=self.settings.download_chunk_bytes)
             done = False
             while not done:
-                self.limiter.acquire()
                 _, done = self._retry(lambda: downloader.next_chunk())
         return path, os.path.getsize(path)
 

@@ -7,9 +7,12 @@ Two service accounts, one per tenant (see README.md section 1.1) — never one
 shared account impersonating both sides, which would mean the source tenant's
 super-admin authorises a key that can also write into the target.
 
-Each call builds a fresh `httplib2.Http` (httplib2 is not thread-safe, and the
-engine is one thread per user) but credentials are cached per (tenant, user)
-since minting them is what's expensive.
+Credentials are cached per (tenant, user) because minting them is expensive.
+Service objects are cached too, but *per thread* -- httplib2.Http is not
+thread-safe, so a shared client would be a data race, while a fresh one per
+call throws away connection pooling and re-parses the discovery document. The
+cache is bounded: each entry holds an open TLS connection, and a worker thread
+walks through many users over a long run.
 """
 
 from __future__ import annotations
@@ -38,6 +41,9 @@ class AuthManager:
         self.settings = settings
         self._creds_cache: dict[tuple[str, str], Any] = {}
         self._lock = threading.Lock()
+        # Service objects are cached per thread rather than shared: each holds
+        # an httplib2.Http, which is not thread-safe.
+        self._local = threading.local()
         import oauth_store
         self._token_store = oauth_store.TokenStore(settings.oauth_token_dir)
 
@@ -144,10 +150,53 @@ class AuthManager:
                 self._creds_cache[key] = creds
             return creds
 
+    # Per thread, because httplib2.Http is not thread-safe. Bounded, because a
+    # worker thread processes many users over a long run and each cached entry
+    # holds an open TLS connection -- an unbounded cache would walk into
+    # RLIMIT_NOFILE (256 soft on macOS, commonly 1024 on Linux) some hours in,
+    # which surfaces as a cascade of connection errors rather than as anything
+    # that names the real cause.
+    _SERVICE_CACHE_MAX = 12
+
     def _service(self, tenant: str, api: str, user: str):
+        """
+        A cached, per-thread API client.
+
+        Previously this built a fresh `httplib2.Http` and re-ran `build()` on
+        every call. Where a service object is held for the life of an engine
+        that cost little, but chat_engine calls `auth.target_chat(sender)`
+        *per message* -- so replaying a conversation meant a new TLS handshake
+        and a fresh discovery parse for every single message.
+
+        Reusing one Http also restores connection pooling, so the second and
+        subsequent calls to an API skip the handshake entirely.
+        """
+        cache = getattr(self._local, "services", None)
+        if cache is None:
+            cache = self._local.services = {}
+        key = (tenant, api, user)
+        svc = cache.get(key)
+        if svc is not None:
+            cache[key] = cache.pop(key)      # keep it fresh for LRU eviction
+            return svc
+
         creds = self._credentials(tenant, user)
         http = google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=300))
-        return build(api, _API_VERSIONS[api], http=http, cache_discovery=False)
+        # static_discovery is left at its default: with no discoveryServiceUrl
+        # set, the client already resolves that to True and uses the bundled
+        # document, so there is no network fetch to avoid here.
+        svc = build(api, _API_VERSIONS[api], http=http, cache_discovery=False)
+
+        while len(cache) >= self._SERVICE_CACHE_MAX:
+            # dicts are insertion-ordered, and a hit re-inserts its key above,
+            # so the first key is the least recently used.
+            evicted = cache.pop(next(iter(cache)))
+            try:
+                evicted.close()          # releases the pooled TLS connection
+            except Exception:            # noqa: BLE001 - eviction must not fail a call
+                pass
+        cache[key] = svc
+        return svc
 
     # -- shorthands mirrored by tests/fakes.FakeAuth ------------------------
     def source_drive(self, user: str):

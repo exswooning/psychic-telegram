@@ -168,7 +168,17 @@ class GmailMigrator:
                 continue
 
             raw = full.get("raw", "")
-            raw_bytes = base64.urlsafe_b64decode(raw.encode() if isinstance(raw, str) else raw)
+            if not isinstance(raw, str):
+                raw = raw.decode()
+            # `raw` is already base64url, and `body["raw"]` wants base64url --
+            # decoding it only to re-encode the identical bytes doubled peak
+            # memory per message and burned CPU on every one. The decode is now
+            # deferred to the large-message branch, which is the only place the
+            # actual bytes are needed. Size is derived from the encoded length
+            # instead: base64 is 4 chars per 3 bytes, and `raw` is unpadded
+            # urlsafe, so this is exact to within two bytes -- far tighter than
+            # a threshold whose job is only to choose an upload strategy.
+            approx_bytes = (len(raw) * 3) // 4
             mapped_labels = self._map_label_ids(label_ids)
 
             if self.settings.dry_run:
@@ -179,14 +189,14 @@ class GmailMigrator:
             body: dict = {"labelIds": mapped_labels}
             media = None
             path = None
-            if len(raw_bytes) > LARGE_MESSAGE_THRESHOLD:
+            if approx_bytes > LARGE_MESSAGE_THRESHOLD:
                 path = os.path.join(self.settings.scratch_dir, uuid.uuid4().hex)
                 os.makedirs(self.settings.scratch_dir, exist_ok=True)
                 with open(path, "wb") as fh:
-                    fh.write(raw_bytes)
+                    fh.write(base64.urlsafe_b64decode(raw))
                 media = MediaFileUpload(path, mimetype="message/rfc822", resumable=True)
             else:
-                body["raw"] = base64.urlsafe_b64encode(raw_bytes).decode()
+                body["raw"] = raw
 
             try:
                 result = self._retry(lambda b=body, md=media: self.tgt.users().messages().insert(
@@ -205,7 +215,7 @@ class GmailMigrator:
 
             self.db.record_mapping(self.source_user, mid, result["id"], "message")
             self.db.log_audit(self.source_user, mid, "message", "SUCCESS",
-                              bytes_moved=len(raw_bytes))
+                              bytes_moved=approx_bytes)
             self.stats["inserted"] += 1
 
         self._migrate_drafts()
@@ -347,7 +357,9 @@ class GmailMigrator:
                 continue
 
             raw = (full.get("message") or {}).get("raw", "")
-            raw_bytes = base64.urlsafe_b64decode(raw.encode() if isinstance(raw, str) else raw)
+            if not isinstance(raw, str):
+                raw = raw.decode()
+            approx_bytes = (len(raw) * 3) // 4   # see the messages path above
 
             if self.settings.dry_run:
                 log.info("[DRY RUN] would create draft from %s", did)
@@ -357,14 +369,14 @@ class GmailMigrator:
             body: dict = {"message": {}}
             media = None
             path = None
-            if len(raw_bytes) > LARGE_MESSAGE_THRESHOLD:
+            if approx_bytes > LARGE_MESSAGE_THRESHOLD:
                 path = os.path.join(self.settings.scratch_dir, uuid.uuid4().hex)
                 os.makedirs(self.settings.scratch_dir, exist_ok=True)
                 with open(path, "wb") as fh:
-                    fh.write(raw_bytes)
+                    fh.write(base64.urlsafe_b64decode(raw))
                 media = MediaFileUpload(path, mimetype="message/rfc822", resumable=True)
             else:
-                body["message"]["raw"] = base64.urlsafe_b64encode(raw_bytes).decode()
+                body["message"]["raw"] = raw
 
             try:
                 result = self._retry(lambda b=body, md=media: self.tgt.users().drafts().create(
@@ -383,7 +395,7 @@ class GmailMigrator:
 
             self.db.record_mapping(self.source_user, did, result["id"], "draft")
             self.db.log_audit(self.source_user, did, "draft", "SUCCESS",
-                              bytes_moved=len(raw_bytes))
+                              bytes_moved=approx_bytes)
             self.stats["drafts_inserted"] += 1
 
     # -- filters -------------------------------------------------------------

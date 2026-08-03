@@ -142,7 +142,21 @@ class MigrationDB:
         if c is None:
             c = sqlite3.connect(self.path, timeout=30.0, isolation_level=None)
             c.row_factory = sqlite3.Row
+            # journal_mode is persisted in the database file; the other two are
+            # NOT. `synchronous` and `foreign_keys` are per-connection, so
+            # setting them in SCHEMA only ever configured the connection that
+            # ran the schema. Every worker thread was therefore running at
+            # synchronous=FULL -- an fsync per commit, on a path that commits
+            # twice per migrated item -- and with foreign keys switched off.
+            #
+            # NORMAL is safe here specifically because journal_mode is WAL: in
+            # WAL, NORMAL can lose only the tail of the last transaction on a
+            # power cut, never a corrupt database. A lost tail is what the
+            # id_mapping resume path already exists to handle -- the item is
+            # simply re-migrated -- whereas a corrupt ledger is unrecoverable.
             c.execute("PRAGMA journal_mode=WAL;")
+            c.execute("PRAGMA synchronous=NORMAL;")
+            c.execute("PRAGMA foreign_keys=ON;")
             c.execute("PRAGMA busy_timeout=30000;")
             self._local.conn = c
         return c

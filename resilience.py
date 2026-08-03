@@ -29,7 +29,34 @@ import threading
 import time
 from typing import Callable, TypeVar
 
+import http.client
+import socket
+import ssl
+
 from googleapiclient.errors import HttpError
+
+# Transient failures that are not HttpError. Every one of these was observed
+# permanently failing an item on a multi-hour run, because the retry decorator
+# only ever caught HttpError.
+#
+# google.auth is imported defensively: it is a hard dependency of the client,
+# but this module must not fail to import if that ever changes.
+try:  # pragma: no cover - exercised implicitly by every real run
+    from google.auth.exceptions import TransportError as _GoogleTransportError
+
+    _AUTH_ERRORS: tuple[type[BaseException], ...] = (_GoogleTransportError,)
+except Exception:  # noqa: BLE001
+    _AUTH_ERRORS = ()
+
+TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (
+    ConnectionError,          # covers ConnectionReset/Aborted/Refused, BrokenPipe
+    socket.timeout,
+    socket.gaierror,          # DNS blips resolve as a failed item otherwise
+    ssl.SSLError,
+    http.client.IncompleteRead,
+    http.client.BadStatusLine,
+    http.client.ResponseNotReady,
+) + _AUTH_ERRORS
 
 log = logging.getLogger(__name__)
 
@@ -135,6 +162,35 @@ def retry_on_google_error(
                         "retrying after HTTP %s (%s): attempt %d/%d in %.2fs",
                         status, reason, attempt, max_retries, delay,
                     )
+                    time.sleep(delay)
+
+                except TRANSPORT_ERRORS as exc:
+                    # A multi-hour migration reliably sees connections reset,
+                    # sockets time out and TLS renegotiate. None of these are
+                    # HttpError, so every one of them used to permanently fail
+                    # an item and cost a re-run to recover.
+                    #
+                    # The honest trade-off: a transport error raised mid-write
+                    # may mean the call actually succeeded and the response was
+                    # lost, so retrying can duplicate. That risk is not new --
+                    # retrying a 500 on files.create has always carried it --
+                    # and it is bounded by the same thing: id_mapping is
+                    # written only after a confirmed create, so a duplicate
+                    # shows up as an extra item, never as a lost one. Given the
+                    # choice this codebase has made everywhere else, an
+                    # occasional duplicate beats an item that silently is not
+                    # there.
+                    attempt += 1
+                    if attempt > max_retries:
+                        raise RuntimeError(
+                            f"exhausted {max_retries} retries on "
+                            f"{type(exc).__name__}: {exc}"
+                        ) from exc
+                    delay = random.uniform(
+                        0, min(max_delay, base_delay * (2 ** (attempt - 1)))
+                    )
+                    log.debug("retrying after %s: attempt %d/%d in %.2fs",
+                              type(exc).__name__, attempt, max_retries, delay)
                     time.sleep(delay)
 
         return wrapper
