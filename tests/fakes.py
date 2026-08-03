@@ -329,6 +329,13 @@ class _DriveFiles:
         # this fake can be trusted on the point.
         for f in out["files"]:
             f["shared"] = self.s._shared_flag(f["id"])
+            # Drive returns the grants inline on files.list too -- measured
+            # live at 96/96 files, with counts matching permissions.list
+            # exactly (contract_probe: "files.list returns permissions
+            # inline"). The engine deliberately does not rely on it, because
+            # permissionDetails is absent there, but acl_audit does: it needs
+            # who-can-reach-this, not how the grant arrived.
+            f["permissions"] = copy.deepcopy(self.s.perms.get(f["id"], []))
         if start + pageSize < len(rows):
             out["nextPageToken"] = str(start + pageSize)
         return out
