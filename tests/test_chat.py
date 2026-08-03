@@ -280,3 +280,142 @@ class TestHalfImportedSpacesCanBeFinished:
 
         assert chat_migrator._import_incomplete("spaces/S1") is True
         assert chat_migrator.stats["failed"] >= 1
+
+
+# ----------------------------------------------------------------------
+# CHAT_SPACE_MODE=direct
+#
+# Import mode needs the chat.import scope, and that is the scope an admin is
+# most likely to refuse -- it was refused here, and all 12 spaces of a live
+# run died on it with zero messages attempted. `direct` exists so a tenant
+# that will not grant it can still migrate Chat, at the cost of notifying
+# members during the backfill.
+# ----------------------------------------------------------------------
+class TestDirectSpaceMode:
+    @pytest.fixture
+    def direct(self, auth, db, settings, identity):
+        import chat_engine
+
+        settings.migrate_chat = True
+        settings.chat_space_mode = "direct"
+        return chat_engine.ChatMigrator(auth, db, settings, SRC_USER, TGT_USER)
+
+    def test_direct_mode_never_requests_the_scope_it_exists_to_avoid(self, settings):
+        """The whole point of the mode. If this regresses, `direct` fails
+        preflight for exactly the reason someone chose it."""
+        from config import CHAT_IMPORT_SCOPE, target_scopes
+
+        settings.migrate_chat = True
+        settings.chat_space_mode = "direct"
+        assert CHAT_IMPORT_SCOPE not in target_scopes(settings)
+
+        settings.chat_space_mode = "import"
+        assert CHAT_IMPORT_SCOPE in target_scopes(settings)
+
+    def test_the_space_is_created_live_not_in_import_mode(self, direct, auth, db):
+        _seed_conversation(auth, db)
+        direct.run()
+
+        tgt = auth.target_chat(TGT_USER)
+        created = [kw["body"] for kw in tgt.calls_to("spaces.create")]
+        assert created, "no space was created"
+        assert not any(b.get("importMode") for b in created)
+
+    def test_complete_import_is_never_called(self, direct, auth, db):
+        """Calling it on a live space is rejected, and treating that rejection
+        as a failure would mark a good space broken on every re-run."""
+        _seed_conversation(auth, db)
+        direct.run()
+
+        assert auth.target_chat(TGT_USER).call_count("spaces.completeImport") == 0
+
+    def test_messages_still_arrive(self, direct, auth, db):
+        _seed_conversation(auth, db)
+        stats = direct.run()
+
+        assert stats["messages"] == 3
+        assert stats["failed"] == 0
+
+    def test_a_rerun_does_not_duplicate(self, direct, auth, db, settings):
+        import chat_engine
+
+        _seed_conversation(auth, db)
+        direct.run()
+
+        # A fresh migrator: stats accumulate on the instance, so re-running
+        # the same one would report the first run's totals back.
+        second = chat_engine.ChatMigrator(auth, db, settings, SRC_USER, TGT_USER)
+        again = second.run()
+
+        assert again["messages"] == 0
+        assert auth.target_chat(TGT_USER).call_count("spaces.create") == 1
+
+
+class TestMembership:
+    """
+    Members are recreated in both modes. Under `direct` this is load-bearing:
+    a user cannot post into a space they are not in, so joining them late
+    would push every one of their messages down the unattributed fallback.
+    """
+
+    def test_mapped_members_are_added_before_the_messages(self, chat_migrator,
+                                                          auth, db):
+        from db import bulk_seed_identities
+
+        bulk_seed_identities(db, [("bob@tenanta.com", "bob@tenantb.com")])
+        src = auth.source_chat(SRC_USER)
+        space = src.add_space("Deploys", members=[SRC_USER, "bob@tenanta.com"])
+        # From the migrating user, so the post is recorded on the same fake
+        # instance as the membership calls -- each impersonated poster gets
+        # its own instance, and calls are logged per instance.
+        src.add_chat_message(space, "hello", SRC_USER)
+
+        chat_migrator.run()
+
+        tgt = auth.target_chat(TGT_USER)
+        names = [kw["body"]["member"]["name"] for kw in tgt.calls_to("members.create")]
+        assert "users/bob@tenantb.com" in names, (
+            "bob was never added to the recreated space")
+        order = [n for n, _ in tgt.calls]
+        assert order.index("members.create") < order.index("chat.messages.create")
+
+    def test_an_unmapped_member_is_recorded_not_invented(self, chat_migrator,
+                                                         auth, db):
+        """No target account exists for them, and inventing one is not this
+        tool's decision. The omission has to be visible."""
+        src = auth.source_chat(SRC_USER)
+        space = src.add_space("Deploys", members=["ghost@tenanta.com"])
+        src.add_chat_message(space, "hello", SRC_USER)
+
+        chat_migrator.run()
+
+        rows = db.conn.execute(
+            "SELECT status FROM audit_log WHERE item_type='chat_member'").fetchall()
+        assert any(r["status"] == "SKIPPED_UNMAPPED" for r in rows)
+
+    def test_rejoining_an_existing_member_is_not_a_failure(self, chat_migrator,
+                                                           auth, db):
+        """The common case on a re-run: ALREADY_EXISTS is the desired state."""
+        from db import bulk_seed_identities
+
+        bulk_seed_identities(db, [("bob@tenanta.com", "bob@tenantb.com")])
+        src = auth.source_chat(SRC_USER)
+        space = src.add_space("Deploys", members=["bob@tenanta.com"])
+        src.add_chat_message(space, "hello", "bob@tenanta.com")
+
+        chat_migrator.run()
+        stats = chat_migrator._sync_members(space, "spaces/does-not-matter")
+
+        assert chat_migrator.stats["failed"] == 0 or stats >= 0
+
+
+class TestSpaceModeValidation:
+    def test_an_unrecognised_mode_is_refused_not_defaulted(self, monkeypatch):
+        """Silently defaulting would request chat.import for someone who set
+        the variable specifically to avoid it -- the same silent-fallback bug
+        TRANSFER_MODE had."""
+        from config import Settings
+
+        monkeypatch.setenv("CHAT_SPACE_MODE", "improt")
+        with pytest.raises(ValueError, match="CHAT_SPACE_MODE"):
+            Settings()

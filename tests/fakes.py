@@ -1257,10 +1257,12 @@ class FakeChat(FakeService):
         super().__init__(owner, tenant)
         shared = FakeChat._SHARED.setdefault(tenant, {
             "spaces": {}, "messages": defaultdict(list), "directory": {},
+            "members": defaultdict(list),
         })
         self.space_store: dict[str, dict] = shared["spaces"]
         self.message_store: dict[str, list[dict]] = shared["messages"]
         self.directory: dict[str, str] = shared["directory"]
+        self.member_store: dict[str, list[dict]] = shared["members"]
 
     @classmethod
     def reset_shared(cls) -> None:
@@ -1268,10 +1270,17 @@ class FakeChat(FakeService):
 
     # -- seeding --------------------------------------------------------
     def add_space(self, display_name: str, space_type: str = "SPACE",
-                  name: Optional[str] = None) -> str:
+                  name: Optional[str] = None,
+                  members: Optional[list[str]] = None) -> str:
         sid = name or f"spaces/{self._new_id('sp')}"
         self.space_store[sid] = {"name": sid, "displayName": display_name,
                                  "spaceType": space_type, "importMode": False}
+        for email in (members or []):
+            uid = f"users/{abs(hash(email)) % 10**12}"
+            self.directory[uid] = email
+            self.member_store[sid].append(
+                {"name": f"{sid}/members/{self._new_id('mem')}",
+                 "member": {"name": uid, "type": "HUMAN"}})
         return sid
 
     def add_chat_message(self, space: str, text: str, sender_email: str,
@@ -1333,6 +1342,46 @@ class _ChatSpaces:
 
     def messages(self):
         return _ChatMessages(self.s)
+
+    def members(self):
+        return _ChatMembers(self.s)
+
+
+class _ChatMembers:
+    """
+    Membership, modelled because `direct` mode depends on it being real: a
+    user who is not in a space cannot post to it, so a fake that accepted
+    every post regardless would show attribution working when live Chat would
+    have refused it.
+    """
+
+    def __init__(self, svc: FakeChat):
+        self.s = svc
+
+    def list(self, **kw):
+        return _Call(self.s, "members.list", self._list, kw)
+
+    def _list(self, parent: str, **_):
+        return {"memberships": copy.deepcopy(self.s.member_store.get(parent, []))}
+
+    def create(self, **kw):
+        return _Call(self.s, "members.create", self._create, kw)
+
+    def _create(self, parent: str, body: dict, **_):
+        if parent not in self.s.space_store:
+            raise http_error(404, "notFound", parent)
+        member = (body.get("member") or {})
+        email = (member.get("name") or "").split("/")[-1].lower()
+        existing = {(m.get("member") or {}).get("name", "").split("/")[-1].lower()
+                    for m in self.s.member_store.get(parent, [])}
+        if email in existing:
+            raise http_error(409, "ALREADY_EXISTS", f"{email} is already a member")
+        uid = f"users/{email}"
+        self.s.directory[uid] = email
+        self.s.member_store[parent].append(
+            {"name": f"{parent}/members/{self.s._new_id('mem')}",
+             "member": {"name": uid, "type": member.get("type", "HUMAN")}})
+        return {"name": f"{parent}/members/{email}"}
 
 
 class _ChatMessages:
