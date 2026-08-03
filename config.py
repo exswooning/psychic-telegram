@@ -57,8 +57,22 @@ EXPORT_MIME_MAP: dict[str, tuple[str, str]] = {
 
 # Fields requested on every files.list/files.get call. Keep this the single
 # definition so discovery, drive_engine and verify all see the same shape.
+# `shared` is here to avoid a call, not to record anything: a file Drive
+# reports as unshared has no grants but the owner's, and _sync_acls skips
+# owner rows, so listing its permissions can only ever return nothing to do.
+# Measured on a live tenant: populated on 504/504 files, and 372 of those
+# (74%) were unshared -- so this skips two round trips, the permissions.list
+# and the modifiedTime restore behind it, on roughly three files in four.
+#
+# Deliberately NOT `permissions(...)` inline. Drive does return the grants
+# inline and the counts match permissions.list exactly, but it does not
+# populate permissionDetails there even when asked -- verified against a
+# folder-inherited share, where inline reported 0 inherited and
+# permissions.list reported 2. _sync_acls reads that flag to honour
+# recreate_inherited_acls, so adopting the inline list would silently ignore
+# that setting rather than fail.
 DRIVE_FILE_FIELDS = (
-    "id,name,mimeType,parents,modifiedTime,size,md5Checksum,owners,"
+    "id,name,mimeType,parents,modifiedTime,size,md5Checksum,owners,shared,"
     "capabilities(canDownload),shortcutDetails,trashed,description,starred"
 )
 

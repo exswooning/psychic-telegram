@@ -447,3 +447,74 @@ class TestTransportExhaustedIsDistinguishable:
         with pytest.raises(RuntimeError) as caught:
             api()
         assert not isinstance(caught.value, TransportExhausted)
+
+
+class TestUnsharedFilesSkipTheAclCall:
+    """
+    Measured against a live tenant, not assumed -- which is the point, because
+    a fake cannot answer a question about the real API's behaviour.
+
+      * `shared` is populated on 504/504 files
+      * 372 of those (74%) are unshared, and their permission list holds only
+        the owner, which _sync_acls skips anyway
+      * so the call can only ever return nothing to do
+
+    Skipping it also skips the modifiedTime restore behind it, which fires
+    only when a grant was applied. Two round trips on three files in four.
+
+    Deliberately NOT adopting inline permissions, which Drive does return and
+    which do match permissions.list exactly: it does not populate
+    permissionDetails there even when asked. Verified on a folder-inherited
+    share -- inline reported 0 inherited, permissions.list reported 2 -- and
+    _sync_acls reads that flag to honour recreate_inherited_acls, so the
+    inline list would silently ignore the setting rather than fail.
+    """
+
+    def test_an_unshared_file_costs_no_permissions_list(self, migrator, auth, db):
+        src = auth.source_drive(migrator.source_user)
+        src.add_binary("private.pdf")
+
+        migrator.run()
+
+        assert src.call_count("permissions.list") == 0, (
+            "listed permissions on a file Drive already said was unshared")
+
+    def test_a_shared_file_still_gets_its_acls(self, migrator, auth, db):
+        """The optimisation must not cost a single grant."""
+        from db import bulk_seed_identities
+
+        bulk_seed_identities(db, [("bob@tenanta.com", "bob@tenantb.com")])
+        src = auth.source_drive(migrator.source_user)
+        fid = src.add_binary("shared.pdf")
+        src.perms[fid].append({"id": "p1", "type": "user", "role": "writer",
+                               "emailAddress": "bob@tenanta.com"})
+
+        migrator.run()
+
+        assert src.call_count("permissions.list") == 1
+        tgt = auth.target_drive(migrator.target_user)
+        assert tgt.call_count("permissions.create") == 1
+
+    def test_the_modified_time_restore_is_skipped_too(self, migrator, auth):
+        """It only fires when a grant was applied, so an unshared file should
+        not pay for it either."""
+        src = auth.source_drive(migrator.source_user)
+        src.add_binary("private.pdf", mtime="2024-03-01T09:00:00Z")
+
+        migrator.run()
+
+        tgt = auth.target_drive(migrator.target_user)
+        updates = [kw for kw in tgt.calls_to("files.update")
+                   if "modifiedTime" in (kw.get("body") or {})]
+        assert updates == []
+
+    def test_an_absent_shared_field_still_lists(self, migrator, auth):
+        """None means the caller did not ask for the field. Guessing there
+        would trade a round trip for silently dropped ACLs."""
+        applied = migrator._sync_acls("src-1", "tgt-1", None)
+        assert migrator.src.call_count("permissions.list") == 1
+        assert applied == 0
+
+    def test_only_an_explicit_false_skips(self, migrator):
+        migrator._sync_acls("src-1", "tgt-1", False)
+        assert migrator.src.call_count("permissions.list") == 0

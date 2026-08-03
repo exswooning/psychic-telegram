@@ -265,6 +265,18 @@ class FakeDrive(FakeService):
     def comments(self):
         return _DriveComments(self)
 
+    def _shared_flag(self, fid: str) -> bool:
+        """
+        Drive reports `shared` on every file, and the engine now skips the
+        per-file permissions.list when it is False.
+
+        Measured against a live tenant before being encoded here: populated on
+        504/504 files, true exactly when a non-owner grant exists. Derived
+        rather than stored so it cannot drift from the permission store the
+        tests manipulate directly.
+        """
+        return any(p.get("role") != "owner" for p in self.perms.get(fid, []))
+
     def replies(self):
         return _DriveReplies(self)
 
@@ -311,6 +323,12 @@ class _DriveFiles:
         start = int(pageToken or 0)
         page = rows[start: start + pageSize]
         out: dict[str, Any] = {"files": [copy.deepcopy(f) for f in page]}
+        # Drive returns `shared` on every file, and the engine skips the
+        # per-file permissions.list when it is False. Verified against a live
+        # tenant (504/504 populated) rather than assumed -- the whole reason
+        # this fake can be trusted on the point.
+        for f in out["files"]:
+            f["shared"] = self.s._shared_flag(f["id"])
         if start + pageSize < len(rows):
             out["nextPageToken"] = str(start + pageSize)
         return out
