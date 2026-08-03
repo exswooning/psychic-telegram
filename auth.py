@@ -220,7 +220,21 @@ class AuthManager:
             drive.about().get(fields="user").execute()
             return True, "ok"
         except Exception as exc:  # noqa: BLE001 - surfaced to the operator verbatim
-            return False, str(exc)
+            msg = str(exc)
+            # One credential carries every scope this run needs, so a scope the
+            # Admin Console has not authorised fails the token exchange itself
+            # -- here, on a Drive call, with no hint that Chat is the reason.
+            # Print the exact list to paste, because the console's editor
+            # *replaces* the scope line rather than appending to it, and a
+            # half-remembered list silently drops whatever is left out.
+            if "unauthorized_client" in msg or "invalid_scope" in msg:
+                wanted = ",".join(self._scopes(tenant))
+                msg += (f"\n\n  The {tenant} client ID is not authorised for "
+                        f"every scope this run needs. Paste this exact list "
+                        f"into Admin Console > Security > API controls > "
+                        f"Domain-wide delegation (it replaces the line, so "
+                        f"partial lists lose scopes):\n\n  {wanted}")
+            return False, msg
 
 
 def list_domain_users(auth: AuthManager, tenant: str, domain: str) -> list[str]:

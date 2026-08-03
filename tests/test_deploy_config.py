@@ -1176,3 +1176,39 @@ class TestEnvIsRewrittenForTheRemoteHost:
         # the nearest preceding conditional must be the credentials guard
         guards = [l.strip() for l in lines[:rewrite_line] if l.strip().startswith("if ")]
         assert guards[-1] == "if include_credentials:", guards[-1]
+
+
+class TestChatImportScope:
+    """
+    Chat creates every space with importMode=True, which Google gates behind
+    a scope the tool never requested. All 12 spaces of a live run failed with
+    "Creating a space in import mode requires the chat.import authorization
+    scope", and because it arrived as a per-space 403 it looked like twelve
+    item failures rather than one configuration error.
+    """
+
+    def _settings(self, **kw):
+        from config import Settings
+
+        s = Settings()
+        for k, v in kw.items():
+            setattr(s, k, v)
+        return s
+
+    def test_target_requests_chat_import_when_chat_is_on(self):
+        from config import CHAT_IMPORT_SCOPE, target_scopes
+
+        assert CHAT_IMPORT_SCOPE in target_scopes(self._settings(migrate_chat=True))
+
+    def test_no_chat_scopes_at_all_when_chat_is_off(self):
+        from config import CHAT_IMPORT_SCOPE, target_scopes
+
+        assert CHAT_IMPORT_SCOPE not in target_scopes(self._settings(migrate_chat=False))
+
+    def test_the_source_is_not_widened_by_chat_import(self):
+        """The source only reads spaces. Granting it the ability to create
+        them in import mode widens a deliberately read-only credential for
+        no reason."""
+        from config import CHAT_IMPORT_SCOPE, source_scopes
+
+        assert CHAT_IMPORT_SCOPE not in source_scopes(self._settings(migrate_chat=True))

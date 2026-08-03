@@ -91,6 +91,14 @@ CHAT_SCOPES = [
     "https://www.googleapis.com/auth/chat.messages",
 ]
 
+# Target-only, and not optional: every space is created with importMode=True,
+# and Chat rejects that outright without this scope --
+#   "Creating a space in import mode requires the chat.import authorization
+#    scope"  (HTTP 403, observed on all 12 spaces of a live run)
+# The source never creates anything, so granting it there would widen the
+# read-only source credential for no reason.
+CHAT_IMPORT_SCOPE = "https://www.googleapis.com/auth/chat.import"
+
 
 def source_scopes(settings: "Settings") -> list[str]:
     """Scopes the source service account actually needs for this run."""
@@ -125,6 +133,7 @@ def target_scopes(settings: "Settings") -> list[str]:
         scopes.append(GMAIL_SETTINGS_SCOPE)
     if settings.migrate_chat:
         scopes.extend(CHAT_SCOPES)
+        scopes.append(CHAT_IMPORT_SCOPE)
     return scopes
 
 
