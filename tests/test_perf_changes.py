@@ -295,67 +295,129 @@ class TestGmailInsertIsSafeToRetry:
         raw = base64.urlsafe_b64encode(b"Subject: no id\r\n\r\nbody").decode()
         assert m._message_id_header(raw) is None
 
-    def test_an_already_delivered_message_is_adopted_not_duplicated(
+    def test_a_lost_response_does_not_produce_a_second_copy(
             self, auth, db, settings, identity, monkeypatch):
-        """The whole point: the insert died in transport but the message did
-        land, so we take the existing id instead of writing a second copy."""
-        from resilience import TransportExhausted
+        """
+        The case that actually duplicates, and the one the first version of
+        this guard could not see.
 
+        Attempt 1 lands server-side and the response is lost. Attempt 2 would
+        insert a second copy and return 200 -- nothing raises, so a guard
+        wrapped around the retry loop never runs. The check has to happen
+        between attempts.
+        """
         m = self._migrator(auth, db, settings)
-        monkeypatch.setattr(m, "_retry",
-                            lambda fn: (_ for _ in ()).throw(
-                                TransportExhausted("connection reset")))
-        monkeypatch.setattr(m, "_find_by_message_id", lambda msgid: "tgt-existing")
+        state = {"inserts": 0, "delivered": False}
+
+        def flaky_insert():
+            state["inserts"] += 1
+            if state["inserts"] == 1:
+                state["delivered"] = True      # it landed...
+                raise ConnectionResetError("response lost")   # ...we never heard
+            return {"id": f"tgt-duplicate-{state['inserts']}"}
+
+        monkeypatch.setattr(m, "_find_by_message_id",
+                            lambda msgid: "tgt-first" if state["delivered"] else None)
+        monkeypatch.setattr(m.settings, "base_backoff", 0.001)
+        monkeypatch.setattr(m.settings, "max_backoff", 0.002)
+        monkeypatch.setattr(
+            m, "tgt",
+            type("T", (), {"users": lambda self=None: type("U", (), {
+                "messages": lambda self=None: type("M", (), {
+                    "insert": lambda self=None, **kw: type("R", (), {
+                        "execute": lambda self=None: flaky_insert()})()})()})()})())
 
         result = m._insert_once({"raw": self._encoded()}, None, self._encoded())
 
-        assert result["id"] == "tgt-existing"
+        assert result["id"] == "tgt-first", "adopted the wrong message"
         assert result.get("adopted") is True
+        assert state["inserts"] == 1, (
+            f"inserted {state['inserts']} times; the second call is the "
+            f"duplicate a user would see in their mailbox")
 
-    def test_a_message_that_never_landed_still_raises(self, auth, db, settings,
-                                                      identity, monkeypatch):
-        """Adoption must not swallow a genuine failure -- that would record a
-        message as migrated when it is not there."""
-        from resilience import TransportExhausted
-
+    def test_a_genuinely_failed_insert_is_still_retried(
+            self, auth, db, settings, identity, monkeypatch):
+        """The guard must not stop legitimate retries: if nothing landed,
+        attempt 2 has to actually run."""
         m = self._migrator(auth, db, settings)
-        monkeypatch.setattr(m, "_retry",
-                            lambda fn: (_ for _ in ()).throw(
-                                TransportExhausted("connection reset")))
+        state = {"inserts": 0}
+
+        def flaky_insert():
+            state["inserts"] += 1
+            if state["inserts"] == 1:
+                raise ConnectionResetError("never arrived")
+            return {"id": "tgt-second-attempt"}
+
         monkeypatch.setattr(m, "_find_by_message_id", lambda msgid: None)
+        monkeypatch.setattr(m.settings, "base_backoff", 0.001)
+        monkeypatch.setattr(m.settings, "max_backoff", 0.002)
+        monkeypatch.setattr(
+            m, "tgt",
+            type("T", (), {"users": lambda self=None: type("U", (), {
+                "messages": lambda self=None: type("M", (), {
+                    "insert": lambda self=None, **kw: type("R", (), {
+                        "execute": lambda self=None: flaky_insert()})()})()})()})())
 
-        with pytest.raises(TransportExhausted):
-            m._insert_once({"raw": self._encoded()}, None, self._encoded())
+        result = m._insert_once({"raw": self._encoded()}, None, self._encoded())
 
-    def test_an_api_refusal_is_not_treated_as_uncertainty(self, auth, db,
-                                                          settings, identity,
-                                                          monkeypatch):
-        """A plain RuntimeError means the API told us it refused. Only a
-        transport failure leaves us genuinely unsure, and only that should
-        cost an extra lookup."""
+        assert result["id"] == "tgt-second-attempt"
+        assert state["inserts"] == 2
+
+    def test_a_rate_limit_does_not_trigger_a_lookup(
+            self, auth, db, settings, identity, monkeypatch):
+        """A 429 was rejected before it was processed, so there is nothing to
+        adopt and the lookup would just spend quota confirming it."""
+        from tests.fakes import http_error
+
         m = self._migrator(auth, db, settings)
         looked = {"n": 0}
-        monkeypatch.setattr(m, "_retry",
-                            lambda fn: (_ for _ in ()).throw(
-                                RuntimeError("exhausted 6 retries on HTTP 500")))
-        monkeypatch.setattr(m, "_find_by_message_id",
-                            lambda msgid: looked.__setitem__("n", looked["n"] + 1))
+        state = {"inserts": 0}
 
-        with pytest.raises(RuntimeError):
-            m._insert_once({"raw": self._encoded()}, None, self._encoded())
-        assert looked["n"] == 0
+        def flaky_insert():
+            state["inserts"] += 1
+            if state["inserts"] == 1:
+                raise http_error(429, "rateLimitExceeded")
+            return {"id": "tgt-1"}
+
+        def counting_lookup(msgid):
+            looked["n"] += 1
+            return None
+
+        monkeypatch.setattr(m, "_find_by_message_id", counting_lookup)
+        monkeypatch.setattr(m.settings, "base_backoff", 0.001)
+        monkeypatch.setattr(m.settings, "max_backoff", 0.002)
+        monkeypatch.setattr(
+            m, "tgt",
+            type("T", (), {"users": lambda self=None: type("U", (), {
+                "messages": lambda self=None: type("M", (), {
+                    "insert": lambda self=None, **kw: type("R", (), {
+                        "execute": lambda self=None: flaky_insert()})()})()})()})())
+
+        m._insert_once({"raw": self._encoded()}, None, self._encoded())
+
+        assert looked["n"] == 0, "spent a lookup on a request that never landed"
 
     def test_the_happy_path_costs_no_extra_call(self, auth, db, settings,
                                                 identity, monkeypatch):
         """The guard must be free when nothing goes wrong."""
         m = self._migrator(auth, db, settings)
         looked = {"n": 0}
-        monkeypatch.setattr(m, "_retry", lambda fn: {"id": "tgt-1"})
-        monkeypatch.setattr(m, "_find_by_message_id",
-                            lambda msgid: looked.__setitem__("n", looked["n"] + 1))
 
-        assert m._insert_once({"raw": self._encoded()}, None,
-                              self._encoded())["id"] == "tgt-1"
+        def counting_lookup(msgid):
+            looked["n"] += 1
+            return None
+
+        monkeypatch.setattr(m, "_find_by_message_id", counting_lookup)
+        monkeypatch.setattr(
+            m, "tgt",
+            type("T", (), {"users": lambda self=None: type("U", (), {
+                "messages": lambda self=None: type("M", (), {
+                    "insert": lambda self=None, **kw: type("R", (), {
+                        "execute": lambda self=None: {"id": "tgt-1"}})()})()})()})())
+
+        result = m._insert_once({"raw": self._encoded()}, None, self._encoded())
+
+        assert result["id"] == "tgt-1"
         assert looked["n"] == 0
 
 

@@ -64,11 +64,12 @@ class GmailMigrator:
             "filters_inserted": 0, "filters_failed": 0, "filters_skipped": 0,
         }
 
-    def _retry(self, fn):
+    def _retry(self, fn, before_retry=None):
         return retry_on_google_error(
             max_retries=self.settings.max_retries,
             base_delay=self.settings.base_backoff,
             max_delay=self.settings.max_backoff,
+            before_retry=before_retry,
         )(fn)()
 
     # -- labels: created parent-first so 'Clients/Acme/2024' resolves ----------
@@ -179,27 +180,47 @@ class GmailMigrator:
         verbatim by the copy. One extra call on a rare path, and it turns a
         probabilistic duplicate into a deterministic resume.
 
+        The check runs *between* attempts, not around them. That distinction
+        is the whole bug this replaced: the dangerous case never raises.
+
+            attempt 1   lands server-side, response lost
+            attempt 2   inserts a SECOND copy, returns 200
+            decorator   reports success
+
+        A guard wrapped around `_retry` cannot see that. It fires only when
+        every attempt failed -- which is exactly the case where nothing was
+        inserted and there is nothing to adopt. So the lookup is handed to the
+        decorator as `before_retry`, which calls it after each ambiguous
+        failure and returns its value instead of re-executing.
+
         Nothing here changes the first attempt: the common path is unchanged
         and costs nothing extra.
         """
+        msgid = self._message_id_header(raw)
+
+        def adopt_if_already_delivered():
+            if not msgid:
+                return None
+            existing = self._find_by_message_id(msgid)
+            if not existing:
+                return None
+            log.info("[%s] a previous attempt had already delivered %s; "
+                     "adopting it instead of inserting a duplicate",
+                     self.source_user, msgid)
+            return {"id": existing, "adopted": True}
+
         insert = lambda: self.tgt.users().messages().insert(   # noqa: E731
             userId="me", body=body, media_body=media,
             internalDateSource="dateHeader").execute()
         try:
-            return self._retry(insert)
+            return self._retry(insert, before_retry=adopt_if_already_delivered)
         except TransportExhausted:
-            # The retry decorator exhausted its attempts, and any of them may
-            # have succeeded with only the response lost in transit. A plain
-            # RuntimeError would mean the API told us it refused; this means
-            # we genuinely do not know.
-            msgid = self._message_id_header(raw)
-            if msgid:
-                existing = self._find_by_message_id(msgid)
-                if existing:
-                    log.info("[%s] adopting message already on the target "
-                             "after a transport failure (%s)",
-                             self.source_user, msgid)
-                    return {"id": existing, "adopted": True}
+            # Every attempt failed, so most likely nothing landed -- but the
+            # last failure gets no before_retry call, so check once more
+            # rather than reporting a failure for a message that is there.
+            adopted = adopt_if_already_delivered()
+            if adopted is not None:
+                return adopted
             raise
 
     # -- messages --------------------------------------------------------------

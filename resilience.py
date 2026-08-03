@@ -136,12 +136,36 @@ def _retry_after_seconds(exc: HttpError) -> float | None:
 
 
 def retry_on_google_error(
-    max_retries: int = 6, base_delay: float = 1.0, max_delay: float = 60.0
+    max_retries: int = 6, base_delay: float = 1.0, max_delay: float = 60.0,
+    before_retry: Callable[[], T | None] | None = None,
 ) -> Callable[[Callable[..., T]], Callable[..., T]]:
     """
     Decorator: retry transient Google API failures with full-jitter exponential
     backoff; raise `PermanentAPIError` immediately for anything that will never
     succeed on retry; raise `RuntimeError` once retries are exhausted.
+
+    before_retry
+    ------------
+    Called between a failure and the next attempt, but *only* when the failure
+    left it genuinely unknown whether the call landed: a transport error, or a
+    5xx. If it returns a non-None value, that value is returned instead of
+    re-executing.
+
+    This exists because the dangerous case for a non-idempotent write is not
+    the one that raises. It is:
+
+        attempt 1   lands server-side, response lost to a reset socket
+        attempt 2   performs the write a SECOND time, returns 200
+        decorator   reports success; nothing raises; nobody is any the wiser
+
+    A guard wrapped around the decorator cannot see that -- it only runs when
+    every attempt failed, which is precisely the case where the write most
+    likely did *not* land. The check has to happen before each retry, which
+    means it has to live in here.
+
+    Not called for 429/rate-limit or 403 quota failures: those mean the
+    request was rejected before it was processed, so there is nothing to
+    adopt and a lookup would just spend quota confirming it.
     """
 
     def decorator(fn: Callable[..., T]) -> Callable[..., T]:
@@ -178,6 +202,12 @@ def retry_on_google_error(
                         status, reason, attempt, max_retries, delay,
                     )
                     time.sleep(delay)
+                    # A 5xx may have been processed before the error was
+                    # generated; a 429 was rejected before it was.
+                    if before_retry is not None and status is not None and status >= 500:
+                        adopted = before_retry()
+                        if adopted is not None:
+                            return adopted
 
                 except TRANSPORT_ERRORS as exc:
                     # A multi-hour migration reliably sees connections reset,
@@ -214,6 +244,10 @@ def retry_on_google_error(
                     log.debug("retrying after %s: attempt %d/%d in %.2fs",
                               type(exc).__name__, attempt, max_retries, delay)
                     time.sleep(delay)
+                    if before_retry is not None:
+                        adopted = before_retry()
+                        if adopted is not None:
+                            return adopted
 
         return wrapper
 
