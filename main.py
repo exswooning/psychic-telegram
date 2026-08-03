@@ -583,9 +583,14 @@ def cmd_backfill_services(args, settings: Settings, db: MigrationDB,
     for r in db.all_identities():
         if r["entity_type"] != "user" or r["status"] != "DONE":
             continue
+        # summary() keys are "<item_type>:<status>", so a bare item type never
+        # matches. Only SUCCESS counts as evidence -- a user whose entire Drive
+        # phase failed must not be recorded as having completed it.
         have = db.summary(r["source_email"]) or {}
+        done_types = {k.split(":", 1)[0] for k, v in have.items()
+                      if k.endswith(":SUCCESS") and v["count"] > 0}
         confirmed = [s for s in args.services
-                     if any(t in have for t in evidence.get(s, ()))]
+                     if done_types & set(evidence.get(s, ()))]
         missing = sorted(set(args.services) - set(confirmed))
         if missing:
             print(f"  {r['source_email']}: no ledger evidence for "

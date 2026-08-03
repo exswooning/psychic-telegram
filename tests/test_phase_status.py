@@ -128,3 +128,51 @@ class TestWiring:
         src = inspect.getsource(main.migrate_user)
         marked = src.index("mark_services_done")
         assert "track_status" in src[:marked]
+
+
+class TestBackfillNeedsEvidence:
+    """
+    `backfill-services` exists to tell an older ledger which services really
+    ran, so the legacy fallback stops skipping the ones that did not. That
+    makes it the one command able to certify work as complete without doing
+    any -- so it verifies the claim against audit_log instead of trusting the
+    flag.
+
+    The first version could never confirm anything: summary() is keyed
+    "<item_type>:<status>", and it tested for a bare "file". It refused every
+    user, which was the safe direction to be wrong in, but wrong.
+    """
+
+    def _run(self, ledger, services):
+        import argparse
+
+        import main
+
+        args = argparse.Namespace(services=services)
+        main.cmd_backfill_services(args, None, ledger, None)
+        return ledger.services_done("alice@c.com")
+
+    def _finish(self, ledger, item_type, status="SUCCESS"):
+        with ledger.write() as c:
+            c.execute("UPDATE identity_map SET status='DONE'")
+        ledger.log_audit("alice@c.com", f"i-{item_type}", item_type, status)
+
+    def test_a_service_with_successful_items_is_recorded(self, ledger):
+        self._finish(ledger, "file")
+        assert self._run(ledger, ["drive"]) == {"drive"}
+
+    def test_a_service_with_no_items_is_refused(self, ledger):
+        """The claim that matters: Drive ran, Gmail did not, and saying both
+        would mark 829 unmigrated messages as done forever."""
+        self._finish(ledger, "file")
+        assert self._run(ledger, ["drive", "gmail"]) == {"drive"}
+
+    def test_a_service_whose_items_all_failed_is_refused(self, ledger):
+        """FAILED rows prove it was attempted, not that it succeeded."""
+        self._finish(ledger, "message", status="FAILED")
+        assert self._run(ledger, ["gmail"]) == set()
+
+    def test_a_pending_user_is_left_alone(self, ledger):
+        """Only DONE users have a status that needs explaining."""
+        ledger.log_audit("alice@c.com", "i-file", "file", "SUCCESS")
+        assert self._run(ledger, ["drive"]) == set()
