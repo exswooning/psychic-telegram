@@ -602,16 +602,9 @@ class TestTheRetryHookCannotBecomeANewFailure:
         assert wrapped() == {"id": "already-there"}
         assert state["n"] == 1, "re-executed despite adopting existing work"
 
-    def test_the_lookup_asks_spam_and_trash_too(self, auth, db, settings,
-                                                identity):
-        """An inserted message can land in Spam, and a lookup that cannot see
-        it there concludes nothing arrived and inserts a second copy."""
-        import gmail_engine
-        from tests.conftest import SRC_USER, TGT_USER
-
-        m = gmail_engine.GmailMigrator(auth, db, settings, SRC_USER, TGT_USER)
-        m._find_by_message_id("<x@y>")
-
-        listed = auth.target_gmail(TGT_USER).calls_to("messages.list")
-        assert listed, "no lookup was issued"
-        assert listed[0].get("includeSpamTrash") is True
+    # A test asserting includeSpamTrash was passed used to live here. It
+    # checked the fake -- which accepts any kwarg -- so it verified that a
+    # parameter was supplied, not that it does anything. The real questions
+    # are whether insert spam-filters (measured: it does not) and whether the
+    # lookup can see a message a previous run left in Trash. Neither is
+    # answerable from inside the suite, so both moved to contract_probe.py.

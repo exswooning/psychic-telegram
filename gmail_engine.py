@@ -146,7 +146,21 @@ class GmailMigrator:
         return match.group(1) if match else None
 
     def _find_by_message_id(self, msgid: str) -> str | None:
-        """Has this exact message already landed on the target?"""
+        """
+        Has this exact message already landed on the target?
+
+        includeSpamTrash is kept, but not for the reason it was added. The
+        belief was that an inserted message might be spam-filtered; measured,
+        it is not -- insert bypasses the delivery pipeline, which is the whole
+        reason this engine uses insert rather than import, and a message asked
+        for as INBOX is stored as INBOX (contract_probe: "insert does not
+        spam-filter").
+
+        What the flag does buy is Trash. A resumed run can check for a message
+        a previous run inserted days earlier, and someone may have deleted it
+        since. Without the flag that message is invisible, the guard concludes
+        nothing arrived, and the retry restores mail the user threw away.
+        """
         query = f"rfc822msgid:{msgid}"
         try:
             self.limiter.acquire()

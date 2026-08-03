@@ -71,10 +71,14 @@ jobs:
         # Exits non-zero on FAIL or UNEXP, so a changed API surfaces as a
         # failed run rather than as output nobody reads.
         run: |
+          # --min-held is the same floor idea as the collected-count guard in
+          # ci.yml: without it, assumptions degrading into SKIP one by one
+          # would keep the workflow green while it checked less and less.
+          # Raise it when assumptions are added; lower it only deliberately.
           if [ "${{ inputs.include_writes }}" = "true" ]; then
-            python contract_probe.py --include-writes
+            python contract_probe.py --include-writes --min-held 14
           else
-            python contract_probe.py
+            python contract_probe.py --min-held 11
           fi
 
       - name: Remove credentials

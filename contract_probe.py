@@ -65,7 +65,7 @@ class Probe:
     def record(self, name: str, where: str, status: str, detail: str) -> None:
         self.results.append((name, where, status, detail))
 
-    def report(self) -> int:
+    def report(self, min_held: int = 0) -> int:
         width = max(len(n) for n, _, _, _ in self.results) + 2
         print(f"\n{'assumption':<{width}} {'result':<6} detail")
         print("-" * (width + 66))
@@ -88,6 +88,16 @@ class Probe:
             print("Untestable is not reassurance -- a corpus smaller than one "
                   "page skips the page-size checks entirely, which is the "
                   "state most first runs are in.")
+        # A probe that quietly stops checking things passes forever. If the
+        # sandbox corpus is reset or a scope lapses, assumptions turn into
+        # SKIPs one by one and nothing ever goes red -- the same failure the
+        # collected-count floor guards against in the test workflow.
+        if min_held and held < min_held:
+            print(f"\nFLOOR: only {held} assumptions could be checked, "
+                  f"expected at least {min_held}. Something stopped being "
+                  f"testable -- an empty corpus, a lapsed scope, a reset "
+                  f"sandbox. Fix it or lower the floor deliberately.")
+            return 1
         return 1 if failed or unexpected else 0
 
 
@@ -244,6 +254,18 @@ def probe_gmail_index_latency(p: Probe, gmail, scratch_domain: str) -> None:
                 break
             time.sleep(0.5)
 
+        # Does insert spam-filter at all? The engine uses insert rather than
+        # import precisely to bypass the delivery pipeline, so it should not
+        # -- but includeSpamTrash was being carried on that belief without
+        # anyone checking it.
+        stored = gmail.users().messages().get(
+            userId="me", id=mid, format="minimal").execute()
+        labels = stored.get("labelIds") or []
+        p.record("insert does not spam-filter",
+                 "gmail_engine._find_by_message_id includeSpamTrash",
+                 PASS if "SPAM" not in labels else UNEXP,
+                 f"asked for INBOX, stored as {','.join(labels) or '(none)'}")
+
         if found_after is None:
             p.record("insert is searchable within 30s",
                      "gmail_engine._insert_once before_retry", FAIL,
@@ -366,6 +388,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--include-writes", action="store_true",
                     help="also create and delete one scratch file on the target")
     ap.add_argument("--user", help="which mapped user to probe as")
+    ap.add_argument("--min-held", type=int, default=0,
+                    help="fail if fewer than N assumptions could be checked")
     args = ap.parse_args(argv)
 
     settings = Settings()
@@ -413,7 +437,7 @@ def main(argv: list[str] | None = None) -> int:
                          "gmail_engine._insert_once before_retry", SKIP,
                          str(exc)[:90])
 
-    return p.report()
+    return p.report(args.min_held)
 
 
 if __name__ == "__main__":
