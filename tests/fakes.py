@@ -47,6 +47,11 @@ FOLDER_MIME = "application/vnd.google-apps.folder"
 # Stands in for "now" when a permission grant bumps a file's modifiedTime.
 # A fixed, obviously-wrong value so a test failure reads unambiguously.
 PERMISSION_BUMP_TIME = "2099-12-31T23:59:59Z"
+# Distinct from the permission bump so a failing assertion says *which* write
+# left the timestamp wrong. Modelling only the permission bump is how the
+# comment-ordering bug got past the whole suite: the engine restored the
+# timestamp after ACLs, then wrote comments, and the fake never noticed.
+COMMENT_BUMP_TIME = "2098-11-30T22:58:58Z"
 
 
 # ======================================================================
@@ -522,6 +527,9 @@ class _DriveComments:
         entry = {"id": cid, "content": body.get("content", ""),
                 "author": {"displayName": self.s.owner}, "replies": []}
         self.s.comment_store[fileId].append(entry)
+        meta = self.s.store.get(fileId)
+        if meta is not None:
+            meta["modifiedTime"] = COMMENT_BUMP_TIME
         return {"id": cid}
 
 
@@ -534,6 +542,9 @@ class _DriveReplies:
 
     def _create(self, fileId: str, commentId: str, body: dict, **_):
         rid = self.s._new_id("rply")
+        meta = self.s.store.get(fileId)
+        if meta is not None:
+            meta["modifiedTime"] = COMMENT_BUMP_TIME
         for c in self.s.comment_store.get(fileId, []):
             if c["id"] == commentId:
                 c.setdefault("replies", []).append(

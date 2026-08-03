@@ -924,6 +924,41 @@ def test_a_dropped_comment_reply_is_recorded(migrator):
 
 
 # ----------------------------------------------------------------------
+# modifiedTime survives *every* post-create write, not just the first kind.
+#
+# Found by measurement, not by review: an A/B across 1,342 real files showed
+# 97 with a drifted modifiedTime in both transfer modes, and every one of the
+# 97 was native and carried comments. The engine restored the timestamp after
+# ACLs and then wrote comments, undoing the restore it had just made. The
+# suite could not see it because the fake modelled the permission bump but
+# not the comment bump -- so the fix is in two places, and this test fails
+# against the old ordering.
+# ----------------------------------------------------------------------
+def test_modified_time_survives_comments_not_just_acls(auth, db, settings,
+                                                       identity, quota):
+    """A commented, shared file must still read back with its own timestamp."""
+    import drive_engine
+
+    settings.migrate_comments = True
+    src = auth.source_drive(SRC_USER)
+    doc = src.add_native("Design — Project note 006", mtime="2024-03-01T09:00:00Z")
+    src.add_comment(doc, "does this still apply?", author="Bob")
+    # Shared, so the ACL path runs too and the two restores cannot be confused.
+    src.perms[doc].append({"id": "p1", "type": "user", "role": "writer",
+                           "emailAddress": "bob@tenanta.com"})
+
+    drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER,
+                               quota).run()
+
+    tgt = auth.target_drive(TGT_USER)
+    got = tgt.by_name("Design — Project note 006")
+    assert got, "the document did not arrive at all"
+    assert got[0]["modifiedTime"] == "2024-03-01T09:00:00Z", (
+        "modifiedTime was left at the value the last write stamped on it "
+        f"({got[0]['modifiedTime']}) instead of the source's")
+
+
+# ----------------------------------------------------------------------
 # owned_only: the invariant that stops a shared file being copied once per
 # recipient. Default True, applied in both discovery and the engine, and
 # until now untested.

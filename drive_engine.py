@@ -424,9 +424,10 @@ class DriveMigrator:
         self.db.log_audit(self.source_user, item["id"], "file", "SUCCESS",
                           modified_time=item.get("modifiedTime"), bytes_moved=size)
         self.stats["files"] += 1
-        self._restore_modified_time(copy_id, item, self._sync_acls(item["id"], copy_id))
+        touched = self._sync_acls(item["id"], copy_id)
         if self.settings.migrate_comments:
-            self._sync_comments(item["id"], copy_id)
+            touched += self._sync_comments(item["id"], copy_id)
+        self._restore_modified_time(copy_id, item, touched)
 
     def _sync_binary(self, item: dict, tgt_parent: str) -> None:
         size = int(item.get("size") or 0)
@@ -475,9 +476,10 @@ class DriveMigrator:
         self.db.log_audit(self.source_user, item["id"], "file", "SUCCESS",
                           modified_time=item.get("modifiedTime"), bytes_moved=size)
         self.stats["files"] += 1
-        self._restore_modified_time(tgt_id, item, self._sync_acls(item["id"], tgt_id))
+        touched = self._sync_acls(item["id"], tgt_id)
         if self.settings.migrate_comments:
-            self._sync_comments(item["id"], tgt_id)
+            touched += self._sync_comments(item["id"], tgt_id)
+        self._restore_modified_time(tgt_id, item, touched)
 
     def _sync_native(self, item: dict, tgt_parent: str) -> None:
         export_mime, _ext = EXPORT_MIME_MAP.get(item["mimeType"], (None, None))
@@ -526,9 +528,10 @@ class DriveMigrator:
         self.db.log_audit(self.source_user, item["id"], "file", "SUCCESS",
                           modified_time=item.get("modifiedTime"), bytes_moved=size)
         self.stats["files"] += 1
-        self._restore_modified_time(tgt_id, item, self._sync_acls(item["id"], tgt_id))
+        touched = self._sync_acls(item["id"], tgt_id)
         if self.settings.migrate_comments:
-            self._sync_comments(item["id"], tgt_id)
+            touched += self._sync_comments(item["id"], tgt_id)
+        self._restore_modified_time(tgt_id, item, touched)
 
     @staticmethod
     def _cleanup(path: str) -> None:
@@ -650,9 +653,10 @@ class DriveMigrator:
             self.stats["files"] += 1
 
     # -- comments ---------------------------------------------------------------
-    def _sync_comments(self, source_id: str, target_id: str) -> None:
+    def _sync_comments(self, source_id: str, target_id: str) -> int:
         """
-        Copy a file's comment threads.
+        Copy a file's comment threads. Returns how many writes landed, because
+        each one bumps modifiedTime and the caller has to undo that afterwards.
 
         The unavoidable caveat: the Drive API has no way to write a comment
         *as* another person, so every migrated comment is authored by the
@@ -661,6 +665,7 @@ class DriveMigrator:
         honest -- silently reattributing a colleague's comment to whoever ran
         the migration is worse.
         """
+        written = 0
         try:
             resp = self._retry(lambda: self.src.comments().list(
                 fileId=source_id, pageSize=100,
@@ -670,7 +675,7 @@ class DriveMigrator:
         except (PermanentAPIError, RuntimeError) as exc:
             log.debug("[%s] comments unavailable on %s: %s",
                      self.source_user, source_id, exc)
-            return
+            return written
 
         for c in resp.get("comments", []):
             if self.db.get_target_id(self.source_user, c["id"], "comment"):
@@ -690,6 +695,7 @@ class DriveMigrator:
             self.db.record_mapping(self.source_user, c["id"], created["id"], "comment")
             self.db.log_audit(self.source_user, c["id"], "comment", "SUCCESS")
             self.stats["comments"] = self.stats.get("comments", 0) + 1
+            written += 1
 
             for r in (c.get("replies") or []):
                 r_author = (r.get("author") or {}).get("displayName") or "unknown"
@@ -709,6 +715,9 @@ class DriveMigrator:
                     self.db.log_audit(
                         self.source_user, f"{source_id}:reply", "comment",
                         "FAILED", f"reply not recreated: {exc}")
+                else:
+                    written += 1
+        return written
 
     # -- ACL translation -----------------------------------------------------------
     def _sync_acls(self, source_id: str, target_id: str) -> int:
@@ -804,9 +813,9 @@ class DriveMigrator:
         return applied
 
     def _restore_modified_time(self, target_id: str, item: dict,
-                               grants_applied: int) -> None:
+                               writes_applied: int) -> None:
         """
-        Re-assert modifiedTime after ACLs.
+        Re-assert modifiedTime after every post-create write.
 
         Granting a permission bumps the file's modifiedTime to now -- verified
         directly against Drive: a file created with modifiedTime=2019 reads
@@ -814,9 +823,17 @@ class DriveMigrator:
         applied after the copy, every shared file would otherwise show the
         migration date, which quietly breaks "sort by last modified" for
         exactly the files people collaborate on most.
+
+        Writing a comment bumps it the same way, and this originally ran
+        *before* comments rather than after -- so the restore was immediately
+        undone by the first comment insert. The A/B measured the damage: 97
+        files drifted, every one of them native and commented, in both
+        transfer modes. Anything that writes to the file after creation has to
+        be counted here, which is why the argument is a total and not a
+        grant count.
         """
         mtime = item.get("modifiedTime")
-        if not grants_applied or not mtime or self.settings.dry_run:
+        if not writes_applied or not mtime or self.settings.dry_run:
             return
         try:
             self._retry(lambda: self.tgt.files().update(
