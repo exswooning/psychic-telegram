@@ -46,11 +46,13 @@ from datetime import datetime, timedelta, timezone
 from auth import AuthManager, list_domain_users
 from calendar_engine import CalendarMigrator
 from chat_engine import ChatMigrator
+from contacts_engine import ContactsMigrator
 from config import Settings
 from db import MigrationDB
 from discovery import print_report, scan_user
 from drive_engine import DriveMigrator
 from gmail_engine import GmailMigrator
+from tasks_engine import TasksMigrator
 from resilience import DailyQuotaGuard, QuotaExhausted
 
 log = logging.getLogger("migrate")
@@ -149,6 +151,15 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
         if "chat" in services and settings.migrate_chat and not SHUTDOWN.is_set():
             cm = ChatMigrator(auth, db, settings, source_user, target_user)
             result["services"]["chat"] = cm.run()
+
+        if ("contacts" in services and settings.migrate_contacts
+                and not SHUTDOWN.is_set()):
+            com = ContactsMigrator(auth, db, settings, source_user, target_user)
+            result["services"]["contacts"] = com.run()
+
+        if "tasks" in services and settings.migrate_tasks and not SHUTDOWN.is_set():
+            tm = TasksMigrator(auth, db, settings, source_user, target_user)
+            result["services"]["tasks"] = tm.run()
 
         status = "INTERRUPTED" if SHUTDOWN.is_set() else "DONE"
         if track_status:

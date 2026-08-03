@@ -103,11 +103,13 @@ CHAT_SCOPES = [
     "https://www.googleapis.com/auth/chat.messages",
 ]
 
-# Adding the original participants to a recreated space. Needed by both space
-# modes, for different reasons: under `direct` a user cannot post into a space
-# they are not in, so without this every message would fall back to the
-# migrating user; under `import` the space would otherwise arrive correct in
-# content and empty of everyone who was in the conversation.
+# Contacts and Tasks. Both have a readonly variant, so the source keeps its
+# read-only property; the target needs the write scope to create anything.
+CONTACTS_READONLY_SCOPE = "https://www.googleapis.com/auth/contacts.readonly"
+CONTACTS_WRITE_SCOPE = "https://www.googleapis.com/auth/contacts"
+TASKS_READONLY_SCOPE = "https://www.googleapis.com/auth/tasks.readonly"
+TASKS_WRITE_SCOPE = "https://www.googleapis.com/auth/tasks"
+
 # SSO. Read on the source, write on the target -- the source tenant's login
 # configuration is the last thing that should be editable by a migration.
 SSO_READONLY_SCOPE = (
@@ -119,6 +121,11 @@ SSO_WRITE_SCOPE = "https://www.googleapis.com/auth/cloud-identity.inboundsso"
 TOKENS_READONLY_SCOPE = (
     "https://www.googleapis.com/auth/admin.directory.user.security")
 
+# Adding the original participants to a recreated space. Needed by both space
+# modes, for different reasons: under `direct` a user cannot post into a space
+# they are not in, so without this every message would fall back to the
+# migrating user; under `import` the space would otherwise arrive correct in
+# content and empty of everyone who was in the conversation.
 CHAT_MEMBERSHIP_SCOPE = "https://www.googleapis.com/auth/chat.memberships"
 # The source only ever reads the participant list, and unlike the other Chat
 # scopes this one does have a read-only variant -- so the source credential
@@ -154,6 +161,10 @@ def source_scopes(settings: "Settings") -> list[str]:
         # No read-only variant exists for either scope.
         scopes.extend(CHAT_SCOPES)
         scopes.append(CHAT_MEMBERSHIP_READONLY_SCOPE)
+    if settings.migrate_contacts:
+        scopes.append(CONTACTS_READONLY_SCOPE)
+    if settings.migrate_tasks:
+        scopes.append(TASKS_READONLY_SCOPE)
     if settings.migrate_sso:
         scopes.extend([SSO_READONLY_SCOPE, TOKENS_READONLY_SCOPE])
     if settings.migrate_calendar_acls:
@@ -177,6 +188,10 @@ def target_scopes(settings: "Settings") -> list[str]:
         # refused, so `direct` exists precisely to not ask for it.
         if settings.chat_space_mode == "import":
             scopes.append(CHAT_IMPORT_SCOPE)
+    if settings.migrate_contacts:
+        scopes.append(CONTACTS_WRITE_SCOPE)
+    if settings.migrate_tasks:
+        scopes.append(TASKS_WRITE_SCOPE)
     if settings.migrate_sso:
         scopes.append(SSO_WRITE_SCOPE)
     return scopes
@@ -341,6 +356,17 @@ class Settings:
     )
     chat_space_mode: str = field(
         default_factory=lambda: os.getenv("CHAT_SPACE_MODE", "import").strip().lower()
+    )
+    # Off by default, despite both being cheap and worth having. Turning them
+    # on adds scopes, and a scope the Admin Console has not authorised makes
+    # *every* call fail with unauthorized_client -- so defaulting these to True
+    # would break existing deployments on upgrade, for a feature nobody asked
+    # for. Enable them deliberately, alongside the scope grant.
+    migrate_contacts: bool = field(
+        default_factory=lambda: _env_bool("MIGRATE_CONTACTS", False)
+    )
+    migrate_tasks: bool = field(
+        default_factory=lambda: _env_bool("MIGRATE_TASKS", False)
     )
     # Off by default and deliberately separate from the per-user services:
     # writing an SSO profile changes how *everyone* signs in, including the

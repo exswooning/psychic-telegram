@@ -52,6 +52,13 @@ class DriveMigrator:
                       "acl_failed": 0}
         self._pending_shortcuts: list[tuple[dict, str]] = []
         self._staging_drive_id: str | None = None
+        # Set by shared_drives.py to point this engine at a shared drive
+        # instead of the user's My Drive. Everything downstream -- the walk,
+        # all three transfer modes, ACLs, comments, the modifiedTime restore
+        # -- is identical, so a shared drive reuses this engine rather than
+        # getting a parallel one that would need every fix applied twice.
+        self.shared_drive: str | None = None
+        self.target_drive_id: str | None = None
 
     # -- plumbing -----------------------------------------------------------
     def _retry(self, fn):
@@ -80,12 +87,17 @@ class DriveMigrator:
     # -- entry point ----------------------------------------------------------
     def run(self, delta: bool = False) -> dict:
         self.delta = delta
-        src_root = self._retry(
-            lambda: self.src.files().get(fileId="root", fields="id").execute()
-        )["id"]
-        tgt_root = self._retry(
-            lambda: self.tgt.files().get(fileId="root", fields="id").execute()
-        )["id"]
+        if self.shared_drive:
+            # A shared drive's id doubles as the id of its root folder, so it
+            # substitutes directly for the My Drive root on both sides.
+            src_root, tgt_root = self.shared_drive, self.target_drive_id
+        else:
+            src_root = self._retry(
+                lambda: self.src.files().get(fileId="root", fields="id").execute()
+            )["id"]
+            tgt_root = self._retry(
+                lambda: self.tgt.files().get(fileId="root", fields="id").execute()
+            )["id"]
 
         if self.server_side and not self.settings.dry_run:
             self._ensure_staging_drive()
@@ -204,9 +216,18 @@ class DriveMigrator:
     # -- traversal ------------------------------------------------------------
     def _list_children(self, parent_id: str):
         q_parts = [f"'{parent_id}' in parents", "trashed = false"]
-        if self.settings.owned_only:
+        # owned_only exists to stop a file shared with four colleagues being
+        # copied five times. It is meaningless inside a shared drive, where
+        # every file is owned by the drive and no user is in `owners` -- and
+        # applying it there matches nothing at all, silently migrating an
+        # empty drive.
+        if self.settings.owned_only and not self.shared_drive:
             q_parts.append("'me' in owners")
         q = " and ".join(q_parts)
+        extra = {}
+        if self.shared_drive:
+            extra = {"corpora": "drive", "driveId": self.shared_drive,
+                     "includeItemsFromAllDrives": True}
         token = None
         while True:
             self.limiter.acquire()
@@ -216,7 +237,7 @@ class DriveMigrator:
                        "modifiedTime,size,md5Checksum,owners,"
                        "capabilities(canDownload),shortcutDetails,description,"
                        "starred)",
-                spaces="drive", supportsAllDrives=True,
+                spaces="drive", supportsAllDrives=True, **extra,
             ).execute())
             for f in resp.get("files", []):
                 yield f

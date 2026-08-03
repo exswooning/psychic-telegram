@@ -28,7 +28,7 @@ from config import Settings, source_scopes, target_scopes
 log = logging.getLogger(__name__)
 
 _API_VERSIONS = {"drive": "v3", "gmail": "v1", "calendar": "v3",
-                 "chat": "v1"}
+                 "chat": "v1", "people": "v1", "tasks": "v1"}
 
 
 class AuthManager:
@@ -211,6 +211,18 @@ class AuthManager:
         creds = self._credentials("source", self.settings.source_admin)
         http = google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=300))
         return build("admin", "directory_v1", http=http, cache_discovery=False)
+
+    def source_people(self, user: str):
+        return self._service("source", "people", user)
+
+    def target_people(self, user: str):
+        return self._service("target", "people", user)
+
+    def source_tasks(self, user: str):
+        return self._service("source", "tasks", user)
+
+    def target_tasks(self, user: str):
+        return self._service("target", "tasks", user)
 
     def target_directory(self):
         """Directory API as the target admin. Needed to resolve an SSO

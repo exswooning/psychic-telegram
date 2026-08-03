@@ -103,9 +103,13 @@ DRIVE_SCOPE = [
               "state still need checking by hand after cutover"),
     ScopeItem("drive", "Apps Script projects", PARTIAL,
               "Exported as JSON only. Container-bound scripts lose their binding"),
-    ScopeItem("drive", "Shared Drives (Team Drives)", NONE,
-              "Out of scope. Needs corpora='drive' traversal and a membership "
-              "model rather than per-file ACLs — a separate engine"),
+    ScopeItem("drive", "Shared Drives (Team Drives)", PARTIAL,
+              "Migrated by shared_drives.py, which reuses the Drive engine "
+              "against a corpora='drive' traversal. Drive-level membership "
+              "(organizer/fileOrganizer/writer/commenter/reader) is restored "
+              "organizer-first. Group and domain grants on a drive are NOT "
+              "recreated — they need the group provisioned on the target "
+              "first, and are logged SKIPPED_NOT_A_USER"),
     ScopeItem("drive", "Files shared with the user but not owned", NONE,
               "Skipped when OWNED_ONLY=true (default). They arrive via their "
               "real owner's own migration"),
@@ -258,9 +262,20 @@ IDENTITY_SCOPE = [
 # EVERYTHING ELSE
 # ======================================================================
 OTHER_SCOPE = [
-    ScopeItem("other", "Google Contacts (personal + directory)", NONE,
-              "People API pass not implemented"),
-    ScopeItem("other", "Google Tasks", NONE, "Tasks API pass not implemented"),
+    ScopeItem("other", "Google Contacts (personal)", PARTIAL,
+              "Migrated when MIGRATE_CONTACTS=true: names, emails, phones, "
+              "organisations, addresses, birthdays, URLs and contact-group "
+              "membership. Photos are skipped, and the auto-collected 'Other "
+              "contacts' list cannot be written to at all — it refills on its "
+              "own as mail is sent"),
+    ScopeItem("other", "Directory contacts", NONE,
+              "Not personal data; they come from the target tenant's own "
+              "directory once accounts exist"),
+    ScopeItem("other", "Google Tasks", PARTIAL,
+              "Migrated when MIGRATE_TASKS=true: lists, tasks, notes, due "
+              "dates, completion state and parent/child nesting. `updated` is "
+              "server-assigned, so every task shows today as last-modified — "
+              "cosmetic, since the dates people read (due, completed) survive"),
     ScopeItem("other", "Google Keep", NONE, "Keep API is admin-export only"),
     ScopeItem("other", "Google Chat spaces and messages", PARTIAL,
               "Migrated when MIGRATE_CHAT=true. Named spaces are recreated in "
