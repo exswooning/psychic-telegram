@@ -179,16 +179,33 @@ def scan_drive(drive, settings: Settings, user: str) -> dict:
     }
 
 
+def count_drafts(gmail) -> int:
+    """
+    Page and count. `resultSizeEstimate` is not a count.
+
+    Measured against a live mailbox holding exactly four drafts:
+    `drafts().list(maxResults=1)` reported `resultSizeEstimate: 201`. Not an
+    approximation — 50x out, and stable across calls, so it reads as a real
+    figure rather than an obvious error. Drafts are few enough that paging
+    them costs one or two requests.
+    """
+    total, token = 0, None
+    while True:
+        resp = gmail.users().drafts().list(
+            userId="me", maxResults=500, pageToken=token).execute()
+        total += len(resp.get("drafts", []))
+        token = resp.get("nextPageToken")
+        if not token:
+            return total
+
+
 def scan_gmail(gmail) -> dict:
     prof = gmail.users().getProfile(userId="me").execute()
     labels = gmail.users().labels().list(userId="me").execute().get("labels", [])
-    drafts = gmail.users().drafts().list(userId="me", maxResults=1).execute()
     return {
         "messages": prof.get("messagesTotal", 0),
         "threads": prof.get("threadsTotal", 0),
-        # getProfile has no draft count; resultSizeEstimate is close enough for
-        # a report and costs one call instead of paging every draft.
-        "drafts": drafts.get("resultSizeEstimate", 0),
+        "drafts": count_drafts(gmail),
         "labels": len([l for l in labels if l.get("type") == "user"]),
     }
 

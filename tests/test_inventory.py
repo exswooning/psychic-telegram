@@ -177,3 +177,57 @@ class TestRender:
             "calendar": {"events": 0, "calendars": 0},
         }], settings())
         assert "link-shared" in out and "fix it before" in out
+
+
+class TestDraftCounting:
+    """
+    resultSizeEstimate is not a count.
+
+    Measured against a live mailbox holding exactly four drafts,
+    drafts().list(maxResults=1) reported resultSizeEstimate: 201 — 50x out,
+    and stable across calls, so it reads as a real figure rather than an
+    obvious error. The index reported 201 drafts per user for five users
+    while the seeder's own log said 20 in total; the seeder was right.
+    """
+
+    class FakeGmail:
+        def __init__(self, pages):
+            self.pages, self.i = pages, 0
+
+        def users(self):
+            return self
+
+        def drafts(self):
+            return self
+
+        def list(self, **kw):
+            self._kw = kw
+            return self
+
+        def execute(self):
+            page = self.pages[min(self.i, len(self.pages) - 1)]
+            self.i += 1
+            return page
+
+    def test_drafts_are_counted_not_estimated(self):
+        gmail = self.FakeGmail([
+            {"drafts": [{"id": str(i)} for i in range(4)],
+             "resultSizeEstimate": 201},
+        ])
+        assert inventory.count_drafts(gmail) == 4
+
+    def test_paging_is_followed(self):
+        gmail = self.FakeGmail([
+            {"drafts": [{"id": "1"}, {"id": "2"}], "nextPageToken": "t"},
+            {"drafts": [{"id": "3"}]},
+        ])
+        assert inventory.count_drafts(gmail) == 3
+
+    def test_an_empty_mailbox_reports_zero(self):
+        assert inventory.count_drafts(self.FakeGmail([{}])) == 0
+
+    def test_the_estimate_is_never_consulted(self):
+        """If it were, a mailbox with no drafts key but a large estimate would
+        report that estimate."""
+        gmail = self.FakeGmail([{"resultSizeEstimate": 9999}])
+        assert inventory.count_drafts(gmail) == 0
