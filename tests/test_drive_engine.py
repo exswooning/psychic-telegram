@@ -921,3 +921,63 @@ def test_a_dropped_comment_reply_is_recorded(migrator):
     handler = reply_bit[:reply_bit.index("# -- ACL translation")]
     assert "log_audit" in handler
     assert "reply not recreated" in handler
+
+
+# ----------------------------------------------------------------------
+# owned_only: the invariant that stops a shared file being copied once per
+# recipient. Default True, applied in both discovery and the engine, and
+# until now untested.
+#
+# The seeder builds a cross-user sharing graph precisely so this can be
+# checked: five users collectively *see* far more than they collectively
+# *own*, and a correct migration reproduces the union of what they own
+# exactly once. Without this filter, a deck shared with four colleagues is
+# stored five times in the target -- paid for five times, and nobody can say
+# which copy is authoritative.
+# ----------------------------------------------------------------------
+def test_a_file_shared_in_from_a_colleague_is_not_migrated(migrator, auth, db):
+    """It belongs to its owner's migration, not to everyone who can see it."""
+    src = auth.source_drive(SRC_USER)
+    mine = src.add_binary("my-deck.pptx")
+    theirs = src.add_binary("their-deck.pptx")
+    # reassign ownership: this one is shared in, not owned
+    src.store[theirs]["owners"] = [{"emailAddress": "colleague@tenanta.com"}]
+
+    migrator.run()
+
+    assert db.get_target_id(SRC_USER, mine, "file"), "own file must migrate"
+    assert not db.get_target_id(SRC_USER, theirs, "file"), \
+        "a shared-in file was copied, so every recipient stores their own copy"
+
+
+def test_owned_only_is_on_by_default(monkeypatch):
+    monkeypatch.delenv("OWNED_ONLY", raising=False)
+    from config import Settings
+
+    assert Settings().owned_only is True
+
+
+def test_turning_it_off_migrates_shared_in_files_too(migrator, auth, db, settings):
+    """The escape hatch exists for a single-user rescue, where 'everything
+    this account can see' is the point."""
+    settings.owned_only = False
+    src = auth.source_drive(SRC_USER)
+    theirs = src.add_binary("their-deck.pptx")
+    src.store[theirs]["owners"] = [{"emailAddress": "colleague@tenanta.com"}]
+
+    migrator.run()
+
+    assert db.get_target_id(SRC_USER, theirs, "file")
+
+
+def test_the_filter_reaches_the_query_not_just_the_results(migrator):
+    """Filtering after listing would still pay to enumerate every shared-in
+    file on every user -- on a real tenant that is the bulk of the listing."""
+    import inspect
+
+    # It belongs in the listing query, not in _walk: filtering after the fact
+    # would still pay to enumerate every shared-in file on every user, which
+    # on a real tenant is the bulk of the listing.
+    src = inspect.getsource(migrator.__class__._list_children)
+    assert "'me' in owners" in src
+    assert "owned_only" in src
