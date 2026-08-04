@@ -1240,6 +1240,100 @@ def snapshot_payload() -> dict:
             "snapshot": _serialize_snapshot(snap)}
 
 
+def spa_users_payload() -> dict:
+    """User[] for migration-webui, read-only from the ledger. See webui_spa.py."""
+    import sqlite3
+
+    import webui_spa
+    from config import Settings
+
+    conn = _db_conn()
+    if conn is None:
+        return {"error": "no database yet — run init-db or create identities.csv",
+               "users": []}
+    try:
+        return {"error": "", "users": webui_spa.users_payload(
+            conn, Settings().effective_upload_cap())}
+    except sqlite3.Error as exc:
+        return {"error": f"db read error: {exc}", "users": []}
+    finally:
+        conn.close()
+
+
+def spa_activity_payload() -> dict:
+    import sqlite3
+
+    import webui_spa
+
+    conn = _db_conn()
+    if conn is None:
+        return {"error": "no database yet", "activity": []}
+    try:
+        return {"error": "", "activity": webui_spa.activity_payload(conn)}
+    except sqlite3.Error as exc:
+        return {"error": f"db read error: {exc}", "activity": []}
+    finally:
+        conn.close()
+
+
+def spa_metrics_payload() -> dict:
+    import sqlite3
+
+    import tui
+    import webui_spa
+    from config import Settings
+
+    settings = Settings()
+    conn = _db_conn()
+    totals: dict = {}
+    if conn is not None:
+        try:
+            totals = tui.collect_snapshot(conn, settings.effective_upload_cap()).totals
+        except sqlite3.Error:
+            totals = {}
+        finally:
+            conn.close()
+    return webui_spa.metrics_payload(settings, settings.effective_upload_cap(), totals)
+
+
+def spa_verification_payload() -> dict:
+    import sqlite3
+
+    import webui_spa
+    from config import Settings
+
+    conn = _db_conn()
+    if conn is None:
+        return {"error": "no database yet", "verification": []}
+    try:
+        return {"error": "", "verification": webui_spa.verification_payload(
+            conn, Settings())}
+    except sqlite3.Error as exc:
+        return {"error": f"db read error: {exc}", "verification": []}
+    finally:
+        conn.close()
+
+
+def spa_report_payload() -> dict:
+    import sqlite3
+
+    import webui_spa
+    from config import Settings
+
+    conn = _db_conn()
+    if conn is None:
+        return {"error": "no database yet", "report": None}
+    try:
+        # The most recently run job's own timing, not a scan over audit_log --
+        # see webui_spa.report_payload's docstring for why.
+        report = webui_spa.report_payload(conn, Settings(), JOB.started, JOB.finished)
+        return {"error": "", "report": report}
+    except sqlite3.Error as exc:
+        return {"error": f"db read error: {exc}", "report": None}
+    finally:
+        conn.close()
+
+
 def scope_payload() -> dict:
     """The scope matrix plus discovered volume, rendered server-side."""
     import scope as scope_mod
@@ -2482,6 +2576,16 @@ class Handler(BaseHTTPRequestHandler):
                         for k, v in ACTIONS.items()})
         elif path == "/api/snapshot":
             self._json(snapshot_payload())
+        elif path == "/api/spa/users":
+            self._json(spa_users_payload())
+        elif path == "/api/spa/activity":
+            self._json(spa_activity_payload())
+        elif path == "/api/spa/metrics":
+            self._json(spa_metrics_payload())
+        elif path == "/api/spa/verification":
+            self._json(spa_verification_payload())
+        elif path == "/api/spa/report":
+            self._json(spa_report_payload())
         elif path == "/api/scope":
             self._json(scope_payload())
         elif path == "/api/logs":

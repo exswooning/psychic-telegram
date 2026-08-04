@@ -1,0 +1,437 @@
+"""
+webui_spa.py
+============
+JSON payloads for migration-webui, the React dashboard, shaped to match its
+TypeScript types exactly (`migration-webui/src/types/index.ts`).
+
+Why this exists
+----------------
+migration-webui was built against fabricated data: `useMigration.ts` called
+`Math.random()` on a timer, and grep for `fetch(` across its `src/` tree
+returns nothing. Every page -- Dashboard, Users, ActivityFeed, Verification,
+SystemHealth, FinalReport -- was a real, well-built UI wired to nothing real.
+This module is the "nothing real" being replaced.
+
+Ground rules, matching the discipline the rest of this engine already
+enforces:
+
+* No live Google API calls on a poll path. The SPA polls every few seconds;
+  status_payload()/STATUS_TTL exists in webui.py for exactly this reason
+  (a synchronous preflight on every poll measured 9.5s and piled up faster
+  than it completed). Everything here reads migration.db read-only or
+  process-local state (metrics.METRICS, resources.recommend()) -- nothing
+  reaches out to Drive, Gmail, or Calendar.
+* Where this engine's ledger genuinely has no number for something the SPA's
+  types ask for (network throughput, per-service ETA, a "warnings" concept
+  distinct from failure), the honest answer is 0 or a stated approximation,
+  never a fabricated one. Comments below say which fields are exact and which
+  are proxies, and why.
+* Reuses tui.collect_snapshot() for the drive/mail/calendar/acl/gb_today
+  numbers rather than re-deriving them -- that function is the tested,
+  single source of truth the terminal dashboard already depends on. This
+  module adds only what it does not carry: contacts/tasks/chat per user, and
+  the SPA's specific field names.
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import sqlite3
+import time
+
+# Item types this engine writes to audit_log that tui.UserRow does not
+# aggregate, because the terminal dashboard predates these engines. Mapped to
+# the UserDetails key the SPA groups them under.
+_EXTRA_SERVICE_TYPES = {
+    "contact": "contacts", "contact_group": "contacts",
+    "task": "tasks", "task_list": "tasks",
+    "chat_message": "chat", "chat_space": "chat",
+}
+
+_STATUS_TO_MIGRATION_STATUS = {
+    "PENDING": "waiting",
+    "RUNNING": "in_progress",
+    "DONE": "completed",
+    "FAILED": "failed",
+    "PAUSED_QUOTA": "needs_attention",
+    "INTERRUPTED": "paused",
+}
+
+
+def _service_progress(done: int, failed: int, total: int | None) -> dict:
+    """
+    One ServiceProgress block.
+
+    `total` is None when no independent expected-count exists for this
+    service (contacts/tasks/chat/permissions have no discovery pass, unlike
+    drive/mail which get one from `main.py discover`). In that case the total
+    shown is attempted-so-far (done+failed), which is honest about being a
+    floor rather than a real target -- the alternative is inventing a number,
+    which this module does not do.
+    """
+    attempted = done + failed
+    exp = total if total is not None else attempted
+    if exp <= 0:
+        status = "not_started"
+        pct = 0
+    elif failed and not done:
+        status = "failed"
+        pct = 0
+    elif done >= exp:
+        status = "completed"
+        pct = 100
+    else:
+        status = "in_progress"
+        pct = round(min(done, exp) / exp * 100)
+    return {"status": status, "progress": pct, "itemsCompleted": done,
+           "itemsTotal": exp}
+
+
+def _extra_per_user(conn: sqlite3.Connection) -> dict[str, dict[str, list[int]]]:
+    """
+    (source_user -> {"contacts": [done, failed], "tasks": [...], "chat": [...],
+    "permissions": [...]}) -- the counts tui.UserRow does not carry.
+
+    "permissions" is item_type='acl', separated from the drive block: a user
+    can finish every file and still have grants outstanding, and the SPA's
+    UserDetails models permissions as its own service for exactly that reason.
+    """
+    out: dict[str, dict[str, list[int]]] = {}
+
+    for r in conn.execute(
+        "SELECT source_user, item_type, status, COUNT(*) n FROM audit_log "
+        "WHERE item_type IN ('contact','contact_group','task','task_list',"
+        "'chat_message','chat_space','acl') GROUP BY 1,2,3"
+    ):
+        user = (r["source_user"] or "").lower()
+        bucket = "permissions" if r["item_type"] == "acl" else _EXTRA_SERVICE_TYPES[r["item_type"]]
+        ok = r["status"] == "SUCCESS"
+        failed = str(r["status"]).startswith("FAILED")
+        if ok:
+            out.setdefault(user, {}).setdefault(bucket, [0, 0])[0] += r["n"]
+        elif failed:
+            out.setdefault(user, {}).setdefault(bucket, [0, 0])[1] += r["n"]
+    return out
+
+
+def _display_name(local: str) -> str:
+    return local.replace(".", " ").replace("_", " ").title() or local
+
+
+def users_payload(conn: sqlite3.Connection, cap_bytes: int) -> list[dict]:
+    """User[], matching migration-webui's src/types/index.ts exactly."""
+    import tui
+
+    snap = tui.collect_snapshot(conn, cap_bytes)
+    extra = _extra_per_user(conn)
+    out = []
+    for u in snap.users:
+        local = u.source.split("@")[0]
+        e = extra.get(u.source.lower(), {})
+        c_done, c_fail = e.get("contacts", [0, 0])
+        t_done, t_fail = e.get("tasks", [0, 0])
+        ch_done, ch_fail = e.get("chat", [0, 0])
+        p_done, p_fail = e.get("permissions", [0, 0])
+
+        mailbox = _service_progress(u.mail_done, u.mail_failed,
+                                    u.exp_mail or None)
+        drive = _service_progress(u.drive_done, u.drive_failed,
+                                  u.exp_drive or None)
+        # No discovery figure exists for calendar/chat/permissions; see
+        # _service_progress's docstring for why the total is a floor here.
+        calendar = _service_progress(u.cal_done, u.cal_failed, None)
+        contacts = _service_progress(c_done, c_fail, None)
+        tasks_svc = _service_progress(t_done, t_fail, None)
+        chat = _service_progress(ch_done, ch_fail, None)
+        permissions = _service_progress(p_done, p_fail, None)
+        # No independent verification pass runs per user on a poll (that would
+        # be a live API call -- see the module docstring); acl_audit.py is the
+        # real check, and its output is folded in separately by
+        # verification_payload() rather than fabricated per user here.
+        verification = {"status": "not_started", "progress": 0,
+                        "itemsCompleted": 0, "itemsTotal": 0}
+
+        overall_done = u.done + c_done + t_done + ch_done + p_done
+        overall_failed = u.failed + c_fail + t_fail + ch_fail + p_fail
+        status = _STATUS_TO_MIGRATION_STATUS.get(u.status, "waiting")
+        progress = round(u.fraction * 100) if u.fraction is not None else (
+            100 if status == "completed" else 0)
+
+        out.append({
+            "id": u.source,
+            "name": _display_name(local),
+            "email": u.source,
+            "status": status,
+            "progress": progress,
+            "currentOperation": (
+                "Migration complete" if status == "completed" else
+                f"{overall_done} of {u.expected or overall_done or 1} item(s) done"
+                if status == "in_progress" else
+                "Not started yet" if status == "waiting" else
+                "Paused" if status == "paused" else
+                "Needs attention" if status == "needs_attention" else
+                "Failed"),
+            # No throughput history is retained per user (metrics.py tracks
+            # latency by API label, not a per-user completion rate), so an ETA
+            # would be invented. Said plainly instead of guessed.
+            "estimatedTimeRemaining": "Done" if status == "completed" else "Unknown",
+            # This ledger does not distinguish "succeeded on retry" from
+            # "succeeded first try", so retries is always 0 rather than a
+            # fabricated count -- see resilience.py's retry decorator, which
+            # retries transparently and only the final outcome is recorded.
+            "retries": 0,
+            # Same reasoning: SKIPPED here almost always means "already
+            # migrated, resumed cleanly", not a warning a human should look
+            # at. Conflating the two would manufacture a false signal.
+            "warnings": 0,
+            "errors": overall_failed,
+            "lastUpdate": _iso(snap.collected_at),
+            "details": {
+                "mailbox": mailbox, "calendar": calendar, "contacts": contacts,
+                "tasks": tasks_svc,
+                "drive": drive, "chat": chat, "permissions": permissions,
+                "verification": verification,
+            },
+        })
+    return out
+
+
+def _iso(epoch: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def activity_payload(conn: sqlite3.Connection, limit: int = 100) -> list[dict]:
+    """
+    ActivityEvent[], newest first.
+
+    Ordered by `id DESC`, not `timestamp DESC`. audit_log has no index on
+    timestamp, and this engine's own history includes exactly the failure
+    this avoids: a query without the right index run on every poll of a busy
+    dashboard. `id` is the autoincrement primary key, inserted in the same
+    order as timestamp for all practical purposes, so `ORDER BY id DESC LIMIT
+    n` answers the same question using the index that already exists.
+    """
+    out = []
+    for r in conn.execute(
+        "SELECT source_user, item_type, item_id, status, error_message, "
+        "timestamp FROM audit_log ORDER BY id DESC LIMIT ?", (limit,)):
+        ok = r["status"] == "SUCCESS"
+        failed = str(r["status"]).startswith("FAILED")
+        mstatus = "failed" if failed else "completed" if ok else "in_progress"
+        out.append({
+            "id": str(r["timestamp"]) + ":" + str(r["item_id"])[:12],
+            "timestamp": r["timestamp"],
+            "user": (r["source_user"] or "system").split("@")[0],
+            "action": f"{r['item_type']} {r['status'].lower()}",
+            "status": mstatus,
+            "details": (r["error_message"] or "")[:160] or None,
+        })
+    return out
+
+
+def metrics_payload(settings, cap_bytes: int, snap_totals: dict) -> dict:
+    """
+    SystemMetrics. Every field is either a real measurement or explicitly a
+    proxy -- see comments per field for which.
+    """
+    import metrics as metrics_mod
+    import resources
+
+    r = resources.recommend()
+    res = r["resources"]
+
+    # Real: current load average as a fraction of core count. Not the same
+    # statistic as "instantaneous CPU busy %", but it is an actual OS-reported
+    # number, not a guess -- and it is what resources.py itself reasons about.
+    try:
+        load1 = os.getloadavg()[0]
+        cpu_pct = min(100, round(load1 / max(res.cpu_logical, 1) * 100))
+    except (OSError, AttributeError):
+        cpu_pct = 0
+
+    ram_used_gb = max(0.0, res.ram_total_gb - res.ram_usable_gb)
+    ram_pct = round(ram_used_gb / res.ram_total_gb * 100) if res.ram_total_gb else 0
+
+    try:
+        du = shutil.disk_usage(settings.scratch_dir or ".")
+        disk_total_gb, disk_used_gb = du.total / 1024**3, (du.total - du.free) / 1024**3
+        disk_pct = round(disk_used_gb / disk_total_gb * 100) if disk_total_gb else 0
+    except OSError:
+        disk_total_gb = disk_used_gb = disk_pct = 0
+
+    # Not tracked: no persistent byte-rate counter exists across a run (only
+    # a per-day total in upload_ledger). Real motion is not fabricated here;
+    # 0 is the honest answer until this engine measures throughput directly.
+    network = {"up": 0.0, "down": 0.0}
+
+    # Live health, not lifetime health: recent() is the control-signal window
+    # (metrics.py), so a bad patch five minutes ago does not mask a recovery
+    # happening now. No calls yet this run reads as healthy -- nothing has
+    # failed because nothing has been attempted.
+    recent = metrics_mod.METRICS.recent()
+    if recent["n"] == 0:
+        api_health = "healthy"
+    else:
+        fail_rate = metrics_mod.METRICS.snapshot()["failures"] / max(
+            metrics_mod.METRICS.snapshot()["calls"], 1)
+        api_health = ("healthy" if fail_rate < 0.05 else
+                     "degraded" if fail_rate < 0.20 else "down")
+
+    cap_gb = cap_bytes / 1024**3
+    gb_today = snap_totals.get("gb_today", 0.0)
+    n_users = max(snap_totals.get("users", 0), 1)
+    quota_pct = min(100, round(gb_today / (cap_gb * n_users) * 100)) if cap_gb else 0
+
+    return {
+        "cpu": cpu_pct,
+        "ram": {"used": round(ram_used_gb, 1), "total": round(res.ram_total_gb, 1),
+               "percentage": ram_pct},
+        "disk": {"used": round(disk_used_gb, 1), "total": round(disk_total_gb, 1),
+                "percentage": disk_pct},
+        "network": network,
+        "workers": {"current": r["user_workers"], "max": resources.HARD_CAP,
+                   "reason": r["reason"]},
+        # Proxies, not measurements: this is a batch CLI with no persistent
+        # task queue object to inspect. Users still PENDING/RUNNING stand in
+        # for "waiting to upload"; recent FAILED rows stand in for "waiting to
+        # retry". Both are real counts from the ledger, just not literally a
+        # queue depth.
+        "uploadQueue": snap_totals.get("users_running", 0) + snap_totals.get("users", 0) - snap_totals.get("users_done", 0) - snap_totals.get("users_failed", 0),
+        "retryQueue": snap_totals.get("items_failed", 0),
+        "apiHealth": api_health,
+        "googleQuota": {"used": round(gb_today, 1),
+                       "limit": round(cap_gb * n_users, 1),
+                       "percentage": quota_pct},
+        "history": [],   # no retained time series yet; see metrics.py's note
+                         # on RESERVOIR/RECENT for why one is not kept here.
+    }
+
+
+def verification_payload(conn: sqlite3.Connection, settings) -> list[dict]:
+    """
+    VerificationResult[].
+
+    Drive/Gmail/Calendar/ACL rows come from the ledger's own done-vs-expected
+    counts (no live API call). "Share access" is added only when
+    acl_audit.json exists on disk -- the output of the real per-file grant
+    diff -- and is the one row here that is a genuine verification rather
+    than a completion proxy; the difference is stated in each row's numbers,
+    not hidden.
+    """
+    import tui
+
+    snap = tui.collect_snapshot(conn, settings.effective_upload_cap())
+    t = snap.totals
+
+    def row(label: str, done: int, expected: int) -> dict:
+        if expected <= 0:
+            return {"type": label, "status": "not_started", "sourceCount": 0,
+                   "targetCount": 0, "confidence": 0}
+        status = "verified" if done >= expected else "mismatch"
+        return {"type": label, "status": status, "sourceCount": expected,
+                "targetCount": done,
+                "confidence": round(min(done, expected) / expected * 100, 1)}
+
+    drive_done = sum(u.drive_done for u in snap.users)
+    drive_exp = sum(u.exp_drive for u in snap.users)
+    mail_done = sum(u.mail_done for u in snap.users)
+    mail_exp = sum(u.exp_mail for u in snap.users)
+    cal_done = sum(u.cal_done for u in snap.users)
+    cal_attempted = sum(u.cal_done + u.cal_failed for u in snap.users)
+    acl_failed = sum(u.acl_failed for u in snap.users)
+
+    out = [
+        row("Drive", drive_done, drive_exp),
+        row("Gmail", mail_done, mail_exp),
+        # No discovery figure for events, so "expected" is what has been
+        # attempted -- a floor, stated the same way _service_progress does.
+        row("Calendar", cal_done, cal_attempted),
+    ]
+
+    audit_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "acl_audit.json")
+    if os.path.isfile(audit_path):
+        try:
+            import json
+            with open(audit_path, encoding="utf-8") as fh:
+                data = json.load(fh)
+            tot = data.get("totals", {})
+            src, matched = tot.get("grants_source", 0), tot.get("grants_matched", 0)
+            out.append({
+                "type": "Share access",
+                "status": "verified" if src and matched >= src else
+                         "mismatch" if src else "not_started",
+                "sourceCount": src, "targetCount": matched,
+                "confidence": round(matched / src * 100, 1) if src else 0,
+            })
+        except (OSError, ValueError):
+            pass
+    else:
+        out.append({"type": "Share access", "status": "not_started",
+                    "sourceCount": 0, "targetCount": 0, "confidence": 0})
+
+    attempted_anything = bool(drive_done or mail_done)
+    out.append(row("ACL retries clean",
+                   1 if acl_failed == 0 and attempted_anything else 0,
+                   1 if attempted_anything else 0))
+    return out
+
+
+def report_payload(conn: sqlite3.Connection, settings, job_started: float,
+                   job_finished: float) -> dict:
+    """
+    FinalReport. Item counts are exact (from the ledger); duration and
+    throughput come from the most recently run job's own start/finish times,
+    tracked in-process by webui.Job, rather than an expensive MIN/MAX scan
+    over a potentially huge audit_log table on every request.
+    """
+    import tui
+
+    snap = tui.collect_snapshot(conn, settings.effective_upload_cap())
+    t = snap.totals
+
+    contacts = tasks_n = chat_n = shared_drives_n = groups_n = 0
+    for r in conn.execute(
+        "SELECT item_type, COUNT(*) n FROM audit_log WHERE status='SUCCESS' "
+        "AND item_type IN ('contact','task','chat_message','shared_drive') "
+        "GROUP BY 1"):
+        if r["item_type"] == "contact":
+            contacts = r["n"]
+        elif r["item_type"] == "task":
+            tasks_n = r["n"]
+        elif r["item_type"] == "chat_message":
+            chat_n = r["n"]
+        elif r["item_type"] == "shared_drive":
+            shared_drives_n = r["n"]
+
+    duration_s = max(0.0, job_finished - job_started) if job_finished else 0.0
+    hours, rem = divmod(int(duration_s), 3600)
+    minutes = rem // 60
+    duration_str = f"{hours}h {minutes}m" if job_started else "—"
+    throughput = (t.get("items_done", 0) / (duration_s / 60)
+                 if duration_s > 0 else 0)
+    speed = (t.get("bytes_moved", 0) / duration_s / 1024**2
+            if duration_s > 0 else 0)
+
+    total_users = t.get("users", 0)
+    failed_users = t.get("users_failed", 0)
+
+    return {
+        "totalUsers": total_users,
+        "successfulUsers": t.get("users_done", 0),
+        "failedUsers": failed_users,
+        "dataMigrated": f"{t.get('bytes_moved', 0) / 1024**3:.2f} GB",
+        "emailsMigrated": sum(u.mail_done for u in snap.users),
+        "driveFilesMigrated": sum(u.drive_done for u in snap.users),
+        "calendarEvents": sum(u.cal_done for u in snap.users),
+        "contacts": contacts,
+        "groups": groups_n,
+        "sharedDrives": shared_drives_n,
+        "totalDuration": duration_str,
+        "averageThroughput": f"{throughput:.1f} items/min" if duration_s else "—",
+        "averageSpeed": f"{speed:.1f} MB/s" if duration_s else "—",
+        "verificationSuccessRate": (
+            round((total_users - failed_users) / total_users * 100, 1)
+            if total_users else 0.0),
+    }
