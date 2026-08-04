@@ -926,9 +926,19 @@ class FakeCalendar(FakeService):
         return cid
 
     def add_event_to(self, cal_id: str, summary: str, ical: str,
-                     organizer: Optional[str] = None) -> str:
-        """Seed an event into a *secondary* calendar."""
-        eid = self._new_id("sevt")
+                     organizer: Optional[str] = None,
+                     event_id: Optional[str] = None) -> str:
+        """
+        Seed an event into a *secondary* calendar.
+
+        `event_id` exists because Google gives the same event resource the
+        same id on every calendar it appears on -- measured on a live tenant,
+        where one event carried id `_edim6bb1dhkm6p9d60mj0g3jc` on three of a
+        user's calendars. A fake that always minted a fresh id per calendar
+        could not express that, which is why the collision it causes in the
+        ledger went unnoticed until a live count did not add up.
+        """
+        eid = event_id or self._new_id("sevt")
         self.cal_events[cal_id][eid] = {
             "id": eid, "iCalUID": ical, "summary": summary, "status": "confirmed",
             "updated": "2024-01-01T00:00:00Z",
