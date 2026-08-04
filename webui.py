@@ -161,6 +161,79 @@ ACTIONS: dict[str, dict] = {
         "destructive": True,
         "confirm": "UNDO",
     },
+    "resolve": {
+        "label": "Resolve failures",
+        "blurb": "Retry every FAILED item with the current code.",
+        "argv": [PY, "resolve_failures.py"],
+    },
+    "backfill_drive": {
+        "label": "Backfill: Drive done",
+        "blurb": "Mark Drive complete on a ledger from before per-service "
+                 "tracking existed. Only records what audit_log proves ran.",
+        "argv": [PY, "main.py", "backfill-services", "--services", "drive"],
+    },
+
+    # -- phased migration: every phase, each reconciled against the tenants
+    # directly rather than trusted from the ledger -----------------------
+    "phased_count_only": {
+        "label": "Reconcile (no migration)",
+        "blurb": "Count both tenants and compare, without moving anything.",
+        "argv": [PY, "phases.py", "--count-only"],
+    },
+    "phased_migrate": {
+        "label": "Migrate: full scope",
+        "blurb": "Drive, shared drives, Gmail, Calendar, Contacts, Tasks, "
+                 "Chat — in that order, each reconciled before the next runs. "
+                 "Chat/Contacts/Tasks follow the checkboxes above.",
+        "argv": [PY, "phases.py", "--continue-on-gap"],
+        "destructive": True,
+        "confirm": "MIGRATE",
+    },
+
+    # -- shared drives: tenant-wide, so not part of the per-user toggles --
+    "shared_drives_inventory": {
+        "label": "Shared drives: inventory",
+        "blurb": "Count files per shared drive. Read-only.",
+        "argv": [PY, "shared_drives.py", "--inventory", "--all-drives"],
+    },
+    "shared_drives_migrate": {
+        "label": "Shared drives: migrate",
+        "blurb": "Create each shared drive on the target, restore membership "
+                 "organizer-first, then copy its contents.",
+        "argv": [PY, "shared_drives.py", "--migrate", "--all-drives"],
+        "destructive": True,
+        "confirm": "MIGRATE",
+    },
+
+    # -- per-file share access, verified one by one, not as a total -------
+    "acl_audit": {
+        "label": "Verify share access",
+        "blurb": "Pairs every source file to the target file it became and "
+                 "diffs the grant set. A total can reconcile while sharing "
+                 "is wrong; this is the check that would catch it.",
+        "argv": [PY, "acl_audit.py", "--json", "acl_audit.json"],
+    },
+
+    # -- SSO: org-wide login configuration, so this stays manual on purpose.
+    # MIGRATE_SSO must already be set in env.sh; this button does not set it,
+    # unlike the per-user services above, because writing an SSO profile
+    # changes how everyone signs in, including whoever is running this. --
+    "sso_inventory": {
+        "label": "SSO: inventory",
+        "blurb": "What's migratable (inbound SAML), what can only be listed "
+                 "('Sign in with Google' grants), what can't (saved "
+                 "passwords). Read-only.",
+        "argv": [PY, "sso.py", "--inventory"],
+    },
+    "sso_migrate": {
+        "label": "SSO: create profiles (unassigned)",
+        "blurb": "Recreates each SAML profile on the target, unassigned. "
+                 "Needs MIGRATE_SSO=true already set in env.sh — this button "
+                 "will not set it for you.",
+        "argv": [PY, "sso.py", "--migrate"],
+        "destructive": True,
+        "confirm": "SSO",
+    },
 }
 
 # ----------------------------------------------------------------------
@@ -356,7 +429,7 @@ STEP_ACTIONS: dict[int, list[str]] = {
     6: ["provision_dry", "provision"],
     7: ["check_seed_accounts", "check_seed_scopes"],
     8: ["discover", "migrate_dry", "migrate"],
-    9: ["verify", "report"],
+    9: ["verify", "report", "acl_audit", "resolve"],
 }
 
 
@@ -1073,14 +1146,37 @@ def _status_uncached() -> dict:
 
 # dry-run + which services "Migrate"/"Delta" run. Mirrors the TUI's
 # d/t/s keys so the web buttons behave identically to the keyboard.
+#
+# contacts/tasks off by default like chat: each widens the OAuth grant, and a
+# scope the Admin Console has not authorised fails every call outright, so
+# enabling one must be a deliberate click, never a default.
 _RUN_STATE: dict = {
     "dry_run": False,
-    "services": {"drive": True, "gmail": True, "calendar": True, "chat": False},
+    "services": {"drive": True, "gmail": True, "calendar": True,
+                "chat": False, "contacts": False, "tasks": False},
 }
 
 # Actions whose argv follow the launch toggles (everything else uses its
 # fixed ACTIONS argv verbatim).
 _LAUNCH_KEYS = ("migrate", "delta")
+
+# Actions that read the toggles through the environment rather than argv.
+# main.py's migrate/delta infer MIGRATE_CHAT/CONTACTS/TASKS from --services,
+# so a checkbox reaches them through _action_argv above. phases.py does not:
+# its per-phase gate reads those settings straight from the environment
+# regardless of --phase, so a toggle only reaches it if this run explicitly
+# sets or clears the variable -- otherwise a MIGRATE_CHAT=true left in env.sh
+# from an earlier session would run Chat with no visible checkbox for it.
+_PHASE_GATED_ACTIONS = ("phased_migrate", "phased_count_only")
+
+
+def _service_env() -> dict:
+    """gcloud_env(), plus the per-user service toggles made explicit."""
+    env = gcloud_env()
+    for key, flag in (("chat", "MIGRATE_CHAT"), ("contacts", "MIGRATE_CONTACTS"),
+                      ("tasks", "MIGRATE_TASKS")):
+        env[flag] = "true" if _RUN_STATE["services"].get(key) else "false"
+    return env
 
 
 def _db_conn():
@@ -2110,13 +2206,19 @@ function drawToolbar(){
     <label class="chk"><input type="checkbox" id="tog-calendar" class="tb-toggle" checked
       onchange="toggleChange()"> calendar</label>
     <label class="chk"><input type="checkbox" id="tog-chat" class="tb-toggle"
-      onchange="toggleChange()"> chat</label>`;
+      onchange="toggleChange()"> chat</label>
+    <label class="chk"><input type="checkbox" id="tog-contacts" class="tb-toggle"
+      onchange="toggleChange()"> contacts</label>
+    <label class="chk"><input type="checkbox" id="tog-tasks" class="tb-toggle"
+      onchange="toggleChange()"> tasks</label>`;
   paintJob();
 }
 
+const SERVICE_KEYS=['drive','gmail','calendar','chat','contacts','tasks'];
+
 async function toggleChange(){
   const svcs={};
-  ['drive','gmail','calendar','chat'].forEach(k=>{const c=$('tog-'+k); if(c) svcs[k]=c.checked;});
+  SERVICE_KEYS.forEach(k=>{const c=$('tog-'+k); if(c) svcs[k]=c.checked;});
   const dry=$('tog-dry');
   await fetch('/api/toggles',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({dry_run:dry&&dry.checked,services:svcs})});
@@ -2127,7 +2229,7 @@ function applyToggles(tg){
   const a=document.activeElement;
   if(a&&a.classList&&a.classList.contains('tb-toggle')) return;
   const dry=$('tog-dry'); if(dry) dry.checked=!!tg.dry_run;
-  ['drive','gmail','calendar','chat'].forEach(k=>{
+  SERVICE_KEYS.forEach(k=>{
     const c=$('tog-'+k); if(c&&tg.services) c.checked=!!tg.services[k]; });
 }
 
@@ -2588,7 +2690,8 @@ class Handler(BaseHTTPRequestHandler):
                         "error": f"{spec['label']} needs confirmation"}, 400)
             return
 
-        ok, msg = JOB.start(spec["label"], _action_argv(name), env=gcloud_env())
+        env = _service_env() if name in _PHASE_GATED_ACTIONS else gcloud_env()
+        ok, msg = JOB.start(spec["label"], _action_argv(name), env=env)
         self._json({"ok": ok, "error": None if ok else msg})
 
 

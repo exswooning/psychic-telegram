@@ -387,7 +387,7 @@ RUN_MODES = {
         # Steps that must be satisfied before this path can run. Everything
         # else is noise for someone who only wants this one outcome.
         "requires": [2, 3, 4, 5],
-        "runs": ["discover", "migrate_dry", "migrate", "verify"],
+        "runs": ["discover", "migrate_dry", "migrate", "verify", "acl_audit"],
         "setup": [
             "Two Workspace domains, and a super-admin account in each.",
             "A service-account key per tenant (or keyless / OAuth) — step 3.",
@@ -425,7 +425,7 @@ RUN_MODES = {
         "blurb": "Build a test corpus and move it. The full rehearsal.",
         "skip": [],
         "requires": [2, 3, 4, 5],
-        "runs": ["seed", "discover", "migrate_dry", "migrate", "verify"],
+        "runs": ["seed", "discover", "migrate_dry", "migrate", "verify", "acl_audit"],
         "setup": [
             "Everything in both lists above.",
             "The SOURCE grant must carry the union: read scopes for migrating "
