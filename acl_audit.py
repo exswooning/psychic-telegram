@@ -57,7 +57,8 @@ FIELDS = ("nextPageToken,files(id,name,mimeType,shared,"
           "permissions(id,type,role,emailAddress,domain,deleted))")
 
 
-def _grant_key(perm: dict, translate) -> tuple | None:
+def _grant_key(perm: dict, translate, source_domain: str = "",
+               target_domain: str = "") -> tuple | None:
     """
     A grant reduced to what actually determines access.
 
@@ -75,7 +76,17 @@ def _grant_key(perm: dict, translate) -> tuple | None:
             return None
         return (ptype, translate(email) or email, role)
     if ptype == "domain":
-        return ("domain", (perm.get("domain") or "").lower(), role)
+        domain = (perm.get("domain") or "").lower()
+        # The engine rewrites a domain-wide grant to follow the tenant
+        # (drive_engine: source_domain -> target_domain), which is correct --
+        # a share with "everyone at the company" should mean everyone at the
+        # new company. The audit has to mirror that translation or every
+        # correctly-migrated domain grant reads as one loss plus one
+        # disclosure. It did: 562 of each, all of them this, which took the
+        # reported fidelity from 100% to 79.4% and pointed at the engine.
+        if source_domain and domain == source_domain.lower():
+            domain = target_domain.lower()
+        return ("domain", domain, role)
     if ptype == "anyone":
         return ("anyone", "", role)
     return (ptype or "?", "", role)
@@ -106,6 +117,11 @@ def audit_user(auth: AuthManager, db: MigrationDB, settings: Settings,
 
     def translate(email: str) -> str | None:
         return db.resolve_identity(email)
+
+    src_dom, tgt_dom = settings.source_domain, settings.target_domain
+
+    def key(perm: dict) -> tuple | None:
+        return _grant_key(perm, translate, src_dom, tgt_dom)
 
     result = {
         "user": source_user,
@@ -145,9 +161,10 @@ def audit_user(auth: AuthManager, db: MigrationDB, settings: Settings,
             if p.get("type") in ("user", "group") and email and not translate(email):
                 unmapped.append(email)
                 continue
-            key = _grant_key(p, translate)
-            if key:
-                want.add(key)
+            k = key(p)
+            if k:
+                want.add(k)
+        # Target grants are NOT translated: they are already in target terms.
         got = {k for k in (_grant_key(p, translate)
                            for p in (tf.get("permissions") or [])) if k}
 

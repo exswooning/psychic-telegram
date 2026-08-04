@@ -99,13 +99,51 @@ class TestItComparesEffectiveAccess:
         r = _run(auth, db, settings)
         assert r["missing_grants"] == 1
 
-    def test_a_domain_grant_is_compared(self, wired):
+    def test_a_domain_grant_rewritten_to_the_target_tenant_is_preserved(self, wired):
+        """
+        The engine rewrites "everyone at the source company" to "everyone at
+        the target company", which is right -- and an audit that does not
+        mirror it reads every one of those as a loss AND a disclosure.
+
+        That is not hypothetical: it reported 562 missing and 562 extra on a
+        live run, dropping apparent fidelity from 100% to 79.4% and pointing
+        the finger at the engine. Every one was this.
+        """
         auth, db, settings = wired
         _pair(auth, db,
-              [{"type": "domain", "role": "reader", "domain": "tenanta.com"}],
-              [{"type": "domain", "role": "reader", "domain": "tenanta.com"}])
+              [{"type": "domain", "role": "reader",
+                "domain": settings.source_domain}],
+              [{"type": "domain", "role": "reader",
+                "domain": settings.target_domain}])
+
         r = _run(auth, db, settings)
+
         assert r["grants_matched"] == 1
+        assert r["missing_grants"] == 0 and r["extra_grants"] == 0
+
+    def test_a_domain_grant_to_an_unrelated_domain_is_not_rewritten(self, wired):
+        """Only the source tenant's own domain follows the migration. A share
+        with a partner company must still be compared as itself."""
+        auth, db, settings = wired
+        _pair(auth, db,
+              [{"type": "domain", "role": "reader", "domain": "partner.com"}],
+              [])
+
+        r = _run(auth, db, settings)
+
+        assert r["missing_grants"] == 1
+
+    def test_a_domain_grant_genuinely_dropped_is_still_reported(self, wired):
+        """The fix must not make domain grants unfailable."""
+        auth, db, settings = wired
+        _pair(auth, db,
+              [{"type": "domain", "role": "writer",
+                "domain": settings.source_domain}],
+              [])
+
+        r = _run(auth, db, settings)
+
+        assert r["missing_grants"] == 1
 
 
 class TestItDoesNotManufactureFindings:
