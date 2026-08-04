@@ -119,3 +119,180 @@ export async function setToggles(
   })
   return res.json()
 }
+
+// -- setup wizard: the same 9 steps and state machine webui.py's own inline
+// wizard already drives (wizard.py's build_steps()), reached here through the
+// identical endpoints rather than a second implementation of the logic.
+
+export type StepState = 'done' | 'todo' | 'manual' | 'skip'
+
+export interface WizardStep {
+  n: number
+  title: string
+  state: StepState
+  note: string
+  help: string[]
+  auto: string
+  manual: boolean
+  skipped: boolean
+  actions: string[]
+}
+
+export interface StatusPayload {
+  error?: string
+  env: Record<string, string>
+  steps: WizardStep[]
+  done: number
+  total: number
+  migrated: number
+  failed: number
+  users_done: number
+  users_total: number
+}
+
+export async function fetchStatus(): Promise<StatusPayload> {
+  return getJSON<StatusPayload>('/api/status')
+}
+
+export interface CheckStepResult {
+  ok: boolean
+  state?: string
+  title?: string
+  detail?: string
+  msg?: string
+  error?: string
+}
+
+export async function checkStep(n: number): Promise<CheckStepResult> {
+  const res = await fetch('/api/checkstep', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ step: n }),
+  })
+  return res.json()
+}
+
+export interface ConfigFields {
+  source_domain: string
+  target_domain: string
+  source_admin: string
+  target_admin: string
+}
+
+export interface RunModeSpec {
+  label: string
+  blurb: string
+  runs: string[]
+  setup: string[]
+}
+
+export interface ConfigPayload {
+  config: ConfigFields
+  env_path: string
+  uploads: Record<string, UploadStatus>
+  auth_modes: string[]
+  auth_mode: string
+  run_mode: string
+  run_modes: Record<string, RunModeSpec>
+}
+
+export async function fetchConfig(): Promise<ConfigPayload> {
+  return getJSON<ConfigPayload>('/api/config')
+}
+
+export async function saveConfig(
+  fields: ConfigFields
+): Promise<{ ok: boolean; error?: string; msg?: string }> {
+  const res = await fetch('/api/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(fields),
+  })
+  return res.json()
+}
+
+export async function setRunMode(
+  mode: string
+): Promise<{ ok: boolean; error?: string; msg?: string }> {
+  const res = await fetch('/api/runmode', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode }),
+  })
+  return res.json()
+}
+
+export interface UploadStatus {
+  present: boolean
+  valid: boolean
+  detail?: { client_email?: string; [k: string]: unknown }
+  error?: string
+  warning?: string
+}
+
+export type UploadKind = 'source_key' | 'target_key' | 'oauth_client'
+
+/** Reads the file as text client-side; the raw JSON is what /api/upload
+ * validates (well-formed JSON, the right kind of credential) before writing
+ * it to disk at mode 0600. Nothing here parses or trusts the content --
+ * that happens once, server-side, in upload_credential(). */
+export async function uploadCredential(
+  kind: UploadKind,
+  file: File
+): Promise<{ ok: boolean; error?: string; msg?: string }> {
+  const content = await file.text()
+  const res = await fetch('/api/upload', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ kind, content }),
+  })
+  return res.json()
+}
+
+export interface DwdTenant {
+  side: 'source' | 'target'
+  domain: string
+  admin: string
+  client_id: string
+  scopes: string
+  scope_list: string[]
+}
+
+export interface DwdPayload {
+  tenants: DwdTenant[]
+  target_provision?: { scopes: string; scope_list: string[] }
+  seed?: { scopes: string; scope_list: string[]; combined: string; combined_list: string[] }
+}
+
+export async function fetchDwd(): Promise<DwdPayload> {
+  return getJSON<DwdPayload>('/api/dwd')
+}
+
+export async function checkDwdNow(): Promise<{ ok: boolean; status: StatusPayload }> {
+  const res = await fetch('/api/check_dwd', { method: 'POST' })
+  return res.json()
+}
+
+export interface SeedResult {
+  ok: boolean
+  error?: string
+}
+
+export async function runSeed(
+  confirmDomain: string,
+  scale: string,
+  createUsers: boolean,
+  reset: boolean
+): Promise<SeedResult> {
+  const res = await fetch('/api/seed', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      confirm_domain: confirmDomain,
+      scale,
+      create_users: createUsers,
+      reset,
+    }),
+  })
+  return res.json()
+}

@@ -35,12 +35,14 @@ import {
   Cloud as DriveIconNav,
   ErrorOutline as ErrorsIconNav,
   HelpOutline as HelpIconNav,
+  School as WizardIconNav,
 } from '@mui/icons-material'
 import { useMigrationStore } from '@/store'
 // DriveMigration/ErrorHandling/HelpSystem existed as files with no route and
 // no nav entry -- reachable by typing a URL nobody would guess, effectively
 // unshipped. Added here alongside the App.tsx routes that now serve them.
 const NAV_ITEMS = [
+  { path: '/wizard', label: 'Setup Wizard', icon: <WizardIconNav /> },
   { path: '/dashboard', label: 'Dashboard', icon: <DashboardIcon /> },
   { path: '/users', label: 'Users', icon: <PeopleIcon /> },
   { path: '/drive', label: 'Drive Migration', icon: <DriveIconNav /> },
