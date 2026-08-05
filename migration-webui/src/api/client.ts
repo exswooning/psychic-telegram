@@ -291,7 +291,8 @@ export async function runSeed(
   confirmDomain: string,
   scale: string,
   createUsers: boolean,
-  reset: boolean
+  reset: boolean,
+  allUsers?: boolean
 ): Promise<SeedResult> {
   const res = await fetch('/api/seed', {
     method: 'POST',
@@ -301,6 +302,7 @@ export async function runSeed(
       scale,
       create_users: createUsers,
       reset,
+      all_users: allUsers,
     }),
   })
   return res.json()

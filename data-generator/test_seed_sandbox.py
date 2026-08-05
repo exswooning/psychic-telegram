@@ -620,6 +620,57 @@ def test_parse_seats_defaults_missing_editions_to_zero():
                     "parameters": {}}
 
 
+def test_entries_from_existing_users_covers_every_real_account():
+    """--all-users' real headcount, not a licence-capacity guess like
+    fit_entries() -- every existing address becomes an entry, none invented."""
+    import seed_sandbox as s
+
+    existing = {"alice@tenanta.com", "bob@tenanta.com", "carol@tenanta.com"}
+    entries = s.entries_from_existing_users(existing, "tenanta.com")
+    assert {e["email"] for e in entries} == existing
+    assert len(entries) == 3
+
+
+def test_entries_from_existing_users_never_invents_anyone():
+    """Unlike fit_entries(), there is no headroom to pad -- an empty
+    directory means an empty seeding list, not generated users."""
+    import seed_sandbox as s
+
+    assert s.entries_from_existing_users(set(), "tenanta.com") == []
+
+
+def test_entries_from_existing_users_ignores_other_domains():
+    """A Directory API response covers the whole customer, which can span
+    more than one domain; only the sandbox source domain should be seeded."""
+    import seed_sandbox as s
+
+    existing = {"alice@tenanta.com", "bob@other-domain.com"}
+    entries = s.entries_from_existing_users(existing, "tenanta.com")
+    assert [e["email"] for e in entries] == ["alice@tenanta.com"]
+
+
+def test_entries_from_existing_users_is_ordered_for_stable_reruns():
+    """Sorted, not dict/set iteration order, so --edge-cases first always
+    lands on the same user across repeated runs."""
+    import seed_sandbox as s
+
+    existing = {"zack@tenanta.com", "amy@tenanta.com", "mike@tenanta.com"}
+    entries = s.entries_from_existing_users(existing, "tenanta.com")
+    assert [e["local"] for e in entries] == ["amy", "mike", "zack"]
+
+
+def test_entries_from_existing_users_assigns_dept_and_project_templates():
+    """Real users still need a department/project template to seed a
+    realistic corpus against -- cycled from ORG same as the default path."""
+    import seed_sandbox as s
+    from corpus import ORG
+
+    existing = {f"user{i}@tenanta.com" for i in range(len(ORG) + 2)}
+    entries = s.entries_from_existing_users(existing, "tenanta.com")
+    for e in entries:
+        assert e["dept"] and e["project"]
+
+
 # ======================================================================
 # Storage top-up, Contacts and Tasks seeding
 #

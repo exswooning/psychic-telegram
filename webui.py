@@ -894,6 +894,12 @@ def seed_argv(body: dict) -> tuple[list[str], dict, str]:
     argv.append("--yes")
     if body.get("create_users"):
         argv.append("--create-users")
+    if body.get("all_users"):
+        # Seeds every account that already exists in the tenant -- the real
+        # headcount via the Directory API, not a fixed 5. seed_sandbox.py
+        # itself refuses to combine this with --users/--fit-to-licenses;
+        # neither is exposed through this endpoint, so nothing more to guard.
+        argv.append("--all-users")
     if body.get("reset"):
         argv.append("--reset")
 
@@ -2076,6 +2082,9 @@ function seedForm(){
     <label style="display:block;margin-top:10px">
       <input type="checkbox" id="seed-create"> also create the five accounts</label>
     <label style="display:block;margin-top:6px">
+      <input type="checkbox" id="seed-all-users"> seed every user the tenant
+      already has (real headcount, not a fixed five)</label>
+    <label style="display:block;margin-top:6px">
       <input type="checkbox" id="seed-reset"> <b style="color:var(--bad)">reset
       first</b> \u2014 DELETES existing data for those users</label>
     <button class="danger" style="margin-top:12px" onclick="runSeed()">
@@ -2172,7 +2181,8 @@ async function runSeed(){
   const r=await (await fetch('/api/seed',{method:'POST',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({confirm_domain:typed, scale:$('seed-scale').value,
-      create_users:$('seed-create').checked, reset:reset})})).json();
+      create_users:$('seed-create').checked, all_users:$('seed-all-users').checked,
+      reset:reset})})).json();
   seedMsg={ok:!!r.ok, text: r.ok ? ('seeding '+src+' \\u2014 output below') : r.error};
   if(r.ok){ clearOut(); }
   await refresh(true);

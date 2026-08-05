@@ -405,13 +405,14 @@ const SeedStep: React.FC = () => {
   const [confirmDomain, setConfirmDomain] = useState('')
   const [scale, setScale] = useState('small')
   const [createUsers, setCreateUsers] = useState(false)
+  const [allUsers, setAllUsers] = useState(false)
   const [reset, setReset] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
 
   const start = async () => {
     setErr(null); setMsg(null)
-    const r = await runSeed(confirmDomain, scale, createUsers, reset)
+    const r = await runSeed(confirmDomain, scale, createUsers, reset, allUsers)
     if (r.ok) setMsg('seeding started -- watch the Activity Feed')
     else setErr(r.error || 'could not start')
   }
@@ -451,6 +452,17 @@ const SeedStep: React.FC = () => {
             control={<Checkbox checked={reset}
                               onChange={(e) => setReset(e.target.checked)} />}
             label={<Typography variant="body2">Reset first</Typography>}
+          />
+        </Grid>
+        <Grid item xs={12} sm={4}>
+          <FormControlLabel
+            control={<Checkbox checked={allUsers}
+                              onChange={(e) => setAllUsers(e.target.checked)} />}
+            label={
+              <Typography variant="body2">
+                Seed every user the tenant already has (real headcount, not a fixed 5)
+              </Typography>
+            }
           />
         </Grid>
       </Grid>

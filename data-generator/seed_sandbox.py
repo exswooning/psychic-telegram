@@ -93,6 +93,11 @@ SEED_SCOPES = [
 # asks for licence fitting.
 REPORTS_SCOPE = "https://www.googleapis.com/auth/admin.reports.usage.readonly"
 
+# Same isolation reasoning as REPORTS_SCOPE: `--all-users` is opt-in and reads
+# the Directory API only, so it is built with this scope alone rather than
+# folded into SEED_SCOPES or DIRECTORY_WRITE_SCOPE.
+DIRECTORY_READONLY_SCOPE = "https://www.googleapis.com/auth/admin.directory.user.readonly"
+
 # customerUsageReports `accounts:` parameters, one (total, used) pair per
 # edition. Google has kept these legacy edition names for current Google
 # Workspace editions, and an org holds exactly one edition -- so only one pair
@@ -1106,6 +1111,27 @@ def build_reports(settings: Settings, user: str):
     return build("admin", "reports_v1", http=http, cache_discovery=False)
 
 
+def build_directory_readonly(settings: Settings, user: str):
+    """A delegated Directory client, read-only, for `--all-users`.
+
+    Isolated to DIRECTORY_READONLY_SCOPE alone -- same pattern as
+    build_reports() and build_people_tasks() -- so a tenant that has not
+    granted directory read still lets every other seeding call succeed.
+    """
+    import google_auth_httplib2
+    import httplib2
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+
+    creds = service_account.Credentials.from_service_account_file(
+        _resolve_key_path(settings), scopes=[DIRECTORY_READONLY_SCOPE]
+    ).with_subject(user)
+    http = google_auth_httplib2.AuthorizedHttp(
+        creds, http=httplib2.Http(timeout=120)
+    )
+    return build("admin", "directory_v1", http=http, cache_discovery=False)
+
+
 # ======================================================================
 # Licence capacity
 # ======================================================================
@@ -1169,6 +1195,25 @@ def _list_users(directory) -> set[str]:
         if not token:
             break
     return emails
+
+
+def entries_from_existing_users(existing_emails: set[str], domain: str) -> list[dict]:
+    """Build seeding entries from every real account already in `domain`.
+
+    Backs `--all-users`: unlike fit_entries() (which pads out to unused
+    licence capacity with generated accounts), this never invents a user --
+    it is exactly the tenant's real, current headcount, sorted for a stable
+    seeding order across re-runs.
+    """
+    emails = sorted(e for e in existing_emails if e.endswith("@" + domain))
+    entries = []
+    for i, email in enumerate(emails):
+        template = ORG[i % len(ORG)]
+        entries.append({
+            "local": email.split("@")[0], "email": email,
+            "dept": template["dept"], "project": template["project"],
+        })
+    return entries
 
 
 def _generated_localpart(i: int, taken: set[str]) -> str:
@@ -1342,6 +1387,16 @@ def main(argv: list[str] | None = None) -> int:
                          "seats are filled with generated users. Requires "
                          "--create-users and admin.reports.usage.readonly "
                          "granted to SEED_SA_KEY")
+    ap.add_argument("--all-users", action="store_true",
+                    help="seed every user account that already exists in the "
+                         "tenant, instead of the default 5 or --users. Reads "
+                         "the real headcount via the Directory API -- the "
+                         "tenant's actual maximum, not a licence-capacity "
+                         "guess like --fit-to-licenses (which creates new "
+                         "accounts up to unused seats; this seeds accounts "
+                         "that are already there). Requires "
+                         "admin.directory.user.readonly granted to "
+                         "SEED_SA_KEY, and SOURCE_ADMIN set.")
     ap.add_argument("--reset", action="store_true", help="DELETE everything")
     ap.add_argument("--target-gb-per-user", type=float, default=None,
                     help="after normal seeding, add large filler files until "
@@ -1371,16 +1426,44 @@ def main(argv: list[str] | None = None) -> int:
                  "many accounts to create, so it only acts on that path.")
     if args.fit_to_licenses and args.reset:
         sys.exit("--fit-to-licenses makes no sense with --reset.")
+    if args.all_users and args.users:
+        sys.exit("--all-users and --users are mutually exclusive: "
+                 "--all-users already means every existing user.")
+    if args.all_users and args.fit_to_licenses:
+        sys.exit("--all-users and --fit-to-licenses are mutually exclusive: "
+                 "--all-users seeds accounts that already exist; "
+                 "--fit-to-licenses creates new ones up to unused seats.")
 
-    locals_ = ([u.strip() for u in args.users.split(",")] if args.users
-               else [e["local"] for e in ORG])
-    entries = []
-    for i, lp in enumerate(locals_):
-        template = ORG[i % len(ORG)]
-        entries.append({
-            "local": lp, "email": f"{lp}@{settings.source_domain}",
-            "dept": template["dept"], "project": template["project"],
-        })
+    if args.all_users:
+        admin = os.getenv("SOURCE_ADMIN")
+        if not admin:
+            sys.exit("SOURCE_ADMIN must be set to a super admin of "
+                     f"{settings.source_domain} to read the tenant's user list.")
+        directory = build_directory_readonly(settings, admin)
+        try:
+            existing = _list_users(directory)
+        except Exception as exc:  # noqa: BLE001
+            sys.exit(f"REFUSING --all-users: could not read the directory "
+                     f"({exc}). Grant this scope to SEED_SA_KEY's client ID "
+                     f"in {settings.source_domain} (Admin Console > API "
+                     f"controls > Domain-wide delegation), then re-run:\n"
+                     f"    {DIRECTORY_READONLY_SCOPE}")
+        entries = entries_from_existing_users(existing, settings.source_domain)
+        if not entries:
+            sys.exit(f"REFUSING --all-users: the directory returned no users "
+                     f"in {settings.source_domain}.")
+        print(f"\n--all-users: found {len(entries)} existing user(s) in "
+              f"{settings.source_domain}; seeding all of them.")
+    else:
+        locals_ = ([u.strip() for u in args.users.split(",")] if args.users
+                  else [e["local"] for e in ORG])
+        entries = []
+        for i, lp in enumerate(locals_):
+            template = ORG[i % len(ORG)]
+            entries.append({
+                "local": lp, "email": f"{lp}@{settings.source_domain}",
+                "dept": template["dept"], "project": template["project"],
+            })
     all_users = [e["email"] for e in entries]
 
     # --- Optionally create the accounts first ----------------------------
