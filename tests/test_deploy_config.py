@@ -869,19 +869,52 @@ class TestSeedScopesDiffer:
 
     def test_payload_survives_a_missing_seeder(self, monkeypatch):
         """data-generator is optional; /api/dwd must not 500 without it."""
-        import builtins
+        import sys
 
-        real_open = builtins.open
-
-        def boom(path, *a, **k):
-            if "seed_sandbox" in str(path):
-                raise FileNotFoundError(path)
-            return real_open(path, *a, **k)
-
-        monkeypatch.setattr(builtins, "open", boom)
+        # sys.modules[name] = None is the standard way to force `import
+        # name` (or a `from name import ...`) to raise ImportError without
+        # touching disk -- dwd_payload() imports seed_sandbox lazily inside
+        # its own try/except specifically to survive this.
+        monkeypatch.setitem(sys.modules, "seed_sandbox", None)
         payload = webui.dwd_payload()
         assert payload["seed"] == {}
         assert payload["tenants"]          # the rest still works
+
+    def test_fit_to_licenses_and_all_users_scopes_are_included(self):
+        """--fit-to-licenses and the default (or --all-users) live discovery
+        each need a scope beyond the base write set -- both belong in the
+        one line an operator is meant to paste once and be done with."""
+        seed = webui.dwd_payload()["seed"]
+        assert "https://www.googleapis.com/auth/admin.reports.usage.readonly" in seed["scope_list"]
+        assert "https://www.googleapis.com/auth/admin.directory.user.readonly" in seed["scope_list"]
+
+    def test_reports_which_client_id_the_seed_scopes_actually_need(
+            self, tmp_path, monkeypatch):
+        """Unlike source/target, there is no dedicated SEED_SA_KEY env var
+        set in a fresh checkout -- it resolves to the source key. The
+        payload must say so, not just print a scope line with nothing to
+        tell the operator which Admin Console entry it belongs on."""
+        key = tmp_path / "source-sa.json"
+        key.write_text(json.dumps({"client_id": "12345"}))
+        monkeypatch.delenv("SEED_SA_KEY", raising=False)
+        monkeypatch.setenv("SOURCE_SA_KEY", str(key))
+
+        payload = webui.dwd_payload()
+        assert payload["seed"]["client_id"] == "12345"
+        assert payload["seed"]["shares_source_key"] is True
+
+    def test_a_dedicated_seed_key_is_not_flagged_as_shared(
+            self, tmp_path, monkeypatch):
+        source_key = tmp_path / "source-sa.json"
+        source_key.write_text(json.dumps({"client_id": "111"}))
+        seed_key = tmp_path / "seed-sa.json"
+        seed_key.write_text(json.dumps({"client_id": "222"}))
+        monkeypatch.setenv("SOURCE_SA_KEY", str(source_key))
+        monkeypatch.setenv("SEED_SA_KEY", str(seed_key))
+
+        payload = webui.dwd_payload()
+        assert payload["seed"]["client_id"] == "222"
+        assert payload["seed"]["shares_source_key"] is False
 
     def test_target_provision_line_carries_the_write_scope(self):
         """provision-users creates accounts, which needs admin.directory.user

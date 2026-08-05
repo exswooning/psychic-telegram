@@ -1075,21 +1075,51 @@ def dwd_payload() -> dict:
     # carrying both -- paste the migration set alone and seeding fails with
     # unauthorized_client, paste the seed set alone and the migration does.
     try:
-        import re as _re
-
         import provision
 
-        seed_src = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "data-generator", "seed_sandbox.py")
-        with open(seed_src, encoding="utf-8") as fh:
-            block = fh.read().split("SEED_SCOPES = [")[1].split("]")[0]
-        seed_scopes = _re.findall(r'"(https://www\.googleapis\.com/auth/[^"]+)"',
-                                  block)
-        seed_scopes.append(provision.DIRECTORY_WRITE_SCOPE)   # --create-users
-        combined = sorted(set(seed_scopes) | set(source_scopes(st)))
+        data_gen = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "data-generator")
+        if data_gen not in sys.path:
+            sys.path.insert(0, data_gen)
+        from seed_sandbox import (
+            DIRECTORY_READONLY_SCOPE, REPORTS_SCOPE, SEED_SCOPES,
+            _resolve_key_path,
+        )
+
+        # Every optional seed feature's scope, unioned -- --create-users,
+        # --fit-to-licenses, and the default/--all-users live Directory
+        # discovery all need a scope beyond the base SEED_SCOPES write set.
+        # One line covering all of them means never having to work out
+        # afterward which feature's unauthorized_client came from a scope
+        # that simply was not asked for yet.
+        full = sorted(set(SEED_SCOPES) | {
+            provision.DIRECTORY_WRITE_SCOPE, REPORTS_SCOPE,
+            DIRECTORY_READONLY_SCOPE,
+        })
+        combined = sorted(set(full) | set(source_scopes(st)))
+
+        # Same client-id resolution seed_sandbox.py itself uses (SEED_SA_KEY,
+        # falling back to the source key) -- so this names the exact Admin
+        # Console entry the scopes above actually need to land on, the same
+        # way the tenants loop above does for source/target.
+        seed_client_id = ""
+        try:
+            with open(_resolve_key_path(st), encoding="utf-8") as fh:
+                seed_client_id = json.load(fh).get("client_id", "")
+        except Exception:  # noqa: BLE001 - absent key is a normal early state
+            pass
+        # True only when no dedicated seed-sa.json exists yet and this
+        # would-be seed key is actually the read-only source key -- pasting
+        # the line below onto it grants it write access, which is exactly
+        # the guarantee a separate SEED_SA_KEY exists to avoid.
+        shares_source_key = (seed_client_id
+                             and seed_client_id == out["tenants"][0]["client_id"])
+
         out["seed"] = {
-            "scopes": ",".join(sorted(set(seed_scopes))),
-            "scope_list": sorted(set(seed_scopes)),
+            "client_id": seed_client_id,
+            "shares_source_key": bool(shares_source_key),
+            "scopes": ",".join(full),
+            "scope_list": full,
             "combined": ",".join(combined),
             "combined_list": combined,
         }

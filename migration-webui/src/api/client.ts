@@ -276,10 +276,19 @@ export interface DwdTenant {
   scope_list: string[]
 }
 
+export interface SeedScopes {
+  client_id: string
+  shares_source_key: boolean
+  scopes: string
+  scope_list: string[]
+  combined: string
+  combined_list: string[]
+}
+
 export interface DwdPayload {
   tenants: DwdTenant[]
   target_provision?: { scopes: string; scope_list: string[] }
-  seed?: { scopes: string; scope_list: string[]; combined: string; combined_list: string[] }
+  seed?: SeedScopes
 }
 
 export async function fetchDwd(): Promise<DwdPayload> {

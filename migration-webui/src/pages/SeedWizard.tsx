@@ -6,8 +6,8 @@ import {
 } from '@mui/material'
 import { Refresh as RefreshIcon } from '@mui/icons-material'
 import {
-  fetchStatus, checkStep, fetchActions, runSeed, runResetTarget,
-  ActionSpec, StatusPayload,
+  fetchStatus, checkStep, fetchActions, fetchDwd, runSeed, runResetTarget,
+  ActionSpec, StatusPayload, DwdPayload,
 } from '@/api/client'
 import JobRunner from '@/components/JobRunner'
 
@@ -30,15 +30,17 @@ import JobRunner from '@/components/JobRunner'
 const SeedWizard: React.FC = () => {
   const [status, setStatus] = useState<StatusPayload | null>(null)
   const [actions, setActions] = useState<Record<string, ActionSpec>>({})
+  const [dwd, setDwd] = useState<DwdPayload | null>(null)
   const [checking, setChecking] = useState(false)
   const [checkResult, setCheckResult] = useState<string | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     try {
-      const [s, a] = await Promise.all([fetchStatus(), fetchActions()])
+      const [s, a, d] = await Promise.all([fetchStatus(), fetchActions(), fetchDwd()])
       if (s.error) { setLoadError(s.error) } else { setStatus(s); setLoadError(null) }
       setActions(a)
+      setDwd(d)
     } catch (e) {
       setLoadError(e instanceof Error ? e.message : String(e))
     }
@@ -91,6 +93,8 @@ const SeedWizard: React.FC = () => {
         production tenant's own data.
       </Typography>
 
+      <SeedScopesCard dwd={dwd} />
+
       {seedStep && (
         <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 2 }}>
           <CardContent sx={{ p: 2.5 }}>
@@ -141,6 +145,79 @@ const SeedWizard: React.FC = () => {
         </CardContent>
       </Card>
     </Box>
+  )
+}
+
+/**
+ * Every OAuth scope the seeder can ever need, in one line, computed from the
+ * exact same constants seed_sandbox.py imports (SEED_SCOPES, plus what
+ * --create-users/--fit-to-licenses/the default live-discovery path each
+ * add) -- see webui.py's dwd_payload(). Paste it once and every seed
+ * feature works, rather than discovering one missing scope per feature as
+ * each hits unauthorized_client in turn.
+ *
+ * client_id names the exact Admin Console entry this belongs on. When no
+ * dedicated SEED_SA_KEY is configured, that resolves to the SOURCE key --
+ * shares_source_key flags this, because pasting write scopes onto the
+ * source key's client ID is exactly the read-only guarantee a separate
+ * seed key exists to keep (see config.SOURCE_SCOPES's own docstring).
+ */
+const SeedScopesCard: React.FC<{ dwd: DwdPayload | null }> = ({ dwd }) => {
+  const seed = dwd?.seed
+  if (!seed || !seed.scope_list?.length) return null
+
+  const copy = (text: string) => navigator.clipboard?.writeText(text)
+
+  return (
+    <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 2 }}>
+      <CardContent sx={{ p: 2.5 }}>
+        <Typography variant="h6" sx={{ fontWeight: 600, mb: 0.5 }}>OAuth scopes for seeding</Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+          Every scope any seeder feature needs -- creating accounts, fitting
+          to licence capacity, and the live account discovery the default
+          (and --all-users) path use -- in one line. The Admin Console
+          replaces the whole scope line per client ID, so paste this
+          exactly, not appended to anything already there.
+        </Typography>
+
+        {seed.shares_source_key && (
+          <Alert severity="warning" sx={{ mb: 1.5 }}>
+            No dedicated seed service account is configured (SEED_SA_KEY) --
+            this client ID is your SOURCE key. Pasting write scopes onto it
+            gives up the source tenant's read-only guarantee. Create a
+            separate service account for seeding if you want that guarantee
+            kept.
+          </Alert>
+        )}
+
+        <Typography variant="caption" color="text.secondary">
+          Client ID{seed.shares_source_key ? ' (source key)' : ' (seed key)'}: {seed.client_id || 'no key found yet'}
+        </Typography>
+        <Box
+          component="pre"
+          sx={{ fontSize: 11, p: 1, mt: 0.5, mb: 1.5, bgcolor: 'action.hover',
+               borderRadius: 1, overflowX: 'auto', cursor: 'pointer' }}
+          onClick={() => copy(seed.scopes)}
+          title="Click to copy"
+        >
+          {seed.scopes}
+        </Box>
+
+        <Typography variant="caption" color="text.secondary">
+          Also migrating this tenant with the same key? Use this line instead
+          -- it carries both the seed and migration-read scopes:
+        </Typography>
+        <Box
+          component="pre"
+          sx={{ fontSize: 11, p: 1, mt: 0.5, bgcolor: 'action.hover',
+               borderRadius: 1, overflowX: 'auto', cursor: 'pointer' }}
+          onClick={() => copy(seed.combined)}
+          title="Click to copy"
+        >
+          {seed.combined}
+        </Box>
+      </CardContent>
+    </Card>
   )
 }
 
