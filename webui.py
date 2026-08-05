@@ -1076,6 +1076,12 @@ def seed_argv(body: dict) -> tuple[list[str], dict, str]:
         argv.append("--all-users")
     if body.get("reset"):
         argv.append("--reset")
+    target_gb = body.get("target_gb_per_user")
+    if target_gb:
+        try:
+            argv += ["--target-gb-per-user", str(float(target_gb))]
+        except (TypeError, ValueError):
+            return [], {}, "target_gb_per_user must be a number"
 
     env = gcloud_env()
     # Set here rather than asking the operator to export it: the value carries

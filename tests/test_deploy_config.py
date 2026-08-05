@@ -810,6 +810,21 @@ class TestSeedFromTheUI:
         assert isinstance(argv, list)
         assert all(isinstance(a, str) for a in argv)
 
+    def test_target_gb_per_user_is_opt_in(self):
+        argv, _, _ = webui.seed_argv({"confirm_domain": "sandbox-src.example"})
+        assert "--target-gb-per-user" not in argv
+
+        argv, _, _ = webui.seed_argv(
+            {"confirm_domain": "sandbox-src.example", "target_gb_per_user": 30})
+        i = argv.index("--target-gb-per-user")
+        assert argv[i + 1] == "30.0"
+
+    def test_a_non_numeric_target_gb_is_refused(self):
+        _, _, err = webui.seed_argv(
+            {"confirm_domain": "sandbox-src.example",
+            "target_gb_per_user": "lots"})
+        assert "must be a number" in err
+
     def test_seeding_still_targets_only_the_source(self):
         """There is no code path that points the seeder at the target: the
         domain is read from SOURCE_DOMAIN, never from the request body."""
