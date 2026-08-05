@@ -671,6 +671,68 @@ def test_entries_from_existing_users_assigns_dept_and_project_templates():
         assert e["dept"] and e["project"]
 
 
+class TestDiscoverTenantEntries:
+    """
+    discover_tenant_entries() is the seeder's default source of users --
+    the real tenant headcount instead of the fixed 5. It must never hard-fail
+    an ordinary run: every way discovery can be unavailable falls back to the
+    5-user default with an explanatory warning, not a crash.
+    """
+
+    def test_without_source_admin_falls_back_with_a_warning(
+            self, settings, monkeypatch):
+        import seed_sandbox as s
+        from corpus import ORG
+
+        monkeypatch.delenv("SOURCE_ADMIN", raising=False)
+        entries, warning = s.discover_tenant_entries(settings)
+        assert len(entries) == len(ORG)
+        assert "SOURCE_ADMIN" in warning
+
+    def test_a_failed_directory_read_falls_back_with_a_warning(
+            self, settings, monkeypatch):
+        import seed_sandbox as s
+        from corpus import ORG
+
+        monkeypatch.setenv("SOURCE_ADMIN", "admin@tenanta.com")
+        monkeypatch.setattr(s, "build_directory_readonly",
+                            lambda *a, **k: object())
+        monkeypatch.setattr(
+            s, "_list_users",
+            lambda directory: (_ for _ in ()).throw(RuntimeError("403")))
+        entries, warning = s.discover_tenant_entries(settings)
+        assert len(entries) == len(ORG)
+        assert "could not read" in warning
+        assert s.DIRECTORY_READONLY_SCOPE in warning
+
+    def test_an_empty_directory_falls_back_with_a_warning(
+            self, settings, monkeypatch):
+        import seed_sandbox as s
+        from corpus import ORG
+
+        monkeypatch.setenv("SOURCE_ADMIN", "admin@tenanta.com")
+        monkeypatch.setattr(s, "build_directory_readonly",
+                            lambda *a, **k: object())
+        monkeypatch.setattr(s, "_list_users", lambda directory: set())
+        entries, warning = s.discover_tenant_entries(settings)
+        assert len(entries) == len(ORG)
+        assert "no users" in warning
+
+    def test_a_successful_discovery_returns_the_real_users_with_no_warning(
+            self, settings, monkeypatch):
+        import seed_sandbox as s
+
+        monkeypatch.setenv("SOURCE_ADMIN", "admin@tenanta.com")
+        monkeypatch.setattr(s, "build_directory_readonly",
+                            lambda *a, **k: object())
+        real_users = {"alice@tenanta.com", "bob@tenanta.com",
+                     "carol@tenanta.com", "dave@tenanta.com"}
+        monkeypatch.setattr(s, "_list_users", lambda directory: real_users)
+        entries, warning = s.discover_tenant_entries(settings)
+        assert {e["email"] for e in entries} == real_users
+        assert warning == ""
+
+
 # ======================================================================
 # Storage top-up, Contacts and Tasks seeding
 #

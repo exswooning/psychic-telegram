@@ -1,20 +1,29 @@
 """
 tools/seed_sandbox.py
 =====================
-Seeds a **sandbox** source tenant with a realistic five-user organisation:
-department trees, project folders, an archive, personal folders, a cross-user
-sharing graph, mail between the users, and shared calendar meetings.
+Seeds a **sandbox** source tenant with a realistic organisation: department
+trees, project folders, an archive, personal folders, a cross-user sharing
+graph, mail between the users, and shared calendar meetings.
+
+By default this targets every user account the tenant actually has, read
+live via the Directory API (see `discover_tenant_entries()`) -- not a fixed
+5. If SOURCE_ADMIN is not set or the Directory scope has not been granted
+yet, it falls back to a fixed 5-user default (`corpus.ORG`) with a printed
+note explaining why, so an ordinary run never hard-fails on that alone.
+`--users a,b,c` overrides with an explicit list; `--all-users` asks for the
+same live discovery but fails loudly instead of falling back, for when you
+want to be sure it worked.
 
 Then tears it all down again, so the rehearsal is repeatable.
 
 The sharing graph is the point
 ------------------------------
-Every user owns their own department and project and shares outward. So the five
-users collectively *see* far more than they collectively *own*, and the union of
-what they own equals the corpus exactly once. With `OWNED_ONLY=true` (the
+Every user owns their own department and project and shares outward. So the
+users collectively *see* far more than they collectively *own*, and the union
+of what they own equals the corpus exactly once. With `OWNED_ONLY=true` (the
 default), a correct migration reproduces that union — no more.
 
-    total files across 5 target users == total files OWNED across 5 source users
+    total files across N target users == total files OWNED across N source users
 
 If the target ends up larger, the engine is duplicating shared-in files once per
 recipient, which on a real tenant means paying to store the same deck four times
@@ -1216,6 +1225,47 @@ def entries_from_existing_users(existing_emails: set[str], domain: str) -> list[
     return entries
 
 
+def discover_tenant_entries(settings: Settings) -> tuple[list[dict], str]:
+    """
+    The seeder's default source of users: every real account already in the
+    tenant, discovered live via the Directory API. Returns
+    (entries, warning) -- `warning` is empty on success, and non-empty (with
+    `entries` falling back to the fixed 5-name ORG default) when discovery
+    could not run at all, so a sandbox without SOURCE_ADMIN set or without
+    the Directory scope granted yet still seeds something instead of hard
+    failing on every ordinary invocation.
+
+    `--all-users` (below) calls entries_from_existing_users() directly
+    instead, precisely because it wants the opposite: a hard failure with a
+    clear scope-to-grant message, not a silent fallback, when someone has
+    explicitly asked to seed the real headcount.
+    """
+    admin = os.getenv("SOURCE_ADMIN")
+    if not admin:
+        return ([e | {"email": f"{e['local']}@{settings.source_domain}"}
+                for e in ORG],
+               "SOURCE_ADMIN is not set, so the real tenant headcount could "
+               "not be read; falling back to the fixed 5-user default. Set "
+               "SOURCE_ADMIN to a super admin to seed every real account.")
+    try:
+        directory = build_directory_readonly(settings, admin)
+        existing = _list_users(directory)
+    except Exception as exc:  # noqa: BLE001
+        return ([e | {"email": f"{e['local']}@{settings.source_domain}"}
+                for e in ORG],
+               f"could not read the tenant's user list ({exc}); falling "
+               f"back to the fixed 5-user default. Grant "
+               f"{DIRECTORY_READONLY_SCOPE} to SEED_SA_KEY's client ID in "
+               f"{settings.source_domain} to seed every real account.")
+    entries = entries_from_existing_users(existing, settings.source_domain)
+    if not entries:
+        return ([e | {"email": f"{e['local']}@{settings.source_domain}"}
+                for e in ORG],
+               f"the directory returned no users in {settings.source_domain}; "
+               f"falling back to the fixed 5-user default.")
+    return entries, ""
+
+
 def _generated_localpart(i: int, taken: set[str]) -> str:
     base = GENERATED_LOCALPARTS[i] if i < len(GENERATED_LOCALPARTS) \
         else f"seeduser{i + 1}"
@@ -1352,11 +1402,14 @@ def reset_one_user(settings: Settings, user: str) -> dict:
 # ======================================================================
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
-        description="Seed or reset a five-user sandbox organisation."
+        description="Seed or reset a sandbox organisation."
     )
     ap.add_argument("--confirm-domain", required=True)
-    ap.add_argument("--users", help="comma-separated localparts "
-                                    "(default: alice,bob,carol,dave,erin)")
+    ap.add_argument("--users", help="comma-separated localparts. Default: "
+                                    "every user the tenant already has (live "
+                                    "Directory lookup), falling back to "
+                                    "alice,bob,carol,dave,erin if that "
+                                    "lookup cannot run.")
     ap.add_argument("--scale", default="medium", choices=list(SCALES))
     ap.add_argument("--external-email", default="external.tester@example.com")
     ap.add_argument("--mail", type=int, help="messages per user "
@@ -1388,13 +1441,15 @@ def main(argv: list[str] | None = None) -> int:
                          "--create-users and admin.reports.usage.readonly "
                          "granted to SEED_SA_KEY")
     ap.add_argument("--all-users", action="store_true",
-                    help="seed every user account that already exists in the "
-                         "tenant, instead of the default 5 or --users. Reads "
-                         "the real headcount via the Directory API -- the "
-                         "tenant's actual maximum, not a licence-capacity "
-                         "guess like --fit-to-licenses (which creates new "
-                         "accounts up to unused seats; this seeds accounts "
-                         "that are already there). Requires "
+                    help="same live discovery the default already does, but "
+                         "fails loudly (with the scope to grant) instead of "
+                         "silently falling back to the 5-user default if "
+                         "SOURCE_ADMIN or the Directory scope is missing -- "
+                         "for when you need to be sure it actually read the "
+                         "tenant. Not a licence-capacity guess like "
+                         "--fit-to-licenses (which creates new accounts up "
+                         "to unused seats; this only ever seeds accounts "
+                         "that already exist). Requires "
                          "admin.directory.user.readonly granted to "
                          "SEED_SA_KEY, and SOURCE_ADMIN set.")
     ap.add_argument("--reset", action="store_true", help="DELETE everything")
@@ -1434,7 +1489,20 @@ def main(argv: list[str] | None = None) -> int:
                  "--all-users seeds accounts that already exist; "
                  "--fit-to-licenses creates new ones up to unused seats.")
 
-    if args.all_users:
+    if args.users:
+        locals_ = [u.strip() for u in args.users.split(",")]
+        entries = []
+        for i, lp in enumerate(locals_):
+            template = ORG[i % len(ORG)]
+            entries.append({
+                "local": lp, "email": f"{lp}@{settings.source_domain}",
+                "dept": template["dept"], "project": template["project"],
+            })
+    elif args.all_users:
+        # Explicit ask: fail loudly with the scope to grant, rather than
+        # silently seeding the 5-user default -- see
+        # discover_tenant_entries()'s docstring for why this differs from
+        # the default (no-flag) path below.
         admin = os.getenv("SOURCE_ADMIN")
         if not admin:
             sys.exit("SOURCE_ADMIN must be set to a super admin of "
@@ -1455,15 +1523,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\n--all-users: found {len(entries)} existing user(s) in "
               f"{settings.source_domain}; seeding all of them.")
     else:
-        locals_ = ([u.strip() for u in args.users.split(",")] if args.users
-                  else [e["local"] for e in ORG])
-        entries = []
-        for i, lp in enumerate(locals_):
-            template = ORG[i % len(ORG)]
-            entries.append({
-                "local": lp, "email": f"{lp}@{settings.source_domain}",
-                "dept": template["dept"], "project": template["project"],
-            })
+        # Default: check every account the tenant actually has, not the
+        # fixed 5 -- with a graceful, clearly-explained fallback to the
+        # 5-user default when discovery cannot run (see
+        # discover_tenant_entries()'s docstring).
+        entries, warning = discover_tenant_entries(settings)
+        if warning:
+            print(f"\nNote: {warning}")
+        else:
+            print(f"\nFound {len(entries)} existing user(s) in "
+                  f"{settings.source_domain}; seeding all of them.")
     all_users = [e["email"] for e in entries]
 
     # --- Optionally create the accounts first ----------------------------
