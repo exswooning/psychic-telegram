@@ -488,6 +488,58 @@ def validate_config(body: dict) -> tuple[dict, str]:
     return clean, ""
 
 
+_DEPLOY_ENV_KEYS = {"host": "DEPLOY_HOST", "user": "DEPLOY_USER",
+                    "port": "DEPLOY_PORT", "key": "DEPLOY_KEY",
+                    "ui_port": "DEPLOY_UI_PORT"}
+
+
+def read_deploy_config() -> dict:
+    """
+    The VPS connection details Deploy last used, if any.
+
+    Previously these lived only in the browser's in-memory JS state (`dep`)
+    -- gone on every page reload, and never available at all from the SPA,
+    which had no deploy UI. Persisted the same way source/target domain
+    config already is: KEY=VALUE pairs in env.sh, so "add my VPS once" and
+    "the UI already knows it next time" are the same file.
+    """
+    from wizard import load_env
+
+    env = load_env(ENV_PATH)
+    return {
+        "host": env.get("DEPLOY_HOST", ""),
+        "user": env.get("DEPLOY_USER", "root"),
+        "port": env.get("DEPLOY_PORT", "22"),
+        "key": env.get("DEPLOY_KEY", ""),
+        "ui_port": env.get("DEPLOY_UI_PORT", "8080"),
+    }
+
+
+def validate_deploy_config(body: dict) -> tuple[dict, str]:
+    """
+    Returns (env-var pairs to persist, error). Empty error means acceptable.
+
+    Reuses deploy_remote.validate() rather than re-deriving the host/user
+    patterns here -- the same check /api/deploy itself relies on before
+    ever shelling out to rsync/ssh.
+    """
+    import deploy_remote
+
+    host = (body.get("host") or "").strip()
+    user = (body.get("user") or "root").strip()
+    key = (body.get("key") or "").strip()
+    try:
+        port = int(body.get("port") or 22)
+        ui_port = int(body.get("ui_port") or 8080)
+    except (TypeError, ValueError):
+        return {}, "port must be a number"
+    err = deploy_remote.validate(host, user, port, key)
+    if err:
+        return {}, err
+    return {"DEPLOY_HOST": host, "DEPLOY_USER": user, "DEPLOY_PORT": str(port),
+            "DEPLOY_KEY": key, "DEPLOY_UI_PORT": str(ui_port)}, ""
+
+
 def write_config_raw(pairs: dict) -> None:
     """Merge arbitrary KEY=VALUE pairs into env.sh and the live environment."""
     from wizard import load_env
@@ -1645,6 +1697,7 @@ pre.out{height:230px}
 <div class="tabs" id="tabs">
   <button data-tab="setup" class="on">Setup</button>
   <button data-tab="seed">Seed sandbox</button>
+  <button data-tab="deploy">Deploy</button>
   <button data-tab="dashboard">Dashboard</button>
   <button data-tab="users">Users</button>
   <button data-tab="failures">Failures</button>
@@ -1663,6 +1716,7 @@ pre.out{height:230px}
 </div>
 
 <div class="view" id="view-seed"></div>
+<div class="view" id="view-deploy"></div>
 <div class="view" id="view-dashboard"><div class="muted">Loading&hellip;</div></div>
 <div class="view" id="view-users"></div>
 <div class="view" id="view-failures"></div>
@@ -1691,7 +1745,8 @@ picks up where it left off.</pre>
 <script>
 let seen=0, acts={}, S=null, cur=null, dwd=null, oauth=null, cfg=null, follow=true;
 let lastSig='', ups=null, authMode=null, authModes=null, upMsg={},
-    seedScales=null, seedMsg=null, resetTargetMsg=null, runMode=null, runModes=null, stepChk=null,
+    seedScales=null, seedMsg=null, resetTargetMsg=null, deployCfgMsg=null,
+    runMode=null, runModes=null, stepChk=null,
     view='path', seedOpen=false,
     dep={user:'root',port:'22',open:false};
 let tab='setup', snap=null, scopeLines=[], logLines=[], logPath='';
@@ -2128,6 +2183,54 @@ function seedTabHTML(){
     ${seedForm()}${resetTargetForm()}`;
 }
 
+/* The VPS connection form. `deploy()` and the /api/deploy endpoint that
+   drives it have existed since this page's captureForm()/restoreForm()
+   were written -- what was missing was this markup itself, so d-host and
+   friends had no element to bind to and "Deploy" was unreachable from the
+   UI at all. Prefilled from dep, which refresh() adopts once from the
+   server's saved DEPLOY_* env.sh entries (read_deploy_config()) the same
+   way the setup form adopts SOURCE_DOMAIN etc. */
+function deployTabHTML(){
+  return `<h2>Deploy to a VPS</h2>
+    <div class="note">Copy this tool to a server that stays up through a
+      multi-hour migration, then reach it over an SSH tunnel. Save your VPS's
+      connection details once here; every future Deploy (and any other
+      session of this UI) reuses them.</div>
+    <div class="card">
+      <h3>VPS connection</h3>
+      <div class="grid2" style="margin-top:12px">
+        <label>Host<input id="d-host" placeholder="203.0.113.10 or vps.example.com"
+          value="${esc(dep.host||'')}"></label>
+        <label>SSH user<input id="d-user" placeholder="root"
+          value="${esc(dep.user||'root')}"></label>
+        <label>SSH port<input id="d-port" placeholder="22"
+          value="${esc(dep.port||'22')}"></label>
+        <label>SSH key path (optional)<input id="d-key"
+          placeholder="~/.ssh/id_ed25519" value="${esc(dep.key||'')}"></label>
+      </div>
+      <label style="display:block;margin-top:10px">
+        <input type="checkbox" id="d-creds" ${dep.creds?'checked':''}> also copy
+        service-account keys and OAuth tokens — lets this host read every
+        mailbox in both tenants</label>
+      <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+        <button onclick="saveDeployConfig()">Save VPS credentials</button>
+        <button class="danger" onclick="deploy()">Deploy now
+          <small>Targets ${esc(dep.host||'(no host set)')}</small></button>
+      </div>
+      <div id="deploycfgmsg" class="muted" style="margin-top:8px">${
+        deployCfgMsg?(deployCfgMsg.ok?'✓ ':'✕ ')+esc(deployCfgMsg.text):''}</div>
+    </div>`;
+}
+
+async function saveDeployConfig(){
+  captureForm();
+  const r=await (await fetch('/api/deploy_config',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({host:dep.host,user:dep.user,port:dep.port,key:dep.key})})).json();
+  deployCfgMsg={ok:!!r.ok, text: r.ok ? 'saved' : r.error};
+  if(tab==='deploy') drawView();
+}
+
 /* ---------------- actions ---------------- */
 async function run(name){
   const a=acts[name];
@@ -2365,6 +2468,10 @@ async function refresh(force){
     if(c&&c.auth_modes){ authModes=c.auth_modes; authMode=c.auth_mode; }
     if(c&&c.seed_scales) seedScales=c.seed_scales;
     if(c&&c.run_modes){ runModes=c.run_modes; runMode=c.run_mode; }
+    /* Same "only before anything is typed" rule as cfg above -- dep.host
+       is null until either a save/deploy has run or this adopts the saved
+       value, so this only ever fires once, on first load. */
+    if(c&&c.deploy&&dep.host==null) Object.assign(dep, c.deploy);
     if(!s.error) $('route').textContent=
       (s.env.SOURCE_DOMAIN||'?')+' \\u2192 '+(s.env.TARGET_DOMAIN||'?')
       +(s.env.AUTH_MODE?'  \\u00b7  '+s.env.AUTH_MODE:'');
@@ -2449,9 +2556,9 @@ function setTab(t){
   tab=t;
   document.querySelectorAll('.tabs button').forEach(b=>
     b.classList.toggle('on',b.dataset.tab===t));
-  const views={setup:$('setup'),seed:$('view-seed'),dashboard:$('view-dashboard'),
-    users:$('view-users'),failures:$('view-failures'),scope:$('view-scope'),
-    logs:$('view-logs'),output:$('view-output')};
+  const views={setup:$('setup'),seed:$('view-seed'),deploy:$('view-deploy'),
+    dashboard:$('view-dashboard'),users:$('view-users'),failures:$('view-failures'),
+    scope:$('view-scope'),logs:$('view-logs'),output:$('view-output')};
   Object.keys(views).forEach(k=>{ const el=views[k]; if(!el) return;
     el.style.display=(k===t)?(k==='setup'?'grid':'block'):'none'; });
   if(t!=='setup'){
@@ -2469,6 +2576,7 @@ function drawView(){
   const el=$('view-'+tab); if(!el) return;
   let h='';
   if(tab==='seed') h=seedTabHTML();
+  else if(tab==='deploy') h=deployTabHTML();
   else if(tab==='dashboard') h=dashboardHTML();
   else if(tab==='users') h=usersHTML();
   else if(tab==='failures') h=failuresHTML();
@@ -2721,7 +2829,8 @@ class Handler(BaseHTTPRequestHandler):
                         "auth_mode": _S().auth_mode,
                         "run_mode": _S().run_mode,
                         "run_modes": _RUN_MODES(),
-                        "seed_scales": list(SEED_SCALES)})
+                        "seed_scales": list(SEED_SCALES),
+                        "deploy": read_deploy_config()})
         elif path == "/oauth/callback":
             # Google redirects the admin's browser back here after consent.
             tenant = "source" if "source" in (self.headers.get("Referer") or "") else None
@@ -2869,22 +2978,25 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": ok, "error": "" if ok else msg})
             return
 
-        if self.path == "/api/deploy":
-            import deploy_remote
-
-            host = (body.get("host") or "").strip()
-            user = (body.get("user") or "root").strip()
-            key = (body.get("key") or "").strip()
-            try:
-                port = int(body.get("port") or 22)
-                ui_port = int(body.get("ui_port") or 8080)
-            except (TypeError, ValueError):
-                self._json({"ok": False, "error": "port must be a number"}, 400)
-                return
-            err = deploy_remote.validate(host, user, port, key)
+        if self.path == "/api/deploy_config":
+            # Save-only: lets the VPS connection be entered once, from either
+            # UI, before a Deploy is ever run -- see read_deploy_config().
+            clean, err = validate_deploy_config(body)
             if err:
                 self._json({"ok": False, "error": err}, 400)
                 return
+            write_config_raw(clean)
+            self._json({"ok": True, "msg": f"saved to {ENV_PATH}"})
+            return
+
+        if self.path == "/api/deploy":
+            clean, err = validate_deploy_config(body)
+            if err:
+                self._json({"ok": False, "error": err}, 400)
+                return
+            host, user = clean["DEPLOY_HOST"], clean["DEPLOY_USER"]
+            port, ui_port = clean["DEPLOY_PORT"], clean["DEPLOY_UI_PORT"]
+            key = clean["DEPLOY_KEY"]
             # Copying credentials to another machine is outward-facing and not
             # undoable, so it takes the same typed confirmation as a migration.
             creds = bool(body.get("include_credentials"))
@@ -2893,8 +3005,12 @@ class Handler(BaseHTTPRequestHandler):
                             "error": "sending credentials to a host needs the "
                                      "confirmation phrase DEPLOY"}, 400)
                 return
+            # Remembered for next time regardless of how this run turns out --
+            # a failed deploy (bad password prompt, network blip) still means
+            # the operator typed a real host worth keeping.
+            write_config_raw(clean)
             argv = [PY, "deploy_remote.py", "--host", host, "--user", user,
-                    "--port", str(port), "--ui-port", str(ui_port)]
+                    "--port", port, "--ui-port", ui_port]
             if key:
                 argv += ["--key", key]
             if creds:

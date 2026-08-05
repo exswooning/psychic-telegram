@@ -15,6 +15,7 @@ import {
   Badge,
   IconButton,
   Tooltip,
+  Alert,
 } from '@mui/material'
 import {
   Search as SearchIcon,
@@ -32,7 +33,7 @@ import { useMigrationStore } from '@/store'
 import { statusLabel, statusColor } from '@/utils/formatters'
 
 const ActivityFeed: React.FC = () => {
-  const { activities } = useMigrationStore()
+  const { activities, error, isLoading } = useMigrationStore()
   const [search, setSearch] = useState('')
   const [filter, setFilter] = useState<string>('all')
 
@@ -59,6 +60,13 @@ const ActivityFeed: React.FC = () => {
     <Box>
       <Typography variant="h4" sx={{ fontWeight: 700, mb: 0.5 }}>Activity Feed</Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>Real-time human-readable migration events</Typography>
+
+      {error && (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          {error}. The list below may be empty or stale because of this, not
+          because nothing has happened yet.
+        </Alert>
+      )}
 
       <Paper elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', p: 2, mb: 2, display: 'flex', gap: 2, flexWrap: 'wrap', alignItems: 'center' }}>
         <TextField
@@ -120,7 +128,12 @@ const ActivityFeed: React.FC = () => {
         </List>
         {filtered.length === 0 && (
           <Box sx={{ p: 3, textAlign: 'center' }}>
-            <Typography variant="body2" color="text.secondary">No activities match your filters</Typography>
+            <Typography variant="body2" color="text.secondary">
+              {isLoading ? 'Loading…'
+                : error ? 'Could not load activity -- see the warning above'
+                : activities.length === 0 ? 'No activity yet -- nothing has run against this ledger'
+                : 'No activities match your filters'}
+            </Typography>
           </Box>
         )}
       </Paper>

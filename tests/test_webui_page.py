@@ -110,6 +110,22 @@ class TestServedPage:
                    "async function doResetTarget("):
             assert fn in js, f"missing {fn}"
 
+    def test_deploy_tab_exists_and_its_form_is_actually_reachable(self):
+        """captureForm()/restoreForm()/deploy() all referenced #d-host and
+        friends, and /api/deploy existed, but no template ever rendered
+        those input elements -- Deploy was wired end to end except for the
+        one piece a person could actually see and click."""
+        js = _js()
+        assert 'data-tab="deploy"' in webui.PAGE
+        assert 'id="view-deploy"' in webui.PAGE
+        for fn in ("function deployTabHTML(", "async function saveDeployConfig(",
+                   "async function deploy("):
+            assert fn in js, f"missing {fn}"
+        html = js[js.index("function deployTabHTML("):]
+        html = html[:html.index("\nfunction ", 1)]
+        for field_id in ("d-host", "d-user", "d-port", "d-key", "d-creds"):
+            assert f'id="{field_id}"' in html, f"deployTabHTML() never renders #{field_id}"
+
     def test_header_progress_strip_present(self):
         """The always-visible progress bar under the header + its updater."""
         assert 'id="progi"' in webui.PAGE and 'id="progpct"' in webui.PAGE

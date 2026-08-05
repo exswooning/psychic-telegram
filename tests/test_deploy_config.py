@@ -1283,3 +1283,78 @@ class TestResetTargetFromTheUI:
         is read from TARGET_DOMAIN, never from the request body."""
         argv, _, _ = webui.reset_target_argv({"confirm_domain": "sandbox-tgt.example"})
         assert "sandbox-src.example" not in argv
+
+
+class TestDeployConfigPersistence:
+    """
+    The VPS connection Deploy last used, saved to env.sh the same way
+    source/target domain config already is -- previously it lived only in
+    the browser's in-memory JS state, gone on every reload and never
+    reachable from the SPA (which had no deploy UI at all).
+    """
+
+    def test_defaults_when_nothing_saved_yet(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(webui, "ENV_PATH", str(tmp_path / "env.sh"))
+        cfg = webui.read_deploy_config()
+        assert cfg == {"host": "", "user": "root", "port": "22",
+                      "key": "", "ui_port": "8080"}
+
+    def test_a_saved_host_round_trips(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(webui, "ENV_PATH", str(tmp_path / "env.sh"))
+        clean, err = webui.validate_deploy_config(
+            {"host": "203.0.113.10", "user": "ubuntu", "port": 2222})
+        assert err == ""
+        webui.write_config_raw(clean)
+        cfg = webui.read_deploy_config()
+        assert cfg["host"] == "203.0.113.10"
+        assert cfg["user"] == "ubuntu"
+        assert cfg["port"] == "2222"
+
+    def test_saving_preserves_unrelated_env_entries(self, tmp_path, monkeypatch):
+        env = tmp_path / "env.sh"
+        env.write_text("export SOURCE_DOMAIN=c.example.com\n")
+        monkeypatch.setattr(webui, "ENV_PATH", str(env))
+
+        clean, _ = webui.validate_deploy_config({"host": "203.0.113.10"})
+        webui.write_config_raw(clean)
+
+        text = env.read_text()
+        assert "SOURCE_DOMAIN=c.example.com" in text
+        assert "DEPLOY_HOST=203.0.113.10" in text
+
+    def test_an_invalid_host_is_rejected_not_saved(self):
+        clean, err = webui.validate_deploy_config(
+            {"host": "1.2.3.4; rm -rf /"})
+        assert err
+        assert clean == {}
+
+    def test_a_missing_key_file_is_rejected_not_saved(self, tmp_path):
+        clean, err = webui.validate_deploy_config(
+            {"host": "203.0.113.10", "key": str(tmp_path / "absent")})
+        assert "no SSH key" in err
+        assert clean == {}
+
+    def test_a_non_numeric_port_is_rejected(self):
+        _, err = webui.validate_deploy_config(
+            {"host": "203.0.113.10", "port": "not-a-number"})
+        assert "port must be a number" in err
+
+    def test_defaults_apply_when_only_host_is_given(self):
+        clean, err = webui.validate_deploy_config({"host": "203.0.113.10"})
+        assert err == ""
+        assert clean["DEPLOY_USER"] == "root"
+        assert clean["DEPLOY_PORT"] == "22"
+        assert clean["DEPLOY_UI_PORT"] == "8080"
+
+    def test_config_payload_includes_the_saved_deploy_target(
+            self, tmp_path, monkeypatch):
+        """The one bundled GET both UIs already poll -- the SPA has no
+        deploy UI of its own to add a second endpoint for, so this is the
+        only way it can ever learn a saved VPS target exists."""
+        env = tmp_path / "env.sh"
+        env.write_text("export DEPLOY_HOST=203.0.113.10\n"
+                       "export DEPLOY_USER=ubuntu\n")
+        monkeypatch.setattr(webui, "ENV_PATH", str(env))
+        cfg = webui.read_deploy_config()
+        assert cfg["host"] == "203.0.113.10"
+        assert cfg["user"] == "ubuntu"

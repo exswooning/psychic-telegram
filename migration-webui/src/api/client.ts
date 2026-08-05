@@ -195,6 +195,14 @@ export interface RunModeSpec {
   setup: string[]
 }
 
+export interface DeployConfig {
+  host: string
+  user: string
+  port: string
+  key: string
+  ui_port: string
+}
+
 export interface ConfigPayload {
   config: ConfigFields
   env_path: string
@@ -203,6 +211,7 @@ export interface ConfigPayload {
   auth_mode: string
   run_mode: string
   run_modes: Record<string, RunModeSpec>
+  deploy: DeployConfig
 }
 
 export async function fetchConfig(): Promise<ConfigPayload> {
@@ -323,6 +332,58 @@ export async function runResetTarget(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ confirm_domain: confirmDomain }),
+  })
+  return res.json()
+}
+
+export interface DeployFields {
+  host: string
+  user: string
+  port: string
+  key: string
+  uiPort?: string
+}
+
+/**
+ * Saves the VPS connection to env.sh (DEPLOY_HOST etc.) without deploying --
+ * lets "add my VPS" and "actually deploy to it" be two separate actions.
+ * webui.py's own inline UI writes the same env.sh entries; whichever surface
+ * saves last is what fetchConfig()'s `deploy` field returns to both.
+ */
+export async function saveDeployConfig(
+  fields: DeployFields
+): Promise<{ ok: boolean; error?: string; msg?: string }> {
+  const res = await fetch('/api/deploy_config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      host: fields.host, user: fields.user, port: fields.port,
+      key: fields.key, ui_port: fields.uiPort,
+    }),
+  })
+  return res.json()
+}
+
+/**
+ * Copies this tool to the VPS and starts its web UI there (deploy_remote.py).
+ * `confirm` must be the literal string "DEPLOY", typed by the operator, and
+ * is only checked server-side when includeCredentials is set -- sending
+ * service-account keys and OAuth tokens to another host is the one
+ * irreversible part of this action.
+ */
+export async function runDeploy(
+  fields: DeployFields,
+  includeCredentials: boolean,
+  confirm?: string
+): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetch('/api/deploy', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      host: fields.host, user: fields.user, port: fields.port,
+      key: fields.key, ui_port: fields.uiPort,
+      include_credentials: includeCredentials, confirm,
+    }),
   })
   return res.json()
 }
