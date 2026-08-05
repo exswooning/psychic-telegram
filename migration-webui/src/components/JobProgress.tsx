@@ -18,33 +18,32 @@ import { fetchJob, stopJob } from '@/api/client'
  * scope error, for instance, which never writes a single audit_log row --
  * so the Activity Feed staying empty was correct, just unexplained).
  *
- * `expectedName` guards against a stale poll from a previous run being
- * mistaken for the one this instance just started -- JOB.start()'s `name`
- * argument ("seed", "reset target", "deploy") is echoed back by /api/job,
- * so a leftover interval from an earlier mount cannot render as if it were
- * this action's live output.
- *
- * `active` only ever gates *starting* a fresh poll cycle (the caller flips
- * it true right after a successful start); once a job finishes this keeps
- * rendering its final output and exit code rather than disappearing the
- * instant it completes -- disable the caller's own start button via
- * `onRunningChange` instead of by toggling `active` off.
+ * Polls continuously from mount, not only after `active` flips true --
+ * webui.py's Job is a single global background process, so a page load
+ * (or a second browser tab) while a run from earlier is still going must
+ * discover and show it too, not stay blank until *this* component instance
+ * is the one that pressed Start. `expectedName` is what makes that safe:
+ * JOB.start()'s `name` argument ("seed", "reset target", "deploy") is
+ * echoed back by /api/job, so this only ever renders output that actually
+ * belongs to it, never a different tool's job that happens to be running.
  */
 const JobProgress: React.FC<{
   active: boolean; expectedName: string
   onDone?: () => void; onRunningChange?: (running: boolean) => void
 }> = ({ active, expectedName, onDone, onRunningChange }) => {
+  const [visible, setVisible] = useState(false)
   const [running, setRunning] = useState(false)
   const [lines, setLines] = useState<string[]>([])
   const [rc, setRc] = useState<number | null>(null)
   const sinceRef = useRef(0)
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const wasRunning = useRef(false)
+  const donePosted = useRef(false)
 
   const poll = useCallback(async () => {
     try {
       const job = await fetchJob(sinceRef.current)
       if (job.name !== expectedName) return
+      setVisible(true)
       if (job.lines.length) {
         setLines((prev) => [...prev, ...job.lines])
         sinceRef.current = job.total
@@ -52,10 +51,9 @@ const JobProgress: React.FC<{
       setRunning(job.running)
       onRunningChange?.(job.running)
       setRc(job.rc)
-      if (job.running) wasRunning.current = true
-      if (!job.running && wasRunning.current && pollRef.current) {
-        clearInterval(pollRef.current)
-        pollRef.current = null
+      if (job.running) { wasRunning.current = true; donePosted.current = false }
+      if (!job.running && wasRunning.current && !donePosted.current) {
+        donePosted.current = true
         onDone?.()
       }
     } catch {
@@ -63,19 +61,28 @@ const JobProgress: React.FC<{
     }
   }, [expectedName, onDone, onRunningChange])
 
+  // Runs for the component's whole lifetime, independent of `active`, so an
+  // already-running job of this name (started before this page loaded, or
+  // from another tab) is discovered rather than requiring a fresh click.
+  useEffect(() => {
+    poll()
+    const id = setInterval(poll, 1500)
+    return () => clearInterval(id)
+  }, [poll])
+
+  // A fresh explicit start from *this* component: reset the transcript so
+  // a previous run's output doesn't linger under the new one, and show the
+  // panel immediately rather than waiting for the next poll tick.
   useEffect(() => {
     if (!active) return
-    setLines([]); setRc(null); setRunning(true)
+    setLines([]); setRc(null); setRunning(true); setVisible(true)
     onRunningChange?.(true)
     sinceRef.current = 0
-    wasRunning.current = false
-    poll()
-    pollRef.current = setInterval(poll, 1000)
-    return () => { if (pollRef.current) clearInterval(pollRef.current) }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active])
+    wasRunning.current = true
+    donePosted.current = false
+  }, [active])   // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (!active) return null
+  if (!visible) return null
 
   return (
     <Box sx={{ mt: 2 }}>
