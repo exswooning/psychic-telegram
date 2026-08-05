@@ -36,6 +36,47 @@ class _FakeDirectorySvc:
         return {"primaryEmail": self._key}
 
 
+class TestKeyResolution:
+    """
+    _build() used to authenticate every check with settings.source_sa_key --
+    the production source key, read-only by design (config.SOURCE_SCOPES's
+    own docstring). A scope check run against it was guaranteed to fail
+    with unauthorized_client no matter what was granted to the real
+    SEED_SA_KEY, because it was never testing that key at all.
+    """
+
+    def test_build_resolves_the_seed_key_not_the_source_key(self, monkeypatch):
+        seen = {}
+
+        class _FakeCreds:
+            def with_subject(self, subject):
+                return self
+
+        def fake_from_file(path, scopes):
+            seen["path"] = path
+            return _FakeCreds()
+
+        monkeypatch.setattr(
+            "google.oauth2.service_account.Credentials.from_service_account_file",
+            staticmethod(fake_from_file))
+        monkeypatch.setattr(check_seed, "_resolve_key_path",
+                            lambda settings: "/path/to/seed-sa.json")
+
+        check_seed._build("drive", "v3", ["scope"], "admin@example.com")
+        assert seen["path"] == "/path/to/seed-sa.json"
+
+    def test_build_source_calls_the_shared_resolver_not_settings_directly(self):
+        """A hardcoded `settings.source_sa_key` in _build()'s actual
+        credential call is exactly the regression this guards against --
+        assert the code calls the same resolver seed_sandbox.py itself
+        uses, not the raw field. Checked past the docstring, which
+        necessarily names the old field in its explanation."""
+        src = inspect.getsource(check_seed._build)
+        body = src[src.index('"""', src.index('"""') + 3) + 3:]
+        assert "_resolve_key_path(settings)" in body
+        assert "settings.source_sa_key" not in body
+
+
 class TestAccountChecking:
     """
     check_accounts() used to check a hardcoded alice/bob/carol/dave/erin,

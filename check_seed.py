@@ -35,13 +35,27 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "data-generator"))
 
 from config import Settings  # noqa: E402
-from seed_sandbox import SEED_SCOPES, discover_tenant_entries  # noqa: E402
+from seed_sandbox import (  # noqa: E402
+    SEED_SCOPES, _resolve_key_path, discover_tenant_entries,
+)
 
 DIRECTORY_WRITE_SCOPE = "https://www.googleapis.com/auth/admin.directory.user"
 
 
 def _build(api: str, version: str, scopes: list[str], subject: str):
-    """A delegated read-only client, minting a fresh token per check."""
+    """
+    A delegated client, minting a fresh token per check.
+
+    Uses SEED_SA_KEY the same way seed_sandbox.py itself resolves it
+    (_resolve_key_path: SEED_SA_KEY env var, falling back to
+    source_sa_key) -- not settings.source_sa_key directly. That key is the
+    production source service account, read-only by design (see
+    config.SOURCE_SCOPES's own docstring), so a scope check against it was
+    always going to fail with unauthorized_client regardless of what was
+    granted to the real seed key. This is meant to answer "will the
+    seeder's own credential work", which means testing the seeder's own
+    credential.
+    """
     import google_auth_httplib2
     import httplib2
     from google.oauth2 import service_account
@@ -49,7 +63,7 @@ def _build(api: str, version: str, scopes: list[str], subject: str):
 
     settings = Settings()
     creds = service_account.Credentials.from_service_account_file(
-        settings.source_sa_key, scopes=scopes
+        _resolve_key_path(settings), scopes=scopes
     ).with_subject(subject)
     return build(api, version,
                  http=google_auth_httplib2.AuthorizedHttp(
