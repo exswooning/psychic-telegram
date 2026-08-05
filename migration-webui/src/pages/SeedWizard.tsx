@@ -1,13 +1,15 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import {
   Box, Typography, Card, CardContent, Chip, Button, TextField, Grid, Alert,
-  MenuItem, Checkbox, FormControlLabel, LinearProgress,
+  MenuItem, Checkbox, FormControlLabel, LinearProgress, Stack,
   Dialog, DialogActions, DialogContent, DialogTitle,
 } from '@mui/material'
 import { Refresh as RefreshIcon } from '@mui/icons-material'
 import {
-  fetchStatus, checkStep, runSeed, runResetTarget, StatusPayload,
+  fetchStatus, checkStep, fetchActions, runSeed, runResetTarget,
+  ActionSpec, StatusPayload,
 } from '@/api/client'
+import JobRunner from '@/components/JobRunner'
 
 /**
  * Sandbox rehearsal tools: seed a throwaway source tenant with test data,
@@ -27,14 +29,16 @@ import {
 
 const SeedWizard: React.FC = () => {
   const [status, setStatus] = useState<StatusPayload | null>(null)
+  const [actions, setActions] = useState<Record<string, ActionSpec>>({})
   const [checking, setChecking] = useState(false)
   const [checkResult, setCheckResult] = useState<string | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     try {
-      const s = await fetchStatus()
+      const [s, a] = await Promise.all([fetchStatus(), fetchActions()])
       if (s.error) { setLoadError(s.error) } else { setStatus(s); setLoadError(null) }
+      setActions(a)
     } catch (e) {
       setLoadError(e instanceof Error ? e.message : String(e))
     }
@@ -99,6 +103,19 @@ const SeedWizard: React.FC = () => {
             </Box>
             {seedStep.note && (
               <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>{seedStep.note}</Typography>
+            )}
+            {/* check_seed_accounts is what actually lists every account the
+               seeder will target -- discover_tenant_entries()'s live
+               Directory lookup, printed OK/MISS per address -- not
+               something /api/status can show on a poll (see
+               webui_spa.py's module docstring on why nothing here makes a
+               live Google API call outside an explicit action). */}
+            {seedStep.actions.length > 0 && (
+              <Stack spacing={2} sx={{ mt: 1.5, mb: 1.5 }}>
+                {seedStep.actions.map((key) => actions[key] && (
+                  <JobRunner key={key} name={key} spec={actions[key]} onDone={refresh} />
+                ))}
+              </Stack>
             )}
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mt: 1 }}>
               <Button variant="outlined" size="small" onClick={handleCheck} disabled={checking}>
