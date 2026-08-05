@@ -20,7 +20,8 @@ import base64
 import pytest
 
 from config import FOLDER_MIME, Settings
-from tests.fakes import FakeAuth, FakeCalendar, FakeChat, FakeDrive, FakeGmail
+from tests.fakes import (FakeAuth, FakeCalendar, FakeChat, FakeDrive,
+                        FakeGmail, FakePeople, FakeTasks)
 from corpus import ORG, SCALES, CorpusBuilder
 
 SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
@@ -523,3 +524,337 @@ class TestResetIsActuallyComplete:
         import seed_sandbox
 
         assert "@seed.test" in inspect.getsource(seed_sandbox.reset_gmail)
+
+
+# ======================================================================
+# Licence-aware user selection (--fit-to-licenses)
+# ======================================================================
+def _entries(locals_):
+    return [{"local": lp, "email": f"{lp}@tenanta.com"} for lp in locals_]
+
+
+def test_fit_truncates_when_over_capacity():
+    """More requested users than seats: keep the first `available`."""
+    import seed_sandbox as s
+
+    fitted = s.fit_entries(_entries(["alice", "bob", "carol", "dave", "erin"]),
+                           available=3, existing_emails=set(),
+                           domain="tenanta.com")
+    assert [e["email"] for e in fitted] == [
+        "alice@tenanta.com", "bob@tenanta.com", "carol@tenanta.com"]
+
+
+def test_fit_keeps_existing_users_first():
+    """Existing users never consume headroom; new users fill what is left."""
+    import seed_sandbox as s
+
+    entries = _entries(["alice", "bob", "carol", "dave", "erin"])
+    existing = {"alice@tenanta.com", "bob@tenanta.com"}
+    fitted = s.fit_entries(entries, available=2, existing_emails=existing,
+                           domain="tenanta.com")
+    assert [e["email"] for e in fitted] == [
+        "alice@tenanta.com", "bob@tenanta.com", "carol@tenanta.com",
+        "dave@tenanta.com"]
+
+
+def test_fit_pads_unused_seats_with_generated_users():
+    """Unused headroom is filled so every licence gets exercised."""
+    import seed_sandbox as s
+
+    entries = _entries(["alice", "bob"])
+    fitted = s.fit_entries(entries, available=5, existing_emails=set(),
+                           domain="tenanta.com")
+    emails = [e["email"] for e in fitted]
+    assert len(emails) == 5
+    assert len(set(emails)) == 5
+    assert emails[:2] == ["alice@tenanta.com", "bob@tenanta.com"]
+    # Generated users must carry the ORG dept/project template, like any seed.
+    for e in fitted[2:]:
+        assert e["dept"] and e["project"]
+
+
+def test_fit_with_no_headroom_keeps_only_existing():
+    """Zero free seats and nobody existing -> nothing to seed."""
+    import seed_sandbox as s
+
+    entries = _entries(["alice", "bob"])
+    fitted = s.fit_entries(entries, available=0, existing_emails=set(),
+                           domain="tenanta.com")
+    assert fitted == []
+
+
+def test_fit_generated_names_never_collide_with_requested():
+    """A generated localpart must not shadow one already in the list."""
+    import seed_sandbox as s
+
+    # "fiona" is the first generated name; force a collision and expect fiona1.
+    entries = _entries(["alice", "fiona"])
+    fitted = s.fit_entries(entries, available=4, existing_emails=set(),
+                           domain="tenanta.com")
+    locals_ = [e["local"] for e in fitted]
+    assert "fiona" in locals_ and len(set(locals_)) == 4
+
+
+def test_parse_seats_sums_across_editions():
+    """The org holds exactly one edition, but the sum must be right either way."""
+    import seed_sandbox as s
+
+    rows = [
+        {"name": "accounts:apps_total_licenses", "intValue": "10"},
+        {"name": "accounts:apps_used_licenses", "intValue": "4"},
+        {"name": "accounts:gsuite_enterprise_total_licenses", "intValue": "1"},
+        {"name": "accounts:gsuite_enterprise_used_licenses", "intValue": "1"},
+    ]
+    seat = s._parse_seats(rows)
+    assert seat["total"] == 11
+    assert seat["used"] == 5
+    assert seat["available"] == 6
+
+
+def test_parse_seats_defaults_missing_editions_to_zero():
+    """A tenant that does not hold a given edition simply omits its row."""
+    import seed_sandbox as s
+
+    seat = s._parse_seats([])
+    assert seat == {"total": 0, "used": 0, "available": 0,
+                    "parameters": {}}
+
+
+# ======================================================================
+# Storage top-up, Contacts and Tasks seeding
+#
+# Added alongside contacts_engine.py/tasks_engine.py, which had nothing to
+# migrate: the seeder built drive/gmail/calendar/chat corpora but no contacts
+# or tasks at all. And "seed to a target GB per user" has no realistic path
+# through the office-document corpus (measured this session at tens of KB per
+# file on average -- reaching tens of GB that way means hundreds of thousands
+# of files per user), so it is a separate, deliberately unrealistic filler
+# pass instead.
+# ======================================================================
+class _FakeMediaFn:
+    """Mirrors test_seed_sandbox.py's own _media() above, injected the same
+    way CorpusBuilder already takes one -- top_up_storage's production code
+    calls the real _media(), which wraps a real MediaIoBaseUpload that this
+    fake Drive cannot read (it expects .read_all(), not the real client's
+    interface). Without injection there is no way to test this at all."""
+
+    def __call__(self, data: bytes, mimetype: str):
+        return _FakeMedia(data, mimetype)
+
+
+class TestStorageTopUp:
+    def test_already_at_target_adds_nothing(self, settings):
+        import seed_sandbox as s
+
+        drive = FakeDrive("alice@tenanta.com", "source")
+        drive.storage_usage = 30 * 1024**3   # already at 30 GB
+        drive.storage_limit = 1024**4
+
+        m = s.top_up_storage(drive, settings, "alice@tenanta.com", 30.0,
+                             media_fn=_FakeMediaFn())
+
+        assert m["filler_files"] == 0
+        assert m["filler_bytes"] == 0
+
+    def test_fills_the_gap_between_usage_and_target(self, settings, monkeypatch):
+        import seed_sandbox as s
+
+        # A small chunk so the test uploads a handful of files, not gigabytes.
+        monkeypatch.setattr(s, "_filler_blob", lambda: b"x" * (10 * 1024**2))
+
+        drive = FakeDrive("alice@tenanta.com", "source")
+        drive.storage_usage = 0
+        drive.storage_limit = 1024**4
+
+        # 25 MiB target over a 10 MiB chunk: 2 full chunks + a 5 MiB
+        # remainder. top_up_storage works in decimal GB (target_gb * 1e9),
+        # matching storageQuota's own byte units -- so the target is derived
+        # from the exact byte count wanted, not assumed from a round GB value.
+        target_bytes = 25 * 1024**2
+        m = s.top_up_storage(drive, settings, "alice@tenanta.com",
+                             target_gb=target_bytes / 1e9, media_fn=_FakeMediaFn())
+
+        assert m["filler_files"] == 3
+        assert m["filler_bytes"] == target_bytes
+
+    def test_a_tiny_remainder_is_not_worth_a_whole_extra_file(
+            self, settings, monkeypatch):
+        monkeypatch.setattr(
+            __import__("seed_sandbox"), "_filler_blob",
+            lambda: b"x" * (10 * 1024**2))
+        import seed_sandbox as s
+
+        drive = FakeDrive("alice@tenanta.com", "source")
+        drive.storage_usage = 0
+        drive.storage_limit = 1024**4
+
+        # 10 MB + 500 KB: the remainder is under the 1 MB floor and is skipped
+        # rather than uploaded as a near-empty file.
+        target_bytes = 10 * 1024**2 + 500 * 1024
+        m = s.top_up_storage(drive, settings, "alice@tenanta.com",
+                             target_gb=target_bytes / 1e9,
+                             media_fn=_FakeMediaFn())
+
+        assert m["filler_files"] == 1
+        assert m["filler_bytes"] == 10 * 1024**2
+
+    def test_the_licence_ceiling_caps_the_target(self, settings, monkeypatch):
+        """Asking for more than the account's own licence limit would just
+        fail partway through with storageQuotaExceeded -- capped here instead
+        of discovered as an upload failure."""
+        monkeypatch.setattr(
+            __import__("seed_sandbox"), "_filler_blob",
+            lambda: b"x" * (10 * 1024**2))
+        import seed_sandbox as s
+
+        drive = FakeDrive("alice@tenanta.com", "source")
+        drive.storage_usage = 0
+        drive.storage_limit = 20 * 1024**2   # a tiny 20 MB "licence"
+
+        m = s.top_up_storage(drive, settings, "alice@tenanta.com",
+                             target_gb=1.0, media_fn=_FakeMediaFn())
+
+        assert m["filler_bytes"] <= 20 * 1024**2
+        assert "licence" in m["note"]
+
+    def test_filler_lives_under_the_reset_root(self, settings, monkeypatch):
+        """Named exactly what reset_drive() already matches on, so top-up
+        adds no separate reset path to write or remember."""
+        monkeypatch.setattr(
+            __import__("seed_sandbox"), "_filler_blob",
+            lambda: b"x" * (10 * 1024**2))
+        import seed_sandbox as s
+
+        drive = FakeDrive("alice@tenanta.com", "source")
+        drive.storage_usage = 0
+        drive.storage_limit = 1024**4
+        s.top_up_storage(drive, settings, "alice@tenanta.com",
+                         target_gb=10 / 1024, media_fn=_FakeMediaFn())
+
+        roots = [f for f in drive.store.values() if f["name"] == "MIGRATION-TEST"]
+        assert len(roots) == 1
+        deleted = s.reset_drive(drive, settings)
+        assert deleted >= 1
+        assert not any(f["name"] == "MIGRATION-TEST" for f in drive.store.values())
+
+
+class TestSeedContacts:
+    def test_creates_contacts_and_two_groups(self, settings):
+        import seed_sandbox as s
+
+        people = FakePeople("alice@tenanta.com", "source")
+        m = s.seed_contacts(people, settings, "alice@tenanta.com",
+                            ["bob@tenanta.com"], "external.tester@example.com",
+                            count=6)
+
+        assert m["contacts"] == 6
+        assert m["groups"] == 2
+        assert m["note"] == ""
+        assert len(people.contacts) == 6
+
+    def test_every_contact_is_marked_for_reset(self, settings):
+        """reset_contacts() can only find what this seeder created if every
+        contact carries the marker -- otherwise a reset silently deletes
+        nothing, or (worse) it becomes tempting to widen the match and delete
+        contacts the seeder never touched."""
+        import seed_sandbox as s
+
+        people = FakePeople("alice@tenanta.com", "source")
+        s.seed_contacts(people, settings, "alice@tenanta.com", [],
+                        "external.tester@example.com", count=3)
+
+        for rec in people.contacts.values():
+            assert s._SEED_MARKER in rec.get("userDefined", [])
+
+    def test_contacts_are_split_across_the_groups(self, settings):
+        import seed_sandbox as s
+
+        people = FakePeople("alice@tenanta.com", "source")
+        s.seed_contacts(people, settings, "alice@tenanta.com", [],
+                        "external.tester@example.com", count=10)
+
+        total_membership = sum(len(v) for v in people.group_members.values())
+        assert total_membership == 10
+
+    def test_a_missing_scope_is_recorded_not_raised(self, settings):
+        """The whole reason this is isolated from build_services(): contacts
+        write access is commonly granted on a different schedule than
+        drive/gmail/calendar/chat, and one user's missing grant must not
+        abort seeding for everyone else."""
+        import seed_sandbox as s
+
+        class _Denying:
+            def contactGroups(self):
+                raise RuntimeError("unauthorized_client")
+
+        m = s.seed_contacts(_Denying(), settings, "alice@tenanta.com", [],
+                            "external.tester@example.com")
+        assert "contacts failed" in m["note"]
+        assert m["contacts"] == 0
+
+    def test_reset_removes_only_marked_contacts(self, settings):
+        import seed_sandbox as s
+
+        people = FakePeople("alice@tenanta.com", "source")
+        people.add_contact("Real Person", "real@tenanta.com")   # not seeded
+        s.seed_contacts(people, settings, "alice@tenanta.com", [],
+                        "external.tester@example.com", count=4)
+        assert len(people.contacts) == 5
+
+        deleted = s.reset_contacts(people, settings)
+
+        assert deleted == 4
+        assert len(people.contacts) == 1
+        assert next(iter(people.contacts.values()))["names"][0]["givenName"] \
+            == "Real Person"
+
+
+class TestSeedTasks:
+    def test_creates_one_list_with_the_requested_tasks(self, settings):
+        import seed_sandbox as s
+
+        tasks = FakeTasks("alice@tenanta.com", "source")
+        m = s.seed_tasks(tasks, settings, count=8)
+
+        assert m["lists"] == 1
+        assert m["tasks"] == 8
+        assert m["note"] == ""
+
+    def test_some_tasks_are_marked_completed(self, settings):
+        """All-pending test data would not exercise the completed/pending
+        split contacts_engine.py's ServiceProgress model actually reports on."""
+        import seed_sandbox as s
+
+        tasks = FakeTasks("alice@tenanta.com", "source")
+        s.seed_tasks(tasks, settings, count=12)
+
+        all_tasks = [t for lst in tasks.task_store.values() for t in lst]
+        completed = [t for t in all_tasks if t.get("status") == "completed"]
+        assert completed and len(completed) < len(all_tasks)
+
+    def test_a_missing_scope_is_recorded_not_raised(self, settings):
+        import seed_sandbox as s
+
+        class _Denying:
+            def tasklists(self):
+                raise RuntimeError("unauthorized_client")
+
+        m = s.seed_tasks(_Denying(), settings)
+        assert "tasks failed" in m["note"]
+        assert m["tasks"] == 0
+
+    def test_reset_deletes_the_list_and_its_tasks(self, settings):
+        import seed_sandbox as s
+
+        tasks = FakeTasks("alice@tenanta.com", "source")
+        other = tasks.add_list("A real list")
+        tasks.add_task(other, "Something real")
+        s.seed_tasks(tasks, settings, count=5)
+        assert len(tasks.lists) == 2
+
+        deleted = s.reset_tasks(tasks, settings)
+
+        assert deleted == 1
+        assert len(tasks.lists) == 1
+        assert tasks.lists[other]["title"] == "A real list"
+        assert len(tasks.task_store[other]) == 1   # untouched

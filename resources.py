@@ -29,6 +29,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 
 # Peak resident memory a single worker needs, in MB. Derived from the migrator
@@ -40,6 +41,14 @@ MB_PER_WORKER = 320
 # Above this fraction of swap in use, the machine is already trading disk for
 # memory and more concurrency makes it strictly worse.
 SWAP_DISTRESS = 0.60
+
+# Drain trigger for the memory-pause watchdog (main.py). A hard floor (128 MB)
+# plus a fraction of TOTAL RAM -- never of *usable* RAM, which shrinks as
+# memory drains and would eventually sit below anything the machine can reach.
+# That self-referential threshold is what made an earlier admission-gate design
+# dead code on any host above ~2.5 GB.
+PRESSURE_FLOOR_MB = 128
+PRESSURE_FLOOR_FRACTION = 0.05
 
 HARD_CAP = 16          # beyond this, Google's per-user quotas bind first
 MIN_WORKERS = 1
@@ -400,6 +409,45 @@ def probe() -> SystemResources:
     if r.cpu_logical < 1:
         r.cpu_logical = _visible_cpus()
     return r
+
+
+def pressure_severe(resources: SystemResources) -> bool:
+    """
+    True when the machine is close to catastrophic memory failure.
+
+    Single-sample predicate; the watchdog in main.py applies the sustained-N
+    rule on top. A host with swap signals distress through swap use -- that is
+    where its memory goes when it runs out. A swapless host, the production
+    path, has nowhere to spill and low usable RAM is fatal, so it gets a hard
+    floor: max(128 MB, 5% of TOTAL RAM). The floor is computed once from total
+    RAM so it cannot shrink as memory drains.
+    """
+    if resources.swap_total_gb > 0:
+        return resources.swap_fraction >= SWAP_DISTRESS
+    floor_gb = max(PRESSURE_FLOOR_MB / 1024.0,
+                   PRESSURE_FLOOR_FRACTION * resources.ram_total_gb)
+    return resources.ram_usable_gb < floor_gb
+
+
+_probe_cache: SystemResources | None = None
+_probe_cache_until = 0.0
+
+
+def cached_probe(ttl: float = 3.0) -> SystemResources:
+    """
+    probe() with a short TTL, for the watchdog's ~2 s polling loop.
+
+    probe() shells out to sysctl/vm_stat on macOS and re-reads /proc on Linux;
+    recomputing it every loop is wasteful and a 2-5 s old snapshot is plenty
+    for a drain decision. Single global, single reader (the watchdog); a stale
+    read is harmless and a duplicate probe is harmless, so no lock is needed.
+    """
+    global _probe_cache, _probe_cache_until
+    now = time.monotonic()
+    if _probe_cache is None or now >= _probe_cache_until:
+        _probe_cache = probe()
+        _probe_cache_until = now + ttl
+    return _probe_cache
 
 
 def recommend(r: SystemResources | None = None) -> dict:

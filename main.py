@@ -54,11 +54,28 @@ from drive_engine import DriveMigrator
 from gmail_engine import GmailMigrator
 from tasks_engine import TasksMigrator
 from resilience import DailyQuotaGuard, QuotaExhausted
+from resources import cached_probe, pressure_severe
 
 log = logging.getLogger("migrate")
 
 # Cooperative shutdown flag, flipped by SIGINT/SIGTERM.
 SHUTDOWN = threading.Event()
+
+# Memory watchdog's own pause flag. Distinct from SHUTDOWN so an exit caused by
+# sustained memory pressure can be reported (and code-pathed) separately from
+# an operator's Ctrl-C, which also sets SHUTDOWN.
+MEMORY_PAUSE = threading.Event()
+
+# Exit code for a run stopped by memory pressure. 0 is success, 1 is a reported
+# error, 2 is argparse usage -- 3 is the first free slot.
+EXIT_PAUSED = 3
+
+# Watchdog cadence: poll a cached probe every 2 s and require 3 consecutive
+# severe samples (~6 s) before draining, so one transient stall never pauses a
+# migration. While draining, remind the operator every 5 minutes.
+WATCHDOG_POLL_SEC = 2.0
+WATCHDOG_SUSTAINED_SAMPLES = 3
+MEMORY_REMINDER_SEC = 300.0
 
 
 def setup_logging(settings: Settings) -> None:
@@ -249,6 +266,96 @@ def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
                 results.append(fut.result())
             except Exception as exc:  # noqa: BLE001
                 log.exception("worker for %s crashed: %s", pending[fut], exc)
+    return results
+
+
+# ======================================================================
+# Memory watchdog
+#
+# Convert catastrophic memory pressure into a clean, resumable pause. The
+# executor, submit-all submission, worker lifecycle and ledger are all
+# untouched: the watchdog just flips SHUTDOWN once sustained severe pressure is
+# confirmed, workers finish their CURRENT service (they already check SHUTDOWN
+# between services), and the run exits PAUSED to resume from the ledger.
+#
+# There is deliberately no admission gate. Queued tasks are ~2.2 KB each (heavy
+# per-user state is built inside migrate_user, not at submit time), so the
+# active working set is bounded by ThreadPoolExecutor(max_workers=N) either
+# way; an admission gate would protect memory that was never in use.
+# ======================================================================
+def _memory_watchdog(stop_event: threading.Event, shutdown=SHUTDOWN,
+                     pause_event=MEMORY_PAUSE, probe_fn=None,
+                     poll: float = WATCHDOG_POLL_SEC,
+                     samples: int = WATCHDOG_SUSTAINED_SAMPLES,
+                     reminder: float = MEMORY_REMINDER_SEC) -> None:
+    """
+    Daemon thread that runs for the whole migration.
+
+    Before a drain it polls a cached probe and counts consecutive severe
+    samples; after `samples` of them it logs the transition and flips SHUTDOWN
+    exactly once. It then stops probing and only emits a periodic reminder
+    while in-flight services finish. Exits when the main thread sets
+    `stop_event` (run_batch returned) or the process dies (daemon).
+
+    Must never raise and never busy-loop: every path through the loop sleeps at
+    least `poll` seconds via stop_event.wait(), and a failing probe is logged
+    and skipped rather than propagated.
+    """
+    probe_fn = probe_fn or cached_probe
+    consecutive = 0
+    last_reminder = 0.0
+    while not stop_event.wait(poll):
+        if shutdown.is_set():
+            # Draining: workers are still finishing their current service.
+            if pause_event.is_set() and time.monotonic() - last_reminder >= reminder:
+                log.warning("Still waiting for current services to finish — "
+                            "the migration will pause. Re-run to resume.")
+                last_reminder = time.monotonic()
+            continue
+        try:
+            snapshot = probe_fn()
+        except Exception as exc:  # noqa: BLE001 - a broken probe must not kill the run
+            log.warning("Memory probe failed: %s — retrying", exc)
+            consecutive = 0
+            continue
+        if pressure_severe(snapshot):
+            consecutive += 1
+            if consecutive == 1:
+                log.warning("Memory pressure detected — confirming before pausing.")
+            elif consecutive >= samples:
+                log.warning("Entering drain mode — waiting for current services "
+                            "to finish.")
+                pause_event.set()
+                shutdown.set()
+                last_reminder = time.monotonic()
+        else:
+            if consecutive:
+                log.warning("Memory pressure subsided.")
+                consecutive = 0
+
+
+def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
+                           only=None) -> list[dict]:
+    """run_batch under the memory watchdog; exits PAUSED if it fires."""
+    MEMORY_PAUSE.clear()
+    stop = threading.Event()
+    watchdog = threading.Thread(target=_memory_watchdog, args=(stop,),
+                                name="watchdog", daemon=True)
+    watchdog.start()
+    try:
+        results = run_batch(auth, db, settings, services, delta=delta,
+                            delta_days=delta_days, only=only)
+    finally:
+        stop.set()
+        watchdog.join(timeout=WATCHDOG_POLL_SEC * 2 + 1)
+    if MEMORY_PAUSE.is_set():
+        log.warning("Migration paused — current services completed "
+                    "successfully; re-run to resume.")
+        print("\nMigration paused due to sustained memory pressure.")
+        print("Current services completed successfully.")
+        print("Re-run the same command to resume.")
+        print("Progress is preserved in the migration ledger.")
+        raise SystemExit(EXIT_PAUSED)
     return results
 
 
@@ -496,8 +603,8 @@ def cmd_migrate(args, settings: Settings, db: MigrationDB, auth: AuthManager):
         settings.migrate_contacts = True
     if "tasks" in services:
         settings.migrate_tasks = True
-    results = run_batch(auth, db, settings, services, delta=False,
-                        delta_days=0, only=args.user)
+    results = _run_with_memory_pause(
+        auth, db, settings, services, delta=False, delta_days=0, only=args.user)
     _print_batch_summary(results)
 
 
@@ -511,8 +618,9 @@ def cmd_delta(args, settings: Settings, db: MigrationDB, auth: AuthManager):
     services = {s.strip().lower() for s in args.services.split(",") if s.strip()}
     if "chat" in services:
         settings.migrate_chat = True
-    results = run_batch(auth, db, settings, services, delta=True,
-                        delta_days=args.days, only=args.user)
+    results = _run_with_memory_pause(
+        auth, db, settings, services, delta=True, delta_days=args.days,
+        only=args.user)
     _print_batch_summary(results)
 
 
