@@ -274,8 +274,18 @@ const ConfigStep: React.FC<{ onChanged: () => void }> = ({ onChanged }) => {
   }
 
   const pickMode = async (mode: string) => {
+    // setRunMode() only returns {ok, run_mode, msg} -- it never updates
+    // this component's own `cfg` state, so the RadioGroup's `value` kept
+    // reading the stale run_mode on every re-render and the click appeared
+    // to do nothing (or silently reverted). Refetching is what actually
+    // picks up the saved value, the same way `save()` above relies on
+    // `onChanged()` to refresh the surrounding wizard's status.
     const r = await setRunMode(mode)
-    if (r.ok) onChanged()
+    if (r.ok) {
+      const fresh = await fetchConfig()
+      setCfg(fresh)
+      onChanged()
+    }
   }
 
   return (
