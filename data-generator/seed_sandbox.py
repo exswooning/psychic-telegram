@@ -82,8 +82,15 @@ from corpus import ORG, SCALES, CorpusBuilder  # noqa: E402
 
 # The labels seed_gmail() creates. Reset removes exactly these -- deleting
 # every user label would take labels the account's owner made themselves.
+#
+# Not "Archive": Gmail's labels().create() rejects that exact name outright
+# with a 400 invalidArgument on every account, 100% reproducible -- observed
+# live on a real tenant, not a permissions or quota issue. Gmail reserves it
+# even though it is not a documented system label ID (unlike INBOX, SENT,
+# TRASH, etc.), presumably because it collides with the "Archive" action's
+# own internal handling. "Archived" (past tense) is accepted.
 SEED_LABELS = ["Clients", "Clients/Acme", "Clients/Acme/2024",
-               "Projects", "Projects/Apollo", "Archive", "Receipts"]
+               "Projects", "Projects/Apollo", "Archived", "Receipts"]
 
 SEED_SCOPES = [
     "https://www.googleapis.com/auth/drive",
