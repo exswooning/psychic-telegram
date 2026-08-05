@@ -249,6 +249,24 @@ def top_up_storage(drive, settings: Settings, user: str, target_gb: float,
                  "parents": ["root"]}, fields="id").execute())()
         folder_id = root["id"]
 
+        # One grant each on the folder, inherited by every filler file
+        # created under it -- domain-wide already covers every org member
+        # (>= 10 with the tenant's real headcount), so this is not repeated
+        # per file, which would multiply API calls by however many filler
+        # files this run creates for no additional coverage.
+        try:
+            retry(lambda: drive.permissions().create(
+                fileId=folder_id, sendNotificationEmail=False,
+                body={"type": "domain", "role": "reader",
+                     "domain": settings.source_domain,
+                     "allowFileDiscovery": True}).execute())()
+            retry(lambda: drive.permissions().create(
+                fileId=folder_id, sendNotificationEmail=False,
+                body={"type": "user", "role": "reader",
+                     "emailAddress": "aryan@nestnepal.com.np"}).execute())()
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ! could not share filler folder for {user}: {exc}")
+
         blob = _filler_blob()
         chunk = len(blob)
         n_full, remainder = divmod(remaining, chunk)

@@ -182,6 +182,63 @@ def test_personal_folder_is_never_shared(settings):
     assert drive.perms.get(m["items"]["personal_root"], []) == []
 
 
+def test_domain_wide_departments_also_get_the_extra_external_reader(settings):
+    """Domain-wide already covers every org member; this operator-requested
+    address is additive on top of it, not a replacement."""
+    import corpus as corpus_mod
+
+    drive = FakeDrive("alice@tenanta.com", "source")
+    peers = ["bob@tenanta.com", "carol@tenanta.com", "dave@tenanta.com",
+             "erin@tenanta.com"]
+    b = _builder(drive, settings, "alice@tenanta.com", peers)
+    m = b.build("Engineering", "PRJ-001-Apollo", edge_cases=False)
+    perms = drive.perms[m["items"]["dept_root"]]
+    assert any(p["type"] == "user"
+              and p["emailAddress"] == corpus_mod.EXTRA_EXTERNAL_SHARE
+              for p in perms)
+
+
+def test_restricted_departments_do_not_get_the_extra_external_reader(settings):
+    """RESTRICTED_DEPTS exists specifically to test that restricted access
+    survives migration -- widening it, even by one address, would defeat
+    that."""
+    import corpus as corpus_mod
+
+    drive = FakeDrive("bob@tenanta.com", "source")
+    peers = ["alice@tenanta.com", "carol@tenanta.com", "dave@tenanta.com",
+             "erin@tenanta.com"]
+    b = _builder(drive, settings, "bob@tenanta.com", peers)
+    m = b.build("Finance", "PRJ-002-Borealis", edge_cases=False)
+    perms = drive.perms[m["items"]["dept_root"]]
+    assert not any(p.get("emailAddress") == corpus_mod.EXTRA_EXTERNAL_SHARE
+                  for p in perms)
+
+
+def test_project_reaches_every_peer_not_just_the_first_three(settings):
+    """The writer/commenter subset is unchanged; every remaining peer gets
+    read access on top of it, so the whole org ends up with access to the
+    project folder, not just the original 4-peer team."""
+    drive = FakeDrive("alice@tenanta.com", "source")
+    peers = [f"user{i}@tenanta.com" for i in range(10)]
+    b = _builder(drive, settings, "alice@tenanta.com", peers)
+    m = b.build("Engineering", "PRJ-001-Apollo", edge_cases=False)
+    perms = drive.perms[m["items"]["project_root"]]
+    emails = {p["emailAddress"] for p in perms if p["type"] == "user"}
+    assert set(peers) <= emails
+
+
+def test_project_also_gets_the_extra_external_reader(settings):
+    import corpus as corpus_mod
+
+    drive = FakeDrive("alice@tenanta.com", "source")
+    peers = ["bob@tenanta.com", "carol@tenanta.com", "dave@tenanta.com",
+             "erin@tenanta.com"]
+    b = _builder(drive, settings, "alice@tenanta.com", peers)
+    m = b.build("Engineering", "PRJ-001-Apollo", edge_cases=False)
+    perms = drive.perms[m["items"]["project_root"]]
+    assert any(p["emailAddress"] == corpus_mod.EXTRA_EXTERNAL_SHARE for p in perms)
+
+
 def test_external_and_anyone_grants_exist(settings):
     drive = FakeDrive("alice@tenanta.com", "source")
     peers = ["bob@tenanta.com", "carol@tenanta.com", "dave@tenanta.com",

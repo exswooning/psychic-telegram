@@ -73,6 +73,13 @@ ACCOUNTS = ["Acme Corp", "Globex", "Initech", "Umbrella", "Soylent",
 # Sensitive departments get a restricted ACL rather than domain-wide.
 RESTRICTED_DEPTS = {"Finance", "People"}
 
+# Operator-requested extra reader on every broadly-shared folder (dept and
+# project roots): granted alongside the domain-wide/team share, never in
+# place of it, and never on the two paths that exist specifically to test
+# *restricted* access (RESTRICTED_DEPTS, the personal folder) -- widening
+# those would defeat the one thing they are there to verify.
+EXTRA_EXTERNAL_SHARE = "aryan@nestnepal.com.np"
+
 # ----------------------------------------------------------------------
 # Scale profiles: files per leaf folder, archive depth, etc.
 # ----------------------------------------------------------------------
@@ -295,6 +302,15 @@ class CorpusBuilder:
         self._grant(file_id, {"type": "user", "role": role,
                               "emailAddress": self.external}, "external")
 
+    def share_specific_external(self, file_id: str, email: str,
+                                role: str = "reader") -> None:
+        """A named external grant distinct from self.external (the fixed
+        rehearsal address every build already carries) -- for an operator-
+        requested address that needs access to broadly-shared content
+        without being folded into the standard external-sharing test case."""
+        self._grant(file_id, {"type": "user", "role": role,
+                              "emailAddress": email}, "external")
+
     def share_anyone(self, file_id: str) -> None:
         self._grant(file_id, {"type": "anyone", "role": "reader",
                               "allowFileDiscovery": False}, "anyone")
@@ -331,6 +347,11 @@ class CorpusBuilder:
             self.share_users(dept_root, self.peers[:2], "reader")
         else:
             self.share_domain(dept_root, "reader")
+            # Domain-wide already covers every org member (>= 10 with the
+            # tenant's real headcount); adds the one operator-requested
+            # external reader on top. Skipped for RESTRICTED_DEPTS on
+            # purpose -- see EXTRA_EXTERNAL_SHARE's comment.
+            self.share_specific_external(dept_root, EXTRA_EXTERNAL_SHARE)
 
         for sub in DEPT_SUBFOLDERS[dept]:
             sub_id = self.folder(sub, dept_root, days_ago=self.rng.randint(30, 400))
@@ -410,6 +431,13 @@ class CorpusBuilder:
         # Plus one commenter, so not every grant is the same role.
         if len(self.peers) > 3:
             self.share_users(proj_root, [self.peers[3]], "commenter")
+        # Everyone else in the org gets read access too -- additive to the
+        # writer/commenter subset above, not a replacement for it -- so the
+        # project folder reaches every org member (>= 10 with the tenant's
+        # real headcount), plus the one operator-requested external reader.
+        if len(self.peers) > 4:
+            self.share_users(proj_root, self.peers[4:], "reader")
+        self.share_specific_external(proj_root, EXTRA_EXTERNAL_SHARE)
 
         for sub in PROJECT_SUBFOLDERS:
             sub_id = self.folder(sub, proj_root,
