@@ -85,7 +85,9 @@ ACTIONS: dict[str, dict] = {
     },
     "check_seed_accounts": {
         "label": "Check seed accounts",
-        "blurb": "Verify alice/bob/carol/dave/erin exist in the source tenant.",
+        "blurb": "Verify the accounts the seeder will target exist -- every "
+                 "user the source tenant already has, or the 5-user default "
+                 "if that lookup cannot run.",
         "argv": [PY, "check_seed.py", "accounts"],
     },
     "check_seed_scopes": {

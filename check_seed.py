@@ -4,13 +4,19 @@ check_seed.py
 Read-only diagnostics for the seeding step. Answers the three questions that
 determine whether `data-generator/seed_sandbox.py` can actually write:
 
-  * `accounts` -- do the five test accounts exist in the source tenant?
+  * `accounts` -- do the accounts the seeder will actually target exist in
+                  the source tenant? Same live Directory lookup
+                  seed_sandbox.py's own default path uses (every user the
+                  tenant already has), falling back to the same fixed
+                  5-user default it falls back to when that lookup cannot
+                  run -- this check and the seeder it is checking never
+                  disagree about who "the accounts" are.
   * `scopes`   -- are the seeder's write scopes authorised, including the
                   `admin.directory.user` write scope that --create-users needs?
 
 Nothing here writes to either tenant; every call is read-only.
 
-    python3 check_seed.py accounts     # report each of the 5 test accounts
+    python3 check_seed.py accounts     # report each account the seeder targets
     python3 check_seed.py scopes       # verify seed + directory write scopes
     python3 check_seed.py              # both
 
@@ -29,9 +35,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "data-generator"))
 
 from config import Settings  # noqa: E402
-from seed_sandbox import SEED_SCOPES  # noqa: E402
+from seed_sandbox import SEED_SCOPES, discover_tenant_entries  # noqa: E402
 
-SEED_USERS = ["alice", "bob", "carol", "dave", "erin"]
 DIRECTORY_WRITE_SCOPE = "https://www.googleapis.com/auth/admin.directory.user"
 
 
@@ -57,14 +62,22 @@ def check_accounts(settings: Settings) -> bool:
         print("SOURCE_ADMIN is not set -- set it to a super admin of "
               f"{settings.source_domain} in step 2 first.")
         return False
-    print(f"Checking the {len(SEED_USERS)} test accounts in "
+
+    # The same discovery seed_sandbox.py's default (no --users/--all-users)
+    # path uses -- so this reports on exactly the accounts a plain seeding
+    # run will actually target, real tenant headcount included, not a
+    # hardcoded five.
+    entries, warning = discover_tenant_entries(settings)
+    if warning:
+        print(f"Note: {warning}\n")
+    print(f"Checking {len(entries)} account(s) in "
           f"{settings.source_domain} as {settings.source_admin} ...\n")
     svc = _build("admin", "directory_v1",
                  ["https://www.googleapis.com/auth/admin.directory.user.readonly"],
                  settings.source_admin)
     ok = True
-    for lp in SEED_USERS:
-        email = f"{lp}@{settings.source_domain}"
+    for entry in entries:
+        email = entry["email"]
         try:
             svc.users().get(userKey=email, fields="primaryEmail").execute()
             print(f"  OK   {email}")
@@ -72,11 +85,11 @@ def check_accounts(settings: Settings) -> bool:
             print(f"  MISS {email}  -> {_short(exc)}")
             ok = False
     if ok:
-        print("\nAll test accounts exist. The seeder can impersonate them.")
+        print(f"\nAll {len(entries)} account(s) exist. The seeder can impersonate them.")
     else:
-        print("\nMissing accounts. Re-run the seeder with 'create the five "
-              "user accounts if they do not exist' checked -- delegation "
-              "cannot act on an address that is not in the directory.")
+        print("\nMissing accounts. Re-run the seeder with 'create the accounts "
+              "if they do not exist' checked -- delegation cannot act on an "
+              "address that is not in the directory.")
     return ok
 
 

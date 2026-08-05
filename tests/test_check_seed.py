@@ -14,7 +14,89 @@ from __future__ import annotations
 
 import inspect
 
+import pytest
+
 import check_seed
+
+
+class _FakeDirectorySvc:
+    def __init__(self, present: set[str]):
+        self.present = present
+
+    def users(self):
+        return self
+
+    def get(self, userKey, fields=None):
+        self._key = userKey
+        return self
+
+    def execute(self):
+        if self._key not in self.present:
+            raise RuntimeError(f"404: {self._key} not found")
+        return {"primaryEmail": self._key}
+
+
+class TestAccountChecking:
+    """
+    check_accounts() used to check a hardcoded alice/bob/carol/dave/erin,
+    regardless of who the seeder would actually target. It now checks
+    exactly discover_tenant_entries()'s output -- the same function
+    seed_sandbox.py's own default path uses -- so this preflight and a
+    plain seeding run never disagree about "the accounts".
+    """
+
+    @pytest.fixture(autouse=True)
+    def _settings(self, settings):
+        settings.source_admin = "admin@src.example.com"
+        self.settings = settings
+        return settings
+
+    def test_checks_every_discovered_account_not_a_fixed_five(self, monkeypatch):
+        entries = [{"email": f"user{i}@src.example.com"} for i in range(8)]
+        monkeypatch.setattr(check_seed, "discover_tenant_entries",
+                            lambda s: (entries, ""))
+        present = {e["email"] for e in entries}
+        monkeypatch.setattr(check_seed, "_build",
+                            lambda *a, **k: _FakeDirectorySvc(present))
+
+        assert check_seed.check_accounts(self.settings) is True
+
+    def test_a_missing_discovered_account_fails_the_check(self, monkeypatch, capsys):
+        entries = [{"email": "alice@src.example.com"},
+                  {"email": "ghost@src.example.com"}]
+        monkeypatch.setattr(check_seed, "discover_tenant_entries",
+                            lambda s: (entries, ""))
+        monkeypatch.setattr(check_seed, "_build",
+                            lambda *a, **k: _FakeDirectorySvc({"alice@src.example.com"}))
+
+        assert check_seed.check_accounts(self.settings) is False
+        out = capsys.readouterr().out
+        assert "MISS ghost@src.example.com" in out
+
+    def test_the_fallback_warning_is_surfaced_to_the_operator(self, monkeypatch, capsys):
+        """discover_tenant_entries() falls back to the 5-user default with a
+        warning when live discovery cannot run -- that warning must reach
+        the person running this check, not be silently absorbed."""
+        entries = [{"email": "alice@src.example.com"}]
+        monkeypatch.setattr(
+            check_seed, "discover_tenant_entries",
+            lambda s: (entries, "SOURCE_ADMIN is not set, so the real "
+                                "tenant headcount could not be read"))
+        monkeypatch.setattr(check_seed, "_build",
+                            lambda *a, **k: _FakeDirectorySvc({"alice@src.example.com"}))
+
+        check_seed.check_accounts(self.settings)
+        out = capsys.readouterr().out
+        assert "tenant headcount could not be read" in out
+
+    def test_no_source_admin_is_reported_without_calling_discovery(self, monkeypatch):
+        self.settings.source_admin = ""
+        called = []
+        monkeypatch.setattr(check_seed, "discover_tenant_entries",
+                            lambda s: called.append(1) or ([], ""))
+
+        assert check_seed.check_accounts(self.settings) is False
+        assert not called
 
 
 class TestScopeReporting:

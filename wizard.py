@@ -546,9 +546,13 @@ def build_steps(st: State, run_mode: str = "") -> list[dict]:
             "auto": ("cd data-generator && python3 seed_sandbox.py "
                      "--confirm-domain <SRC> --scale medium"),
             "help": [
-                "Builds a five-user organisation with a cross-user sharing",
-                "graph, mail, calendars, comments, drafts and the edge cases",
-                "that have broken migrations before.",
+                "Seeds every user the source tenant already has by default --",
+                "not a fixed five -- with a cross-user sharing graph, mail,",
+                "calendars, comments, drafts and the edge cases that have",
+                "broken migrations before. Pass --users a,b,c for an explicit",
+                "list instead, or --all-users to fail loudly rather than fall",
+                "back to a 5-user default if the tenant's user list can't be",
+                "read live.",
                 "",
                 "Refuses to run unless SANDBOX_MODE=true, --confirm-domain",
                 "matches, and the domain is not in PROTECTED_DOMAINS.",
