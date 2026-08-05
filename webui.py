@@ -1508,18 +1508,63 @@ def spa_users_payload() -> dict:
         conn.close()
 
 
+def _job_activity_entry() -> dict | None:
+    """
+    A synthetic ActivityEvent for the one background job, if any.
+
+    audit_log-backed activity is structurally blind to seed_sandbox.py,
+    reset_target.py, and deploy_remote.py: none of them ever write a row
+    to it (seed_sandbox.py calls Google's APIs directly; see
+    webui_spa.py's module docstring on why nothing here makes a live API
+    call of its own). Without this, "what is happening right now" lived in
+    two places depending on which kind of work it was -- the ledger-backed
+    feed for a migration, and only JobProgress's own panel for everything
+    else -- and a seed run looked like nothing was happening at all here.
+
+    Reshapes the same live Job state JobProgress already streams (see
+    Job.snapshot()) into one row at the front of the list, so it is not a
+    second thing to check.
+    """
+    snap = JOB.snapshot()
+    if not snap["name"]:
+        return None
+    last = next((ln for ln in reversed(snap["lines"]) if ln.strip()), "")
+    if snap["running"]:
+        status, action = "in_progress", f"{snap['name']} running"
+    elif snap["rc"] == 0:
+        status, action = "completed", f"{snap['name']} finished"
+    else:
+        status, action = "needs_attention", f"{snap['name']} stopped (exit {snap['rc']})"
+    return {
+        "id": f"job:{snap['name']}:{snap['total']}",
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "user": "System",
+        "action": action,
+        "status": status,
+        "details": last[:200] or None,
+    }
+
+
 def spa_activity_payload() -> dict:
     import sqlite3
 
     import webui_spa
 
+    job_entry = _job_activity_entry()
     conn = _db_conn()
     if conn is None:
-        return {"error": "no database yet", "activity": []}
+        # Still surfaced: a job can run before init-db has ever been done
+        # (a seed-only session, say), and the operator should see it -- but
+        # the "no database yet" note is real diagnostic information too
+        # (see ActivityFeed.tsx's error banner), so it is kept, not dropped
+        # just because there also happens to be a job to show.
+        return {"error": "no database yet", "activity": [job_entry] if job_entry else []}
     try:
-        return {"error": "", "activity": webui_spa.activity_payload(conn)}
+        activity = webui_spa.activity_payload(conn)
+        return {"error": "", "activity": ([job_entry] if job_entry else []) + activity}
     except sqlite3.Error as exc:
-        return {"error": f"db read error: {exc}", "activity": []}
+        return {"error": f"db read error: {exc}",
+               "activity": [job_entry] if job_entry else []}
     finally:
         conn.close()
 
