@@ -26,6 +26,7 @@ import {
 } from '@mui/icons-material'
 import { useMigrationStore } from '@/store'
 import { fetchConfig, saveDeployConfig, runDeploy, DeployFields } from '@/api/client'
+import JobProgress from '@/components/JobProgress'
 
 const Settings: React.FC = () => {
   const { darkMode, toggleDarkMode } = useMigrationStore()
@@ -133,8 +134,9 @@ const DeployCard: React.FC = () => {
   const [includeCredentials, setIncludeCredentials] = useState(false)
   const [loaded, setLoaded] = useState(false)
   const [saveMsg, setSaveMsg] = useState<string | null>(null)
-  const [deployMsg, setDeployMsg] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
+  const [jobActive, setJobActive] = useState(false)
+  const [jobRunning, setJobRunning] = useState(false)
 
   useEffect(() => {
     fetchConfig().then((c) => {
@@ -155,7 +157,8 @@ const DeployCard: React.FC = () => {
   }
 
   const deploy = async () => {
-    setErr(null); setDeployMsg(null)
+    setErr(null)
+    setJobActive(false)
     let confirm: string | undefined
     if (includeCredentials) {
       confirm = window.prompt(
@@ -165,7 +168,7 @@ const DeployCard: React.FC = () => {
       if (confirm !== 'DEPLOY') return
     }
     const r = await runDeploy(fields, includeCredentials, confirm)
-    if (r.ok) setDeployMsg('deploy started -- watch the Activity Feed')
+    if (r.ok) setJobActive(true)
     else setErr(r.error || 'could not start')
   }
 
@@ -225,13 +228,13 @@ const DeployCard: React.FC = () => {
           <Button variant="outlined" startIcon={<SaveIcon />} onClick={save}>
             Save VPS credentials
           </Button>
-          <Button variant="contained" color="error" disabled={!fields.host} onClick={deploy}>
+          <Button variant="contained" color="error" disabled={!fields.host || jobRunning} onClick={deploy}>
             Deploy now
           </Button>
         </Stack>
         {saveMsg && <Alert severity="success" sx={{ mt: 2 }}>{saveMsg}</Alert>}
-        {deployMsg && <Alert severity="success" sx={{ mt: 2 }}>{deployMsg}</Alert>}
         {err && <Alert severity="error" sx={{ mt: 2 }}>{err}</Alert>}
+        <JobProgress active={jobActive} expectedName="deploy" onRunningChange={setJobRunning} />
       </CardContent>
     </Card>
   )

@@ -10,6 +10,7 @@ import {
   ActionSpec, StatusPayload, DwdPayload,
 } from '@/api/client'
 import JobRunner from '@/components/JobRunner'
+import JobProgress from '@/components/JobProgress'
 
 /**
  * Sandbox rehearsal tools: seed a throwaway source tenant with test data,
@@ -227,13 +228,15 @@ const SeedStep: React.FC = () => {
   const [createUsers, setCreateUsers] = useState(false)
   const [allUsers, setAllUsers] = useState(false)
   const [reset, setReset] = useState(false)
-  const [msg, setMsg] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
+  const [jobActive, setJobActive] = useState(false)
+  const [jobRunning, setJobRunning] = useState(false)
 
   const start = async () => {
-    setErr(null); setMsg(null)
+    setErr(null)
+    setJobActive(false)
     const r = await runSeed(confirmDomain, scale, createUsers, reset, allUsers)
-    if (r.ok) setMsg('seeding started -- watch the Activity Feed')
+    if (r.ok) setJobActive(true)
     else setErr(r.error || 'could not start')
   }
 
@@ -286,11 +289,11 @@ const SeedStep: React.FC = () => {
           />
         </Grid>
       </Grid>
-      <Button sx={{ mt: 1 }} size="small" variant="contained" onClick={start}>
+      <Button sx={{ mt: 1 }} size="small" variant="contained" onClick={start} disabled={jobRunning}>
         Start seeding
       </Button>
-      {msg && <Alert severity="success" sx={{ mt: 1 }}>{msg}</Alert>}
       {err && <Alert severity="error" sx={{ mt: 1 }}>{err}</Alert>}
+      <JobProgress active={jobActive} expectedName="seed" onRunningChange={setJobRunning} />
     </Box>
   )
 }
@@ -309,15 +312,17 @@ const SeedStep: React.FC = () => {
  */
 const ResetTargetStep: React.FC = () => {
   const [confirmDomain, setConfirmDomain] = useState('')
-  const [msg, setMsg] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [confirmOpen, setConfirmOpen] = useState(false)
+  const [jobActive, setJobActive] = useState(false)
+  const [jobRunning, setJobRunning] = useState(false)
 
   const start = async () => {
     setConfirmOpen(false)
-    setErr(null); setMsg(null)
+    setErr(null)
+    setJobActive(false)
     const r = await runResetTarget(confirmDomain)
-    if (r.ok) setMsg('reset started -- watch the Activity Feed')
+    if (r.ok) setJobActive(true)
     else setErr(r.error || 'could not start')
   }
 
@@ -338,15 +343,15 @@ const ResetTargetStep: React.FC = () => {
         <Grid item xs={12} sm={4}>
           <Button
             color="error" variant="outlined" size="small"
-            disabled={!confirmDomain}
+            disabled={!confirmDomain || jobRunning}
             onClick={() => setConfirmOpen(true)}
           >
             Reset target tenant
           </Button>
         </Grid>
       </Grid>
-      {msg && <Alert severity="success" sx={{ mt: 1 }}>{msg}</Alert>}
       {err && <Alert severity="error" sx={{ mt: 1 }}>{err}</Alert>}
+      <JobProgress active={jobActive} expectedName="reset target" onRunningChange={setJobRunning} />
 
       <Dialog open={confirmOpen} onClose={() => setConfirmOpen(false)}>
         <DialogTitle>Empty {confirmDomain}?</DialogTitle>
