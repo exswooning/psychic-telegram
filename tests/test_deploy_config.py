@@ -1212,3 +1212,74 @@ class TestChatImportScope:
         from config import CHAT_IMPORT_SCOPE, source_scopes
 
         assert CHAT_IMPORT_SCOPE not in source_scopes(self._settings(migrate_chat=True))
+
+
+class TestResetTargetFromTheUI:
+    """
+    Running reset_target.py from the browser.
+
+    Mirrors TestSeedFromTheUI, pointed at the other tenant and the other
+    domain: reset_target.py's own guard (assert_sandbox) needs
+    SANDBOX_MODE=true, an exact --confirm-domain match on TARGET_DOMAIN, and
+    a PROTECTED_DOMAINS deny list. The typed-domain check here fails fast with
+    a specific message; the guard that actually matters runs again inside
+    reset_target.py regardless of what this function decides.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _env(self, monkeypatch):
+        monkeypatch.setenv("SOURCE_DOMAIN", "sandbox-src.example")
+        monkeypatch.setenv("TARGET_DOMAIN", "sandbox-tgt.example")
+        monkeypatch.delenv("PROTECTED_DOMAINS", raising=False)
+
+    def test_correct_confirmation_builds_the_command(self):
+        argv, env, err = webui.reset_target_argv(
+            {"confirm_domain": "sandbox-tgt.example"})
+        assert err == ""
+        assert argv[argv.index("--confirm-domain") + 1] == "sandbox-tgt.example"
+        assert "--yes" in argv
+        assert env["SANDBOX_MODE"] == "true"
+
+    def test_yes_is_always_passed(self):
+        """Without --yes reset_target.py's confirm prompt blocks on the web
+        server's stdin, and the job looks alive while doing no work."""
+        argv, _, _ = webui.reset_target_argv({"confirm_domain": "sandbox-tgt.example"})
+        assert "--yes" in argv
+
+    def test_nothing_typed_is_refused(self):
+        _, _, err = webui.reset_target_argv({})
+        assert "type the target domain" in err
+
+    def test_a_mismatched_domain_is_refused(self):
+        _, _, err = webui.reset_target_argv({"confirm_domain": "something-else.com"})
+        assert "does not match the target domain" in err
+
+    def test_typing_the_source_domain_is_called_out_specifically(self):
+        """The dangerous slip in the opposite direction from seeding: typing
+        the source here would not touch anything (the guard only checks
+        against TARGET_DOMAIN), but a wrong belief about which domain this
+        button empties is exactly the kind of mistake worth naming instead of
+        leaving as a generic mismatch."""
+        _, _, err = webui.reset_target_argv({"confirm_domain": "sandbox-src.example"})
+        assert "SOURCE domain" in err
+
+    def test_protected_domains_are_refused(self, monkeypatch):
+        monkeypatch.setenv("PROTECTED_DOMAINS", "sandbox-tgt.example,corp.com")
+        _, _, err = webui.reset_target_argv({"confirm_domain": "sandbox-tgt.example"})
+        assert "PROTECTED_DOMAINS" in err
+
+    def test_protected_check_is_case_insensitive(self, monkeypatch):
+        monkeypatch.setenv("PROTECTED_DOMAINS", "SANDBOX-TGT.EXAMPLE")
+        _, _, err = webui.reset_target_argv({"confirm_domain": "sandbox-tgt.example"})
+        assert "PROTECTED_DOMAINS" in err
+
+    def test_the_command_is_an_argv_list_not_a_shell_string(self):
+        argv, _, _ = webui.reset_target_argv({"confirm_domain": "sandbox-tgt.example"})
+        assert isinstance(argv, list)
+        assert all(isinstance(a, str) for a in argv)
+
+    def test_reset_target_only_ever_targets_the_target(self):
+        """There is no code path that points this at the source: the domain
+        is read from TARGET_DOMAIN, never from the request body."""
+        argv, _, _ = webui.reset_target_argv({"confirm_domain": "sandbox-tgt.example"})
+        assert "sandbox-src.example" not in argv

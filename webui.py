@@ -904,6 +904,44 @@ def seed_argv(body: dict) -> tuple[list[str], dict, str]:
     return argv, env, ""
 
 
+def reset_target_argv(body: dict) -> tuple[list[str], dict, str]:
+    """
+    Build the reset_target command, or return why it must not run.
+
+    Mirrors seed_argv exactly, pointed at the other tenant: reset_target.py's
+    own guard (assert_sandbox) needs SANDBOX_MODE=true and an exact,
+    case-insensitive match on TARGET_DOMAIN, and refuses outright if target
+    and source are ever the same domain. The typed-domain check here is a
+    convenience that fails fast with a specific message; the guard that
+    actually matters runs again inside reset_target.py itself regardless.
+    """
+    from config import Settings
+
+    st = Settings()
+    domain = (st.target_domain or "").strip().lower()
+    typed = (body.get("confirm_domain") or "").strip().lower()
+
+    if not domain:
+        return [], {}, "set the target domain in step 2 first"
+    if not typed:
+        return [], {}, f"type the target domain ({domain}) to confirm"
+    if typed != domain:
+        source = (st.source_domain or "").strip().lower()
+        extra = (" — that is the SOURCE domain, which this would never touch, "
+                "but it is also not the target" if typed and typed == source else "")
+        return [], {}, f"{typed!r} does not match the target domain {domain!r}{extra}"
+
+    protected = [d.strip().lower()
+                for d in os.getenv("PROTECTED_DOMAINS", "").split(",") if d.strip()]
+    if domain in protected:
+        return [], {}, f"{domain} is listed in PROTECTED_DOMAINS"
+
+    argv = [PY, "reset_target.py", "--confirm-domain", domain, "--yes"]
+    env = gcloud_env()
+    env["SANDBOX_MODE"] = "true"
+    return argv, env, ""
+
+
 def gcloud_env() -> dict:
     """
     Child-process environment with gcloud reachable.
@@ -2670,6 +2708,16 @@ class Handler(BaseHTTPRequestHandler):
                 "seed", argv, env=env,
                 cwd=os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                  "data-generator"))
+            self._json({"ok": ok, "error": "" if ok else msg})
+            return
+
+        if self.path == "/api/reset_target":
+            argv, env, err = reset_target_argv(body)
+            if err:
+                self._json({"ok": False, "error": err}, 400)
+                return
+            # reset_target.py lives at the repo root, unlike the seeder.
+            ok, msg = JOB.start("reset target", argv, env=env)
             self._json({"ok": ok, "error": "" if ok else msg})
             return
 

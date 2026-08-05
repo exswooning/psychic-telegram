@@ -3,6 +3,7 @@ import {
   Box, Typography, Stepper, Step, StepButton, StepLabel, Card, CardContent,
   Chip, Button, TextField, Grid, Alert, Divider, RadioGroup, FormControlLabel,
   Radio, MenuItem, Checkbox, LinearProgress, Stack,
+  Dialog, DialogActions, DialogContent, DialogTitle,
 } from '@mui/material'
 import {
   CheckCircle as DoneIcon, RadioButtonUnchecked as TodoIcon,
@@ -10,7 +11,7 @@ import {
 } from '@mui/icons-material'
 import {
   fetchStatus, checkStep, fetchConfig, saveConfig, setRunMode, fetchActions,
-  uploadCredential, fetchDwd, checkDwdNow, runSeed, ActionSpec,
+  uploadCredential, fetchDwd, checkDwdNow, runSeed, runResetTarget, ActionSpec,
   StatusPayload, ConfigFields, ConfigPayload, DwdPayload, UploadKind,
 } from '@/api/client'
 import JobRunner from '@/components/JobRunner'
@@ -219,6 +220,7 @@ const StepBody: React.FC<{ n: number; onChanged: () => void }> = ({ n, onChanged
     case 3: return <CredentialsStep onChanged={onChanged} />
     case 5: return <DelegationStep />
     case 7: return <SeedStep />
+    case 8: return <ResetTargetStep />
     default: return null
   }
 }
@@ -457,6 +459,80 @@ const SeedStep: React.FC = () => {
       </Button>
       {msg && <Alert severity="success" sx={{ mt: 1 }}>{msg}</Alert>}
       {err && <Alert severity="error" sx={{ mt: 1 }}>{err}</Alert>}
+    </Box>
+  )
+}
+
+/**
+ * Empties the TARGET tenant's seeded data, right where "run a clean migrate"
+ * lives -- the natural place to want it, since a re-test against a target
+ * that already holds a previous run's data does not verify what it looks
+ * like it verifies (phases.py's own reconciliation only means something
+ * against a target that started empty).
+ *
+ * Typed-domain gated the same way SeedStep gates the source: nothing here
+ * can run without the operator typing the target domain back, the server
+ * re-checks it before building the command, and reset_target.py's own guard
+ * checks a third time regardless.
+ */
+const ResetTargetStep: React.FC = () => {
+  const [confirmDomain, setConfirmDomain] = useState('')
+  const [msg, setMsg] = useState<string | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const [confirmOpen, setConfirmOpen] = useState(false)
+
+  const start = async () => {
+    setConfirmOpen(false)
+    setErr(null); setMsg(null)
+    const r = await runResetTarget(confirmDomain)
+    if (r.ok) setMsg('reset started -- watch the Activity Feed')
+    else setErr(r.error || 'could not start')
+  }
+
+  return (
+    <Box sx={{ mb: 2 }}>
+      <Alert severity="error" sx={{ mb: 2 }}>
+        Empties the TARGET tenant's seeded Drive/Gmail/Calendar/Chat data --
+        not the ledger, and never the source. Do this before a clean re-test,
+        not after a real migration you want to keep.
+      </Alert>
+      <Grid container spacing={2} alignItems="center">
+        <Grid item xs={12} sm={5}>
+          <TextField
+            fullWidth size="small" label="Type the target domain to confirm"
+            value={confirmDomain} onChange={(e) => setConfirmDomain(e.target.value)}
+          />
+        </Grid>
+        <Grid item xs={12} sm={4}>
+          <Button
+            color="error" variant="outlined" size="small"
+            disabled={!confirmDomain}
+            onClick={() => setConfirmOpen(true)}
+          >
+            Reset target tenant
+          </Button>
+        </Grid>
+      </Grid>
+      {msg && <Alert severity="success" sx={{ mt: 1 }}>{msg}</Alert>}
+      {err && <Alert severity="error" sx={{ mt: 1 }}>{err}</Alert>}
+
+      <Dialog open={confirmOpen} onClose={() => setConfirmOpen(false)}>
+        <DialogTitle>Empty {confirmDomain}?</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2">
+            This deletes the seeded Drive files, mail, calendar events and chat
+            spaces reset_target.py can find for every mapped user in this
+            tenant. It does not touch the source tenant or the migration
+            ledger.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConfirmOpen(false)}>Cancel</Button>
+          <Button color="error" variant="contained" onClick={start}>
+            Empty {confirmDomain}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   )
 }

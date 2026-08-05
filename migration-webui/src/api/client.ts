@@ -296,3 +296,22 @@ export async function runSeed(
   })
   return res.json()
 }
+
+/**
+ * Empties the TARGET tenant's seeded data (reset_target.py), typed-domain
+ * gated exactly like runSeed -- the browser must type the domain back, the
+ * server re-checks it against TARGET_DOMAIN before building the command, and
+ * reset_target.py's own assert_sandbox() checks a third time regardless of
+ * what this call decides. Nothing here can point at the source: the domain
+ * the server compares against comes from Settings(), never from this body.
+ */
+export async function runResetTarget(
+  confirmDomain: string
+): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetch('/api/reset_target', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ confirm_domain: confirmDomain }),
+  })
+  return res.json()
+}
