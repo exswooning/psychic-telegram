@@ -464,6 +464,25 @@ _CONFIG_FIELDS = (
 _HOST_INFO_CACHE: dict | None = None
 
 
+def _primary_ip() -> str:
+    """
+    This machine's outbound-facing IP, without sending any traffic --
+    connect() on a UDP socket only picks a local interface/route, no packet
+    actually goes anywhere. Loopback fallback keeps this from ever raising.
+    """
+    import socket
+
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+        finally:
+            s.close()
+    except OSError:
+        return "127.0.0.1"
+
+
 def host_info() -> dict:
     """
     Where this process is actually running -- the answer to "is this the
@@ -472,18 +491,26 @@ def host_info() -> dict:
     and look identical in the browser, and nothing on screen said which one
     a given tab was talking to.
 
-    hostname + this file's own directory identify the machine and the
-    deployment; commit is best-effort (this is a git checkout locally, but
-    a deploy_remote.py target is a plain rsync copy with no .git at all --
-    see its own module docstring for why, so an absent commit there is
+    `location` is the one field meant to answer that at a glance: a laptop's
+    outbound interface is almost always a private/NAT'd address (RFC1918,
+    or loopback), while a VPS's is a routable public IP -- so a public
+    address is shown as itself (it names the actual VPS), and a private one
+    is shown as "Local machine" (the address itself is not useful there;
+    every laptop on a LAN has one and it means nothing to the operator).
+
+    hostname + this file's own directory further identify the machine and
+    the deployment; commit is best-effort (this is a git checkout locally,
+    but a deploy_remote.py target is a plain rsync copy with no .git at all
+    -- see its own module docstring for why, so an absent commit there is
     normal, not an error). Cached for the process's lifetime: none of this
     changes while it is running, so there is no reason to shell out to git
-    on every poll.
+    or probe the network on every poll.
     """
     global _HOST_INFO_CACHE
     if _HOST_INFO_CACHE is not None:
         return _HOST_INFO_CACHE
 
+    import ipaddress
     import socket
 
     code_dir = os.path.dirname(os.path.abspath(__file__))
@@ -496,8 +523,17 @@ def host_info() -> dict:
     except Exception:  # noqa: BLE001 - not a git checkout is a normal state
         pass
 
+    ip = _primary_ip()
+    try:
+        is_private = ipaddress.ip_address(ip).is_private
+    except ValueError:
+        is_private = True
+    location = "Local machine" if is_private else ip
+
     _HOST_INFO_CACHE = {
         "hostname": socket.gethostname(),
+        "ip": ip,
+        "location": location,
         "code_path": code_dir,
         "commit": commit,
         "pid": os.getpid(),

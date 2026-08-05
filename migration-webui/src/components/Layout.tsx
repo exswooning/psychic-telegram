@@ -10,6 +10,7 @@ import {
   Badge,
   Avatar,
   Tooltip,
+  LinearProgress,
   useMediaQuery,
   useTheme,
   CssBaseline,
@@ -66,7 +67,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   const theme = useTheme()
   const navigate = useNavigate()
   const location = useLocation()
-  const { sidebarOpen, darkMode, toggleSidebar, toggleDarkMode } = useMigrationStore()
+  const { sidebarOpen, darkMode, toggleSidebar, toggleDarkMode, metrics, users } = useMigrationStore()
   const [mobileOpen, setMobileOpen] = useState(false)
   const [host, setHost] = useState<HostInfo | null>(null)
   const isDesktop = useMediaQuery('(min-width:960px)')
@@ -90,6 +91,11 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
     }
   }
 
+  const memoryPct = metrics?.ram?.percentage ?? 0
+  const overallProgress = users.length > 0
+    ? Math.round(users.reduce((sum, u) => sum + u.progress, 0) / users.length)
+    : 0
+
   const drawerContent = (
     <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
       <Toolbar sx={{ display: 'flex', alignItems: 'center', px: 2 }}>
@@ -98,6 +104,51 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
           Migration Tool
         </Typography>
       </Toolbar>
+      <Divider />
+      {/* Where this tab is actually talking to, plus the two numbers that
+         matter most while a run is going: is this host under memory
+         pressure (resources.py throttles workers under it), and how far
+         along is the migration. Found the need for this the hard way --
+         a local seed run and a deployed VPS instance can both bind
+         127.0.0.1:8080 and look identical in the browser. */}
+      <Box sx={{ px: 2, py: 1.5 }}>
+        <Tooltip title={host ? (
+          <>
+            <div>Code: {host.code_path}</div>
+            <div>PID: {host.pid}{host.commit ? ` · commit ${host.commit}` : ' · no git history (deployed copy)'}</div>
+          </>
+        ) : ''}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, mb: 1.5, cursor: 'default' }}>
+            <Box sx={{
+              width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
+              bgcolor: host && host.location !== 'Local machine' ? 'success.main' : 'text.disabled',
+            }} />
+            <Typography variant="caption" noWrap sx={{ fontFamily: 'ui-monospace, monospace', color: 'text.secondary' }}>
+              {host ? host.location : 'locating…'}
+            </Typography>
+          </Box>
+        </Tooltip>
+
+        <Box sx={{ mb: 1 }}>
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 0.25 }}>
+            <Typography variant="caption" color="text.secondary">Memory</Typography>
+            <Typography variant="caption" color="text.secondary" sx={{ fontVariantNumeric: 'tabular-nums' }}>{memoryPct}%</Typography>
+          </Box>
+          <LinearProgress
+            variant="determinate" value={memoryPct}
+            color={memoryPct >= 85 ? 'error' : memoryPct >= 65 ? 'warning' : 'primary'}
+            sx={{ height: 4, borderRadius: 2 }}
+          />
+        </Box>
+
+        <Box>
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 0.25 }}>
+            <Typography variant="caption" color="text.secondary">Migration progress</Typography>
+            <Typography variant="caption" color="text.secondary" sx={{ fontVariantNumeric: 'tabular-nums' }}>{overallProgress}%</Typography>
+          </Box>
+          <LinearProgress variant="determinate" value={overallProgress} sx={{ height: 4, borderRadius: 2 }} />
+        </Box>
+      </Box>
       <Divider />
       <List sx={{ pt: 1 }}>
         {NAV_ITEMS.map((item) => {
@@ -156,29 +207,9 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
           <IconButton edge="start" color="inherit" onClick={handleDrawerToggle} sx={{ mr: 2 }}>
             <MenuIcon />
           </IconButton>
-          <Typography variant="h6" noWrap component="div" sx={{ fontWeight: 600, color: 'text.primary' }}>
+          <Typography variant="h6" noWrap component="div" sx={{ flexGrow: 1, fontWeight: 600, color: 'text.primary' }}>
             Google Workspace Migration
           </Typography>
-          <Box sx={{ flexGrow: 1 }} />
-          {host && (
-            <Tooltip title={
-              <>
-                <div>Code: {host.code_path}</div>
-                <div>PID: {host.pid}{host.commit ? ` · commit ${host.commit}` : ' · no git history (deployed copy)'}</div>
-              </>
-            }>
-              <Typography
-                variant="caption"
-                sx={{
-                  mr: 2, px: 1, py: 0.5, borderRadius: 1, cursor: 'default',
-                  bgcolor: 'action.hover', color: 'text.secondary',
-                  fontFamily: 'ui-monospace, monospace',
-                }}
-              >
-                {host.hostname}
-              </Typography>
-            </Tooltip>
-          )}
           <Badge badgeContent={notifications} color="error" sx={{ mr: 2 }}>
             <IconButton color="inherit">
               <NotificationsIcon />

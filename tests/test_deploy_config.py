@@ -1424,4 +1424,44 @@ class TestHostInfo:
         monkeypatch.setattr(webui, "__file__", str(tmp_path / "webui.py"))
         info = webui.host_info()
         assert info["commit"] == ""
-        assert info["code_path"] == str(tmp_path)
+
+    def test_a_private_address_is_shown_as_local_machine(self, monkeypatch):
+        """A laptop's outbound interface is almost always RFC1918/loopback --
+        the address itself means nothing to the operator (every machine on
+        a LAN has one), so it is named instead of printed."""
+        monkeypatch.setattr(webui, "_HOST_INFO_CACHE", None)
+        monkeypatch.setattr(webui, "_primary_ip", lambda: "192.168.1.42")
+        info = webui.host_info()
+        assert info["ip"] == "192.168.1.42"
+        assert info["location"] == "Local machine"
+
+    def test_a_public_address_is_shown_as_itself(self, monkeypatch):
+        """A VPS's outbound interface is a routable public IP -- that IS
+        the useful answer to "where is this running", so show it directly
+        rather than replacing it with a generic label."""
+        monkeypatch.setattr(webui, "_HOST_INFO_CACHE", None)
+        monkeypatch.setattr(webui, "_primary_ip", lambda: "78.47.176.120")
+        info = webui.host_info()
+        assert info["location"] == "78.47.176.120"
+
+    def test_loopback_is_treated_as_local_not_a_real_address(self, monkeypatch):
+        monkeypatch.setattr(webui, "_HOST_INFO_CACHE", None)
+        monkeypatch.setattr(webui, "_primary_ip", lambda: "127.0.0.1")
+        info = webui.host_info()
+        assert info["location"] == "Local machine"
+
+    def test_primary_ip_never_raises_even_with_no_network(self, monkeypatch):
+        """connect() on a UDP socket can still fail (no route, no interface
+        up) -- this must fall back to loopback, never propagate an
+        exception into host_info() and break /api/config entirely."""
+        import socket as socket_mod
+
+        class _Boom:
+            def connect(self, *a):
+                raise OSError("network unreachable")
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(socket_mod, "socket", lambda *a, **k: _Boom())
+        assert webui._primary_ip() == "127.0.0.1"

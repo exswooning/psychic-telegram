@@ -205,6 +205,8 @@ export interface DeployConfig {
 
 export interface HostInfo {
   hostname: string
+  ip: string
+  location: string
   code_path: string
   commit: string
   pid: number
