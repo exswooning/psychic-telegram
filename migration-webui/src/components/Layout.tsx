@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import {
   Box,
@@ -39,6 +39,7 @@ import {
   Science as SeedWizardIconNav,
 } from '@mui/icons-material'
 import { useMigrationStore } from '@/store'
+import { fetchConfig, HostInfo } from '@/api/client'
 // DriveMigration/ErrorHandling/HelpSystem existed as files with no route and
 // no nav entry -- reachable by typing a URL nobody would guess, effectively
 // unshipped. Added here alongside the App.tsx routes that now serve them.
@@ -67,8 +68,19 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   const location = useLocation()
   const { sidebarOpen, darkMode, toggleSidebar, toggleDarkMode } = useMigrationStore()
   const [mobileOpen, setMobileOpen] = useState(false)
+  const [host, setHost] = useState<HostInfo | null>(null)
   const isDesktop = useMediaQuery('(min-width:960px)')
   const notifications = 3
+
+  // Fetched once, not polled: a process's own hostname/code path/pid never
+  // change while it is running (see webui.py's host_info(), which caches
+  // this server-side for the same reason). This exists because a local
+  // seed run and a deployed VPS instance can both bind 127.0.0.1:8080 and
+  // look identical in the browser -- nothing on screen said which one a
+  // given tab was actually talking to until now.
+  useEffect(() => {
+    fetchConfig().then((c) => setHost(c.host)).catch(() => {})
+  }, [])
 
   const handleDrawerToggle = () => {
     if (isDesktop) {
@@ -144,9 +156,29 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
           <IconButton edge="start" color="inherit" onClick={handleDrawerToggle} sx={{ mr: 2 }}>
             <MenuIcon />
           </IconButton>
-          <Typography variant="h6" noWrap component="div" sx={{ flexGrow: 1, fontWeight: 600, color: 'text.primary' }}>
+          <Typography variant="h6" noWrap component="div" sx={{ fontWeight: 600, color: 'text.primary' }}>
             Google Workspace Migration
           </Typography>
+          <Box sx={{ flexGrow: 1 }} />
+          {host && (
+            <Tooltip title={
+              <>
+                <div>Code: {host.code_path}</div>
+                <div>PID: {host.pid}{host.commit ? ` · commit ${host.commit}` : ' · no git history (deployed copy)'}</div>
+              </>
+            }>
+              <Typography
+                variant="caption"
+                sx={{
+                  mr: 2, px: 1, py: 0.5, borderRadius: 1, cursor: 'default',
+                  bgcolor: 'action.hover', color: 'text.secondary',
+                  fontFamily: 'ui-monospace, monospace',
+                }}
+              >
+                {host.hostname}
+              </Typography>
+            </Tooltip>
+          )}
           <Badge badgeContent={notifications} color="error" sx={{ mr: 2 }}>
             <IconButton color="inherit">
               <NotificationsIcon />

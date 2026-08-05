@@ -203,6 +203,13 @@ export interface DeployConfig {
   ui_port: string
 }
 
+export interface HostInfo {
+  hostname: string
+  code_path: string
+  commit: string
+  pid: number
+}
+
 export interface ConfigPayload {
   config: ConfigFields
   env_path: string
@@ -212,6 +219,7 @@ export interface ConfigPayload {
   run_mode: string
   run_modes: Record<string, RunModeSpec>
   deploy: DeployConfig
+  host: HostInfo
 }
 
 export async function fetchConfig(): Promise<ConfigPayload> {

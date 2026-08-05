@@ -1391,3 +1391,37 @@ class TestDeployConfigPersistence:
         cfg = webui.read_deploy_config()
         assert cfg["host"] == "203.0.113.10"
         assert cfg["user"] == "ubuntu"
+
+
+class TestHostInfo:
+    """
+    Where this process is actually running -- found the hard way once
+    already, when a local seed run and a VPS deployment both bound
+    127.0.0.1:8080 and looked identical in the browser, with nothing on
+    screen saying which one a given tab was actually talking to.
+    """
+
+    def test_reports_this_machine_and_code_path(self, monkeypatch):
+        monkeypatch.setattr(webui, "_HOST_INFO_CACHE", None)
+        info = webui.host_info()
+        assert info["hostname"]
+        assert info["code_path"] == os.path.dirname(os.path.abspath(webui.__file__))
+        assert info["pid"] == os.getpid()
+
+    def test_result_is_cached_not_recomputed_per_call(self, monkeypatch):
+        """None of this changes while the process is running -- no reason
+        to shell out to git on every /api/config poll."""
+        monkeypatch.setattr(webui, "_HOST_INFO_CACHE", None)
+        first = webui.host_info()
+        first["hostname"] = "mutated-to-prove-its-the-same-object"
+        assert webui.host_info() is first
+
+    def test_survives_a_directory_with_no_git_history(self, tmp_path, monkeypatch):
+        """deploy_remote.py's own target is a plain rsync copy with no .git
+        at all (see its module docstring for why) -- an absent commit there
+        is the normal case, not a failure."""
+        monkeypatch.setattr(webui, "_HOST_INFO_CACHE", None)
+        monkeypatch.setattr(webui, "__file__", str(tmp_path / "webui.py"))
+        info = webui.host_info()
+        assert info["commit"] == ""
+        assert info["code_path"] == str(tmp_path)

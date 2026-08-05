@@ -126,6 +126,17 @@ class TestServedPage:
         for field_id in ("d-host", "d-user", "d-port", "d-key", "d-creds"):
             assert f'id="{field_id}"' in html, f"deployTabHTML() never renders #{field_id}"
 
+    def test_host_badge_shows_which_machine_is_actually_serving_this_page(self):
+        """A local seed run and a deployed VPS instance can both bind
+        127.0.0.1:8080 and look identical in the browser -- found live, when
+        a seed run believed to be on the VPS turned out to be running on a
+        laptop the whole time. hostname must be visible on load, filled in
+        from /api/config's real host_info(), not a placeholder."""
+        assert 'id="hostbadge"' in webui.PAGE
+        js = _js()
+        assert "hostbadge" in js
+        assert "c.host.hostname" in js
+
     def test_header_progress_strip_present(self):
         """The always-visible progress bar under the header + its updater."""
         assert 'id="progi"' in webui.PAGE and 'id="progpct"' in webui.PAGE

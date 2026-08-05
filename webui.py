@@ -461,6 +461,50 @@ _CONFIG_FIELDS = (
 )
 
 
+_HOST_INFO_CACHE: dict | None = None
+
+
+def host_info() -> dict:
+    """
+    Where this process is actually running -- the answer to "is this the
+    VPS, or is this still my laptop?", found the hard way once already: a
+    local seed run and a deployed VPS instance can both bind 127.0.0.1:8080
+    and look identical in the browser, and nothing on screen said which one
+    a given tab was talking to.
+
+    hostname + this file's own directory identify the machine and the
+    deployment; commit is best-effort (this is a git checkout locally, but
+    a deploy_remote.py target is a plain rsync copy with no .git at all --
+    see its own module docstring for why, so an absent commit there is
+    normal, not an error). Cached for the process's lifetime: none of this
+    changes while it is running, so there is no reason to shell out to git
+    on every poll.
+    """
+    global _HOST_INFO_CACHE
+    if _HOST_INFO_CACHE is not None:
+        return _HOST_INFO_CACHE
+
+    import socket
+
+    code_dir = os.path.dirname(os.path.abspath(__file__))
+    commit = ""
+    try:
+        r = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                          cwd=code_dir, capture_output=True, text=True, timeout=3)
+        if r.returncode == 0:
+            commit = r.stdout.strip()
+    except Exception:  # noqa: BLE001 - not a git checkout is a normal state
+        pass
+
+    _HOST_INFO_CACHE = {
+        "hostname": socket.gethostname(),
+        "code_path": code_dir,
+        "commit": commit,
+        "pid": os.getpid(),
+    }
+    return _HOST_INFO_CACHE
+
+
 def read_config() -> dict:
     from wizard import load_env
 
@@ -1712,6 +1756,7 @@ pre.out{height:230px}
 <header>
   <h1>Workspace Migration</h1>
   <span class="muted" id="route"></span>
+  <span class="muted" id="hostbadge" style="font-family:ui-monospace,monospace;cursor:default"></span>
     <span class="muted" style="margin-left:auto;display:flex;gap:8px;align-items:center"
     title="127.0.0.1 only · SSH tunnel">
     <span class="dot" id="dot"></span><b id="jname">idle</b>
@@ -1778,7 +1823,7 @@ picks up where it left off.</pre>
 let seen=0, acts={}, S=null, cur=null, dwd=null, oauth=null, cfg=null, follow=true;
 let lastSig='', ups=null, authMode=null, authModes=null, upMsg={},
     seedScales=null, seedMsg=null, resetTargetMsg=null, deployCfgMsg=null,
-    runMode=null, runModes=null, stepChk=null,
+    runMode=null, runModes=null, stepChk=null, hostShown=false,
     view='path', seedOpen=false,
     dep={user:'root',port:'22',open:false};
 let tab='setup', snap=null, scopeLines=[], logLines=[], logPath='';
@@ -2504,6 +2549,21 @@ async function refresh(force){
        is null until either a save/deploy has run or this adopts the saved
        value, so this only ever fires once, on first load. */
     if(c&&c.deploy&&dep.host==null) Object.assign(dep, c.deploy);
+    // Set once and never touched again: a process's hostname/code path/pid
+    // cannot change while it keeps running (see webui.py's host_info(),
+    // cached server-side for the same reason). This exists because a local
+    // seed run and a deployed VPS instance can both bind 127.0.0.1:8080 and
+    // look identical in the browser -- nothing said which one a tab was
+    // actually talking to until now.
+    if(c&&c.host&&!hostShown){
+      hostShown=true;
+      const hb=$('hostbadge');
+      if(hb){
+        hb.textContent=c.host.hostname;
+        hb.title='Code: '+c.host.code_path+'\\nPID: '+c.host.pid+
+          (c.host.commit?' \\u00b7 commit '+c.host.commit:' \\u00b7 no git history (deployed copy)');
+      }
+    }
     if(!s.error) $('route').textContent=
       (s.env.SOURCE_DOMAIN||'?')+' \\u2192 '+(s.env.TARGET_DOMAIN||'?')
       +(s.env.AUTH_MODE?'  \\u00b7  '+s.env.AUTH_MODE:'');
@@ -2862,7 +2922,8 @@ class Handler(BaseHTTPRequestHandler):
                         "run_mode": _S().run_mode,
                         "run_modes": _RUN_MODES(),
                         "seed_scales": list(SEED_SCALES),
-                        "deploy": read_deploy_config()})
+                        "deploy": read_deploy_config(),
+                        "host": host_info()})
         elif path == "/oauth/callback":
             # Google redirects the admin's browser back here after consent.
             tenant = "source" if "source" in (self.headers.get("Referer") or "") else None
