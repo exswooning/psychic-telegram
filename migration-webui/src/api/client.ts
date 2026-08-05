@@ -14,6 +14,7 @@
 
 import {
   User,
+  MigrationStage,
   SystemMetrics,
   ActivityEvent,
   VerificationResult,
@@ -30,6 +31,14 @@ export async function fetchUsers(): Promise<User[]> {
   const data = await getJSON<{ error: string; users: User[] }>('/api/spa/users')
   if (data.error) throw new Error(data.error)
   return data.users
+}
+
+export async function fetchStages(): Promise<MigrationStage[]> {
+  const data = await getJSON<{ error: string; stages: MigrationStage[] }>(
+    '/api/spa/stages'
+  )
+  if (data.error) throw new Error(data.error)
+  return data.stages
 }
 
 export async function fetchActivity(): Promise<ActivityEvent[]> {

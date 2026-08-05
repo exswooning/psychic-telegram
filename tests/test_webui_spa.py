@@ -301,3 +301,96 @@ class TestReportPayload:
         report = webui_spa.report_payload(reader, Settings(), 1000.0, 2000.0)
         assert report["emailsMigrated"] == 42
         assert report["driveFilesMigrated"] == 13
+
+
+class TestStagesPayload:
+    """
+    The Dashboard's pipeline widget used to be frozen fake data (Gmail
+    permanently at 68%, Drive at 42%) that nothing in the frontend ever
+    updated. stages_payload() replaces it -- these tests pin both the real
+    rollups (gmail/drive/etc, sourced from users_payload) and the honestly
+    unknown ones (user_creation has no ledger table at all).
+    """
+
+    def test_no_users_is_all_waiting_not_fabricated_progress(self, ledger, reader):
+        from config import Settings
+
+        stages = webui_spa.stages_payload(reader, Settings(), job_finished=0.0)
+        by_id = {s["id"] for s in stages}
+        assert {"discovery", "gmail", "drive", "user_creation"} <= by_id
+        # user_creation has no ledger signal at all and is always
+        # "not_started" (never "waiting", which would imply it is queued
+        # behind something this engine can actually observe).
+        assert all(s["status"] in ("waiting", "not_started") for s in stages)
+        assert all(s["progress"] == 0 for s in stages)
+
+    def test_gmail_stage_rolls_up_real_per_user_mailbox_progress(
+            self, ledger, reader):
+        from config import Settings
+
+        _seed_identity(ledger, "alice@src.com", "alice@tgt.com")
+        _seed_identity(ledger, "bob@src.com", "bob@tgt.com")
+        with ledger.write() as c:
+            c.execute("INSERT INTO discovery (source_user, messages_total) "
+                      "VALUES (?,?)", ("alice@src.com", 10))
+            c.execute("INSERT INTO discovery (source_user, messages_total) "
+                      "VALUES (?,?)", ("bob@src.com", 10))
+        _audit(ledger, "alice@src.com", "message", "SUCCESS", n=10)
+        _audit(ledger, "bob@src.com", "message", "SUCCESS", n=5)
+
+        stages = webui_spa.stages_payload(reader, Settings(), job_finished=0.0)
+        gmail = next(s for s in stages if s["id"] == "gmail")
+        assert gmail["progress"] == 75          # (100 + 50) / 2, matches Users page exactly
+        assert gmail["usersCompleted"] == 1      # only alice hit 100%
+        assert gmail["status"] == "in_progress"
+
+    def test_discovery_stage_reflects_real_table_coverage(self, ledger, reader):
+        from config import Settings
+
+        _seed_identity(ledger, "alice@src.com", "alice@tgt.com")
+        _seed_identity(ledger, "bob@src.com", "bob@tgt.com")
+        with ledger.write() as c:
+            c.execute("INSERT INTO discovery (source_user, file_count) "
+                      "VALUES (?,?)", ("alice@src.com", 5))
+
+        stages = webui_spa.stages_payload(reader, Settings(), job_finished=0.0)
+        discovery = next(s for s in stages if s["id"] == "discovery")
+        assert discovery["status"] == "in_progress"
+        assert discovery["usersCompleted"] == 1
+        assert discovery["usersTotal"] == 2
+
+    def test_user_creation_is_always_reported_unknown_not_guessed(
+            self, ledger, reader):
+        """provision.ensure_users never writes to audit_log (see
+        main.py's cmd_provision_users), so there is no ledger signal for
+        this stage at all -- it must never claim completed."""
+        from config import Settings
+
+        _seed_identity(ledger, "alice@src.com", "alice@tgt.com", status="DONE")
+        _audit(ledger, "alice@src.com", "file", "SUCCESS", n=5)
+
+        stages = webui_spa.stages_payload(reader, Settings(), job_finished=0.0)
+        user_creation = next(s for s in stages if s["id"] == "user_creation")
+        assert user_creation["status"] == "not_started"
+
+    def test_authentication_is_proxied_by_real_activity_ever_happening(
+            self, ledger, reader):
+        from config import Settings
+
+        _seed_identity(ledger, "alice@src.com", "alice@tgt.com")
+        before = webui_spa.stages_payload(reader, Settings(), job_finished=0.0)
+        assert next(s for s in before if s["id"] == "authentication")["status"] == "waiting"
+
+        _audit(ledger, "alice@src.com", "file", "SUCCESS", n=1)
+        after = webui_spa.stages_payload(reader, Settings(), job_finished=0.0)
+        assert next(s for s in after if s["id"] == "authentication")["status"] == "completed"
+
+    def test_report_stage_completes_only_once_a_job_has_actually_finished(
+            self, ledger, reader):
+        from config import Settings
+
+        stages = webui_spa.stages_payload(reader, Settings(), job_finished=0.0)
+        assert next(s for s in stages if s["id"] == "report")["status"] == "waiting"
+
+        stages = webui_spa.stages_payload(reader, Settings(), job_finished=12345.0)
+        assert next(s for s in stages if s["id"] == "report")["status"] == "completed"

@@ -1334,6 +1334,24 @@ def spa_metrics_payload() -> dict:
     return webui_spa.metrics_payload(settings, settings.effective_upload_cap(), totals)
 
 
+def spa_stages_payload() -> dict:
+    import sqlite3
+
+    import webui_spa
+    from config import Settings
+
+    conn = _db_conn()
+    if conn is None:
+        return {"error": "no database yet", "stages": []}
+    try:
+        return {"error": "", "stages": webui_spa.stages_payload(
+            conn, Settings(), JOB.finished)}
+    except sqlite3.Error as exc:
+        return {"error": f"db read error: {exc}", "stages": []}
+    finally:
+        conn.close()
+
+
 def spa_verification_payload() -> dict:
     import sqlite3
 
@@ -2620,6 +2638,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(spa_activity_payload())
         elif path == "/api/spa/metrics":
             self._json(spa_metrics_payload())
+        elif path == "/api/spa/stages":
+            self._json(spa_stages_payload())
         elif path == "/api/spa/verification":
             self._json(spa_verification_payload())
         elif path == "/api/spa/report":

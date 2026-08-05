@@ -3,6 +3,7 @@ import { useMigrationStore } from '@/store'
 import { MetricPoint } from '@/types'
 import {
   fetchUsers,
+  fetchStages,
   fetchMetrics,
   fetchActivity,
   fetchVerification,
@@ -29,8 +30,8 @@ const HISTORY_POINTS = 30
 
 const useMigration = () => {
   const {
-    users, setUsers, setMetrics, setActivities, setVerification, setReport,
-    setLastUpdate, setError,
+    users, setUsers, setStages, setMetrics, setActivities, setVerification,
+    setReport, setLastUpdate, setError, setLoading,
   } = useMigrationStore()
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const inFlight = useRef(false)
@@ -47,8 +48,9 @@ const useMigration = () => {
     if (inFlight.current) return
     inFlight.current = true
     try {
-      const [users, metrics, activity, verification, report] = await Promise.all([
+      const [users, stages, metrics, activity, verification, report] = await Promise.all([
         fetchUsers(),
+        fetchStages(),
         fetchMetrics(),
         fetchActivity(),
         fetchVerification(),
@@ -66,6 +68,7 @@ const useMigration = () => {
         },
       ]
       setUsers(users)
+      setStages(stages)
       setMetrics({ ...metrics, history: history.current })
       setActivities(activity)
       setVerification(verification)
@@ -78,10 +81,14 @@ const useMigration = () => {
       // request without anything actually being wrong.
       setError(e instanceof Error ? e.message : String(e))
     } finally {
+      // isLoading only ever gates the *first* paint (see store/index.ts) --
+      // it drops to false whether this poll succeeded or failed, so a down
+      // backend shows the real error state instead of a spinner forever.
+      setLoading(false)
       inFlight.current = false
     }
-  }, [setUsers, setMetrics, setActivities, setVerification, setReport,
-     setLastUpdate, setError])
+  }, [setUsers, setStages, setMetrics, setActivities, setVerification, setReport,
+     setLastUpdate, setError, setLoading])
 
   useEffect(() => {
     poll()

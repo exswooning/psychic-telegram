@@ -378,6 +378,125 @@ def verification_payload(conn: sqlite3.Connection, settings) -> list[dict]:
     return out
 
 
+_STAGE_DEFS = [
+    ("discovery", "Discovery", "Scanning source tenant for data"),
+    ("authentication", "Authentication", "Verifying OAuth tokens for both tenants"),
+    ("user_creation", "User Creation", "Creating target tenant user accounts"),
+    ("gmail", "Gmail Migration", "Migrating emails, labels, and drafts"),
+    ("drive", "Drive Migration", "Copying files, folders, and sharing permissions"),
+    ("calendar", "Calendar", "Migrating events and calendars"),
+    ("contacts", "Contacts", "Migrating contact groups and entries"),
+    ("chat", "Google Chat", "Migrating chat messages and spaces"),
+    ("permissions", "Permissions", "Restoring ACLs, delegates, and sharing"),
+    ("validation", "Validation", "Verifying migrated data integrity"),
+    ("report", "Final Report", "Generating completion summary and exports"),
+]
+
+# users_payload()'s per-user "details" key each stage id rolls up from. Stages
+# with no entry (discovery/authentication/user_creation/validation/report)
+# have no per-user service block to roll up -- they get their own signal
+# below, each sourced from a real table, never a guess.
+_STAGE_DETAIL_KEY = {
+    "gmail": "mailbox", "drive": "drive", "calendar": "calendar",
+    "contacts": "contacts", "chat": "chat", "permissions": "permissions",
+}
+
+
+def _rollup_stage(users: list[dict], detail_key: str) -> dict:
+    """
+    Roll many users' per-service ServiceProgress (from users_payload) into
+    one stage row, by averaging each user's own progress% rather than
+    re-deriving item counts -- keeps this in exact agreement with what the
+    Users page shows for the same service.
+    """
+    n = len(users)
+    if n == 0:
+        return {"status": "waiting", "progress": 0, "usersCompleted": 0}
+    completed = sum(1 for u in users if u["details"][detail_key]["status"] == "completed")
+    progress = round(sum(u["details"][detail_key]["progress"] for u in users) / n)
+    if completed == n:
+        status = "completed"
+    elif progress > 0 or any(u["details"][detail_key]["status"] in
+                             ("in_progress", "failed") for u in users):
+        status = "in_progress"
+    else:
+        status = "waiting"
+    return {"status": status, "progress": progress, "usersCompleted": completed}
+
+
+def stages_payload(conn: sqlite3.Connection, settings, job_finished: float) -> list[dict]:
+    """
+    MigrationStage[] for the Dashboard's pipeline widget.
+
+    Previously this list was frozen, hand-written fake data (Gmail stuck at
+    68%, Drive at 42%, forever) -- nothing in the frontend ever updated it.
+    Six of the eleven stages roll up real per-user service progress via
+    users_payload(); the rest have no ledger table shaped like "did this
+    happen" (provision.ensure_users, this engine's account-creation step, does
+    not write to audit_log at all -- see main.py's cmd_provision_users), so
+    they get the most honest real signal available rather than an invented
+    percentage:
+
+    * discovery -- coverage of the `discovery` table over identity_map users.
+    * authentication -- proxied by "has anything been migrated at all", since
+      a single audit_log row cannot exist without a live token having worked.
+    * user_creation -- genuinely untracked; always reported not-yet-verified
+      rather than guessed.
+    * validation -- rolled up from verification_payload()'s own real rows.
+    * report -- "completed" once a job has actually finished (JOB.finished),
+      the same signal report_payload() itself gates on.
+    """
+    users = users_payload(conn, settings.effective_upload_cap())
+    n = len(users)
+
+    covered = conn.execute(
+        "SELECT COUNT(DISTINCT source_user) c FROM discovery").fetchone()["c"]
+    if n == 0 or covered == 0:
+        discovery = {"status": "waiting", "progress": 0, "usersCompleted": 0}
+    elif covered >= n:
+        discovery = {"status": "completed", "progress": 100, "usersCompleted": n}
+    else:
+        discovery = {"status": "in_progress",
+                    "progress": round(covered / n * 100), "usersCompleted": covered}
+
+    any_activity = conn.execute(
+        "SELECT 1 FROM audit_log LIMIT 1").fetchone() is not None
+    authentication = ({"status": "completed", "progress": 100, "usersCompleted": n}
+                      if any_activity else
+                      {"status": "waiting", "progress": 0, "usersCompleted": 0})
+
+    user_creation = {"status": "not_started", "progress": 0, "usersCompleted": 0}
+
+    verification = verification_payload(conn, settings)
+    checked = [v for v in verification if v["status"] != "not_started"]
+    if not checked:
+        validation = {"status": "waiting", "progress": 0, "usersCompleted": 0}
+    else:
+        avg_conf = sum(v["confidence"] for v in checked) / len(checked)
+        all_verified = all(v["status"] == "verified" for v in checked)
+        validation = {
+            "status": "completed" if all_verified and len(checked) == len(verification) else "in_progress",
+            "progress": round(avg_conf), "usersCompleted": 0,
+        }
+
+    report = ({"status": "completed", "progress": 100, "usersCompleted": n}
+             if job_finished else
+             {"status": "waiting", "progress": 0, "usersCompleted": 0})
+
+    rollups = {
+        "discovery": discovery, "authentication": authentication,
+        "user_creation": user_creation, "validation": validation, "report": report,
+    }
+    for stage_id, detail_key in _STAGE_DETAIL_KEY.items():
+        rollups[stage_id] = _rollup_stage(users, detail_key)
+
+    return [
+        {"id": sid, "name": name, "description": desc, "expanded": False,
+        "usersTotal": n, **rollups[sid]}
+        for sid, name, desc in _STAGE_DEFS
+    ]
+
+
 def report_payload(conn: sqlite3.Connection, settings, job_started: float,
                    job_finished: float) -> dict:
     """
