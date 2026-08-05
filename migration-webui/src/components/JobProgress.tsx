@@ -35,6 +35,7 @@ const JobProgress: React.FC<{
   const [running, setRunning] = useState(false)
   const [lines, setLines] = useState<string[]>([])
   const [rc, setRc] = useState<number | null>(null)
+  const [progressPct, setProgressPct] = useState<number | null>(null)
   const sinceRef = useRef(0)
   const wasRunning = useRef(false)
   const donePosted = useRef(false)
@@ -51,6 +52,7 @@ const JobProgress: React.FC<{
       setRunning(job.running)
       onRunningChange?.(job.running)
       setRc(job.rc)
+      setProgressPct(job.progressPct)
       if (job.running) { wasRunning.current = true; donePosted.current = false }
       if (!job.running && wasRunning.current && !donePosted.current) {
         donePosted.current = true
@@ -90,8 +92,17 @@ const JobProgress: React.FC<{
         {running ? (
           <>
             <Box sx={{ flexGrow: 1 }}>
-              <LinearProgress />
+              {progressPct !== null ? (
+                <LinearProgress variant="determinate" value={progressPct} />
+              ) : (
+                <LinearProgress />
+              )}
             </Box>
+            {progressPct !== null && (
+              <Typography variant="caption" color="text.secondary" sx={{ fontVariantNumeric: 'tabular-nums' }}>
+                {progressPct}%
+              </Typography>
+            )}
             <Button size="small" startIcon={<StopIcon />} onClick={() => stopJob()}>
               Stop
             </Button>

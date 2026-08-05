@@ -111,6 +111,10 @@ export interface JobStatus {
   elapsed: number
   lines: string[]
   total: number
+  // Only ever set for a "seed" job (parsed from its own printed lines --
+  // see webui.py's _seed_progress_pct()). null for every other job name,
+  // including when nothing is running at all.
+  progressPct: number | null
 }
 
 export async function fetchJob(since = 0): Promise<JobStatus> {

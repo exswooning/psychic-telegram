@@ -239,6 +239,38 @@ ACTIONS: dict[str, dict] = {
 }
 
 # ----------------------------------------------------------------------
+# A seed job's numeric progress.
+#
+# seed_sandbox.py has no structured progress protocol -- it is a CLI script
+# printing to stdout, not an API. The nav bar's progress figure has to come
+# from somewhere, though, and this engine's own discipline (see
+# webui_spa.py's module docstring) is to say plainly when a number is a
+# proxy rather than inventing a false-precision one. This one is real, just
+# derived: seed_sandbox.py always prints "Seeding N users in ..." once
+# per run, and exactly one "done in" or "FAILED" line per user as it
+# finishes -- both attempted-so-far, so a completed run always reaches
+# 100%, and a straggler mid-run never overstates itself.
+# ----------------------------------------------------------------------
+_SEED_TOTAL_RE = re.compile(r"^Seeding (\d+) users? in\b")
+_SEED_DONE_RE = re.compile(r"^\s*\[.+?\]\s+done in\b")
+_SEED_FAILED_RE = re.compile(r"^\s*!\s+\S+\s+FAILED:")
+
+
+def _seed_progress_pct(lines: list[str]) -> int | None:
+    total = None
+    for ln in lines:
+        m = _SEED_TOTAL_RE.match(ln)
+        if m:
+            total = int(m.group(1))
+            break
+    if not total:
+        return None
+    attempted = sum(1 for ln in lines
+                    if _SEED_DONE_RE.match(ln) or _SEED_FAILED_RE.match(ln))
+    return round(min(attempted, total) / total * 100)
+
+
+# ----------------------------------------------------------------------
 # One job at a time, with its output buffered for streaming to the page.
 # ----------------------------------------------------------------------
 class Job:
@@ -317,6 +349,14 @@ class Job:
                 if self.started else 0,
                 "total": len(self.lines),
                 "lines": self.lines[since:],
+                # Only seed_sandbox.py's output is parsed for this -- see
+                # _seed_progress_pct(). Every other job name (migrate,
+                # discover, deploy, reset target, ...) has either a better
+                # real source already (the ledger, for migrate/discover) or
+                # no meaningful percentage at all, so this stays null there
+                # rather than guessing.
+                "progressPct": (_seed_progress_pct(self.lines)
+                               if self.name == "seed" else None),
             }
 
 

@@ -40,7 +40,7 @@ import {
   Science as SeedWizardIconNav,
 } from '@mui/icons-material'
 import { useMigrationStore } from '@/store'
-import { fetchConfig, HostInfo } from '@/api/client'
+import { fetchConfig, fetchJob, HostInfo, JobStatus } from '@/api/client'
 // DriveMigration/ErrorHandling/HelpSystem existed as files with no route and
 // no nav entry -- reachable by typing a URL nobody would guess, effectively
 // unshipped. Added here alongside the App.tsx routes that now serve them.
@@ -70,6 +70,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   const { sidebarOpen, darkMode, toggleSidebar, toggleDarkMode, metrics, users } = useMigrationStore()
   const [mobileOpen, setMobileOpen] = useState(false)
   const [host, setHost] = useState<HostInfo | null>(null)
+  const [job, setJob] = useState<JobStatus | null>(null)
   const isDesktop = useMediaQuery('(min-width:960px)')
   const notifications = 3
 
@@ -83,6 +84,19 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
     fetchConfig().then((c) => setHost(c.host)).catch(() => {})
   }, [])
 
+  // Polled everywhere, not just on the page that started it -- webui.py's
+  // Job is one global background process, so a seed (or migrate) kicked
+  // off from the Seed/Setup Wizard must still show here while you are
+  // looking at Dashboard or Settings. `since` is set past any real log
+  // length on purpose: this only needs name/running/rc/progressPct, not
+  // the full transcript JobProgress already streams on its own page.
+  useEffect(() => {
+    const poll = () => fetchJob(1_000_000_000).then(setJob).catch(() => {})
+    poll()
+    const id = setInterval(poll, 3000)
+    return () => clearInterval(id)
+  }, [])
+
   const handleDrawerToggle = () => {
     if (isDesktop) {
       toggleSidebar()
@@ -92,9 +106,22 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   }
 
   const memoryPct = metrics?.ram?.percentage ?? 0
-  const overallProgress = users.length > 0
+  const ledgerProgress = users.length > 0
     ? Math.round(users.reduce((sum, u) => sum + u.progress, 0) / users.length)
     : 0
+  // While a job is actually running, its own real progress is more useful
+  // than the ledger average -- a seed run in particular does not touch
+  // migration.db at all (seed_sandbox.py writes straight to Google's APIs;
+  // see webui_spa.py's module docstring), so the ledger figure would just
+  // sit frozen at whatever a previous migration left it at. progressPct is
+  // only ever set for a seed job (see webui.py's _seed_progress_pct());
+  // any other running job (migrate, discover, delta) has no parsed number
+  // of its own, so it falls back to the same real ledger figure, which for
+  // those jobs *is* live and accurate.
+  const jobRunning = job?.running ?? false
+  const progressPct = jobRunning && job!.progressPct !== null ? job!.progressPct : ledgerProgress
+  const progressLabel = jobRunning ? `${job!.name}…` : 'Migration progress'
+  const progressIndeterminate = jobRunning && job!.progressPct === null
 
   const drawerContent = (
     <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
@@ -208,10 +235,16 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
             </Box>
             <Box sx={{ width: 110 }}>
               <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
-                <Typography variant="caption" color="text.secondary">Progress</Typography>
-                <Typography variant="caption" color="text.secondary" sx={{ fontVariantNumeric: 'tabular-nums' }}>{overallProgress}%</Typography>
+                <Typography variant="caption" color="text.secondary" noWrap>{progressLabel}</Typography>
+                {!progressIndeterminate && (
+                  <Typography variant="caption" color="text.secondary" sx={{ fontVariantNumeric: 'tabular-nums' }}>{progressPct}%</Typography>
+                )}
               </Box>
-              <LinearProgress variant="determinate" value={overallProgress} sx={{ height: 4, borderRadius: 2 }} />
+              {progressIndeterminate ? (
+                <LinearProgress sx={{ height: 4, borderRadius: 2 }} />
+              ) : (
+                <LinearProgress variant="determinate" value={progressPct} sx={{ height: 4, borderRadius: 2 }} />
+              )}
             </Box>
           </Box>
 
