@@ -1644,6 +1644,7 @@ pre.out{height:230px}
 
 <div class="tabs" id="tabs">
   <button data-tab="setup" class="on">Setup</button>
+  <button data-tab="seed">Seed sandbox</button>
   <button data-tab="dashboard">Dashboard</button>
   <button data-tab="users">Users</button>
   <button data-tab="failures">Failures</button>
@@ -1661,6 +1662,7 @@ pre.out{height:230px}
   <div class="main" id="main"><div class="muted">Loading&hellip;</div></div>
 </div>
 
+<div class="view" id="view-seed"></div>
 <div class="view" id="view-dashboard"><div class="muted">Loading&hellip;</div></div>
 <div class="view" id="view-users"></div>
 <div class="view" id="view-failures"></div>
@@ -1689,7 +1691,7 @@ picks up where it left off.</pre>
 <script>
 let seen=0, acts={}, S=null, cur=null, dwd=null, oauth=null, cfg=null, follow=true;
 let lastSig='', ups=null, authMode=null, authModes=null, upMsg={},
-    seedScales=null, seedMsg=null, runMode=null, runModes=null, stepChk=null,
+    seedScales=null, seedMsg=null, resetTargetMsg=null, runMode=null, runModes=null, stepChk=null,
     view='path', seedOpen=false,
     dep={user:'root',port:'22',open:false};
 let tab='setup', snap=null, scopeLines=[], logLines=[], logPath='';
@@ -2094,6 +2096,38 @@ function seedForm(){
   </div>`;
 }
 
+function resetTargetForm(){
+  const tgt=(cfg&&cfg.target_domain)||'';
+  return `<div class="card" style="border-color:var(--bad)">
+    <h3>Reset the target tenant</h3>
+    <div class="warnbox">Empties the TARGET tenant's seeded Drive, Gmail,
+      Calendar and Chat data \u2014 not the ledger, and never the source. Do
+      this before a clean re-test, not after a real migration you want to
+      keep.</div>
+    <div class="grid2" style="margin-top:12px">
+      <label>Type the target domain to confirm
+        <input id="reset-target-confirm" placeholder="${esc(tgt||'set the domains first')}"></label>
+    </div>
+    <button class="danger" style="margin-top:12px" onclick="doResetTarget()">
+      Empty the target tenant<small>Targets ${esc(tgt||'(no target domain)')}</small></button>
+    <div id="resettargetmsg" class="muted" style="margin-top:8px">${
+      resetTargetMsg?(resetTargetMsg.ok?'\u2713 ':'\u2715 ')+esc(resetTargetMsg.text):''}</div>
+  </div>`;
+}
+
+/* The seed tab: its own destination, not a step buried inside the linear
+   setup wizard -- seeding and resetting a sandbox tenant are rehearsal
+   tools for test tenants only, orthogonal to the real migration setup
+   steps 1-8 track (see wizard.py's build_steps() docstring). */
+function seedTabHTML(){
+  return `<h2>Seed sandbox</h2>
+    <div class="note">Build test data in a throwaway SOURCE tenant, run a
+      rehearsal migration against it, then reset the TARGET tenant here for
+      a clean re-test. Separate from the Setup wizard on purpose: none of
+      this applies to a real migration, where the data is already there.</div>
+    ${seedForm()}${resetTargetForm()}`;
+}
+
 /* ---------------- actions ---------------- */
 async function run(name){
   const a=acts[name];
@@ -2185,6 +2219,22 @@ async function runSeed(){
       reset:reset})})).json();
   seedMsg={ok:!!r.ok, text: r.ok ? ('seeding '+src+' \\u2014 output below') : r.error};
   if(r.ok){ clearOut(); }
+  if(tab==='seed') drawView();
+  await refresh(true);
+}
+
+async function doResetTarget(){
+  const typed=$('reset-target-confirm').value.trim();
+  const tgt=(cfg&&cfg.target_domain)||'';
+  if(!confirm('This empties '+(typed||tgt)+
+      '.\\n\\nThis cannot be undone. Continue?'))
+    return;
+  const r=await (await fetch('/api/reset_target',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({confirm_domain:typed})})).json();
+  resetTargetMsg={ok:!!r.ok, text: r.ok ? ('resetting '+tgt+' \\u2014 output below') : r.error};
+  if(r.ok){ clearOut(); }
+  if(tab==='seed') drawView();
   await refresh(true);
 }
 
@@ -2355,7 +2405,7 @@ function drawToolbar(){
     return `<button class="${a.destructive?'danger':''}" onclick="run('${k}')"
       title="${esc(a.blurb)}">${esc(a.label)}</button>`;
   }).join('')+`<span class="sep"></span>
-    <button onclick="goSeed()" title="Seed the source tenant (wizard step 7)">Seed</button>
+    <button onclick="goSeed()" title="Seed a sandbox tenant with test data">Seed</button>
     <span class="sep"></span>
     <label class="chk"><input type="checkbox" id="tog-dry" class="tb-toggle"
       onchange="toggleChange()"> dry-run</label>
@@ -2393,15 +2443,15 @@ function applyToggles(tg){
     const c=$('tog-'+k); if(c&&tg.services) c.checked=!!tg.services[k]; });
 }
 
-function goSeed(){ cur=7; follow=false; setTab('setup'); }
+function goSeed(){ setTab('seed'); }
 
 function setTab(t){
   tab=t;
   document.querySelectorAll('.tabs button').forEach(b=>
     b.classList.toggle('on',b.dataset.tab===t));
-  const views={setup:$('setup'),dashboard:$('view-dashboard'),users:$('view-users'),
-    failures:$('view-failures'),scope:$('view-scope'),logs:$('view-logs'),
-    output:$('view-output')};
+  const views={setup:$('setup'),seed:$('view-seed'),dashboard:$('view-dashboard'),
+    users:$('view-users'),failures:$('view-failures'),scope:$('view-scope'),
+    logs:$('view-logs'),output:$('view-output')};
   Object.keys(views).forEach(k=>{ const el=views[k]; if(!el) return;
     el.style.display=(k===t)?(k==='setup'?'grid':'block'):'none'; });
   if(t!=='setup'){
@@ -2418,7 +2468,8 @@ function drawView(){
   if(tab==='setup') return;
   const el=$('view-'+tab); if(!el) return;
   let h='';
-  if(tab==='dashboard') h=dashboardHTML();
+  if(tab==='seed') h=seedTabHTML();
+  else if(tab==='dashboard') h=dashboardHTML();
   else if(tab==='users') h=usersHTML();
   else if(tab==='failures') h=failuresHTML();
   else if(tab==='scope') h=scopeHTML();

@@ -2,6 +2,7 @@ import React from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import Layout from '@/components/Layout'
 import Wizard from '@/pages/Wizard'
+import SeedWizard from '@/pages/SeedWizard'
 import Dashboard from '@/pages/Dashboard'
 import Users from '@/pages/Users'
 import UserDetail from '@/pages/UserDetail'
@@ -28,6 +29,7 @@ const App: React.FC = () => {
       <Routes>
         <Route path="/" element={<Navigate to="/dashboard" replace />} />
         <Route path="/wizard" element={<Wizard />} />
+        <Route path="/seed-wizard" element={<SeedWizard />} />
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/users" element={<Users />} />
         <Route path="/users/:email" element={<UserDetail />} />

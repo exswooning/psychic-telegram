@@ -95,6 +95,20 @@ class TestServedPage:
         for label in ("Setup", "Dashboard", "Users", "Failures", "Scope",
                       "Logs", "Output"):
             assert f'data-tab="{label.lower()}"' in webui.PAGE, label
+        # "Seed sandbox" is its own tab, not step 7 of the Setup wizard --
+        # separated so seeding a test tenant is not shown as if it were part
+        # of a real migration's one-time setup. See seedTabHTML()'s comment.
+        assert 'data-tab="seed"' in webui.PAGE
+
+    def test_seed_tab_is_its_own_view_not_a_setup_step(self):
+        """goSeed() used to jump into the Setup wizard at step 7; it must now
+        land on the dedicated seed tab instead."""
+        js = _js()
+        assert "function goSeed(){ setTab('seed'); }" in js
+        assert "id=\"view-seed\"" in webui.PAGE
+        for fn in ("function seedTabHTML(", "function resetTargetForm(",
+                   "async function doResetTarget("):
+            assert fn in js, f"missing {fn}"
 
     def test_header_progress_strip_present(self):
         """The always-visible progress bar under the header + its updater."""

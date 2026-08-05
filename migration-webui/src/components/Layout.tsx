@@ -36,6 +36,7 @@ import {
   ErrorOutline as ErrorsIconNav,
   HelpOutline as HelpIconNav,
   School as WizardIconNav,
+  Science as SeedWizardIconNav,
 } from '@mui/icons-material'
 import { useMigrationStore } from '@/store'
 // DriveMigration/ErrorHandling/HelpSystem existed as files with no route and
@@ -43,6 +44,7 @@ import { useMigrationStore } from '@/store'
 // unshipped. Added here alongside the App.tsx routes that now serve them.
 const NAV_ITEMS = [
   { path: '/wizard', label: 'Setup Wizard', icon: <WizardIconNav /> },
+  { path: '/seed-wizard', label: 'Seed Wizard', icon: <SeedWizardIconNav /> },
   { path: '/dashboard', label: 'Dashboard', icon: <DashboardIcon /> },
   { path: '/users', label: 'Users', icon: <PeopleIcon /> },
   { path: '/drive', label: 'Drive Migration', icon: <DriveIconNav /> },

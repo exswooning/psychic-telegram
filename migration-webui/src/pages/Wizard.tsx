@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   Box, Typography, Stepper, Step, StepButton, StepLabel, Card, CardContent,
   Chip, Button, TextField, Grid, Alert, Divider, RadioGroup, FormControlLabel,
-  Radio, MenuItem, Checkbox, LinearProgress, Stack,
-  Dialog, DialogActions, DialogContent, DialogTitle,
+  Radio, LinearProgress, Stack,
 } from '@mui/material'
 import {
   CheckCircle as DoneIcon, RadioButtonUnchecked as TodoIcon,
@@ -11,21 +11,30 @@ import {
 } from '@mui/icons-material'
 import {
   fetchStatus, checkStep, fetchConfig, saveConfig, setRunMode, fetchActions,
-  uploadCredential, fetchDwd, checkDwdNow, runSeed, runResetTarget, ActionSpec,
+  uploadCredential, fetchDwd, checkDwdNow, ActionSpec,
   StatusPayload, ConfigFields, ConfigPayload, DwdPayload, UploadKind,
 } from '@/api/client'
 import JobRunner from '@/components/JobRunner'
 
 /**
- * The guided setup path, in the React app.
+ * The guided setup path, in the React app -- for a real migration's one-time
+ * setup only. wizard.py's build_steps() still reports 9 steps (its step 7,
+ * "Source seeded (test tenants only)", is how RUN_MODES tracks seed_only /
+ * seed_and_migrate skip logic on the backend), but this page filters that
+ * one out of the stepper it renders: seeding and resetting a sandbox tenant
+ * are rehearsal tools for test tenants, not part of what a production
+ * migration needs, and living inside the same linear stepper as "Domain-Wide
+ * Delegation authorised" implied otherwise. See pages/SeedWizard.tsx, which
+ * now owns that step's UI.
  *
- * Reuses the exact 9-step model webui.py's inline-JS wizard already drives --
- * wizard.py's build_steps() via /api/status -- rather than a second
- * implementation of what "done" means for each step. Every action button here
- * is the same whitelisted ACTIONS entry the operator dashboard's toolbar
- * fires; this page only arranges them behind a state machine that says which
- * one makes sense next.
+ * Every action button here is the same whitelisted ACTIONS entry the
+ * operator dashboard's toolbar fires; this page only arranges them behind a
+ * state machine that says which one makes sense next.
  */
+
+// wizard.py's step 7. Filtered out of this page's stepper -- see the
+// module docstring above and pages/SeedWizard.tsx.
+const SEED_STEP_TITLE_MARKER = 'seeded'
 
 const STATE_ICON: Record<string, React.ReactElement> = {
   done: <DoneIcon color="success" fontSize="small" />,
@@ -35,6 +44,7 @@ const STATE_ICON: Record<string, React.ReactElement> = {
 }
 
 const Wizard: React.FC = () => {
+  const navigate = useNavigate()
   const [status, setStatus] = useState<StatusPayload | null>(null)
   const [active, setActive] = useState(1)
   const [actions, setActions] = useState<Record<string, ActionSpec>>({})
@@ -92,7 +102,14 @@ const Wizard: React.FC = () => {
 
   if (!status) return <LinearProgress sx={{ mt: 4 }} />
 
-  const step = status.steps.find((s) => s.n === active) ?? status.steps[0]
+  // Real migration setup only -- see the module docstring for why step 7
+  // (sandbox seeding) is excluded here and lives on its own page instead.
+  const setupSteps = status.steps.filter(
+    (s) => !s.title.toLowerCase().includes(SEED_STEP_TITLE_MARKER))
+  const stepIdx = Math.max(0, setupSteps.findIndex((s) => s.n === active))
+  const step = setupSteps[stepIdx] ?? setupSteps[0]
+  const done = setupSteps.filter((s) => s.state === 'done').length
+  const total = setupSteps.filter((s) => s.state !== 'skip').length
 
   return (
     <Box>
@@ -101,14 +118,19 @@ const Wizard: React.FC = () => {
         <Button size="small" startIcon={<RefreshIcon />} onClick={refresh}>Refresh</Button>
       </Box>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-        {status.done} of {status.total} steps satisfied
+        {done} of {total} steps satisfied
         {status.users_total > 0 && ` · ${status.users_done} of ${status.users_total} users done`}
+        {' · '}
+        <Box component="span" onClick={() => navigate('/seed-wizard')}
+             sx={{ color: 'primary.main', cursor: 'pointer', textDecoration: 'underline' }}>
+          Need a test tenant seeded first? Open the Seed Wizard →
+        </Box>
       </Typography>
 
       <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 2 }}>
         <CardContent sx={{ p: 2 }}>
-          <Stepper nonLinear activeStep={active - 1} alternativeLabel>
-            {status.steps.map((s) => (
+          <Stepper nonLinear activeStep={stepIdx} alternativeLabel>
+            {setupSteps.map((s) => (
               <Step key={s.n} completed={s.state === 'done'}>
                 <StepButton onClick={() => setActive(s.n)}>
                   <StepLabel
@@ -195,13 +217,16 @@ const Wizard: React.FC = () => {
           </Box>
 
           <Box sx={{ display: 'flex', justifyContent: 'space-between', mt: 3 }}>
-            <Button disabled={active <= 1} onClick={() => setActive(active - 1)}>
+            <Button
+              disabled={stepIdx <= 0}
+              onClick={() => setActive(setupSteps[stepIdx - 1].n)}
+            >
               &larr; Back
             </Button>
             <Button
               variant="contained"
-              disabled={active >= status.steps.length}
-              onClick={() => setActive(active + 1)}
+              disabled={stepIdx >= setupSteps.length - 1}
+              onClick={() => setActive(setupSteps[stepIdx + 1].n)}
             >
               Next &rarr;
             </Button>
@@ -213,14 +238,14 @@ const Wizard: React.FC = () => {
 }
 
 /** Per-step interactive controls. Steps with nothing to fill in beyond
- * reading the help text (1, 9) render nothing extra here. */
+ * reading the help text render nothing extra here. Seeding/reset-target
+ * used to live at n===7/8 -- moved to SeedWizard.tsx, see the module
+ * docstring above. */
 const StepBody: React.FC<{ n: number; onChanged: () => void }> = ({ n, onChanged }) => {
   switch (n) {
     case 2: return <ConfigStep onChanged={onChanged} />
     case 3: return <CredentialsStep onChanged={onChanged} />
     case 5: return <DelegationStep />
-    case 7: return <SeedStep />
-    case 8: return <ResetTargetStep />
     default: return null
   }
 }
@@ -397,154 +422,6 @@ const DelegationStep: React.FC = () => {
         Check delegation now
       </Button>
       {result && <Typography variant="caption" sx={{ ml: 1 }}>{result}</Typography>}
-    </Box>
-  )
-}
-
-const SeedStep: React.FC = () => {
-  const [confirmDomain, setConfirmDomain] = useState('')
-  const [scale, setScale] = useState('small')
-  const [createUsers, setCreateUsers] = useState(false)
-  const [allUsers, setAllUsers] = useState(false)
-  const [reset, setReset] = useState(false)
-  const [msg, setMsg] = useState<string | null>(null)
-  const [err, setErr] = useState<string | null>(null)
-
-  const start = async () => {
-    setErr(null); setMsg(null)
-    const r = await runSeed(confirmDomain, scale, createUsers, reset, allUsers)
-    if (r.ok) setMsg('seeding started -- watch the Activity Feed')
-    else setErr(r.error || 'could not start')
-  }
-
-  return (
-    <Box sx={{ mb: 2 }}>
-      <Alert severity="warning" sx={{ mb: 2 }}>
-        Writes fabricated data into the SOURCE tenant. Type the domain back to
-        confirm -- this is the only thing that gates it.
-      </Alert>
-      <Grid container spacing={2} alignItems="center">
-        <Grid item xs={12} sm={4}>
-          <TextField
-            fullWidth size="small" label="Type the source domain to confirm"
-            value={confirmDomain} onChange={(e) => setConfirmDomain(e.target.value)}
-          />
-        </Grid>
-        <Grid item xs={12} sm={3}>
-          <TextField
-            fullWidth size="small" select label="Scale" value={scale}
-            onChange={(e) => setScale(e.target.value)}
-          >
-            {['tiny', 'small', 'medium', 'large', 'huge'].map((s) => (
-              <MenuItem key={s} value={s}>{s}</MenuItem>
-            ))}
-          </TextField>
-        </Grid>
-        <Grid item xs={6} sm={2.5}>
-          <FormControlLabel
-            control={<Checkbox checked={createUsers}
-                              onChange={(e) => setCreateUsers(e.target.checked)} />}
-            label={<Typography variant="body2">Create users</Typography>}
-          />
-        </Grid>
-        <Grid item xs={6} sm={2.5}>
-          <FormControlLabel
-            control={<Checkbox checked={reset}
-                              onChange={(e) => setReset(e.target.checked)} />}
-            label={<Typography variant="body2">Reset first</Typography>}
-          />
-        </Grid>
-        <Grid item xs={12} sm={4}>
-          <FormControlLabel
-            control={<Checkbox checked={allUsers}
-                              onChange={(e) => setAllUsers(e.target.checked)} />}
-            label={
-              <Typography variant="body2">
-                Seed every user the tenant already has (real headcount, not a fixed 5)
-              </Typography>
-            }
-          />
-        </Grid>
-      </Grid>
-      <Button sx={{ mt: 1 }} size="small" variant="contained" onClick={start}>
-        Start seeding
-      </Button>
-      {msg && <Alert severity="success" sx={{ mt: 1 }}>{msg}</Alert>}
-      {err && <Alert severity="error" sx={{ mt: 1 }}>{err}</Alert>}
-    </Box>
-  )
-}
-
-/**
- * Empties the TARGET tenant's seeded data, right where "run a clean migrate"
- * lives -- the natural place to want it, since a re-test against a target
- * that already holds a previous run's data does not verify what it looks
- * like it verifies (phases.py's own reconciliation only means something
- * against a target that started empty).
- *
- * Typed-domain gated the same way SeedStep gates the source: nothing here
- * can run without the operator typing the target domain back, the server
- * re-checks it before building the command, and reset_target.py's own guard
- * checks a third time regardless.
- */
-const ResetTargetStep: React.FC = () => {
-  const [confirmDomain, setConfirmDomain] = useState('')
-  const [msg, setMsg] = useState<string | null>(null)
-  const [err, setErr] = useState<string | null>(null)
-  const [confirmOpen, setConfirmOpen] = useState(false)
-
-  const start = async () => {
-    setConfirmOpen(false)
-    setErr(null); setMsg(null)
-    const r = await runResetTarget(confirmDomain)
-    if (r.ok) setMsg('reset started -- watch the Activity Feed')
-    else setErr(r.error || 'could not start')
-  }
-
-  return (
-    <Box sx={{ mb: 2 }}>
-      <Alert severity="error" sx={{ mb: 2 }}>
-        Empties the TARGET tenant's seeded Drive/Gmail/Calendar/Chat data --
-        not the ledger, and never the source. Do this before a clean re-test,
-        not after a real migration you want to keep.
-      </Alert>
-      <Grid container spacing={2} alignItems="center">
-        <Grid item xs={12} sm={5}>
-          <TextField
-            fullWidth size="small" label="Type the target domain to confirm"
-            value={confirmDomain} onChange={(e) => setConfirmDomain(e.target.value)}
-          />
-        </Grid>
-        <Grid item xs={12} sm={4}>
-          <Button
-            color="error" variant="outlined" size="small"
-            disabled={!confirmDomain}
-            onClick={() => setConfirmOpen(true)}
-          >
-            Reset target tenant
-          </Button>
-        </Grid>
-      </Grid>
-      {msg && <Alert severity="success" sx={{ mt: 1 }}>{msg}</Alert>}
-      {err && <Alert severity="error" sx={{ mt: 1 }}>{err}</Alert>}
-
-      <Dialog open={confirmOpen} onClose={() => setConfirmOpen(false)}>
-        <DialogTitle>Empty {confirmDomain}?</DialogTitle>
-        <DialogContent>
-          <Typography variant="body2">
-            This deletes the seeded Drive files, mail, calendar events and chat
-            spaces reset_target.py can find for every mapped user in this
-            tenant. It does not touch the source tenant or the migration
-            ledger.
-          </Typography>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setConfirmOpen(false)}>Cancel</Button>
-          <Button color="error" variant="contained" onClick={start}>
-            Empty {confirmDomain}
-          </Button>
-        </DialogActions>
-      </Dialog>
     </Box>
   )
 }
