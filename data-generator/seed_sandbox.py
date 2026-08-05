@@ -43,6 +43,13 @@ Usage
     python tools/seed_sandbox.py --confirm-domain sandbox-src.example \\
         --scale medium --external-email you@gmail.com
     python tools/seed_sandbox.py --confirm-domain sandbox-src.example --reset
+
+    # Create accounts and fill every licence the trial provides. Needs
+    # admin.directory.user (for --create-users) and
+    # admin.reports.usage.readonly (for --fit-to-licenses) granted to
+    # SEED_SA_KEY's client ID in the sandbox source tenant.
+    python tools/seed_sandbox.py --confirm-domain sandbox-src.example \\
+        --create-users --fit-to-licenses
 """
 
 from __future__ import annotations
@@ -79,6 +86,31 @@ SEED_SCOPES = [
     "https://www.googleapis.com/auth/chat.messages",
 ]
 
+# Not part of SEED_SCOPES on purpose. `--fit-to-licenses` is opt-in, and
+# adding a scope the Admin Console has not authorised makes *every* delegated
+# call fail with `unauthorized_client` (see config.py's scope comments). So
+# the reports service is built with this scope only, and only when the user
+# asks for licence fitting.
+REPORTS_SCOPE = "https://www.googleapis.com/auth/admin.reports.usage.readonly"
+
+# customerUsageReports `accounts:` parameters, one (total, used) pair per
+# edition. Google has kept these legacy edition names for current Google
+# Workspace editions, and an org holds exactly one edition -- so only one pair
+# is ever populated, and summing across all of them yields the org's numbers.
+SEAT_PARAMS = [
+    ("apps_total_licenses", "apps_used_licenses"),
+    ("gsuite_basic_total_licenses", "gsuite_basic_used_licenses"),
+    ("gsuite_enterprise_total_licenses", "gsuite_enterprise_used_licenses"),
+    ("gsuite_unlimited_total_licenses", "gsuite_unlimited_used_licenses"),
+]
+
+# Localparts for the generated users that fill unused licence seats.
+GENERATED_LOCALPARTS = [
+    "fiona", "george", "hannah", "ivan", "jane", "kyle", "lara", "mike",
+    "nina", "oliver", "priya", "quinn", "ravi", "sarah", "tom", "uma",
+    "victor", "wendy", "xander", "yara", "zane",
+]
+
 
 # ======================================================================
 # Safety
@@ -110,6 +142,116 @@ def _media(data: bytes, mimetype: str):
 
     return MediaIoBaseUpload(io.BytesIO(data), mimetype=mimetype,
                              resumable=len(data) > 5 * 1024 * 1024)
+
+
+# ======================================================================
+# Storage top-up — filler files, purely to reach a target quota usage.
+#
+# Nothing about realistic document variety helps here: the office-document
+# corpus above averages tens of KB per file (confirmed by measurement against
+# a live tenant this session), so reaching tens of GB through that content
+# alone would mean hundreds of thousands of files per user -- impractical to
+# generate, upload, and later migrate within any reasonable time, and it
+# would say nothing about storage limits that a much smaller number of large
+# files does not already say better.
+# ======================================================================
+_FILLER_CHUNK_BYTES = 200 * 1024 * 1024   # 200 MB per filler file
+_filler_blob_cache: bytes | None = None
+
+
+def _filler_blob() -> bytes:
+    """
+    200 MB of random bytes, generated once and reused for every filler file
+    across every user.
+
+    The content has to exist to occupy storage; what it contains does not
+    matter, since nothing reads it back. Generating a fresh 200 MB via
+    os.urandom() per file would mean ~150 GB worth of RNG output for a
+    30 GB x 5-user run, which costs real CPU time for a property (randomness)
+    nothing here needs. Immutable bytes are cheap to share.
+    """
+    global _filler_blob_cache
+    if _filler_blob_cache is None:
+        _filler_blob_cache = os.urandom(_FILLER_CHUNK_BYTES)
+    return _filler_blob_cache
+
+
+def top_up_storage(drive, settings: Settings, user: str, target_gb: float,
+                   media_fn=None) -> dict:
+    """
+    Adds large filler files until this user's total Workspace storage
+    (Gmail + Drive + Photos, pooled -- storageQuota.usage) reaches target_gb.
+
+    Filler lives inside a folder named exactly "MIGRATION-TEST" -- the same
+    name reset_drive() already matches on -- so resetting the seeded corpus
+    removes the filler too, with no separate reset path to write or maintain.
+
+    The one caveat worth stating rather than discovering later: Gmail's
+    contribution to storageQuota.usage does not update in real time (Google's
+    own accounting can lag by hours), so a target computed immediately after
+    seeding a large mailbox will overshoot how much filler is actually needed
+    once Gmail's count catches up. Re-run with --top-up-only once it has --
+    that flag skips every other seeding step and only checks and tops up
+    storage, so it is safe to run repeatedly without duplicating mail, drive
+    content, or anything else.
+    """
+    from config import FOLDER_MIME
+
+    media_fn = media_fn or _media
+    retry = _retry_factory(settings)
+    m = {"filler_files": 0, "filler_bytes": 0, "usage_before_gb": 0.0,
+        "usage_after_gb": 0.0, "note": ""}
+    try:
+        about = retry(lambda: drive.about().get(
+            fields="storageQuota").execute())()
+        quota = about.get("storageQuota", {})
+        usage = int(quota.get("usage") or 0)
+        limit = quota.get("limit")
+        m["usage_before_gb"] = round(usage / 1e9, 2)
+
+        target_bytes = int(target_gb * 1e9)
+        if limit and int(limit) < target_bytes:
+            # The account's own licence ceiling is lower than what was asked
+            # for. Filling further would just fail partway through with
+            # storageQuotaExceeded once the real limit is hit.
+            target_bytes = int(limit)
+            m["note"] = (f"target capped at the account's own licence limit "
+                        f"({int(limit) / 1e9:.1f} GB)")
+
+        remaining = target_bytes - usage
+        if remaining <= 0:
+            m["usage_after_gb"] = m["usage_before_gb"]
+            return m
+
+        root = retry(lambda: drive.files().create(
+            body={"name": "MIGRATION-TEST", "mimeType": FOLDER_MIME,
+                 "parents": ["root"]}, fields="id").execute())()
+        folder_id = root["id"]
+
+        blob = _filler_blob()
+        chunk = len(blob)
+        n_full, remainder = divmod(remaining, chunk)
+        i = -1
+        for i in range(int(n_full)):
+            retry(lambda i=i: drive.files().create(
+                body={"name": f"filler-{i:04d}.bin", "parents": [folder_id]},
+                media_body=media_fn(blob, "application/octet-stream"),
+                fields="id").execute())()
+            m["filler_files"] += 1
+            m["filler_bytes"] += chunk
+        if remainder > 1024 * 1024:      # skip a leftover under 1 MB
+            retry(lambda: drive.files().create(
+                body={"name": f"filler-{i + 1:04d}.bin", "parents": [folder_id]},
+                media_body=media_fn(blob[:int(remainder)], "application/octet-stream"),
+                fields="id").execute())()
+            m["filler_files"] += 1
+            m["filler_bytes"] += int(remainder)
+
+        m["usage_after_gb"] = round((usage + m["filler_bytes"]) / 1e9, 2)
+    except Exception as exc:  # noqa: BLE001
+        m["note"] = f"storage top-up failed: {exc}"
+        print(f"  ! top-up for {user}: {exc}")
+    return m
 
 
 def _retry_factory(settings: Settings):
@@ -373,6 +515,168 @@ def reset_chat(chat, settings: Settings, local: str) -> int:
         token = resp.get("nextPageToken")
         if not token:
             break
+    return deleted
+
+
+# ======================================================================
+# Contacts / Tasks — realistic coverage for contacts_engine.py / tasks_engine.py
+#
+# Neither existed in the seeder before these engines did. Each is written the
+# same way seed_chat() is: wrapped in a single try/except that records a note
+# and returns rather than raising, because contacts.write/tasks scopes are
+# typically granted on a different schedule than drive/gmail/calendar/chat --
+# verified live: the SEED_SCOPES credential mints today, a separate
+# contacts+tasks-only credential does not yet. One user's missing grant must
+# not abort the whole seeding run for every other user.
+# ======================================================================
+_CONTACT_GROUP_NAMES = ("Clients", "Vendors")
+
+# Marks every seeded contact so reset_contacts() deletes only what this
+# script created -- the same discipline reset_drive()/reset_chat() already
+# follow via a name match, done here through a custom People field since
+# contacts have no free-text "owner" concept to match on.
+_SEED_MARKER = {"key": "seed_sandbox", "value": "true"}
+
+
+def seed_contacts(people, settings: Settings, user: str, peers: list[str],
+                  external: str, count: int = 25) -> dict:
+    retry = _retry_factory(settings)
+    m = {"contacts": 0, "groups": 0, "note": ""}
+    first_names = ("Priya", "Jordan", "Wei", "Fatima", "Sam", "Elena", "Kwame",
+                  "Noor", "Diego", "Aisling", "Ravi", "Chloe")
+    last_names = ("Nakamura", "Silva", "Okafor", "Kowalski", "Haddad",
+                  "Lindqvist", "Reyes", "Achebe", "Bianchi", "Petrov")
+    domains = [external, "partner-co.example", "vendor-services.example"]
+    try:
+        group_ids = []
+        for name in _CONTACT_GROUP_NAMES:
+            created = retry(lambda n=name: people.contactGroups().create(
+                body={"contactGroup": {"name": n}}).execute())()
+            group_ids.append(created["resourceName"])
+            m["groups"] += 1
+
+        rng = random.Random(hash(user) & 0xFFFFFFFF)
+        for i in range(count):
+            given, family = rng.choice(first_names), rng.choice(last_names)
+            email = f"{given.lower()}.{family.lower()}{i}@{rng.choice(domains)}"
+            body = {
+                "names": [{"givenName": given, "familyName": family}],
+                "emailAddresses": [{"value": email}],
+                "phoneNumbers": [{"value": f"+1-555-{rng.randint(100,999)}-"
+                                          f"{rng.randint(1000,9999)}"}],
+                "organizations": [{"name": rng.choice(
+                    ["Acme Logistics", "Northwind Traders", "Globex", "Initech"])}],
+                "userDefined": [_SEED_MARKER],
+            }
+            created = retry(lambda b=body: people.people().createContact(
+                body=b).execute())()
+            m["contacts"] += 1
+            group = group_ids[i % len(group_ids)]
+            retry(lambda rn=created["resourceName"], g=group:
+                 people.contactGroups().members().modify(
+                     resourceName=g,
+                     body={"resourceNamesToAdd": [rn]}).execute())()
+    except Exception as exc:  # noqa: BLE001
+        m["note"] = f"contacts failed (People API enabled? scopes granted?): {exc}"
+        print(f"  ! contacts for {user}: {exc}")
+    return m
+
+
+def reset_contacts(people, settings: Settings) -> int:
+    """Delete only contacts carrying _SEED_MARKER, and the two groups this
+    seeder creates -- never "every contact this user has"."""
+    retry = _retry_factory(settings)
+    deleted = 0
+    try:
+        token = None
+        while True:
+            resp = retry(lambda t=token: people.people().connections().list(
+                resourceName="people/me", pageSize=200, pageToken=t,
+                personFields="userDefined").execute())()
+            for p in resp.get("connections", []):
+                marked = any(
+                    d.get("key") == _SEED_MARKER["key"]
+                    and d.get("value") == _SEED_MARKER["value"]
+                    for d in (p.get("userDefined") or []))
+                if marked:
+                    try:
+                        retry(lambda rn=p["resourceName"]:
+                             people.people().deleteContact(
+                                 resourceName=rn).execute())()
+                        deleted += 1
+                    except Exception:  # noqa: BLE001
+                        pass
+            token = resp.get("nextPageToken")
+            if not token:
+                break
+        for name in _CONTACT_GROUP_NAMES:
+            resp = retry(lambda: people.contactGroups().list(
+                pageSize=100).execute())()
+            for g in resp.get("contactGroups", []):
+                if g.get("name") == name:
+                    try:
+                        retry(lambda rn=g["resourceName"]:
+                             people.contactGroups().delete(
+                                 resourceName=rn, deleteContacts=False).execute())()
+                    except Exception:  # noqa: BLE001
+                        pass
+    except Exception:  # noqa: BLE001
+        pass
+    return deleted
+
+
+_TASK_LIST_NAME = "MIGRATION-TEST Tasks"
+
+
+def seed_tasks(tasks, settings: Settings, count: int = 20) -> dict:
+    retry = _retry_factory(settings)
+    m = {"lists": 0, "tasks": 0, "note": ""}
+    verbs = ("Follow up on", "Review", "Draft", "Approve", "Schedule",
+            "Close out", "Escalate", "File")
+    subjects = ("the Q3 budget", "vendor contract", "onboarding checklist",
+               "security review", "the migration runbook", "client renewal",
+               "the roadmap doc", "expense report")
+    try:
+        created = retry(lambda: tasks.tasklists().insert(
+            body={"title": _TASK_LIST_NAME}).execute())()
+        list_id = created["id"]
+        m["lists"] += 1
+        rng = random.Random(count)
+        for i in range(count):
+            body = {
+                "title": f"{rng.choice(verbs)} {rng.choice(subjects)}",
+                "notes": "Seeded test data.",
+            }
+            if i % 3 == 0:
+                body["status"] = "completed"
+            if i % 4 == 0:
+                body["due"] = _iso(rng.randint(1, 30))
+            retry(lambda b=body: tasks.tasks().insert(
+                tasklist=list_id, body=b).execute())()
+            m["tasks"] += 1
+    except Exception as exc:  # noqa: BLE001
+        m["note"] = f"tasks failed (Tasks API enabled? scopes granted?): {exc}"
+        print(f"  ! tasks: {exc}")
+    return m
+
+
+def reset_tasks(tasks, settings: Settings) -> int:
+    """Delete only the task list this seeder creates, by name -- deleting a
+    list deletes its tasks with it, so there is nothing else to clean up."""
+    retry = _retry_factory(settings)
+    deleted = 0
+    try:
+        resp = retry(lambda: tasks.tasklists().list(maxResults=100).execute())()
+        for tl in resp.get("items", []):
+            if tl.get("title") == _TASK_LIST_NAME:
+                try:
+                    retry(lambda i=tl["id"]: tasks.tasklists().delete(
+                        tasklist=i).execute())()
+                    deleted += 1
+                except Exception:  # noqa: BLE001
+                    pass
+    except Exception:  # noqa: BLE001
+        pass
     return deleted
 
 
@@ -745,12 +1049,173 @@ def build_chat(settings: Settings, user: str):
     return build("chat", "v1", http=http, cache_discovery=False)
 
 
+def build_people_tasks(settings: Settings, user: str):
+    """
+    Delegated People/Tasks clients, with their own credentials object.
+
+    Not appended to SEED_SCOPES -- same reasoning as build_reports() just
+    above. contacts/tasks write scopes are typically granted later than
+    drive/gmail/calendar/chat (verified live: the SEED_SCOPES credential
+    mints fine today; a separate credential requesting only
+    contacts+tasks fails with unauthorized_client because those two scopes
+    are not yet authorised). Requesting them as part of the same combined
+    scope-set as SEED_SCOPES would fail that ENTIRE token exchange the
+    moment either is missing -- breaking drive/gmail/calendar/chat seeding
+    too, not just contacts/tasks. A separate Credentials object confines the
+    failure to exactly the two services that are not ready yet.
+    """
+    import google_auth_httplib2
+    import httplib2
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+
+    from config import CONTACTS_WRITE_SCOPE, TASKS_WRITE_SCOPE
+
+    creds = service_account.Credentials.from_service_account_file(
+        _resolve_key_path(settings),
+        scopes=[CONTACTS_WRITE_SCOPE, TASKS_WRITE_SCOPE],
+    ).with_subject(user)
+
+    def svc(api, version):
+        http = google_auth_httplib2.AuthorizedHttp(
+            creds, http=httplib2.Http(timeout=300)
+        )
+        return build(api, version, http=http, cache_discovery=False)
+
+    return svc("people", "v1"), svc("tasks", "v1")
+
+
+def build_reports(settings: Settings, user: str):
+    """A delegated Reports client, for reading licence seat usage.
+
+    Built with REPORTS_SCOPE on top of the seed scopes, and only ever called
+    by `--fit-to-licenses`; see the comment above REPORTS_SCOPE for why that
+    scope is not just added to SEED_SCOPES.
+    """
+    import google_auth_httplib2
+    import httplib2
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+
+    creds = service_account.Credentials.from_service_account_file(
+        _resolve_key_path(settings), scopes=SEED_SCOPES + [REPORTS_SCOPE]
+    ).with_subject(user)
+    http = google_auth_httplib2.AuthorizedHttp(
+        creds, http=httplib2.Http(timeout=120)
+    )
+    return build("admin", "reports_v1", http=http, cache_discovery=False)
+
+
+# ======================================================================
+# Licence capacity
+# ======================================================================
+def _parse_seats(parameters: list[dict]) -> dict:
+    """Turn `usageReports[0].parameters` into total/used/available seats.
+
+    `intValue` arrives as a string ("10" not 10), and any edition the tenant
+    does not hold is simply absent from the report -- so both defaults are
+    zero and the sums are over the edition the org actually has.
+    """
+    values = {}
+    for p in parameters:
+        name = p.get("name", "")
+        raw = p.get("intValue")
+        if raw is not None:
+            values[name] = int(raw)
+    total = sum(values.get(f"accounts:{t}", 0) for t, _ in SEAT_PARAMS)
+    used = sum(values.get(f"accounts:{u}", 0) for _, u in SEAT_PARAMS)
+    return {"total": total, "used": used, "available": total - used,
+            "parameters": values}
+
+
+def seat_report(settings: Settings, reports=None) -> dict:
+    """Read Google Workspace seat usage from the Reports API.
+
+    Runs as SOURCE_ADMIN because the Reports API only answers to an
+    administrator. `reports` is injectable for tests; the default builds a
+    delegated client. Reports lag up to a day, so the most recent non-empty
+    report in the last week is used.
+    """
+    admin = os.getenv("SOURCE_ADMIN")
+    if not admin:
+        raise RuntimeError(
+            "SOURCE_ADMIN must be set to a super admin of the source domain "
+            "to read licence usage."
+        )
+    if reports is None:
+        reports = build_reports(settings, admin)
+    params = ",".join(f"accounts:{p}" for pair in SEAT_PARAMS for p in pair)
+    for back in range(1, 8):
+        d = (datetime.now(timezone.utc) - timedelta(days=back)).strftime("%Y-%m-%d")
+        resp = reports.customerUsageReports().get(date=d, parameters=params).execute()
+        rows = (resp.get("usageReports") or [{}])[0].get("parameters") or []
+        if rows:
+            return _parse_seats(rows)
+    raise RuntimeError("no licence usage report was available in the last week")
+
+
+def _list_users(directory) -> set[str]:
+    """Every primary email in the source domain, paged."""
+    emails = set()
+    token = None
+    while True:
+        resp = directory.users().list(
+            customer="my_customer", pageToken=token, maxResults=500,
+            fields="users(primaryEmail),nextPageToken",
+        ).execute()
+        for u in resp.get("users", []):
+            emails.add(u["primaryEmail"])
+        token = resp.get("nextPageToken")
+        if not token:
+            break
+    return emails
+
+
+def _generated_localpart(i: int, taken: set[str]) -> str:
+    base = GENERATED_LOCALPARTS[i] if i < len(GENERATED_LOCALPARTS) \
+        else f"seeduser{i + 1}"
+    candidate, n = base, 1
+    while candidate in taken:
+        n += 1
+        candidate = f"{base}{n}"
+    return candidate
+
+
+def fit_entries(entries: list[dict], available: int,
+                existing_emails: set[str], domain: str) -> list[dict]:
+    """Fit the requested user list to the tenant's licence headroom.
+
+    * Users that already exist are always kept: they occupy seats already
+      counted in the `used` figure, so keeping them never over-subscribes.
+    * New users are admitted up to `available`; the list is truncated if it
+      asks for more than the tenant can seat.
+    * Unused headroom is filled with generated localparts, so a trial's
+      licences are actually exercised -- the point of seeding a sandbox up
+      to capacity.
+    """
+    present = [e for e in entries if e["email"] in existing_emails]
+    missing = [e for e in entries if e["email"] not in existing_emails]
+    room = max(available, 0)
+    kept = missing[:room]
+    used_local = {e["local"] for e in present} | {e["local"] for e in kept}
+    i = 0
+    while len(kept) < room:
+        lp = _generated_localpart(i, used_local)
+        used_local.add(lp)
+        template = ORG[(len(present) + len(kept)) % len(ORG)]
+        kept.append({"local": lp, "email": f"{lp}@{domain}",
+                     "dept": template["dept"], "project": template["project"]})
+        i += 1
+    return present + kept
+
+
 # ======================================================================
 # Per-user worker
 # ======================================================================
 def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
                   external: str, scale: str, mail_count: int,
-                  event_count: int, edge_cases: bool) -> dict:
+                  event_count: int, edge_cases: bool,
+                  target_gb_per_user: float | None = None) -> dict:
     user = entry["email"]
     peers = [u for u in all_users if u != user]
     t0 = time.time()
@@ -770,6 +1235,20 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
     chat_m = seed_chat(chat, settings, user, peers, external,
                        user.split("@")[0])
 
+    # Separate credential (build_people_tasks, not build_services): contacts
+    # and tasks write scopes are commonly granted on a different schedule
+    # than drive/gmail/calendar/chat, and a missing grant here must not touch
+    # anything already seeded successfully above.
+    people, tasks = build_people_tasks(settings, user)
+    contacts_m = seed_contacts(people, settings, user, peers, external)
+    tasks_m = seed_tasks(tasks, settings)
+
+    # Last: every other pass has to finish first so storageQuota.usage
+    # reflects everything they wrote, not just some of it.
+    fill_m = {"filler_files": 0, "filler_bytes": 0, "note": ""}
+    if target_gb_per_user:
+        fill_m = top_up_storage(drive, settings, user, target_gb_per_user)
+
     elapsed = round(time.time() - t0, 1)
     print(f"  [{user}] done in {elapsed}s: {drive_m['total_files']} files, "
           f"{drive_m['folders']} folders, {drive_m.get('comments', 0)} comments, "
@@ -777,21 +1256,49 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
           f"{cal_m['events']} events, "
           f"{cal_m.get('calendars', 0)} secondary calendars, "
           f"{chat_m['messages']} chat messages in {chat_m['spaces']} spaces"
-          + (f" ({chat_m['note']})" if chat_m["note"] else ""))
+          + (f" ({chat_m['note']})" if chat_m["note"] else "")
+          + f", {contacts_m['contacts']} contacts"
+          + (f" ({contacts_m['note']})" if contacts_m["note"] else "")
+          + f", {tasks_m['tasks']} tasks"
+          + (f" ({tasks_m['note']})" if tasks_m["note"] else "")
+          + (f", {fill_m['filler_files']} filler file(s) "
+             f"({fill_m.get('usage_before_gb', 0):.1f}GB -> "
+             f"{fill_m.get('usage_after_gb', 0):.1f}GB)"
+             if target_gb_per_user else "")
+          + (f" ({fill_m['note']})" if fill_m.get("note") else ""))
     return {"user": user, "dept": entry["dept"], "project": entry["project"],
             "drive": drive_m, "gmail": gmail_m, "calendar": cal_m,
-            "chat": chat_m, "elapsed_sec": elapsed}
+            "chat": chat_m, "contacts": contacts_m, "tasks": tasks_m,
+            "storage": fill_m, "elapsed_sec": elapsed}
+
+
+def top_up_one_user(settings: Settings, user: str, target_gb_per_user: float) -> dict:
+    """The --top-up-only path: check and fill storage only, safe to re-run
+    any number of times without duplicating mail, drive content, contacts or
+    tasks -- see top_up_storage()'s docstring for why a second pass is
+    sometimes needed (Gmail's usage accounting lags real time)."""
+    drive, _gmail, _cal = build_services(settings, user)
+    t0 = time.time()
+    m = top_up_storage(drive, settings, user, target_gb_per_user)
+    elapsed = round(time.time() - t0, 1)
+    print(f"  [{user}] top-up in {elapsed}s: {m['usage_before_gb']:.1f}GB -> "
+         f"{m['usage_after_gb']:.1f}GB ({m['filler_files']} filler file(s))"
+         + (f" -- {m['note']}" if m.get("note") else ""))
+    return {"user": user, "storage": m, "elapsed_sec": elapsed}
 
 
 def reset_one_user(settings: Settings, user: str) -> dict:
     drive, gmail, cal = build_services(settings, user)
     chat = build_chat(settings, user)
+    people, tasks = build_people_tasks(settings, user)
     return {
         "user": user,
         "drive": reset_drive(drive, settings),
         "gmail": reset_gmail(gmail, settings),
         "calendar": reset_calendar(cal, settings),
         "chat": reset_chat(chat, settings, user.split("@")[0]),
+        "contacts": reset_contacts(people, settings),
+        "tasks": reset_tasks(tasks, settings),
     }
 
 
@@ -827,11 +1334,43 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--create-users", action="store_true",
                     help="create the test accounts first if they do not exist "
                          "(needs admin.directory.user granted to SEED_SA_KEY)")
+    ap.add_argument("--fit-to-licenses", action="store_true",
+                    help="query the tenant's Google Workspace licence usage "
+                         "and seed up to the available seats: the requested "
+                         "list is truncated if it exceeds capacity, users "
+                         "that already exist are always kept, and unused "
+                         "seats are filled with generated users. Requires "
+                         "--create-users and admin.reports.usage.readonly "
+                         "granted to SEED_SA_KEY")
     ap.add_argument("--reset", action="store_true", help="DELETE everything")
+    ap.add_argument("--target-gb-per-user", type=float, default=None,
+                    help="after normal seeding, add large filler files until "
+                         "each user's total Workspace storage (Gmail+Drive+"
+                         "Photos, pooled) reaches this many GB. Filler lives "
+                         "under the same MIGRATION-TEST root --reset already "
+                         "cleans up. Gmail's own usage accounting lags real "
+                         "time, so a run right after heavy mail seeding can "
+                         "undershoot; re-run with --top-up-only afterwards.")
+    ap.add_argument("--top-up-only", action="store_true",
+                    help="skip every seeding step and only check/top up "
+                         "storage toward --target-gb-per-user. Safe to run "
+                         "repeatedly -- it never touches mail, Drive "
+                         "documents, contacts or tasks.")
     args = ap.parse_args(argv)
+
+    if args.top_up_only and not args.target_gb_per_user:
+        sys.exit("--top-up-only needs --target-gb-per-user")
+    if args.top_up_only and args.reset:
+        sys.exit("--top-up-only makes no sense with --reset")
 
     settings = Settings()
     assert_sandbox(settings, args.confirm_domain)
+
+    if args.fit_to_licenses and not args.create_users:
+        sys.exit("--fit-to-licenses requires --create-users: it decides how "
+                 "many accounts to create, so it only acts on that path.")
+    if args.fit_to_licenses and args.reset:
+        sys.exit("--fit-to-licenses makes no sense with --reset.")
 
     locals_ = ([u.strip() for u in args.users.split(",")] if args.users
                else [e["local"] for e in ORG])
@@ -864,6 +1403,33 @@ def main(argv: list[str] | None = None) -> int:
             http=google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=120)),
             cache_discovery=False,
         )
+
+        if args.fit_to_licenses:
+            existing = _list_users(directory)
+            try:
+                seats = seat_report(settings)
+            except Exception as exc:  # noqa: BLE001
+                print(f"REFUSING --fit-to-licenses: could not read licence "
+                      f"usage ({exc}).")
+                print(f"Grant this scope to SEED_SA_KEY's client ID in "
+                      f"{settings.source_domain} (Admin Console > API "
+                      f"controls > Domain-wide delegation), then re-run:")
+                print(f"    {REPORTS_SCOPE}")
+                return 1
+            print(f"\nLicence usage: {seats['total']} total, "
+                  f"{seats['used']} used, {seats['available']} available")
+            entries = fit_entries(entries, seats["available"], existing,
+                                  settings.source_domain)
+            all_users = [e["email"] for e in entries]
+            if not all_users:
+                print("No users to seed: the tenant has no free licences "
+                      "and none of the requested users already exist.")
+                return 1
+            present = len(existing & set(all_users))
+            print(f"  users to seed: {len(all_users)} "
+                  f"({present} already exist, "
+                  f"{len(all_users) - present} new)")
+
         print(f"\nEnsuring {len(all_users)} account(s) exist in "
               f"{settings.source_domain} ...")
         res = provision.ensure_users(directory, all_users)
@@ -886,6 +1452,16 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:  # noqa: BLE001
             args.workers = 3
 
+    # --- Top-up only -------------------------------------------------------
+    if args.top_up_only:
+        print(f"\nTopping up storage for {len(all_users)} user(s) toward "
+             f"{args.target_gb_per_user:.1f} GB each ...")
+        with futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
+            list(pool.map(
+                lambda u: top_up_one_user(settings, u, args.target_gb_per_user),
+                all_users))
+        return 0
+
     # --- Reset -----------------------------------------------------------
     if args.reset:
         print(f"About to DELETE all Drive files, mail, events and Chat for:")
@@ -907,7 +1483,8 @@ def main(argv: list[str] | None = None) -> int:
             for r in pool.map(lambda u: reset_one_user(settings, u), all_users):
                 print(f"  {r['user']}: {r['drive']} files, {r['gmail']} "
                       f"messages, {r['calendar']} events, "
-                      f"{r['chat']} chat spaces deleted")
+                      f"{r['chat']} chat spaces, {r['contacts']} contacts, "
+                      f"{r['tasks']} task list(s) deleted")
         for f in (args.manifest,):
             if os.path.exists(f):
                 os.remove(f)
@@ -944,6 +1521,7 @@ def main(argv: list[str] | None = None) -> int:
                 seed_one_user, settings, e, all_users, args.external_email,
                 args.scale, mail_count, event_count,
                 args.edge_cases == "all" or (args.edge_cases == "first" and i == 0),
+                args.target_gb_per_user,
             ): e["email"]
             for i, e in enumerate(entries)
         }
@@ -971,6 +1549,11 @@ def main(argv: list[str] | None = None) -> int:
         "secondary_calendars": sum(r["calendar"].get("calendars", 0) for r in ok),
         "chat_spaces": sum(r["chat"].get("spaces", 0) for r in ok),
         "chat_messages": sum(r["chat"].get("messages", 0) for r in ok),
+        "contacts": sum(r.get("contacts", {}).get("contacts", 0) for r in ok),
+        "tasks": sum(r.get("tasks", {}).get("tasks", 0) for r in ok),
+        "filler_files": sum(r.get("storage", {}).get("filler_files", 0) for r in ok),
+        "filler_gb": round(sum(
+            r.get("storage", {}).get("filler_bytes", 0) for r in ok) / 1e9, 2),
         "grants_user": sum(r["drive"]["grants"]["user"] for r in ok),
         "grants_domain": sum(r["drive"]["grants"]["domain"] for r in ok),
         "grants_anyone": sum(r["drive"]["grants"]["anyone"] for r in ok),
@@ -1015,6 +1598,12 @@ def main(argv: list[str] | None = None) -> int:
           f"{totals['grants_domain']:,} domain, "
           f"{totals['grants_external']:,} external, "
           f"{totals['grants_anyone']:,} anyone")
+    print(f"  Contacts    : {totals['contacts']:,}")
+    print(f"  Tasks       : {totals['tasks']:,}")
+    if args.target_gb_per_user:
+        print(f"  Filler      : {totals['filler_files']:,} file(s), "
+              f"{totals['filler_gb']:.2f} GB added toward "
+              f"{args.target_gb_per_user:.1f} GB/user")
     print(f"{'='*66}")
     print(f"Manifest   -> {args.manifest}")
     print(f"Identities -> {args.identities_out}")

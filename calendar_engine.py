@@ -49,11 +49,12 @@ class CalendarMigrator:
         self.limiter = RateLimiter(settings.per_user_qps)
         self.stats = {"events": 0, "exceptions": 0, "failed": 0, "skipped": 0}
 
-    def _retry(self, fn):
+    def _retry(self, fn, label=None):
         return retry_on_google_error(
             max_retries=self.settings.max_retries,
             base_delay=self.settings.base_backoff,
             max_delay=self.settings.max_backoff,
+            label=label or "calendar",
         )(fn)()
 
     # -- listing ----------------------------------------------------------------
@@ -254,13 +255,35 @@ class CalendarMigrator:
                 self.db.log_audit(self.source_user, f"{src_cal_id}:{svalue}",
                                   "calendar_acl", "FAILED", str(exc))
 
+    @staticmethod
+    def _event_key(src_cal_id: str, event_id: str) -> str:
+        """
+        The ledger key for an event, scoped to the calendar it lives on.
+
+        Google gives the same event resource the same `id` on every calendar it
+        appears on -- verified on a live tenant, where one event carried id
+        `_edim6bb1dhkm6p9d60mj0g3jc` on three of a user's calendars. Keying
+        idempotency on the id alone meant the first calendar imported it and
+        the other two skipped it as "already migrated", so an event a user had
+        on three calendars arrived on one.
+
+        It cost 12 of 76 event listings per user on the measured corpus, and it
+        was invisible to reconciliation: nothing failed, nothing was logged,
+        and the counter that noticed only saw a total.
+
+        Re-keying is safe against an existing ledger. Events are written with
+        `events.import` keyed on iCalUID, so re-importing one that is already
+        there updates it rather than creating a second copy.
+        """
+        return f"{src_cal_id}::{event_id}"
+
     def _migrate_calendar(self, src_cal_id: str, tgt_cal_id: str,
                           updated_min: str | None) -> None:
         for item in self._iter_events(updated_min, calendar_id=src_cal_id):
             eid = item["id"]
 
             if item.get("recurringEventId"):
-                self._handle_exception(item, tgt_cal_id)
+                self._handle_exception(item, tgt_cal_id, src_cal_id)
                 continue
 
             if not item.get("iCalUID"):
@@ -269,7 +292,8 @@ class CalendarMigrator:
                 self.stats["skipped"] += 1
                 continue
 
-            if self.db.get_target_id(self.source_user, eid, "event"):
+            if self.db.get_target_id(self.source_user,
+                                     self._event_key(src_cal_id, eid), "event"):
                 self.stats["skipped"] += 1
                 continue
 
@@ -289,20 +313,28 @@ class CalendarMigrator:
                 self.stats["failed"] += 1
                 continue
 
-            self.db.record_mapping(self.source_user, eid, result["id"], "event")
+            self.db.record_mapping(self.source_user,
+                                   self._event_key(src_cal_id, eid),
+                                   result["id"], "event")
             self.db.log_audit(self.source_user, eid, "event", "SUCCESS")
             self.stats["events"] += 1
 
     # -- recurring exceptions --------------------------------------------------------
-    def _handle_exception(self, item: dict, tgt_cal_id: str = "primary") -> None:
+    def _handle_exception(self, item: dict, tgt_cal_id: str = "primary",
+                          src_cal_id: str = "primary") -> None:
         eid = item["id"]
         recurring_parent = item["recurringEventId"]
 
-        if self.db.get_target_id(self.source_user, eid, "event"):
+        if self.db.get_target_id(self.source_user,
+                                 self._event_key(src_cal_id, eid), "event"):
             self.stats["skipped"] += 1
             return
 
-        target_master_id = self.db.get_target_id(self.source_user, recurring_parent, "event")
+        # The master is looked up on the same calendar: a series and its
+        # exceptions always live together, and an unscoped lookup here would
+        # reintroduce the collision this key exists to prevent.
+        target_master_id = self.db.get_target_id(
+            self.source_user, self._event_key(src_cal_id, recurring_parent), "event")
         if not target_master_id:
             self.db.log_audit(self.source_user, eid, "event", "SKIPPED_ORPHAN_EXCEPTION",
                               "master recurring event has not migrated")
@@ -338,6 +370,8 @@ class CalendarMigrator:
             self.stats["failed"] += 1
             return
 
-        self.db.record_mapping(self.source_user, eid, target_instance_id, "event")
+        self.db.record_mapping(self.source_user,
+                               self._event_key(src_cal_id, eid),
+                               target_instance_id, "event")
         self.db.log_audit(self.source_user, eid, "event", "SUCCESS")
         self.stats["exceptions"] += 1

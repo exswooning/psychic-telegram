@@ -25,6 +25,8 @@ import os
 import time
 import uuid
 
+import metrics
+
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload  # noqa: F401
 
 from config import EXPORT_MIME_MAP, FOLDER_MIME, SHORTCUT_MIME, Settings
@@ -61,11 +63,12 @@ class DriveMigrator:
         self.target_drive_id: str | None = None
 
     # -- plumbing -----------------------------------------------------------
-    def _retry(self, fn):
+    def _retry(self, fn, label=None):
         return retry_on_google_error(
             max_retries=self.settings.max_retries,
             base_delay=self.settings.base_backoff,
             max_delay=self.settings.max_backoff,
+            label=label or "drive",
         )(fn)()
 
     def _scratch_path(self) -> str:
@@ -73,20 +76,61 @@ class DriveMigrator:
         return os.path.join(self.settings.scratch_dir, uuid.uuid4().hex)
 
     def _download_via(self, request_factory) -> tuple[str, int]:
-        """Drain a Drive request (get_media or export_media) to a scratch file."""
+        """
+        Drain a Drive request (get_media or export_media) to a scratch file.
+
+        Two things here were costing more than they looked.
+
+        The chunk size was the library default, which is 100 MB. With N
+        workers the worst-case resident set is N x 100 MB of buffer for files
+        that may be a few kilobytes -- on a codebase whose resources.py exists
+        precisely because an 8 GB laptop swap-stalled into socket timeouts.
+        An explicit size makes per-worker peak memory a known quantity, which
+        is what lets resources.py derive a worker count instead of guessing
+        one.
+
+        And the limiter was acquired per *chunk*. The bucket is sized for API
+        requests per second; a large file draining through it spent its tokens
+        on byte transfer, throttling every other call this user had to make.
+        Byte movement is bounded by bandwidth, not by the request quota, so the
+        request token is taken once for the call and the chunks then run at
+        whatever the link allows.
+        """
         path = self._scratch_path()
         request = request_factory()
+        self.limiter.acquire()
+        started = time.monotonic()
         with open(path, "wb") as fh:
-            downloader = MediaIoBaseDownload(fh, request)
+            downloader = MediaIoBaseDownload(
+                fh, request, chunksize=self.settings.download_chunk_bytes)
             done = False
             while not done:
-                self.limiter.acquire()
-                _, done = self._retry(lambda: downloader.next_chunk())
+                # Chunks get their own label so they do not mix with logical
+                # operations. Left as-is, a download recorded one sample per
+                # chunk while an upload recorded one sample for the entire
+                # resumable dance inside a single .execute() -- so the read
+                # side counted round trips and the write side counted
+                # operations, and the two were being compared. Immaterial on a
+                # corpus where 2 of 1,342 files exceed the resumable threshold;
+                # badly misleading on one where they do not.
+                _, done = self._retry(lambda: downloader.next_chunk(),
+                                      label="drive.get_media.chunk")
+        # One sample for the whole download, matching how files.create is
+        # measured on the other side.
+        metrics.METRICS.record("drive.files.get_media",
+                               time.monotonic() - started)
         return path, os.path.getsize(path)
 
     # -- entry point ----------------------------------------------------------
     def run(self, delta: bool = False) -> dict:
         self.delta = delta
+        # One query instead of one per item. get_target_id runs before every
+        # create -- and again for every deferred shortcut at the end of the
+        # run -- so on a resume it is the most frequent query in the engine.
+        loaded = self.db.preload_mappings(self.source_user)
+        if loaded:
+            log.info("[%s] resuming against %d known mapping(s)",
+                     self.source_user, loaded)
         if self.shared_drive:
             # A shared drive's id doubles as the id of its root folder, so it
             # substitutes directly for the My Drive root on both sides.
@@ -234,11 +278,11 @@ class DriveMigrator:
             resp = self._retry(lambda t=token: self.src.files().list(
                 q=q, pageSize=200, pageToken=t,
                 fields="nextPageToken, files(id,name,mimeType,parents,"
-                       "modifiedTime,size,md5Checksum,owners,"
+                       "modifiedTime,size,md5Checksum,owners,shared,"
                        "capabilities(canDownload),shortcutDetails,description,"
                        "starred)",
                 spaces="drive", supportsAllDrives=True, **extra,
-            ).execute())
+            ).execute(), label="drive.files.list")
             for f in resp.get("files", []):
                 yield f
             token = resp.get("nextPageToken")
@@ -290,7 +334,7 @@ class DriveMigrator:
         self.db.log_audit(self.source_user, item["id"], "folder", "SUCCESS",
                           modified_time=item.get("modifiedTime"))
         self.stats["folders"] += 1
-        self._restore_modified_time(tgt_id, item, self._sync_acls(item["id"], tgt_id))
+        self._restore_modified_time(tgt_id, item, self._sync_acls(item["id"], tgt_id, item.get("shared")))
         return tgt_id
 
     # -- files -------------------------------------------------------------------
@@ -445,7 +489,7 @@ class DriveMigrator:
         self.db.log_audit(self.source_user, item["id"], "file", "SUCCESS",
                           modified_time=item.get("modifiedTime"), bytes_moved=size)
         self.stats["files"] += 1
-        touched = self._sync_acls(item["id"], copy_id)
+        touched = self._sync_acls(item["id"], copy_id, item.get("shared"))
         if self.settings.migrate_comments:
             touched += self._sync_comments(item["id"], copy_id)
         self._restore_modified_time(copy_id, item, touched)
@@ -475,7 +519,7 @@ class DriveMigrator:
             result = self._retry(lambda: self.tgt.files().create(
                 body=body, media_body=media, fields="id,md5Checksum",
                 supportsAllDrives=True,
-            ).execute())
+            ).execute(), label="drive.files.create")
         except (PermanentAPIError, RuntimeError) as exc:
             self.quota.refund(size)
             self.db.log_audit(self.source_user, item["id"], "file", "FAILED", str(exc))
@@ -497,7 +541,7 @@ class DriveMigrator:
         self.db.log_audit(self.source_user, item["id"], "file", "SUCCESS",
                           modified_time=item.get("modifiedTime"), bytes_moved=size)
         self.stats["files"] += 1
-        touched = self._sync_acls(item["id"], tgt_id)
+        touched = self._sync_acls(item["id"], tgt_id, item.get("shared"))
         if self.settings.migrate_comments:
             touched += self._sync_comments(item["id"], tgt_id)
         self._restore_modified_time(tgt_id, item, touched)
@@ -549,7 +593,7 @@ class DriveMigrator:
         self.db.log_audit(self.source_user, item["id"], "file", "SUCCESS",
                           modified_time=item.get("modifiedTime"), bytes_moved=size)
         self.stats["files"] += 1
-        touched = self._sync_acls(item["id"], tgt_id)
+        touched = self._sync_acls(item["id"], tgt_id, item.get("shared"))
         if self.settings.migrate_comments:
             touched += self._sync_comments(item["id"], tgt_id)
         self._restore_modified_time(tgt_id, item, touched)
@@ -741,16 +785,43 @@ class DriveMigrator:
         return written
 
     # -- ACL translation -----------------------------------------------------------
-    def _sync_acls(self, source_id: str, target_id: str) -> int:
-        """Returns the number of grants actually applied -- the caller needs
-        that to know whether modifiedTime has to be re-asserted."""
+    def _sync_acls(self, source_id: str, target_id: str,
+                   shared: bool | None = None) -> int:
+        """
+        Returns the number of grants actually applied -- the caller needs that
+        to know whether modifiedTime has to be re-asserted.
+
+        `shared` comes from the file listing and lets the whole call be
+        skipped. A file Drive reports as unshared carries no permission but
+        the owner's, and the loop below skips owner rows, so listing them can
+        only ever return nothing to do.
+
+        Worth one round trip per unshared file, not two: the modifiedTime
+        restore already short-circuits on zero writes applied, so an unshared
+        file never paid for it either way. Measured on a live tenant, 372 of
+        504 files were unshared -- about 19% of that corpus's Drive calls.
+
+        Only an explicit False skips. `None` means the caller did not ask for
+        the field, and guessing there would trade a round trip for silently
+        dropped ACLs.
+
+        Not applied inside a shared drive. Every measurement behind this was
+        taken over `'me' in owners` -- pure My Drive -- and a shared drive
+        grants access through membership rather than per-file permissions, so
+        whether Drive reports `shared` the same way there is unverified. If it
+        said False on an item that still carried a real per-file grant, the
+        skip would drop it silently. One round trip per file is a cheap price
+        for not guessing; lift this once contract_probe covers a shared drive.
+        """
+        if shared is False and self.shared_drive is None:
+            return 0
         try:
             perms = self._retry(lambda: self.src.permissions().list(
                 fileId=source_id,
                 fields="permissions(id,type,role,emailAddress,domain,"
                        "allowFileDiscovery,permissionDetails)",
                 supportsAllDrives=True,
-            ).execute()).get("permissions", [])
+            ).execute(), label="drive.permissions.list").get("permissions", [])
         except (PermanentAPIError, RuntimeError) as exc:
             # Record it, do not merely warn. A warning scrolls past and leaves
             # nothing for `report` or resolve_failures to act on, so a file
@@ -825,7 +896,7 @@ class DriveMigrator:
                 self._retry(lambda b=body: self.tgt.permissions().create(
                     fileId=target_id, body=b, sendNotificationEmail=False,
                     supportsAllDrives=True, fields="id",
-                ).execute())
+                ).execute(), label="drive.permissions.create")
                 applied += 1
             except (PermanentAPIError, RuntimeError) as exc:
                 self.db.log_audit(self.source_user, audit_key, "acl", "FAILED", str(exc))
@@ -860,7 +931,7 @@ class DriveMigrator:
             self._retry(lambda: self.tgt.files().update(
                 fileId=target_id, body={"modifiedTime": mtime},
                 supportsAllDrives=True, fields="id",
-            ).execute())
+            ).execute(), label="drive.files.update.mtime")
         except (PermanentAPIError, RuntimeError) as exc:
             log.warning("[%s] could not restore modifiedTime on %s: %s",
                        self.source_user, target_id, exc)

@@ -145,6 +145,11 @@ class FakeDrive(FakeService):
         # Server-side copy crosses tenants, so the fake needs a way to reach
         # the other side's store. FakeAuth wires this up.
         self.peer: Optional["FakeDrive"] = None
+        # Settable per test (e.g. seed_sandbox's storage top-up), rather than
+        # the previous hardcoded 0 -- a fixed answer could never exercise
+        # "already at target" or "licence cap below the requested target".
+        self.storage_usage = 0
+        self.storage_limit = 1099511627776   # 1 TiB, the previous constant
         self.root_id = f"root-{tenant}"
         self.store[self.root_id] = {
             "id": self.root_id, "name": "My Drive", "mimeType": FOLDER_MIME,
@@ -265,6 +270,18 @@ class FakeDrive(FakeService):
     def comments(self):
         return _DriveComments(self)
 
+    def _shared_flag(self, fid: str) -> bool:
+        """
+        Drive reports `shared` on every file, and the engine now skips the
+        per-file permissions.list when it is False.
+
+        Measured against a live tenant before being encoded here: populated on
+        504/504 files, true exactly when a non-owner grant exists. Derived
+        rather than stored so it cannot drift from the permission store the
+        tests manipulate directly.
+        """
+        return any(p.get("role") != "owner" for p in self.perms.get(fid, []))
+
     def replies(self):
         return _DriveReplies(self)
 
@@ -299,7 +316,15 @@ class _DriveFiles:
             return {"files": [copy.deepcopy(f) for f in rows[:pageSize]]}
         m = _Q_PARENT.search(q or "")
         if m:
-            rows = [f for f in rows if m.group(1) in (f.get("parents") or [])]
+            # _create() resolves the "root" alias to self.s.root_id when
+            # STORING a file's parents (matching the real API's behaviour),
+            # so a query using the same "root" alias has to resolve it the
+            # same way or it can never match anything. Caught by reset_drive's
+            # own query, which real code sends literally as "'root' in
+            # parents" -- there was no prior test exercising reset_drive
+            # against this fake at all to have caught it sooner.
+            wanted = self.s.root_id if m.group(1) == "root" else m.group(1)
+            rows = [f for f in rows if wanted in (f.get("parents") or [])]
         if "trashed = false" in (q or "") or "trashed=false" in (q or ""):
             rows = [f for f in rows if not f.get("trashed")]
         if "'me' in owners" in (q or ""):
@@ -311,6 +336,19 @@ class _DriveFiles:
         start = int(pageToken or 0)
         page = rows[start: start + pageSize]
         out: dict[str, Any] = {"files": [copy.deepcopy(f) for f in page]}
+        # Drive returns `shared` on every file, and the engine skips the
+        # per-file permissions.list when it is False. Verified against a live
+        # tenant (504/504 populated) rather than assumed -- the whole reason
+        # this fake can be trusted on the point.
+        for f in out["files"]:
+            f["shared"] = self.s._shared_flag(f["id"])
+            # Drive returns the grants inline on files.list too -- measured
+            # live at 96/96 files, with counts matching permissions.list
+            # exactly (contract_probe: "files.list returns permissions
+            # inline"). The engine deliberately does not rely on it, because
+            # permissionDetails is absent there, but acl_audit does: it needs
+            # who-can-reach-this, not how the grant arrived.
+            f["permissions"] = copy.deepcopy(self.s.perms.get(f["id"], []))
         if start + pageSize < len(rows):
             out["nextPageToken"] = str(start + pageSize)
         return out
@@ -481,6 +519,41 @@ class _DriveFiles:
                 result["size"] = meta["size"]
         return result
 
+    def delete(self, **kw):
+        return _Call(self.s, "files.delete", self._delete, kw)
+
+    def _delete(self, fileId: str, **_):
+        """
+        Whole-file/folder deletion, previously entirely absent from this
+        fake -- calling `drive.files().delete()` raised AttributeError,
+        which reset_drive()'s own try/except swallowed silently. Its outer
+        `while True` then re-listed the same never-actually-deleted folder
+        every iteration and looped forever: nothing had ever exercised
+        reset_drive() against this fake to catch it before now.
+
+        Deleting a folder in real Drive recursively removes its whole
+        subtree (a folder is not a symlink; children hold their parent's id
+        by reference and nothing else keeps them alive), so this walks the
+        store and removes every descendant too -- not just the id passed in.
+        """
+        if fileId not in self.s.store:
+            return {}
+        to_remove = [fileId]
+        frontier = [fileId]
+        while frontier:
+            current = frontier.pop()
+            children = [f["id"] for f in self.s.store.values()
+                       if current in (f.get("parents") or [])]
+            to_remove.extend(children)
+            frontier.extend(children)
+        for fid in to_remove:
+            self.s.store.pop(fid, None)
+            self.s.content.pop(fid, None)
+            self.s.exports.pop(fid, None)
+            self.s.perms.pop(fid, None)
+            self.s.comment_store.pop(fid, None)
+        return {}
+
 
 class _DrivePermissions:
     def __init__(self, svc: FakeDrive):
@@ -600,7 +673,8 @@ class _DriveAbout:
 
     def _get(self, **_):
         return {"user": {"emailAddress": self.s.owner},
-                "storageQuota": {"limit": "1099511627776", "usage": "0"}}
+                "storageQuota": {"limit": str(self.s.storage_limit),
+                                 "usage": str(self.s.storage_usage)}}
 
 
 # ======================================================================
@@ -901,9 +975,19 @@ class FakeCalendar(FakeService):
         return cid
 
     def add_event_to(self, cal_id: str, summary: str, ical: str,
-                     organizer: Optional[str] = None) -> str:
-        """Seed an event into a *secondary* calendar."""
-        eid = self._new_id("sevt")
+                     organizer: Optional[str] = None,
+                     event_id: Optional[str] = None) -> str:
+        """
+        Seed an event into a *secondary* calendar.
+
+        `event_id` exists because Google gives the same event resource the
+        same id on every calendar it appears on -- measured on a live tenant,
+        where one event carried id `_edim6bb1dhkm6p9d60mj0g3jc` on three of a
+        user's calendars. A fake that always minted a fresh id per calendar
+        could not express that, which is why the collision it causes in the
+        ledger went unnoticed until a live count did not add up.
+        """
+        eid = event_id or self._new_id("sevt")
         self.cal_events[cal_id][eid] = {
             "id": eid, "iCalUID": ical, "summary": summary, "status": "confirmed",
             "updated": "2024-01-01T00:00:00Z",
@@ -1518,6 +1602,13 @@ class _PeoplePeople:
         self.s.contacts[rid] = rec
         return rec
 
+    def deleteContact(self, **kw):
+        return _Call(self.s, "people.deleteContact", self._delete, kw)
+
+    def _delete(self, resourceName: str, **_):
+        self.s.contacts.pop(resourceName, None)
+        return {}
+
 
 class _PeopleGroups:
     def __init__(self, svc):
@@ -1550,6 +1641,13 @@ class _PeopleGroups:
             raise http_error(404, "notFound", resourceName)
         for rn in body.get("resourceNamesToAdd", []):
             self.s.group_members[resourceName].append(rn)
+        return {}
+
+    def delete(self, **kw):
+        return _Call(self.s, "contactGroups.delete", self._delete, kw)
+
+    def _delete(self, resourceName: str, **_):
+        self.s.groups.pop(resourceName, None)
         return {}
 
 
@@ -1604,6 +1702,14 @@ class _TaskLists:
         lid = self.s._new_id("tl")
         self.s.lists[lid] = {"id": lid, "title": body.get("title", "")}
         return self.s.lists[lid]
+
+    def delete(self, **kw):
+        return _Call(self.s, "tasklists.delete", self._delete, kw)
+
+    def _delete(self, tasklist: str, **_):
+        self.s.lists.pop(tasklist, None)
+        self.s.task_store.pop(tasklist, None)
+        return {}
 
 
 class _Tasks:

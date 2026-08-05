@@ -642,3 +642,66 @@ def test_attachment_for_unmigrated_file_is_dropped(cal_migrator, auth):
     cal_migrator.run()
     body = auth.target_calendar(TGT_USER).calls_to("events.import")[0]["body"]
     assert "attachments" not in body, "a dead link is worse than none"
+
+
+class TestAnEventOnSeveralCalendars:
+    """
+    Google gives the same event resource the same `id` on every calendar it
+    appears on -- verified live, where one event carried id
+    `_edim6bb1dhkm6p9d60mj0g3jc` on three of a user's calendars.
+
+    Keying idempotency on the id alone meant the first calendar imported it and
+    the rest skipped it as already migrated, so an event a user had on three
+    calendars arrived on one. Nothing failed and nothing was logged; the only
+    symptom was a total that did not add up, and only if someone counted raw
+    listings rather than distinct events.
+    """
+
+    def test_the_ledger_key_is_scoped_to_the_calendar(self):
+        from calendar_engine import CalendarMigrator
+
+        a = CalendarMigrator._event_key("cal-a", "evt-1")
+        b = CalendarMigrator._event_key("cal-b", "evt-1")
+        assert a != b, "one event id on two calendars collides in the ledger"
+
+    def test_the_same_event_on_three_calendars_arrives_on_three(
+            self, auth, db, settings, identity):
+        import calendar_engine
+        from tests.conftest import SRC_USER, TGT_USER
+
+        settings.migrate_secondary_calendars = True
+        src = auth.source_calendar(SRC_USER)
+        shared_id = "_edim6bb1dhkm6p9d60mj0g3jc"
+        for name in ("Roadmap", "Releases", "Budgets"):
+            cal = src.add_calendar(name)
+            src.add_event_to(cal, "Quarterly review", "quarterly@src",
+                             event_id=shared_id)
+
+        calendar_engine.CalendarMigrator(auth, db, settings, SRC_USER,
+                                         TGT_USER).run()
+
+        tgt = auth.target_calendar(TGT_USER)
+        imported = tgt.call_count("events.import")
+        assert imported >= 3, (
+            f"only {imported} import(s) for an event on three calendars; the "
+            f"other calendars were skipped as already migrated")
+
+    def test_a_genuine_rerun_still_skips(self, auth, db, settings, identity):
+        """Scoping the key must not cost idempotency: a second run over the
+        same calendar must import nothing."""
+        import calendar_engine
+        from tests.conftest import SRC_USER, TGT_USER
+
+        settings.migrate_secondary_calendars = True
+        src = auth.source_calendar(SRC_USER)
+        cal = src.add_calendar("Roadmap")
+        src.add_event_to(cal, "Quarterly review", "quarterly@src")
+
+        calendar_engine.CalendarMigrator(auth, db, settings, SRC_USER,
+                                         TGT_USER).run()
+        first = auth.target_calendar(TGT_USER).call_count("events.import")
+        calendar_engine.CalendarMigrator(auth, db, settings, SRC_USER,
+                                         TGT_USER).run()
+        second = auth.target_calendar(TGT_USER).call_count("events.import")
+
+        assert second == first, "a re-run re-imported events it had already done"

@@ -161,6 +161,79 @@ ACTIONS: dict[str, dict] = {
         "destructive": True,
         "confirm": "UNDO",
     },
+    "resolve": {
+        "label": "Resolve failures",
+        "blurb": "Retry every FAILED item with the current code.",
+        "argv": [PY, "resolve_failures.py"],
+    },
+    "backfill_drive": {
+        "label": "Backfill: Drive done",
+        "blurb": "Mark Drive complete on a ledger from before per-service "
+                 "tracking existed. Only records what audit_log proves ran.",
+        "argv": [PY, "main.py", "backfill-services", "--services", "drive"],
+    },
+
+    # -- phased migration: every phase, each reconciled against the tenants
+    # directly rather than trusted from the ledger -----------------------
+    "phased_count_only": {
+        "label": "Reconcile (no migration)",
+        "blurb": "Count both tenants and compare, without moving anything.",
+        "argv": [PY, "phases.py", "--count-only"],
+    },
+    "phased_migrate": {
+        "label": "Migrate: full scope",
+        "blurb": "Drive, shared drives, Gmail, Calendar, Contacts, Tasks, "
+                 "Chat — in that order, each reconciled before the next runs. "
+                 "Chat/Contacts/Tasks follow the checkboxes above.",
+        "argv": [PY, "phases.py", "--continue-on-gap"],
+        "destructive": True,
+        "confirm": "MIGRATE",
+    },
+
+    # -- shared drives: tenant-wide, so not part of the per-user toggles --
+    "shared_drives_inventory": {
+        "label": "Shared drives: inventory",
+        "blurb": "Count files per shared drive. Read-only.",
+        "argv": [PY, "shared_drives.py", "--inventory", "--all-drives"],
+    },
+    "shared_drives_migrate": {
+        "label": "Shared drives: migrate",
+        "blurb": "Create each shared drive on the target, restore membership "
+                 "organizer-first, then copy its contents.",
+        "argv": [PY, "shared_drives.py", "--migrate", "--all-drives"],
+        "destructive": True,
+        "confirm": "MIGRATE",
+    },
+
+    # -- per-file share access, verified one by one, not as a total -------
+    "acl_audit": {
+        "label": "Verify share access",
+        "blurb": "Pairs every source file to the target file it became and "
+                 "diffs the grant set. A total can reconcile while sharing "
+                 "is wrong; this is the check that would catch it.",
+        "argv": [PY, "acl_audit.py", "--json", "acl_audit.json"],
+    },
+
+    # -- SSO: org-wide login configuration, so this stays manual on purpose.
+    # MIGRATE_SSO must already be set in env.sh; this button does not set it,
+    # unlike the per-user services above, because writing an SSO profile
+    # changes how everyone signs in, including whoever is running this. --
+    "sso_inventory": {
+        "label": "SSO: inventory",
+        "blurb": "What's migratable (inbound SAML), what can only be listed "
+                 "('Sign in with Google' grants), what can't (saved "
+                 "passwords). Read-only.",
+        "argv": [PY, "sso.py", "--inventory"],
+    },
+    "sso_migrate": {
+        "label": "SSO: create profiles (unassigned)",
+        "blurb": "Recreates each SAML profile on the target, unassigned. "
+                 "Needs MIGRATE_SSO=true already set in env.sh — this button "
+                 "will not set it for you.",
+        "argv": [PY, "sso.py", "--migrate"],
+        "destructive": True,
+        "confirm": "SSO",
+    },
 }
 
 # ----------------------------------------------------------------------
@@ -356,7 +429,7 @@ STEP_ACTIONS: dict[int, list[str]] = {
     6: ["provision_dry", "provision"],
     7: ["check_seed_accounts", "check_seed_scopes"],
     8: ["discover", "migrate_dry", "migrate"],
-    9: ["verify", "report"],
+    9: ["verify", "report", "acl_audit", "resolve"],
 }
 
 
@@ -831,6 +904,44 @@ def seed_argv(body: dict) -> tuple[list[str], dict, str]:
     return argv, env, ""
 
 
+def reset_target_argv(body: dict) -> tuple[list[str], dict, str]:
+    """
+    Build the reset_target command, or return why it must not run.
+
+    Mirrors seed_argv exactly, pointed at the other tenant: reset_target.py's
+    own guard (assert_sandbox) needs SANDBOX_MODE=true and an exact,
+    case-insensitive match on TARGET_DOMAIN, and refuses outright if target
+    and source are ever the same domain. The typed-domain check here is a
+    convenience that fails fast with a specific message; the guard that
+    actually matters runs again inside reset_target.py itself regardless.
+    """
+    from config import Settings
+
+    st = Settings()
+    domain = (st.target_domain or "").strip().lower()
+    typed = (body.get("confirm_domain") or "").strip().lower()
+
+    if not domain:
+        return [], {}, "set the target domain in step 2 first"
+    if not typed:
+        return [], {}, f"type the target domain ({domain}) to confirm"
+    if typed != domain:
+        source = (st.source_domain or "").strip().lower()
+        extra = (" — that is the SOURCE domain, which this would never touch, "
+                "but it is also not the target" if typed and typed == source else "")
+        return [], {}, f"{typed!r} does not match the target domain {domain!r}{extra}"
+
+    protected = [d.strip().lower()
+                for d in os.getenv("PROTECTED_DOMAINS", "").split(",") if d.strip()]
+    if domain in protected:
+        return [], {}, f"{domain} is listed in PROTECTED_DOMAINS"
+
+    argv = [PY, "reset_target.py", "--confirm-domain", domain, "--yes"]
+    env = gcloud_env()
+    env["SANDBOX_MODE"] = "true"
+    return argv, env, ""
+
+
 def gcloud_env() -> dict:
     """
     Child-process environment with gcloud reachable.
@@ -1073,14 +1184,37 @@ def _status_uncached() -> dict:
 
 # dry-run + which services "Migrate"/"Delta" run. Mirrors the TUI's
 # d/t/s keys so the web buttons behave identically to the keyboard.
+#
+# contacts/tasks off by default like chat: each widens the OAuth grant, and a
+# scope the Admin Console has not authorised fails every call outright, so
+# enabling one must be a deliberate click, never a default.
 _RUN_STATE: dict = {
     "dry_run": False,
-    "services": {"drive": True, "gmail": True, "calendar": True, "chat": False},
+    "services": {"drive": True, "gmail": True, "calendar": True,
+                "chat": False, "contacts": False, "tasks": False},
 }
 
 # Actions whose argv follow the launch toggles (everything else uses its
 # fixed ACTIONS argv verbatim).
 _LAUNCH_KEYS = ("migrate", "delta")
+
+# Actions that read the toggles through the environment rather than argv.
+# main.py's migrate/delta infer MIGRATE_CHAT/CONTACTS/TASKS from --services,
+# so a checkbox reaches them through _action_argv above. phases.py does not:
+# its per-phase gate reads those settings straight from the environment
+# regardless of --phase, so a toggle only reaches it if this run explicitly
+# sets or clears the variable -- otherwise a MIGRATE_CHAT=true left in env.sh
+# from an earlier session would run Chat with no visible checkbox for it.
+_PHASE_GATED_ACTIONS = ("phased_migrate", "phased_count_only")
+
+
+def _service_env() -> dict:
+    """gcloud_env(), plus the per-user service toggles made explicit."""
+    env = gcloud_env()
+    for key, flag in (("chat", "MIGRATE_CHAT"), ("contacts", "MIGRATE_CONTACTS"),
+                      ("tasks", "MIGRATE_TASKS")):
+        env[flag] = "true" if _RUN_STATE["services"].get(key) else "false"
+    return env
 
 
 def _db_conn():
@@ -1142,6 +1276,100 @@ def snapshot_payload() -> dict:
         conn.close()
     return {"error": "", "toggles": dict(_RUN_STATE),
             "snapshot": _serialize_snapshot(snap)}
+
+
+def spa_users_payload() -> dict:
+    """User[] for migration-webui, read-only from the ledger. See webui_spa.py."""
+    import sqlite3
+
+    import webui_spa
+    from config import Settings
+
+    conn = _db_conn()
+    if conn is None:
+        return {"error": "no database yet — run init-db or create identities.csv",
+               "users": []}
+    try:
+        return {"error": "", "users": webui_spa.users_payload(
+            conn, Settings().effective_upload_cap())}
+    except sqlite3.Error as exc:
+        return {"error": f"db read error: {exc}", "users": []}
+    finally:
+        conn.close()
+
+
+def spa_activity_payload() -> dict:
+    import sqlite3
+
+    import webui_spa
+
+    conn = _db_conn()
+    if conn is None:
+        return {"error": "no database yet", "activity": []}
+    try:
+        return {"error": "", "activity": webui_spa.activity_payload(conn)}
+    except sqlite3.Error as exc:
+        return {"error": f"db read error: {exc}", "activity": []}
+    finally:
+        conn.close()
+
+
+def spa_metrics_payload() -> dict:
+    import sqlite3
+
+    import tui
+    import webui_spa
+    from config import Settings
+
+    settings = Settings()
+    conn = _db_conn()
+    totals: dict = {}
+    if conn is not None:
+        try:
+            totals = tui.collect_snapshot(conn, settings.effective_upload_cap()).totals
+        except sqlite3.Error:
+            totals = {}
+        finally:
+            conn.close()
+    return webui_spa.metrics_payload(settings, settings.effective_upload_cap(), totals)
+
+
+def spa_verification_payload() -> dict:
+    import sqlite3
+
+    import webui_spa
+    from config import Settings
+
+    conn = _db_conn()
+    if conn is None:
+        return {"error": "no database yet", "verification": []}
+    try:
+        return {"error": "", "verification": webui_spa.verification_payload(
+            conn, Settings())}
+    except sqlite3.Error as exc:
+        return {"error": f"db read error: {exc}", "verification": []}
+    finally:
+        conn.close()
+
+
+def spa_report_payload() -> dict:
+    import sqlite3
+
+    import webui_spa
+    from config import Settings
+
+    conn = _db_conn()
+    if conn is None:
+        return {"error": "no database yet", "report": None}
+    try:
+        # The most recently run job's own timing, not a scan over audit_log --
+        # see webui_spa.report_payload's docstring for why.
+        report = webui_spa.report_payload(conn, Settings(), JOB.started, JOB.finished)
+        return {"error": "", "report": report}
+    except sqlite3.Error as exc:
+        return {"error": f"db read error: {exc}", "report": None}
+    finally:
+        conn.close()
 
 
 def scope_payload() -> dict:
@@ -2110,13 +2338,19 @@ function drawToolbar(){
     <label class="chk"><input type="checkbox" id="tog-calendar" class="tb-toggle" checked
       onchange="toggleChange()"> calendar</label>
     <label class="chk"><input type="checkbox" id="tog-chat" class="tb-toggle"
-      onchange="toggleChange()"> chat</label>`;
+      onchange="toggleChange()"> chat</label>
+    <label class="chk"><input type="checkbox" id="tog-contacts" class="tb-toggle"
+      onchange="toggleChange()"> contacts</label>
+    <label class="chk"><input type="checkbox" id="tog-tasks" class="tb-toggle"
+      onchange="toggleChange()"> tasks</label>`;
   paintJob();
 }
 
+const SERVICE_KEYS=['drive','gmail','calendar','chat','contacts','tasks'];
+
 async function toggleChange(){
   const svcs={};
-  ['drive','gmail','calendar','chat'].forEach(k=>{const c=$('tog-'+k); if(c) svcs[k]=c.checked;});
+  SERVICE_KEYS.forEach(k=>{const c=$('tog-'+k); if(c) svcs[k]=c.checked;});
   const dry=$('tog-dry');
   await fetch('/api/toggles',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({dry_run:dry&&dry.checked,services:svcs})});
@@ -2127,7 +2361,7 @@ function applyToggles(tg){
   const a=document.activeElement;
   if(a&&a.classList&&a.classList.contains('tb-toggle')) return;
   const dry=$('tog-dry'); if(dry) dry.checked=!!tg.dry_run;
-  ['drive','gmail','calendar','chat'].forEach(k=>{
+  SERVICE_KEYS.forEach(k=>{
     const c=$('tog-'+k); if(c&&tg.services) c.checked=!!tg.services[k]; });
 }
 
@@ -2380,6 +2614,16 @@ class Handler(BaseHTTPRequestHandler):
                         for k, v in ACTIONS.items()})
         elif path == "/api/snapshot":
             self._json(snapshot_payload())
+        elif path == "/api/spa/users":
+            self._json(spa_users_payload())
+        elif path == "/api/spa/activity":
+            self._json(spa_activity_payload())
+        elif path == "/api/spa/metrics":
+            self._json(spa_metrics_payload())
+        elif path == "/api/spa/verification":
+            self._json(spa_verification_payload())
+        elif path == "/api/spa/report":
+            self._json(spa_report_payload())
         elif path == "/api/scope":
             self._json(scope_payload())
         elif path == "/api/logs":
@@ -2464,6 +2708,16 @@ class Handler(BaseHTTPRequestHandler):
                 "seed", argv, env=env,
                 cwd=os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                  "data-generator"))
+            self._json({"ok": ok, "error": "" if ok else msg})
+            return
+
+        if self.path == "/api/reset_target":
+            argv, env, err = reset_target_argv(body)
+            if err:
+                self._json({"ok": False, "error": err}, 400)
+                return
+            # reset_target.py lives at the repo root, unlike the seeder.
+            ok, msg = JOB.start("reset target", argv, env=env)
             self._json({"ok": ok, "error": "" if ok else msg})
             return
 
@@ -2588,7 +2842,8 @@ class Handler(BaseHTTPRequestHandler):
                         "error": f"{spec['label']} needs confirmation"}, 400)
             return
 
-        ok, msg = JOB.start(spec["label"], _action_argv(name), env=gcloud_env())
+        env = _service_env() if name in _PHASE_GATED_ACTIONS else gcloud_env()
+        ok, msg = JOB.start(spec["label"], _action_argv(name), env=env)
         self._json({"ok": ok, "error": None if ok else msg})
 
 

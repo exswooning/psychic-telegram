@@ -27,7 +27,8 @@ from google.auth.exceptions import RefreshError
 from googleapiclient.http import MediaFileUpload  # noqa: F401
 
 from config import Settings
-from resilience import PermanentAPIError, RateLimiter, retry_on_google_error
+from resilience import (PermanentAPIError, RateLimiter, TransportExhausted,
+                        retry_on_google_error)
 
 # An un-granted scope surfaces as a RefreshError at token-mint time, not as an
 # HttpError, so the retry decorator never sees it. Optional passes catch it so
@@ -63,11 +64,13 @@ class GmailMigrator:
             "filters_inserted": 0, "filters_failed": 0, "filters_skipped": 0,
         }
 
-    def _retry(self, fn):
+    def _retry(self, fn, before_retry=None, label=None):
         return retry_on_google_error(
             max_retries=self.settings.max_retries,
             base_delay=self.settings.base_backoff,
             max_delay=self.settings.max_backoff,
+            before_retry=before_retry,
+            label=label or "gmail",
         )(fn)()
 
     # -- labels: created parent-first so 'Clients/Acme/2024' resolves ----------
@@ -117,6 +120,125 @@ class GmailMigrator:
                 out.append(label_map[lid])
         return out
 
+    # -- insert, made safe to retry -------------------------------------------
+    @staticmethod
+    def _message_id_header(raw: str) -> str | None:
+        """
+        The RFC822 Message-ID, pulled out of the base64 payload.
+
+        It has to come from `raw` rather than from `payload.headers`, because
+        the fetch uses `format="raw"` and that response carries no parsed
+        headers at all -- a lookup against `payload` would silently return
+        None for every message and quietly disable the guard below.
+
+        Only a prefix is decoded. Headers sit at the top of the message, and
+        this runs on a failure path where decoding a 25 MB attachment to read
+        one header would be a poor trade.
+        """
+        window = raw[: (8192 // 3) * 4]
+        window = window[: len(window) - (len(window) % 4)]   # base64 needs 4s
+        if not window:
+            return None
+        try:
+            text = base64.urlsafe_b64decode(window).decode("utf-8", "replace")
+        except (ValueError, TypeError):
+            return None
+        match = re.search(r"^message-id:\s*(<[^>]+>)", text, re.IGNORECASE | re.MULTILINE)
+        return match.group(1) if match else None
+
+    def _find_by_message_id(self, msgid: str) -> str | None:
+        """
+        Has this exact message already landed on the target?
+
+        includeSpamTrash is kept, but not for the reason it was added. The
+        belief was that an inserted message might be spam-filtered; measured,
+        it is not -- insert bypasses the delivery pipeline, which is the whole
+        reason this engine uses insert rather than import, and a message asked
+        for as INBOX is stored as INBOX (contract_probe: "insert does not
+        spam-filter").
+
+        What the flag does buy is Trash. A resumed run can check for a message
+        a previous run inserted days earlier, and someone may have deleted it
+        since. Without the flag that message is invisible, the guard concludes
+        nothing arrived, and the retry restores mail the user threw away.
+        """
+        query = f"rfc822msgid:{msgid}"
+        try:
+            self.limiter.acquire()
+            resp = self._retry(lambda: self.tgt.users().messages().list(
+                userId="me", q=query, maxResults=1,
+                includeSpamTrash=True).execute())
+        except (PermanentAPIError, RuntimeError):
+            # Cannot tell -- fall through and let the caller insert. A possible
+            # duplicate beats refusing to migrate the message at all.
+            return None
+        found = resp.get("messages") or []
+        return found[0]["id"] if found else None
+
+    def _insert_once(self, body: dict, media, raw: str) -> dict:
+        """
+        Insert a message, tolerating a transport failure without duplicating it.
+
+        Widening the retry set to transport errors bought reliability at the
+        cost of a specific risk, and the risk is not uniform across services.
+        A retried `files.create` leaves an orphan in Drive that `verify` sees
+        as a surplus; `events.import` is genuinely idempotent through
+        iCalUID; but `messages.insert` produces **a second copy of an email a
+        user will actually see**, and the retry returns a fresh id which then
+        gets written to id_mapping as canonical -- so the ledger records the
+        duplicate as the real thing and no later pass can find the first copy.
+        "An extra item beats a missing one" is defensible for a Drive orphan.
+        It is much weaker for mail.
+
+        So on a transport failure we ask the target whether the message is
+        already there, keyed on the RFC822 Message-ID, which is carried
+        verbatim by the copy. One extra call on a rare path, and it turns a
+        probabilistic duplicate into a deterministic resume.
+
+        The check runs *between* attempts, not around them. That distinction
+        is the whole bug this replaced: the dangerous case never raises.
+
+            attempt 1   lands server-side, response lost
+            attempt 2   inserts a SECOND copy, returns 200
+            decorator   reports success
+
+        A guard wrapped around `_retry` cannot see that. It fires only when
+        every attempt failed -- which is exactly the case where nothing was
+        inserted and there is nothing to adopt. So the lookup is handed to the
+        decorator as `before_retry`, which calls it after each ambiguous
+        failure and returns its value instead of re-executing.
+
+        Nothing here changes the first attempt: the common path is unchanged
+        and costs nothing extra.
+        """
+        msgid = self._message_id_header(raw)
+
+        def adopt_if_already_delivered():
+            if not msgid:
+                return None
+            existing = self._find_by_message_id(msgid)
+            if not existing:
+                return None
+            log.info("[%s] a previous attempt had already delivered %s; "
+                     "adopting it instead of inserting a duplicate",
+                     self.source_user, msgid)
+            return {"id": existing, "adopted": True}
+
+        insert = lambda: self.tgt.users().messages().insert(   # noqa: E731
+            userId="me", body=body, media_body=media,
+            internalDateSource="dateHeader").execute()
+        try:
+            return self._retry(insert, before_retry=adopt_if_already_delivered,
+                               label="gmail.messages.insert")
+        except TransportExhausted:
+            # Every attempt failed, so most likely nothing landed -- but the
+            # last failure gets no before_retry call, so check once more
+            # rather than reporting a failure for a message that is there.
+            adopted = adopt_if_already_delivered()
+            if adopted is not None:
+                return adopted
+            raise
+
     # -- messages --------------------------------------------------------------
     def _iter_messages(self, query: str):
         token = None
@@ -133,6 +255,9 @@ class GmailMigrator:
                 return
 
     def run(self, delta: bool = False, since_epoch_days: int = 0) -> dict:
+        # A mailbox is the largest item count in the system, and every message
+        # costs a get_target_id before anything else happens.
+        self.db.preload_mappings(self.source_user)
         self.sync_labels()
         query = f"newer_than:{since_epoch_days}d" if delta and since_epoch_days else ""
 
@@ -145,7 +270,7 @@ class GmailMigrator:
             try:
                 full = self._retry(lambda m=mid: self.src.users().messages().get(
                     userId="me", id=m, format="raw",
-                ).execute())
+                ).execute(), label="gmail.messages.get")
             except (PermanentAPIError, RuntimeError) as exc:
                 self.db.log_audit(self.source_user, mid, "message", "FAILED", str(exc))
                 self.stats["failed"] += 1
@@ -168,7 +293,17 @@ class GmailMigrator:
                 continue
 
             raw = full.get("raw", "")
-            raw_bytes = base64.urlsafe_b64decode(raw.encode() if isinstance(raw, str) else raw)
+            if not isinstance(raw, str):
+                raw = raw.decode()
+            # `raw` is already base64url, and `body["raw"]` wants base64url --
+            # decoding it only to re-encode the identical bytes doubled peak
+            # memory per message and burned CPU on every one. The decode is now
+            # deferred to the large-message branch, which is the only place the
+            # actual bytes are needed. Size is derived from the encoded length
+            # instead: base64 is 4 chars per 3 bytes, and `raw` is unpadded
+            # urlsafe, so this is exact to within two bytes -- far tighter than
+            # a threshold whose job is only to choose an upload strategy.
+            approx_bytes = (len(raw) * 3) // 4
             mapped_labels = self._map_label_ids(label_ids)
 
             if self.settings.dry_run:
@@ -179,19 +314,17 @@ class GmailMigrator:
             body: dict = {"labelIds": mapped_labels}
             media = None
             path = None
-            if len(raw_bytes) > LARGE_MESSAGE_THRESHOLD:
+            if approx_bytes > LARGE_MESSAGE_THRESHOLD:
                 path = os.path.join(self.settings.scratch_dir, uuid.uuid4().hex)
                 os.makedirs(self.settings.scratch_dir, exist_ok=True)
                 with open(path, "wb") as fh:
-                    fh.write(raw_bytes)
+                    fh.write(base64.urlsafe_b64decode(raw))
                 media = MediaFileUpload(path, mimetype="message/rfc822", resumable=True)
             else:
-                body["raw"] = base64.urlsafe_b64encode(raw_bytes).decode()
+                body["raw"] = raw
 
             try:
-                result = self._retry(lambda b=body, md=media: self.tgt.users().messages().insert(
-                    userId="me", body=b, media_body=md, internalDateSource="dateHeader",
-                ).execute())
+                result = self._insert_once(body, media, raw)
             except (PermanentAPIError, RuntimeError) as exc:
                 self.db.log_audit(self.source_user, mid, "message", "FAILED", str(exc))
                 self.stats["failed"] += 1
@@ -205,7 +338,7 @@ class GmailMigrator:
 
             self.db.record_mapping(self.source_user, mid, result["id"], "message")
             self.db.log_audit(self.source_user, mid, "message", "SUCCESS",
-                              bytes_moved=len(raw_bytes))
+                              bytes_moved=approx_bytes)
             self.stats["inserted"] += 1
 
         self._migrate_drafts()
@@ -347,7 +480,9 @@ class GmailMigrator:
                 continue
 
             raw = (full.get("message") or {}).get("raw", "")
-            raw_bytes = base64.urlsafe_b64decode(raw.encode() if isinstance(raw, str) else raw)
+            if not isinstance(raw, str):
+                raw = raw.decode()
+            approx_bytes = (len(raw) * 3) // 4   # see the messages path above
 
             if self.settings.dry_run:
                 log.info("[DRY RUN] would create draft from %s", did)
@@ -357,14 +492,14 @@ class GmailMigrator:
             body: dict = {"message": {}}
             media = None
             path = None
-            if len(raw_bytes) > LARGE_MESSAGE_THRESHOLD:
+            if approx_bytes > LARGE_MESSAGE_THRESHOLD:
                 path = os.path.join(self.settings.scratch_dir, uuid.uuid4().hex)
                 os.makedirs(self.settings.scratch_dir, exist_ok=True)
                 with open(path, "wb") as fh:
-                    fh.write(raw_bytes)
+                    fh.write(base64.urlsafe_b64decode(raw))
                 media = MediaFileUpload(path, mimetype="message/rfc822", resumable=True)
             else:
-                body["message"]["raw"] = base64.urlsafe_b64encode(raw_bytes).decode()
+                body["message"]["raw"] = raw
 
             try:
                 result = self._retry(lambda b=body, md=media: self.tgt.users().drafts().create(
@@ -383,7 +518,7 @@ class GmailMigrator:
 
             self.db.record_mapping(self.source_user, did, result["id"], "draft")
             self.db.log_audit(self.source_user, did, "draft", "SUCCESS",
-                              bytes_moved=len(raw_bytes))
+                              bytes_moved=approx_bytes)
             self.stats["drafts_inserted"] += 1
 
     # -- filters -------------------------------------------------------------

@@ -29,7 +29,41 @@ import threading
 import time
 from typing import Callable, TypeVar
 
+import http.client
+import socket
+import ssl
+
 from googleapiclient.errors import HttpError
+
+# Imported as a module, not `from metrics import METRICS`. A by-value
+# binding means a test (or anything else) that swaps the collector has to
+# patch this module's global as well as metrics' own -- and the next
+# module to import it silently measures into the old collector if anyone
+# forgets. One indirection removes a whole class of that.
+import metrics
+
+# Transient failures that are not HttpError. Every one of these was observed
+# permanently failing an item on a multi-hour run, because the retry decorator
+# only ever caught HttpError.
+#
+# google.auth is imported defensively: it is a hard dependency of the client,
+# but this module must not fail to import if that ever changes.
+try:  # pragma: no cover - exercised implicitly by every real run
+    from google.auth.exceptions import TransportError as _GoogleTransportError
+
+    _AUTH_ERRORS: tuple[type[BaseException], ...] = (_GoogleTransportError,)
+except Exception:  # noqa: BLE001
+    _AUTH_ERRORS = ()
+
+TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (
+    ConnectionError,          # covers ConnectionReset/Aborted/Refused, BrokenPipe
+    socket.timeout,
+    socket.gaierror,          # DNS blips resolve as a failed item otherwise
+    ssl.SSLError,
+    http.client.IncompleteRead,
+    http.client.BadStatusLine,
+    http.client.ResponseNotReady,
+) + _AUTH_ERRORS
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +72,21 @@ T = TypeVar("T")
 
 class PermanentAPIError(Exception):
     """Raised for errors retrying will never fix. Callers should give up."""
+
+
+class TransportExhausted(RuntimeError):
+    """
+    The connection failed repeatedly and we stopped trying.
+
+    Distinct from a plain RuntimeError because the *uncertainty* differs. An
+    API that returned 500 five times told us five times that it did not do the
+    thing. A socket that reset mid-write told us nothing: the write may have
+    landed and only the response was lost. Anything whose duplicate a user
+    would see -- a second copy of an email, most obviously -- needs to check
+    before assuming it can simply try again.
+
+    Subclasses RuntimeError so every existing handler keeps working unchanged.
+    """
 
 
 class QuotaExhausted(Exception):
@@ -93,13 +142,63 @@ def _retry_after_seconds(exc: HttpError) -> float | None:
         return None
 
 
+def _ask_hook(before_retry):
+    """
+    Run a before_retry hook without letting it become a new failure mode.
+
+    The hook makes an API call, and it is invoked from inside an exception
+    handler at the exact moment the network is known to be unwell -- which is
+    the state that got us here. An unguarded call would let a second failure
+    propagate out of the handler and kill the whole retry, and it would do so
+    precisely when a copy of the work may already exist on the server: the
+    case the hook was added to make safer.
+
+    So a failing hook degrades to "we could not check", and the retry proceeds
+    on the original terms. That accepts the duplicate risk rather than
+    converting it into a certain hard failure, which is the trade this
+    codebase makes everywhere else.
+    """
+    if before_retry is None:
+        return None
+    try:
+        return before_retry()
+    except Exception as exc:  # noqa: BLE001 - a hook must never fail the retry
+        log.debug("before_retry hook failed, proceeding with the retry: %s", exc)
+        return None
+
+
 def retry_on_google_error(
-    max_retries: int = 6, base_delay: float = 1.0, max_delay: float = 60.0
+    max_retries: int = 6, base_delay: float = 1.0, max_delay: float = 60.0,
+    before_retry: Callable[[], T | None] | None = None,
+    label: str | None = None,
 ) -> Callable[[Callable[..., T]], Callable[..., T]]:
     """
     Decorator: retry transient Google API failures with full-jitter exponential
     backoff; raise `PermanentAPIError` immediately for anything that will never
     succeed on retry; raise `RuntimeError` once retries are exhausted.
+
+    before_retry
+    ------------
+    Called between a failure and the next attempt, but *only* when the failure
+    left it genuinely unknown whether the call landed: a transport error, or a
+    5xx. If it returns a non-None value, that value is returned instead of
+    re-executing.
+
+    This exists because the dangerous case for a non-idempotent write is not
+    the one that raises. It is:
+
+        attempt 1   lands server-side, response lost to a reset socket
+        attempt 2   performs the write a SECOND time, returns 200
+        decorator   reports success; nothing raises; nobody is any the wiser
+
+    A guard wrapped around the decorator cannot see that -- it only runs when
+    every attempt failed, which is precisely the case where the write most
+    likely did *not* land. The check has to happen before each retry, which
+    means it has to live in here.
+
+    Not called for 429/rate-limit or 403 quota failures: those mean the
+    request was rejected before it was processed, so there is nothing to
+    adopt and a lookup would just spend quota confirming it.
     """
 
     def decorator(fn: Callable[..., T]) -> Callable[..., T]:
@@ -107,9 +206,20 @@ def retry_on_google_error(
         def wrapper(*args, **kwargs) -> T:
             attempt = 0
             while True:
+                # Timed here because every Google call in the engine passes
+                # through this decorator, so instrumenting it needs no change
+                # at any call site -- and a call site that forgot to
+                # instrument itself would silently skew the distribution the
+                # concurrency work is going to be sized against.
+                started = time.monotonic()
                 try:
-                    return fn(*args, **kwargs)
+                    result = fn(*args, **kwargs)
+                    metrics.METRICS.record(label or "api", time.monotonic() - started,
+                                   ok=True, retried=attempt > 0)
+                    return result
                 except HttpError as exc:
+                    metrics.METRICS.record(label or "api", time.monotonic() - started,
+                                   ok=False)
                     status = _status_of(exc)
                     reason = _extract_reason(exc)
                     if _is_permanent(status, reason):
@@ -136,6 +246,53 @@ def retry_on_google_error(
                         status, reason, attempt, max_retries, delay,
                     )
                     time.sleep(delay)
+                    # A 5xx may have been processed before the error was
+                    # generated; a 429 was rejected before it was.
+                    if status is not None and status >= 500:
+                        adopted = _ask_hook(before_retry)
+                        if adopted is not None:
+                            return adopted
+
+                except TRANSPORT_ERRORS as exc:
+                    metrics.METRICS.record(label or "api", time.monotonic() - started,
+                                   ok=False)
+                    # A multi-hour migration reliably sees connections reset,
+                    # sockets time out and TLS renegotiate. None of these are
+                    # HttpError, so every one of them used to permanently fail
+                    # an item and cost a re-run to recover.
+                    #
+                    # The honest trade-off: a transport error raised mid-write
+                    # may mean the call actually succeeded and the response was
+                    # lost, so retrying can duplicate. That risk is not new --
+                    # retrying a 500 on files.create has always carried it --
+                    # and it is bounded by the same thing: id_mapping is
+                    # written only after a confirmed create, so a duplicate
+                    # shows up as an extra item, never as a lost one. Given the
+                    # choice this codebase has made everywhere else, an
+                    # occasional duplicate beats an item that silently is not
+                    # there.
+                    attempt += 1
+                    if attempt > max_retries:
+                        # A distinct type, subclassing RuntimeError so every
+                        # existing `except RuntimeError` still catches it.
+                        # Callers that need to tell "the network died, and the
+                        # write may or may not have landed" apart from "the
+                        # API refused this" can now do so -- gmail_engine uses
+                        # it to check whether a message arrived before
+                        # retrying and duplicating it.
+                        raise TransportExhausted(
+                            f"exhausted {max_retries} retries on "
+                            f"{type(exc).__name__}: {exc}"
+                        ) from exc
+                    delay = random.uniform(
+                        0, min(max_delay, base_delay * (2 ** (attempt - 1)))
+                    )
+                    log.debug("retrying after %s: attempt %d/%d in %.2fs",
+                              type(exc).__name__, attempt, max_retries, delay)
+                    time.sleep(delay)
+                    adopted = _ask_hook(before_retry)
+                    if adopted is not None:
+                        return adopted
 
         return wrapper
 
