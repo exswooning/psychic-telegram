@@ -176,14 +176,21 @@ def _media(data: bytes, mimetype: str):
 # would say nothing about storage limits that a much smaller number of large
 # files does not already say better.
 # ======================================================================
-_FILLER_CHUNK_BYTES = 200 * 1024 * 1024   # 200 MB per filler file
+_FILLER_CHUNK_BYTES = 50 * 1024 * 1024   # 50 MB per filler file
 _filler_blob_cache: bytes | None = None
 
 
 def _filler_blob() -> bytes:
     """
-    200 MB of random bytes, generated once and reused for every filler file
+    50 MB of random bytes, generated once and reused for every filler file
     across every user.
+
+    Was 200 MB; a real run reproducibly hit "Redirected but the response is
+    missing a Location: header" (a resumable-upload protocol error) on
+    every single user's top-up pass, on a modest, likely bandwidth-limited
+    VPS. A smaller resumable session spends less time in flight and is
+    less exposed to whatever timeout or connection issue triggers that --
+    see seed_one_user()'s comment on the connection-reuse half of this fix.
 
     The content has to exist to occupy storage; what it contains does not
     matter, since nothing reads it back. Generating a fresh 200 MB via
@@ -1367,7 +1374,18 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
     # reflects everything they wrote, not just some of it.
     fill_m = {"filler_files": 0, "filler_bytes": 0, "note": ""}
     if target_gb_per_user:
-        fill_m = top_up_storage(drive, settings, user, target_gb_per_user)
+        # A fresh client, not the `drive` object above: that one has by now
+        # handled hundreds of small requests over several minutes on the
+        # same httplib2 connection, and a large (100MB+) resumable upload
+        # on a connection in that state is exactly the shape of request
+        # that surfaced "Redirected but the response is missing a
+        # Location: header" in production -- confirmed reproducible on
+        # every single user in a real run, always at this step, never
+        # during the small-file corpus pass on the same connection.
+        # httplib2's connection reuse is the documented culprit for this
+        # class of failure; a new connection sidesteps it entirely.
+        fresh_drive, _, _ = build_services(settings, user)
+        fill_m = top_up_storage(fresh_drive, settings, user, target_gb_per_user)
 
     elapsed = round(time.time() - t0, 1)
     print(f"  [{user}] done in {elapsed}s: {drive_m['total_files']} files, "
