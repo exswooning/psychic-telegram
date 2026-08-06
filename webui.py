@@ -1254,6 +1254,72 @@ def dwd_payload() -> dict:
     return out
 
 
+def scope_diagnosis(tenant: str) -> dict:
+    """
+    Which scope, exactly, is not authorised -- for a tenant whose combined
+    request fails.
+
+    A single unauthorised (or not-yet-propagated) scope fails the *entire*
+    combined token request with the same generic unauthorized_client error,
+    whatever else in that request is fine. Diagnosing which one requires
+    minting a separate token per scope and checking each in isolation --
+    this was done live, more than once, over SSH by hand before this
+    existed. This is that same bisection, as a button instead of a manual
+    session.
+
+    Deliberately explicit-trigger only (POST /api/scope_diagnosis), never
+    on a poll path: bisecting N scopes is N+1 live token mints against
+    Google, the same "no live API call on a poll loop" rule
+    webui_spa.py's module docstring states for exactly this reason.
+    """
+    from config import Settings, source_scopes, target_scopes
+
+    st = Settings()
+    if tenant == "source":
+        key, admin = st.source_sa_key, st.source_admin
+        scopes, domain = source_scopes(st), st.source_domain
+    elif tenant == "target":
+        key, admin = st.target_sa_key, st.target_admin
+        scopes, domain = target_scopes(st), st.target_domain
+    else:
+        return {"tenant": tenant, "error": "tenant must be 'source' or 'target'"}
+
+    result: dict = {"tenant": tenant, "domain": domain, "admin": admin,
+                    "combined_ok": False, "error": "", "scopes": []}
+    if not admin:
+        result["error"] = f"no admin configured for {tenant} (set it in step 2)"
+        return result
+    if not (key and os.path.isfile(key)):
+        result["error"] = f"no key file for {tenant} yet"
+        return result
+
+    def _try(scope_list: list[str]) -> tuple[bool, str]:
+        try:
+            from google.auth.transport.requests import Request
+            from google.oauth2 import service_account
+
+            creds = service_account.Credentials.from_service_account_file(
+                key, scopes=scope_list).with_subject(admin)
+            creds.refresh(Request())
+            return True, ""
+        except Exception as exc:  # noqa: BLE001 - reporting the failure is the point
+            return False, str(exc)[:200]
+
+    ok, err = _try(scopes)
+    result["combined_ok"] = ok
+    if ok:
+        result["scopes"] = [{"scope": s, "ok": True} for s in scopes]
+        return result
+
+    # Only bisect on failure -- a passing combined check already answers
+    # the question for every scope in it, at 1/N the cost.
+    result["error"] = err
+    for s in scopes:
+        s_ok, s_err = _try([s])
+        result["scopes"].append({"scope": s, "ok": s_ok, "error": "" if s_ok else s_err})
+    return result
+
+
 # ----------------------------------------------------------------------
 # Status snapshots
 #
@@ -2314,10 +2380,45 @@ function delegationBody(){
         <span class="muted">${count} scopes \u2014 paste the whole line, that
           editor replaces rather than appends</span></div>
       <pre class="copy">${esc(line||'(set the domains first)')}</pre>
+      <button onclick="diagnoseScopes('${t.side}',this)">Diagnose scopes</button>
+      <div id="diag-${t.side}" style="margin-top:6px"></div>
     </div>`;
   });
   return h+`<div class="muted">Grants take ~2 minutes to propagate, sometimes 30.
     Use <b>Re-check</b> above; it goes green when a real token mint succeeds.</div>`;
+}
+
+/* A single unauthorised (or not-yet-propagated) scope fails the *whole*
+   combined token request with the same generic unauthorized_client error,
+   whatever else in it is fine -- diagnosed live, more than once, by
+   manually minting one token per scope over SSH before this existed.
+   Mints one token per scope against Google, so this is a click, never
+   something polled. */
+async function diagnoseScopes(tenant, btn){
+  const box=$('diag-'+tenant);
+  const label=btn.innerHTML;
+  btn.disabled=true; btn.innerHTML='Checking each scope…';
+  try{
+    const r=await (await fetch('/api/scope_diagnosis',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({tenant:tenant})})).json();
+    if(!r.ok){ box.innerHTML=`<div class="muted" style="color:var(--bad)">${esc(r.error||'failed')}</div>`; return; }
+    const d=r.diagnosis;
+    if(d.error && !d.combined_ok){
+      box.innerHTML=`<div class="muted" style="color:var(--bad)">Combined request failed: ${esc(d.error)}</div>`;
+    } else { box.innerHTML=''; }
+    if(d.combined_ok){
+      box.innerHTML+=`<div class="muted" style="color:var(--ok)">All ${d.scopes.length} scope(s) authorised.</div>`;
+    } else {
+      box.innerHTML+=d.scopes.map(s=>
+        `<div style="display:flex;gap:8px;align-items:center;margin-top:2px">
+           <span class="pill" style="background:${s.ok?'var(--ok)':'var(--bad)'};color:#fff">${s.ok?'OK':'FAIL'}</span>
+           <code style="font-size:11px">${esc(s.scope)}</code>
+         </div>`).join('');
+    }
+  } finally {
+    btn.disabled=false; btn.innerHTML=label;
+  }
 }
 
 function actionButtons(keys){
@@ -3141,6 +3242,14 @@ class Handler(BaseHTTPRequestHandler):
             with _snap_lock:
                 data = _snap["data"] or {}
             self._json({"ok": True, "status": data})
+            return
+
+        if self.path == "/api/scope_diagnosis":
+            tenant = (body.get("tenant") or "").strip().lower()
+            if tenant not in ("source", "target"):
+                self._json({"ok": False, "error": "tenant must be 'source' or 'target'"}, 400)
+                return
+            self._json({"ok": True, "diagnosis": scope_diagnosis(tenant)})
             return
 
         if self.path == "/api/checkstep":

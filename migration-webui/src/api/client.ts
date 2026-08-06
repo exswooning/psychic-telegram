@@ -314,6 +314,39 @@ export async function checkDwdNow(): Promise<{ ok: boolean; status: StatusPayloa
   return res.json()
 }
 
+export interface ScopeCheck {
+  scope: string
+  ok: boolean
+  error?: string
+}
+
+export interface ScopeDiagnosis {
+  tenant: string
+  domain?: string
+  admin?: string
+  combined_ok: boolean
+  error: string
+  scopes: ScopeCheck[]
+}
+
+/**
+ * Bisects a tenant's combined OAuth scope request scope-by-scope when it
+ * fails -- a single unauthorised (or not-yet-propagated) scope fails the
+ * *whole* combined request with the same generic unauthorized_client
+ * error, whatever else in it is fine. Mints one token per scope against
+ * Google, so this is an explicit button click, never something polled.
+ */
+export async function diagnoseScopes(
+  tenant: 'source' | 'target'
+): Promise<{ ok: boolean; diagnosis: ScopeDiagnosis; error?: string }> {
+  const res = await fetch('/api/scope_diagnosis', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tenant }),
+  })
+  return res.json()
+}
+
 export interface SeedResult {
   ok: boolean
   error?: string

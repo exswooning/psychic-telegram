@@ -1615,3 +1615,95 @@ class TestHostInfo:
 
         monkeypatch.setattr(socket_mod, "socket", lambda *a, **k: _Boom())
         assert webui._primary_ip() == "127.0.0.1"
+
+
+class TestScopeDiagnosis:
+    """
+    A single unauthorised (or not-yet-propagated) scope fails the *entire*
+    combined token request with the same generic unauthorized_client error,
+    whatever else in the request is fine -- diagnosed live, more than once,
+    by manually minting one token per scope over SSH before this existed.
+    This is that same bisection, built in.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _settings(self, tmp_path, monkeypatch):
+        key = tmp_path / "sa.json"
+        key.write_text("{}")
+        monkeypatch.setenv("SOURCE_SA_KEY", str(key))
+        monkeypatch.setenv("SOURCE_ADMIN", "admin@src.example.com")
+        monkeypatch.setenv("TARGET_SA_KEY", str(key))
+        monkeypatch.setenv("TARGET_ADMIN", "admin@tgt.example.com")
+
+    def _fake_from_file(self, failing_scopes):
+        class _FakeCreds:
+            def __init__(self, scopes):
+                self.scopes = scopes
+
+            def with_subject(self, subject):
+                return self
+
+            def refresh(self, request):
+                if any(s in failing_scopes for s in self.scopes):
+                    raise RuntimeError(
+                        "unauthorized_client: Client is unauthorized ...")
+
+        def fake_from_file(path, scopes):
+            return _FakeCreds(scopes)
+        return fake_from_file
+
+    def test_a_passing_combined_check_reports_every_scope_ok_without_bisecting(
+            self, monkeypatch):
+        calls = []
+        real_fake = self._fake_from_file(failing_scopes=set())
+
+        def counting_fake(path, scopes):
+            calls.append(scopes)
+            return real_fake(path, scopes)
+
+        monkeypatch.setattr(
+            "google.oauth2.service_account.Credentials.from_service_account_file",
+            staticmethod(counting_fake))
+        result = webui.scope_diagnosis("source")
+        assert result["combined_ok"] is True
+        assert result["scopes"] and all(s["ok"] for s in result["scopes"])
+        # One call for the combined check -- a pass answers every scope at
+        # once, so bisecting on top of that would be pure waste.
+        assert len(calls) == 1
+
+    def test_a_failing_combined_check_bisects_to_find_the_culprit(self, monkeypatch):
+        from config import Settings, source_scopes
+
+        bad = source_scopes(Settings())[0]
+        monkeypatch.setattr(
+            "google.oauth2.service_account.Credentials.from_service_account_file",
+            staticmethod(self._fake_from_file(failing_scopes={bad})))
+        result = webui.scope_diagnosis("source")
+        assert result["combined_ok"] is False
+        assert result["error"]
+        failing = [s["scope"] for s in result["scopes"] if not s["ok"]]
+        assert failing == [bad]
+        # Everything else in the same request must be reported healthy,
+        # not swept up as "also unauthorized" just because the combined
+        # request failed.
+        assert all(s["ok"] for s in result["scopes"] if s["scope"] != bad)
+
+    def test_unknown_tenant_is_rejected(self):
+        result = webui.scope_diagnosis("both")
+        assert "tenant" in result["error"]
+
+    def test_missing_admin_is_reported_without_attempting_a_token_mint(
+            self, monkeypatch):
+        monkeypatch.delenv("SOURCE_ADMIN", raising=False)
+        calls = []
+        monkeypatch.setattr(
+            "google.oauth2.service_account.Credentials.from_service_account_file",
+            staticmethod(lambda *a, **k: calls.append(1)))
+        result = webui.scope_diagnosis("source")
+        assert "no admin configured" in result["error"]
+        assert not calls
+
+    def test_missing_key_file_is_reported(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("SOURCE_SA_KEY", str(tmp_path / "absent.json"))
+        result = webui.scope_diagnosis("source")
+        assert "no key file" in result["error"]

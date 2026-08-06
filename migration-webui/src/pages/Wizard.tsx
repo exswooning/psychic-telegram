@@ -11,8 +11,8 @@ import {
 } from '@mui/icons-material'
 import {
   fetchStatus, checkStep, fetchConfig, saveConfig, setRunMode, fetchActions,
-  uploadCredential, fetchDwd, checkDwdNow, ActionSpec,
-  StatusPayload, ConfigFields, ConfigPayload, DwdPayload, UploadKind,
+  uploadCredential, fetchDwd, checkDwdNow, diagnoseScopes, ActionSpec,
+  StatusPayload, ConfigFields, ConfigPayload, DwdPayload, ScopeDiagnosis, UploadKind,
 } from '@/api/client'
 import JobRunner from '@/components/JobRunner'
 
@@ -393,6 +393,8 @@ const DelegationStep: React.FC = () => {
   const [dwd, setDwd] = useState<DwdPayload | null>(null)
   const [checking, setChecking] = useState(false)
   const [result, setResult] = useState<string | null>(null)
+  const [diagnosing, setDiagnosing] = useState<'source' | 'target' | null>(null)
+  const [diagnosis, setDiagnosis] = useState<Record<string, ScopeDiagnosis>>({})
 
   useEffect(() => { fetchDwd().then(setDwd) }, [])
 
@@ -407,27 +409,75 @@ const DelegationStep: React.FC = () => {
     }
   }
 
+  const diagnose = async (tenant: 'source' | 'target') => {
+    setDiagnosing(tenant)
+    try {
+      const r = await diagnoseScopes(tenant)
+      if (r.ok) setDiagnosis((prev) => ({ ...prev, [tenant]: r.diagnosis }))
+    } finally {
+      setDiagnosing(null)
+    }
+  }
+
   const copy = (text: string) => navigator.clipboard?.writeText(text)
 
   return (
     <Box sx={{ mb: 2 }}>
-      {dwd?.tenants.map((t) => (
-        <Box sx={{ mb: 1.5 }} key={t.side}>
-          <Typography variant="caption" color="text.secondary">
-            {t.side.toUpperCase()} client ID ({t.client_id}) -- paste the whole
-            line into {t.domain}'s Admin Console; it replaces what is there:
-          </Typography>
-          <Box
-            component="pre"
-            sx={{ fontSize: 11, p: 1, bgcolor: 'action.hover', borderRadius: 1,
-                 overflowX: 'auto', cursor: 'pointer' }}
-            onClick={() => copy(t.scopes)}
-            title="Click to copy"
-          >
-            {t.scopes}
+      {dwd?.tenants.map((t) => {
+        const diag = diagnosis[t.side]
+        return (
+          <Box sx={{ mb: 2 }} key={t.side}>
+            <Typography variant="caption" color="text.secondary">
+              {t.side.toUpperCase()} client ID ({t.client_id}) -- paste the whole
+              line into {t.domain}'s Admin Console; it replaces what is there:
+            </Typography>
+            <Box
+              component="pre"
+              sx={{ fontSize: 11, p: 1, bgcolor: 'action.hover', borderRadius: 1,
+                   overflowX: 'auto', cursor: 'pointer' }}
+              onClick={() => copy(t.scopes)}
+              title="Click to copy"
+            >
+              {t.scopes}
+            </Box>
+            <Button
+              size="small" sx={{ mt: 0.5 }}
+              onClick={() => diagnose(t.side as 'source' | 'target')}
+              disabled={diagnosing === t.side}
+            >
+              {diagnosing === t.side ? 'Checking each scope…' : 'Diagnose scopes'}
+            </Button>
+            {diag && (
+              <Box sx={{ mt: 1 }}>
+                {diag.error && !diag.combined_ok && (
+                  <Alert severity="warning" sx={{ mb: 1, fontSize: 12 }}>
+                    Combined request failed: {diag.error}
+                  </Alert>
+                )}
+                {diag.combined_ok ? (
+                  <Alert severity="success" sx={{ fontSize: 12 }}>
+                    All {diag.scopes.length} scope(s) authorised.
+                  </Alert>
+                ) : (
+                  <Stack spacing={0.5}>
+                    {diag.scopes.map((s) => (
+                      <Box key={s.scope} sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                        <Chip
+                          size="small" label={s.ok ? 'OK' : 'FAIL'}
+                          color={s.ok ? 'success' : 'error'}
+                        />
+                        <Typography variant="caption" sx={{ fontFamily: 'ui-monospace, monospace' }}>
+                          {s.scope}
+                        </Typography>
+                      </Box>
+                    ))}
+                  </Stack>
+                )}
+              </Box>
+            )}
           </Box>
-        </Box>
-      ))}
+        )
+      })}
       <Button size="small" variant="outlined" onClick={check} disabled={checking}>
         Check delegation now
       </Button>
