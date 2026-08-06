@@ -65,7 +65,7 @@ class TestSizing:
     def test_cpu_binds_when_memory_is_plentiful(self):
         r = make(ram_usable=64.0, cores=2, swap_used=0.0)
         rec = resources.recommend(r)
-        assert rec["user_workers"] == 4          # 2 cores x2, I/O-bound
+        assert rec["user_workers"] == 8          # 2 cores x4, I/O-bound
         assert "cpu-bound" in rec["reason"]
 
     def test_a_big_machine_is_capped_by_api_quota_not_hardware(self):
@@ -73,7 +73,19 @@ class TestSizing:
         buy nothing but retries."""
         rec = resources.recommend(make(ram_usable=256.0, cores=64, swap_used=0.0))
         assert rec["user_workers"] == resources.HARD_CAP
-        assert "quota" in rec["reason"]
+
+    def test_a_small_vps_is_not_needlessly_held_below_its_real_ram_headroom(self):
+        """The exact case found live: a 2-logical-core, ~3.7 GB VPS capped at
+        4 workers under the old x2 multiplier even though RAM had headroom
+        for 8 -- the work is I/O-bound (each worker mostly waits on the
+        network), and Google's own migration guidance recommends
+        distributing across many more per-user workers than raw core count
+        would suggest, since per-user API quota is the real ceiling, not
+        compute."""
+        r = make(ram_usable=3.0, cores=2, swap_used=0.0)
+        rec = resources.recommend(r)
+        assert rec["user_workers"] == 8          # 2 cores x4, not the old x2's 4
+        assert "cpu-bound" in rec["reason"]
 
     def test_seed_and_migrate_pools_agree(self):
         rec = resources.recommend(make())

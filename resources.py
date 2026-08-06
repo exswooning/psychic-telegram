@@ -454,13 +454,21 @@ def recommend(r: SystemResources | None = None) -> dict:
     """
     Worker counts this machine can actually sustain.
 
-    Memory is the binding constraint, not CPU: the pools are I/O-bound, so the
-    cap that matters is how many in-flight buffers fit without swapping.
+    Memory is meant to be the binding constraint, not CPU -- the pools are
+    I/O-bound (each worker mostly waits on the network, not the CPU), and
+    Google's own Drive migration guidance recommends distributing work
+    across many per-user workers (10-50) precisely because the real ceiling
+    is per-user API quota, not compute. A x2 core multiplier used to
+    contradict that on small machines: a 2-logical-core VPS capped at 4
+    workers even when RAM had headroom for many more, because by_cpu bound
+    before by_ram ever got a say. x4 keeps by_cpu from binding except on the
+    smallest machines, letting RAM (or Google's own per-user ceiling, via
+    HARD_CAP) be the real limit instead.
     """
     r = r or probe()
 
     by_ram = int((r.ram_usable_gb * 1024) // MB_PER_WORKER)
-    by_cpu = max(r.cpu_logical, 1) * 2          # I/O-bound: oversubscribe cores
+    by_cpu = max(r.cpu_logical, 1) * 4          # I/O-bound: oversubscribe cores
     workers = max(MIN_WORKERS, min(by_ram, by_cpu, HARD_CAP))
 
     why = []
@@ -478,7 +486,7 @@ def recommend(r: SystemResources | None = None) -> dict:
         why.append(f"memory-bound: {r.ram_usable_gb:.1f} GB usable / "
                    f"{MB_PER_WORKER} MB per worker = {by_ram}")
     else:
-        why.append(f"cpu-bound: {r.cpu_logical} logical cores x2 = {by_cpu}")
+        why.append(f"cpu-bound: {r.cpu_logical} logical cores x4 = {by_cpu}")
     if workers == HARD_CAP:
         why.append(f"capped at {HARD_CAP}; past this Google's per-user quotas bind first")
 
@@ -486,9 +494,15 @@ def recommend(r: SystemResources | None = None) -> dict:
         "user_workers": workers,
         # The seeder holds a whole corpus per user; give it the same ceiling.
         "seed_workers": workers,
-        # Requests/sec per user. Raising this on a machine that cannot keep up
-        # just fills the retry queue.
-        "per_user_qps": 8.0 if not r.under_memory_pressure else 4.0,
+        # Requests/sec per user. Was 8.0/4.0 -- Google's own Drive migration
+        # guidance recommends sustained writes around 3 requests/sec/account;
+        # 8 ran hotter than that, spending Drive's per-user write quota on
+        # requests that just come back as 429/rateLimitExceeded and get
+        # retried anyway. 3.0 tracks the documented rate directly; halved
+        # under memory pressure for the same reason the worker count drops
+        # then -- a machine already struggling should not also be racing to
+        # fill a retry queue.
+        "per_user_qps": 3.0 if not r.under_memory_pressure else 1.5,
         "reason": "; ".join(why),
         "resources": r,
     }
