@@ -50,7 +50,12 @@ class DriveMigrator:
         self.quota = quota
         self.src = auth.source_drive(source_user)
         self.tgt = auth.target_drive(target_user)
+        # `limiter` stays the read/general bucket and keeps its name: it is
+        # what _download_via charges once per call, and tests substitute it.
         self.limiter = RateLimiter(settings.per_user_qps)
+        self._read_limiter = self.limiter
+        # The ceiling that actually bounds a migration. See _retry().
+        self._write_limiter = RateLimiter(settings.drive_write_qps)
         self.delta = False
         self.stats = {"folders": 0, "files": 0, "skipped": 0, "failed": 0,
                       "acl_failed": 0}
@@ -71,7 +76,34 @@ class DriveMigrator:
         self.target_drive_id: str | None = None
 
     # -- plumbing -----------------------------------------------------------
-    def _retry(self, fn, label=None):
+    def _retry(self, fn, label=None, write: bool = True):
+        """
+        Every Drive call goes through here, and every call is paced.
+
+        Two buckets, because Google prices the two kinds of call about two
+        orders of magnitude apart:
+
+          writes  3/sec sustained **per account**, and explicitly not
+                  raiseable on request. This is the real ceiling on a
+                  migration; ~4.4 of the ~5.7 calls per file are writes.
+          reads   part of the 20,000-per-100s pool (~200/sec, per user *and*
+                  per project). Effectively free at our volume.
+
+        Sharing one 3/sec bucket between them -- which is what a single
+        limiter would do -- spends ~22% of the ceiling on reads that were
+        never charged against it.
+
+        `write=True` is the default deliberately: an uncategorised call is
+        paced at the safe rate. Mislabelling a write as a read is the
+        expensive mistake (it invites 429s); the reverse only costs a little
+        throughput.
+
+        This is load-bearing only under `drive_file_workers > 1`. On the
+        serial path a user runs at ~0.66 req/s and never approaches either
+        bucket -- which is exactly why the write path went unthrottled for
+        so long without anyone noticing.
+        """
+        (self._write_limiter if write else self._read_limiter).acquire()
         return retry_on_google_error(
             max_retries=self.settings.max_retries,
             base_delay=self.settings.base_backoff,
@@ -145,11 +177,11 @@ class DriveMigrator:
             src_root, tgt_root = self.shared_drive, self.target_drive_id
         else:
             src_root = self._retry(
-                lambda: self.src.files().get(fileId="root", fields="id").execute()
-            )["id"]
+                lambda: self.src.files().get(fileId="root", fields="id").execute(),
+                write=False)["id"]
             tgt_root = self._retry(
-                lambda: self.tgt.files().get(fileId="root", fields="id").execute()
-            )["id"]
+                lambda: self.tgt.files().get(fileId="root", fields="id").execute(),
+                write=False)["id"]
 
         if self.server_side and not self.settings.dry_run:
             self._ensure_staging_drive()
@@ -192,7 +224,7 @@ class DriveMigrator:
 
         existing = self._retry(lambda: self.tgt.drives().list(
             q=f"name = '{name}'", pageSize=10, fields="drives(id,name)",
-        ).execute()).get("drives", [])
+        ).execute(), write=False).get("drives", [])
         match = next((d for d in existing if d.get("name") == name), None)
 
         if match:
@@ -226,7 +258,7 @@ class DriveMigrator:
         if not self._staging_drive_id:
             return
         try:
-            left = self._retry(lambda: self.tgt.files().list(
+            left = self._retry(write=False, fn=lambda: self.tgt.files().list(
                 corpora="drive", driveId=self._staging_drive_id,
                 includeItemsFromAllDrives=True, supportsAllDrives=True,
                 pageSize=10, fields="files(id,name)",
@@ -296,11 +328,10 @@ class DriveMigrator:
             fields += ",owners"
         token = None
         while True:
-            self.limiter.acquire()
             resp = self._retry(lambda t=token: self.src.files().list(
                 q=q, pageSize=200, pageToken=t, fields=fields,
                 spaces="drive", supportsAllDrives=True, **extra,
-            ).execute(), label="drive.files.list")
+            ).execute(), label="drive.files.list", write=False)
             for f in resp.get("files", []):
                 yield f
             token = resp.get("nextPageToken")
@@ -324,14 +355,13 @@ class DriveMigrator:
         q = "sharedWithMe = true and trashed = false"
         token = None
         while True:
-            self.limiter.acquire()
             resp = self._retry(lambda t=token: self.src.files().list(
                 q=q, pageSize=200, pageToken=t,
                 fields="nextPageToken, files(id,name,mimeType,parents,"
                        "modifiedTime,size,md5Checksum,shared,owners,"
                        "capabilities(canDownload),shortcutDetails,description)",
                 spaces="drive", supportsAllDrives=True,
-            ).execute(), label="drive.files.list.sharedWithMe")
+            ).execute(), label="drive.files.list.sharedWithMe", write=False)
             for f in resp.get("files", []):
                 if self._owned_by_source_org(f):
                     continue
@@ -902,7 +932,7 @@ class DriveMigrator:
                 fileId=source_id, pageSize=100,
                 fields="comments(id,content,author,createdTime,resolved,"
                        "replies(id,content,author,createdTime))",
-            ).execute())
+            ).execute(), write=False)
         except (PermanentAPIError, RuntimeError) as exc:
             log.debug("[%s] comments unavailable on %s: %s",
                      self.source_user, source_id, exc)
@@ -987,7 +1017,7 @@ class DriveMigrator:
                 fields="permissions(id,type,role,emailAddress,domain,"
                        "allowFileDiscovery,permissionDetails)",
                 supportsAllDrives=True,
-            ).execute(), label="drive.permissions.list").get("permissions", [])
+            ).execute(), label="drive.permissions.list", write=False).get("permissions", [])
         except (PermanentAPIError, RuntimeError) as exc:
             # Record it, do not merely warn. A warning scrolls past and leaves
             # nothing for `report` or resolve_failures to act on, so a file

@@ -38,6 +38,10 @@ def settings(tmp_path) -> Settings:
     s.base_backoff = 0.001
     s.max_backoff = 0.004
     s.per_user_qps = 10_000.0     # effectively disable pacing in tests
+    # Same reason, for the write bucket: its real default is Google's 3/sec
+    # ceiling, which would pace every faked write and turn a 14s suite into
+    # a multi-minute one. Tests that care about pacing set it themselves.
+    s.drive_write_qps = 10_000.0
     s.dry_run = False
     s.owned_only = True
     os.makedirs(s.scratch_dir, exist_ok=True)

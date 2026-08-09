@@ -309,6 +309,16 @@ class Settings:
     drive_file_workers: int = field(
         default_factory=lambda: max(1, int(os.getenv("DRIVE_FILE_WORKERS", "1")))
     )
+    # Sustained Drive **write** requests per second, per account. Google's
+    # documented ceiling is 3/sec and is explicitly not raiseable on request
+    # (support.google.com/a/answer/10445916), so this is a real wall, not a
+    # tuning knob -- raising it buys 429s and retry backoff, which is slower.
+    # Reads are governed by per_user_qps instead: they come out of the far
+    # looser 20,000-per-100s pool (~200/sec) and must not be charged against
+    # the write ceiling. See drive_engine._retry().
+    drive_write_qps: float = field(
+        default_factory=lambda: float(os.getenv("DRIVE_WRITE_QPS", "0")) or 3.0
+    )
 
     # -- retry / backoff -----------------------------------------------------
     max_retries: int = 6

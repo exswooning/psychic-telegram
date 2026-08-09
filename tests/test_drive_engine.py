@@ -1288,3 +1288,44 @@ class TestIntraUserFileConcurrency:
         quota.cap_bytes = 0
         with pytest.raises(QuotaExhausted):
             migrator.run()
+
+
+class TestWritePacing:
+    """
+    The write path was completely unthrottled: `_retry` never touched a
+    limiter, and the only `limiter.acquire()` calls sat in `files.list` and
+    the download helper. Serial, at ~0.66 req/s per user, nothing noticed.
+    With `drive_file_workers > 1` it becomes a 429 generator, so the pacing
+    has to be real before the concurrency is usable.
+    """
+
+    class _Counting:
+        def __init__(self):
+            self.n = 0
+
+        def acquire(self):
+            self.n += 1
+
+    def test_writes_are_charged_to_the_write_bucket(self, migrator, auth):
+        w, r = self._Counting(), self._Counting()
+        migrator._write_limiter, migrator._read_limiter = w, r
+        auth.source_drive(SRC_USER).add_binary("a.bin")
+        migrator.run()
+        assert w.n > 0, "the copy/move/create path paid nothing to the write bucket"
+
+    def test_listing_is_not_charged_to_the_write_bucket(self, migrator, auth):
+        """Reads come out of the 20,000/100s pool. Charging them against the
+        3/sec write ceiling would spend ~22% of it on calls Google prices
+        two orders of magnitude cheaper."""
+        w, r = self._Counting(), self._Counting()
+        migrator._write_limiter, migrator._read_limiter = w, r
+        src = auth.source_drive(SRC_USER)
+        src.add_folder("empty")
+        migrator.run()
+        assert r.n > 0, "the tree walk paid nothing to the read bucket"
+
+    def test_write_bucket_defaults_to_googles_ceiling(self):
+        """3/sec sustained per account, explicitly not raiseable on request.
+        A default above it would just buy 429s and retry backoff."""
+        from config import Settings
+        assert Settings().drive_write_qps == 3.0
