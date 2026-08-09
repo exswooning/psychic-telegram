@@ -89,6 +89,26 @@ of that kind and record the plateau here.
   direction (account-level, billing-adjacent). Won't move the 3/sec
   ceiling regardless.
 
+## Absolute ceiling floor (documented so nobody re-bids against it)
+
+Google's **3 writes/sec/account** ceiling (not raiseable by request, per
+their official large-migration doc) sets a hard floor for any Drive
+migration architecture, greenfield included:
+
+- Drive copy path minimum ≈ 2 writes/file (copy + move; ACL batching
+  already removes most permissions.create round-trips from the count).
+- alice alone (3,118 files) ≈ **~35-42 min** of pure write-serialization.
+- The 9-user corpus (12,309 files) ≈ **~1.7-2.7h floor** before any
+  overhead, on today's tenant + quotas.
+
+**Consequence:** a claimed "3.7h → ~45min" greenfield reduction is not
+reachable through architecture alone — only Google raising/adjusting the
+ceiling (external) or a new API path (none exists today) breaks below
+it. Realistic rebuild upside is the remaining Tier-2 batching
+(~15-20%) plus ergonomics/async for future multi-tenant use. This is the
+math recorded in the coordination file's greenfield-proposal triage
+(2026-08-09 10:30 UTC).
+
 ## Raw source files (on the VPS)
 
 - `/root/mig_run2.log` (R0)

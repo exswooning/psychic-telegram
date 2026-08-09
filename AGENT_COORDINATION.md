@@ -595,3 +595,22 @@ Per-user drive wall-times were consistently ~1.3–1.6x faster under server_side
 **Sync check at 10:15 UTC:** `git fetch origin workspace-migrator` — local is 0 ahead / 0 behind origin, clean tree. Latest remote commits are my own (2448e65, 972f397, 6b1f95f, 2d24435, ee170da). No other agent's commits on origin yet. If another agent pushes, I'll fetch+rebase/pull before any further code change and note the merge here.
 
 **Live migration status (10:15 UTC):** full wipe (`reset_target.py`, pid 1187526) still running, ~22 min elapsed, CPU climbing steadily. Verified live progress: alice's target Drive is fully empty (0 files) and her Gmail is down to 31 messages from ~1,000+. Will log the wipe completion + the R3 full-remigration launch and final benchmark data as they happen.
+
+---
+
+## 2026-08-09 10:30 UTC — Claude — Greenfield rebuild proposals: triage against hard external ceilings
+
+User forwarded a "Greenfield Proposals (Future Rebuild)" list (async-first design, server-side-only mode, idempotent ops, real-time WebSocket progress, declarative config, multi-tenant parallelism, ML-driven retry scheduling; claimed 70-80% time reduction, 3.7h → ~45min). Triaging against what the live A/B already proved, because several of these collide with Google ceilings that no architecture can bypass:
+
+**Real wins the rebuild should take (no ceiling collision):**
+- **Server-side-only mode** — already decided: `server_side` won the A/B (1.55x faster, 0 ACL leaks). A rebuild that drops `download_upload`/`link_flip` entirely removes dead branches + the link_flip public-exposure footgun. Free.
+- **Idempotent operations** — the ledger (`id_mapping` keyed on source_id) already gives most of this; a rebuild can make every step retry-safe by construction rather than by `_retry()` wrapping.
+- **Async-first design** — real speedup IF bounded by cross-user concurrency (already `user_workers=8`). An async rewrite that raises *in-file* concurrency will hit the 429 wall and be *slower* — the ceiling is the same one already documented.
+- **Declarative config** — ergonomic, no runtime cost; worth it. env.sh → single validated YAML/TOML.
+- **WebSocket real-time progress** — UI-only, no migration speed impact; nice-to-have.
+- **Multi-tenant parallelism** — real win but limited by machine/credential ceiling; we're a single tenant pair today, so deferred.
+- **ML-driven retry scheduling** — overkill. Phase A/B showed retries ≈ 0 (1 and 0 of ~70K calls). The 3 writes/sec/account ceiling dominates; an ML scheduler optimizes a near-empty problem.
+
+**Claimed 70-80% reduction — FLAGGED as not achievable for Drive writes.** The hard gate is Google's **3 writes/sec/account ceiling (not raiseable by request, per Google's official large-migration doc)**. Drive copy path is copy()+move() (2 writes/file) + permissions.create — that's ~2.4 writes/file minimum. At 3 writes/sec/account the absolute floor for alice's 3,118 files is ~3,118×2.4/3 ≈ **42 min just for alice's writes**, and the aggregate for 9 users ≈ 12,309×2.4/3 ≈ **2.7h** of pure write-serialization *before* any overhead. So the theoretical floor is ~2.7h for the current corpus — **not 45 min**. Only a quota/ceiling change from Google (out of our hands) or a fundamentally different API path (none exists) breaks below that. I'll record this in BENCHMARKS.md as the documented floor so nobody re-bids against it.
+
+**Recommendation:** do NOT fund a rebuild chasing the 45-min claim. The realistic future work is: (a) folder-creation batching + write-batching (remaining Tier-2 items, ~15-20%), (b) rebuild-around for ergonomics/async only if a future multi-tenant need appears. Logged here for DeepSeek/Kimi to sanity-check the ceiling math before anyone plans against it.
