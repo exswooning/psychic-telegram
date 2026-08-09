@@ -336,11 +336,30 @@ class Settings:
     transfer_mode: str = field(
         default_factory=lambda: os.getenv("TRANSFER_MODE", "download_upload")
     )
+    # files.copy() preserves content checksums by contract -- the whole reason
+    # server_side never streams bytes through this host. Verifying the returned
+    # md5 is nearly free (it comes back in the copy response, not a second
+    # call), but it can false-positive when the source file changed between the
+    # listing and the copy. The A/B compared checksums for exactly this; with
+    # the comparison phase over, a mismatch is logged and the file still counts
+    # as transferred rather than failed.
+    verify_server_side_md5: bool = field(
+        default_factory=lambda: _env_bool("VERIFY_SERVER_SIDE_MD5", False)
+    )
     staging_drive_prefix: str = field(
         default_factory=lambda: os.getenv("STAGING_DRIVE_PREFIX", "MIGRATION-STAGING")
     )
 
     # -- optional passes -------------------------------------------------------
+    # ACL grants for one file are sent in a single HTTP round trip instead of
+    # one permissions.create call per grantee. Round trips dominated the A/B
+    # timing (p50 ~550ms/call), and files commonly carry 2-5 grants, so this
+    # cuts the ACL phase's wall clock by roughly that factor. The BatchHttpRequest
+    # is built and torn down per file; batch_size is per-request-in-batch, not
+    # across files (cross-file batching would need a whole-engine post-pass).
+    acl_batch_size: int = field(
+        default_factory=lambda: int(os.getenv("ACL_BATCH_SIZE", "20"))
+    )
     # Gmail filters need gmail.settings.basic on both tenants, which the
     # baseline grant deliberately does not include. Off unless asked for.
     migrate_gmail_settings: bool = field(

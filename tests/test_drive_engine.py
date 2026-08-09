@@ -496,6 +496,105 @@ def test_acl_failure_does_not_lose_the_file(migrator, auth, db):
     assert auth.target_drive(TGT_USER).by_name("policy-blocked.pdf")
 
 
+def test_acl_batch_applies_every_grant_via_one_round_trip(
+        migrator, auth, db, settings, monkeypatch):
+    """
+    _sync_acls routes multiple grants through a BatchHttpRequest when the
+    client is the real API. The test fakes have no _http, so this forces the
+    batch path by faking a client and a BatchHttpRequest that just executes
+    each request object it is given -- the point is to prove the batching
+    bookkeeping (applied count, per-grant failure audit) matches the
+    per-call loop it replaced.
+    """
+    from db import bulk_seed_identities
+
+    bulk_seed_identities(db, [("bob@tenanta.com", "bob@tenantb.com"),
+                              ("carol@tenanta.com", "carol@tenantb.com")])
+    src = auth.source_drive(SRC_USER)
+    fid = src.add_binary("shared-with-team.pdf")
+    src.add_permission(fid, "user", "reader", email="bob@tenanta.com")
+    src.add_permission(fid, "user", "writer", email="carol@tenanta.com")
+
+    # Make the target client look like the real API so the batch path runs.
+    auth.target_drive(TGT_USER)._http = object()
+
+    executed: list = []
+
+    class FakeBatch:
+        def __init__(self, http=None):
+            self._requests = []
+
+        def add(self, request, request_id=None, callback=None):
+            self._requests.append((request, request_id, callback))
+
+        def execute(self, **kw):
+            for request, request_id, callback in self._requests:
+                try:
+                    resp = request.execute()
+                except Exception as exc:
+                    callback(request_id, None, exc)
+                else:
+                    callback(request_id, resp, None)
+
+    monkeypatch.setattr("googleapiclient.http.BatchHttpRequest", FakeBatch)
+    settings.acl_batch_size = 20
+
+    migrator.run()
+
+    tgt = auth.target_drive(TGT_USER)
+    copied = tgt.by_name("shared-with-team.pdf")[0]
+    emails = {p["emailAddress"] for p in tgt.perms[copied["id"]]}
+    assert emails == {"bob@tenantb.com", "carol@tenantb.com"}
+    assert db.get_audit(SRC_USER, fid, "file")["status"] == "SUCCESS"
+
+
+def test_acl_batch_chunks_respect_batch_size(migrator, auth, db, settings,
+                                             monkeypatch):
+    """Grants beyond acl_batch_size spill into a second batch request."""
+    from db import bulk_seed_identities
+
+    seeds = [(f"u{i}@tenanta.com", f"u{i}@tenantb.com") for i in range(5)]
+    bulk_seed_identities(db, seeds)
+    src = auth.source_drive(SRC_USER)
+    fid = src.add_binary("many-grantees.pdf")
+    for i in range(5):
+        src.add_permission(fid, "user", "reader", email=f"u{i}@tenanta.com")
+
+    auth.target_drive(TGT_USER)._http = object()
+    batches: list[list] = []
+
+    class FakeBatch:
+        def __init__(self, http=None):
+            self._requests = []
+
+        def add(self, request, request_id=None, callback=None):
+            self._requests.append((request, request_id, callback))
+
+        def execute(self, **kw):
+            batches.append(self._requests)
+            for request, request_id, callback in self._requests:
+                try:
+                    resp = request.execute()
+                except Exception as exc:
+                    callback(request_id, None, exc)
+                else:
+                    callback(request_id, resp, None)
+
+    monkeypatch.setattr("googleapiclient.http.BatchHttpRequest", FakeBatch)
+    settings.acl_batch_size = 2
+
+    migrator.run()
+
+    # 5 grants at 2 per batch = 2 batch requests (2+2), with the trailing
+    # single grant going through the per-call path rather than a one-item
+    # batch. Every grant must still land regardless of which path took it.
+    assert len(batches) == 2
+    assert [len(b) for b in batches] == [2, 2]
+    tgt = auth.target_drive(TGT_USER)
+    copied = tgt.by_name("many-grantees.pdf")[0]
+    assert len(tgt.perms[copied["id"]]) == 5
+
+
 # ======================================================================
 # Drive comments (MIGRATE_COMMENTS)
 # ======================================================================
