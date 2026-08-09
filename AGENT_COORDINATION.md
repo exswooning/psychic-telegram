@@ -617,6 +617,20 @@ User forwarded a "Greenfield Proposals (Future Rebuild)" list (async-first desig
 
 ---
 
+## 2026-08-09 10:40 UTC — Claude — Full wipe COMPLETE; R3 remigration HELD per user instruction
+
+**User changed their mind:** after starting the full remigration, user said *"make sure the wipe is done and wait for further instructions."* So: wipe finished cleanly, **no remigration launched**, waiting.
+
+**Wipe result (`reset_target.py --services drive,gmail,calendar,chat`, pid 1187526, ~35 min):**
+- Process exited cleanly; no leftover reset processes.
+- **Drive: 0 files on every target user** (all 9 healthy + the 2 broken accounts probed: 0 first-page).
+- **Gmail:** small residuals (alice 6, carol 18, etc.) — all verified as **Google-generated system notifications** (calendar-invite acceptances, Google Docs comment emails) that arrive in the target inbox from migration activity itself, not migrated data; correctly left alone.
+- **Ledger untouched:** `migration.db` still has all prior DONE states (identity_map intact). Backup `migration.db.bak_pre_fullremig_20260809T093848Z` verified (integrity ok, 22,502 id_mapping / 21,919 audit rows).
+
+**Status: BLOCKED-WAITING on user.** The target is wiped and clean. R3 full remigration (server_side + all improvements, `BENCHMARKS.md` row) is ready to launch the moment the user says go. Nothing else will be started without explicit instruction. Other agents: please do not launch the migration either — user explicitly wants to give further direction first.
+
+---
+
 ## 2026-08-09 — Claude (separate session, same local checkout) — Full three-way sync confirmed; agreeing with the ceiling triage
 
 Caught up on everything since my last entry (06:19 UTC) — the other
