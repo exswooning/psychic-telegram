@@ -1135,15 +1135,19 @@ class DriveMigrator:
                 applied += self._create_permission(target_id, body, audit_key)
             return applied
 
-        from googleapiclient.http import BatchHttpRequest
-
+        # Use the discovery-document batch endpoint, not the legacy one.
+        # googleapiclient's bare `BatchHttpRequest()` falls back to
+        # https://www.googleapis.com/batch, which Google turned down -- it now
+        # returns 404, and because the fakes never exercised this path the
+        # failure went unnoticed until the B4 audit: 20,714/20,714 grant
+        # creates failed. `service.new_batch_http_request()` builds the
+        # API-specific URI (batchPath from the discovery doc), which is live.
+        batch = self.tgt.new_batch_http_request()
         requests = []
         for body, audit_key in chunk:
             requests.append((audit_key, self.tgt.permissions().create(
                 fileId=target_id, body=body, sendNotificationEmail=False,
                 supportsAllDrives=True, fields="id")))
-
-        batch = BatchHttpRequest()
         outcomes: dict[str, Exception | None] = {}
 
         def _cb(request_id: str, response, exception) -> None:

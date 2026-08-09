@@ -267,6 +267,22 @@ class FakeDrive(FakeService):
     def drives(self):
         return _DriveDrives(self)
 
+    def new_batch_http_request(self, callback=None):
+        """Mirror the discovery-doc batch constructor (drive v3 batchPath).
+
+        Imported lazily so tests that monkeypatch
+        `googleapiclient.http.BatchHttpRequest` intercept this too -- exactly
+        as they would have intercepted the real client's constructor. The
+        batch_uri matches the live drive.v3 discovery batchPath, never the
+        dead legacy `https://www.googleapis.com/batch`.
+        """
+        from googleapiclient.http import BatchHttpRequest
+
+        return BatchHttpRequest(
+            callback=callback,
+            batch_uri="https://www.googleapis.com/batch/drive/v3",
+        )
+
     def comments(self):
         return _DriveComments(self)
 

@@ -521,7 +521,7 @@ def test_acl_batch_applies_every_grant_via_one_round_trip(
     executed: list = []
 
     class FakeBatch:
-        def __init__(self, http=None):
+        def __init__(self, callback=None, batch_uri=None, http=None):
             self._requests = []
 
         def add(self, request, request_id=None, callback=None):
@@ -564,7 +564,7 @@ def test_acl_batch_chunks_respect_batch_size(migrator, auth, db, settings,
     batches: list[list] = []
 
     class FakeBatch:
-        def __init__(self, http=None):
+        def __init__(self, callback=None, batch_uri=None, http=None):
             self._requests = []
 
         def add(self, request, request_id=None, callback=None):
@@ -593,6 +593,65 @@ def test_acl_batch_chunks_respect_batch_size(migrator, auth, db, settings,
     tgt = auth.target_drive(TGT_USER)
     copied = tgt.by_name("many-grantees.pdf")[0]
     assert len(tgt.perms[copied["id"]]) == 5
+
+
+def test_acl_batch_uses_the_discovery_endpoint_not_the_legacy_one(
+        migrator, auth, db, settings, monkeypatch):
+    """The B4 bug, as a regression test.
+
+    `BatchHttpRequest()` without a batch_uri falls back to the legacy
+    `https://www.googleapis.com/batch`, which Google turned down -- the live
+    B4 Trial A ran every grant create against a 404 and silently lost
+    20,714/20,714 grants while the files themselves copied fine. The engine
+    must build its batch from the discovery document (drive v3 batchPath),
+    i.e. via the client's `new_batch_http_request()`, never the bare class.
+    """
+    from db import bulk_seed_identities
+
+    bulk_seed_identities(db, [("bob@tenanta.com", "bob@tenantb.com"),
+                              ("carol@tenanta.com", "carol@tenantb.com")])
+    src = auth.source_drive(SRC_USER)
+    fid = src.add_binary("shared-to-team.pdf")
+    src.add_permission(fid, "user", "reader", email="bob@tenanta.com")
+    src.add_permission(fid, "user", "writer", email="carol@tenanta.com")
+
+    auth.target_drive(TGT_USER)._http = object()
+
+    uris: list[str] = []
+
+    class FakeBatch:
+        def __init__(self, callback=None, batch_uri=None, http=None):
+            self._requests = []
+            self._callback = callback
+            uris.append(batch_uri)
+
+        def add(self, request, request_id=None, callback=None):
+            self._requests.append((request, request_id, callback))
+
+        def execute(self, **kw):
+            for request, request_id, callback in self._requests:
+                try:
+                    resp = request.execute()
+                except Exception as exc:
+                    callback(request_id, None, exc)
+                else:
+                    callback(request_id, resp, None)
+
+    monkeypatch.setattr("googleapiclient.http.BatchHttpRequest", FakeBatch)
+    settings.acl_batch_size = 20
+
+    migrator.run()
+
+    assert uris, "expected the batch path to run"
+    assert all(u != "https://www.googleapis.com/batch" for u in uris), \
+        "legacy batch endpoint must never be used"
+    assert all("/batch/" in u for u in uris), \
+        f"expected an API-specific batchPath, got {uris}"
+    tgt = auth.target_drive(TGT_USER)
+    copied = tgt.by_name("shared-to-team.pdf")[0]
+    assert {p["emailAddress"] for p in tgt.perms[copied["id"]]} == \
+        {"bob@tenantb.com", "carol@tenantb.com"}
+    assert db.get_audit(SRC_USER, fid, "file")["status"] == "SUCCESS"
 
 
 # ======================================================================

@@ -173,7 +173,7 @@ If performance improves but correctness/security regresses:
 | B2  | fields trim           | B     |         |           |       |      |         |          |         |                 |               |              |
 | B3  | Next optimization     | A     |         |           |       |      |         |          |         |                 |               |              |
 | B3  | Next optimization     | B     |         |           |       |      |         |          |         |                 |               |              |
-| B4  | Final combined        | A     |         |           |       |      |         |          |         |                 |               |              |
+| B4  | Final combined        | A     | 18,306s | 26,480    | 2.69  | 0    | 1       | 0        | 0       | 19,849      | 0            | FAIL (ACL bug) |
 | B4  | Final combined        | B     |         |           |       |      |         |          |         |                 |               |              |
 
 ## 12. Required benchmark table (service-level)
@@ -182,7 +182,7 @@ If performance improves but correctness/security regresses:
 | --- | ----- | ------------: | ------------: | ---------------: | -----------: | -----------: | ------------: | ------------: | ----------: | -----------: |
 | B0  | A     |               |               |                  |              |              |               |               |             |              |
 | B0  | B     |               |               |                  |              |              |               |               |             |              |
-| B4  | A     |               |               |                  |              |              |               |               |             |              |
+| B4  | A     | 18,306s     |               |                  |              |              |               |               |             |              |
 | B4  | B     |               |               |                  |              |              |               |               |             |              |
 
 ## 13. Final benchmark report (published at B4)
@@ -266,6 +266,20 @@ Performance improvements that violate those conditions are rejected.
 - The full wipe completed (target clean, 2026-08-09 10:40); the
   remigration was **held by explicit user instruction** awaiting
   direction. Superseded by this benchmark protocol.
+
+### B4 Trial A — Final combined config — INVALID (ACL fidelity failure)
+- Date: 2026-08-09 10:47–15:32 UTC, drive-only, `server_side`
+- Elapsed **18,306s** (~5h05m); 2.69 req/s (0.24/worker); p50 306ms; 1 retry
+- Files: 12,309 SUCCESS / 0 FAILED; 1,792 folders — copy path clean
+- **ACLs: FAIL. 20,714/20,714 grant creates returned HTTP 404.** Root cause:
+  `BatchHttpRequest()` without a batch_uri hit the dead legacy
+  `https://www.googleapis.com/batch`. Live `acl_audit.py`: 19,849 of 19,873
+  source grants MISSING on target (0.1% preserved).
+- **Verdict: FAIL on fidelity (decision rule §9) — not promotable.**
+  Wall clock was also +38% vs B0 (18,306s vs 13,284s), so the deployed
+  improvements neither sped up the serial path nor preserved sharing.
+- Fixed (review pending): batch now built via `new_batch_http_request()`
+  (discovery-doc endpoint). Trial B must re-run from a clean target + ledger.
 
 ## Ceiling floor analysis (context for the 5% bar)
 
