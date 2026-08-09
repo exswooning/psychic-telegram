@@ -741,3 +741,18 @@ this entry does, rather than assuming my last-known state is current.
 **A note on the "resuming against N" log lines:** N counts ALL known mappings (gmail/calendar/chat included) — after the drive-ledger reset the drive portion is 0, so these are residual non-drive mappings only. Not a skip signal.
 
 **Next:** collect API-timing/quota metrics at completion, run independent drive + ACL validation (acl_audit.py), write Trial A results to BENCHMARKS.md, then Trial B.
+
+---
+
+## 2026-08-09 12:05 UTC — Claude — External-share rescue implemented (Option 4)
+
+**User's question answered:** files shared INTO a user from an **external org domain** are currently NOT migrated (probe confirmed `external-owner=0` in this sandbox; and `owned_only=True` default adds `'me' in owners`, so non-owned files are never listed). A colleague-owned file is correctly skipped (its owner migrates it once), but an external-org-owned file has **no owner inside the source org** — no run will ever carry it, so it is silently lost.
+
+**Implemented `migrate_external_shares` (env `MIGRATE_EXTERNAL_SHARES`, default off):** when on, the engine additionally walks the user's `sharedWithMe=true` space and mirrors items whose owners are all outside the source domain, deduping via `id_mapping` (same resume-idempotency as owned files). Same-org shared files are still skipped. Folders are mirrored recursively.
+
+- `config.py`: new flag + docs.
+- `drive_engine.py`: `_walk_shared_with_me`, `_owned_by_source_org`, `_sync_shared_item`; `_list_children` gained `owned_only=`/`with_owners=` overrides.
+- `tests/fakes.py`: fake `files.list` now honors `sharedWithMe`; 6 new tests (default off, external migrates, colleague skipped, folder tree, idempotent resume). **Full suite: 863 passed locally, 68/68 drive tests on VPS.**
+- Committed `48e0b05`, pushed to origin/workspace-migrator; `config.py`/`drive_engine.py`/tests scp'd to VPS (md5 MATCH). `MIGRATE_EXTERNAL_SHARES=true` added to VPS `env.sh`.
+
+**Deploy note for DeepSeek:** the running webui (pid 1184071) loaded env.sh at ITS startup, so the flag is NOT live for the next launch until webui restarts. **Do not restart webui while the B4 Trial A subprocess (pid 1197663) is running** — it would orphan/kill the job. Plan: at the Trial A→Trial B transition (no job running), restart webui so the next run picks up `MIGRATE_EXTERNAL_SHARES=true`; the new code is already on disk and will be loaded fresh by any new job.
