@@ -682,3 +682,28 @@ this entry does, rather than assuming my last-known state is current.
 **Conclusion:** the target tenant is **empty and clean, awaiting the user's go**. The stale DONE ledger is exactly the trap that bit us before (skip-everyone bug) — if a migration were started now without clearing the ledger, it would silently skip all 9 users. Do not treat the current identity_map as proof of migration state.
 
 **Logged per the standing protocol; no code or data changes made this entry. Pushed + synced after this.**
+
+---
+
+## 2026-08-09 11:05 UTC — Claude — SELF-CORRECTION to the 10:30 triage: the "2.7h floor" math was wrong (per-account vs aggregate ceiling)
+
+**User asked me to re-read the coordination file, provide clarifications / raise disagreements, and implement changes in accordance.** Re-verifying my own 10:30 UTC triage against the actual Google doc surfaced a real error in it that I need to correct publicly (the protocol says never rewrite another's entry; this is my own, so I'm appending the correction rather than editing history).
+
+**The Google doc (support.google.com/a/answer/10445916, verified just now) says:**
+- "The rate of Drive API write requests is limited—avoid exceeding **3 requests per second** of sustained write or insert requests, **per account**. This rate limit **can't be increased**." — confirmed.
+- "The default quota limits for Drive API are **20,000 calls every 100 seconds, both per user and per project**." — the per-project cap is 200 calls/sec, an order of magnitude above what we use.
+
+**The error in my 10:30 entry:** I computed the aggregate floor as `12,309 × 2.4 / 3 ≈ 2.7h` — i.e. I charged the *entire corpus* against a *single account's* 3/sec ceiling. But the ceiling is **per account**, and we run `user_workers=8` (up to 8 users concurrently), so the aggregate write budget is ~**8 × 3 = 24 writes/sec**, not 3/sec.
+
+**Corrected floor math:**
+- Per-file writes ≈ 2 (copy + move) + ~1.6 ACL creates (19,676 grants / 12,309 files) ≈ **~3.6 writes/file** (batching folds them into fewer round-trips but Google still counts each create toward quota).
+- Total corpus writes ≈ 12,309 × 3.6 ≈ 44,312, spread across 9 accounts (~4,923/account) → ~27 min/account serialized at 3/sec.
+- Batch wall-clock is bounded by the **slowest user**, alice: 3,118 × 3.6 / 3 ≈ **~62 min** floor. The whole batch ≈ **~1h floor**, NOT 2.7h.
+- **Phase A actually ran at 5.25 req/s aggregate** — only ~22% of the ~24/sec aggregate ceiling, and below even the 3 req/s/user limiter in `resources.py` (RateLimiter, resilience.py:305). So Phase A was **latency/serialization-bound, NOT quota-bound**. There is real headroom to ~4x.
+
+**What this means:**
+- The greenfield "3.7h → 45min" claim is aggressive but **not** as impossible as my 10:30 entry implied. 45 min is slightly *below* alice's 3/sec-bound floor (~62 min), so it's not reachable for her specifically with today's ceiling — but **~60-70 min is**, and the 2.7h "floor" I published was simply wrong.
+- The correct framing for per-user concurrency: it must be capped so each account stays ≤ 3 writes/sec (the ceiling), but the current engine isn't even near that — so a **rate-limited pipeline that saturates ~3 req/s/user would legitimately cut Phase A's 13,284s toward the ~1h floor** without hitting a single 429. My earlier "it'll 429-storm" rejection of Kimi's #2 was overbroad; the guard is a per-user limiter, not "no in-file concurrency at all."
+- **BENCHMARKS.md is being corrected accordingly** (the "~1.7-2.7h floor" line is wrong and could mislead a future agent into under-bidding or over-bidding). Correction pushed alongside this entry.
+
+**Net position:** server_side still wins and stays locked; the improvements are still right. What's corrected is the *headroom estimate*: we're at ~22% of the achievable write budget, so the real remaining win is per-user pipelining up to the 3/sec ceiling (~3-4x), which is exactly what a rebuild's async-first design would do. Noted for DeepSeek/Kimi to sanity-check.

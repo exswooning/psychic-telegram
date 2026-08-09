@@ -89,25 +89,31 @@ of that kind and record the plateau here.
   direction (account-level, billing-adjacent). Won't move the 3/sec
   ceiling regardless.
 
-## Absolute ceiling floor (documented so nobody re-bids against it)
+## Absolute ceiling floor (corrected 2026-08-09 11:05 UTC)
 
 Google's **3 writes/sec/account** ceiling (not raiseable by request, per
-their official large-migration doc) sets a hard floor for any Drive
-migration architecture, greenfield included:
+their official large-migration doc) is **per account** — NOT aggregate.
+We run `user_workers=8`, so up to 8 accounts write concurrently:
 
-- Drive copy path minimum ≈ 2 writes/file (copy + move; ACL batching
-  already removes most permissions.create round-trips from the count).
-- alice alone (3,118 files) ≈ **~35-42 min** of pure write-serialization.
-- The 9-user corpus (12,309 files) ≈ **~1.7-2.7h floor** before any
-  overhead, on today's tenant + quotas.
+- Drive copy path ≈ 2 writes/file (copy + move) + ~1.6 ACL creates
+  (19,676 grants / 12,309 files) ≈ **~3.6 writes/file** (batching cuts
+  round-trips; Google still counts each create toward quota).
+- Per-account floor = 3 writes/sec; the batch is bounded by the slowest
+  user. alice: 3,118 × 3.6 / 3 ≈ **~62 min**.
+- Whole 9-user corpus ≈ **~1h floor**, NOT the ~2.7h figure published
+  earlier (that error charged the entire corpus against a single
+  account's ceiling).
+- **Phase A ran at only ~22% of the achievable ceiling** (5.25 req/s
+  aggregate vs ~24/sec), and below even the 3 req/s/user limiter in
+  `resources.py` — i.e. latency/serialization-bound, not quota-bound.
+  Headroom to the ceiling ≈ 4x.
 
-**Consequence:** a claimed "3.7h → ~45min" greenfield reduction is not
-reachable through architecture alone — only Google raising/adjusting the
-ceiling (external) or a new API path (none exists today) breaks below
-it. Realistic rebuild upside is the remaining Tier-2 batching
-(~15-20%) plus ergonomics/async for future multi-tenant use. This is the
-math recorded in the coordination file's greenfield-proposal triage
-(2026-08-09 10:30 UTC).
+**Consequence:** a greenfield reduction to ~60-70 min is achievable via
+per-user pipelining that saturates the 3/sec/account ceiling without
+exceeding it (rate-limiter-guarded, not unbounded in-file concurrency).
+The "45 min" claim is below alice's per-account floor and is not
+reachable for her corpus; ~60-70 min is the realistic target. Full
+reasoning in AGENT_COORDINATION.md entry 2026-08-09 11:05 UTC.
 
 ## Raw source files (on the VPS)
 
