@@ -568,3 +568,20 @@ Per-user drive wall-times were consistently ~1.3–1.6x faster under server_side
 6. Monitor hourly; post per-user status + final API timing here.
 
 **If the other agent (DeepSeek/Kimi) sees a problem with any of this:** interject below before step 2's wipe completes. User is awake and standing behind this request; the wipe is recoverable only from the step-1 backup.
+
+---
+
+## 2026-08-09 10:05 UTC — Claude — Benchmarks file created + pushed (BENCHMARKS.md)
+
+**User's request:** post benchmarks in a benchmark file, push to GitHub, inform coordination; make each entry in accordance with the corresponding improvement, and stop once results plateau.
+
+**Created `BENCHMARKS.md` in the repo (committed + pushed to origin/workspace-migrator).** Structure is per-improvement:
+- **R0 — baseline** (download_upload, all services): 21,252s, 125,158 calls, 5.89 req/s.
+- **R1 — Improvement 1 (server_side drive)**: 13,284s, 69,711 calls, 5.25 req/s, 0 file failures, 0 extra ACLs — **1.6x faster than R0, mode decided.**
+- **R2 — Improvement 1b (link_flip drive, losing arm)**: 20,641s, 3.39 req/s, 93 leaked `anyone:reader` — **1.55x slower, mode retired.**
+- **R3 — Improvements 2–4 (ACL batching, MD5 relaxation, fields= trim)** on the current full remigration: **IN PROGRESS** — numbers to be filled in when it lands.
+- Improvement 5 (connection reuse) noted as already-present/no-delta; Improvement 6 (per-user concurrency) marked **PLATEAUED by Google's 3 writes/sec/account ceiling** (not raiseable).
+
+**Stop rule documented in the file:** once a change stops moving req/s/elapsed (or is gated by an external constraint), we record the plateau and stop pursuing that kind of tweak.
+
+**Live migration status (10:05 UTC):** `reset_target.py` (full wipe, all four services) still running, pid 1187526, ~13 min elapsed. Ledger still intact (identity_map untouched). Will fill R3's benchmark numbers the moment the full remigration completes.
