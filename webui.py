@@ -47,6 +47,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
 
@@ -2137,6 +2139,115 @@ def logs_payload() -> dict:
     return {"path": path, "lines": lines[-600:]}
 
 
+# ----------------------------------------------------------------------
+# Groq "active log" — a live diagnostic panel for benchmarking and error
+# reporting.
+#
+# The migration's own log tail answers "what happened", but reading 600
+# lines of it to answer "is it going OK, and if not why" is exactly the
+# chore an LLM is good at. This exposes a narrow seam for that: the key is
+# stored in env.sh like every other setting (case-preserved — the API key
+# is not a domain to lowercase), and the panel sends the current log tail
+# plus the run's headline metrics to Groq and renders the summary back.
+# Nothing here runs commands and nothing the browser sends is executed.
+# ----------------------------------------------------------------------
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+
+
+def groq_api_key() -> str:
+    from wizard import load_env
+
+    return load_env(ENV_PATH).get("GROQ_API_KEY", "")
+
+
+def save_groq_key(key: str) -> str:
+    """Persist the Groq API key to env.sh, case-preserved."""
+    key = (key or "").strip()
+    if not key:
+        return "Groq API key is required"
+    write_config_raw({"GROQ_API_KEY": key})
+    return ""
+
+
+def _groq_analyze_log(tail: str, prompt: str, key: str) -> tuple[str, str]:
+    """
+    Send the log tail to Groq and return (markdown_summary, error).
+    Uses urllib only — this file is deliberately stdlib-only.
+    """
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    system = (
+        "You are a migration engineer's diagnostic assistant. The user runs a "
+        "Google Workspace data migration. You are given the tail of its log "
+        "and the run's headline metrics. Produce a concise, actionable "
+        "summary in Markdown with three sections if any content matches: "
+        "**Status** (one or two lines: healthy or not, and why), **Errors** "
+        "(every distinct FAILED/WARNING line, deduplicated, with the count "
+        "and the one-line cause), and **Benchmark** (rates, latencies, "
+        "progress). If there is nothing notable, say so in one line. Do not "
+        "invent failures. Quote the actual log lines when you cite something."
+    )
+    body = json.dumps({
+        "model": GROQ_MODEL,
+        "temperature": 0,
+        "max_tokens": 700,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": f"{prompt}\n\n---- LOG TAIL ----\n{tail}"},
+        ],
+    }).encode()
+    req = urllib.request.Request(
+        url, data=body, method="POST",
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {key}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=90) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", "replace")[:300]
+        except Exception:  # noqa: BLE001
+            pass
+        return "", f"Groq API error {exc.code}: {detail or exc.reason}"
+    except Exception as exc:  # noqa: BLE001 - network/urllib failures
+        return "", f"could not reach Groq: {exc}"
+    try:
+        return data["choices"][0]["message"]["content"], ""
+    except (KeyError, IndexError, TypeError):
+        return "", f"unexpected Groq response: {str(data)[:200]}"
+
+
+def _groq_run_summary() -> str:
+    """The headline numbers the panel always sends alongside the log tail."""
+    parts = []
+    try:
+        payload = snapshot_payload()
+        t = (payload.get("snapshot") or {}).get("totals") or {}
+        parts.append(
+            f"- Progress: {t.get('items_done', 0)}/{t.get('items_expected', '?')} "
+            f"items, {t.get('users_done', 0)}/{t.get('users', 0)} users, "
+            f"{t.get('items_failed', 0)} failed, {t.get('bytes_moved', 0)} bytes moved"
+        )
+    except Exception:  # noqa: BLE001 - a metrics hiccup must not kill the panel
+        pass
+    try:
+        import metrics
+
+        s = metrics.METRICS.snapshot()
+        if s.get("calls"):
+            parts.append(
+                f"- API: {s['calls']:,} calls, {s['requests_per_sec']:.2f} req/s "
+                f"across {s['workers']} workers, p50 {s['p50'] * 1000:.0f}ms "
+                f"p95 {s['p95'] * 1000:.0f}ms p99 {s['p99'] * 1000:.0f}ms, "
+                f"{s['retries']:,} retries, {s['failures']:,} failures"
+            )
+    except Exception:  # noqa: BLE001
+        pass
+    return "\n".join(parts)
+
+
+
 def set_toggles(body: dict) -> dict:
     """Apply the launch toggles sent by the toolbar."""
     dry = body.get("dry_run")
@@ -2285,6 +2396,11 @@ letter-spacing:.05em;position:sticky;top:0;background:var(--panel)}
 td.num{text-align:right;font-variant-numeric:tabular-nums}
 .mono{font:12px/1.55 ui-monospace,Menlo,monospace;white-space:pre-wrap;word-break:break-word}
 .scroll{max-height:60vh;overflow:auto}
+.groq{border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:10px 0;
+  background:var(--panel)}
+.groqout{margin-top:8px;padding:10px;border:1px dashed var(--line);border-radius:6px;
+  font:12px/1.55 ui-monospace,Menlo,monospace;white-space:pre-wrap;word-break:break-word;
+  max-height:40vh;overflow:auto}
 .gbar{height:6px;background:var(--line);border-radius:99px;overflow:hidden}
 .gbar>i{display:block;height:100%;background:var(--accent);transition:width .4s ease}
 .hdprog{display:flex;align-items:center;gap:12px;padding:7px 22px;
@@ -2384,6 +2500,7 @@ let lastSig='', ups=null, authMode=null, authModes=null, upMsg={},
     view='path', seedOpen=false,
     dep={user:'root',port:'22',open:false};
 let tab='setup', snap=null, scopeLines=[], logLines=[], logPath='', deployHistory=[];
+let groqConfigured=false, groqKeyMask='';
 let followOut=true;
 const $=i=>document.getElementById(i);
 /* Connection loss detection. Every poll loop reports ok/fail here; three
@@ -3503,7 +3620,61 @@ function scopeHTML(){
 function logsHTML(){
   return `<h2>Logs</h2>
     <div class="muted" style="margin-bottom:6px">${esc(logPath)}</div>
+    <div class="groq">
+      <b style="font-size:12px">Active log \u2014 Groq diagnosis</b>
+      <div class="muted" style="margin-top:2px">Sends the current log tail and
+        headline metrics to Groq for a live benchmark + error summary.
+        ${groqConfigured ? 'Key saved (${esc(groqKeyMask)}).' :
+          'Add a Groq API key below.'}</div>
+      <div style="margin-top:6px;display:flex;gap:6px;align-items:center">
+        <input id="groq-key" type="password" placeholder="gsk_..."
+          style="flex:1" ${groqConfigured?'':''}>
+        <button class="primary" onclick="saveGroq()">Save key</button>
+        <button onclick="groqAnalyze()" id="groq-btn">Analyze log</button>
+      </div>
+      <div id="groqmsg" class="muted" style="margin-top:4px"></div>
+      <div id="groqout" class="groqout" style="display:none"></div>
+    </div>
     <pre class="mono scroll" style="margin:0">${esc(logLines.join('\\n'))}</pre>`;
+}
+
+async function saveGroq(){
+  const key=$('groq-key').value.trim();
+  if(!key) return;
+  const r=await (await fetch('/api/groq',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({key:key})})).json();
+  const m=$('groqmsg');
+  m.textContent=r.ok?('Saved \u2014 '+r.msg):('\u26a0 '+r.error);
+  m.style.color=r.ok?'var(--ok)':'var(--bad)';
+  if(r.ok){ groqConfigured=true; $('groq-key').value=''; fetchGroqStatus(); drawView(); }
+}
+async function groqAnalyze(){
+  const btn=$('groq-btn'), out=$('groqout'), m=$('groqmsg');
+  btn.disabled=true; btn.textContent='Analyzing...';
+  out.style.display='block'; out.textContent='';
+  m.textContent=''; 
+  try{
+    const r=await (await fetch('/api/groq_log',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({prompt:$('groq-prompt')?$('groq-prompt').value:''})})).json();
+    if(r.ok){
+      out.style.whiteSpace='pre-wrap'; out.textContent=r.text;
+    }else{
+      m.textContent='\u26a0 '+r.error; m.style.color='var(--bad)';
+    }
+  }catch(e){
+    m.textContent='Error: '+e; m.style.color='var(--bad)';
+  }finally{
+    btn.disabled=false; btn.textContent='Analyze log';
+  }
+}
+async function fetchGroqStatus(){
+  try{
+    const r=await (await fetch('/api/groq')).json();
+    groqConfigured=!!r.configured; groqKeyMask=r.key||'';
+    if(tab==='logs') drawView();
+  }catch(e){}
 }
 
 async function fetchScope(){
@@ -3556,6 +3727,7 @@ function paintProg(){
 
 fetch('/api/actions').then(r=>r.json()).then(a=>{
   acts=a; drawToolbar(); setTab('setup'); refresh(); pollJob(); pollSnap();
+  fetchGroqStatus();
 });
 document.querySelectorAll('.tabs button').forEach(b=>
   b.onclick=()=>setTab(b.dataset.tab));
@@ -3612,6 +3784,16 @@ class Handler(BaseHTTPRequestHandler):
             self._json(scope_payload())
         elif path == "/api/logs":
             self._json(logs_payload())
+        elif path == "/api/groq":
+            # The panel needs to know whether a key is saved (masked) so it
+            # can prompt to enter one, without ever round-tripping the real
+            # key back to the browser.
+            key = groq_api_key()
+            self._json({
+                "configured": bool(key),
+                "key": (key[:4] + "\u2022" * 12) if key else "",
+                "model": GROQ_MODEL,
+            })
         elif path == "/api/oauth/status":
             self._json(oauth_status())
         elif path == "/api/dwd":
@@ -3768,6 +3950,43 @@ class Handler(BaseHTTPRequestHandler):
             write_config(clean)
             self._json({"ok": True, "msg": f"saved to {ENV_PATH}",
                         "config": read_config()})
+            return
+
+        if self.path == "/api/groq":
+            # Save the Groq API key (case-preserved -- it is not a domain) or
+            # clear it with an empty string.
+            if "key" in body:
+                err = save_groq_key(body.get("key", ""))
+                if err:
+                    self._json({"ok": False, "error": err}, 400)
+                    return
+                self._json({"ok": True,
+                            "msg": "saved to " + ENV_PATH,
+                            "configured": bool(groq_api_key())})
+                return
+            self._json({"ok": False, "error": "no key field"}, 400)
+            return
+
+        if self.path == "/api/groq_log":
+            # Ask Groq to summarise the current log tail + headline metrics.
+            key = groq_api_key()
+            if not key:
+                self._json({"ok": False,
+                            "error": "no Groq API key — add one in the Logs panel"},
+                           400)
+                return
+            prompt = (body.get("prompt") or "").strip()[:2000]
+            if not prompt:
+                prompt = ("Summarise this migration's current state for "
+                          "benchmarking and error reporting.")
+            tail = "\n".join(logs_payload()["lines"][-500:])
+            summary = _groq_run_summary()
+            text, err = _groq_analyze_log(
+                f"{summary}\n\n{prompt}" if summary else prompt, prompt, key)
+            if err:
+                self._json({"ok": False, "error": err}, 502)
+                return
+            self._json({"ok": True, "text": text})
             return
 
         if self.path == "/api/setup":
