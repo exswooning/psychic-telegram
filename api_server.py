@@ -147,6 +147,24 @@ class RevertPublic(WriteAction):
     confirm: str = Field(description="must be the literal string REVERT")
 
 
+class StartBenchmark(WriteAction):
+    """A full benchmark: wipe target -> reset ledger -> migrate -> audit.
+
+    `confirm_domain` must equal TARGET_DOMAIN and is echoed straight into
+    reset_target.py, which checks it again itself. Two independent checks on
+    the one parameter that decides which tenant gets emptied.
+    """
+    label: str = Field(min_length=1, description="benchmark id, e.g. B5")
+    confirm_domain: str = Field(description="must match TARGET_DOMAIN")
+    services: str = "drive"
+    # The speed knobs under test. Defaults reproduce the current serial
+    # baseline, so an operator who changes nothing measures the same thing
+    # the last run measured.
+    drive_file_workers: int = Field(default=1, ge=1, le=16)
+    drive_write_qps: float = Field(default=3.0, gt=0, le=10)
+    skip_wipe: bool = False
+
+
 # ======================================================================
 # WebSocket hub
 # ======================================================================
@@ -427,6 +445,104 @@ class Heartbeat(BaseModel):
     active_job: str | None = None
     job_pid: int | None = None
     transfer_mode: str | None = None
+
+
+@app.post("/api/v2/benchmark/start")
+async def benchmark_start(body: StartBenchmark, op: Operator = Depends(operator)):
+    """
+    Launch benchmark_run.py detached, so it survives this request, a browser
+    close, and an api_server restart -- the run takes hours and must not be
+    tied to the lifetime of an HTTP connection or a laptop lid.
+
+    Guarded harder than the other writes because it WIPES THE TARGET TENANT:
+    RBAC + Reason Code (as everything) + a typed domain that must match
+    TARGET_DOMAIN, which reset_target.py then re-checks independently.
+    """
+    from config import Settings
+
+    target = (Settings().target_domain or "").strip().lower()
+    typed = (body.confirm_domain or "").strip().lower()
+    if not target:
+        raise HTTPException(400, "TARGET_DOMAIN is not configured")
+    if typed != target:
+        source = (Settings().source_domain or "").strip().lower()
+        extra = (" -- that is the SOURCE domain" if typed and typed == source else "")
+        raise HTTPException(400, f"{typed!r} does not match the target domain "
+                                 f"{target!r}{extra}")
+    if not body.skip_wipe and body.drive_file_workers > 4:
+        # Untested territory: >4 cannot help (the account is already at
+        # Google's 3 writes/sec ceiling at 4) and only adds 429 risk.
+        raise HTTPException(400, "drive_file_workers > 4 buys nothing above "
+                                 "the 3 writes/sec/account ceiling; refusing")
+
+    def _launch() -> tuple[bool, str]:
+        argv = [PY, "benchmark_run.py", "--label", body.label,
+                "--confirm-domain", body.confirm_domain,
+                "--services", body.services, "--yes"]
+        if body.skip_wipe:
+            argv.append("--skip-wipe")
+        env = dict(os.environ)
+        env["DRIVE_FILE_WORKERS"] = str(body.drive_file_workers)
+        env["DRIVE_WRITE_QPS"] = str(body.drive_write_qps)
+        log = os.path.join(HERE, f"benchmark-{body.label}.log")
+        with open(log, "wb") as fh:
+            proc = subprocess.Popen(argv, cwd=HERE, stdout=fh, stderr=fh,
+                                    stdin=subprocess.DEVNULL, env=env,
+                                    start_new_session=True)
+        return True, (f"benchmark {body.label} started pid {proc.pid} "
+                      f"(W={body.drive_file_workers}, qps={body.drive_write_qps}) "
+                      f"-> {log}")
+
+    return await _gated(op, "benchmark.start", body, body.label, _launch)
+
+
+@app.get("/api/v2/benchmark/results")
+async def benchmark_results():
+    """Every completed run, newest first, read from benchmarks/*.json."""
+    def _read() -> list[dict]:
+        d = os.path.join(HERE, "benchmarks")
+        if not os.path.isdir(d):
+            return []
+        out = []
+        for name in sorted(os.listdir(d), reverse=True):
+            if not name.endswith(".json") or name.endswith("-acl.json"):
+                continue
+            try:
+                with open(os.path.join(d, name), encoding="utf-8") as fh:
+                    r = json.load(fh)
+                out.append({
+                    "file": name, "label": r.get("label"),
+                    "startedAt": r.get("startedAt"), "passed": r.get("passed"),
+                    "elapsedS": r.get("elapsedS"), "secPerFile": r.get("secPerFile"),
+                    "totalFiles": r.get("totalFiles"),
+                    "driveFileWorkers": (r.get("config") or {}).get("driveFileWorkers"),
+                    "fidelityPct": (r.get("acl") or {}).get("fidelityPct"),
+                    "extraGrants": (r.get("acl") or {}).get("extraGrants"),
+                    "failures": r.get("failures", []),
+                })
+            except (OSError, ValueError):
+                continue
+        return out
+    return await _off_loop(_read)
+
+
+@app.get("/api/v2/benchmark/running")
+async def benchmark_running():
+    """Is a benchmark in flight? Read from the process table rather than a
+    pidfile, which goes stale after a hard kill."""
+    def _check() -> dict:
+        ps = subprocess.run(["ps", "-eo", "pid=,args="], capture_output=True,
+                            text=True).stdout
+        for line in ps.splitlines():
+            if "benchmark_run.py" in line and "grep" not in line:
+                pid, _, args = line.strip().partition(" ")
+                label = ""
+                parts = args.split()
+                if "--label" in parts:
+                    label = parts[parts.index("--label") + 1]
+                return {"running": True, "pid": int(pid), "label": label}
+        return {"running": False}
+    return await _off_loop(_check)
 
 
 @app.post("/api/v2/fleet/heartbeat")

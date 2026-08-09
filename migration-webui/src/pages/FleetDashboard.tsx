@@ -13,6 +13,7 @@ import {
 import JobController from '@/components/JobController'
 import EmergencyBrake from '@/components/EmergencyBrake'
 import ForensicModal from '@/components/ForensicModal'
+import BenchmarkRunner from '@/components/BenchmarkRunner'
 
 /**
  * The Command Center screen: fleet health, the security brake, job control,
@@ -167,6 +168,8 @@ const FleetDashboard: React.FC = () => {
       </Box>
 
       <JobController users={users} nodes={nodes} onChanged={refreshLists} />
+
+      <BenchmarkRunner />
 
       <Paper variant="outlined" sx={{ borderRadius: 2, p: 2 }}>
         <Typography variant="h6" sx={{ mb: 1 }}>

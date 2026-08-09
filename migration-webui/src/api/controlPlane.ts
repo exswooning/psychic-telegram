@@ -151,6 +151,29 @@ export const retryItem = (sourceUser: string, itemId: string, reason: string) =>
     body: JSON.stringify({ reason, source_user: sourceUser, item_id: itemId }),
   })
 
+export interface BenchmarkResult {
+  file: string; label: string; startedAt: string; passed: boolean
+  elapsedS: number; secPerFile: number; totalFiles: number
+  driveFileWorkers: number | null; fidelityPct: number | null
+  extraGrants: number | null; failures: string[]
+}
+
+export interface StartBenchmarkBody {
+  reason: string; label: string; confirm_domain: string; services: string
+  drive_file_workers: number; drive_write_qps: number; skip_wipe: boolean
+}
+
+export const startBenchmark = (body: StartBenchmarkBody) =>
+  cpFetch<ActionResult>('/api/v2/benchmark/start', {
+    method: 'POST', body: JSON.stringify(body),
+  })
+
+export const fetchBenchmarkResults = () =>
+  cpFetch<BenchmarkResult[]>('/api/v2/benchmark/results')
+
+export const fetchBenchmarkRunning = () =>
+  cpFetch<{ running: boolean; pid?: number; label?: string }>('/api/v2/benchmark/running')
+
 export const revertPublicShares = (reason: string, tenant = 'target') =>
   cpFetch<ActionResult>('/api/v2/emergency/revert-public', {
     method: 'POST',
