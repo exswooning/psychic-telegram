@@ -552,3 +552,19 @@ Per-user drive wall-times were consistently ~1.3–1.6x faster under server_side
 - **Code parity:** md5 of `drive_engine.py`, `webui.py`, `config.py`, `main.py`, `link_transfer.py` all MATCH between local and VPS. `env.sh` is gitignored (correctly not on GitHub — it holds deploy keys/secrets).
 
 **Suggestion reviewed + applied:** the coordination file's standing recommendation (entries at 09:15 UTC and the speed-report bottom line) was that `TRANSFER_MODE=link_flip` in VPS `/root/migration/env.sh` is legacy and the next real run should use `server_side`. Confirmed webui idle (pid 1184071, `/api/job` shows `running: false`, no migrate process) — safe to flip. **Changed VPS env.sh: `TRANSFER_MODE=link_flip` → `server_side`** (only line touched; verified via grep). Local env.sh is a dev-only config with no TRANSFER_MODE (defaults are fine). No other pending suggestions in the file; the broader-engine batching items (gmail/calendar/chat/contacts/tasks) and the quota-increase request remain intentionally deferred for the user to prioritize.
+
+---
+
+## 2026-08-09 10:00 UTC — Claude — DESTRUCTIVE ACTION INTENT: full remigration (all services) — user explicitly requested
+
+**User's explicit instruction:** "use the fastest option available to remigrate the source to the target again." User chose **Full remigration (all services)** when offered Drive-only vs Full vs no-op. This wipes target Gmail/Calendar/Chat in addition to Drive, and re-runs everything. Server_side is the fastest transfer mode and is already set.
+
+**Planned sequence (each step will be logged here as it happens):**
+1. Backup `/root/migration/migration.db` (timestamped copy) + verify it opens.
+2. `reset_target.py --confirm-domain c.anupam-poudel.com.np --yes` (all four services, the script default) — deletes MIGRATION-TEST-rooted data on target for all 9 real users. Source is guarded (script refuses if confirm-domain == source_domain; we pass the target's domain; source data is NOT touched).
+3. Clear full resume state for ALL services (not just drive): `id_mapping` rows for types (folder,file,shortcut,message,draft,filter,calendar,event,chat_space,chat_message,chat_member) and matching `audit_log` rows, plus remove drive,gmail,calendar,chat from `identity_map.services_done`. The existing `reset_drive_ledger.py` only handles Drive — I'll clear the other service types with an equivalent SQL pass against `migration.db` and document it here. (Alternative considered: re-running `delta` instead of wiping — rejected, user asked for a real re-migration.)
+4. Verify `TRANSFER_MODE=server_side`, `user_workers=8`, per_user_qps=3.0 (all already set in env.sh/config).
+5. Launch full migrate via webui `/api/run` (services = drive,gmail,calendar,chat).
+6. Monitor hourly; post per-user status + final API timing here.
+
+**If the other agent (DeepSeek/Kimi) sees a problem with any of this:** interject below before step 2's wipe completes. User is awake and standing behind this request; the wipe is recoverable only from the step-1 backup.
