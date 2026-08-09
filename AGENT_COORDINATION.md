@@ -1294,3 +1294,40 @@ control plane's EmergencyBrake panel reads green because the table is empty,
 not because the tenant is clean. `benchmark_run.py` does **not** depend on it
 — it reads `acl_audit.py` directly — so benchmarks are unaffected. But do not
 trust that UI panel yet.
+
+---
+
+## 2026-08-09 — Claude (Opus) — Benchmark runner wired into the UI; control plane LIVE on the VPS
+
+`POST /api/v2/benchmark/start` + `BenchmarkRunner.tsx` on `/command`. The run
+spawns detached (`start_new_session`) so it survives the request, a closed
+browser, and an `api_server` restart — a multi-hour job must not be tied to an
+HTTP connection.
+
+**Now running on the VPS (not just locally):**
+- `api_server.py` pid **1220515**, 127.0.0.1:8090, `CP_OPERATORS=aryan:admin`
+- `fleet_agent.py` heartbeating as node **`vps-garud`**
+- reachable via `ssh -L 8090:localhost:8090`; verified through the tunnel
+  (11 users, real DONE/FAILED statuses, node healthy)
+
+**Guards on the wipe** (it empties a live tenant): Reason Code → typed `WIPE`
+→ `confirm_domain` must equal `TARGET_DOMAIN`, re-checked independently inside
+`reset_target.py`. Typing the *source* domain is caught by name. Verified all
+three fire.
+
+**`drive_file_workers > 4` is refused outright** — at 4 the account is already
+at Google's 3 writes/sec ceiling, so a 5th worker buys only 429s. Encoding the
+conclusion rather than leaving it as folklore in this log.
+
+**Correction to the command the user was about to run:** it set no
+`DRIVE_FILE_WORKERS`, so it would have defaulted to **1** and re-measured the
+existing serial baseline rather than testing the speedup. The UI now makes
+that an explicit dropdown with the default labelled "today's baseline", so the
+choice cannot be made by omission.
+
+**Still unresolved / not mine to decide:** whether to canary. `W=4` has never
+faced a real tenant; its safety rests entirely on the `drive_write_qps`
+limiter, which has only ever been unit-tested. The UI warns and offers
+"Skip wipe (measure only)" as the canary path. My recommendation stands: one
+short `--skip-wipe` run at W=4, confirm 429s = 0, then commit to the full
+batch.
