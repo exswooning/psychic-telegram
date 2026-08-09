@@ -147,6 +147,9 @@ class DriveMigrator:
             self._ensure_staging_drive()
         try:
             self._walk(src_root, tgt_root, depth=1)
+            if (self.settings.migrate_external_shares
+                    and not self.shared_drive and not self.delta):
+                self._walk_shared_with_me(tgt_root)
             self._fixup_shortcuts()
         finally:
             if self.server_side and not self.settings.dry_run:
@@ -258,35 +261,36 @@ class DriveMigrator:
                 return
 
     # -- traversal ------------------------------------------------------------
-    def _list_children(self, parent_id: str):
+    def _list_children(self, parent_id: str, owned_only: bool | None = None,
+                       with_owners: bool = False):
         q_parts = [f"'{parent_id}' in parents", "trashed = false"]
         # owned_only exists to stop a file shared with four colleagues being
         # copied five times. It is meaningless inside a shared drive, where
         # every file is owned by the drive and no user is in `owners` -- and
         # applying it there matches nothing at all, silently migrating an
         # empty drive.
-        if self.settings.owned_only and not self.shared_drive:
+        apply_owned = self.settings.owned_only if owned_only is None else owned_only
+        if apply_owned and not self.shared_drive:
             q_parts.append("'me' in owners")
         q = " and ".join(q_parts)
         extra = {}
         if self.shared_drive:
             extra = {"corpora": "drive", "driveId": self.shared_drive,
                      "includeItemsFromAllDrives": True}
+        fields = ("nextPageToken, files(id,name,mimeType,parents,modifiedTime,"
+                  "size,md5Checksum,shared,capabilities(canDownload),"
+                  "shortcutDetails,description)")
+        # owners is only requested when the caller needs it (the external-share
+        # walk, which has to inspect who owns each file). On the default hot
+        # path -- the tree mirror -- it stays out of the response, exactly as
+        # before.
+        if with_owners:
+            fields += ",owners"
         token = None
         while True:
             self.limiter.acquire()
-            # owners/starred are requested by the older DRIVE_FILE_FIELDS
-            # constant (kept for contract_probe compatibility) but never read
-            # on this hot path -- owners only appears in the query, and
-            # starred is dropped at the destination. Asking Drive for bytes it
-            # is not going to send costs nothing at the protocol level, but a
-            # leaner mask keeps the response decode and any future consumer
-            # honest about what the engine actually uses.
             resp = self._retry(lambda t=token: self.src.files().list(
-                q=q, pageSize=200, pageToken=t,
-                fields="nextPageToken, files(id,name,mimeType,parents,"
-                       "modifiedTime,size,md5Checksum,shared,"
-                       "capabilities(canDownload),shortcutDetails,description)",
+                q=q, pageSize=200, pageToken=t, fields=fields,
                 spaces="drive", supportsAllDrives=True, **extra,
             ).execute(), label="drive.files.list")
             for f in resp.get("files", []):
@@ -294,6 +298,80 @@ class DriveMigrator:
             token = resp.get("nextPageToken")
             if not token:
                 return
+
+    def _walk_shared_with_me(self, tgt_root: str) -> None:
+        """Copy files shared INTO the user from owners outside the source org.
+
+        A file owned by a colleague is migrated by that colleague's own run,
+        so copying it here too would store the same file once per recipient --
+        that is what `owned_only` exists to prevent. But a file owned by an
+        EXTERNAL domain has no owner inside the source org, so no other run
+        will ever carry it; without this pass it is silently lost. Only those
+        files are copied here.
+
+        Everything lands at the target user's My Drive root: a shared-with-me
+        file has no parent inside the user's own tree, so there is no source
+        hierarchy to mirror.
+        """
+        q = "sharedWithMe = true and trashed = false"
+        token = None
+        while True:
+            self.limiter.acquire()
+            resp = self._retry(lambda t=token: self.src.files().list(
+                q=q, pageSize=200, pageToken=t,
+                fields="nextPageToken, files(id,name,mimeType,parents,"
+                       "modifiedTime,size,md5Checksum,shared,owners,"
+                       "capabilities(canDownload),shortcutDetails,description)",
+                spaces="drive", supportsAllDrives=True,
+            ).execute(), label="drive.files.list.sharedWithMe")
+            for f in resp.get("files", []):
+                if self._owned_by_source_org(f):
+                    continue
+                self._sync_shared_item(f, tgt_root, depth=1)
+            token = resp.get("nextPageToken")
+            if not token:
+                return
+
+    def _owned_by_source_org(self, item: dict) -> bool:
+        """True if any owner of the file belongs to the source org.
+
+        Files with a source-org owner are migrated by that owner; files whose
+        owners are all from other domains are carried by nobody and need the
+        external-share pass. A file with no owner information at all (or an
+        unset source_domain) is treated as source-owned to stay conservative:
+        guessing wrong in the other direction copies a file a colleague's run
+        already owns.
+        """
+        source = (self.settings.source_domain or "").lower()
+        owners = item.get("owners") or []
+        if not source or not owners:
+            return True
+        for o in owners:
+            email = (o.get("emailAddress") or "").lower()
+            if email.endswith("@" + source):
+                return True
+        return False
+
+    def _sync_shared_item(self, item: dict, tgt_parent: str, depth: int) -> None:
+        """Mirror one external-owned shared item into the target root."""
+        if depth > self.settings.max_recursion_depth:
+            log.warning("[%s] max_recursion_depth %d exceeded under shared item "
+                        "%s — pruning", self.source_user,
+                        self.settings.max_recursion_depth, item["id"])
+            return
+        mime = item.get("mimeType")
+        if mime == FOLDER_MIME:
+            tgt_id = self._sync_folder(item, tgt_parent)
+            if tgt_id is not None:
+                for child in self._list_children(item["id"], owned_only=False,
+                                                 with_owners=True):
+                    if self._owned_by_source_org(child):
+                        continue
+                    self._sync_shared_item(child, tgt_id, depth + 1)
+        elif mime == SHORTCUT_MIME:
+            self._defer_shortcut(item, tgt_parent)
+        else:
+            self._sync_file(item, tgt_parent)
 
     def _walk(self, src_parent: str, tgt_parent: str, depth: int) -> None:
         if depth > self.settings.max_recursion_depth:

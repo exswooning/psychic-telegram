@@ -331,6 +331,13 @@ class _DriveFiles:
             rows = [f for f in rows
                     if any(o.get("emailAddress") == self.s.owner
                            for o in f.get("owners", []))]
+        if "sharedWithMe" in (q or ""):
+            # The engine's external-share walk asks for the user's "Shared
+            # with me" space: files the requester can see but does not own.
+            rows = [f for f in rows
+                    if not any(o.get("emailAddress") == self.s.owner
+                               for o in f.get("owners", []))
+                    and self.s._shared_flag(f["id"])]
         rows.sort(key=lambda f: (f["mimeType"] != FOLDER_MIME, f["name"]))
 
         start = int(pageToken or 0)

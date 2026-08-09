@@ -300,6 +300,16 @@ class Settings:
     max_recursion_depth: int = 200
     export_size_limit: int = 10 * 1024 * 1024   # files.export hard ceiling
     owned_only: bool = field(default_factory=lambda: _env_bool("OWNED_ONLY", True))
+    # Files shared INTO a user from owners OUTSIDE the source org have no owner
+    # inside the org, so no user's migration will ever carry them -- without
+    # this they are lost. When on, the engine additionally walks the user's
+    # "Shared with me" space and copies items whose owners are all from other
+    # domains. Colleague-owned (same-domain) shared files are still skipped:
+    # their owner migrates them, and copying them too would store the same
+    # file once per recipient. Default off because on most tenants it is a
+    # no-op (zero external-domain owners) and it costs an extra listing.
+    migrate_external_shares: bool = field(
+        default_factory=lambda: _env_bool("MIGRATE_EXTERNAL_SHARES", False))
 
     # -- transfer mode ---------------------------------------------------------
     # download_upload : stream every file through this host. Works with a

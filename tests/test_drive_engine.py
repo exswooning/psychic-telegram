@@ -1115,3 +1115,110 @@ def test_the_filter_reaches_the_query_not_just_the_results(migrator):
     src = inspect.getsource(migrator.__class__._list_children)
     assert "'me' in owners" in src
     assert "owned_only" in src
+
+
+# ======================================================================
+# migrate_external_shares: rescue files shared in from owners OUTSIDE the
+# source org. A colleague-owned file is migrated by that colleague, so a
+# recipient must not copy it; a file owned by an external domain is carried
+# by nobody and is lost unless the recipient's run picks it up.
+# ======================================================================
+def test_external_share_flag_defaults_off(monkeypatch):
+    monkeypatch.delenv("MIGRATE_EXTERNAL_SHARES", raising=False)
+    from config import Settings
+
+    assert Settings().migrate_external_shares is False
+
+
+def test_external_owned_shared_file_is_migrated_when_enabled(
+        migrator, auth, db, settings):
+    """A file owned by an external domain and shared in is carried by the
+    recipient's run when the flag is on."""
+    settings.migrate_external_shares = True
+    src = auth.source_drive(SRC_USER)
+    owned = src.add_binary("my-deck.pptx")
+    theirs = src.add_binary("their-deck.pptx")
+    # reassign ownership: this one is shared in, not owned
+    src.store[theirs]["owners"] = [{"emailAddress": "external@partner.com"}]
+    src.perms[theirs].append({"id": "p1", "type": "user", "role": "reader",
+                              "emailAddress": SRC_USER})
+
+    migrator.run()
+
+    assert db.get_target_id(SRC_USER, owned, "file"), "own file must migrate"
+    assert db.get_target_id(SRC_USER, theirs, "file"), \
+        "external-org-owned shared file must be rescued"
+
+
+def test_external_owned_shared_file_is_not_migrated_by_default(
+        migrator, auth, db):
+    """Flag off: identical to today's behaviour -- external shares are left
+    alone, matching the owned_only invariant for same-org files."""
+    src = auth.source_drive(SRC_USER)
+    theirs = src.add_binary("their-deck.pptx")
+    src.store[theirs]["owners"] = [{"emailAddress": "external@partner.com"}]
+    src.perms[theirs].append({"id": "p1", "type": "user", "role": "reader",
+                              "emailAddress": SRC_USER})
+
+    migrator.run()
+
+    assert not db.get_target_id(SRC_USER, theirs, "file"), \
+        "external share must not migrate while the flag is off"
+
+
+def test_colleague_owned_shared_file_still_not_migrated_even_when_enabled(
+        migrator, auth, db, settings):
+    """The rescue must not turn into a copy-once-per-recipient for files a
+    colleague (source org) owns -- their run carries those."""
+    settings.migrate_external_shares = True
+    src = auth.source_drive(SRC_USER)
+    theirs = src.add_binary("their-deck.pptx")
+    src.store[theirs]["owners"] = [{"emailAddress": "colleague@tenanta.com"}]
+    src.perms[theirs].append({"id": "p1", "type": "user", "role": "reader",
+                              "emailAddress": SRC_USER})
+
+    migrator.run()
+
+    assert not db.get_target_id(SRC_USER, theirs, "file"), \
+        "same-org owner migrates it; a recipient must not copy it"
+
+
+def test_external_shared_folder_tree_is_migrated_when_enabled(
+        migrator, auth, db, settings):
+    """Folders shared in from an external org are mirrored, recursively."""
+    settings.migrate_external_shares = True
+    src = auth.source_drive(SRC_USER)
+    folder = src.add_folder("ext-proj")
+    src.store[folder]["owners"] = [{"emailAddress": "external@partner.com"}]
+    src.perms[folder].append({"id": "p1", "type": "user", "role": "reader",
+                              "emailAddress": SRC_USER})
+    child = src.add_binary("child.pdf", parent=folder)
+    src.store[child]["owners"] = [{"emailAddress": "external@partner.com"}]
+    src.perms[child].append({"id": "p1", "type": "user", "role": "reader",
+                             "emailAddress": SRC_USER})
+
+    migrator.run()
+
+    assert db.get_target_id(SRC_USER, folder, "folder")
+    assert db.get_target_id(SRC_USER, child, "file")
+
+
+def test_external_share_is_idempotent_across_runs(migrator, auth, db, settings):
+    """Re-running must not duplicate an external-shared file (id_mapping
+    dedupes by source id, exactly like owned files)."""
+    settings.migrate_external_shares = True
+    src = auth.source_drive(SRC_USER)
+    theirs = src.add_binary("their-deck.pptx")
+    src.store[theirs]["owners"] = [{"emailAddress": "external@partner.com"}]
+    src.perms[theirs].append({"id": "p1", "type": "user", "role": "reader",
+                              "emailAddress": SRC_USER})
+
+    migrator.run()
+    first = db.get_target_id(SRC_USER, theirs, "file")
+    files_before = migrator.stats["files"]
+    migrator.run()
+
+    assert first
+    assert db.get_target_id(SRC_USER, theirs, "file") == first
+    assert migrator.stats["files"] == files_before, \
+        "resume must not copy it again"
