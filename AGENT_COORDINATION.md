@@ -722,3 +722,22 @@ this entry does, rather than assuming my last-known state is current.
 - R3 (full remigration with improvements) **never ran** — held by user instruction; superseded by this protocol. The target is still clean/empty.
 
 **Status: awaiting user decision on (1) B1/B2 isolation approach, and (2) go-ahead to run the B-series trials** (each stage is a multi-hour migration on the live tenant; the protocol requires clean target + clean ledger before every trial). Nothing will be launched without explicit direction.
+
+---
+
+## 2026-08-09 10:47 UTC — Claude — LAUNCHED: B4 Trial A (live benchmark run)
+
+**User gave go-ahead ("run test migrations and benchmarks").** B4 (final combined config: ACL batching + MD5 relax + fields= trim) Trial A launched at **10:47:02Z** on the live tenant, **drive-only** to match the B0/R1 anchor's workload exactly (all improvements under test are Drive-engine changes; full-services would break the protocol's same-workload comparability).
+
+**Pre-launch state (steps 1-7 of the protocol, all verified):**
+- Repo in sync with origin/workspace-migrator; commit `9238b55d`; all 8 core files md5-MATCH VPS.
+- Config hash: `TRANSFER_MODE=server_side`, `acl_batch_size=20`, `verify_server_side_md5=False`, `user_workers=8`, `per_user_qps=3.0`.
+- Target Drive wiped clean (0 files on alice/carol sampled).
+- **Drive ledger reset via `reset_drive_ledger.py`** (14,109 id_mapping + 14,109 audit rows cleared across 9 users) — otherwise every user would be skipped by the stale-DONE trap.
+- Source dataset verified = **14,109 owned files** (9 healthy users), identical to R1's workload.
+
+**In-flight:** running under webui (pid 1184071, port 8080). 3@c/e@c fail instantly (known environmental, excluded). Remaining 9 users copying. Expected duration ~2-4h (R1 took 13,284s pre-improvements; the whole point is whether B4 beats it).
+
+**A note on the "resuming against N" log lines:** N counts ALL known mappings (gmail/calendar/chat included) — after the drive-ledger reset the drive portion is 0, so these are residual non-drive mappings only. Not a skip signal.
+
+**Next:** collect API-timing/quota metrics at completion, run independent drive + ACL validation (acl_audit.py), write Trial A results to BENCHMARKS.md, then Trial B.
