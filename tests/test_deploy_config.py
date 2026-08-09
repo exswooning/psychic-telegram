@@ -1069,6 +1069,102 @@ class TestJobDuration:
         assert webui.Job().snapshot()["elapsed"] == 0
 
 
+class TestDeployHistory:
+    """
+    Nothing tracked this before: "did the last deploy to this VPS actually
+    work, and what commit is running there now" had no answer except SSHing
+    in and checking by hand. A flat JSON file, not migration.db, because a
+    deploy can happen before that database exists at all.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolated_history_file(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(webui, "DEPLOY_HISTORY_PATH",
+                            str(tmp_path / "deploy_history.json"))
+
+    def test_a_fresh_install_has_no_history(self):
+        assert webui.load_deploy_history() == []
+
+    def test_starting_a_deploy_records_an_in_progress_entry(self):
+        rec_id = webui.record_deploy_start(
+            "203.0.113.10", "root", "22", "8080", False, "abc1234")
+        history = webui.load_deploy_history()
+        assert len(history) == 1
+        assert history[0]["id"] == rec_id
+        assert history[0]["host"] == "203.0.113.10"
+        assert history[0]["commit"] == "abc1234"
+        assert history[0]["rc"] is None
+        assert history[0]["finishedAt"] is None
+
+    def test_finishing_updates_the_same_record_in_place(self):
+        rec_id = webui.record_deploy_start(
+            "203.0.113.10", "root", "22", "8080", False, "abc1234")
+        webui.record_deploy_finish(rec_id, 0)
+        history = webui.load_deploy_history()
+        assert len(history) == 1
+        assert history[0]["rc"] == 0
+        assert history[0]["finishedAt"] is not None
+
+    def test_most_recent_deploy_is_first(self):
+        first = webui.record_deploy_start(
+            "10.0.0.1", "root", "22", "8080", False, "aaa1111")
+        webui.record_deploy_finish(first, 0)
+        second = webui.record_deploy_start(
+            "10.0.0.2", "root", "22", "8080", False, "bbb2222")
+        history = webui.load_deploy_history()
+        assert history[0]["id"] == second
+        assert history[1]["id"] == first
+
+    def test_credentials_flag_is_recorded_not_the_credentials_themselves(self):
+        webui.record_deploy_start(
+            "10.0.0.1", "root", "22", "8080", True, "abc1234")
+        assert webui.load_deploy_history()[0]["includeCredentials"] is True
+
+    def test_history_is_capped_so_it_cannot_grow_without_bound(self):
+        for i in range(webui._MAX_DEPLOY_HISTORY + 10):
+            webui.record_deploy_start(
+                f"10.0.0.{i % 255}", "root", "22", "8080", False, "abc1234")
+        assert len(webui.load_deploy_history()) == webui._MAX_DEPLOY_HISTORY
+
+    def test_a_corrupt_history_file_reads_as_empty_not_a_crash(self, tmp_path):
+        bad = tmp_path / "corrupt.json"
+        bad.write_text("{not valid json")
+        webui.DEPLOY_HISTORY_PATH = str(bad)
+        assert webui.load_deploy_history() == []
+
+    def test_a_job_reports_its_outcome_through_on_finish(self):
+        """The real wiring an actual /api/deploy uses: Job.start()'s
+        on_finish callback is how history learns a detached subprocess's
+        rc without polling for it."""
+        import time as _t
+
+        seen = []
+        job = webui.Job()
+        ok, _ = job.start("true", ["/usr/bin/true"],
+                          on_finish=lambda rc: seen.append(rc))
+        assert ok
+        for _ in range(100):
+            if seen:
+                break
+            _t.sleep(0.05)
+        assert seen == [0]
+
+    def test_on_finish_raising_does_not_break_the_drain_thread(self):
+        """A broken history write must not take the job's own tracked
+        state down with it."""
+        import time as _t
+
+        job = webui.Job()
+        ok, _ = job.start("true", ["/usr/bin/true"],
+                          on_finish=lambda rc: (_ for _ in ()).throw(OSError("disk full")))
+        assert ok
+        for _ in range(100):
+            if not job.running:
+                break
+            _t.sleep(0.05)
+        assert job.snapshot()["rc"] == 0
+
+
 class TestSeedProgressParsing:
     """
     seed_sandbox.py has no structured progress protocol -- it is a CLI
@@ -1202,6 +1298,102 @@ class _FakeRunningProc:
     which is all Job.running actually checks."""
     def poll(self):
         return None
+
+
+class TestJobProgressAndEta:
+    """
+    The Activity Feed's synthetic job row needs a progress bar and an ETA,
+    not just a status pill -- an operator watching an 11-user, 5-minute
+    migration had no way to tell "almost done" from "just started" without
+    tailing the raw output. ETA is linear extrapolation from elapsed time
+    and fraction complete, so it is only shown while the job still runs;
+    a stopped job's "time left" is meaningless.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_job(self, monkeypatch):
+        monkeypatch.setattr(webui, "JOB", webui.Job())
+
+    def test_seed_progress_yields_an_eta_while_running(self, monkeypatch):
+        job = webui.Job()
+        job.name = "seed"
+        job.started = 100.0
+        job.lines = ["Seeding 4 users in x.com at scale small",
+                    "  [a@x.com] done in 1.0s: 1 files"]
+        job.proc = _FakeRunningProc()
+        monkeypatch.setattr(webui.time, "time", lambda: 110.0)  # 10s elapsed
+        snap = job.snapshot()
+        assert snap["progressPct"] == 25
+        # 10s for 25% -> 30s left for the remaining 75%.
+        assert snap["etaSeconds"] == 30
+
+    def test_a_stopped_job_keeps_its_final_percentage_but_drops_the_eta(self):
+        job = webui.Job()
+        job.name = "seed"
+        job.started = 100.0
+        job.finished = 110.0
+        job.lines = ["Seeding 2 users in x.com at scale small",
+                    "  [a@x.com] done in 1.0s: 1 files",
+                    "  [b@x.com] done in 1.0s: 1 files"]
+        job.proc = None
+        job.rc = 0
+        snap = job.snapshot()
+        assert snap["progressPct"] == 100
+        assert snap["etaSeconds"] is None
+
+    def test_migrate_progress_reads_the_ledger_fraction_not_the_lines(self, monkeypatch):
+        monkeypatch.setattr(webui, "_ledger_progress_fraction", lambda: 0.4)
+        job = webui.Job()
+        job.name = "migrate"
+        job.started = 100.0
+        job.lines = ["this text is never parsed for migrate"]
+        job.proc = _FakeRunningProc()
+        monkeypatch.setattr(webui.time, "time", lambda: 140.0)  # 40s elapsed
+        snap = job.snapshot()
+        assert snap["progressPct"] == 40
+        # 40s for 40% -> 60s left for the remaining 60%.
+        assert snap["etaSeconds"] == 60
+
+    def test_an_empty_ledger_reports_no_percentage_or_eta(self, monkeypatch):
+        monkeypatch.setattr(webui, "_ledger_progress_fraction", lambda: None)
+        job = webui.Job()
+        job.name = "migrate"
+        job.started = 100.0
+        job.proc = _FakeRunningProc()
+        snap = job.snapshot()
+        assert snap["progressPct"] is None
+        assert snap["etaSeconds"] is None
+
+    def test_a_job_type_with_no_progress_source_reports_neither(self):
+        job = webui.Job()
+        job.name = "deploy"
+        job.started = 100.0
+        job.proc = _FakeRunningProc()
+        snap = job.snapshot()
+        assert snap["progressPct"] is None
+        assert snap["etaSeconds"] is None
+
+    def test_zero_percent_never_divides_by_zero_for_an_eta(self, monkeypatch):
+        monkeypatch.setattr(webui, "_ledger_progress_fraction", lambda: 0.0)
+        job = webui.Job()
+        job.name = "migrate"
+        job.started = 100.0
+        job.proc = _FakeRunningProc()
+        monkeypatch.setattr(webui.time, "time", lambda: 150.0)
+        snap = job.snapshot()
+        assert snap["progressPct"] == 0
+        assert snap["etaSeconds"] is None
+
+    def test_activity_entry_carries_progress_and_eta_through(self, monkeypatch):
+        monkeypatch.setattr(webui, "_ledger_progress_fraction", lambda: 0.5)
+        webui.JOB.name = "migrate"
+        webui.JOB.started = 100.0
+        webui.JOB.lines = ["some output"]
+        webui.JOB.proc = _FakeRunningProc()
+        monkeypatch.setattr(webui.time, "time", lambda: 120.0)
+        entry = webui._job_activity_entry()
+        assert entry["progressPct"] == 50
+        assert entry["etaSeconds"] == 20
 
 
 class TestInitDbRejectsAStaleCsv:
@@ -1467,6 +1659,27 @@ class TestResetTargetFromTheUI:
         argv, _, _ = webui.reset_target_argv({"confirm_domain": "sandbox-tgt.example"})
         assert "sandbox-src.example" not in argv
 
+    def test_services_is_optional_and_defaults_to_a_full_wipe(self):
+        """Omitting it must not change behavior for a caller that has never
+        heard of it -- reset_target.py's own --services default is already
+        all four services."""
+        argv, _, _ = webui.reset_target_argv({"confirm_domain": "sandbox-tgt.example"})
+        assert "--services" not in argv
+
+    def test_services_narrows_the_wipe_to_what_is_asked_for(self):
+        """Confirmed live: comparing Drive transfer modes needed a way to
+        wipe only Drive without also destroying already-correct Gmail/
+        Calendar/Chat data from the same tenant."""
+        argv, _, _ = webui.reset_target_argv(
+            {"confirm_domain": "sandbox-tgt.example", "services": "drive"})
+        assert "--services" in argv
+        assert argv[argv.index("--services") + 1] == "drive"
+
+    def test_services_list_is_joined_not_stringified(self):
+        argv, _, _ = webui.reset_target_argv(
+            {"confirm_domain": "sandbox-tgt.example", "services": ["drive", "gmail"]})
+        assert argv[argv.index("--services") + 1] == "drive,gmail"
+
 
 class TestDeployConfigPersistence:
     """
@@ -1707,3 +1920,56 @@ class TestScopeDiagnosis:
         monkeypatch.setenv("SOURCE_SA_KEY", str(tmp_path / "absent.json"))
         result = webui.scope_diagnosis("source")
         assert "no key file" in result["error"]
+
+
+class TestDwdPayloadFullScopeUnion:
+    """
+    The "paste once, never revisit" scope lines: every scope source/target
+    could ever need across every transfer mode and optional-feature toggle,
+    not just whichever ones are on right now -- because the Admin Console
+    editor replaces the whole grant on every edit and re-triggers
+    propagation delay (~2 min typical, up to 30) for the ENTIRE grant, not
+    just the newly added scope. A narrower, current-settings-only line risks
+    that same live incident recurring every time a feature toggle changes.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _settings(self, tmp_path, monkeypatch):
+        key = tmp_path / "sa.json"
+        key.write_text(json.dumps({"client_id": "123"}))
+        monkeypatch.setenv("SOURCE_SA_KEY", str(key))
+        monkeypatch.setenv("SOURCE_ADMIN", "admin@src.example.com")
+        monkeypatch.setenv("TARGET_SA_KEY", str(key))
+        monkeypatch.setenv("TARGET_ADMIN", "admin@tgt.example.com")
+        monkeypatch.setenv("SOURCE_DOMAIN", "src.example.com")
+        monkeypatch.setenv("TARGET_DOMAIN", "tgt.example.com")
+
+    def test_full_union_is_a_superset_of_the_current_settings_scopes(self):
+        payload = webui.dwd_payload()
+        source_line = next(t for t in payload["tenants"] if t["side"] == "source")
+        target_line = next(t for t in payload["tenants"] if t["side"] == "target")
+        assert set(source_line["scope_list"]) <= set(payload["migrate_source_full"])
+        assert set(target_line["scope_list"]) <= set(payload["migrate_target_full"])
+
+    def test_full_union_covers_both_read_and_write_drive_variants(self):
+        from config import DRIVE_READONLY_SCOPE, DRIVE_WRITE_SCOPE
+
+        payload = webui.dwd_payload()
+        full = set(payload["migrate_source_full"])
+        # download_upload asks for the readonly scope, server_side/link_flip
+        # ask for the write scope in its place -- a single current-settings
+        # line only ever carries one of the two.
+        assert DRIVE_READONLY_SCOPE in full
+        assert DRIVE_WRITE_SCOPE in full
+
+    def test_full_union_covers_every_optional_feature_scope(self):
+        from config import (
+            CHAT_MEMBERSHIP_SCOPE, CONTACTS_WRITE_SCOPE, GMAIL_SETTINGS_SCOPE,
+            SSO_WRITE_SCOPE, TASKS_WRITE_SCOPE,
+        )
+
+        payload = webui.dwd_payload()
+        full = set(payload["migrate_target_full"])
+        for scope in (GMAIL_SETTINGS_SCOPE, CHAT_MEMBERSHIP_SCOPE,
+                     CONTACTS_WRITE_SCOPE, TASKS_WRITE_SCOPE, SSO_WRITE_SCOPE):
+            assert scope in full

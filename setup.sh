@@ -80,9 +80,18 @@ for side in source target; do
         || gcloud projects create "$PROJ" --name="$PROJ" >/dev/null 2>&1 \
         || warn "project create failed (may already exist globally)"
 
+    # people/tasks/chat/cloudidentity back the optional migrate_contacts,
+    # migrate_tasks, migrate_chat, and migrate_sso toggles -- config.py will
+    # ask for those scopes and drive_engine et al. will call these APIs the
+    # moment an operator turns one on, DWD grant already in place, with no
+    # further setup step to remind them these need enabling too. Confirmed
+    # live: contacts_engine failing with SERVICE_DISABLED on a project this
+    # script itself had created, because this line never asked for it.
     gcloud services enable drive.googleapis.com gmail.googleapis.com \
         calendar-json.googleapis.com admin.googleapis.com \
-        iamcredentials.googleapis.com --project="$PROJ" >/dev/null 2>&1 \
+        iamcredentials.googleapis.com people.googleapis.com \
+        tasks.googleapis.com chat.googleapis.com \
+        cloudidentity.googleapis.com --project="$PROJ" >/dev/null 2>&1 \
         && ok "APIs enabled" || warn "could not enable all APIs (billing linked?)"
 
     gcloud iam service-accounts describe "$SA@$PROJ.iam.gserviceaccount.com" \

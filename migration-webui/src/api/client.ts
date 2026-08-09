@@ -111,10 +111,15 @@ export interface JobStatus {
   elapsed: number
   lines: string[]
   total: number
-  // Only ever set for a "seed" job (parsed from its own printed lines --
-  // see webui.py's _seed_progress_pct()). null for every other job name,
-  // including when nothing is running at all.
+  // Only ever set for a seed job (its own printed lines) or a migrate/
+  // delta/discover job (the ledger's completion fraction) -- see webui.py's
+  // _job_progress(). null everywhere else, including when nothing is
+  // running at all.
   progressPct: number | null
+  // Linear extrapolation from elapsed time and progressPct -- only set
+  // while the job is actually running (see webui.py's Job.snapshot()); a
+  // stopped job's "time left" is meaningless.
+  etaSeconds: number | null
 }
 
 export async function fetchJob(since = 0): Promise<JobStatus> {
@@ -303,6 +308,11 @@ export interface DwdPayload {
   tenants: DwdTenant[]
   target_provision?: { scopes: string; scope_list: string[] }
   seed?: SeedScopes
+  // The "paste once, never revisit" scope lines: every scope source/target
+  // could ever need across every transfer mode and optional-feature toggle,
+  // not just whichever ones are on right now. See webui.py's dwd_payload().
+  migrate_source_full?: string[]
+  migrate_target_full?: string[]
 }
 
 export async function fetchDwd(): Promise<DwdPayload> {
@@ -427,6 +437,29 @@ export async function saveDeployConfig(
  * service-account keys and OAuth tokens to another host is the one
  * irreversible part of this action.
  */
+export interface DeployHistoryEntry {
+  id: string
+  startedAt: string
+  finishedAt: string | null
+  host: string
+  user: string
+  port: string
+  uiPort: string
+  includeCredentials: boolean
+  commit: string
+  rc: number | null
+}
+
+/**
+ * Every past /api/deploy call, most recent first. Previously the only
+ * answer to "did the last deploy actually work, and what commit is
+ * running on that VPS right now" was SSHing in and checking by hand.
+ */
+export async function fetchDeployHistory(): Promise<DeployHistoryEntry[]> {
+  const data = await getJSON<{ history: DeployHistoryEntry[] }>('/api/deploy_history')
+  return data.history
+}
+
 export async function runDeploy(
   fields: DeployFields,
   includeCredentials: boolean,

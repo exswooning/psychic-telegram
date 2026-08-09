@@ -42,11 +42,13 @@ import html
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Callable
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -282,18 +284,26 @@ class Job:
         self.started = 0.0
         self.finished = 0.0
         self.rc: int | None = None
+        self._on_finish: Callable[[int | None], None] | None = None
 
     @property
     def running(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
 
     def start(self, name: str, argv: list[str],
-              env: dict | None = None, cwd: str | None = None) -> tuple[bool, str]:
+              env: dict | None = None, cwd: str | None = None,
+              on_finish: Callable[[int | None], None] | None = None
+              ) -> tuple[bool, str]:
         with self.lock:
             if self.running:
                 return False, f"{self.name} is still running"
             self.name, self.lines, self.rc = name, [], None
             self.started, self.finished = time.time(), 0.0
+            # Only deploy_remote.py's caller passes this today -- it is how
+            # deploy history learns the outcome of a job that runs detached
+            # from the request that started it, without polling its own
+            # poll loop just to catch the one moment rc stops being None.
+            self._on_finish = on_finish
             env = dict(env or os.environ)
             env.setdefault("PYTHONUNBUFFERED", "1")
             try:
@@ -324,6 +334,15 @@ class Job:
                     del self.lines[:1000]
         self.rc = self.proc.wait()
         self.finished = time.time()
+        if self._on_finish is not None:
+            try:
+                self._on_finish(self.rc)
+            except Exception:  # noqa: BLE001
+                # A broken history write must never take down the drain
+                # thread -- the job itself already finished successfully or
+                # not; losing its history entry is a lesser failure than
+                # losing the ability to see that the job ran at all.
+                pass
 
     def stop(self) -> str:
         with self.lock:
@@ -336,33 +355,194 @@ class Job:
             return f"interrupt sent to {self.name}"
 
     def snapshot(self, since: int = 0) -> dict:
+        # _job_progress() can open a sqlite connection (for migrate/delta/
+        # discover's ledger-backed fraction) -- done after releasing the
+        # lock below so a slow disk read never blocks start()/stop() for
+        # every other request in flight.
         with self.lock:
-            return {
-                "name": self.name,
-                "running": self.running,
-                "rc": self.rc,
-                # Frozen at completion. Computing this live meant a finished
-                # job's "duration" kept climbing with the clock -- an init-db
-                # that took under a second was reported as "exit 0 · 105.1s",
-                # which reads as a performance problem that does not exist.
-                "elapsed": round((self.finished or time.time()) - self.started, 1)
-                if self.started else 0,
-                "total": len(self.lines),
-                "lines": self.lines[since:],
-                # Only seed_sandbox.py's output is parsed for this -- see
-                # _seed_progress_pct(). Every other job name (migrate,
-                # discover, deploy, reset target, ...) has either a better
-                # real source already (the ledger, for migrate/discover) or
-                # no meaningful percentage at all, so this stays null there
-                # rather than guessing.
-                "progressPct": (_seed_progress_pct(self.lines)
-                               if self.name == "seed" else None),
-            }
+            name, running, rc = self.name, self.running, self.rc
+            elapsed = round((self.finished or time.time()) - self.started, 1) \
+                if self.started else 0
+            total = len(self.lines)
+            lines = self.lines[since:]
+            all_lines = self.lines if name == "seed" else None
+        # Only seed_sandbox.py's own printed lines and the migrate/delta/
+        # discover ledger have a real completion fraction to read --
+        # everything else (deploy, reset target, provisioning, ...) has no
+        # meaningful percentage at all, so this stays null there rather
+        # than guessing. See _job_progress(). Percentage is still worth
+        # showing after the job stops (a finished run's final 100%); an ETA
+        # is not -- "time left" on a job that already ended is nonsense, so
+        # that half is dropped the moment running goes false.
+        pct, eta = _job_progress(name, all_lines or [], elapsed)
+        if not running:
+            eta = None
+        return {
+            "name": name,
+            "running": running,
+            "rc": rc,
+            # Frozen at completion. Computing this live meant a finished
+            # job's "duration" kept climbing with the clock -- an init-db
+            # that took under a second was reported as "exit 0 · 105.1s",
+            # which reads as a performance problem that does not exist.
+            "elapsed": elapsed,
+            "total": total,
+            "lines": lines,
+            "progressPct": pct,
+            "etaSeconds": eta,
+        }
 
 
 JOB = Job()
 # Which tenant the in-flight consent belongs to, so the callback knows.
 _PENDING: dict[str, str] = {}
+
+# ----------------------------------------------------------------------
+# Processes started OUTSIDE this webui (over SSH, from the TUI, from cron...)
+#
+# The webui's own Job only ever sees the children it spawned itself, so an
+# operator who kicked off a migrate from another shell watched "idle" no
+# matter how much work was running. A live ps scan is the only honest way to
+# notice processes that arrive and leave without ever passing through this
+# process -- so it is done here, on every job poll. Migration subcommands of
+# main.py, plus the standalone job scripts the webui itself can also launch
+# (seed/reset/deploy), are the things worth surfacing as "active".
+# ----------------------------------------------------------------------
+_EXT_MAIN_CMDS = {"init-db", "preflight", "provision-users", "discover",
+                  "migrate", "delta", "syncacls", "report",
+                  "backfill-services", "scope"}
+_EXT_SCRIPTS = {"seed_sandbox.py": "seed", "reset_target.py": "reset target",
+                "deploy_remote.py": "deploy", "verify.py": "verify",
+                "resolve_failures.py": "resolve-failures",
+                "phases.py": "phases"}
+# Last-seen output tail per external pid, for the suffix-diff that turns the
+# unbounded migration.log into the same "just the new lines" contract the
+# webui-launched Job streams.
+_EXT_TAIL: dict[int, list[str]] = {}
+_EXT_TAIL_LEN: int = 2000
+_EXT_INITIAL_LINES: int = 120
+
+
+def _detached_log_path() -> str:
+    """The job log a detached main.py writes to -- migration.log in the repo
+    dir by default (see config.Settings.log_file)."""
+    try:
+        from config import Settings
+        lp = Settings().log_file
+    except Exception:  # noqa: BLE001 - default is right if config is unreadable
+        lp = "migration.log"
+    if os.path.isabs(lp):
+        return lp
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), lp)
+
+
+def _process_output_tail(pid: int) -> list[str]:
+    """The last _EXT_TAIL_LEN lines of a process's own output. Where stdout
+    is redirected to a file -- the normal way a migrate is run over SSH -- its
+    actual target is resolved through /proc/<pid>/fd/1, so the live feed
+    streams the real log the operator is used to seeing, not the static
+    migration.log a run may have stopped writing to. Falls back to that
+    migration.log when stdout is a pipe or the proc target is unreadable."""
+    path = None
+    try:
+        tgt = os.readlink(f"/proc/{pid}/fd/1")
+        if os.path.isabs(tgt) and os.path.exists(tgt):
+            path = tgt
+    except OSError:
+        pass
+    path = path or _detached_log_path()
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return [ln.rstrip("\n") for ln in fh.readlines()[-_EXT_TAIL_LEN:]]
+    except OSError:
+        return []
+
+
+def _external_processes() -> list[dict]:
+    """Running migration processes this webui did not start, as
+    {pid, elapsed, name}. A migrate always sorts first so a seed running in
+    another tab never hides the real migration."""
+    try:
+        out = subprocess.run(["ps", "-eo", "pid=,etimes=,args="],
+                             capture_output=True, text=True, timeout=5).stdout
+    except Exception:  # noqa: BLE001 - ps missing means nothing external running
+        return []
+    found: list[dict] = []
+    own = str(os.getpid())
+    shells = {"bash", "sh", "zsh", "dash", "fish", "-bash", "-sh", "-zsh", "-dash"}
+    for line in out.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3:
+            continue
+        pid, etimes, args = parts
+        if pid == own:
+            continue
+        # A `bash -c "… main.py migrate …"` wrapper would otherwise look
+        # exactly like a second migration. Only the real program token counts.
+        if args.split(None, 1)[0] in shells:
+            continue
+        try:
+            elapsed = int(etimes)
+        except ValueError:
+            continue
+        name = next((label for script, label in _EXT_SCRIPTS.items()
+                     if re.search(r"(?:^|/)" + re.escape(script) + r"(?:\s|$)",
+                                  args)), None)
+        if name is None:
+            m = re.search(r"(?:^|[\s/])main\.py\s+(\S+)", args)
+            if m and m.group(1) in _EXT_MAIN_CMDS:
+                name = m.group(1)
+        if name is None:
+            continue
+        found.append({"pid": int(pid), "elapsed": elapsed, "name": name})
+    found.sort(key=lambda x: (x["name"] != "migrate", -x["elapsed"], x["pid"]))
+    return found
+
+
+def _external_job_snapshot() -> dict | None:
+    """A Job.snapshot()-shaped view of the primary external process, or None
+    when nothing is running outside the webui. progressPct/eta reuse the same
+    ledger-backed math a webui-launched migrate gets."""
+    jobs = _external_processes()
+    live = {j["pid"] for j in jobs}
+    for stale in [pid for pid in _EXT_TAIL if pid not in live]:
+        del _EXT_TAIL[stale]
+    if not jobs:
+        return None
+    job = jobs[0]
+    tail = _process_output_tail(job["pid"])
+    prev = _EXT_TAIL.get(job["pid"])
+    _EXT_TAIL[job["pid"]] = tail
+    if prev is None:
+        # Brand-new process: hand over a recent slice as history, so the live
+        # feed shows where the run already is -- not just lines added from
+        # this exact second forward.
+        lines = tail[-_EXT_INITIAL_LINES:]
+    else:
+        # Suffix-diff: the tail window always holds the newest lines, so the
+        # new ones are the trailing slice of tail after the longest prefix of
+        # tail that is still a suffix of the previous window. The descending
+        # search finds it on the first try in the steady states (no new
+        # output, or a log shorter than the window); only a window that rolled
+        # entirely over costs more than a couple of tries.
+        limit = min(len(prev), len(tail))
+        match = next((c for c in range(limit, 0, -1)
+                      if tail[:c] == prev[len(prev) - c:]), 0)
+        lines = tail[match:] if match < len(tail) else []
+    pct, eta = _job_progress(job["name"], tail, job["elapsed"])
+    return {
+        "name": job["name"],
+        "running": True,
+        "rc": None,
+        "elapsed": job["elapsed"],
+        "total": len(tail),
+        "lines": lines,
+        "progressPct": pct,
+        "etaSeconds": eta,
+        "detached": True,
+        "pid": job["pid"],
+        "pids": [j["pid"] for j in jobs],
+    }
 
 # ----------------------------------------------------------------------
 # OAuth: the flow a non-technical admin can actually complete.
@@ -492,6 +672,72 @@ _HOST_RE = re.compile(rf"^(?:{_LABEL}\.)*{_LABEL}$|^\d{{1,3}}(?:\.\d{{1,3}}){{3}
 _USER_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$", re.I)
 
 ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "env.sh")
+
+# ----------------------------------------------------------------------
+# Deploy history: every /api/deploy invocation, appended when it starts and
+# updated in place when it finishes. Nothing tracked this before -- "did the
+# last deploy to this VPS actually work, and what commit is running there
+# now" had no answer except SSHing in and checking by hand. A flat JSON
+# array (not migration.db) because a deploy can happen before that database
+# exists at all, and this has nothing to do with migration state.
+# ----------------------------------------------------------------------
+DEPLOY_HISTORY_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "deploy_history.json")
+_DEPLOY_HISTORY_LOCK = threading.Lock()
+_MAX_DEPLOY_HISTORY = 100
+
+
+def load_deploy_history() -> list[dict]:
+    """Most recent first. Never raises -- a corrupt or absent history file
+    means an empty list, not a broken Deploy tab."""
+    try:
+        with open(DEPLOY_HISTORY_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def _save_deploy_history(records: list[dict]) -> None:
+    tmp = DEPLOY_HISTORY_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(records, fh, indent=2)
+    os.replace(tmp, DEPLOY_HISTORY_PATH)  # atomic on the same filesystem
+
+
+def record_deploy_start(host: str, user: str, port: str, ui_port: str,
+                        include_credentials: bool, commit: str) -> str:
+    """Appends a new in-progress record and returns its id, used later to
+    find and update it once the job finishes."""
+    with _DEPLOY_HISTORY_LOCK:
+        records = load_deploy_history()
+        rec_id = f"{time.time():.6f}"
+        records.insert(0, {
+            "id": rec_id,
+            "startedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "finishedAt": None,
+            "host": host, "user": user, "port": port, "uiPort": ui_port,
+            "includeCredentials": include_credentials,
+            "commit": commit,
+            "rc": None,
+        })
+        del records[_MAX_DEPLOY_HISTORY:]
+        _save_deploy_history(records)
+        return rec_id
+
+
+def record_deploy_finish(rec_id: str, rc: int | None) -> None:
+    with _DEPLOY_HISTORY_LOCK:
+        records = load_deploy_history()
+        for r in records:
+            if r.get("id") == rec_id:
+                r["rc"] = rc
+                r["finishedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                break
+        else:
+            return  # record vanished (history trimmed mid-run) -- nothing to update
+        _save_deploy_history(records)
+
 
 _CONFIG_FIELDS = (
     ("source_domain", "SOURCE_DOMAIN", _DOMAIN_RE, "a domain like c.example.com"),
@@ -1123,6 +1369,12 @@ def reset_target_argv(body: dict) -> tuple[list[str], dict, str]:
         return [], {}, f"{domain} is listed in PROTECTED_DOMAINS"
 
     argv = [PY, "reset_target.py", "--confirm-domain", domain, "--yes"]
+    # Optional and additive: omitting it keeps today's full-wipe default
+    # (reset_target.py's own --services default is all four services), so
+    # this never changes behavior for a caller that does not know about it.
+    services = body.get("services")
+    if services:
+        argv += ["--services", services if isinstance(services, str) else ",".join(services)]
     env = gcloud_env()
     env["SANDBOX_MODE"] = "true"
     return argv, env, ""
@@ -1159,7 +1411,40 @@ def dwd_payload() -> dict:
     the same `config.py` functions the engine authenticates with, so they
     cannot drift from what is actually requested at runtime.
     """
-    from config import Settings, source_scopes, target_scopes
+    from config import Settings, TRANSFER_MODES, source_scopes, target_scopes
+
+    def _full_union(base: "Settings", fn) -> list[str]:
+        """Every scope `fn` could ever ask for, across every toggle this
+        operator might flip on later -- the "one line that never needs
+        re-pasting" answer, not just what today's settings happen to need.
+        The Admin Console replaces the whole scope line on every edit, and
+        each edit re-triggers propagation delay for the entire grant (seen
+        live: ~2 min typical, up to 30), so a line that already covers a
+        feature you turn on next week is strictly better than one you have
+        to keep re-pasting."""
+        import dataclasses
+
+        scopes: set[str] = set()
+        for mode in TRANSFER_MODES:
+            for gmail in (False, True):
+                for chat in (False, True):
+                    for chat_mode in ("direct", "import"):
+                        for contacts in (False, True):
+                            for tasks in (False, True):
+                                for sso in (False, True):
+                                    for cal_acls in (False, True):
+                                        s = dataclasses.replace(
+                                            base, transfer_mode=mode,
+                                            migrate_gmail_settings=gmail,
+                                            migrate_chat=chat,
+                                            chat_space_mode=chat_mode,
+                                            migrate_contacts=contacts,
+                                            migrate_tasks=tasks,
+                                            migrate_sso=sso,
+                                            migrate_calendar_acls=cal_acls,
+                                        )
+                                        scopes.update(fn(s))
+        return sorted(scopes)
 
     st = Settings()
     out = {"tenants": []}
@@ -1179,6 +1464,19 @@ def dwd_payload() -> dict:
             "scopes": ",".join(scopes),
             "scope_list": scopes,
         })
+
+    # "MIGRATE SOURCE" / "MIGRATE TARGET" -- the full union across every
+    # transfer mode and optional-feature toggle, not just whichever ones are
+    # on right now. This is the exact line to paste once and never revisit,
+    # matched to the copy-paste blocks already worked out by hand for this
+    # tenant pair; the per-tenant `scopes` field above stays as the narrower
+    # "what today's settings actually need" answer.
+    try:
+        out["migrate_source_full"] = _full_union(st, source_scopes)
+        out["migrate_target_full"] = _full_union(st, target_scopes)
+    except Exception:  # noqa: BLE001 - never break /api/dwd over this extra
+        out["migrate_source_full"] = []
+        out["migrate_target_full"] = []
 
     # Provisioning a target account needs admin.directory.user (write), which
     # the migration target set deliberately does not carry. The Admin Console
@@ -1580,6 +1878,55 @@ def spa_users_payload() -> dict:
         conn.close()
 
 
+def _ledger_progress_fraction() -> float | None:
+    """The same items_done/items_expected fraction the header progress bar
+    and snapshot_payload() already compute from the ledger -- reused here
+    rather than re-derived, since tui.collect_snapshot() is the one place
+    that already resolves partial per-service completion into one number."""
+    import sqlite3
+
+    from config import Settings
+
+    conn = _db_conn()
+    if conn is None:
+        return None
+    try:
+        import tui
+
+        totals = tui.collect_snapshot(conn, Settings().effective_upload_cap()).totals
+        return totals.get("fraction")
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+
+
+def _job_progress(name: str, lines: list[str], elapsed: float
+                  ) -> tuple[int | None, int | None]:
+    """(progressPct, etaSeconds) for the running job, or (None, None) when
+    there is no reliable source for either -- guessing a percentage from
+    nothing but log lines is worse than showing none at all.
+
+    ETA is extrapolated linearly from elapsed time and fraction complete:
+    it assumes the remaining work costs the same, per item, as the work
+    already done. That is wrong the instant one user has 10x another's
+    mailbox, but it is the same assumption every "time remaining" bar
+    anyone has ever used makes, and it gets more accurate as fraction
+    grows -- which is exactly when an operator starts actually watching it.
+    """
+    if name == "seed":
+        pct = _seed_progress_pct(lines)
+    elif name in ("migrate", "delta", "discover"):
+        frac = _ledger_progress_fraction()
+        pct = round(frac * 100) if frac is not None else None
+    else:
+        pct = None
+    if pct is None or pct <= 0 or elapsed <= 0:
+        return pct, None
+    eta = round(elapsed * (100 - pct) / pct)
+    return pct, eta
+
+
 def _job_activity_entry() -> dict | None:
     """
     A synthetic ActivityEvent for the one background job, if any.
@@ -1598,6 +1945,10 @@ def _job_activity_entry() -> dict | None:
     second thing to check.
     """
     snap = JOB.snapshot()
+    if not snap["running"]:
+        ext = _external_job_snapshot()
+        if ext is not None:
+            snap = ext
     if not snap["name"]:
         return None
     last = next((ln for ln in reversed(snap["lines"]) if ln.strip()), "")
@@ -1614,6 +1965,10 @@ def _job_activity_entry() -> dict | None:
         "action": action,
         "status": status,
         "details": last[:200] or None,
+        # See Job.snapshot()/_job_progress(): percentage can still be
+        # meaningful after a job stops (its final figure), an ETA cannot.
+        "progressPct": snap["progressPct"],
+        "etaSeconds": snap["etaSeconds"],
     }
 
 
@@ -1956,6 +2311,15 @@ pre.out{height:230px}
     <span id="jmeta"></span></span>
 </header>
 
+<div id="connbar" style="display:none;position:sticky;top:0;z-index:50;
+  background:var(--bad);color:#fff;padding:7px 14px;font-size:13px">
+  Connection to the migration server lost &mdash; the SSH tunnel or webui may
+  be down. The page keeps the last known state; nothing new is being read.
+  <button onclick="reconnect()" style="margin-left:8px;background:#fff;color:var(--bad);
+    border:0;padding:3px 10px;border-radius:4px;font-weight:600">Reconnect</button>
+  <span id="connmsg" style="opacity:.85"></span>
+</div>
+
 <div class="hdprog">
   <div class="gbar"><i id="progi" style="width:0%"></i></div>
   <b class="muted" id="progpct">0%</b>
@@ -2019,9 +2383,35 @@ let lastSig='', ups=null, authMode=null, authModes=null, upMsg={},
     runMode=null, runModes=null, stepChk=null, hostShown=false,
     view='path', seedOpen=false,
     dep={user:'root',port:'22',open:false};
-let tab='setup', snap=null, scopeLines=[], logLines=[], logPath='';
+let tab='setup', snap=null, scopeLines=[], logLines=[], logPath='', deployHistory=[];
 let followOut=true;
 const $=i=>document.getElementById(i);
+/* Connection loss detection. Every poll loop reports ok/fail here; three
+   consecutive failures (a dropped SSH tunnel, a restarted webui, a bad
+   network blip) turns on the banner. The page keeps the last known state
+   throughout, and self-heals with one repaint the moment a poll succeeds. */
+let connFails=0, connLost=false;
+function connOk(){
+  const was=connLost;
+  connFails=0; connLost=false;
+  const b=$('connbar'); if(b) b.style.display='none';
+  if(was) refresh(true);           // resync step state after the outage
+}
+function connFail(){
+  connFails++;
+  if(connLost||connFails<3) return;
+  connLost=true;
+  const b=$('connbar'); if(b){ b.style.display='block';
+    const m=$('connmsg'); if(m) m.textContent=''; }
+}
+async function reconnect(){
+  const m=$('connmsg'); if(m) m.textContent='trying\u2026';
+  try{
+    const r=await fetch('/api/status',{cache:'no-store'});
+    if(r.ok){ location.reload(); return; }
+  }catch(e){}
+  if(m) m.textContent='still unreachable \u2014 restore the SSH tunnel, then Reconnect';
+}
 const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const MARK={done:'\u2713',manual:'!',active:'\u25b8',todo:'',skip:'\u2013'};
@@ -2382,10 +2772,30 @@ function delegationBody(){
       <pre class="copy">${esc(line||'(set the domains first)')}</pre>
       <button onclick="diagnoseScopes('${t.side}',this)">Diagnose scopes</button>
       <div id="diag-${t.side}" style="margin-top:6px"></div>
+      ${fullUnionBlock(t.side)}
     </div>`;
   });
   return h+`<div class="muted">Grants take ~2 minutes to propagate, sometimes 30.
     Use <b>Re-check</b> above; it goes green when a real token mint succeeds.</div>`;
+}
+
+/* The "paste once, never revisit" line: every scope this tenant could ever
+   need across every transfer mode and optional-feature toggle, not just
+   whichever ones happen to be on right now. The Admin Console editor
+   replaces the whole grant on every edit and re-triggers propagation delay
+   for the ENTIRE grant (seen live: ~2 min typical, up to 30) -- so turning
+   on a new feature next month by re-pasting a narrower line risks breaking
+   everything that already worked, exactly as happened live this session. */
+function fullUnionBlock(side){
+  const key = side==='source' ? 'migrate_source_full' : 'migrate_target_full';
+  const full = (dwd && dwd[key]) || [];
+  if(!full.length) return '';
+  const line = full.join(',');
+  return `<details style="margin-top:8px">
+    <summary class="muted" style="cursor:pointer">MIGRATE ${side.toUpperCase()} — full key (${full.length} scopes, every feature toggle, paste once)</summary>
+    <div class="cprow"><button onclick="copy(${esc(JSON.stringify(line))},this)">Copy</button></div>
+    <pre class="copy">${esc(line)}</pre>
+  </details>`;
 }
 
 /* A single unauthorised (or not-yet-propagated) scope fails the *whole*
@@ -2524,7 +2934,43 @@ function deployTabHTML(){
       </div>
       <div id="deploycfgmsg" class="muted" style="margin-top:8px">${
         deployCfgMsg?(deployCfgMsg.ok?'✓ ':'✕ ')+esc(deployCfgMsg.text):''}</div>
-    </div>`;
+    </div>
+    ${deployHistoryTable()}`;
+}
+
+/* Every past /api/deploy call, most recent first -- previously the only
+   answer to "did the last deploy actually work, and what commit is running
+   on that VPS right now" was SSHing in and checking by hand. A still-running
+   entry (rc still null with no finishedAt) reads as "in progress", not a
+   silent gap, since the callback that would fill it in only fires once the
+   detached deploy_remote.py process actually exits. */
+function deployHistoryTable(){
+  if(!deployHistory.length) return `<div class="card" style="margin-top:16px">
+    <h3>Deploy history</h3>
+    <div class="muted">No deploys recorded yet in this checkout.</div></div>`;
+  const rows=deployHistory.map(h=>{
+    const status=h.rc===null
+      ? (h.finishedAt?'<span class="pill" style="background:var(--bad);color:#fff">never started</span>'
+                     :'<span class="pill" style="background:var(--accent);color:#fff">in progress</span>')
+      : (h.rc===0?'<span class="pill" style="background:var(--ok);color:#fff">ok</span>'
+                 :`<span class="pill" style="background:var(--bad);color:#fff">exit ${h.rc}</span>`);
+    return `<tr>
+      <td>${esc(h.startedAt||'')}</td>
+      <td>${esc(h.host||'')}</td>
+      <td><code>${esc(h.commit||'(no git history)')}</code></td>
+      <td>${h.includeCredentials?'yes':'no'}</td>
+      <td>${status}</td>
+    </tr>`;
+  }).join('');
+  return `<div class="card" style="margin-top:16px">
+    <h3>Deploy history</h3>
+    <table class="mono" style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead><tr style="text-align:left">
+        <th>Started</th><th>Host</th><th>Commit</th><th>Creds</th><th>Result</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>`;
 }
 
 async function saveDeployConfig(){
@@ -2611,6 +3057,7 @@ async function deploy(){
       include_credentials:creds,confirm:confirmPhrase})})).json();
   if(!r.ok){ alert(r.error); return; }
   clearOut();
+  fetchDeployHistory();
 }
 
 async function runSeed(){
@@ -2733,12 +3180,20 @@ async function oauthDrop(t){
 }
 
 let job={};
+function fmtEta(s){
+  if(s<60) return s+'s left';
+  const m=Math.round(s/60); if(m<60) return m+'m left';
+  const h=Math.floor(m/60); return h+'h '+(m%60)+'m left';
+}
 function paintJob(){
   const r=job.running;
   const set=(id,v)=>{const e=$(id); if(e&&e.textContent!==v) e.textContent=v;};
   if($('dot')) $('dot').className='dot'+(r?' on':'');
   if($('jdot')) $('jdot').className='dot'+(r?' on':'');
+  const prog=(r&&job.progressPct!=null)?' \u00b7 '+job.progressPct+'%'
+    +(job.etaSeconds!=null?' \u00b7 '+fmtEta(job.etaSeconds):''):'';
   const meta=r?job.elapsed+'s elapsed'
+    +(job.detached?' \u00b7 external pid '+job.pid:'')+prog
     :(job.rc===null||job.rc===undefined?'':'exit '+job.rc+' \u00b7 '+job.elapsed+'s');
   const statusTxt=r?'running'
     :(job.rc===null||job.rc===undefined?'idle'
@@ -2757,12 +3212,14 @@ function paintJob(){
 }
 
 async function refresh(force){
+  let ok=false;
   try{
     const [s,o,d,c]=await Promise.all([
       fetch('/api/status').then(r=>r.json()).catch(()=>null),
       fetch('/api/oauth/status').then(r=>r.json()).catch(()=>null),
       fetch('/api/dwd').then(r=>r.json()).catch(()=>null),
       fetch('/api/config').then(r=>r.json()).catch(()=>null)]);
+    ok=!!s;
     if(s&&!s.error) S=s; else if(!S) S=s;      // keep the last good status
     if(o) oauth=o;
     if(d) dwd=d;
@@ -2793,15 +3250,19 @@ async function refresh(force){
       }
     }
     if(!s.error) $('route').textContent=
-      (s.env.SOURCE_DOMAIN||'?')+' \\u2192 '+(s.env.TARGET_DOMAIN||'?')
-      +(s.env.AUTH_MODE?'  \\u00b7  '+s.env.AUTH_MODE:'');
+      (s.env.SOURCE_DOMAIN||'?')+' \u2192 '+(s.env.TARGET_DOMAIN||'?')
+      +(s.env.AUTH_MODE?'  \u00b7  '+s.env.AUTH_MODE:'');
     draw(force);
   }catch(e){}
+  ok?connOk():connFail();
 }
 
 async function pollJob(){
+  let ok=false;
   try{
     const j=await (await fetch('/api/job?since='+seen)).json();
+    ok=true;
+    if(j.pid&&j.pid!==job.pid) seen=0;   // a different process started: refetch
     if(j.lines.length){
       window._out=(window._out||'')+j.lines.join('\\n')+'\\n';
       seen=j.total;
@@ -2813,8 +3274,12 @@ async function pollJob(){
         if(followOut) pre2.scrollTop=pre2.scrollHeight; }
     }
     const was=job.running; job=j; paintJob();
-    if(was&&!j.running) refresh(true);   // a finished job usually changes step state
+    if(was&&!j.running){
+      refresh(true);   // a finished job usually changes step state
+      if(j.name==='deploy') fetchDeployHistory();
+    }
   }catch(e){}
+  ok?connOk():connFail();
   setTimeout(pollJob,1200);
 }
 
@@ -2885,6 +3350,7 @@ function setTab(t){
     if(!S) refresh();
     if(t==='scope'&&!scopeLines.length) fetchScope();
     if(t==='logs'&&!logLines.length) fetchLogs();
+    if(t==='deploy') fetchDeployHistory();
     drawView();
   }else{
     draw(true);
@@ -3052,15 +3518,24 @@ async function fetchLogs(){
     if(r.lines){ logLines=r.lines; logPath=r.path; drawView(); }
   }catch(e){}
 }
+async function fetchDeployHistory(){
+  try{
+    const r=await (await fetch('/api/deploy_history')).json();
+    if(r.history){ deployHistory=r.history; if(tab==='deploy') drawView(); }
+  }catch(e){}
+}
 
 async function pollSnap(){
+  let ok=false;
   try{
     const r=await (await fetch('/api/snapshot')).json();
+    ok=true;
     snap=r;
     applyToggles(r.toggles);
     paintProg();
     drawView();
   }catch(e){}
+  ok?connOk():connFail();
   setTimeout(pollSnap,2000);
 }
 
@@ -3170,7 +3645,14 @@ class Handler(BaseHTTPRequestHandler):
                     since = int(self.path.split("since=")[1].split("&")[0])
                 except ValueError:
                     since = 0
-            self._json(JOB.snapshot(since))
+            snap = JOB.snapshot(since)
+            if not snap["running"]:
+                ext = _external_job_snapshot()
+                if ext is not None:
+                    snap = ext
+            self._json(snap)
+        elif path == "/api/deploy_history":
+            self._json({"history": load_deploy_history()})
         else:
             self._json({"error": "not found"}, 404)
 
@@ -3344,12 +3826,40 @@ class Handler(BaseHTTPRequestHandler):
                 argv += ["--key", key]
             if creds:
                 argv.append("--include-credentials")
-            ok, msg = JOB.start("deploy", argv)
+            rec_id = record_deploy_start(host, user, port, ui_port, creds,
+                                         host_info().get("commit", ""))
+            ok, msg = JOB.start("deploy", argv,
+                                on_finish=lambda rc: record_deploy_finish(rec_id, rc))
+            if not ok:
+                # Never started -- e.g. another job already running -- so
+                # there is no process to ever call on_finish. Recording it
+                # as its own immediate failure keeps the history honest
+                # instead of leaving a permanently "in progress" ghost.
+                record_deploy_finish(rec_id, None)
             self._json({"ok": ok, "error": "" if ok else msg})
             return
 
         if self.path == "/api/stop":
-            self._json({"ok": True, "msg": JOB.stop()})
+            if JOB.running:
+                self._json({"ok": True, "msg": JOB.stop()})
+            else:
+                jobs = _external_processes()
+                if not jobs:
+                    self._json({"ok": True, "msg": "nothing running"})
+                else:
+                    sent = []
+                    for j in jobs:
+                        try:
+                            # Same cooperative SIGINT the webui's own Stop uses:
+                            # the engine finishes in-flight items, then resumes.
+                            os.kill(j["pid"], signal.SIGINT)
+                            sent.append(str(j["pid"]))
+                        except (ProcessLookupError, PermissionError):
+                            pass
+                    msg = (f"interrupt sent to {len(sent)} external "
+                           f"process(es): {', '.join(sent)}") if sent \
+                        else "external process(es) already gone"
+                    self._json({"ok": True, "msg": msg})
             return
 
         if self.path != "/api/run":

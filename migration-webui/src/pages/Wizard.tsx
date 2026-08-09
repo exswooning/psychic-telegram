@@ -395,6 +395,7 @@ const DelegationStep: React.FC = () => {
   const [result, setResult] = useState<string | null>(null)
   const [diagnosing, setDiagnosing] = useState<'source' | 'target' | null>(null)
   const [diagnosis, setDiagnosis] = useState<Record<string, ScopeDiagnosis>>({})
+  const [showFull, setShowFull] = useState<Record<string, boolean>>({})
 
   useEffect(() => { fetchDwd().then(setDwd) }, [])
 
@@ -475,6 +476,34 @@ const DelegationStep: React.FC = () => {
                 )}
               </Box>
             )}
+            {(() => {
+              const full = t.side === 'source' ? dwd.migrate_source_full : dwd.migrate_target_full
+              if (!full || !full.length) return null
+              const open = !!showFull[t.side]
+              const line = full.join(',')
+              return (
+                <Box sx={{ mt: 1 }}>
+                  <Button
+                    size="small"
+                    onClick={() => setShowFull((prev) => ({ ...prev, [t.side]: !prev[t.side] }))}
+                  >
+                    {open ? 'Hide' : 'Show'} MIGRATE {t.side.toUpperCase()} full key
+                    ({full.length} scopes, every feature toggle, paste once)
+                  </Button>
+                  {open && (
+                    <Box
+                      component="pre"
+                      sx={{ fontSize: 11, p: 1, mt: 0.5, bgcolor: 'action.hover',
+                           borderRadius: 1, overflowX: 'auto', cursor: 'pointer' }}
+                      onClick={() => copy(line)}
+                      title="Click to copy"
+                    >
+                      {line}
+                    </Box>
+                  )}
+                </Box>
+              )
+            })()}
           </Box>
         )
       })}

@@ -94,7 +94,11 @@ def assert_sandbox(settings: Settings, confirm_domain: str) -> None:
     print(f"Sandbox guard passed for {domain} (target).")
 
 
-def reset_one(settings: Settings, auth: AuthManager, user: str) -> dict:
+ALL_SERVICES = ("drive", "gmail", "calendar", "chat")
+
+
+def reset_one(settings: Settings, auth: AuthManager, user: str,
+              services: tuple[str, ...] = ALL_SERVICES) -> dict:
     seed = _load_seeder()
 
     local = user.split("@")[0]
@@ -104,14 +108,17 @@ def reset_one(settings: Settings, auth: AuthManager, user: str) -> dict:
         ("gmail", seed.reset_gmail, auth.target_gmail),
         ("calendar", seed.reset_calendar, auth.target_calendar),
     ):
+        if key not in services:
+            continue
         try:
             out[key] = fn(svc(user), settings)
         except Exception as exc:  # noqa: BLE001 - one service must not lose the rest
             print(f"    ! {user} {key}: {str(exc)[:90]}")
-    try:
-        out["chat"] = seed.reset_chat(auth.target_chat(user), settings, local)
-    except Exception as exc:  # noqa: BLE001 - Chat is frequently switched off
-        print(f"    ! {user} chat: {str(exc)[:90]}")
+    if "chat" in services:
+        try:
+            out["chat"] = seed.reset_chat(auth.target_chat(user), settings, local)
+        except Exception as exc:  # noqa: BLE001 - Chat is frequently switched off
+            print(f"    ! {user} chat: {str(exc)[:90]}")
     return out
 
 
@@ -121,7 +128,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--yes", action="store_true",
                     help="skip the prompt; --confirm-domain is already a typed match")
     ap.add_argument("--workers", type=int, default=0)
+    ap.add_argument("--services", default=",".join(ALL_SERVICES),
+                    help="comma-separated subset of drive,gmail,calendar,chat -- "
+                         "e.g. --services drive to reset only Drive and leave "
+                         "already-migrated Gmail/Calendar/Chat data untouched")
     args = ap.parse_args(argv)
+    services = tuple(s.strip() for s in args.services.split(",") if s.strip())
+    unknown = set(services) - set(ALL_SERVICES)
+    if unknown:
+        sys.exit(f"REFUSING: unknown service(s) {sorted(unknown)}; "
+                 f"choose from {ALL_SERVICES}")
 
     settings = Settings()
     assert_sandbox(settings, args.confirm_domain)
@@ -142,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
         print("identity_map is empty — nothing to reset.")
         return 1
 
-    print(f"About to DELETE the seeded corpus for {len(users)} user(s) in "
+    print(f"About to DELETE {', '.join(services)} for {len(users)} user(s) in "
           f"{settings.target_domain}:")
     for u in users:
         print(f"    {u}")
@@ -153,7 +169,7 @@ def main(argv: list[str] | None = None) -> int:
 
     totals = {"drive": 0, "gmail": 0, "calendar": 0, "chat": 0}
     with futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
-        for r in pool.map(lambda u: reset_one(settings, auth, u), users):
+        for r in pool.map(lambda u: reset_one(settings, auth, u, services), users):
             print(f"  {r['user']}: {r['drive']} drive root(s), {r['gmail']} mail, "
                   f"{r['calendar']} calendar, {r['chat']} chat")
             for k in totals:

@@ -160,7 +160,22 @@ def audit_user(auth: AuthManager, db: MigrationDB, settings: Settings,
             email = (p.get("emailAddress") or "").lower()
             if p.get("type") in ("user", "group") and email and not translate(email):
                 unmapped.append(email)
-                continue
+                # drive_engine._sync_acls only ever SKIPPED_UNMAPPED_IDENTITY
+                # (drops the grant) for a *source-domain* identity with no
+                # identity_map row -- that grant genuinely cannot exist on
+                # the target, so it is correctly excluded from `want` below.
+                # Anything else (an external address, confirmed live:
+                # aryan@nestnepal.com.np, deliberately seeded onto every
+                # file) is preserved verbatim instead, and _grant_key()'s own
+                # fallback (`translate(email) or email`) already produces a
+                # key that matches the target's grant for exactly that
+                # reason -- so it must still enter `want`, or every
+                # correctly-preserved external share reads as a false EXTRA.
+                # This was live: 5,127 of them, all one seeded address, all
+                # present and correct on the target, all reported as
+                # over-sharing that was never real.
+                if email.split("@")[-1] == src_dom.lower():
+                    continue
             k = key(p)
             if k:
                 want.add(k)
@@ -213,8 +228,18 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\n{'=' * 78}\n PER-FILE SHARE ACCESS AUDIT — {len(rows)} user(s)\n{'=' * 78}")
     totals: dict[str, int] = defaultdict(int)
     results = []
+    failed_users = []
     for r in rows:
-        res = audit_user(auth, db, settings, r["source_email"], r["target_email"])
+        # One account with a dead/suspended session (confirmed live: two
+        # such accounts sit in every identity_map here) must not abort the
+        # audit for every other user -- migrate_user() in main.py already
+        # isolates failures the same way, per user, for the same reason.
+        try:
+            res = audit_user(auth, db, settings, r["source_email"], r["target_email"])
+        except Exception as exc:  # noqa: BLE001
+            failed_users.append(r["source_email"])
+            print(f"\n  [{r['source_email'].split('@')[0]}]  AUDIT FAILED: {exc}")
+            continue
         results.append(res)
         for k, v in res.items():
             if isinstance(v, int):
@@ -252,15 +277,22 @@ def main(argv: list[str] | None = None) -> int:
     if totals["unmapped_grantees"]:
         print(f"  {totals['unmapped_grantees']} grantee(s) unmapped; provision "
               f"those accounts and re-run syncacls")
+    if failed_users:
+        print(f"  {len(failed_users)} user(s) could not be audited at all: "
+              f"{', '.join(failed_users)}")
     print("=" * 78)
 
     if args.json:
         with open(args.json, "w") as fh:
-            json.dump({"totals": dict(totals), "users": results}, fh, indent=2)
+            json.dump({"totals": dict(totals), "users": results,
+                       "failed_users": failed_users}, fh, indent=2)
         print(f"  full detail written to {args.json}")
 
     # Extra grants are as serious as missing ones: sharing more widely than the
-    # source did is a disclosure, not a rounding error.
+    # source did is a disclosure, not a rounding error. A user this could not
+    # even reach (dead account, expired session) is reported above but does
+    # not itself fail the run -- that account was already excluded from
+    # totals, so it cannot silently pass either.
     return 1 if (totals["missing_grants"] or totals["extra_grants"]
                  or totals["missing_files"]) else 0
 

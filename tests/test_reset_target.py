@@ -85,6 +85,77 @@ class TestItReusesTheSeedersReset:
         assert src.count("except Exception") >= 2
 
 
+class TestSelectiveServiceReset:
+    """
+    Before --services existed, reset_target.py always wiped all four
+    services together. That is wrong the moment only one of them needs a
+    redo -- e.g. comparing Drive transfer modes after Gmail/Calendar/Chat
+    already migrated successfully. Wiping everything to retest Drive would
+    have destroyed real, already-correct data for no reason.
+    """
+
+    def test_default_resets_every_service(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(reset_target, "_load_seeder", lambda: _fake_seeder(calls))
+        out = reset_target.reset_one(settings(), _FakeAuth(), "a@a.example.com")
+        assert calls == ["drive", "gmail", "calendar", "chat"]
+        assert out["drive"] == out["gmail"] == out["calendar"] == out["chat"] == 1
+
+    def test_services_drive_only_touches_nothing_else(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(reset_target, "_load_seeder", lambda: _fake_seeder(calls))
+        out = reset_target.reset_one(settings(), _FakeAuth(), "a@a.example.com",
+                                     services=("drive",))
+        assert calls == ["drive"]
+        assert out["drive"] == 1
+        assert out["gmail"] == out["calendar"] == out["chat"] == 0
+
+    def test_unknown_service_name_is_refused_at_the_cli(self):
+        with pytest.raises(SystemExit, match="unknown service"):
+            reset_target.main(["--confirm-domain", "a.example.com",
+                              "--services", "drive,carrier-pigeon"])
+
+    def test_services_argument_defaults_to_all_four_in_help(self):
+        """The flag exists to narrow scope, not to require it on every call
+        -- an operator who never heard of --services must get today's
+        full-wipe behavior unchanged."""
+        assert reset_target.ALL_SERVICES == ("drive", "gmail", "calendar", "chat")
+
+
+class _FakeAuth:
+    def target_drive(self, user):
+        return ("drive", user)
+
+    def target_gmail(self, user):
+        return ("gmail", user)
+
+    def target_calendar(self, user):
+        return ("calendar", user)
+
+    def target_chat(self, user):
+        return ("chat", user)
+
+
+def _fake_seeder(calls: list):
+    class _Seed:
+        def reset_drive(self, svc, settings):
+            calls.append("drive")
+            return 1
+
+        def reset_gmail(self, svc, settings):
+            calls.append("gmail")
+            return 1
+
+        def reset_calendar(self, svc, settings):
+            calls.append("calendar")
+            return 1
+
+        def reset_chat(self, svc, settings, local):
+            calls.append("chat")
+            return 1
+    return _Seed()
+
+
 class TestItDoesNotShadowTheRealVerify:
     """
     data-generator/ holds its own verify.py. Putting that directory on

@@ -19,13 +19,23 @@ import {
   Select,
   MenuItem,
   Grid,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  Chip,
 } from '@mui/material'
 import {
   Settings as SettingsIcon, Save as SaveIcon, Refresh as RefreshIcon,
   Security as SecurityIcon, Dns as DeployIcon,
 } from '@mui/icons-material'
 import { useMigrationStore } from '@/store'
-import { fetchConfig, saveDeployConfig, runDeploy, DeployFields } from '@/api/client'
+import {
+  fetchConfig, saveDeployConfig, runDeploy, DeployFields,
+  fetchDeployHistory, DeployHistoryEntry,
+} from '@/api/client'
 import JobProgress from '@/components/JobProgress'
 
 const Settings: React.FC = () => {
@@ -137,6 +147,8 @@ const DeployCard: React.FC = () => {
   const [err, setErr] = useState<string | null>(null)
   const [jobActive, setJobActive] = useState(false)
   const [jobRunning, setJobRunning] = useState(false)
+  const [history, setHistory] = useState<DeployHistoryEntry[]>([])
+  const wasRunning = React.useRef(false)
 
   useEffect(() => {
     fetchConfig().then((c) => {
@@ -147,7 +159,16 @@ const DeployCard: React.FC = () => {
       }
       setLoaded(true)
     })
+    fetchDeployHistory().then(setHistory)
   }, [])
+
+  // A running->stopped edge means the detached deploy just called
+  // Job.start()'s on_finish callback server-side and wrote its rc --
+  // refetch so the "in progress" row picks up the real result.
+  useEffect(() => {
+    if (wasRunning.current && !jobRunning) fetchDeployHistory().then(setHistory)
+    wasRunning.current = jobRunning
+  }, [jobRunning])
 
   const save = async () => {
     setErr(null); setSaveMsg(null)
@@ -235,8 +256,61 @@ const DeployCard: React.FC = () => {
         {saveMsg && <Alert severity="success" sx={{ mt: 2 }}>{saveMsg}</Alert>}
         {err && <Alert severity="error" sx={{ mt: 2 }}>{err}</Alert>}
         <JobProgress active={jobActive} expectedName="deploy" onRunningChange={setJobRunning} />
+        <DeployHistoryTable history={history} />
       </CardContent>
     </Card>
+  )
+}
+
+/**
+ * Every past /api/deploy call, most recent first -- previously the only
+ * answer to "did the last deploy actually work, and what commit is running
+ * on that VPS right now" was SSHing in and checking by hand.
+ */
+const DeployHistoryTable: React.FC<{ history: DeployHistoryEntry[] }> = ({ history }) => {
+  if (!history.length) {
+    return (
+      <Typography variant="body2" color="text.secondary" sx={{ mt: 3 }}>
+        No deploys recorded yet in this checkout.
+      </Typography>
+    )
+  }
+  return (
+    <Box sx={{ mt: 3 }}>
+      <Typography variant="subtitle2" fontWeight={600} sx={{ mb: 1 }}>Deploy history</Typography>
+      <TableContainer sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 1 }}>
+        <Table size="small">
+          <TableHead>
+            <TableRow>
+              <TableCell>Started</TableCell>
+              <TableCell>Host</TableCell>
+              <TableCell>Commit</TableCell>
+              <TableCell>Creds</TableCell>
+              <TableCell>Result</TableCell>
+            </TableRow>
+          </TableHead>
+          <TableBody>
+            {history.map((h) => (
+              <TableRow key={h.id}>
+                <TableCell>{new Date(h.startedAt).toLocaleString()}</TableCell>
+                <TableCell>{h.host}</TableCell>
+                <TableCell sx={{ fontFamily: 'ui-monospace, monospace' }}>
+                  {h.commit || '(no git history)'}
+                </TableCell>
+                <TableCell>{h.includeCredentials ? 'yes' : 'no'}</TableCell>
+                <TableCell>
+                  {h.rc === null
+                    ? <Chip size="small" label={h.finishedAt ? 'never started' : 'in progress'}
+                           color={h.finishedAt ? 'error' : 'info'} variant="outlined" />
+                    : <Chip size="small" label={h.rc === 0 ? 'ok' : `exit ${h.rc}`}
+                           color={h.rc === 0 ? 'success' : 'error'} variant="outlined" />}
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </TableContainer>
+    </Box>
   )
 }
 

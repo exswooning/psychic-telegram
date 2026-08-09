@@ -182,6 +182,9 @@ def restore_one(drive, db: MigrationDB, row: dict) -> tuple[bool, str]:
     for p in json.loads(saved["permissions"]):
         if p.get("type") == "anyone":
             continue                      # was already public before we started
+        if p.get("role") == "owner":
+            continue                      # cannot be re-created via the API and
+                                          # the owner never changes during the flip
         body = {"type": p["type"], "role": p["role"]}
         if p.get("emailAddress"):
             body["emailAddress"] = p["emailAddress"]
@@ -205,8 +208,9 @@ def restore_one(drive, db: MigrationDB, row: dict) -> tuple[bool, str]:
                 fileId=file_id, permissionId=row["public_perm"],
                 supportsAllDrives=True).execute()
         except Exception as exc:  # noqa: BLE001
-            mark_restored(db, row["source_user"], file_id, False, str(exc)[:80])
-            return False, f"public grant still present: {exc}"
+            if "not found" not in str(exc).lower():
+                mark_restored(db, row["source_user"], file_id, False, str(exc)[:80])
+                return False, f"public grant still present: {exc}"
 
     mark_restored(db, row["source_user"], file_id, True)
     return True, "restored"

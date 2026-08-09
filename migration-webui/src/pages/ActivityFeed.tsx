@@ -16,6 +16,7 @@ import {
   IconButton,
   Tooltip,
   Alert,
+  LinearProgress,
 } from '@mui/material'
 import {
   Search as SearchIcon,
@@ -44,6 +45,14 @@ const ActivityFeed: React.FC = () => {
     const matchesFilter = filter === 'all' || a.status === filter
     return matchesSearch && matchesFilter
   })
+
+  const formatEta = (seconds: number): string => {
+    if (seconds < 60) return `${seconds}s left`
+    const m = Math.round(seconds / 60)
+    if (m < 60) return `${m}m left`
+    const h = Math.floor(m / 60)
+    return `${h}h ${m % 60}m left`
+  }
 
   const statusIcon = (status: string) => {
     switch (status) {
@@ -115,6 +124,25 @@ const ActivityFeed: React.FC = () => {
                     <Box>
                       <Typography variant="caption" color="text.secondary">{activity.details}</Typography>
                       <Typography variant="caption" color="text.secondary" display="block">{new Date(activity.timestamp).toLocaleString()}</Typography>
+                      {activity.progressPct != null && (
+                        <Box sx={{ mt: 0.75, maxWidth: 320 }}>
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                            <LinearProgress
+                              variant="determinate"
+                              value={activity.progressPct}
+                              sx={{ flex: 1, height: 6, borderRadius: 3 }}
+                            />
+                            <Typography variant="caption" color="text.secondary" sx={{ minWidth: 32, textAlign: 'right' }}>
+                              {activity.progressPct}%
+                            </Typography>
+                          </Box>
+                          {activity.etaSeconds != null && (
+                            <Typography variant="caption" color="text.secondary">
+                              {formatEta(activity.etaSeconds)}
+                            </Typography>
+                          )}
+                        </Box>
+                      )}
                     </Box>
                   }
                 />

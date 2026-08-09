@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 
 import pytest
 
@@ -274,6 +275,29 @@ class TestVerificationPayload:
         out = webui_spa.verification_payload(reader, Settings())
         share = next(r for r in out if r["type"] == "Share access")
         assert share["status"] == "not_started"
+        assert share["ageSeconds"] is None
+
+    def test_share_access_reports_its_own_staleness(
+            self, ledger, reader, tmp_path, monkeypatch):
+        """acl_audit.py is a standalone script -- nothing during migrate or
+        delta ever rewrites acl_audit.json, so a 3-day-old file can sit next
+        to a migration that has been running for an hour with no way to
+        tell them apart except this. Confirmed live: a "79.4%" card was
+        mistaken for current progress when the file was actually 3 days
+        old."""
+        import os
+        from config import Settings
+
+        audit_file = tmp_path / "acl_audit.json"
+        audit_file.write_text(json.dumps(
+            {"totals": {"grants_source": 500, "grants_matched": 397}}))
+        old = time.time() - 3 * 86400
+        os.utime(audit_file, (old, old))
+        monkeypatch.setattr(webui_spa, "__file__", str(tmp_path / "webui_spa.py"))
+
+        out = webui_spa.verification_payload(reader, Settings())
+        share = next(r for r in out if r["type"] == "Share access")
+        assert share["ageSeconds"] == pytest.approx(3 * 86400, abs=5)
 
 
 class TestReportPayload:

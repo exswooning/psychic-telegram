@@ -27,6 +27,17 @@ const Verification: React.FC = () => {
     ? Math.round(verification.reduce((sum, v) => sum + v.confidence, 0) / verification.length)
     : 0
 
+  const formatAge = (seconds: number): string => {
+    if (seconds < 3600) return `${Math.round(seconds / 60)}m old`
+    if (seconds < 86400) return `${Math.round(seconds / 3600)}h old`
+    return `${Math.round(seconds / 86400)}d old`
+  }
+  // acl_audit.py is a standalone script that never runs automatically during
+  // migrate/delta, so this row's numbers can describe a run from days ago
+  // rather than what is happening right now -- flagged past 10 minutes so a
+  // stale snapshot is never mistaken for live progress.
+  const isStale = (seconds?: number | null) => seconds != null && seconds > 600
+
   const statusIcon = (status: string) => {
     switch (status) {
       case 'verified': return <VerifiedIcon color="success" />
@@ -71,7 +82,12 @@ const Verification: React.FC = () => {
                   <Typography variant="caption" color="text.secondary">Source: {item.sourceCount}</Typography>
                   <Typography variant="caption" color="text.secondary">Target: {item.targetCount}</Typography>
                 </Box>
-                <Chip label={statusLabel(item.status)} size="small" color={statusColor(item.status) as any} variant="outlined" sx={{ mt: 1 }} />
+                <Box sx={{ display: 'flex', gap: 0.5, mt: 1, flexWrap: 'wrap' }}>
+                  <Chip label={statusLabel(item.status)} size="small" color={statusColor(item.status) as any} variant="outlined" />
+                  {isStale(item.ageSeconds) && (
+                    <Chip label={`stale · ${formatAge(item.ageSeconds!)}`} size="small" color="warning" variant="outlined" />
+                  )}
+                </Box>
               </CardContent>
             </Card>
           </Grid>
@@ -102,6 +118,11 @@ const Verification: React.FC = () => {
                     <TableCell>
                       <LinearProgress variant="determinate" value={item.confidence} sx={{ height: 6, borderRadius: 3, width: 100 }} />
                       <Typography variant="caption">{item.confidence}%</Typography>
+                      {isStale(item.ageSeconds) && (
+                        <Typography variant="caption" color="warning.main" display="block">
+                          stale snapshot, {formatAge(item.ageSeconds!)} · not live
+                        </Typography>
+                      )}
                     </TableCell>
                   </TableRow>
                 ))}

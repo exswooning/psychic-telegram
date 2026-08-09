@@ -358,18 +358,27 @@ def verification_payload(conn: sqlite3.Connection, settings) -> list[dict]:
                 data = json.load(fh)
             tot = data.get("totals", {})
             src, matched = tot.get("grants_source", 0), tot.get("grants_matched", 0)
+            # acl_audit.py is a standalone script -- nothing during migrate
+            # or delta ever rewrites this file, so its numbers can silently
+            # describe a run from days ago rather than what is happening
+            # now. Surfaced as an age rather than hidden, so a stale 79%
+            # cannot be mistaken for a live one (the exact confusion this
+            # caused live: the file was 3 days old mid-migration).
+            age = max(0, round(time.time() - os.path.getmtime(audit_path)))
             out.append({
                 "type": "Share access",
                 "status": "verified" if src and matched >= src else
                          "mismatch" if src else "not_started",
                 "sourceCount": src, "targetCount": matched,
                 "confidence": round(matched / src * 100, 1) if src else 0,
+                "ageSeconds": age,
             })
         except (OSError, ValueError):
             pass
     else:
         out.append({"type": "Share access", "status": "not_started",
-                    "sourceCount": 0, "targetCount": 0, "confidence": 0})
+                    "sourceCount": 0, "targetCount": 0, "confidence": 0,
+                    "ageSeconds": None})
 
     attempted_anything = bool(drive_done or mail_done)
     out.append(row("ACL retries clean",

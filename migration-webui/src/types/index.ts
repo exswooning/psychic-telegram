@@ -87,6 +87,11 @@ export interface ActivityEvent {
   action: string
   status: MigrationStatus
   details?: string
+  // Only ever set on the one synthetic "System" row for the live background
+  // job (see webui.py's _job_activity_entry()) -- null for every real
+  // ledger-backed row, and null there too once the job stops running.
+  progressPct?: number | null
+  etaSeconds?: number | null
 }
 
 export interface VerificationResult {
@@ -95,6 +100,12 @@ export interface VerificationResult {
   sourceCount: number
   targetCount: number
   confidence: number
+  // Only ever set on the "Share access" row: acl_audit.json is written by a
+  // standalone script, never automatically during migrate/delta, so its
+  // numbers can be stale relative to what is actually running right now.
+  // Seconds since that file was last written; null for every ledger-backed
+  // row, which is always live because it reads migration.db directly.
+  ageSeconds?: number | null
 }
 
 export interface FinalReport {

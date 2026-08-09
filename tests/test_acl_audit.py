@@ -10,6 +10,8 @@ reconciles perfectly. These pin the checks that make the difference.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 import acl_audit
@@ -156,20 +158,60 @@ class TestItDoesNotManufactureFindings:
         assert r["missing_grants"] == 0 and r["extra_grants"] == 0
         assert r["exact"] == 1
 
-    def test_an_unmapped_grantee_is_not_counted_as_loss(self, wired):
-        """No target account exists for them, so this is a provisioning gap.
-        Calling it data loss would send someone to re-run a migration that
-        cannot fix it."""
+    def test_an_unprovisioned_source_domain_grantee_is_not_counted_as_loss(
+            self, wired):
+        """A source-domain identity with no identity_map row is one
+        drive_engine._sync_acls itself drops (SKIPPED_UNMAPPED_IDENTITY) --
+        the grant genuinely cannot exist on the target, so this is a
+        provisioning gap, not data loss. Calling it a loss would send
+        someone to re-run a migration that cannot fix it."""
         auth, db, settings = wired
         _pair(auth, db,
               [{"type": "user", "role": "reader",
-                "emailAddress": "contractor@outside.com"}],
+                "emailAddress": f"contractor@{settings.source_domain}"}],
               [])
 
         r = _run(auth, db, settings)
 
         assert r["unmapped_grantees"] == 1
         assert r["missing_grants"] == 0
+
+    def test_a_preserved_external_grantee_is_matched_not_flagged_extra(
+            self, wired):
+        """An address outside the source domain is never dropped by
+        drive_engine._sync_acls -- it is preserved verbatim on the target
+        regardless of identity_map, since sharing with an external address
+        needs no target-tenant account at all. Confirmed live: acl_audit.py
+        used to exclude these from `want` entirely (treating "no
+        identity_map row" as equivalent to "dropped"), so every one of
+        5,127 correctly-preserved external grants -- all one deliberately
+        seeded address -- read as the target over-sharing when nothing was
+        actually wrong."""
+        auth, db, settings = wired
+        grant = {"type": "user", "role": "reader",
+                 "emailAddress": "aryan@nestnepal.com.np"}
+        _pair(auth, db, [grant], [grant])
+
+        r = _run(auth, db, settings)
+
+        assert r["unmapped_grantees"] == 1
+        assert r["missing_grants"] == 0
+        assert r["extra_grants"] == 0
+        assert r["exact"] == 1
+
+    def test_a_dropped_external_grantee_is_reported_as_missing(self, wired):
+        """The inverse of the case above: if an external grant genuinely did
+        not make it to the target, that is a real loss and must still be
+        caught, not swallowed by the same fix that stops false positives."""
+        auth, db, settings = wired
+        _pair(auth, db,
+              [{"type": "user", "role": "reader",
+                "emailAddress": "aryan@nestnepal.com.np"}],
+              [])
+
+        r = _run(auth, db, settings)
+
+        assert r["missing_grants"] == 1
 
     def test_files_are_paired_through_the_ledger_not_by_name(self, wired):
         """Two files can share a name in different folders; matching on it
@@ -209,3 +251,50 @@ class TestItDoesNotManufactureFindings:
         r = _run(auth, db, settings)
 
         assert r["missing_files"] == 1
+
+
+class TestMainIsolatesPerUserFailures:
+    """
+    Confirmed live: a dead/suspended source account (session invalid, a 401
+    on every call) made audit_user() raise, and with no per-user try/except
+    in main()'s loop that took down the *entire* audit -- every other
+    already-migrated user's real ACL numbers were lost along with it, and
+    acl_audit.json was never written at all. migrate_user() in main.py
+    already isolates failures the same way, per user; this is that same
+    fix for the audit script.
+    """
+
+    def test_one_dead_account_does_not_abort_the_whole_audit(
+            self, wired, monkeypatch, capsys, tmp_path):
+        auth, db, settings = wired
+        real_audit_user = acl_audit.audit_user
+
+        def flaky(auth_, db_, settings_, source_user, target_user):
+            if source_user == SRC_USER:
+                raise Exception("HTTP 401 (authError): Active session is invalid")
+            return real_audit_user(auth_, db_, settings_, source_user, target_user)
+
+        monkeypatch.setattr(acl_audit, "audit_user", flaky)
+        monkeypatch.setattr(acl_audit, "Settings", lambda: settings)
+        monkeypatch.setattr(acl_audit, "MigrationDB", lambda *_a, **_k: db)
+        monkeypatch.setattr(acl_audit, "AuthManager", lambda *_a, **_k: auth)
+
+        out_json = tmp_path / "acl_audit.json"
+        rc = acl_audit.main(["--json", str(out_json)])
+
+        printed = capsys.readouterr().out
+        assert SRC_USER.split("@")[0] in printed
+        assert "AUDIT FAILED" in printed
+        # A user whose account is dead is reported, not silently dropped --
+        # but it must not itself flip the run to a failing exit code, since
+        # that would be indistinguishable from a real ACL loss.
+        assert rc == 0
+
+        data = json.loads(out_json.read_text())
+        assert SRC_USER in data["failed_users"]
+        # bob and carol (from the `wired` fixture) still got audited fine --
+        # they have no files paired in this test, so their contribution to
+        # totals is legitimately all zero, not absent because SRC_USER's
+        # exception ate the whole run.
+        assert all(v == 0 for v in data["totals"].values())
+        assert len(data["users"]) == 2  # bob, carol -- not SRC_USER
