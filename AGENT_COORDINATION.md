@@ -1396,3 +1396,48 @@ discovery batchPath) is on the VPS; the write limiter (`d46fbbc`) is in
 - Fallback: if the 429 warn fires, next run drops to W=2.
 - I will not modify code during this run (fidelity needs identical code), and
   I will not touch the source tenant.
+
+---
+
+## 2026-08-09 17:50 UTC — DeepSeek — B5 LAUNCHED AND ABORTED: target tenant has only 1 account left. BLOCKER.
+
+I launched B5 at 17:34 per the intent above. It failed within seconds for
+every previously-live user with `RefreshError: invalid_grant: Invalid email
+or User ID` on the very first target call (`tgt.files().get(fileId="root")`).
+Only `info` (the target admin) ran. I killed the run immediately.
+
+**Root cause confirmed — this is not a code bug and not caused by my launch:**
+
+- Directory API `users.list(domain=a.anupam-poudel.com.np)` returns **exactly
+  one account: `info@a`**. `alice@a`, `bob@a`, `carol@a`, `dave@a`, `erin@a`,
+  `1@a`, `3@a`, `a@a`, `c@a`, `e@a` all return HTTP 404 on `users.get`.
+- Impersonation probe (2 min after abort): source `alice@c` OK, target
+  `info@a` OK, target `alice@a` invalid_grant. So the source tenant is
+  untouched and the VPS key/config is fine — the TARGET ACCOUNTS ARE GONE.
+- `reset_target.py` only deletes `MIGRATION-TEST` roots (seeder
+  `reset_drive`); it cannot delete user accounts. My launch did not do this.
+- B4 Trial A (which completed 15:52 today) migrated 12,309 files *into* these
+  target accounts, so they existed at 15:52. They vanished between 15:52 and
+  my 17:34 launch. No operator_actions_log row, no evidence on the VPS of a
+  deletion path. This looks like an external/admin-console deletion of the
+  target user accounts, or a tenant-scope change, NOT something this repo
+  did.
+
+**State right now:**
+- B5 run killed (benchmark_run + main.py migrate, both dead).
+- Target tenant `a.anupam-poudel.com.np` contains only `info@a`. Nothing can
+  be migrated until the target accounts are re-provisioned
+  (`provision.py`/`provision-users` — creates only, never deletes) or restored.
+- Source tenant and `migration.db` untouched by the aborted run (the only
+  new audit rows are 11 `user` FAILED markers + the info staging drive).
+- Wipe did not run yet? It DID run (ledger was reset, `MIGRATION-TEST` roots
+  gone) — but with zero target accounts, "wiping" deleted nothing. The ledger
+  has been reset, so a future run will re-copy cleanly once accounts exist.
+
+**BLOCKED — need a human decision before anything else runs:**
+1. Are the target accounts supposed to exist? Were they deleted deliberately?
+2. Re-provision the 10 missing target accounts (`provision-users --tenant
+   target`), or restore from a backup, before any further run.
+3. Confirm the target tenant is still the intended sandbox.
+
+I will not re-launch B5 until accounts exist. No code changes were made.
