@@ -468,3 +468,25 @@ whatever else is queued.
 Will post Phase B's final numbers the moment rc lands (background
 monitor re-armed after a session gap, hourly).
 
+
+---
+
+## 2026-08-09 08:30 UTC — DeepSeek — Phase B (link_flip) COMPLETE + verdict: link_flip LOSES on a verified security/fidelity leak
+
+**Phase B (link_flip) final: rc 0, elapsed 20,641s, 12,309 files, 0 file failures, 9/9 healthy users DONE.** All per-user acl_failed remain the e@a environmental constant (21-23/user). Full numbers in /root/phaseB_linkflip_job.json; audit in /root/phaseB_acl_audit.json.
+
+**NEW DEFECT — verified live, decisive for the A/B:** `acl_audit` reports **93 EXTRA grants, all `anyone:reader`, on the TARGET files** (Phase A had 0 extra). Live check confirmed: `filler-0530.bin` on target has `anyone:reader` while the source does not. Root cause: `link_flip`'s temporary `anyoneWithLink` on the SOURCE is inherited by the `files.copy()` result, and `restore_one()` only strips the public grant from the SOURCE — it never touches the copied target file. So **93 files on the live target tenant are publicly link-shareable**, spread across all 8 real users (1@:12, bob:15, dave:14, alice:11, a:11, carol:11, c:10, erin:9).
+
+**Verdict: server_side wins.** Phase A: 0 file failures, 0 extra grants, 100% real ACL fidelity, 13,284s. Phase B: 0 file failures but 93 public target files (security leak), 20,641s (1.55x slower). link_flip is both slower AND leaks public access. Per the coordination plan, I will **land the target in server_side mode** (it's already server_side-correct from Phase A for ACLs; the link_flip run was always going to be re-run in the winner's mode per the original plan).
+
+**Cleanup needed NOW (security):** remove `anyone` permission from the 93 leaked target files (per-file, via target admin, tracking in a script). I'll write + run it, then re-audit to confirm 0 extra grants.
+
+**Performance takeaways for the agreed improvements:** Phase B API timing: 69,988 calls, 3.39 req/s (vs Phase A 5.25 req/s), p50 552ms/p95 1616ms/p99 3289ms, 0 retries. The extra public-grant create + per-file restore + the slower effective rate (link_flip does strictly more per-file work) confirm Kimi's structural analysis: link_flip is more API calls per file. The bottleneck is serial per-call latency — batching (Kimi #1 ACL batching, #3 MD5 relaxation for server_side, #7 fields=) and cross-user concurrency remain the right speedups, with the per-user write rate capped per Claude's correction.
+
+**Agreed improvements to implement next (per user's request):**
+1. Land target in server_side (already the ACL-correct state; verify + re-audit)
+2. Batch ACL permission creation in drive_engine._sync_acls() (BatchHttpRequest)
+3. Relax per-file MD5 verification for server_side (copy() preserves md5 by contract) — now safe, the A/B is over
+4. Aggressive fields= on the hot-path calls
+5. (SQLite WAL already on) — add connection reuse in auth.py
+6. Groq-API-key + active-log benchmarking/error panel in the webui (user's explicit new request)
