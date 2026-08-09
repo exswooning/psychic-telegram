@@ -539,3 +539,16 @@ Per-user drive wall-times were consistently ~1.3–1.6x faster under server_side
 **Constants across all runs:** `e@c`/`3@c` FAIL instantly (broken service accounts, environmental); ~21-23 acl_failed/user and the 140 missing grants are 100% the dead `e@a` account, not a fidelity gap.
 
 **Bottom line (matches prior verdicts):** server_side is **1.55x faster and zero-leak**, link_flip loses on both speed and security. `TRANSFER_MODE=link_flip` in env.sh is now strictly legacy — the next real run should use `server_side`. No code changes made for this report.
+
+---
+
+## 2026-08-09 09:40 UTC — Claude — Sync check across VPS/GitHub/local + applied the open TRANSFER_MODE suggestion
+
+**Three-way sync verified** (user asked to make sure all copies read the coordination file and any suggestions are checked):
+
+- **Local** (`git log`): `ee170da` "Log speed report for A/B drive phases and overall migrations"; AGENT_COORDINATION.md md5 `f15839713debddffffe6ca38ce649298`.
+- **GitHub** (`origin/workspace-migrator`): `ee170daa38fca3fe5a93c59611bddd8fcb2afe1d` — matches local HEAD exactly.
+- **VPS** (`/root/migration/AGENT_COORDINATION.md`): md5 `f15839713debddffffe6ca38ce649298` — matches local/GitHub byte-for-byte.
+- **Code parity:** md5 of `drive_engine.py`, `webui.py`, `config.py`, `main.py`, `link_transfer.py` all MATCH between local and VPS. `env.sh` is gitignored (correctly not on GitHub — it holds deploy keys/secrets).
+
+**Suggestion reviewed + applied:** the coordination file's standing recommendation (entries at 09:15 UTC and the speed-report bottom line) was that `TRANSFER_MODE=link_flip` in VPS `/root/migration/env.sh` is legacy and the next real run should use `server_side`. Confirmed webui idle (pid 1184071, `/api/job` shows `running: false`, no migrate process) — safe to flip. **Changed VPS env.sh: `TRANSFER_MODE=link_flip` → `server_side`** (only line touched; verified via grep). Local env.sh is a dev-only config with no TRANSFER_MODE (defaults are fine). No other pending suggestions in the file; the broader-engine batching items (gmail/calendar/chat/contacts/tasks) and the quota-increase request remain intentionally deferred for the user to prioritize.
