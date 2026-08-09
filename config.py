@@ -337,11 +337,14 @@ class Settings:
     #                   org, then move out to the target user's My Drive.
     #                   Google moves the bytes; nothing touches this machine.
     #                   Needs the write Drive scope on the source.
-    # link_flip       : server_side, but each file is first published to
-    #                   "anyone with the link" and restored afterwards. For
-    #                   the cross-org cases server_side alone cannot read.
-    #                   NOT a default and should not become one: every file in
-    #                   flight is publicly reachable until it is restored.
+    # link_flip       : DEPRECATED, benchmark-only. server_side, but each file
+    #                   is first published to "anyone with the link" and
+    #                   restored afterwards. Lost the A/B decisively
+    #                   (2026-08-09): 1.55x slower AND leaked 93 target files
+    #                   as publicly link-shareable (the temporary source grant
+    #                   is inherited by files.copy and restore_one() only strips
+    #                   it from the source). Kept for regression/benchmark
+    #                   reproducibility; do not run on a live migration.
     #                   See link_transfer.py.
     transfer_mode: str = field(
         default_factory=lambda: os.getenv("TRANSFER_MODE", "download_upload")

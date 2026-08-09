@@ -69,6 +69,23 @@ class FakeDrive:
         return {}
 
 
+class FailOnCreateDuplicate(FakeDrive):
+    """permissions.create errors because the grant already exists; that must
+    be treated as a no-op, not a restore failure."""
+
+    def create(self, **kw):
+        raise RuntimeError("Permission already has a writer (duplicate)")
+
+
+class _DeleteMissing(FakeDrive):
+    """permissions.delete of a public grant that is already gone is exactly
+    the outcome we want — the file is no longer exposed."""
+
+    def delete(self, **kw):
+        raise RuntimeError(
+            "File not found: the permission was removed on its own")
+
+
 PRIVATE = [
     {"id": "p1", "type": "user", "role": "writer", "emailAddress": "bob@c.com"},
     {"id": "p2", "type": "domain", "role": "reader", "domain": "c.com"},
@@ -168,6 +185,55 @@ class TestRestore:
             FakeDrive(PRIVATE), db,
             {"source_user": "a@c.com", "file_id": "nope", "public_perm": "x"})
         assert not ok and "no saved ACL" in note
+
+    def test_the_owner_role_is_never_recreated(self, db):
+        """Drive refuses `permissions.create` with role=owner -- 403. If the
+        saved ACL carries an owner grant we must skip it, not fail the whole
+        restore and leave the file public. The owner itself never changes
+        during the flip, so this is safe."""
+        with_owner = PRIVATE + [
+            {"id": "po", "type": "user", "role": "owner", "emailAddress": "a@c.com"},
+        ]
+        link_transfer.flip_to_public(FakeDrive(with_owner), db, "a@c.com",
+                                     {"id": "F1", "name": "Plan"})
+        row = link_transfer.outstanding(db)[0]
+
+        drive = FakeDrive(PRIVATE)   # flip did not touch the real ACL, only perms create
+        ok, _ = link_transfer.restore_one(drive, db, row)
+
+        assert ok
+        assert all(c.get("role") != "owner" for c in drive.created), (
+            "owner grant must be skipped, not re-created")
+        assert drive.deleted == ["created-perm"]
+
+    def test_a_duplicate_permission_is_not_a_restore_failure(self, db):
+        """Day-2 fix: the first call declared the whole restore failed when
+        Drive replied 'already has permission'. The grant is already present
+        -- that is the state we want."""
+        link_transfer.flip_to_public(FakeDrive(PRIVATE), db, "a@c.com",
+                                     {"id": "F1", "name": "Plan"})
+        row = link_transfer.outstanding(db)[0]
+
+        drive = FailOnCreateDuplicate(PRIVATE)
+        ok, _ = link_transfer.restore_one(drive, db, row)
+
+        assert ok
+        assert drive.deleted == ["created-perm"]
+        assert link_transfer.outstanding(db) == []
+
+    def test_a_missing_public_grant_is_not_a_restore_failure(self, db):
+        """If the public permission disappears on its own (owner removed it,
+        or Drive dropped it) the restore must still succeed -- the file is no
+        longer exposed, which is the invariant we actually care about."""
+        link_transfer.flip_to_public(FakeDrive(PRIVATE), db, "a@c.com",
+                                     {"id": "F1", "name": "Plan"})
+        row = link_transfer.outstanding(db)[0]
+
+        drive = _DeleteMissing(PRIVATE)
+        ok, _ = link_transfer.restore_one(drive, db, row)
+
+        assert ok
+        assert link_transfer.outstanding(db) == []
 
 
 class TestAlreadyPublicFiles:

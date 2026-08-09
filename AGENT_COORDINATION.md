@@ -756,3 +756,46 @@ this entry does, rather than assuming my last-known state is current.
 - Committed `48e0b05`, pushed to origin/workspace-migrator; `config.py`/`drive_engine.py`/tests scp'd to VPS (md5 MATCH). `MIGRATE_EXTERNAL_SHARES=true` added to VPS `env.sh`.
 
 **Deploy note for DeepSeek:** the running webui (pid 1184071) loaded env.sh at ITS startup, so the flag is NOT live for the next launch until webui restarts. **Do not restart webui while the B4 Trial A subprocess (pid 1197663) is running** — it would orphan/kill the job. Plan: at the Trial A→Trial B transition (no job running), restart webui so the next run picks up `MIGRATE_EXTERNAL_SHARES=true`; the new code is already on disk and will be loaded fresh by any new job.
+
+---
+
+## 2026-08-09 12:35 UTC — Claude — Options 1 & 2 complete (link_flip sunset + speed audit)
+
+**Option 1 (security fix + A/B verdict + deprecation):**
+- The owner-role skip, duplicate-grant-ok, and 404-as-success restore fixes were already in `link_transfer.py` and md5-matched VPS (verified).
+- **New regression tests locked the fixes in** (`tests/test_link_transfer.py`): owner role is never re-created (Drive 403s on `role=owner`, which used to fail the whole restore and leave the file public), a duplicate permission is a no-op not a restore failure, and a public grant that vanishes on its own is success not failure. Suite: **866 passed locally** (was 863).
+- `config.py` transfer_mode doc block now marks `link_flip` **DEPRECATED, benchmark-only**, citing the 08:30 verdict (1.55x slower AND leaked 93 target files as publicly link-shareable). A/B (20,641s vs 13,284s, 0 vs 93 extra ACLs) remains the standing decision: **server_side is final**.
+
+Split-level: link_flip is fully retired. `TRANSFER_MODE=link_flip` remains accepted for regression/benchmark reproducibility but is documented as never for a live migration.
+
+**Option 2 (speed audit):** verified every previously-agreed optimization is actually present and live in the repo:
+- `verify_server_side_md5` (config.py) — exists; default False (MD5 relaxed).
+- `fields=` trimming — on every `files().` / `permissions().` call in `drive_engine.py`.
+- ACL batching — `_create_permissions_chunk` + `BatchHttpRequest` (drive_engine.py:1020); WAL + synchronous=NORMAL + busy_timeout (db.py:179+); identity snapshot cache (db.py:296), id_mapping read-through resume cache (db.py:343).
+- Auth LRU service-cache (`_SERVICE_CACHE_MAX=12`, auth.py:159) + `cache_discovery=False`.
+- `user_workers`/`per_user_qps` auto-sized (config.py:287).
+
+**Two genuine gaps remain (item #4 folder-create batching and #5 audit/ledger-write batching from the ranked plan). DEFERRED ON PURPOSE:** the B4 Trial A/A/B comparison requires both trials to run identical engine code. Trial A is already mid-flight on the current code; editing `drive_engine.py`/`db.py` now would boots B with different code and invalidate the benchmark. They will be implemented straight after Trial B completes (see ARCHITECTURE_V2.md, which scopes a post-benchmark hardening pass).
+
+---
+
+## 2026-08-09 12:40 UTC — Claude — ARCHITECTURE_V2.md written (Option 3)
+
+Added `ARCHITECTURE_V2.md` — the greenfield design the user requested, scoped
+honestly against the established ceilings (3 writes/sec/account floor, ~2.7h
+aggregate for the current corpus; the 70-80% claim is explicitly re-bid to
+"not achievable").
+
+Contents: server-side-only engine (drops download_upload/link_flip), one
+engine skeleton per service, declarative YAML config, idempotency-by-
+construction (single ledger transaction per apply), a single `TenantPacer`
+for pacing+retry+429 degradation, the two deferred write-batching items
+(folder-create and ledger/audit) folded into one §5, WebSocket observability,
+and a porting horizon: the bits already known-good (identity cache, auth LRU,
+server_side copy path, tests/fakes.py) are carried, not rewritten.
+
+Explicitly marked: no effect on the running B4 Trial A (docs only).
+
+Files changed this session: `config.py` (link_flip deprecation), 
+`tests/test_link_transfer.py` (+3 regression tests), `AGENT_COORDINATION.md`,
+`ARCHITECTURE_V2.md` (new). Local suite **866 passed**.
