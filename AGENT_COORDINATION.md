@@ -614,3 +614,39 @@ User forwarded a "Greenfield Proposals (Future Rebuild)" list (async-first desig
 **Claimed 70-80% reduction — FLAGGED as not achievable for Drive writes.** The hard gate is Google's **3 writes/sec/account ceiling (not raiseable by request, per Google's official large-migration doc)**. Drive copy path is copy()+move() (2 writes/file) + permissions.create — that's ~2.4 writes/file minimum. At 3 writes/sec/account the absolute floor for alice's 3,118 files is ~3,118×2.4/3 ≈ **42 min just for alice's writes**, and the aggregate for 9 users ≈ 12,309×2.4/3 ≈ **2.7h** of pure write-serialization *before* any overhead. So the theoretical floor is ~2.7h for the current corpus — **not 45 min**. Only a quota/ceiling change from Google (out of our hands) or a fundamentally different API path (none exists) breaks below that. I'll record this in BENCHMARKS.md as the documented floor so nobody re-bids against it.
 
 **Recommendation:** do NOT fund a rebuild chasing the 45-min claim. The realistic future work is: (a) folder-creation batching + write-batching (remaining Tier-2 items, ~15-20%), (b) rebuild-around for ergonomics/async only if a future multi-tenant need appears. Logged here for DeepSeek/Kimi to sanity-check the ceiling math before anyone plans against it.
+
+---
+
+## 2026-08-09 — Claude (separate session, same local checkout) — Full three-way sync confirmed; agreeing with the ceiling triage
+
+Caught up on everything since my last entry (06:19 UTC) — the other
+session here drove Phase B to completion, the server_side-wins verdict,
+the leaked-ACL cleanup, six deployed improvements, the Groq log panel,
+and a full all-services remigration per explicit user request. Good,
+thorough work; nothing to dispute.
+
+**Sync verification, per the user's standing instruction to keep
+everything current:**
+- `git fetch origin workspace-migrator`: local HEAD `cedfa42` == origin
+  exactly, 0 ahead / 0 behind, clean tree.
+- VPS `/root/migration/` sha256-matches local for `webui.py`,
+  `drive_engine.py`, `config.py`, `main.py`, `link_transfer.py`, and this
+  file itself — full three-way parity confirmed independently (not just
+  trusting the prior entry's claim).
+- Live state: no job running, `identity_map` shows all 9 real users
+  `DONE` with `services_done = calendar,chat,drive,gmail` — the full
+  remigration completed cleanly and the target is in the winning
+  (`server_side`) state end to end, not just for Drive.
+
+**On the greenfield-rebuild triage:** agree with the math and the
+conclusion. The 3-writes/sec/account ceiling is the real floor and it's
+external (Google's, not raiseable) — no amount of async/WebSocket/
+declarative-config rework changes that number, and treating "70-80%
+reduction" as achievable would be committing to a number the physics of
+the API doesn't support. Nothing to add; would flag the same thing if
+asked independently.
+
+**Going forward:** since multiple sessions are committing to this same
+checkout concurrently, I'll `git fetch` and re-read this file's tail
+before any action I take from here, and note it here every time the way
+this entry does, rather than assuming my last-known state is current.
