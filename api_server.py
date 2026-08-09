@@ -1,0 +1,456 @@
+"""
+api_server.py
+=============
+FastAPI + WebSocket control plane for the Migration Command Center.
+
+Runs as its own process on its own port (default 8090). It does **not**
+replace `webui.py` (stdlib, 8080) and does not import the migration engines
+into its own process. Both of those are deliberate: the existing UI keeps
+working, and a crash or a slow request here can never take down or stall a
+migration that is mid-flight.
+
+How this stays off the hot path
+-------------------------------
+The spec's real question is how an async API sits in front of blocking,
+hours-long I/O without blocking. Four rules:
+
+1. **Engines are subprocesses, never coroutines.** Starting a migration is
+   `Popen(["python", "main.py", ...])`. No engine code runs in this event
+   loop, so no engine call can stall it.
+2. **Every DB read is read-only WAL.** A reader cannot take a lock a writer
+   needs, so a dashboard refresh cannot slow a copy down. See
+   `control_plane_db.ro()`.
+3. **One tailer, N clients.** A single background task reads the ledger and
+   broadcasts diffs. Fifty open browsers cost one DB read per tick, not
+   fifty. This is the honest reading of "no polling": the *clients* never
+   poll, the server tails once.
+4. **Blocking calls go to a threadpool.** SQLite reads and `subprocess`
+   dispatch run under `run_in_executor`, so a slow disk delays one request
+   rather than the whole loop.
+
+Security posture
+----------------
+Same as `webui.py`: binds 127.0.0.1 only, reached over an SSH tunnel. This
+process can start migrations and revoke ACLs -- exposing it on a public
+interface would hand over both tenants. `--host` exists and warns loudly.
+
+Not stdlib
+----------
+`webui.py` promises no-pip-install. This process breaks that promise on
+purpose, because hand-rolling WebSockets on `http.server` is not a
+reasonable thing to maintain. Deps live in
+`requirements-control-plane.txt`, separate from the engine's own, so the
+migration path keeps its guarantee even when this does not.
+
+    pip install -r requirements-control-plane.txt
+    python3 api_server.py --port 8090
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+from contextlib import asynccontextmanager
+import json
+import os
+import subprocess
+import sys
+import time
+from typing import Any, Literal
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+try:
+    from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+    from fastapi.responses import JSONResponse
+    from pydantic import BaseModel, Field
+except ImportError:  # pragma: no cover - import guard, not logic
+    sys.exit("control plane needs: pip install -r requirements-control-plane.txt")
+
+import control_plane_db as cpdb
+
+PY = sys.executable
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+# Poll interval for the single server-side ledger tailer. 1s keeps the UI
+# sub-second-ish while costing one WAL read per second regardless of how
+# many browsers are attached.
+TAIL_INTERVAL_S = 1.0
+
+
+# ======================================================================
+# RBAC
+#
+# Deliberately simple and header-based, because the real access control is
+# the SSH tunnel -- you cannot reach this port without already holding a key
+# to the box. This layer exists to make *accidents* hard (a viewer cannot
+# fat-finger a tenant wipe), not to resist an attacker who already has
+# shell. Anything stronger would be security theatre over an ssh -L.
+# ======================================================================
+Role = Literal["admin", "viewer"]
+
+
+def _roles() -> dict[str, Role]:
+    """`CP_OPERATORS=alice:admin,bob:viewer`. Unlisted callers are viewers."""
+    out: dict[str, Role] = {}
+    for pair in os.getenv("CP_OPERATORS", "").split(","):
+        if ":" in pair:
+            name, role = pair.split(":", 1)
+            if name.strip():
+                out[name.strip()] = "admin" if role.strip() == "admin" else "viewer"
+    return out
+
+
+class Operator(BaseModel):
+    name: str
+    role: Role
+
+
+async def operator(x_operator: str = Header(default="")) -> Operator:
+    name = (x_operator or "").strip() or "anonymous"
+    return Operator(name=name, role=_roles().get(name, "viewer"))
+
+
+def require_admin(op: Operator) -> None:
+    if op.role != "admin":
+        raise HTTPException(403, f"{op.name!r} is a viewer; this action needs admin")
+
+
+# ======================================================================
+# Request models -- `reason` is required on every write, by type.
+#
+# Putting it in the base model rather than each endpoint means a new write
+# endpoint cannot forget it: you physically cannot declare one without
+# inheriting the field.
+# ======================================================================
+class WriteAction(BaseModel):
+    reason: str = Field(min_length=3, description="Reason Code. Logged, required.")
+
+
+class StartMigration(WriteAction):
+    services: list[str] = Field(default_factory=lambda: ["drive"])
+    users: list[str] = Field(default_factory=list)   # empty = whole batch
+    dry_run: bool = False
+
+
+class JobSignal(WriteAction):
+    pass
+
+
+class RetryItem(WriteAction):
+    source_user: str
+    item_id: str
+
+
+class RevertPublic(WriteAction):
+    tenant: Literal["source", "target"] = "target"
+    confirm: str = Field(description="must be the literal string REVERT")
+
+
+# ======================================================================
+# WebSocket hub
+# ======================================================================
+class Hub:
+    """Fan-out to connected clients. A dead socket is dropped, never retried:
+    the browser reconnects and re-syncs from the snapshot on connect."""
+
+    def __init__(self) -> None:
+        self._clients: set[WebSocket] = set()
+        self._lock = asyncio.Lock()
+
+    async def join(self, ws: WebSocket) -> None:
+        await ws.accept()
+        async with self._lock:
+            self._clients.add(ws)
+
+    async def leave(self, ws: WebSocket) -> None:
+        async with self._lock:
+            self._clients.discard(ws)
+
+    async def broadcast(self, event: dict) -> None:
+        payload = json.dumps(event, default=str)
+        async with self._lock:
+            targets = list(self._clients)
+        for ws in targets:
+            try:
+                await ws.send_text(payload)
+            except Exception:  # noqa: BLE001 - a closed socket is normal
+                await self.leave(ws)
+
+
+HUB = Hub()
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Apply control-plane migrations, then start the single ledger tailer.
+
+    Lifespan rather than the deprecated `@app.on_event`, and the tailer is
+    cancelled on shutdown so a reload does not leave orphaned tasks
+    broadcasting to sockets that are already gone.
+    """
+    await _off_loop(cpdb.apply_migrations)
+    task = asyncio.create_task(_tailer())
+    try:
+        yield
+    finally:
+        task.cancel()
+
+
+app = FastAPI(title="Migration Command Center", version="1.0", lifespan=lifespan)
+
+
+def _envelope(event_type: str, data: Any) -> dict:
+    return {"type": event_type, "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                                    time.gmtime()), "data": data}
+
+
+async def _off_loop(fn, *a, **kw):
+    """Run a blocking call in the default threadpool. Rule 4."""
+    return await asyncio.get_running_loop().run_in_executor(None, lambda: fn(*a, **kw))
+
+
+# ======================================================================
+# The single tailer. Rule 3.
+# ======================================================================
+_last_snapshot: dict = {}
+
+
+async def _tailer() -> None:
+    global _last_snapshot
+    while True:
+        try:
+            progress = await _off_loop(cpdb.user_progress)
+            nodes = await _off_loop(cpdb.fleet)
+            public = await _off_loop(cpdb.open_public_shares, "target")
+
+            snap = {"users": progress, "nodes": nodes, "publicShares": len(public)}
+            # Diff before broadcasting. An idle migration otherwise pushes an
+            # identical frame every second to every browser forever.
+            if snap != _last_snapshot:
+                await HUB.broadcast(_envelope("JOB_PROGRESS", snap))
+                prev = _last_snapshot.get("publicShares", 0)
+                if public and len(public) > prev:
+                    await HUB.broadcast(_envelope("CRITICAL_ALERT", {
+                        "kind": "PUBLIC_SHARE_DETECTED",
+                        "count": len(public),
+                        "sample": public[:5],
+                        "message": (f"{len(public)} file(s) are publicly shared on "
+                                    f"the target tenant"),
+                    }))
+                _last_snapshot = snap
+        except Exception as exc:  # noqa: BLE001 - the tailer must never die
+            await HUB.broadcast(_envelope("TAILER_ERROR", {"error": str(exc)[:300]}))
+        await asyncio.sleep(TAIL_INTERVAL_S)
+
+
+@app.websocket("/ws")
+async def ws_endpoint(ws: WebSocket) -> None:
+    await HUB.join(ws)
+    try:
+        # Snapshot on connect, so a client that joins mid-run is immediately
+        # correct instead of blank until the next change.
+        await ws.send_text(json.dumps(_envelope("SNAPSHOT", {
+            "users": await _off_loop(cpdb.user_progress),
+            "nodes": await _off_loop(cpdb.fleet),
+            "publicShares": len(await _off_loop(cpdb.open_public_shares, "target")),
+        }), default=str))
+        while True:
+            await ws.receive_text()   # client keepalive; server is push-only
+    except WebSocketDisconnect:
+        await HUB.leave(ws)
+    except Exception:  # noqa: BLE001
+        await HUB.leave(ws)
+
+
+# ======================================================================
+# Read endpoints
+# ======================================================================
+@app.get("/api/v2/fleet")
+async def get_fleet():
+    return await _off_loop(cpdb.fleet)
+
+
+@app.get("/api/v2/users")
+async def get_users():
+    return await _off_loop(cpdb.user_progress)
+
+
+@app.get("/api/v2/failures")
+async def get_failures(limit: int = 200, source_user: str | None = None):
+    return await _off_loop(cpdb.failure_feed, limit, source_user)
+
+
+@app.get("/api/v2/forensics/{source_user}/{item_id}")
+async def get_forensics(source_user: str, item_id: str):
+    return await _off_loop(cpdb.forensic_detail, source_user, item_id)
+
+
+@app.get("/api/v2/public-shares")
+async def get_public_shares(tenant: str = "target"):
+    return await _off_loop(cpdb.open_public_shares, tenant)
+
+
+@app.get("/api/v2/actions")
+async def get_actions(limit: int = 100):
+    return await _off_loop(cpdb.recent_actions, limit)
+
+
+@app.get("/api/v2/whoami")
+async def whoami(op: Operator = Depends(operator)):
+    return op
+
+
+# ======================================================================
+# Write endpoints -- all four go through the same gate.
+# ======================================================================
+async def _gated(op: Operator, action: str, body: WriteAction,
+                 target: str | None, fn) -> JSONResponse:
+    """
+    RBAC -> log intent -> execute -> patch outcome.
+
+    `fn` runs off-loop and returns (ok, detail). A refusal is logged too:
+    "who tried to do the dangerous thing" is as interesting as who did it.
+    """
+    try:
+        require_admin(op)
+    except HTTPException as exc:
+        try:
+            aid = await _off_loop(cpdb.begin_action, op.name, op.role, action,
+                                  body.reason, target, body.model_dump(), None)
+            await _off_loop(cpdb.finish_action, aid, "REFUSED", exc.detail)
+        except ValueError:
+            pass   # no reason given AND not admin -- nothing worth logging
+        raise
+
+    action_id = await _off_loop(cpdb.begin_action, op.name, op.role, action,
+                                body.reason, target, body.model_dump(), None)
+    try:
+        ok, detail = await _off_loop(fn)
+    except Exception as exc:  # noqa: BLE001
+        await _off_loop(cpdb.finish_action, action_id, "FAILED", str(exc)[:2000])
+        await HUB.broadcast(_envelope("ACTION_COMPLETE", {
+            "actionId": action_id, "action": action, "outcome": "FAILED",
+            "actor": op.name}))
+        raise HTTPException(500, str(exc)[:500])
+
+    await _off_loop(cpdb.finish_action, action_id, "OK" if ok else "FAILED", detail)
+    await HUB.broadcast(_envelope("ACTION_COMPLETE", {
+        "actionId": action_id, "action": action, "outcome": "OK" if ok else "FAILED",
+        "actor": op.name, "reason": body.reason, "detail": detail[:300]}))
+    return JSONResponse({"ok": ok, "actionId": action_id, "detail": detail})
+
+
+def _spawn(argv: list[str]) -> tuple[bool, str]:
+    """Detached subprocess. Rule 1 -- engines never run in this loop."""
+    proc = subprocess.Popen(argv, cwd=HERE, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                            text=True)
+    return True, f"started pid {proc.pid}: {' '.join(argv[1:4])}"
+
+
+@app.post("/api/v2/migrate/start")
+async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
+    argv = [PY, "main.py"]
+    if body.dry_run:
+        argv.append("--dry-run")
+    argv += ["migrate", "--services", ",".join(body.services)]
+    for u in body.users:
+        argv += ["--user", u]
+    target = ",".join(body.users) if body.users else "ALL"
+    return await _gated(op, "migrate.start", body, target, lambda: _spawn(argv))
+
+
+@app.post("/api/v2/jobs/{pid}/stop")
+async def job_stop(pid: int, body: JobSignal, op: Operator = Depends(operator)):
+    def _stop() -> tuple[bool, str]:
+        # SIGINT, not SIGKILL: the engine handles it cooperatively, finishes
+        # the item in flight and commits, so the ledger stays resumable.
+        # SIGKILL here would strand a file mid-copy in the staging drive.
+        os.kill(pid, 2)
+        return True, f"SIGINT -> {pid}"
+    return await _gated(op, "job.stop", body, str(pid), _stop)
+
+
+@app.post("/api/v2/retry")
+async def retry_item(body: RetryItem, op: Operator = Depends(operator)):
+    """
+    Retry one item by clearing its FAILED audit row, then running a delta
+    pass scoped to that user. Delta is used rather than migrate because
+    migrate skips any user already marked DONE -- the exact trap that made a
+    previous re-run silently no-op.
+    """
+    def _retry() -> tuple[bool, str]:
+        with cpdb.rw() as conn:
+            n = conn.execute(
+                "DELETE FROM audit_log WHERE source_user=? AND item_id=? "
+                "AND status='FAILED'", (body.source_user, body.item_id)).rowcount
+        argv = [PY, "main.py", "delta", "--services", "drive",
+                "--user", body.source_user]
+        ok, detail = _spawn(argv)
+        return ok, f"cleared {n} failed row(s); {detail}"
+    return await _gated(op, "item.retry", body,
+                        f"{body.source_user}:{body.item_id}", _retry)
+
+
+@app.post("/api/v2/emergency/revert-public")
+async def revert_public(body: RevertPublic, op: Operator = Depends(operator)):
+    """
+    The kill switch. Revokes every `anyone` grant on the chosen tenant.
+
+    Typed confirmation on top of the Reason Code because this is the one
+    action whose blast radius is every file in a tenant.
+    """
+    if body.confirm != "REVERT":
+        raise HTTPException(400, "confirm must be the literal string REVERT")
+
+    def _revert() -> tuple[bool, str]:
+        script = os.path.join(HERE, "unpublish_target.py")
+        if not os.path.isfile(script):
+            return False, ("unpublish_target.py is not present on this node -- "
+                           "cannot revert; run the ACL audit and clear by hand")
+        return _spawn([PY, script, "--tenant", body.tenant, "--yes"])
+    return await _gated(op, "acl.revert_public", body, body.tenant, _revert)
+
+
+# ======================================================================
+# Heartbeat -- each node self-reports.
+# ======================================================================
+class Heartbeat(BaseModel):
+    node_id: str
+    hostname: str | None = None
+    location: str | None = None
+    code_commit: str | None = None
+    cpu_pct: float | None = None
+    ram_pct: float | None = None
+    disk_pct: float | None = None
+    active_job: str | None = None
+    job_pid: int | None = None
+    transfer_mode: str | None = None
+
+
+@app.post("/api/v2/fleet/heartbeat")
+async def heartbeat(hb: Heartbeat):
+    await _off_loop(cpdb.upsert_node, hb.node_id,
+                    **hb.model_dump(exclude={"node_id"}))
+    await HUB.broadcast(_envelope("NODE_HEARTBEAT", hb.model_dump()))
+    return {"ok": True}
+
+
+def main(argv: list[str] | None = None) -> int:
+    import uvicorn
+
+    ap = argparse.ArgumentParser(description="Migration Command Center API")
+    ap.add_argument("--port", type=int, default=8090)
+    ap.add_argument("--host", default="127.0.0.1")
+    args = ap.parse_args(argv)
+    if args.host not in ("127.0.0.1", "localhost"):
+        print("WARNING: this process can start migrations and revoke ACLs on "
+              "both tenants. Binding it off loopback exposes that to anyone "
+              "who finds the port. Use an SSH tunnel instead.", file=sys.stderr)
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

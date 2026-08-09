@@ -1,0 +1,10 @@
+# Deps for api_server.py (the Migration Command Center) ONLY.
+#
+# Kept separate from requirements.txt on purpose: webui.py and the migration
+# engines are stdlib-plus-google-client and stay that way, so a migration host
+# never needs these to run a migration. Install only where the control plane
+# actually runs.
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.6
+websockets>=12.0

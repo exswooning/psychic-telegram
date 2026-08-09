@@ -41,6 +41,7 @@ import {
   Reorder as StagesIconNav,
   ArrowForward as ArrowForwardIcon,
   Dns as HostIcon,
+  Shield as CommandIcon,
   StopCircle as InterruptIcon,
 } from '@mui/icons-material'
 import { useMigrationStore } from '@/store'
@@ -53,6 +54,7 @@ const NAV_ITEMS = [
   { path: '/wizard', label: 'Setup Wizard', icon: <WizardIconNav /> },
   { path: '/seed-wizard', label: 'Seed Wizard', icon: <SeedWizardIconNav /> },
   { path: '/dashboard', label: 'Overview', icon: <DashboardIcon /> },
+  { path: '/command', label: 'Command Center', icon: <CommandIcon /> },
   { path: '/users', label: 'Users', icon: <PeopleIcon /> },
   { path: '/drive', label: 'Drive Migration', icon: <DriveIconNav /> },
   { path: '/activity', label: 'Activity', icon: <ActivityIcon /> },

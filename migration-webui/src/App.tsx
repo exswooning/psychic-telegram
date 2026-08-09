@@ -4,6 +4,7 @@ import Layout from '@/components/Layout'
 import Wizard from '@/pages/Wizard'
 import SeedWizard from '@/pages/SeedWizard'
 import Dashboard from '@/pages/Dashboard'
+import FleetDashboard from '@/pages/FleetDashboard'
 import Users from '@/pages/Users'
 import UserDetail from '@/pages/UserDetail'
 import SystemHealth from '@/pages/SystemHealth'
@@ -31,6 +32,7 @@ const App: React.FC = () => {
         <Route path="/wizard" element={<Wizard />} />
         <Route path="/seed-wizard" element={<SeedWizard />} />
         <Route path="/dashboard" element={<Dashboard />} />
+        <Route path="/command" element={<FleetDashboard />} />
         <Route path="/users" element={<Users />} />
         <Route path="/users/:email" element={<UserDetail />} />
         <Route path="/drive" element={<DriveMigration />} />
