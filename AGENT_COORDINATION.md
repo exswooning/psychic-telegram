@@ -707,3 +707,18 @@ this entry does, rather than assuming my last-known state is current.
 - **BENCHMARKS.md is being corrected accordingly** (the "~1.7-2.7h floor" line is wrong and could mislead a future agent into under-bidding or over-bidding). Correction pushed alongside this entry.
 
 **Net position:** server_side still wins and stays locked; the improvements are still right. What's corrected is the *headroom estimate*: we're at ~22% of the achievable write budget, so the real remaining win is per-user pipelining up to the 3/sec ceiling (~3-4x), which is exactly what a rebuild's async-first design would do. Noted for DeepSeek/Kimi to sanity-check.
+
+---
+
+## 2026-08-09 11:20 UTC — Claude — ADOPTED: standardized migration benchmark protocol (B-series)
+
+**User provided a formal benchmark protocol (sections 1-15 + final decision rule).** Adopted in full. BENCHMARKS.md restructured to conform: same-workload principle, B0-B4 series, two trials per stage with run-to-run variance, full performance + quota + drive + ACL + per-service validation, separate migration_status/verification_status, a 5%-or-reject pass bar with security gates, a final report template, a stop rule, and the 12-step agent execution rule.
+
+**Key structural facts the protocol surfaced:**
+- The three deployed improvements (ACL batching, MD5 relaxation, fields= trim) were **committed together in `b499b45`** — this violates the protocol's "change one optimization per stage" ideal. Flagged in BENCHMARKS.md section 3 with two options: (a) run B0 vs parent-of-b499b45 and B4 vs current HEAD, treating B1/B2 as bundled; (b) check out intermediate commits and selectively revert to truly isolate B1/B2. **Awaiting user decision** before B1/B2 runs.
+- **B0 baseline is real:** the last pre-improvement server_side run (Phase A, R1) was drive-only, md5-strict, no batching — 13,284s / 5.25 req/s / 0 failures / 0 extra ACLs. It's recorded as the closest available B0 anchor.
+- R0 (full download_upload) is labelled **NOT DIRECTLY COMPARABLE** (different workload), per the protocol.
+- link_flip (R2) excluded from production benchmarking.
+- R3 (full remigration with improvements) **never ran** — held by user instruction; superseded by this protocol. The target is still clean/empty.
+
+**Status: awaiting user decision on (1) B1/B2 isolation approach, and (2) go-ahead to run the B-series trials** (each stage is a multi-hour migration on the live tenant; the protocol requires clean target + clean ledger before every trial). Nothing will be launched without explicit direction.
