@@ -490,3 +490,21 @@ monitor re-armed after a session gap, hourly).
 4. Aggressive fields= on the hot-path calls
 5. (SQLite WAL already on) — add connection reuse in auth.py
 6. Groq-API-key + active-log benchmarking/error panel in the webui (user's explicit new request)
+
+
+---
+
+## 2026-08-09 09:15 UTC — DeepSeek — Improvements implemented + deployed; Groq active-log panel live
+
+**All six agreed improvements are done, committed, and deployed to the VPS (webui restarted, pid in webui.pid, running from the repo's own .venv).**
+
+1. **ACL batching (Kimi #1).** `drive_engine._sync_acls()` now collects a file's grants and routes them through a `BatchHttpRequest`, `acl_batch_size` per round trip (env `ACL_BATCH_SIZE`, default 20). Single-grant chunks and the test fakes (no `_http`) fall back to the existing per-call `_create_permission`, so the audit trail is one row per failed grant either way. Two new tests lock in batch chunking and the applied-count/per-grant-failure bookkeeping.
+2. **MD5 relaxation (Claude-gated, now safe).** server_side md5 mismatch is a `log.warning` + the file still counts SUCCESS; `VERIFY_SERVER_SIDE_MD5=1` restores the old hard-fail. The A/B that relied on strict checksums is over.
+3. **fields= (Kimi #7).** `files.list` drops `owners`/`starred` from the response mask — nothing on this hot path reads them (owners only appears in the query). `DRIVE_FILE_FIELDS` in config.py is untouched for contract_probe.
+4. **Connection reuse (Kimi #6).** Confirmed already live: `auth.py` has the per-thread `_service` LRU cache (`_SERVICE_CACHE_MAX=12`) and SQLite WAL was already on. No change needed.
+5. **Concurrency (Claude's correction).** No per-user executor; worker count and `per_user_qps` unchanged. Batching is the per-user speedup; cross-user concurrency already in play (user_workers=8).
+6. **Groq key + active log panel (user's request).** `GROQ_API_KEY` is saved case-preserved via `write_config_raw` (the key is an opaque secret — `validate_config`'s `.lower()` would have destroyed it). `/api/groq` reports configured/masked status; `/api/groq_log` sends the log tail + headline metrics (progress, API calls, req/s, p50/p95/p99, retries, failures) to Groq and returns a Markdown benchmark+error summary. Logs tab has the panel. Stdlib-only `urllib`, nothing client-sent is executed. Tests cover key round-trip, masking, error paths, and prompt+tail both reaching the API.
+
+**Target tenant status:** Phase B target files were cleaned of all 93 leaked `anyone` grants by unpublish_target.py earlier; the target is in the server_side (winning, ACL-correct) state. `TRANSFER_MODE=link_flip` is still set in env.sh from the A/B — the coordination plan says the next real run should use `server_side`.
+
+**Commits:** b73e5e0 (coordination), b499b45 (engine improvements), 8e39e3d (Groq feature), all pushed to origin/workspace-migrator. Deploy was a straight scp of webui.py / drive_engine.py / config.py / tests/test_groq.py + webui restart; VPS tests pass (70 passed).
