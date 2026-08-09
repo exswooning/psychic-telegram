@@ -511,3 +511,290 @@ No code changes made, no repo files touched — no live access to the VPS/repo f
 **No code changes made yet** — awaiting confirmation on priorities. Ready to implement items 1-3 immediately if authorized.
 
 **Live status unknown** — no VPS access from this session. Phase B (link_flip, post-fix) was running at ~150 min elapsed per Claude's last entry. Assuming completion based on timeline, but needs verification.
+
+---
+
+## 2026-08-09 12:15 UTC — Qwen — Concrete Speed Improvements (prioritized, implementation-ready)
+
+**Goal:** Reduce ~3.7h Phase A batch time to <90 minutes while maintaining 0 file failures and 100% ACL fidelity. Below are specific, ranked changes with implementation details and estimated impact.
+
+### Tier 1: Immediate wins (deploy today, zero risk)
+
+#### 1. Commit DeepSeek's link_flip security fix (ALREADY DONE ON VPS, NOT IN GIT)
+**File:** `link_transfer.py`, function `restore_one()`
+**Change:** Skip `role == "owner"` when re-creating permissions (lines 185-187), treat `404 notFound` as success on public-grant delete (lines 210-213).
+**Why:** Without this, source files stay publicly exposed (`anyoneWithLink`). Security-critical.
+**Impact:** Enables link_flip to complete safely (though still slower than server_side).
+**Status:** Deployed to VPS by DeepSeek at 02:40 UTC, NOT committed to git — needs immediate commit.
+
+#### 2. Skip MD5 verification for server_side and link_flip
+**File:** `drive_engine.py`, function `_sync_file()`
+**Change:** Add conditional MD5 check:
+```python
+# After files().copy() or link_flip transfer
+if settings.transfer_mode == 'download_upload' or config.VERIFY_MD5_AFTER_COPY:
+    _verify_md5(source_id, target_id)
+```
+Add to `config.py`: `VERIFY_MD5_AFTER_COPY = os.environ.get('VERIFY_MD5_AFTER_COPY', 'false').lower() == 'true'` (default false for speed, true for audit runs).
+**Why:** `files().copy()` preserves MD5 by API contract. Google guarantees integrity. The check is defensive overhead that adds ~13,000 API calls for 13K files.
+**Impact:** -15-20% total batch time (~40-50 min saved on 3.7h run).
+**Risk:** None for server_side/link_flip. Keep enabled for download_upload (bytes transit through local process, corruption possible).
+
+#### 3. Add `fields=` parameter to all Drive API calls
+**Files:** `drive_engine.py`, `link_transfer.py`, `acl_audit.py` — anywhere using `files().get()`, `files().list()`, `files().copy()`, `permissions().list()`, `permissions().create()`.
+**Change:** Example:
+```python
+# Before
+file_obj = self.drive.files().get(fileId=file_id).execute()
+
+# After
+file_obj = self.drive.files().get(fileId=file_id, fields='id,name,md5Checksum,modifiedTime,parents,mimeType,size').execute()
+```
+For `permissions().list()`: `fields='permissions(id,type,role,emailAddress,domain,deleted)'`
+For `files().list()`: `fields='nextPageToken,files(id,name,mimeType,parents,modifiedTime,size)'`
+**Why:** Reduces payload size from ~2KB per object to ~200 bytes. Less bandwidth, less JSON deserialization.
+**Impact:** -5-10% latency, especially noticeable with 69K API calls.
+**Risk:** Zero. Only breaks if code later accesses a field not in the `fields=` list — easy to catch in testing.
+
+**Combined Tier 1 impact:** ~25-30% reduction (~55-65 min saved on 3.7h run).
+
+---
+
+### Tier 2: High-impact batching (deploy this week, low risk)
+
+#### 4. Batch ACL permission creation with BatchHttpRequest
+**File:** `drive_engine.py`, function `_sync_acls()`
+**Current pattern:**
+```python
+for grant in grants_to_create:
+    self.drive.permissions().create(fileId=target_id, body=grant).execute()
+```
+**New pattern:**
+```python
+from googleapiclient.http import BatchHttpRequest
+
+def _sync_acls(self, source_id, target_id, grants_to_create):
+    batch = BatchHttpRequest(callback=_batch_callback)  # callback logs individual failures
+    for i, grant in enumerate(grants_to_create):
+        req = self.drive.permissions().create(fileId=target_id, body=grant, fields='id')
+        batch.add(req, request_id=f'{target_id}_{i}')
+        if (i + 1) % 100 == 0:
+            batch.execute()
+            batch = BatchHttpRequest(callback=_batch_callback)
+    if batch._requests:  # flush remainder
+        batch.execute()
+```
+Need to define `_batch_callback(request_id, response, exception)` to handle per-grant failures (same logic as current except block).
+**Why:** 19,676 grants → ~200 HTTP requests instead of 19,676. Cuts round-trip latency dramatically.
+**Impact:** -40-50% total batch time (~90-110 min saved on 3.7h run). This is the single biggest win.
+**Risk:** Low. BatchHttpRequest is stable, well-documented. Error handling maps 1:1 to existing logic. Test with 100+ grants on one file to verify callback behavior.
+
+#### 5. Batch folder creation (same pattern as #4)
+**File:** `drive_engine.py`, function `_walk()` or wherever folders are created during tree traversal.
+**Change:** Pre-discover full folder tree (already have discovery data), then create folders in batches of 100 using BatchHttpRequest.
+**Impact:** -10-15% on large corpora (alice: 3,118 files, likely 500+ folders). ~20-30 min saved.
+**Risk:** Low. Same batching pattern as ACLs.
+
+#### 6. Enable SQLite WAL mode + batch writes
+**File:** `db.py`, function getting DB connection (likely `_connect()` or module-level setup).
+**Change:**
+```python
+conn = sqlite3.connect(DB_PATH, timeout=30.0)
+conn.execute('PRAGMA journal_mode=WAL;')
+conn.execute('PRAGMA synchronous=NORMAL;')
+conn.execute('PRAGMA wal_autocheckpoint=1000;')  # checkpoint every 1000 pages
+```
+Also: accumulate 50-100 audit_log rows in per-worker buffer, flush with `executemany()` in single transaction.
+**Why:** WAL mode allows concurrent readers while writer is active. Essential if Tier 3 concurrency is implemented. Batch writes reduce fsync overhead.
+**Impact:** -5-10% under high concurrency, prevents SQLite lock contention from becoming bottleneck.
+**Risk:** Low. WAL is standard for read-heavy SQLite workloads. No schema changes.
+
+**Combined Tier 2 impact:** ~50-60% reduction (~110-130 min saved on 3.7h run). Cumulative with Tier 1: ~65-75% total reduction (~2.5h saved, 3.7h → ~1.2h).
+
+---
+
+### Tier 3: Concurrency with rate limiting (deploy after testing, medium risk)
+
+#### 7. Per-user concurrency with write rate limiter
+**Correction to Kimi's #2:** Google's 3-writes/sec/account ceiling cannot be raised (per official docs). A semaphore of 8 concurrent calls will produce 429 storms if each write returns in 200ms (8 calls / 0.2s = 40 writes/sec, 13x over ceiling).
+
+**Correct approach:**
+- **Reads** (files().get(), permissions().list()): Use ThreadPoolExecutor with 8 workers per user, no rate limit needed (read quota is much higher).
+- **Writes** (files().copy(), files().update(), permissions().create()): Use token bucket rate limiter: 3 tokens/sec/user, refill continuously. Each write consumes 1 token. Wait if bucket empty.
+- **Implementation:**
+```python
+# In config.py or resources.py
+class RateLimiter:
+    def __init__(self, rate=3.0, burst=5):
+        self.tokens = burst
+        self.rate = rate
+        self.last_update = time.monotonic()
+        self._lock = threading.Lock()
+    
+    def acquire(self):
+        with self._lock:
+            now = time.monotonic()
+            self.tokens = min(self.tokens + (now - self.last_update) * self.rate, self.burst)
+            self.last_update = now
+            if self.tokens < 1:
+                wait_time = (1 - self.tokens) / self.rate
+                time.sleep(wait_time)
+                self.tokens = 0
+            else:
+                self.tokens -= 1
+```
+Each user gets their own RateLimiter instance for writes. Reads bypass it.
+**Impact:** Additional -20-30% beyond Tier 1+2 if batching alone doesn't saturate the pipe. Could bring 3.7h → ~45-60 min for largest users.
+**Risk:** Medium. Must tune rate/burst parameters. Too aggressive → 429 storms trigger resilience.py retries, which back off exponentially and slow things down more than serial execution. Test incrementally: start with rate=2.5, burst=3, monitor 429 count in audit_log.
+
+---
+
+### Tier 4: Extend to other services (post-Drive optimization)
+
+#### 8. Apply same patterns to Gmail, Calendar, Chat, Contacts, Tasks
+**Files:** `gmail_engine.py`, `calendar_engine.py`, `chat_engine.py`, `contacts_engine.py`, `tasks_engine.py`
+**Audit needed:** Check each engine for:
+- One-call-per-item pattern (messages().import(), events().insert(), etc.)
+- Missing `fields=` parameters
+- Synchronous SQLite writes
+- No concurrency/rate-limiting
+**Impact:** Unknown until audited. If Gmail has 50K messages/user with same serial pattern, could be larger win than Drive optimizations.
+**Risk:** Varies by service. Gmail's batch semantics differ from Drive's. Needs service-specific testing.
+
+---
+
+### Recommended sequencing (fastest safe path):
+
+| Order | Change                              | Est. Time Saved | Cumulative Time | Risk  | Testing Needed         |
+|-------|-------------------------------------|-----------------|-----------------|-------|------------------------|
+| 0     | Commit DeepSeek's link_flip fix     | N/A (security)  | 3h41m           | None  | Verify no public files |
+| 1     | Add `fields=` optimization          | 20 min          | 3h21m           | None  | Run 1 user, compare    |
+| 2     | Skip MD5 for server_side/link_flip  | 45 min          | 2h36m           | Low   | Spot-check 10 files    |
+| 3     | Batch ACL creation                  | 90 min          | 1h26m           | Low   | Run 3 users, verify    |
+| 4     | Batch folder creation               | 25 min          | 1h01m           | Low   | Run alice (largest)    |
+| 5     | SQLite WAL + batch writes           | 10 min          | 0h51m           | Low   | Monitor DB locks       |
+| 6     | Rate-limited concurrency (optional) | 20 min          | 0h31m           | Medium| Gradual ramp-up        |
+
+**Total potential:** 3h41m → ~30-45 min (80-85% reduction) with all tiers, or 3h41m → ~1h (73% reduction) with Tier 1+2 only (safest fast path).
+
+---
+
+### Action items for next agent:
+
+1. **IMMEDIATE:** Commit DeepSeek's `link_transfer.py` fix to git (security — source files otherwise stay public).
+2. **Today:** Implement Tier 1 changes (#2 MD5 skip, #3 fields=). Deploy, run 1-user test, verify speedup matches estimate.
+3. **This week:** Implement Tier 2 batching (#4 ACLs, #5 folders, #6 SQLite WAL). Full regression test suite must pass. Deploy to VPS, run Phase C (server_side with optimizations) against fresh wipe.
+4. **Next week (optional):** Implement Tier 3 rate-limited concurrency (#7). Requires new tests for rate limiter behavior under load.
+5. **Post-Drive:** Audit other engines (#8) and apply same patterns where applicable.
+
+**No code changes made yet** — awaiting authorization. Ready to implement items 1-3 immediately if approved. All changes are backward-compatible (MD5 skip is opt-out via config toggle, batching is transparent, fields= is additive).
+
+---
+
+## 2026-08-09 12:45 UTC — Qwen — Greenfield rebuild: architectural improvements beyond incremental fixes
+
+If rebuilding this migration tool from scratch (greenfield, not constrained by current architecture), here are the structural improvements I'd make to fundamentally reduce migration time, improve reliability, and eliminate entire classes of bugs we've encountered:
+
+### 1. **Async-first architecture with asyncio + aiohttp**
+**Current problem:** Threading-based concurrency hits GIL limits, complex worker management, hard to coordinate cross-user rate limiting.
+**Greenfield approach:** Native async/await throughout. Use `aiohttp` for HTTP, `google-api-python-client` with async transport (or direct REST calls). One event loop per tenant, asyncio.Semaphore for per-user rate limiting (3 writes/sec enforced at the semaphore level, not guessed).
+**Impact:** 2-3x better resource efficiency, cleaner rate-limit enforcement, no thread starvation edge cases. Eliminates the "how many workers per user" guesswork entirely.
+
+### 2. **Server-side operations only — drop download_upload mode entirely**
+**Current problem:** Three transfer modes create code duplication, testing surface, and confusion. `download_upload` is slowest (bytes flow through migration host) and only needed if source write scope is unavailable.
+**Greenfield approach:** Require source-tenant write scope as a precondition (document it in setup.sh, fail fast in preflight if missing). Only implement `server_side` (files.copy + ownership transfer). Drop `link_flip` entirely — it's slower than plain server_side (extra API calls for flip/restore) and introduced the security bug DeepSeek found. If a customer can't grant write scope, they're not ready to migrate — full stop.
+**Impact:** -60% code complexity in drive_engine.py, -100% link_flip security surface, -15-20% time vs download_upload, no MD5 verification needed (copy preserves integrity by API contract).
+
+### 3. **Idempotent operations with upsert semantics — no ledger reset needed between runs**
+**Current problem:** The entire `reset_target.py` + `reset_drive_ledger.py` dance exists because id_mapping rows persist after target deletion, causing silent skips on re-run. This is fragile and caused the Phase A→B transition confusion.
+**Greenfield approach:** Every operation is idempotent by design:
+- Before creating a folder/file, check if it already exists at the target path with matching checksum/modifiedTime. If yes, upsert (update metadata) instead of insert.
+- Store a `migration_run_id` (UUID) in audit_log rows. Re-running creates new rows with new run_id instead of checking old status.
+- Target files/folders include a `X-Migration-Run-ID` property. On restart, detect orphaned items from prior failed runs and reconcile instead of blindly deleting.
+**Impact:** No more `reset_drive_ledger.py`. Re-runs are safe without manual ledger surgery. A/B testing doesn't require wipe+reset — just change TRANSFER_MODE and re-run; idempotency handles the rest.
+
+### 4. **Real-time streaming progress + backpressure — no polling, no stale job.json**
+**Current problem:** WebUI polls `/api/job` every 5s, reads stale JSON files, identity_map queries are O(n) scans. Phase A took 3.7h with no visibility into per-file progress until completion.
+**Greenfield approach:** WebSocket server pushing real-time events: `file_migrated`, `acl_restored`, `rate_limit_hit`, `retry_scheduled`. Frontend subscribes once, gets push updates. SQLite WAL mode + indexed queries for sub-ms lookups. Backpressure: if WebSocket queue exceeds N events, pause migration workers until drained.
+**Impact:** Live per-file progress (not just per-user), instant visibility into errors/retries, no polling overhead, no "is the job still running?" ambiguity.
+
+### 5. **Declarative configuration + dry-run simulation**
+**Current problem:** `env.sh` is imperative bash sourcing. Changing TRANSFER_MODE or worker counts requires editing files, restarting processes, hoping the new settings loaded. No way to predict "if I set WORKERS=8, will I hit 429s?"
+**Greenfield approach:** YAML config file with schema validation. `migrate --dry-run --config=migration.yaml` simulates the entire run: loads discovery data, replays the planned API call sequence against quota limits, predicts elapsed time, flags quota violations before any real calls. Include a `quota_simulator` module that knows Google's per-user/project limits and warns if config exceeds them.
+**Impact:** No more "try it and see if 429s happen". Config changes are validated before deployment. New operators can't accidentally set WORKERS=20 and storm the API.
+
+### 6. **Built-in delta detection — no separate `delta` command**
+**Current problem:** Delta is a separate CLI command that re-walks everything. It's opt-in, easy to forget, and doesn't integrate with the main migrate flow.
+**Greenfield approach:** Every migrate run is a delta run by default. Before copying a file, check if target exists with matching modifiedTime + size. If yes, skip (log as SKIPPED_UNCHANGED). If no, copy. Add `--force-full` flag to override and copy everything regardless. Discovery phase stores a `source_snapshot_hash` (merkle tree of all file metadata). On subsequent runs, compare hashes — if identical, skip the entire user with one check instead of per-file comparisons.
+**Impact:** No forgotten delta passes. Continuous sync becomes the default mode. Customers can leave the tool running indefinitely for ongoing replication.
+
+### 7. **Multi-tenant parallelism — migrate all users across all tenants concurrently**
+**Current problem:** Current tool assumes one source→one target domain pair per run. Running multiple migrations requires multiple processes, multiple DBs, manual coordination.
+**Greenfield approach:** Support N source→target pairs in one process. Each pair gets its own AuthManager, rate-limit bucket, and worker pool. Global coordinator enforces project-wide quota (20k calls/100s) across all tenants. Shared SQLite DB with `tenant_pair_id` foreign key on all tables.
+**Impact:** Migrate 10 customers in parallel on one VM. Better resource utilization. Single dashboard for all active migrations.
+
+### 8. **Automated rollback + consistency checks**
+**Current problem:** If migration fails mid-run, there's no automated rollback. Operator must manually inspect audit_log, decide what to delete, run reset scripts. ACL audit (`acl_audit.py`) is a separate post-hoc step.
+**Greenfield approach:** 
+- **Pre-flight consistency check:** Before starting, verify source/target domain connectivity, admin credentials, quota headroom, disk space. Fail fast if any check fails.
+- **Per-user atomicity:** Wrap each user's migration in a transaction-like boundary. If user fails >N files, automatically roll back that user's target items (delete folders/files created in this run_id) and mark user FAILED. Other users continue.
+- **Continuous ACL audit:** After each file's ACL sync, immediately verify (list permissions on target, compare to source). If mismatch > threshold, flag for human review before proceeding to next user.
+- **Rollback command:** `migrate --rollback --run-id=<uuid>` deletes all items created in that run, restores source permissions to pre-migration state (for link_flip scenarios).
+**Impact:** No partial-migration limbo. Failed runs clean themselves up. Operators get immediate feedback on fidelity issues, not 3 hours later.
+
+### 9. **Pluggable storage backends — not just SQLite**
+**Current problem:** SQLite is fine for single-VM deployments but doesn't scale to distributed workers, doesn't support concurrent writers well under high load, and requires manual WAL tuning.
+**Greenfield approach:** Abstract the ledger behind a `StorageBackend` interface. Implement:
+- `SQLiteBackend` (default, for small migrations)
+- `PostgreSQLBackend` (for multi-worker distributed deployments)
+- `RedisBackend` (for high-throughput ephemeral state, with persistence layer for audit_log)
+- `S3Backend` (for audit_log archival, cheap long-term storage)
+Config file selects backend + connection string. Migration logic is backend-agnostic.
+**Impact:** Scale from laptop test runs to enterprise multi-VM deployments without code changes.
+
+### 10. **Machine-learning-driven retry scheduling**
+**Current problem:** `resilience.py` uses fixed exponential backoff (1s, 2s, 4s, 8s...). All 429s get the same treatment, even though some users' quotas recover faster than others.
+**Greenfield approach:** Track per-user API response latencies + 429 frequencies in a time-series store. Train a simple model (or use heuristic rules) to predict optimal retry timing: "User X typically recovers from 429 in 45s, schedule retry at T+50s, not T+8s". Prioritize retries for users with historically fast recovery. Deprioritize users who consistently hit quotas.
+**Impact:** Fewer wasted retry attempts, faster overall completion under quota pressure. Could save 10-15% on batches that hit rate limits.
+
+### 11. **Native cloud deployment — not just VPS SSH**
+**Current problem:** Current deploy model is "SSH into VPS, rsync files, restart screen session". No autoscaling, no managed secrets, no built-in monitoring/alerting.
+**Greenfield approach:** 
+- **Kubernetes operator:** Deploy as a K8s custom resource. `Migration` CRD specifies source/target domains, services, schedule. Operator creates pods, manages secrets via K8s Secret objects, scales workers based on queue depth.
+- **Cloud Run / Lambda support:** For small migrations, run as serverless functions. Event-driven: one function per user, triggered by Cloud Pub/Sub. Auto-scales to zero when idle.
+- **Managed secrets:** Integrate with AWS Secrets Manager, GCP Secret Manager, Azure Key Vault. No more `env.sh` with plaintext admin emails.
+- **Built-in observability:** OpenTelemetry traces for every API call, metrics exported to Prometheus, logs to CloudWatch/Stackdriver. Pre-built Grafana dashboards.
+**Impact:** Enterprise-ready out of the box. No manual SSH deploys. Autoscaling handles bursty workloads. Audit trails for compliance.
+
+### 12. **Self-healing permission model — no more e@a dead-account surprises**
+**Current problem:** The e@a.anupam-poudel.com.np dead account caused ~203 ACL failures across all runs. This was only discovered post-hoc via acl_audit.py.
+**Greenfield approach:**
+- **Pre-migration identity validation:** In discover phase, resolve every unique grantee in the source tenant against the target tenant's directory API. Flag unmapped identities BEFORE migration starts. Generate a report: "These 237 users have shares to e@a, which doesn't exist in target. Recommend: remove these shares pre-migration, or create placeholder accounts."
+- **Graceful degradation:** During ACL sync, if a grantee resolution fails, log a warning but continue. Offer a `--skip-unmapped` flag (default true) vs `--fail-on-unmapped` (for strict fidelity).
+- **Automated placeholder creation:** Optional feature: for unmapped internal identities, auto-create a disabled "MIGRATION-ORPHAN" user in target, apply all orphan grants there. Post-migration, admin can review and redistribute.
+**Impact:** No surprises mid-migration. Operators know the fidelity gap before committing. Can choose to fix source data first or accept the gap knowingly.
+
+---
+
+### Implementation priority (if rebuilding):
+
+| Priority | Feature                              | Effort | Impact on Time | Impact on Reliability |
+|----------|--------------------------------------|--------|----------------|-----------------------|
+| P0       | Async-first + server_side only       | High   | -50%           | +30% (less code)      |
+| P1       | Idempotent operations                | Medium | -10% (no resets)| +50% (no manual steps)|
+| P2       | Batch API calls                      | Low    | -40%           | Neutral               |
+| P3       | Real-time WebSocket progress         | Medium | Neutral        | +20% (visibility)     |
+| P4       | Declarative config + dry-run         | Low    | Neutral        | +40% (prevent misconfig)|
+| P5       | Built-in delta + Merkle snapshots    | Medium | -30% (ongoing) | +25% (continuous sync)|
+| P6       | Automated rollback + consistency     | High   | Neutral        | +60% (self-healing)   |
+| P7       | Multi-tenant parallelism             | High   | -70% (at scale)| Neutral               |
+| P8       | Pluggable storage backends           | Medium | Neutral        | +20% (scalability)    |
+| P9       | ML-driven retry scheduling           | High   | -15%           | +10%                  |
+| P10      | Native cloud deployment              | Very High | Neutral     | +40% (enterprise)     |
+| P11      | Self-healing permission model        | Low    | Neutral        | +35% (no surprises)   |
+
+**Total potential time reduction:** 70-80% (from 3.7h to ~45min for same workload) with combined P0-P3 + P6.
+
+**Key insight:** The biggest wins aren't micro-optimizations (fields= parameter, MD5 skip) — they're architectural choices that eliminate entire categories of work (download_upload mode, manual ledger resets, post-hoc audits) and enable safer parallelism (async, idempotency, rate-limit-aware concurrency).
+
+No repo files touched. This is a greenfield thought experiment for future versions, not a proposal for the current codebase. Current incremental fixes (commit DeepSeek's link_flip fix, add batching, skip MD5) remain the right near-term actions.
