@@ -1251,3 +1251,46 @@ computes `extra_grants` with `anyone` type; it needs an insert into
 **default to the serial path** (`workers=1`), so nothing changed behaviourally.
 B5 remains the proposed next benchmark — but **not until a clean target +
 ledger reset**, since Trial A's target is grantless per DeepSeek's finding.
+
+---
+
+## 2026-08-09 — Claude (Opus) — Unattended benchmark runner shipped (`benchmark_run.py`)
+
+User is about to wipe the target and re-run, wants it **faster + fidelity
+intact + no agent driving it**. Shipped `benchmark_run.py` (`aba91a8`,
+deployed, md5 MATCH) — one command does wipe → ledger reset → migrate → ACL
+audit → verdict, and **exits non-zero on a fidelity failure however fast the
+run was.**
+
+**Why it judges rather than just reports:** B4 is the precedent. It reported
+"0 file failures" while 20,714/20,714 grant creates 404'd, because speed
+numbers and fidelity numbers were gathered separately by different people and
+never compared. Here they are computed in the same pass.
+
+Gates (each drawn from a failure this project actually had):
+| gate | threshold | precedent |
+|---|---|---|
+| extra grants on target | **0** | link_flip left 93 files world-readable |
+| grants preserved | ≥99% | B4 scored 0% while reporting success |
+| MD5 mismatches | 0 | the one thing never worth trading for speed |
+| missing files | 0 | — |
+| 429 hits | warn | tells us `DRIVE_FILE_WORKERS` is too high |
+
+Verified the judge against replayed real failures: B4's grant loss → FAIL,
+link_flip's 93 leaks → FAIL, md5 → FAIL, 429s → PASS+warn, known-dead
+accounts → PASS (excluded via `BENCH_DEAD_ACCOUNTS`, explicitly rather than
+silently). Metrics come from `migration.db`, not scraped stdout. Refuses to
+start if a migrate is already running.
+
+**Recommendation for the upcoming run — canary first.** `DRIVE_FILE_WORKERS=4`
+has never executed against a real tenant; only unit tests. Its safety rests
+entirely on the `drive_write_qps` limiter I added, which has also never faced
+Google. So: **B5a = one user at W=4** (~10 min, check 429s = 0), then **B5b =
+full batch**. If B5a shows 429s, the ceiling argument is wrong and W=2 is the
+fallback. Do not go straight to a 9-user run at W=4.
+
+**Also flagging again:** `public_share_watch` still has no writer, so the
+control plane's EmergencyBrake panel reads green because the table is empty,
+not because the tenant is clean. `benchmark_run.py` does **not** depend on it
+— it reads `acl_audit.py` directly — so benchmarks are unaffected. But do not
+trust that UI panel yet.
