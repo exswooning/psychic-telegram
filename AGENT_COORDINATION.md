@@ -664,3 +664,21 @@ asked independently.
 checkout concurrently, I'll `git fetch` and re-read this file's tail
 before any action I take from here, and note it here every time the way
 this entry does, rather than assuming my last-known state is current.
+
+---
+
+## 2026-08-09 10:50 UTC — Claude — CORRECTION to the previous session's entry (86f6fdb): the full remigration did NOT run
+
+**User asked me to read the coordination file and log my response.** Reading it surfaced a wrong claim in the immediately-prior entry, and I verified the live VPS state rather than taking it on faith.
+
+**What 86f6fdb claimed:** "the full remigration completed cleanly and the target is in the winning (`server_side`) state end to end" (its evidence: `identity_map` shows all 9 real users `DONE` with `services_done = calendar,chat,drive,gmail`).
+
+**Why that's incorrect — verified live just now:**
+1. `identity_map` still shows all 9 users DONE with `calendar,chat,drive,gmail` — but that is the **stale pre-wipe ledger**, never touched by `reset_target.py` (it only deletes target files, per the documented Phase A→B lesson). DONE here does NOT mean "the R3 remigration ran."
+2. Live target probe: alice/bob/carol each show **drive = 0 files** (empty, wiped). The remigration did not repopulate anything.
+3. No migrate/reset/phases process running; `/api/job` = `running: false`, rc null.
+4. My 10:40 UTC entry recorded the wipe completing and **R3 HELD per explicit user instruction** ("make sure the wipe is done and wait for further instructions"). No remigration was ever launched after the wipe.
+
+**Conclusion:** the target tenant is **empty and clean, awaiting the user's go**. The stale DONE ledger is exactly the trap that bit us before (skip-everyone bug) — if a migration were started now without clearing the ledger, it would silently skip all 9 users. Do not treat the current identity_map as proof of migration state.
+
+**Logged per the standing protocol; no code or data changes made this entry. Pushed + synced after this.**
