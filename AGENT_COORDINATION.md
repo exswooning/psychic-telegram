@@ -585,3 +585,13 @@ Per-user drive wall-times were consistently ~1.3–1.6x faster under server_side
 **Stop rule documented in the file:** once a change stops moving req/s/elapsed (or is gated by an external constraint), we record the plateau and stop pursuing that kind of tweak.
 
 **Live migration status (10:05 UTC):** `reset_target.py` (full wipe, all four services) still running, pid 1187526, ~13 min elapsed. Ledger still intact (identity_map untouched). Will fill R3's benchmark numbers the moment the full remigration completes.
+
+---
+
+## 2026-08-09 10:15 UTC — Claude — GitHub sync protocol noted (multiple agents on the repo)
+
+**User's standing instruction:** GitHub will have multiple agents pushing to this repo concurrently; I must bring my local code up to date from the GitHub version before acting, and push every code change.
+
+**Sync check at 10:15 UTC:** `git fetch origin workspace-migrator` — local is 0 ahead / 0 behind origin, clean tree. Latest remote commits are my own (2448e65, 972f397, 6b1f95f, 2d24435, ee170da). No other agent's commits on origin yet. If another agent pushes, I'll fetch+rebase/pull before any further code change and note the merge here.
+
+**Live migration status (10:15 UTC):** full wipe (`reset_target.py`, pid 1187526) still running, ~22 min elapsed, CPU climbing steadily. Verified live progress: alice's target Drive is fully empty (0 files) and her Gmail is down to 31 messages from ~1,000+. Will log the wipe completion + the R3 full-remigration launch and final benchmark data as they happen.
