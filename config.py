@@ -290,6 +290,25 @@ class Settings:
     per_user_qps: float = field(
         default_factory=lambda: float(os.getenv("PER_USER_QPS", "0")) or _auto("per_user_qps", 4.0)
     )
+    # Concurrent file copies *within* one user's Drive walk.
+    #
+    # user_workers scales across users; this scales inside one. They solve
+    # different halves of the same problem, and only this one shortens the
+    # critical path, because a batch cannot finish before its slowest single
+    # user and that user is one thread. Measured on the live tenant: 0.66
+    # req/s per user against Google's 3 sustained writes/sec/account ceiling
+    # -- ~4.6x of unused per-account budget that no amount of extra
+    # user_workers can reach.
+    #
+    # This does NOT raise the per-account rate: every call still passes
+    # through the one per-user RateLimiter, so workers interleave into the
+    # same bucket. It raises *utilisation* of a ceiling we are far below.
+    #
+    # Default 1 keeps the serial path byte-identical, so deploying this
+    # cannot perturb an in-flight benchmark trial.
+    drive_file_workers: int = field(
+        default_factory=lambda: max(1, int(os.getenv("DRIVE_FILE_WORKERS", "1")))
+    )
 
     # -- retry / backoff -----------------------------------------------------
     max_retries: int = 6

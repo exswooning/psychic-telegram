@@ -21,25 +21,49 @@ engine accumulated its capabilities incrementally over many agent sessions:
   `wizard.py`, `inventory.py`
 
 A rebuild is warranted for **ergonomics, correctness-by-construction and
-lock-step scalability**, NOT for a raw speed fantasy: the hard ceiling is
-Google's **3 writes/sec/account** (not raiseable on request). For the current
-corpus the measured write-floor is ~2.7h aggregate; no architecture moves that
-without a Google-side change. Every speedup below is on top of that floor and
-is honestly bounded by it.
+lock-step scalability**. The hard ceiling is Google's **3 writes/sec/account**
+(not raiseable on request), and every speedup below is bounded by it.
+
+> **Correction (supersedes the original draft of this section).** This
+> document was first written carrying a "~2.7h aggregate write-floor". That
+> number was wrong and is retracted — it charged the *whole corpus* against a
+> *single account's* 3/sec ceiling. The ceiling is **per account**, and the
+> engine runs up to `user_workers=8` accounts concurrently, so the aggregate
+> write budget is ~24 writes/sec, not 3. See AGENT_COORDINATION.md, 11:05 UTC.
+>
+> **Corrected floor:** a batch cannot finish before its slowest single user.
+> Here that is `alice` at 3,118 files × ~4.4 writes/file ÷ 3 writes/sec ≈
+> **~76 min**, so the batch floor is ~1.3h, not 2.7h. Phase A took 13,284s
+> (3h41m) — meaning the engine is at **~35% of its own achievable floor**, and
+> the remaining win is real rather than imaginary.
 
 ## 1. Non-negotiable: the ceilings the design must respect
 
 | Ceiling | Value | Consequence |
 |---|---|---|
-| Drive writes/sec/account | 3 (sustained) | Copy path ~2.4 writes/file avg → per-account serial floor |
-| Cross-user writ right | ~8 users concurrent | Parallelism multiplier, already `user_workers=8` |
-| per-user QPS | ~4 req/s avg | Rate limiting is per-account, not global |
+| Drive writes/sec/account | 3 (sustained), not raiseable | ~4.4 writes/file measured → per-account floor |
+| Drive calls/100s | 20,000 per user *and* per project | ~200/s — two orders above current use; reads are effectively free |
+| Cross-user concurrency | 8 accounts (`user_workers=8`) | Aggregate budget ≈ 8 × 3 = 24 writes/sec |
+| per-user QPS limiter | `per_user_qps=3.0` (`resources.py`) | One shared token bucket per user |
 | memory | sized via `resources.py` | fixed, bounded workers |
 
-Design rule: **concurrency is across users, not across writes of one user.**
-An async rewrite that raises in-file concurrency hits the 429 wall and is
-strictly slower. Async here buys *connection reuse and batching*, not
-concurrency, for a single account's write path.
+Design rule: **saturate each account's 3 writes/sec; never exceed it.**
+
+> **Correction (supersedes this section's original rule).** The first draft
+> said *"concurrency is across users, not across writes of one user … an
+> async rewrite that raises in-file concurrency hits the 429 wall and is
+> strictly slower."* The prohibition is wrong and is retracted; only the
+> ceiling is real. The measured rate is **0.66 req/s per user against a
+> 3/sec ceiling — 4.6x of that account's budget sits unused.** In-user
+> concurrency is not what breaches the ceiling; it is the only thing that
+> *reaches* it. What must never happen is in-user concurrency **without** a
+> shared per-account limiter — that is the 429 storm the original rule was
+> reaching for, and the guard is the limiter, not serialism.
+>
+> Why it matters more than cross-user scaling: a batch cannot finish before
+> its slowest single user, and that user is one thread. Raising
+> `user_workers` cannot shorten `alice`; only splitting `alice` can.
+> Implemented as `drive_file_workers` (default 1) — see §5.1.
 
 ## 2. Target architecture (one module = one responsibility)
 
@@ -136,6 +160,29 @@ puts them in by design:
   only the frequency changes. (Crash-consistency margin: a lost tail re-migrates,
   which the ledger's exact-once-`id_mapping` rejection already handles.)
 
+### 5.1 Intra-user pipelining — the largest remaining win, already shipped
+
+Implemented ahead of the rebuild (it is ~40 lines in the current engine, and
+V2 should inherit the shape rather than reinvent it):
+`Settings.drive_file_workers`, consumed by `drive_engine._sync_files`.
+
+- Folders stay strictly serial and depth-first — a child's copy needs its
+  parent's target id, so parallelising the tree would race the ordering the
+  mirror depends on. Only the *files within a folder* fan out.
+- Every call still passes through the one per-user `RateLimiter`, so workers
+  interleave into the same per-account bucket. Utilisation rises; the ceiling
+  does not move.
+- `stats` moved behind `_bump()` + a lock. `d[k] += 1` is not atomic, and the
+  lost update would have silently undercounted the failure counters a run is
+  judged on.
+- `QuotaExhausted` still aborts the whole user rather than degrading to a
+  per-file failure, matching the serial path.
+- **Default 1 = byte-identical to the serial path**, so deploying it cannot
+  perturb an in-flight benchmark trial.
+
+Expected: `alice` from ~164 min latency-bound toward her ~76 min write floor.
+To be measured as **B5** against B4's numbers, once B4 Trial B is done.
+
 ## 6. Observability with WebSockets
 
 Progress today is `webui.py`'s `/api/status` polling with a server-side cache.
@@ -184,6 +231,26 @@ the transition.
 
 The rebuild's wins are: removing the FUD of three transfer modes, one
 retry/rate system, first-class batching in the write path, and real-time
-operability. The claimed 70-80% speed reduction of the original greenfield
-pitch is **not achievable** under Google's 3-writes/sec/account ceiling for
-Drive writes; V2 is justified by the other four, not by that number.
+operability.
+
+**On the original pitch's "70-80% faster" claim** — this section previously
+called it *"not achievable"*. That verdict rested on the retracted 2.7h
+floor and is itself now corrected:
+
+| | value | vs Phase A |
+|---|---|---|
+| Phase A measured | 13,284s (3h41m) | — |
+| Corrected write-ceiling floor | ~4,600s (~76 min, `alice`-bound) | **~65% faster** |
+| Original pitch | ~45 min | ~80% faster |
+
+So ~65% is the honest theoretical ceiling for this corpus — the pitch's
+70-80% band is *near* the floor rather than fantasy, but 45 min sits
+**below** `alice`'s own 76-minute write floor and remains unreachable while
+she is a single account. The reachable version of that number is
+per-account parallelism (splitting one user's writes across accounts), which
+Google's ceiling explicitly forbids.
+
+Corrected position: **a ~2-2.5x speedup is real and mostly unclaimed**, and
+§5.1 is the mechanism. V2 is still justified by the other four wins — but it
+should no longer be sold as *"speed is impossible, buy ergonomics"*, which
+is what this section previously argued.

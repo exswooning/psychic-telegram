@@ -1222,3 +1222,69 @@ def test_external_share_is_idempotent_across_runs(migrator, auth, db, settings):
     assert db.get_target_id(SRC_USER, theirs, "file") == first
     assert migrator.stats["files"] == files_before, \
         "resume must not copy it again"
+
+
+class TestIntraUserFileConcurrency:
+    """
+    `drive_file_workers` parallelises the files inside one folder.
+
+    It exists because the batch cannot finish before its slowest single
+    user, and that user is one thread: measured on the live tenant, a user
+    thread runs at 0.66 req/s against Google's 3 sustained writes/sec
+    *per account* ceiling, so ~4.6x of that account's budget goes unused
+    and no amount of extra `user_workers` can reach it.
+    """
+
+    def _tree(self, auth, n_files: int) -> None:
+        src = auth.source_drive(SRC_USER)
+        for i in range(n_files):
+            src.add_binary(f"f{i}.bin")
+
+    def test_default_is_serial_and_byte_identical(self, migrator, auth, settings):
+        """Default 1 must not change the existing path at all -- deploying
+        this mid-benchmark has to be a no-op."""
+        assert settings.drive_file_workers == 1
+        self._tree(auth, 5)
+        migrator.run()
+        assert migrator.stats["files"] == 5
+        assert migrator.stats["failed"] == 0
+
+    def test_parallel_copies_every_file_exactly_once(self, migrator, auth, settings):
+        settings.drive_file_workers = 4
+        self._tree(auth, 12)
+        migrator.run()
+        assert migrator.stats["files"] == 12
+        assert migrator.stats["failed"] == 0
+        # Exactly-once is the property that matters: a double-copy would
+        # duplicate real user data on the target.
+        tgt = auth.target_drive(TGT_USER)
+        names = [f["name"] for f in tgt.store.values()
+                 if f.get("mimeType") != FOLDER_MIME]
+        assert sorted(names) == sorted(f"f{i}.bin" for i in range(12))
+
+    def test_parallel_result_matches_serial_result(self, migrator, auth, settings):
+        """The whole point: same outcome, less wall clock."""
+        settings.drive_file_workers = 8
+        self._tree(auth, 20)
+        migrator.run()
+        assert migrator.stats == {"folders": 0, "files": 20, "skipped": 0,
+                                  "failed": 0, "acl_failed": 0}
+
+    def test_stats_are_not_lost_under_concurrent_increment(self, migrator, auth,
+                                                           settings):
+        """`d[k] += 1` is not atomic. Without the lock this undercounts, and
+        it would undercount the failure counters the run is judged on."""
+        settings.drive_file_workers = 8
+        self._tree(auth, 40)
+        migrator.run()
+        assert migrator.stats["files"] == 40
+
+    def test_quota_exhaustion_still_aborts_the_user(self, migrator, auth,
+                                                    settings, quota):
+        """On the serial path QuotaExhausted propagates and halts the user.
+        Parallelism must not downgrade it to a per-file failure."""
+        settings.drive_file_workers = 4
+        self._tree(auth, 6)
+        quota.cap_bytes = 0
+        with pytest.raises(QuotaExhausted):
+            migrator.run()

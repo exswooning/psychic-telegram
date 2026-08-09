@@ -20,8 +20,10 @@ fixup pass that runs after the rest of the tree has been mirrored.
 
 from __future__ import annotations
 
+import concurrent.futures as futures
 import logging
 import os
+import threading
 import time
 import uuid
 
@@ -52,6 +54,12 @@ class DriveMigrator:
         self.delta = False
         self.stats = {"folders": 0, "files": 0, "skipped": 0, "failed": 0,
                       "acl_failed": 0}
+        # `stats` is read-modify-written from every file task. With
+        # drive_file_workers > 1 those tasks run concurrently inside one
+        # user, and `d[k] += 1` is not atomic -- the lost update would
+        # silently undercount exactly the failure counters the run is
+        # judged on. Every mutation goes through _bump().
+        self._stats_lock = threading.Lock()
         self._pending_shortcuts: list[tuple[dict, str]] = []
         self._staging_drive_id: str | None = None
         # Set by shared_drives.py to point this engine at a shared drive
@@ -373,11 +381,22 @@ class DriveMigrator:
         else:
             self._sync_file(item, tgt_parent)
 
+    def _bump(self, key: str, n: int = 1) -> None:
+        """The only writer to `stats`. See _stats_lock in __init__."""
+        with self._stats_lock:
+            self.stats[key] = self.stats.get(key, 0) + n
+
     def _walk(self, src_parent: str, tgt_parent: str, depth: int) -> None:
         if depth > self.settings.max_recursion_depth:
             log.warning("[%s] max_recursion_depth %d exceeded under %s — pruning",
                        self.source_user, self.settings.max_recursion_depth, src_parent)
             return
+        # Files in this folder are collected and handled as one stage rather
+        # than inline, so they can run concurrently (see _sync_files). Folders
+        # stay strictly serial and depth-first: a child's copy needs its
+        # parent's target id, so parallelising the tree would race the very
+        # ordering the mirror depends on.
+        files: list[dict] = []
         for item in self._list_children(src_parent):
             mime = item.get("mimeType")
             if mime == FOLDER_MIME:
@@ -387,7 +406,60 @@ class DriveMigrator:
             elif mime == SHORTCUT_MIME:
                 self._defer_shortcut(item, tgt_parent)
             else:
+                files.append(item)
+        self._sync_files(files, tgt_parent)
+
+    def _sync_files(self, files: list[dict], tgt_parent: str) -> None:
+        """
+        One folder's files, in parallel when `drive_file_workers > 1`.
+
+        Why this exists. Per file the server-side path issues ~5.7 API calls
+        (copy, permissions.list, the batched grant create, the staging move,
+        the modifiedTime restore) and each one blocks on its own round trip.
+        Measured on the live tenant: 5.25 req/s aggregate across 8 user
+        workers is 0.66 req/s *per user*, against a per-account ceiling of 3
+        sustained writes/sec -- so a user thread spends most of its life
+        waiting, at roughly a fifth of the rate Google would allow it.
+
+        Adding user workers does not fix that. The batch cannot finish before
+        its slowest single user does, and the slowest user is one thread: on
+        this corpus `alice` alone is 3,118 files, a ~164 min latency-bound
+        walk whose own write-ceiling floor is ~76 min. Only concurrency
+        *inside* a user shortens the critical path.
+
+        The ceiling is still respected: every call already passes through
+        `self.limiter`, one shared token bucket per user, so N workers
+        interleave into the same per-account rate instead of multiplying it.
+        This raises utilisation toward the ceiling; it cannot exceed it.
+
+        Default is 1 -- byte-identical to the serial path, so a benchmark
+        trial is never perturbed by merely deploying this.
+        """
+        workers = max(1, int(getattr(self.settings, "drive_file_workers", 1)))
+        if workers == 1 or len(files) < 2:
+            for item in files:
                 self._sync_file(item, tgt_parent)
+            return
+
+        with futures.ThreadPoolExecutor(
+            max_workers=min(workers, len(files)),
+            thread_name_prefix=f"drive-{self.source_user.split('@')[0]}",
+        ) as pool:
+            pending = [pool.submit(self._sync_file, item, tgt_parent)
+                       for item in files]
+            for fut in futures.as_completed(pending):
+                # QuotaExhausted must still abort the user, exactly as it does
+                # on the serial path -- it means the 750 GB/day cap is spent,
+                # and continuing would just log failures against a wall.
+                exc = fut.exception()
+                if isinstance(exc, QuotaExhausted):
+                    for p in pending:
+                        p.cancel()
+                    raise exc
+                if exc is not None:
+                    log.exception("[%s] file task crashed: %s",
+                                  self.source_user, exc)
+                    self._bump("failed")
 
     # -- folders ---------------------------------------------------------------
     def _sync_folder(self, item: dict, tgt_parent: str) -> str | None:
@@ -397,7 +469,7 @@ class DriveMigrator:
 
         if self.settings.dry_run:
             log.info("[DRY RUN] would create folder %s", item["name"])
-            self.stats["folders"] += 1
+            self._bump("folders")
             return f"dryrun:{item['id']}"
 
         body = {"name": item["name"], "mimeType": FOLDER_MIME, "parents": [tgt_parent]}
@@ -409,7 +481,7 @@ class DriveMigrator:
             ).execute())
         except (PermanentAPIError, RuntimeError) as exc:
             self.db.log_audit(self.source_user, item["id"], "folder", "FAILED", str(exc))
-            self.stats["failed"] += 1
+            self._bump("failed")
             return None
 
         tgt_id = result["id"]
@@ -417,7 +489,7 @@ class DriveMigrator:
                                parent_target_id=tgt_parent, source_name=item["name"])
         self.db.log_audit(self.source_user, item["id"], "folder", "SUCCESS",
                           modified_time=item.get("modifiedTime"))
-        self.stats["folders"] += 1
+        self._bump("folders")
         self._restore_modified_time(tgt_id, item, self._sync_acls(item["id"], tgt_id, item.get("shared")))
         return tgt_id
 
@@ -429,18 +501,18 @@ class DriveMigrator:
             if self.delta:
                 self._maybe_delta_update(item, existing, is_native)
             else:
-                self.stats["skipped"] += 1
+                self._bump("skipped")
             return
 
         if not item.get("capabilities", {}).get("canDownload", True):
             self.db.log_audit(self.source_user, item["id"], "file",
                               "SKIPPED_NO_DOWNLOAD", "capabilities.canDownload=false")
-            self.stats["skipped"] += 1
+            self._bump("skipped")
             return
 
         if self.settings.dry_run:
             log.info("[DRY RUN] would copy file %s", item["name"])
-            self.stats["files"] += 1
+            self._bump("files")
             return
 
         if self.server_side:
@@ -501,7 +573,7 @@ class DriveMigrator:
                 # this item rather than proceeding without a way back.
                 self.db.log_audit(self.source_user, item["id"], "file", "FAILED",
                                   f"link_flip could not record the ACL: {exc}")
-                self.stats["failed"] += 1
+                self._bump("failed")
                 if size:
                     self.quota.refund(size)
                 return
@@ -516,7 +588,7 @@ class DriveMigrator:
                 self.quota.refund(size)
             self.db.log_audit(self.source_user, item["id"], "file", "FAILED",
                               f"server-side copy failed: {exc}")
-            self.stats["failed"] += 1
+            self._bump("failed")
             return
         finally:
             # Restore in a finally: a failed copy must not leave the file
@@ -550,7 +622,7 @@ class DriveMigrator:
                     self.quota.refund(size)
                 self.db.log_audit(self.source_user, item["id"], "file", "FAILED",
                                   "checksum mismatch after server-side copy")
-                self.stats["failed"] += 1
+                self._bump("failed")
                 return
             log.warning("[%s] md5 mismatch after server-side copy of %s "
                         "(source changed mid-copy?): %s != %s",
@@ -575,14 +647,14 @@ class DriveMigrator:
                 self.source_user, item["id"], "file", "FAILED",
                 f"copied to staging but move to My Drive failed: {exc}",
             )
-            self.stats["failed"] += 1
+            self._bump("failed")
             return
 
         self.db.record_mapping(self.source_user, item["id"], copy_id, "file",
                                parent_target_id=tgt_parent, source_name=item["name"])
         self.db.log_audit(self.source_user, item["id"], "file", "SUCCESS",
                           modified_time=item.get("modifiedTime"), bytes_moved=size)
-        self.stats["files"] += 1
+        self._bump("files")
         touched = self._sync_acls(item["id"], copy_id, item.get("shared"))
         if self.settings.migrate_comments:
             touched += self._sync_comments(item["id"], copy_id)
@@ -599,7 +671,7 @@ class DriveMigrator:
         except (PermanentAPIError, RuntimeError) as exc:
             self.quota.refund(size)
             self.db.log_audit(self.source_user, item["id"], "file", "FAILED", str(exc))
-            self.stats["failed"] += 1
+            self._bump("failed")
             return
 
         body = {"name": item["name"], "parents": [tgt_parent]}
@@ -617,7 +689,7 @@ class DriveMigrator:
         except (PermanentAPIError, RuntimeError) as exc:
             self.quota.refund(size)
             self.db.log_audit(self.source_user, item["id"], "file", "FAILED", str(exc))
-            self.stats["failed"] += 1
+            self._bump("failed")
             return
         finally:
             self._cleanup(path)
@@ -626,7 +698,7 @@ class DriveMigrator:
             self.quota.refund(size)
             self.db.log_audit(self.source_user, item["id"], "file", "FAILED",
                               "checksum mismatch after transfer")
-            self.stats["failed"] += 1
+            self._bump("failed")
             return
 
         tgt_id = result["id"]
@@ -634,7 +706,7 @@ class DriveMigrator:
                                parent_target_id=tgt_parent, source_name=item["name"])
         self.db.log_audit(self.source_user, item["id"], "file", "SUCCESS",
                           modified_time=item.get("modifiedTime"), bytes_moved=size)
-        self.stats["files"] += 1
+        self._bump("files")
         touched = self._sync_acls(item["id"], tgt_id, item.get("shared"))
         if self.settings.migrate_comments:
             touched += self._sync_comments(item["id"], tgt_id)
@@ -645,7 +717,7 @@ class DriveMigrator:
         if not export_mime:
             self.db.log_audit(self.source_user, item["id"], "file",
                               "SKIPPED_UNEXPORTABLE", f"no export mapping for {item['mimeType']}")
-            self.stats["skipped"] += 1
+            self._bump("skipped")
             return
 
         try:
@@ -654,7 +726,7 @@ class DriveMigrator:
             )
         except (PermanentAPIError, RuntimeError) as exc:
             self.db.log_audit(self.source_user, item["id"], "file", "FAILED", str(exc))
-            self.stats["failed"] += 1
+            self._bump("failed")
             return
 
         if size > self.settings.export_size_limit:
@@ -662,7 +734,7 @@ class DriveMigrator:
             self.db.log_audit(self.source_user, item["id"], "file",
                               "SKIPPED_EXPORT_TOO_LARGE",
                               f"{size} bytes exceeds the {self.settings.export_size_limit}-byte export ceiling")
-            self.stats["skipped"] += 1
+            self._bump("skipped")
             return
 
         body = {"name": item["name"], "mimeType": item["mimeType"], "parents": [tgt_parent]}
@@ -676,7 +748,7 @@ class DriveMigrator:
             ).execute())
         except (PermanentAPIError, RuntimeError) as exc:
             self.db.log_audit(self.source_user, item["id"], "file", "FAILED", str(exc))
-            self.stats["failed"] += 1
+            self._bump("failed")
             return
         finally:
             self._cleanup(path)
@@ -686,7 +758,7 @@ class DriveMigrator:
                                parent_target_id=tgt_parent, source_name=item["name"])
         self.db.log_audit(self.source_user, item["id"], "file", "SUCCESS",
                           modified_time=item.get("modifiedTime"), bytes_moved=size)
-        self.stats["files"] += 1
+        self._bump("files")
         touched = self._sync_acls(item["id"], tgt_id, item.get("shared"))
         if self.settings.migrate_comments:
             touched += self._sync_comments(item["id"], tgt_id)
@@ -702,24 +774,24 @@ class DriveMigrator:
     # -- delta pass ----------------------------------------------------------
     def _maybe_delta_update(self, item: dict, target_id: str, is_native: bool) -> None:
         if item.get("mimeType") == FOLDER_MIME:
-            self.stats["skipped"] += 1
+            self._bump("skipped")
             return
 
         last_synced = self.db.last_synced_modified_time(self.source_user, item["id"], "file")
         src_mtime = item.get("modifiedTime") or ""
         if last_synced and src_mtime <= last_synced:
-            self.stats["skipped"] += 1
+            self._bump("skipped")
             return
 
         if self.settings.dry_run:
             log.info("[DRY RUN] would update changed file %s", item["name"])
-            self.stats["files"] += 1
+            self._bump("files")
             return
 
         if is_native:
             export_mime, _ext = EXPORT_MIME_MAP.get(item["mimeType"], (None, None))
             if not export_mime:
-                self.stats["skipped"] += 1
+                self._bump("skipped")
                 return
             try:
                 path, size = self._download_via(
@@ -727,7 +799,7 @@ class DriveMigrator:
                 )
             except (PermanentAPIError, RuntimeError) as exc:
                 self.db.log_audit(self.source_user, item["id"], "file", "FAILED", str(exc))
-                self.stats["failed"] += 1
+                self._bump("failed")
                 return
             mimetype_for_upload = export_mime
         else:
@@ -740,7 +812,7 @@ class DriveMigrator:
             except (PermanentAPIError, RuntimeError) as exc:
                 self.quota.refund(size)
                 self.db.log_audit(self.source_user, item["id"], "file", "FAILED", str(exc))
-                self.stats["failed"] += 1
+                self._bump("failed")
                 return
             mimetype_for_upload = item.get("mimeType")
 
@@ -756,14 +828,14 @@ class DriveMigrator:
             if not is_native:
                 self.quota.refund(size)
             self.db.log_audit(self.source_user, item["id"], "file", "FAILED", str(exc))
-            self.stats["failed"] += 1
+            self._bump("failed")
             return
         finally:
             self._cleanup(path)
 
         self.db.log_audit(self.source_user, item["id"], "file", "SUCCESS",
                           modified_time=item.get("modifiedTime"), bytes_moved=size)
-        self.stats["files"] += 1
+        self._bump("files")
 
     # -- shortcuts (two-pass) ---------------------------------------------------
     def _defer_shortcut(self, item: dict, tgt_parent: str) -> None:
@@ -772,7 +844,7 @@ class DriveMigrator:
         # duplicates every shortcut it had already migrated.
         existing = self.db.get_target_id(self.source_user, item["id"], "shortcut")
         if existing:
-            self.stats["skipped"] += 1
+            self._bump("skipped")
             return
         self._pending_shortcuts.append((item, tgt_parent))
 
@@ -787,12 +859,12 @@ class DriveMigrator:
                 self.db.log_audit(self.source_user, item["id"], "shortcut",
                                   "SKIPPED_UNRESOLVED_TARGET",
                                   "shortcut target has not migrated")
-                self.stats["skipped"] += 1
+                self._bump("skipped")
                 continue
 
             if self.settings.dry_run:
                 log.info("[DRY RUN] would create shortcut %s", item["name"])
-                self.stats["files"] += 1
+                self._bump("files")
                 continue
 
             body = {"name": item["name"], "mimeType": SHORTCUT_MIME,
@@ -803,13 +875,13 @@ class DriveMigrator:
                 ).execute())
             except (PermanentAPIError, RuntimeError) as exc:
                 self.db.log_audit(self.source_user, item["id"], "shortcut", "FAILED", str(exc))
-                self.stats["failed"] += 1
+                self._bump("failed")
                 continue
 
             self.db.record_mapping(self.source_user, item["id"], result["id"], "shortcut",
                                    parent_target_id=tgt_parent, source_name=item["name"])
             self.db.log_audit(self.source_user, item["id"], "shortcut", "SUCCESS")
-            self.stats["files"] += 1
+            self._bump("files")
 
     # -- comments ---------------------------------------------------------------
     def _sync_comments(self, source_id: str, target_id: str) -> int:
@@ -853,7 +925,7 @@ class DriveMigrator:
 
             self.db.record_mapping(self.source_user, c["id"], created["id"], "comment")
             self.db.log_audit(self.source_user, c["id"], "comment", "SUCCESS")
-            self.stats["comments"] = self.stats.get("comments", 0) + 1
+            self._bump("comments")
             written += 1
 
             for r in (c.get("replies") or []):
@@ -926,7 +998,7 @@ class DriveMigrator:
             self.db.log_audit(self.source_user, f"{source_id}:(list-failed)",
                               "acl", "FAILED",
                               f"could not read source permissions: {exc}")
-            self.stats["acl_failed"] = self.stats.get("acl_failed", 0) + 1
+            self._bump("acl_failed")
             return 0
 
         applied = 0
@@ -1057,7 +1129,7 @@ class DriveMigrator:
             # them all, like the per-call loop would have.
             for _, audit_key in chunk:
                 self.db.log_audit(self.source_user, audit_key, "acl", "FAILED", str(exc))
-            self.stats["acl_failed"] = self.stats.get("acl_failed", 0) + len(chunk)
+            self._bump("acl_failed", len(chunk))
             return 0
 
         applied = 0
@@ -1065,7 +1137,7 @@ class DriveMigrator:
             exc = outcomes.get(str(idx))
             if exc is not None:
                 self.db.log_audit(self.source_user, audit_key, "acl", "FAILED", str(exc))
-                self.stats["acl_failed"] = self.stats.get("acl_failed", 0) + 1
+                self._bump("acl_failed")
             else:
                 applied += 1
         return applied
@@ -1082,7 +1154,7 @@ class DriveMigrator:
             return 1
         except (PermanentAPIError, RuntimeError) as exc:
             self.db.log_audit(self.source_user, audit_key, "acl", "FAILED", str(exc))
-            self.stats["acl_failed"] = self.stats.get("acl_failed", 0) + 1
+            self._bump("acl_failed")
             return 0
 
     def _restore_modified_time(self, target_id: str, item: dict,

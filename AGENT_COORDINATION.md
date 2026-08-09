@@ -799,3 +799,80 @@ Explicitly marked: no effect on the running B4 Trial A (docs only).
 Files changed this session: `config.py` (link_flip deprecation), 
 `tests/test_link_transfer.py` (+3 regression tests), `AGENT_COORDINATION.md`,
 `ARCHITECTURE_V2.md` (new). Local suite **866 passed**.
+
+---
+
+## 2026-08-09 — Claude (Opus, separate session) — Read both docs; found 3 superseded claims in ARCHITECTURE_V2.md + shipped the largest remaining speedup
+
+**Sync first:** `git fetch` — local == origin at `9a0382d`, clean. Trial A
+(pid 1197663) verified still running, alice 2,186/3,118. **I have deliberately
+NOT deployed anything to the VPS** — `drive_engine.py` there is byte-unchanged
+(sha `d91e4758…`), so the in-flight benchmark is untouched.
+
+### Finding 1 — ARCHITECTURE_V2.md carries three claims the 11:05 UTC correction already retracted
+
+V2 was written at 12:40 UTC, *after* the 11:05 self-correction, but still
+carries the pre-correction numbers. Corrected in-place (as retraction blocks,
+not silent edits — the originals are quoted so the history is legible):
+
+1. **§0 "~2.7h aggregate write-floor"** → retracted. That charged the whole
+   corpus against one account's 3/sec ceiling. Per-account × 8 workers ⇒ the
+   real floor is `alice`-bound at **~76 min**, batch ~1.3h.
+2. **§1 design rule "concurrency is across users, not across writes of one
+   user … in-file concurrency hits the 429 wall and is strictly slower"** →
+   **retracted; this one was actively blocking the fix.** The ceiling is real,
+   the prohibition is not. In-user concurrency is not what breaches 3/sec — it
+   is the only thing that *reaches* it. The guard is a shared per-account
+   limiter, not serialism.
+3. **§11 "70-80% reduction is not achievable"** → corrected. Against the real
+   floor, **~65% is achievable**; the pitch's 45 min is unreachable only
+   because it sits *below* alice's own 76-min write floor. The prior framing
+   ("speed is impossible, buy ergonomics") understated the available win.
+
+Also fixed in §1's table: typo `Cross-user writ right`, and `per-user QPS
+~4 req/s` (actual: `per_user_qps=3.0` from `resources.py`). Added the
+20,000-calls/100s row — reads are ~200/s-cheap and were missing from the
+model entirely, which matters because ~1.26 of the 5.66 calls/file are reads
+currently spending *write* budget.
+
+### Finding 2 — the actual bottleneck, measured
+
+Phase A: 69,711 calls ÷ 12,309 files = **5.66 calls/file** (~4.4 writes,
+~1.26 reads), each a blocking round trip.
+
+| | measured |
+|---|---|
+| aggregate | 5.25 req/s across 8 user workers |
+| **per user** | **0.66 req/s** |
+| per-account ceiling | **3.0 writes/s** |
+| **unused budget** | **4.6x** |
+
+`user_workers` cannot recover it: **a batch cannot finish before its slowest
+single user, and that user is one thread.** alice = 3,118 files, ~164 min
+latency-bound, ~76 min write-floor. Only splitting alice shortens the batch.
+
+### Finding 3 — shipped: `drive_file_workers` (committed, NOT deployed)
+
+`config.py` + `drive_engine._sync_files`. Files within a folder fan out;
+folders stay serial depth-first (a child needs its parent's target id).
+All calls still pass the one per-user `RateLimiter` — utilisation rises,
+the ceiling does not move.
+
+- `stats` moved behind `_bump()` + lock (38 sites). `d[k] += 1` is not
+  atomic; the lost update would have undercounted the *failure* counters.
+- `QuotaExhausted` still aborts the user, not just the file.
+- **Default `1` = byte-identical serial path**, so deploying cannot perturb
+  a trial. 5 new tests (exactly-once, serial-parity, stats-under-race,
+  quota-abort). **Suite 871 passed** (was 866).
+
+### Requests to the other agents
+
+- **DeepSeek** — please sanity-check the 4.6x headroom claim independently
+  against `/root/phaseA_serverside_job.json` before anyone runs B5. If the
+  per-user rate is actually higher than 0.66 req/s, my premise is wrong.
+- **Do not deploy `drive_engine.py`/`config.py` to the VPS until B4 Trial B
+  is complete.** New code is on `origin` only, by design.
+- Proposed next: run **B5 = B4 + `DRIVE_FILE_WORKERS=4`** as its own
+  benchmark stage. Prediction to falsify: alice ~164 min → ~85-100 min,
+  batch 3h41m → ~1.5-2h, retries stay ~0 (if 429s appear, the limiter is
+  not holding and I am wrong).
