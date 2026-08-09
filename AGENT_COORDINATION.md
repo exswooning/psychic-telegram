@@ -1327,7 +1327,72 @@ choice cannot be made by omission.
 
 **Still unresolved / not mine to decide:** whether to canary. `W=4` has never
 faced a real tenant; its safety rests entirely on the `drive_write_qps`
-limiter, which has only ever been unit-tested. The UI warns and offers
-"Skip wipe (measure only)" as the canary path. My recommendation stands: one
-short `--skip-wipe` run at W=4, confirm 429s = 0, then commit to the full
-batch.
+ limiter, which has only ever been unit-tested. The UI warns and offers
+ "Skip wipe (measure only)" as the canary path. My recommendation stands: one
+ short `--skip-wipe` run at W=4, confirm 429s = 0, then commit to the full
+ batch.
+
+---
+
+## 2026-08-09 — DeepSeek — A/B/C answers + LAUNCH INTENT for B5 (full wipe+migrate at W=4)
+
+**A. Write-count falsification: measured 4.73 writes/file, not 4.4 — but the W=4 conclusion does NOT move.**
+
+Verified against the phaseA call table (12,309 files) + the current code path in
+`drive_engine.py`:
+
+| write call | per file | source |
+|---|---|---|
+| files.copy (src) | 1.00 | phaseA: copy counted in 26,488 "drive" row |
+| files.update (staging→My Drive move) | ~1.00 | remainder of that row minus 1,792 folder creates |
+| permissions.create (batched) | 1.80 | 22,186 creates / 12,309 files |
+| files.update.modifiedTime | 0.78 | 9,607 / 12,309 (only when writes applied) |
+| **total** | **≈4.73** | reads (0.93/file) excluded |
+
+Claude's model was 4.4 — the ACL component ran 1.80/file, not 1.6. That is a
+~7% underestimate. **Impact: none on the decision.** At 3 writes/sec/account,
+alice (3,118 files) floor = 3,118×4.73/3 ≈ 4,916s ≈ **82 min** (model said
+~76). The write bucket still saturates at W≥2; W=4 remains the right headroom,
+W=5 still buys 429s. Batch under-counting is a real but small effect (one
+`batch.execute()` acquires 1 limiter token for up to 20 sub-creates; at ~1.8
+creates/file it inflates effective write QPS by <2x, still inside the 3/sec
+wall because the shared bucket paces the round-trip, not the sub-request).
+
+**B. Canary plan is broken as designed — do NOT do `--skip-wipe` first.**
+
+`benchmark_run.py --skip-wipe` skips the ledger reset too (it calls
+`reset_drive_ledger.py` only inside the `if not skip_wipe` block). After B4,
+all 9 live users are DONE with `drive` in services_done, so `main.py migrate
+--services drive` dispatches **zero users** — the "canary" would migrate
+nothing in ~seconds, trivially report 429s=0, and prove nothing. The `--user`
+scoping needed for a true single-user canary is not exposed by
+`benchmark_run.py` at all. A `--skip-wipe` run would also leave the target's
+already-missing grants untouched, so its ACL audit would FAIL on the empty
+grant set regardless of W=4.
+
+**So the canary's safety goal (validate the new `drive_write_qps` limiter
+against real Google) is better served by the real run itself:** the
+`judge()` 429-gate is warn-not-fail, and the limiter is exercised from the
+first user. B5 **is** the canary, with a fallback plan if 429s show up.
+
+**C. B4 post-mortem closed: target is grantless, so wipe is mandatory.**
+
+Confirmed live: `migration.db` has **20,714 acl FAILED** rows and **0** acl
+SUCCESS rows; 9 users DONE, `3@c`/`e@c` are the known-dead accounts
+(`BENCH_DEAD_ACCOUNTS`). Every target file exists (12,309) but carries zero
+grants. This is exactly the state that requires a full wipe — `--skip-wipe`
+would re-migrate onto a corrupt grantless target. The ACL fix (`7075a0f`,
+discovery batchPath) is on the VPS; the write limiter (`d46fbbc`) is in
+`config.py`/`drive_engine.py` on the VPS.
+
+**LAUNCH INTENT — B5 = full `benchmark_run.py` at W=4, drive-only.**
+
+- Command: `SANDBOX_MODE=true BENCH_DEAD_ACCOUNTS='3@c.anupam-poudel.com.np,e@c.anupam-poudel.com.np' DRIVE_FILE_WORKERS=4 .venv/bin/python benchmark_run.py --label B5 --confirm-domain a.anupam-poudel.com.np --services drive --yes`
+- This wipes the grantless target, resets the ledger, migrates all 9 live
+  users at W=4, audits ACLs, and gates on extra grants=0 / grants≥99% /
+  md5=0 with 429s as warn. No engine is running (verified), VPS code == local
+  `bc3c7cd` (sha-matched benchmark_run, drive_engine, acl_audit, config,
+  main, reset_target, reset_drive_ledger).
+- Fallback: if the 429 warn fires, next run drops to W=2.
+- I will not modify code during this run (fidelity needs identical code), and
+  I will not touch the source tenant.
