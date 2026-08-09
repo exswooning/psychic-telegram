@@ -508,3 +508,34 @@ monitor re-armed after a session gap, hourly).
 **Target tenant status:** Phase B target files were cleaned of all 93 leaked `anyone` grants by unpublish_target.py earlier; the target is in the server_side (winning, ACL-correct) state. `TRANSFER_MODE=link_flip` is still set in env.sh from the A/B — the coordination plan says the next real run should use `server_side`.
 
 **Commits:** b73e5e0 (coordination), b499b45 (engine improvements), 8e39e3d (Groq feature), all pushed to origin/workspace-migrator. Deploy was a straight scp of webui.py / drive_engine.py / config.py / tests/test_groq.py + webui restart; VPS tests pass (70 passed).
+
+---
+
+## 2026-08-09 09:30 UTC — Claude — Speed report (user request): A/B drive phases + overall completed migrations
+
+User asked for a speed report on the A/B drive migrations and overall migrations completed. Compiled from `/root/phaseA_serverside_job.json`, `/root/phaseB_linkflip_job.json`, `/root/mig_run2.log`, `/root/phaseA_acl_audit_correct.json`, `/root/phaseB_acl_audit.json`.
+
+**The A/B comparison (drive-only, 9/9 healthy users DONE both phases, 0 file failures both):**
+
+| Metric | A — server_side | B — link_flip | Delta |
+|---|---|---|---|
+| elapsed (wall) | 13,284s (3h41m) | 20,641s (5h44m) | **1.55x faster A** |
+| API calls | 69,711 | 69,988 | — |
+| requests/sec | 5.25 | 3.39 | 1.55x faster A |
+| per worker | 0.48 | 0.31 | — |
+| latency p50/p95/p99 | 557 / 1769 / 3401 ms | 552 / 1616 / 3289 ms | near-identical latency |
+| retries | 1 (0.0%) | 0 (0.0%) | tie |
+| file failures | 0 / 12,309 | 0 / 12,309 | tie |
+| audit exact | 12,169 | 12,076 | — |
+| **extra grants (leaks)** | **0** | **93 `anyone:reader`** (cleaned) | **A wins** |
+
+Per-user drive wall-times were consistently ~1.3–1.6x faster under server_side (alice 13,284 vs 20,641s; erin 12,071 vs 15,860s; carol 9,659 vs 12,972s; dave 6,412 vs 9,454s; bob 6,115 vs 9,948s; 1@ 4,904 vs 7,345s; a 4,382 vs 6,104s; c 3,813 vs 5,943s; info 3,582 vs 5,181s). Link_flip's structural overhead (public-grant create + per-file restore pass + public-grant delete on top of the same copy) matches Kimi's analysis: strictly more per-file API work, and it leaked 93 public target files (fixed via unpublish_target.py).
+
+**Overall completed migrations (this migration project to date):**
+1. **Full migration (all services)** — `/root/mig_run2.log`, Aug 7: 9 users, 21,252s (5h54m), 125,158 calls, 5.89 req/s, p50/p95/p99 585/3834/7435ms, 3 retries; Drive had 10 failed files (alice 5, 1@ 3, erin 2).
+2. **Phase A drive (server_side, drive-only)** — 13,284s, 0 file failures, 0 leaked ACLs, 100% real ACL fidelity (140 missing grants all e@a dead-account constant).
+3. **Phase B drive (link_flip, drive-only)** — 20,641s, 0 file failures, 93 leaked publics → cleaned.
+
+**Constants across all runs:** `e@c`/`3@c` FAIL instantly (broken service accounts, environmental); ~21-23 acl_failed/user and the 140 missing grants are 100% the dead `e@a` account, not a fidelity gap.
+
+**Bottom line (matches prior verdicts):** server_side is **1.55x faster and zero-leak**, link_flip loses on both speed and security. `TRANSFER_MODE=link_flip` in env.sh is now strictly legacy — the next real run should use `server_side`. No code changes made for this report.
