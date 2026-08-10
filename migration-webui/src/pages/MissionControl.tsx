@@ -21,6 +21,8 @@ import ForensicModal from '@/components/ForensicModal'
 import BenchmarkRunner from '@/components/BenchmarkRunner'
 import ProvisionUsers from '@/components/ProvisionUsers'
 import AiDiagnostics from '@/components/AiDiagnostics'
+import DwdSetup from '@/components/DwdSetup'
+import CoverageAudit from '@/components/CoverageAudit'
 
 /**
  * Mission Control — one screen instead of six tabs.
@@ -182,6 +184,11 @@ const MissionControl: React.FC = () => {
 
       {alert && <Alert severity="warning" onClose={() => setAlert(null)}>{alert}</Alert>}
 
+      {/* First, because every panel below fails with unauthorized_client
+          if this is not done -- there is nothing more useful to show an
+          operator ahead of a broken setup than the reason it is broken. */}
+      <DwdSetup />
+
       <EmergencyBrake shares={shares} liveCount={shareCount} onReverted={refreshLists} />
 
       {/* Fleet */}
@@ -251,6 +258,8 @@ const MissionControl: React.FC = () => {
           going on" is the first question, and it reads the same ledger the
           panels below render one facet of each. */}
       <AiDiagnostics />
+
+      <CoverageAudit />
 
       <ProvisionUsers />
 

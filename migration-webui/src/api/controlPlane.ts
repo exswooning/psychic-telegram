@@ -271,6 +271,39 @@ export const runAiAnalysis = (prompt = '') =>
     method: 'POST', body: JSON.stringify({ prompt }),
   })
 
+// -- coverage audit ----------------------------------------------------------
+export interface CoverageRow {
+  service: string; item: string; status: string; verdict: string
+  count: number | null; note: string
+}
+export interface CoverageResult {
+  rows: CoverageRow[]
+  counts: { covered: number; absent: number; unprobed: number }
+  errors: Record<string, string>
+  externalSharedWithMe: number
+  migrateExternalShares: boolean
+}
+export interface CoverageStatus {
+  running: boolean; file?: string; result: CoverageResult | null
+}
+
+export const startCoverage = (reason: string) =>
+  cpFetch<ActionResult>('/api/v2/coverage/start', {
+    method: 'POST', body: JSON.stringify({ reason }),
+  })
+
+export const fetchCoverageStatus = () =>
+  cpFetch<CoverageStatus>('/api/v2/coverage/status')
+
+// -- DWD scope status ---------------------------------------------------------
+export interface DwdStatus {
+  tenant: string; checked: boolean; clientId?: string
+  live?: number; total?: number; missing?: string[]; error?: string
+}
+
+export const fetchDwdStatus = (tenant: 'source' | 'target') =>
+  cpFetch<DwdStatus>(`/api/v2/dwd/status?tenant=${tenant}`)
+
 export const revertPublicShares = (reason: string, tenant = 'target') =>
   cpFetch<ActionResult>('/api/v2/emergency/revert-public', {
     method: 'POST',

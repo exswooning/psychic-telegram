@@ -396,3 +396,99 @@ class TestBenchmarkLiveStatus:
         assert scoped["scopedSince"] == "2098-01-01T00:00:00Z"
         d.close()
         os.unlink(path)
+
+
+class TestCoverageAudit:
+    """
+    Coverage audits make one real API call per user per service and can run
+    for minutes, so they launch detached like a benchmark rather than
+    blocking a request. The status endpoint has to tell "no audit has run
+    yet" apart from "one is running and has not written anything yet" apart
+    from "one finished and here is the result" -- three different UI states
+    from the same two files (a process table entry and a JSON log).
+    """
+
+    def test_a_viewer_cannot_launch_it(self, cp):
+        r = cp.post("/api/v2/coverage/start",
+                    json={"reason": "curiosity"}, headers=VIEWER)
+        assert r.status_code == 403
+
+    def test_no_audit_yet_is_a_clean_not_running_result_none(self, cp, monkeypatch):
+        import api_server
+        monkeypatch.setattr(api_server, "HERE", tempfile.mkdtemp())
+        r = cp.get("/api/v2/coverage/status")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["running"] is False
+        assert body["result"] is None
+
+    def test_a_completed_result_is_parsed_and_summarised(self, cp, monkeypatch):
+        import json as _json
+
+        import api_server
+        d = tempfile.mkdtemp()
+        monkeypatch.setattr(api_server, "HERE", d)
+        os.makedirs(os.path.join(d, "logs"), exist_ok=True)
+        payload = {
+            "rows": [
+                {"service": "drive", "item": "Folders", "status": "FULL",
+                 "verdict": "COVERED", "count": 10, "note": ""},
+                {"service": "drive", "item": "Apps Script", "status": "PARTIAL",
+                 "verdict": "ABSENT", "count": 0, "note": ""},
+                {"service": "other", "item": "Contacts", "status": "PARTIAL",
+                 "verdict": "UNPROBED", "count": None, "note": ""},
+            ],
+            "totals": {"errors": {}, "external_shared_with_me": 0,
+                      "migrate_external_shares": True},
+        }
+        with open(os.path.join(d, "logs", "coverage-20990101T000000Z.json"),
+                 "w", encoding="utf-8") as fh:
+            _json.dump(payload, fh)
+        r = cp.get("/api/v2/coverage/status")
+        body = r.json()
+        assert body["running"] is False
+        assert body["result"]["counts"] == {"covered": 1, "absent": 1, "unprobed": 1}
+
+    def test_a_run_still_being_written_does_not_crash_the_endpoint(self, cp, monkeypatch):
+        """The file exists the instant the subprocess opens it for writing,
+        long before valid JSON is in it. Partial/invalid JSON must read as
+        'no result yet', not as a 500."""
+        import api_server
+        d = tempfile.mkdtemp()
+        monkeypatch.setattr(api_server, "HERE", d)
+        os.makedirs(os.path.join(d, "logs"), exist_ok=True)
+        with open(os.path.join(d, "logs", "coverage-20990101T000000Z.json"),
+                 "w", encoding="utf-8") as fh:
+            fh.write('{"rows": [')   # truncated
+        r = cp.get("/api/v2/coverage/status")
+        assert r.status_code == 200
+        assert r.json()["result"] is None
+
+
+class TestDwdStatus:
+    """
+    Functional, not documentary: Google exposes no API to read a DWD
+    delegation entry, so this mints a token per required scope and reports
+    which ones succeed. A key that does not exist, or an admin that is not
+    configured, must be reported -- not raise past the caller into a 500.
+    """
+
+    def test_an_unknown_tenant_is_rejected(self, cp):
+        r = cp.get("/api/v2/dwd/status?tenant=sideways")
+        assert r.status_code == 400
+
+    def test_a_missing_key_is_reported_not_a_500(self, cp, monkeypatch, settings):
+        """The handler does `from config import Settings` inside its own
+        closure so it always sees the live config, not one captured at
+        import time -- which means the patch target is config.Settings
+        itself, not api_server's or verify_scopes' module namespace."""
+        import config
+
+        settings.source_sa_key = "/definitely/does/not/exist.json"
+        settings.source_admin = "admin@source.example"
+        monkeypatch.setattr(config, "Settings", lambda: settings)
+        r = cp.get("/api/v2/dwd/status?tenant=source")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["checked"] is False
+        assert "key" in body["error"]

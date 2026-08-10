@@ -823,6 +823,131 @@ async def ai_analyze(body: AnalyzeRequest, op: Operator = Depends(operator)):
     return result
 
 
+# ======================================================================
+# Coverage audit
+#
+# "Which supported data types does the source actually have" -- read-only
+# against Drive/Gmail/Calendar/Chat/People/Tasks, but slow (a full per-user
+# scan) and users tend to run it right after a seed, so it is launched
+# detached like a benchmark rather than blocked on a single HTTP request.
+# ======================================================================
+class StartCoverage(WriteAction):
+    """Not destructive, but it does make a real API call per user per
+    service, so it goes through the same gate as everything else here --
+    an operator running it against the wrong tenant should still be able to
+    say why later."""
+
+
+def _coverage_log_dir() -> str:
+    d = os.path.join(HERE, "logs")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+@app.post("/api/v2/coverage/start")
+async def coverage_start(body: StartCoverage, op: Operator = Depends(operator)):
+    def _launch() -> tuple[bool, str]:
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        out = os.path.join(_coverage_log_dir(), f"coverage-{stamp}.json")
+        err = os.path.join(_coverage_log_dir(), f"coverage-{stamp}.err")
+        argv = [PY, "coverage_audit.py", "--json", "--allow-absent"]
+        with open(out, "wb") as o, open(err, "wb") as e:
+            proc = subprocess.Popen(argv, cwd=HERE, stdout=o, stderr=e,
+                                    stdin=subprocess.DEVNULL,
+                                    start_new_session=True)
+        return True, f"coverage audit started pid {proc.pid} -> {out}"
+    return await _gated(op, "coverage.start", body, "source", _launch)
+
+
+@app.get("/api/v2/coverage/status")
+async def coverage_status():
+    def _check() -> dict:
+        ps = subprocess.run(["ps", "-eo", "pid=,args="], capture_output=True,
+                            text=True).stdout
+        running = any("coverage_audit.py" in ln and "grep" not in ln
+                      for ln in ps.splitlines())
+
+        d = _coverage_log_dir()
+        candidates = sorted(
+            (f for f in os.listdir(d) if f.startswith("coverage-") and f.endswith(".json")),
+            reverse=True)
+        if not candidates:
+            return {"running": running, "result": None}
+        latest = os.path.join(d, candidates[0])
+        try:
+            with open(latest, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            # A run that is still writing, or crashed mid-write. Neither is
+            # an error worth surfacing over `running`, which already tells
+            # the caller whether to expect the file to change.
+            return {"running": running, "result": None}
+        rows = data.get("rows", [])
+        return {
+            "running": running,
+            "file": candidates[0],
+            "result": {
+                "rows": rows,
+                "counts": {
+                    "covered": sum(1 for r in rows if r["verdict"] == "COVERED"),
+                    "absent": sum(1 for r in rows if r["verdict"] == "ABSENT"),
+                    "unprobed": sum(1 for r in rows if r["verdict"] == "UNPROBED"),
+                },
+                "errors": (data.get("totals") or {}).get("errors", {}),
+                "externalSharedWithMe":
+                    (data.get("totals") or {}).get("external_shared_with_me", 0),
+                "migrateExternalShares":
+                    (data.get("totals") or {}).get("migrate_external_shares", False),
+            },
+        }
+    return await _off_loop(_check)
+
+
+# ======================================================================
+# DWD scope status
+#
+# Read-only, no browser involved -- this is verify_scopes.py's functional
+# check (mint a token per scope), which is the only real answer to "is
+# this granted" since Google exposes no API to read a delegation entry.
+# The automation itself (dwd_helper.py) needs a local display and cannot
+# run on this headless host; this endpoint tells the UI whether it is
+# needed at all.
+# ======================================================================
+@app.get("/api/v2/dwd/status")
+async def dwd_status(tenant: str = "source"):
+    if tenant not in ("source", "target"):
+        raise HTTPException(400, "tenant must be source or target")
+
+    def _check() -> dict:
+        try:
+            import verify_scopes
+            from config import Settings
+
+            s = Settings()
+            key, subject = verify_scopes._key_and_subject(s, tenant)
+            if not os.path.isfile(key):
+                return {"tenant": tenant, "checked": False,
+                       "error": f"no service-account key at {key}"}
+            if not subject:
+                return {"tenant": tenant, "checked": False,
+                       "error": f"{tenant.upper()}_ADMIN is not set"}
+            scopes = verify_scopes.required_scopes(s, tenant)
+            rows = verify_scopes.verify(s, tenant, scopes)
+            missing = [r["scope"] for r in rows if not r["ok"]]
+            client_id = ""
+            try:
+                with open(key, encoding="utf-8") as fh:
+                    client_id = json.load(fh).get("client_id", "")
+            except (OSError, ValueError):
+                pass
+            return {"tenant": tenant, "checked": True, "clientId": client_id,
+                    "live": len(rows) - len(missing), "total": len(rows),
+                    "missing": missing}
+        except Exception as exc:      # noqa: BLE001 - report, do not 500
+            return {"tenant": tenant, "checked": False, "error": str(exc)[:200]}
+    return await _off_loop(_check)
+
+
 @app.post("/api/v2/fleet/heartbeat")
 async def heartbeat(hb: Heartbeat):
     await _off_loop(cpdb.upsert_node, hb.node_id,
