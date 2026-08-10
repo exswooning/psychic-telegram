@@ -676,9 +676,14 @@ async def benchmark_running():
             if found["elapsedS"] > 30:
                 phase, phase_label = "judging", "Judging the run"
 
+        # Failures are counted from when this run started, not all-time.
+        # audit_log survives reset_drive_ledger.py, so an unscoped count
+        # shows yesterday's failures against today's run.
+        started = time.gmtime(time.time() - found["elapsedS"])
+        since = time.strftime("%Y-%m-%dT%H:%M:%SZ", started)
         found.update({"phase": phase, "phaseLabel": phase_label,
                       "phases": [p[0] for p in _BENCH_PHASES],
-                      "progress": cpdb.drive_migrated_counts()})
+                      "progress": cpdb.drive_migrated_counts(since_iso=since)})
         return found
     return await _off_loop(_check)
 

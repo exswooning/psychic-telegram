@@ -366,6 +366,33 @@ class TestBenchmarkLiveStatus:
             conn.execute("INSERT INTO audit_log (source_user,item_id,item_type,"
                          "status) VALUES ('a@s.com','f1:bob','acl','FAILED')")
         got = cpdb.drive_migrated_counts()
-        assert got == {"files": 1, "folders": 1, "failed": 2, "aclFailed": 1}
+        assert got["files"] == 1 and got["folders"] == 1
+        assert got["failed"] == 2 and got["aclFailed"] == 1
+        d.close()
+        os.unlink(path)
+
+    def test_failures_are_scoped_to_the_run_not_all_time(self):
+        """reset_drive_ledger.py clears Drive mappings but not audit_log, so
+        ACL rows outlive a wipe. Unscoped, the first live run of this
+        reported aclFailed: 20714 -- every one from the previous day's run,
+        none from the run being watched. A permanent five-figure failure
+        count beside a healthy run teaches the operator to ignore the exact
+        field that exists to catch the next silent ACL collapse.
+        """
+        path = tempfile.mktemp(suffix=".db")
+        os.environ["MIGRATION_DB"] = path
+        d = MigrationDB(path)
+        cpdb.apply_migrations()
+        with d.write() as conn:
+            conn.execute("INSERT INTO audit_log (source_user,item_id,item_type,"
+                         "status,timestamp) VALUES ('a@s.com','old','acl','FAILED',"
+                         "'2020-01-01T00:00:00Z')")
+            conn.execute("INSERT INTO audit_log (source_user,item_id,item_type,"
+                         "status,timestamp) VALUES ('a@s.com','new','acl','FAILED',"
+                         "'2099-01-01T00:00:00Z')")
+        assert cpdb.drive_migrated_counts()["aclFailed"] == 2
+        scoped = cpdb.drive_migrated_counts(since_iso="2098-01-01T00:00:00Z")
+        assert scoped["aclFailed"] == 1, "a previous run's failures leaked in"
+        assert scoped["scopedSince"] == "2098-01-01T00:00:00Z"
         d.close()
         os.unlink(path)

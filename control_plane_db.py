@@ -208,14 +208,27 @@ def identity_count() -> int:
         ).fetchone()["n"]
 
 
-def drive_migrated_counts() -> dict:
+def drive_migrated_counts(since_iso: str | None = None) -> dict:
     """Files and folders currently mapped, plus failures.
 
-    The live progress number for a running benchmark. Read from id_mapping
-    rather than the audit log because id_mapping is the exactly-once record
-    of what exists on the target -- audit_log counts attempts, so a retried
-    file would inflate it.
+    `since_iso` scopes the failure counts to one run, and it matters more
+    than it looks. `reset_drive_ledger.py` clears Drive *mappings* but
+    leaves audit_log alone, so ACL rows survive a wipe: unscoped, the first
+    live run of this reported `aclFailed: 20714` -- every one of them from
+    B4, the previous day, and none from the run being watched. A permanent
+    five-figure failure count parked next to a healthy run is worse than no
+    number at all, because it trains the operator to ignore the field that
+    exists to catch the next B4.
+
+    Counts of what *exists* need no window: id_mapping was reset with the
+    ledger, so it already describes this run only.
     """
+    where = ""
+    args: tuple = ()
+    if since_iso:
+        where = " AND timestamp >= ?"
+        args = (since_iso,)
+
     with ro() as conn:
         rows = conn.execute(
             "SELECT type, COUNT(*) n FROM id_mapping "
@@ -223,15 +236,16 @@ def drive_migrated_counts() -> dict:
         ).fetchall()
         counts = {r["type"]: r["n"] for r in rows}
         failed = conn.execute(
-            "SELECT COUNT(*) n FROM audit_log "
-            "WHERE status='FAILED' AND item_type IN ('file','folder')"
+            "SELECT COUNT(*) n FROM audit_log WHERE status='FAILED' "
+            "AND item_type IN ('file','folder')" + where, args
         ).fetchone()["n"]
         acl_failed = conn.execute(
-            "SELECT COUNT(*) n FROM audit_log "
-            "WHERE status='FAILED' AND item_type='acl'"
+            "SELECT COUNT(*) n FROM audit_log WHERE status='FAILED' "
+            "AND item_type='acl'" + where, args
         ).fetchone()["n"]
     return {"files": counts.get("file", 0), "folders": counts.get("folder", 0),
-            "failed": failed, "aclFailed": acl_failed}
+            "failed": failed, "aclFailed": acl_failed,
+            "scopedSince": since_iso}
 
 
 def user_progress() -> list[dict]:
