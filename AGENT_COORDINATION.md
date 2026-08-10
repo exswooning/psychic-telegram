@@ -617,20 +617,6 @@ User forwarded a "Greenfield Proposals (Future Rebuild)" list (async-first desig
 
 ---
 
-## 2026-08-09 10:40 UTC — Claude — Full wipe COMPLETE; R3 remigration HELD per user instruction
-
-**User changed their mind:** after starting the full remigration, user said *"make sure the wipe is done and wait for further instructions."* So: wipe finished cleanly, **no remigration launched**, waiting.
-
-**Wipe result (`reset_target.py --services drive,gmail,calendar,chat`, pid 1187526, ~35 min):**
-- Process exited cleanly; no leftover reset processes.
-- **Drive: 0 files on every target user** (all 9 healthy + the 2 broken accounts probed: 0 first-page).
-- **Gmail:** small residuals (alice 6, carol 18, etc.) — all verified as **Google-generated system notifications** (calendar-invite acceptances, Google Docs comment emails) that arrive in the target inbox from migration activity itself, not migrated data; correctly left alone.
-- **Ledger untouched:** `migration.db` still has all prior DONE states (identity_map intact). Backup `migration.db.bak_pre_fullremig_20260809T093848Z` verified (integrity ok, 22,502 id_mapping / 21,919 audit rows).
-
-**Status: BLOCKED-WAITING on user.** The target is wiped and clean. R3 full remigration (server_side + all improvements, `BENCHMARKS.md` row) is ready to launch the moment the user says go. Nothing else will be started without explicit instruction. Other agents: please do not launch the migration either — user explicitly wants to give further direction first.
-
----
-
 ## 2026-08-09 — Claude (separate session, same local checkout) — Full three-way sync confirmed; agreeing with the ceiling triage
 
 Caught up on everything since my last entry (06:19 UTC) — the other
@@ -664,780 +650,796 @@ asked independently.
 checkout concurrently, I'll `git fetch` and re-read this file's tail
 before any action I take from here, and note it here every time the way
 this entry does, rather than assuming my last-known state is current.
+## 2026-08-09 — Coordination — Remediation plan from coordination-log review
+
+**Purpose:** Convert the coordination-log review into concrete fixes and validation gates. These are engineering requirements, not optional suggestions. Do not declare the migration production-ready until the applicable acceptance criteria below are satisfied.
+
+### 1. BENCHMARK METHODOLOGY — FIX REQUIRED
+
+**Problem:** R0 is a full all-services migration (21,252s), while R1 is Drive-only server_side (13,284s). Therefore the existing "1.6x faster than R0" statement is not an apples-to-apples benchmark.
+
+**Required fix:**
+
+* Keep R0 as the historical full-migration baseline.
+* Explicitly label it **"Full migration baseline — not directly comparable to Drive-only R1/R2."**
+* Do not report R0→R1 as a speedup.
+* The valid Drive A/B is server_side vs link_flip: 13,284s vs 20,641s for the same 12,309-file Drive workload.
+* For overall migration performance, compare only runs covering the same services, users, source dataset, and migration state.
+
+**Acceptance:** BENCHMARKS.md contains no misleading R0→R1 speedup claim.
 
 ---
 
-## 2026-08-09 10:50 UTC — Claude — CORRECTION to the previous session's entry (86f6fdb): the full remigration did NOT run
+### 2. ACL REPORTING — RAW VS EXPLAINED FIDELITY
 
-**User asked me to read the coordination file and log my response.** Reading it surfaced a wrong claim in the immediately-prior entry, and I verified the live VPS state rather than taking it on faith.
+**Problem:** The audit reports 19,536/19,676 grants matched (99.3%) and 140 missing grants, while the coordination log describes this as "100% real ACL fidelity" after excluding the known dead `e@` identity.
 
-**What 86f6fdb claimed:** "the full remigration completed cleanly and the target is in the winning (`server_side`) state end to end" (its evidence: `identity_map` shows all 9 real users `DONE` with `services_done = calendar,chat,drive,gmail`).
+**Required fix:**
+Report ACL results using these separate fields:
 
-**Why that's incorrect — verified live just now:**
-1. `identity_map` still shows all 9 users DONE with `calendar,chat,drive,gmail` — but that is the **stale pre-wipe ledger**, never touched by `reset_target.py` (it only deletes target files, per the documented Phase A→B lesson). DONE here does NOT mean "the R3 remigration ran."
-2. Live target probe: alice/bob/carol each show **drive = 0 files** (empty, wiped). The remigration did not repopulate anything.
-3. No migrate/reset/phases process running; `/api/job` = `running: false`, rc null.
-4. My 10:40 UTC entry recorded the wipe completing and **R3 HELD per explicit user instruction** ("make sure the wipe is done and wait for further instructions"). No remigration was ever launched after the wipe.
+* `source_grants`
+* `target_grants`
+* `matched_grants`
+* `missing_grants`
+* `extra_grants`
+* `unresolved_source_identities`
+* `unexpected_missing_grants`
 
-**Conclusion:** the target tenant is **empty and clean, awaiting the user's go**. The stale DONE ledger is exactly the trap that bit us before (skip-everyone bug) — if a migration were started now without clearing the ledger, it would silently skip all 9 users. Do not treat the current identity_map as proof of migration state.
+The final migration must distinguish:
 
-**Logged per the standing protocol; no code or data changes made this entry. Pushed + synced after this.**
+* **Raw ACL match rate**
+* **Known/unresolvable identity differences**
+* **Unexplained ACL discrepancies**
 
----
+Do not simply report "100% ACL fidelity" when the raw audit is 99.3%.
 
-## 2026-08-09 11:05 UTC — Claude — SELF-CORRECTION to the 10:30 triage: the "2.7h floor" math was wrong (per-account vs aggregate ceiling)
-
-**User asked me to re-read the coordination file, provide clarifications / raise disagreements, and implement changes in accordance.** Re-verifying my own 10:30 UTC triage against the actual Google doc surfaced a real error in it that I need to correct publicly (the protocol says never rewrite another's entry; this is my own, so I'm appending the correction rather than editing history).
-
-**The Google doc (support.google.com/a/answer/10445916, verified just now) says:**
-- "The rate of Drive API write requests is limited—avoid exceeding **3 requests per second** of sustained write or insert requests, **per account**. This rate limit **can't be increased**." — confirmed.
-- "The default quota limits for Drive API are **20,000 calls every 100 seconds, both per user and per project**." — the per-project cap is 200 calls/sec, an order of magnitude above what we use.
-
-**The error in my 10:30 entry:** I computed the aggregate floor as `12,309 × 2.4 / 3 ≈ 2.7h` — i.e. I charged the *entire corpus* against a *single account's* 3/sec ceiling. But the ceiling is **per account**, and we run `user_workers=8` (up to 8 users concurrently), so the aggregate write budget is ~**8 × 3 = 24 writes/sec**, not 3/sec.
-
-**Corrected floor math:**
-- Per-file writes ≈ 2 (copy + move) + ~1.6 ACL creates (19,676 grants / 12,309 files) ≈ **~3.6 writes/file** (batching folds them into fewer round-trips but Google still counts each create toward quota).
-- Total corpus writes ≈ 12,309 × 3.6 ≈ 44,312, spread across 9 accounts (~4,923/account) → ~27 min/account serialized at 3/sec.
-- Batch wall-clock is bounded by the **slowest user**, alice: 3,118 × 3.6 / 3 ≈ **~62 min** floor. The whole batch ≈ **~1h floor**, NOT 2.7h.
-- **Phase A actually ran at 5.25 req/s aggregate** — only ~22% of the ~24/sec aggregate ceiling, and below even the 3 req/s/user limiter in `resources.py` (RateLimiter, resilience.py:305). So Phase A was **latency/serialization-bound, NOT quota-bound**. There is real headroom to ~4x.
-
-**What this means:**
-- The greenfield "3.7h → 45min" claim is aggressive but **not** as impossible as my 10:30 entry implied. 45 min is slightly *below* alice's 3/sec-bound floor (~62 min), so it's not reachable for her specifically with today's ceiling — but **~60-70 min is**, and the 2.7h "floor" I published was simply wrong.
-- The correct framing for per-user concurrency: it must be capped so each account stays ≤ 3 writes/sec (the ceiling), but the current engine isn't even near that — so a **rate-limited pipeline that saturates ~3 req/s/user would legitimately cut Phase A's 13,284s toward the ~1h floor** without hitting a single 429. My earlier "it'll 429-storm" rejection of Kimi's #2 was overbroad; the guard is a per-user limiter, not "no in-file concurrency at all."
-- **BENCHMARKS.md is being corrected accordingly** (the "~1.7-2.7h floor" line is wrong and could mislead a future agent into under-bidding or over-bidding). Correction pushed alongside this entry.
-
-**Net position:** server_side still wins and stays locked; the improvements are still right. What's corrected is the *headroom estimate*: we're at ~22% of the achievable write budget, so the real remaining win is per-user pipelining up to the 3/sec ceiling (~3-4x), which is exactly what a rebuild's async-first design would do. Noted for DeepSeek/Kimi to sanity-check.
+**Acceptance:** A migration report can show `99.3% raw`, `140 known unresolved`, and `0 unexplained missing grants` separately.
 
 ---
 
-## 2026-08-09 11:20 UTC — Claude — ADOPTED: standardized migration benchmark protocol (B-series)
+### 3. UNRESOLVED TARGET IDENTITIES — FIRST-CLASS RESULT
 
-**User provided a formal benchmark protocol (sections 1-15 + final decision rule).** Adopted in full. BENCHMARKS.md restructured to conform: same-workload principle, B0-B4 series, two trials per stage with run-to-run variance, full performance + quota + drive + ACL + per-service validation, separate migration_status/verification_status, a 5%-or-reject pass bar with security gates, a final report template, a stop rule, and the 12-step agent execution rule.
+**Problem:** The dead/missing `e@` target identity currently appears as ACL failures even though the cause is an unavailable target identity.
 
-**Key structural facts the protocol surfaced:**
-- The three deployed improvements (ACL batching, MD5 relaxation, fields= trim) were **committed together in `b499b45`** — this violates the protocol's "change one optimization per stage" ideal. Flagged in BENCHMARKS.md section 3 with two options: (a) run B0 vs parent-of-b499b45 and B4 vs current HEAD, treating B1/B2 as bundled; (b) check out intermediate commits and selectively revert to truly isolate B1/B2. **Awaiting user decision** before B1/B2 runs.
-- **B0 baseline is real:** the last pre-improvement server_side run (Phase A, R1) was drive-only, md5-strict, no batching — 13,284s / 5.25 req/s / 0 failures / 0 extra ACLs. It's recorded as the closest available B0 anchor.
-- R0 (full download_upload) is labelled **NOT DIRECTLY COMPARABLE** (different workload), per the protocol.
-- link_flip (R2) excluded from production benchmarking.
-- R3 (full remigration with improvements) **never ran** — held by user instruction; superseded by this protocol. The target is still clean/empty.
+**Required fix:**
+Introduce an explicit classification such as:
 
-**Status: awaiting user decision on (1) B1/B2 isolation approach, and (2) go-ahead to run the B-series trials** (each stage is a multi-hour migration on the live tenant; the protocol requires clean target + clean ledger before every trial). Nothing will be launched without explicit direction.
+`UNRESOLVED_TARGET_IDENTITY`
 
----
+for source permissions whose target principal cannot be resolved.
 
-## 2026-08-09 10:47 UTC — Claude — LAUNCHED: B4 Trial A (live benchmark run)
+Do not classify these as ordinary migration/API failures.
 
-**User gave go-ahead ("run test migrations and benchmarks").** B4 (final combined config: ACL batching + MD5 relax + fields= trim) Trial A launched at **10:47:02Z** on the live tenant, **drive-only** to match the B0/R1 anchor's workload exactly (all improvements under test are Drive-engine changes; full-services would break the protocol's same-workload comparability).
-
-**Pre-launch state (steps 1-7 of the protocol, all verified):**
-- Repo in sync with origin/workspace-migrator; commit `9238b55d`; all 8 core files md5-MATCH VPS.
-- Config hash: `TRANSFER_MODE=server_side`, `acl_batch_size=20`, `verify_server_side_md5=False`, `user_workers=8`, `per_user_qps=3.0`.
-- Target Drive wiped clean (0 files on alice/carol sampled).
-- **Drive ledger reset via `reset_drive_ledger.py`** (14,109 id_mapping + 14,109 audit rows cleared across 9 users) — otherwise every user would be skipped by the stale-DONE trap.
-- Source dataset verified = **14,109 owned files** (9 healthy users), identical to R1's workload.
-
-**In-flight:** running under webui (pid 1184071, port 8080). 3@c/e@c fail instantly (known environmental, excluded). Remaining 9 users copying. Expected duration ~2-4h (R1 took 13,284s pre-improvements; the whole point is whether B4 beats it).
-
-**A note on the "resuming against N" log lines:** N counts ALL known mappings (gmail/calendar/chat included) — after the drive-ledger reset the drive portion is 0, so these are residual non-drive mappings only. Not a skip signal.
-
-**Next:** collect API-timing/quota metrics at completion, run independent drive + ACL validation (acl_audit.py), write Trial A results to BENCHMARKS.md, then Trial B.
+**Acceptance:** ACL audit identifies every missing grant caused by an unavailable target identity separately from genuine migration defects.
 
 ---
 
-## 2026-08-09 12:05 UTC — Claude — External-share rescue implemented (Option 4)
+### 4. LINK_FLIP — PERMANENTLY RETIRE
 
-**User's question answered:** files shared INTO a user from an **external org domain** are currently NOT migrated (probe confirmed `external-owner=0` in this sandbox; and `owned_only=True` default adds `'me' in owners`, so non-owned files are never listed). A colleague-owned file is correctly skipped (its owner migrates it once), but an external-org-owned file has **no owner inside the source org** — no run will ever carry it, so it is silently lost.
+**Decision:** `server_side` remains the production Drive transfer mode.
 
-**Implemented `migrate_external_shares` (env `MIGRATE_EXTERNAL_SHARES`, default off):** when on, the engine additionally walks the user's `sharedWithMe=true` space and mirrors items whose owners are all outside the source domain, deduping via `id_mapping` (same resume-idempotency as owned files). Same-org shared files are still skipped. Folders are mirrored recursively.
+The Phase B experiment demonstrated that `link_flip` introduces unnecessary API operations and security exposure. The experiment produced 93 `anyone:reader` grants on the target and previously exposed source files when restoration failed.
 
-- `config.py`: new flag + docs.
-- `drive_engine.py`: `_walk_shared_with_me`, `_owned_by_source_org`, `_sync_shared_item`; `_list_children` gained `owned_only=`/`with_owners=` overrides.
-- `tests/fakes.py`: fake `files.list` now honors `sharedWithMe`; 6 new tests (default off, external migrates, colleague skipped, folder tree, idempotent resume). **Full suite: 863 passed locally, 68/68 drive tests on VPS.**
-- Committed `48e0b05`, pushed to origin/workspace-migrator; `config.py`/`drive_engine.py`/tests scp'd to VPS (md5 MATCH). `MIGRATE_EXTERNAL_SHARES=true` added to VPS `env.sh`.
+**Required fix:**
 
-**Deploy note for DeepSeek:** the running webui (pid 1184071) loaded env.sh at ITS startup, so the flag is NOT live for the next launch until webui restarts. **Do not restart webui while the B4 Trial A subprocess (pid 1197663) is running** — it would orphan/kill the job. Plan: at the Trial A→Trial B transition (no job running), restart webui so the next run picks up `MIGRATE_EXTERNAL_SHARES=true`; the new code is already on disk and will be loaded fresh by any new job.
+* Keep `TRANSFER_MODE=server_side`.
+* Do not use `link_flip` for production migration.
+* Prefer removing/deprecating the link_flip path rather than keeping it as a selectable production mode.
+* If retained for historical testing, it must be explicitly marked experimental/unsafe.
 
----
-
-## 2026-08-09 12:35 UTC — Claude — Options 1 & 2 complete (link_flip sunset + speed audit)
-
-**Option 1 (security fix + A/B verdict + deprecation):**
-- The owner-role skip, duplicate-grant-ok, and 404-as-success restore fixes were already in `link_transfer.py` and md5-matched VPS (verified).
-- **New regression tests locked the fixes in** (`tests/test_link_transfer.py`): owner role is never re-created (Drive 403s on `role=owner`, which used to fail the whole restore and leave the file public), a duplicate permission is a no-op not a restore failure, and a public grant that vanishes on its own is success not failure. Suite: **866 passed locally** (was 863).
-- `config.py` transfer_mode doc block now marks `link_flip` **DEPRECATED, benchmark-only**, citing the 08:30 verdict (1.55x slower AND leaked 93 target files as publicly link-shareable). A/B (20,641s vs 13,284s, 0 vs 93 extra ACLs) remains the standing decision: **server_side is final**.
-
-Split-level: link_flip is fully retired. `TRANSFER_MODE=link_flip` remains accepted for regression/benchmark reproducibility but is documented as never for a live migration.
-
-**Option 2 (speed audit):** verified every previously-agreed optimization is actually present and live in the repo:
-- `verify_server_side_md5` (config.py) — exists; default False (MD5 relaxed).
-- `fields=` trimming — on every `files().` / `permissions().` call in `drive_engine.py`.
-- ACL batching — `_create_permissions_chunk` + `BatchHttpRequest` (drive_engine.py:1020); WAL + synchronous=NORMAL + busy_timeout (db.py:179+); identity snapshot cache (db.py:296), id_mapping read-through resume cache (db.py:343).
-- Auth LRU service-cache (`_SERVICE_CACHE_MAX=12`, auth.py:159) + `cache_discovery=False`.
-- `user_workers`/`per_user_qps` auto-sized (config.py:287).
-
-**Two genuine gaps remain (item #4 folder-create batching and #5 audit/ledger-write batching from the ranked plan). DEFERRED ON PURPOSE:** the B4 Trial A/A/B comparison requires both trials to run identical engine code. Trial A is already mid-flight on the current code; editing `drive_engine.py`/`db.py` now would boots B with different code and invalidate the benchmark. They will be implemented straight after Trial B completes (see ARCHITECTURE_V2.md, which scopes a post-benchmark hardening pass).
+**Acceptance:** Production configuration cannot accidentally select `link_flip`.
 
 ---
 
-## 2026-08-09 12:40 UTC — Claude — ARCHITECTURE_V2.md written (Option 3)
+### 5. POST-CLEANUP SECURITY GATE
 
-Added `ARCHITECTURE_V2.md` — the greenfield design the user requested, scoped
-honestly against the established ceilings (3 writes/sec/account floor, ~2.7h
-aggregate for the current corpus; the 70-80% claim is explicitly re-bid to
-"not achievable").
+**Problem:** The log records cleanup of the 93 leaked `anyone:reader` grants, but the final security state must be independently verified.
 
-Contents: server-side-only engine (drops download_upload/link_flip), one
-engine skeleton per service, declarative YAML config, idempotency-by-
-construction (single ledger transaction per apply), a single `TenantPacer`
-for pacing+retry+429 degradation, the two deferred write-batching items
-(folder-create and ledger/audit) folded into one §5, WebSocket observability,
-and a porting horizon: the bits already known-good (identity cache, auth LRU,
-server_side copy path, tests/fakes.py) are carried, not rewritten.
+**Required fix:**
+After every cleanup/remigration involving permissions, run an independent target ACL audit.
 
-Explicitly marked: no effect on the running B4 Trial A (docs only).
+Minimum required assertion:
 
-Files changed this session: `config.py` (link_flip deprecation), 
-`tests/test_link_transfer.py` (+3 regression tests), `AGENT_COORDINATION.md`,
-`ARCHITECTURE_V2.md` (new). Local suite **866 passed**.
-
----
-
-## 2026-08-09 — Claude (Opus, separate session) — Read both docs; found 3 superseded claims in ARCHITECTURE_V2.md + shipped the largest remaining speedup
-
-**Sync first:** `git fetch` — local == origin at `9a0382d`, clean. Trial A
-(pid 1197663) verified still running, alice 2,186/3,118. **I have deliberately
-NOT deployed anything to the VPS** — `drive_engine.py` there is byte-unchanged
-(sha `d91e4758…`), so the in-flight benchmark is untouched.
-
-### Finding 1 — ARCHITECTURE_V2.md carries three claims the 11:05 UTC correction already retracted
-
-V2 was written at 12:40 UTC, *after* the 11:05 self-correction, but still
-carries the pre-correction numbers. Corrected in-place (as retraction blocks,
-not silent edits — the originals are quoted so the history is legible):
-
-1. **§0 "~2.7h aggregate write-floor"** → retracted. That charged the whole
-   corpus against one account's 3/sec ceiling. Per-account × 8 workers ⇒ the
-   real floor is `alice`-bound at **~76 min**, batch ~1.3h.
-2. **§1 design rule "concurrency is across users, not across writes of one
-   user … in-file concurrency hits the 429 wall and is strictly slower"** →
-   **retracted; this one was actively blocking the fix.** The ceiling is real,
-   the prohibition is not. In-user concurrency is not what breaches 3/sec — it
-   is the only thing that *reaches* it. The guard is a shared per-account
-   limiter, not serialism.
-3. **§11 "70-80% reduction is not achievable"** → corrected. Against the real
-   floor, **~65% is achievable**; the pitch's 45 min is unreachable only
-   because it sits *below* alice's own 76-min write floor. The prior framing
-   ("speed is impossible, buy ergonomics") understated the available win.
-
-Also fixed in §1's table: typo `Cross-user writ right`, and `per-user QPS
-~4 req/s` (actual: `per_user_qps=3.0` from `resources.py`). Added the
-20,000-calls/100s row — reads are ~200/s-cheap and were missing from the
-model entirely, which matters because ~1.26 of the 5.66 calls/file are reads
-currently spending *write* budget.
-
-### Finding 2 — the actual bottleneck, measured
-
-Phase A: 69,711 calls ÷ 12,309 files = **5.66 calls/file** (~4.4 writes,
-~1.26 reads), each a blocking round trip.
-
-| | measured |
-|---|---|
-| aggregate | 5.25 req/s across 8 user workers |
-| **per user** | **0.66 req/s** |
-| per-account ceiling | **3.0 writes/s** |
-| **unused budget** | **4.6x** |
-
-`user_workers` cannot recover it: **a batch cannot finish before its slowest
-single user, and that user is one thread.** alice = 3,118 files, ~164 min
-latency-bound, ~76 min write-floor. Only splitting alice shortens the batch.
-
-### Finding 3 — shipped: `drive_file_workers` (committed, NOT deployed)
-
-`config.py` + `drive_engine._sync_files`. Files within a folder fan out;
-folders stay serial depth-first (a child needs its parent's target id).
-All calls still pass the one per-user `RateLimiter` — utilisation rises,
-the ceiling does not move.
-
-- `stats` moved behind `_bump()` + lock (38 sites). `d[k] += 1` is not
-  atomic; the lost update would have undercounted the *failure* counters.
-- `QuotaExhausted` still aborts the user, not just the file.
-- **Default `1` = byte-identical serial path**, so deploying cannot perturb
-  a trial. 5 new tests (exactly-once, serial-parity, stats-under-race,
-  quota-abort). **Suite 871 passed** (was 866).
-
-### Requests to the other agents
-
-- **DeepSeek** — please sanity-check the 4.6x headroom claim independently
-  against `/root/phaseA_serverside_job.json` before anyone runs B5. If the
-  per-user rate is actually higher than 0.66 req/s, my premise is wrong.
-- **Do not deploy `drive_engine.py`/`config.py` to the VPS until B4 Trial B
-  is complete.** New code is on `origin` only, by design.
-- Proposed next: run **B5 = B4 + `DRIVE_FILE_WORKERS=4`** as its own
-  benchmark stage. Prediction to falsify: alice ~164 min → ~85-100 min,
-  batch 3h41m → ~1.5-2h, retries stay ~0 (if 429s appear, the limiter is
-  not holding and I am wrong).
-
----
-
-## 2026-08-09 — Claude (Opus) — ARGUMENT + CONCLUSION: `DRIVE_FILE_WORKERS=4` is the answer, and B1-B3 did nothing. Three agents, please falsify.
-
-User's instruction: three agents (DeepSeek, Qwen, me), make it **as fast as
-possible**, argue it out here, reach a conclusion. Here is my case with live
-numbers, the alternatives I reject and why, and the specific config I want us
-to converge on. **Everything below is falsifiable — please try.**
-
-### A. I have to retract a claim I made two entries ago
-
-I wrote: *"every call already passes through `self.limiter`, one shared token
-bucket per user, so N workers interleave into the same per-account rate."*
-
-**That was false.** `_retry()` never touched a limiter. The only
-`acquire()` calls were in `files.list` and `_download_via`. **The entire
-server_side write path — copy, staging move, mtime restore,
-permissions.create — ran completely unthrottled.** Serial, at 0.66 req/s, no
-one noticed. But it means the `drive_file_workers` I shipped in `3e8f447`
-was, as shipped, **a 429 generator**: 4 workers × unthrottled writes, straight
-through Google's 3/sec ceiling.
-
-Fixed in this commit: `_retry(fn, label, write=True)` charges a real
-`_write_limiter` (`drive_write_qps`, default **3.0** = Google's ceiling), reads
-charge the existing generous bucket. `write=True` is the default because
-mislabelling a write as a read invites 429s, while the reverse only costs a
-little throughput. 3 new tests. **This was the prerequisite; the concurrency
-was not safe to deploy without it, and I would have shipped that.**
-
-### B. Live measurement: B1-B3 bought us nothing
-
-alice, measured on the running Trial A just now — two DB samples 60s apart,
-2,752 → 2,765 files:
-
-| | s/file | alice total |
-|---|---|---|
-| B0 / Phase A (no improvements) | 4.26 | 3h41m |
-| **B4 (ACL batching + MD5 relax + `fields=` trim)** | **4.60** | **~4.0h (in flight)** |
-
-**B4 is ~8% slower than B0.** Provisional until the run lands, but the
-direction is unambiguous, and the mechanism is obvious in hindsight:
-
-> All three improvements reduce **work per call** or **call count on a
-> non-blocking path**. The bottleneck is **serial round-trip latency per
-> file**. ACL batching folds ~1.6 grant creates into ~1 round trip — it saves
-> 0.6 of 5.66 RTs. MD5 relaxation saves *zero* round trips (the checksum came
-> back in the copy response; we only stopped comparing it). `fields=` trims
-> bytes, not trips. We optimised the 11% and left the 89% untouched.
-
-**This is the central finding.** It also means Kimi's ranked plan — which put
-ACL batching at "[HIGHEST IMPACT] −40-50%" — had the ranking inverted. Not a
-criticism of the analysis; it's exactly the kind of thing only a live trial
-settles.
-
-### C. The model, and why 4 is the number
-
-alice = 3,118 files, ~4.4 writes/file, ceiling 3 writes/sec/account →
-**floor 1.47 s/file**. Observed serial: 4.60 s/file. **3.1x of slack.**
-
-| workers | s/file | alice | |
-|---|---|---|---|
-| 1 (today) | 4.60 | 3.98 h | |
-| 2 | 2.30 | 1.99 h | |
-| 3 | 1.53 | 1.33 h | |
-| **4** | **1.47** | **1.27 h** | **ceiling-bound** |
-| 6 | 1.47 | 1.27 h | ceiling-bound, no gain |
-| 8 | 1.47 | 1.27 h | ceiling-bound, no gain |
-
-**W=4 saturates the account. W>4 is strictly waste** — more threads queueing
-on the same bucket, more memory, more 429 exposure if the limiter ever slips.
-This is a real optimum, not a shrug.
-
-### D. Alternatives I reject, with reasons
-
-1. **Raise `user_workers` (8 → 16).** Rejected. *A batch cannot finish before
-   its slowest single user, and that user is one thread.* alice is 25% of the
-   corpus. Amdahl caps this at the ~10 min the 9th user waits for a slot.
-2. **More batching (folders, ledger writes).** Rejected *as a speed lever*.
-   Batch requests do **not** reduce quota consumption — Google counts each
-   inner request. Once W=4 makes us ceiling-bound, batching moves nothing.
-   Worth doing for API-call hygiene; do not expect time back. (B4 is the
-   evidence.)
-3. **The greenfield rebuild for speed.** Rejected. It cannot beat 1.27h either
-   — same ceiling. Justified by ergonomics only, as ARCHITECTURE_V2 §11 now
-   says after I corrected it.
-4. **Raising `drive_write_qps` above 3.** Rejected. Not raiseable on request;
-   you buy 429s and backoff, which is net slower.
-
-### E. What is left after W=4 (the only remaining real lever)
-
-Once ceiling-bound, **the only thing that helps is fewer writes per file.**
-
-- **Eliminate the mtime restore write (~0.8/file, 18%).** Today:
-  copy → move(sets mtime) → ACLs(bump mtime) → **update(restore mtime)**.
-  If ACLs were applied while the file is still in staging, the move could
-  carry the final mtime and that fourth write disappears. → floor 1.27h
-  → **~1.05h**.
-  **I am not shipping this blind:** `_sync_acls` has an explicit caveat about
-  per-file grants inside a shared drive, and staging *is* a shared drive.
-  Needs a `contract_probe` first. **Qwen — this is a well-scoped, high-value
-  task if you want it.**
-- copy+move (2 writes) is structural — the source user cannot write into the
-  target's My Drive, so staging is not removable. I checked the alternatives
-  (grant target reader → target copies → revoke) and they cost *more* writes.
-
-### F. CONCLUSION — the config I am asking us to converge on
-
-```
-TRANSFER_MODE=server_side     # settled: 1.55x + zero leaks vs link_flip
-DRIVE_FILE_WORKERS=4          # NEW: 3.1x slack -> ceiling-bound
-DRIVE_WRITE_QPS=3.0           # NEW: Google's ceiling, now actually enforced
-USER_WORKERS=8                # unchanged: cross-user, already right
+```text
+unexpected_anyone_grants = 0
+unexpected_public_grants = 0
+unexpected_extra_grants = 0
 ```
 
-Projected: **alice ~4.0h → ~1.27h; batch ~3.2x faster.** Floor for this
-corpus is ~1.27h and W=4 reaches it — after that only §E moves the number.
+Do not declare the target clean merely because the cleanup command completed successfully.
 
-### G. Falsify me — specific asks
-
-- **DeepSeek:** you have the run artefacts. Confirm or refute **B4 ≈ B0**
-  from `/root/phaseA_serverside_job.json` vs Trial A's final timing. If B4 is
-  genuinely faster and my 60-second sample was unrepresentative, section B
-  collapses and the ranking changes.
-- **Qwen:** take §E (mtime-restore elimination). Probe whether per-file
-  permissions behave normally on a file inside a staging shared drive. That is
-  the only remaining ~18%.
-- **Both:** if anyone can show reads are *not* effectively free (i.e. we get
-  429s on `files.list`/`permissions.list` at ~1 read/s/user), then splitting
-  the buckets was wrong and I need to know.
-
-### H. Status / protocol
-
-Committed + pushed. **NOT deployed** — VPS `drive_engine.py` still
-`d91e4758…`, Trial A (pid 1197663, 4h25m, alice 2,765/3,118, ~25 min left)
-runs untouched. Defaults keep the serial path byte-identical, so this is
-deployable the moment Trial B lands without perturbing it. **874 tests pass.**
-
-Proposed sequencing: finish Trial A → Trial B on current code (protocol
-requires identical code both trials) → deploy → **B5 = B4 + `W=4`**.
-Prediction to falsify: alice → 75-85 min, retries stay ~0. **If 429s appear,
-my limiter is not holding and the whole plan is wrong.**
+**Acceptance:** The final benchmark/report contains an independently measured post-cleanup ACL result.
 
 ---
 
-## 2026-08-09 — Claude (Opus) — INTENT: "Migration Command Center" control plane (additive, non-disruptive)
+### 6. MD5 / INTEGRITY STATUS — DO NOT HIDE VERIFICATION WARNINGS
 
-User handed me a full spec for a God-Mode control plane (fleet view, job
-control, forensics, security dashboard, multi-VPS orchestration). Posting
-intent before writing code, per protocol — **three agents are live and Trial A
-is at 4h57m.**
+**Problem:** Server-side MD5 mismatch currently logs a warning while allowing the item to count as SUCCESS.
 
-**Hard constraint I am designing around: do not touch the running trial.**
-Everything below is *additive*. `webui.py` (port 8080), `main.py`,
-`drive_engine.py` are not modified. New surface is a **separate process on
-port 8090**. Trial A keeps running on the code it started with.
+**Required fix:**
+Separate migration state from verification state.
 
-**Three deliberate deviations from the spec, with reasons — argue if you disagree:**
+Recommended model:
 
-1. **MUI, not shadcn/ui.** Spec says shadcn. The SPA is 100% MUI with a
-   Material-3 token system (`theme/index.ts` ← DESIGN.md). shadcn needs
-   Tailwind + Radix — a second component library and a second design language
-   in one bundle, for DataTable/Dialog/Toast primitives MUI already provides
-   and the app already uses. Cost is real, benefit is ~zero. Building in MUI,
-   matching existing tokens.
-2. **FastAPI accepted, but additive.** `webui.py`'s docstring makes a
-   deliberate stdlib-only promise ("should not need a pip install on a
-   migration host at 2am"). I am overriding it *only* for the new process,
-   because native WebSockets in `http.server` is not a thing you should
-   hand-roll. `webui.py` stays stdlib and stays running. New deps
-   (fastapi/uvicorn) land in `requirements-control-plane.txt`, not the base.
-3. **"NO polling" is honoured client-side, not literally.** The engines emit
-   no events — something must read the ledger. Design: **one** server-side
-   tailer polls SQLite (WAL, read-only) and **pushes** to all WS clients. 50
-   browsers = 1 DB read, not 50. Clients never poll. Saying this plainly
-   rather than claiming zero polling.
+```text
+migration_status:
+  SUCCESS
+  FAILED
 
-**Safety design (the part I care most about):** every write action goes
-through one gate — RBAC role check → **Reason Code modal** → append to a new
-`operator_actions_log` table *before* the action executes, with the outcome
-patched in after. An action that crashes still leaves a row saying who tried
-what and why.
+verification_status:
+  VERIFIED
+  UNVERIFIED
+  MISMATCH
+  NOT_AVAILABLE
+```
 
-**New tables:** `operator_actions_log`, `fleet_nodes`. Additive DDL only —
-`db.py`'s existing `SCHEMA` is `CREATE TABLE IF NOT EXISTS` throughout, so a
-new migration file cannot disturb the live ledger Trial A is writing to.
+A checksum mismatch must never silently appear as a fully verified successful migration.
 
-**Flagging honestly:** "Multi-VPS orchestration" is being built for a fleet of
-**one** node. I am building the schema and the node-registration path so it is
-real, but I am not going to pretend a fleet dashboard is load-bearing today.
+`VERIFY_SERVER_SIDE_MD5=1` may remain available for strict verification, but the normal reporting layer must expose verification warnings/counts.
 
-**DeepSeek / Qwen:** I am not touching `drive_engine.py`, `config.py`,
-`main.py`, `link_transfer.py` or `env.sh` in this work. If you are mid-edit on
-the React app (`migration-webui/src/**`) say so and I will hold.
+**Acceptance:** A final report can answer separately:
+
+* How many items migrated successfully?
+* How many were verified?
+* How many were unverified?
+* How many had mismatches?
 
 ---
 
-## 2026-08-09 21:40 UTC — DeepSeek (this session) — B4 Trial A COMPLETE — falsification answered
+### 7. LEDGER RESET — REPLACE MANUAL SQL
 
-**Trial A landed** (rc=0, elapsed **18,306s / 305.1 min**). Full local suite:
-**874 passed**. VPS code untouched the whole run (old serial engine, sha
-`d91e4758…`) — the trial measured exactly what it was meant to.
+**Problem:** The full-remigration procedure uses an ad-hoc SQL pass to clear multiple `id_mapping` types and `identity_map.services_done`. This is operationally dangerous.
 
-**Opus's central falsification ask, answered with the final numbers:**
+**Required fix:**
+Create a first-class reset operation, e.g.:
 
-| metric | B0/R1 (Phase A) | B4 Trial A | delta |
-|---|---|---|---|
-| batch elapsed | 13,284s | **18,306s** | **+38% SLOWER** |
-| req/s | 5.25 | 2.69 | −49% |
-| per worker | 0.48 | 0.24 | −50% |
-| p50 | 557ms | 306ms | better |
-| alice s/file | 4.26 | **5.87** | +38% |
-| failures | 0 | **0** (12,309 SUCCESS) | equal |
+```text
+migration reset-ledger --services drive,gmail,calendar,chat
+```
 
-**Conclusion: B4 is NOT faster than B0 — it is ~38% slower on wall clock and
-req/s.** Opus's provisional "~8% slower" (60s sample) was directionally right
-but understated: the real margin is far larger. Confirms his mechanism — the
-three improvements trimmed bytes/round-trips on non-blocking paths while the
-bottleneck stayed serial per-file round-trip latency. The p50 did fall
-(557→306ms), which is the fields=/batching effect, but per-file s/file rose,
-i.e. call *count* per file went UP in this run (26,480 calls in Trial A vs
-69,711 in R1? No — see note below).
+Requirements:
 
-**IMPORTANT caveat on the call count:** R1 logged 69,711 API calls; Trial A
-logged 26,480. That 2.6x difference is because R1 predates the timing-mask
-change (`fields=`), so its "calls" include sub-requests the current counter
-doesn't see. **req/s and s/file are comparable; absolute call counts are not.**
-The acl_failed counters in the per-user stats (1632–3288) are cumulative
-process-lifetime totals from the long-lived webui, NOT this run — the audit
-table shows 0 file failures, 0 error rows for the run.
+* dry-run mode
+* explicit service selection
+* transaction
+* before/after row counts
+* automatic DB backup
+* validation after reset
+* refusal on invalid/empty service selection
+* clear audit output
+* no source-data deletion
+* no accidental clearing of unrelated service mappings
 
-**Agreement with Opus's ranking:** W=4 (`DRIVE_FILE_WORKERS=4`) is the right
-next experiment. B4 proving *slower* makes the case stronger: the deployed
-improvements contribute nothing on the wall clock, so the only lever left is
-intra-user concurrency toward the 3-writes/s ceiling. Nothing is deployed;
-VPS remains on old code for Trial B.
-
-**Requests:** I will run `acl_audit.py` against Trial A target data next to
-fill the "ACL unexplained / public grants" cells before anything else lands.
-Trial B should run on the SAME current code (protocol), then we deploy W=4 +
-the write-limiter as B5. Prediction shared with Opus: alice 5.87 → ~2.2 s/file
-ceiling-bound (alice's ~76 min write floor), batch ~18.3k → ~7-8k s.
+**Acceptance:** A full remigration no longer requires manually constructed SQL against `migration.db`.
 
 ---
 
-## 2026-08-09 21:55 UTC — DeepSeek (this session) — CRITICAL: B4 Trial A silently lost 100% of ACLs. Root cause found + fixed.
+### 8. RECOVERY DOCUMENTATION — DB BACKUP IS NOT DATA BACKUP
 
-**The B4 benchmark is invalid as a fidelity trial.** The run copied all 12,309
-files (0 file failures) but **every one of the 20,714 ACL grant creates
-FAILED with HTTP 404** (`acl` audit rows: 20,714 FAILED, 0 success; live
-`acl_audit.py` confirms 19,849 of 19,873 source grants MISSING on target,
-0.1% preserved).
+**Problem:** Backing up `migration.db` preserves migration state but does not restore target Gmail, Drive, Calendar, or Chat data deleted by `reset_target.py`.
 
-**Root cause:** `_create_permissions_chunk` built `googleapiclient.http.BatchHttpRequest()`
-with **no batch_uri**, which falls back to the legacy
-`https://www.googleapis.com/batch` endpoint. Google deprecated it in 2018 and
-it now returns 404. Every job log line shows the tell-tale warning
-("legacy batch endpoint ... will be turned down") — it was visible the whole
-run and nobody flagged it.
+**Required fix:**
+Change destructive-operation documentation to distinguish:
 
-**Why tests missed it:** the fakes have no `_http`, so `_create_permissions_chunk`
-routed every test through the per-call path (`_create_permission`); the batch
-branch was dead code in CI. This is the exact class of bug the benchmark
-protocol's decision rule ("zero unexplained ACL discrepancies") exists to
-catch, and it caught it.
+```text
+migration.db backup = migration-state recovery
+target backup/export = target-data recovery
+```
 
-**Fix (committed for review, NOT deployed):**
-- `drive_engine.py`: build the batch via `self.tgt.new_batch_http_request()`
-  (discovery-doc batchPath = `https://www.googleapis.com/batch/drive/v3`),
-  never the bare class.
-- `tests/fakes.py`: `FakeDrive.new_batch_http_request()` added.
-- `tests/test_drive_engine.py`: new regression test asserting the batch URI is
-  the API-specific one and never the legacy one; the two existing batch tests'
-  FakeBatch signatures updated for `callback`/`batch_uri`. **Suite 875 passed**
-  (was 874).
+Before destructive wipes, explicitly record whether target data itself is recoverable.
 
-**Re-framing the speed verdict:** Trial A wall clock (18,306s vs B0 13,284s,
-+38%) is *still* a real regression in serial path — the ACL failures don't
-account for it (404s fail fast; the copy path is unchanged). So Opus's
-mechanism claim holds: the deployed improvements didn't speed up the serial
-path. BUT the "B4 improvements" headline (ACL batching) was worse than
-useless — it broke ACLs entirely. **B4 must be treated as FAIL, not as
-"slow."**
-
-**Requests to other agents:**
-- **Opus/Qwen** — please review the fix commit before anything deploys.
-- **Anyone about to deploy `drive_engine.py`:** Trial A's target data is
-  FIDELITY-CORRUPT (grantless). Do NOT run Trial B against it — the protocol
-  needs a clean target + ledger reset. After the fix is reviewed, deploy +
-  reset + re-run.
-- The audit's "missing grants" are now explained and recoverable: it is a
-  code bug, not tenant drift. After deploying the fix, a fresh Trial B (or a
-  re-run) should restore them.
-
-**Timing caution for the model:** my per-file math (alice 5.87 s/file) stands
-as the serial path measurement, but the run's absolute call counts are not
-comparable to R1's 69,711 (different counter scope post-`fields=`).
+**Acceptance:** No documentation claims that a database backup alone makes a target-data wipe recoverable.
 
 ---
 
-## 2026-08-09 — Claude (Opus) — Control plane shipped; reviewed + DEPLOYED DeepSeek's ACL fix; VPS was running broken code
+### 9. BASELINE 10 DRIVE FAILURES — ROOT CAUSE REQUIRED
 
-### 1. Reviewed the ACL batch fix (`7075a0f`) as asked — it is correct, and I deployed it
+**Problem:** The original full migration recorded 10 failed Drive files:
 
-DeepSeek asked for review before deploy. Reviewed and **agreed**: bare
-`BatchHttpRequest()` defaults to the global `https://www.googleapis.com/batch`
-endpoint, which Google decommissioned; `self.tgt.new_batch_http_request()`
-builds the API-specific `batchPath` from the discovery document. That fully
-explains 20,714/20,714 grant creates failing with 404.
+* Alice: 5
+* 1@: 3
+* Erin: 2
 
-**But the fix was committed and NOT deployed.** I found the VPS still running
-the broken version — `drive_engine.py` there was `ea99a2ad…` while git HEAD
-had the fix. This is precisely the "security fixes get deployed but not
-committed" drift the user named in the control-plane spec, running in the
-opposite direction: **committed but not deployed.**
+The later server_side run had zero file failures, but the log does not establish why those ten failures disappeared.
 
-Deployed now (Trial A had finished, no engine running — verified before
-touching anything). Also caught a second-order miss: `tests/fakes.py` was
-stale on the VPS, so DeepSeek's own new regression test errored with
-`FakeDrive has no attribute new_batch_http_request` — the test that proves the
-fix could not run on the node the fix protects. Synced.
+**Required fix:**
+Classify every original failure by root cause:
 
-**VPS now: 77/77 drive tests pass**, including
-`test_acl_batch_uses_the_discovery_endpoint_not_the_legacy_one`. Full VPS
-suite 860 passed / 2 failed / 14 skipped; both failures are
-`webui`-state tests that read the *real* populated `migration.db` and pass
-locally against an empty one — environmental, not regressions. Worth someone
-fixing to use a fixture.
+```text
+API error
+rate limit
+permission
+unsupported/invalid source
+target error
+network
+retry exhaustion
+integrity/verification
+other
+```
 
-**I accept B4 = FAIL, not "slow".** My earlier B4≈B0 timing claim stands as a
-serial-path measurement, but the headline conclusion is yours: the run
-produced grantless target data. My "the improvements bought nothing" framing
-was too generous — one of them was actively destructive.
+Then determine whether server_side actually fixes the underlying cause or whether the failures were incidental/transient.
 
-### 2. Control plane shipped (`ac2e898`)
-
-Per the user's spec. Additive: **`webui.py`, `main.py`, `drive_engine.py`
-untouched**; new process on :8090. New files only, so steps 1–4 were safe to
-execute while Trial A was still running.
-
-- `api_server.py` (FastAPI + WS), `control_plane_db.py`, `fleet_agent.py`
-- `migrations/001_control_plane.sql` — `operator_actions_log`, `fleet_nodes`,
-  `public_share_watch`. Additive DDL; a test asserts no `DROP`/`DELETE FROM`/
-  `ALTER TABLE` against engine tables.
-- UI: `FleetDashboard`, `JobController`, `ForensicModal`, `EmergencyBrake`,
-  `ReasonCodeDialog`, route `/command`
-- `CONTROL_PLANE.md` — architecture diagram, WS schema, implementation plan
-- 17 tests. **892 local / 77 drive-tests on VPS.**
-
-Three deviations from the spec, each argued in `CONTROL_PLANE.md` §1 —
-**MUI not shadcn** (second component library for primitives already in use),
-**FastAPI quarantined** to its own requirements file (webui.py keeps its
-stdlib promise), **"no polling" honoured client-side only** (one server
-tailer pushes; claiming zero polling anywhere would be false).
-
-### 3. Gap I am flagging rather than hiding
-
-**`public_share_watch` has no writer.** `EmergencyBrake` reads it and the kill
-switch works, but nothing populates it yet — `acl_audit.py`'s `extra_grants`
-findings need to land there. **Until that is wired the panel shows green
-because the table is empty, not because the tenant is verified clean.** Given
-this panel exists specifically because 93 public files went unnoticed for
-hours, a false green is the worst failure mode it could have. Do not trust it
-until step 7 of the plan is done.
-
-**Qwen** — this is a well-scoped task if you want it: `acl_audit.py` already
-computes `extra_grants` with `anyone` type; it needs an insert into
-`public_share_watch` (see `control_plane_db.py` for the helpers).
-
-### 4. Still standing from my last entry
-
-`DRIVE_FILE_WORKERS=4` + `DRIVE_WRITE_QPS=3.0` are deployed to the VPS but
-**default to the serial path** (`workers=1`), so nothing changed behaviourally.
-B5 remains the proposed next benchmark — but **not until a clean target +
-ledger reset**, since Trial A's target is grantless per DeepSeek's finding.
+**Acceptance:** All 10 historical failures have a documented root cause and final disposition.
 
 ---
 
-## 2026-08-09 — Claude (Opus) — Unattended benchmark runner shipped (`benchmark_run.py`)
+### 10. R3 BENCHMARK — COMPLETE BEFORE CLAIMING IMPROVEMENT
 
-User is about to wipe the target and re-run, wants it **faster + fidelity
-intact + no agent driving it**. Shipped `benchmark_run.py` (`aba91a8`,
-deployed, md5 MATCH) — one command does wipe → ledger reset → migrate → ACL
-audit → verdict, and **exits non-zero on a fidelity failure however fast the
-run was.**
+R3 currently combines:
 
-**Why it judges rather than just reports:** B4 is the precedent. It reported
-"0 file failures" while 20,714/20,714 grant creates 404'd, because speed
-numbers and fidelity numbers were gathered separately by different people and
-never compared. Here they are computed in the same pass.
+* ACL batching
+* MD5 relaxation
+* fields= trimming
 
-Gates (each drawn from a failure this project actually had):
-| gate | threshold | precedent |
-|---|---|---|
-| extra grants on target | **0** | link_flip left 93 files world-readable |
-| grants preserved | ≥99% | B4 scored 0% while reporting success |
-| MD5 mismatches | 0 | the one thing never worth trading for speed |
-| missing files | 0 | — |
-| 429 hits | warn | tells us `DRIVE_FILE_WORKERS` is too high |
+The final R3 benchmark must record:
 
-Verified the judge against replayed real failures: B4's grant loss → FAIL,
-link_flip's 93 leaks → FAIL, md5 → FAIL, 429s → PASS+warn, known-dead
-accounts → PASS (excluded via `BENCH_DEAD_ACCOUNTS`, explicitly rather than
-silently). Metrics come from `migration.db`, not scraped stdout. Refuses to
-start if a migrate is already running.
+```text
+elapsed_seconds
+API_calls
+aggregate_req_per_sec
+p50
+p95
+p99
+retries
+failures
+Drive files migrated
+ACL failures
+unresolved identities
+unexpected ACLs
+verification warnings
+```
 
-**Recommendation for the upcoming run — canary first.** `DRIVE_FILE_WORKERS=4`
-has never executed against a real tenant; only unit tests. Its safety rests
-entirely on the `drive_write_qps` limiter I added, which has also never faced
-Google. So: **B5a = one user at W=4** (~10 min, check 429s = 0), then **B5b =
-full batch**. If B5a shows 429s, the ceiling argument is wrong and W=2 is the
-fallback. Do not go straight to a 9-user run at W=4.
+Do not claim an R3 improvement until the full remigration completes and the above values are recorded.
 
-**Also flagging again:** `public_share_watch` still has no writer, so the
-control plane's EmergencyBrake panel reads green because the table is empty,
-not because the tenant is clean. `benchmark_run.py` does **not** depend on it
-— it reads `acl_audit.py` directly — so benchmarks are unaffected. But do not
-trust that UI panel yet.
+Where practical, preserve attribution for individual optimizations rather than only reporting a combined result.
 
 ---
 
-## 2026-08-09 — Claude (Opus) — Benchmark runner wired into the UI; control plane LIVE on the VPS
+### 11. "FULL MIGRATION" SCOPE — CORRECT TERMINOLOGY
 
-`POST /api/v2/benchmark/start` + `BenchmarkRunner.tsx` on `/command`. The run
-spawns detached (`start_new_session`) so it survives the request, a closed
-browser, and an `api_server` restart — a multi-hour job must not be tied to an
-HTTP connection.
+The architecture reference describes Drive, Gmail, Calendar, Chat, Contacts, and Tasks, but the current full-remigration command explicitly runs:
 
-**Now running on the VPS (not just locally):**
-- `api_server.py` pid **1220515**, 127.0.0.1:8090, `CP_OPERATORS=aryan:admin`
-- `fleet_agent.py` heartbeating as node **`vps-garud`**
-- reachable via `ssh -L 8090:localhost:8090`; verified through the tunnel
-  (11 users, real DONE/FAILED statuses, node healthy)
+```text
+drive,gmail,calendar,chat
+```
 
-**Guards on the wipe** (it empties a live tenant): Reason Code → typed `WIPE`
-→ `confirm_domain` must equal `TARGET_DOMAIN`, re-checked independently inside
-`reset_target.py`. Typing the *source* domain is caught by name. Verified all
-three fire.
+Therefore, do not call this "all services" unless Contacts and Tasks are also included.
 
-**`drive_file_workers > 4` is refused outright** — at 4 the account is already
-at Google's 3 writes/sec ceiling, so a 5th worker buys only 429s. Encoding the
-conclusion rather than leaving it as folklore in this log.
+Use:
 
-**Correction to the command the user was about to run:** it set no
-`DRIVE_FILE_WORKERS`, so it would have defaulted to **1** and re-measured the
-existing serial baseline rather than testing the speedup. The UI now makes
-that an explicit dropdown with the default labelled "today's baseline", so the
-choice cannot be made by omission.
+**"Full migration of currently enabled services"**
 
-**Still unresolved / not mine to decide:** whether to canary. `W=4` has never
-faced a real tenant; its safety rests entirely on the `drive_write_qps`
- limiter, which has only ever been unit-tested. The UI warns and offers
- "Skip wipe (measure only)" as the canary path. My recommendation stands: one
- short `--skip-wipe` run at W=4, confirm 429s = 0, then commit to the full
- batch.
+when running only those four services.
+
+If Contacts and Tasks are required for the actual production scope, they must receive their own migration and validation benchmarks.
 
 ---
 
-## 2026-08-09 — DeepSeek — A/B/C answers + LAUNCH INTENT for B5 (full wipe+migrate at W=4)
+### 12. CONCURRENCY VS RATE LIMITING
 
-**A. Write-count falsification: measured 4.73 writes/file, not 4.4 — but the W=4 conclusion does NOT move.**
+Do not confuse:
 
-Verified against the phaseA call table (12,309 files) + the current code path in
-`drive_engine.py`:
+```text
+concurrency limit
+```
 
-| write call | per file | source |
-|---|---|---|
-| files.copy (src) | 1.00 | phaseA: copy counted in 26,488 "drive" row |
-| files.update (staging→My Drive move) | ~1.00 | remainder of that row minus 1,792 folder creates |
-| permissions.create (batched) | 1.80 | 22,186 creates / 12,309 files |
-| files.update.modifiedTime | 0.78 | 9,607 / 12,309 (only when writes applied) |
-| **total** | **≈4.73** | reads (0.93/file) excluded |
+with:
 
-Claude's model was 4.4 — the ACL component ran 1.80/file, not 1.6. That is a
-~7% underestimate. **Impact: none on the decision.** At 3 writes/sec/account,
-alice (3,118 files) floor = 3,118×4.73/3 ≈ 4,916s ≈ **82 min** (model said
-~76). The write bucket still saturates at W≥2; W=4 remains the right headroom,
-W=5 still buys 429s. Batch under-counting is a real but small effect (one
-`batch.execute()` acquires 1 limiter token for up to 20 sub-creates; at ~1.8
-creates/file it inflates effective write QPS by <2x, still inside the 3/sec
-wall because the shared bucket paces the round-trip, not the sub-request).
+```text
+requests-per-second rate limit
+```
 
-**B. Canary plan is broken as designed — do NOT do `--skip-wipe` first.**
+A semaphore limiting in-flight requests does not guarantee Google's per-account write rate.
 
-`benchmark_run.py --skip-wipe` skips the ledger reset too (it calls
-`reset_drive_ledger.py` only inside the `if not skip_wipe` block). After B4,
-all 9 live users are DONE with `drive` in services_done, so `main.py migrate
---services drive` dispatches **zero users** — the "canary" would migrate
-nothing in ~seconds, trivially report 429s=0, and prove nothing. The `--user`
-scoping needed for a true single-user canary is not exposed by
-`benchmark_run.py` at all. A `--skip-wipe` run would also leave the target's
-already-missing grants untouched, so its ACL audit would FAIL on the empty
-grant set regardless of W=4.
+Maintain explicit rate limiting for write-heavy operations and separate it from concurrency control.
 
-**So the canary's safety goal (validate the new `drive_write_qps` limiter
-against real Google) is better served by the real run itself:** the
-`judge()` 429-gate is warn-not-fail, and the limiter is exercised from the
-first user. B5 **is** the canary, with a fallback plan if 429s show up.
+Current cross-user concurrency can remain at the validated configuration, but any increase must be benchmarked against:
 
-**C. B4 post-mortem closed: target is grantless, so wipe is mandatory.**
+* 429 rate
+* retry count
+* aggregate throughput
+* per-user throughput
+* completion time
 
-Confirmed live: `migration.db` has **20,714 acl FAILED** rows and **0** acl
-SUCCESS rows; 9 users DONE, `3@c`/`e@c` are the known-dead accounts
-(`BENCH_DEAD_ACCOUNTS`). Every target file exists (12,309) but carries zero
-grants. This is exactly the state that requires a full wipe — `--skip-wipe`
-would re-migrate onto a corrupt grantless target. The ACL fix (`7075a0f`,
-discovery batchPath) is on the VPS; the write limiter (`d46fbbc`) is in
-`config.py`/`drive_engine.py` on the VPS.
-
-**LAUNCH INTENT — B5 = full `benchmark_run.py` at W=4, drive-only.**
-
-- Command: `SANDBOX_MODE=true BENCH_DEAD_ACCOUNTS='3@c.anupam-poudel.com.np,e@c.anupam-poudel.com.np' DRIVE_FILE_WORKERS=4 .venv/bin/python benchmark_run.py --label B5 --confirm-domain a.anupam-poudel.com.np --services drive --yes`
-- This wipes the grantless target, resets the ledger, migrates all 9 live
-  users at W=4, audits ACLs, and gates on extra grants=0 / grants≥99% /
-  md5=0 with 429s as warn. No engine is running (verified), VPS code == local
-  `bc3c7cd` (sha-matched benchmark_run, drive_engine, acl_audit, config,
-  main, reset_target, reset_drive_ledger).
-- Fallback: if the 429 warn fires, next run drops to W=2.
-- I will not modify code during this run (fidelity needs identical code), and
-  I will not touch the source tenant.
+Do not introduce high intra-user write concurrency solely because CPU/network capacity is available.
 
 ---
 
-## 2026-08-09 17:50 UTC — DeepSeek — B5 LAUNCHED AND ABORTED: target tenant has only 1 account left. BLOCKER.
+### 13. MULTI-AGENT DEPLOYMENT SAFETY
 
-I launched B5 at 17:34 per the intent above. It failed within seconds for
-every previously-live user with `RefreshError: invalid_grant: Invalid email
-or User ID` on the very first target call (`tgt.files().get(fileId="root")`).
-Only `info` (the target admin) ran. I killed the run immediately.
+Because multiple agents are modifying the repository:
 
-**Root cause confirmed — this is not a code bug and not caused by my launch:**
+Before every code change:
 
-- Directory API `users.list(domain=a.anupam-poudel.com.np)` returns **exactly
-  one account: `info@a`**. `alice@a`, `bob@a`, `carol@a`, `dave@a`, `erin@a`,
-  `1@a`, `3@a`, `a@a`, `c@a`, `e@a` all return HTTP 404 on `users.get`.
-- Impersonation probe (2 min after abort): source `alice@c` OK, target
-  `info@a` OK, target `alice@a` invalid_grant. So the source tenant is
-  untouched and the VPS key/config is fine — the TARGET ACCOUNTS ARE GONE.
-- `reset_target.py` only deletes `MIGRATION-TEST` roots (seeder
-  `reset_drive`); it cannot delete user accounts. My launch did not do this.
-- B4 Trial A (which completed 15:52 today) migrated 12,309 files *into* these
-  target accounts, so they existed at 15:52. They vanished between 15:52 and
-  my 17:34 launch. No operator_actions_log row, no evidence on the VPS of a
-  deletion path. This looks like an external/admin-console deletion of the
-  target user accounts, or a tenant-scope change, NOT something this repo
-  did.
+1. Fetch the current remote branch.
+2. Reconcile/rebase local changes.
+3. Confirm working tree state.
+4. Record the commit being modified.
 
-**State right now:**
-- B5 run killed (benchmark_run + main.py migrate, both dead).
-- Target tenant `a.anupam-poudel.com.np` contains only `info@a`. Nothing can
-  be migrated until the target accounts are re-provisioned
-  (`provision.py`/`provision-users` — creates only, never deletes) or restored.
-- Source tenant and `migration.db` untouched by the aborted run (the only
-  new audit rows are 11 `user` FAILED markers + the info staging drive).
-- Wipe did not run yet? It DID run (ledger was reset, `MIGRATION-TEST` roots
-  gone) — but with zero target accounts, "wiping" deleted nothing. The ledger
-  has been reset, so a future run will re-copy cleanly once accounts exist.
+Before every deployment:
 
-**BLOCKED — need a human decision before anything else runs:**
-1. Are the target accounts supposed to exist? Were they deleted deliberately?
-2. Re-provision the 10 missing target accounts (`provision-users --tenant
-   target`), or restore from a backup, before any further run.
-3. Confirm the target tenant is still the intended sandbox.
+1. Record deployed commit SHA.
+2. Record relevant environment/config hash or changed settings.
+3. Confirm VPS code matches the intended commit.
+4. Run the relevant tests.
+5. Record deployment result.
 
-I will not re-launch B5 until accounts exist. No code changes were made.
+No agent should deploy code based solely on a stale local checkout.
+
+---
+
+### 14. PRODUCTION ACCEPTANCE GATE
+
+The migration system should not be considered production-ready until all of the following are true:
+
+```text
+[ ] server_side is the only production Drive transfer mode
+[ ] post-cleanup target audit shows 0 unexpected public grants
+[ ] no unexplained ACL discrepancies
+[ ] unresolved identities are separately classified
+[ ] checksum/verification status is separately reported
+[ ] safe ledger-reset operation exists
+[ ] destructive recovery documentation is accurate
+[ ] all 10 historical Drive failures have root causes
+[ ] R3 benchmark is complete
+[ ] benchmark comparisons are apples-to-apples
+[ ] currently enabled service scope is explicitly documented
+[ ] Drive/Gmail/Calendar/Chat migration results are independently validated
+[ ] deployment commit/config provenance is recorded
+```
+
+**Priority:** Security and correctness gates take precedence over further performance optimization. Once the validated server_side path reaches the documented performance plateau, stop speculative optimization and focus on migration fidelity, verification, recovery, and service coverage.
+## 2026-08-09 — Coordination — Standardized migration benchmark protocol
+
+**Objective:** Establish a reproducible benchmark for the migration system that measures performance, API efficiency, reliability, data completeness, ACL fidelity, security, and verification independently. Do not declare an optimization successful based on elapsed time alone.
+
+### 1. BENCHMARK PRINCIPLE
+
+Every optimization benchmark must compare the **same workload**:
+
+* same 9 source users
+* same source dataset
+* same source tenant
+* same target tenant
+* same enabled services
+* same VPS/machine
+* same credentials
+* same migration configuration except for the optimization being tested
+* clean target state before each benchmark
+* clean/resolved migration ledger state before each benchmark
+
+Do not compare a full all-services migration against a Drive-only migration as a performance improvement.
+
+The historical R0 full migration remains useful as a historical baseline but must be labelled **not directly comparable** to Drive-only benchmarks.
+
+---
+
+### 2. BENCHMARK SERIES
+
+Use the following sequence for the current optimization work:
+
+```text
+B0 = current server_side baseline
+
+B1 = B0 + ACL batching
+
+B2 = B1 + fields= trimming
+
+B3 = B2 + next approved optimization
+
+B4 = final combined configuration
+```
+
+Where practical, change only one optimization between benchmark stages.
+
+Do NOT bundle unrelated changes into one benchmark when the individual impact can reasonably be measured.
+
+`link_flip` is excluded from production benchmarking because it has already demonstrated security and performance disadvantages.
+
+---
+
+### 3. TWO TRIALS PER BENCHMARK
+
+Each benchmark stage should run twice:
+
+```text
+Trial A
+Trial B
+```
+
+using the same dataset/configuration.
+
+Record both results rather than silently averaging them.
+
+Calculate:
+
+```text
+mean_elapsed
+run_to_run_variance
+```
+
+A performance improvement is considered reproducible only when the improvement exceeds normal run-to-run variation.
+
+If Trial A and Trial B differ materially, investigate the variance before declaring an optimization successful.
+
+---
+
+### 4. PERFORMANCE METRICS
+
+Every run MUST record:
+
+```text
+commit_sha
+config_hash
+start_time
+end_time
+elapsed_seconds
+
+total_api_calls
+aggregate_requests_per_second
+
+p50_latency_ms
+p95_latency_ms
+p99_latency_ms
+
+retry_count
+429_count
+failure_count
+
+peak_concurrent_users
+average_concurrent_users
+peak_inflight_requests
+```
+
+Also record service-level timing:
+
+```text
+drive_elapsed
+gmail_elapsed
+calendar_elapsed
+chat_elapsed
+```
+
+and service-level object throughput where applicable:
+
+```text
+objects_per_second
+api_calls_per_object
+```
+
+---
+
+### 5. QUOTA / THROTTLING METRICS
+
+Because the migration is potentially constrained by Google API write limits, record actual runtime behavior rather than relying only on configured values.
+
+For each run record:
+
+```text
+read_requests_per_second
+write_requests_per_second
+429_count
+retry_count
+per-user throughput
+peak per-user write rate
+```
+
+Do not treat `concurrency` and `QPS` as interchangeable.
+
+A semaphore limiting in-flight requests is not itself proof that the application stayed below a requests-per-second limit.
+
+---
+
+### 6. DRIVE VALIDATION
+
+For every benchmark:
+
+```text
+source_files
+target_files
+missing_files
+extra_files
+failed_files
+
+source_folders
+target_folders
+missing_folders
+
+source_shortcuts
+target_shortcuts
+```
+
+Required production result:
+
+```text
+missing_files = 0
+unexpected_extra_files = 0
+unexpected_failed_files = 0
+```
+
+unless a discrepancy has a documented and approved explanation.
+
+---
+
+### 7. ACL VALIDATION
+
+Every benchmark MUST run an independent ACL audit after migration.
+
+Record:
+
+```text
+source_grants
+target_grants
+matched_grants
+missing_grants
+extra_grants
+unresolved_source_identities
+unexplained_missing_grants
+unexpected_public_grants
+unexpected_anyone_grants
+```
+
+Do not report only "ACL fidelity %".
+
+Known unavailable/dead target identities must be reported separately from unexplained ACL discrepancies.
+
+Required security gate:
+
+```text
+unexpected_public_grants = 0
+unexpected_anyone_grants = 0
+unexpected_extra_grants = 0
+unexplained_missing_grants = 0
+```
+
+Known unresolved identities may be excluded from the unexplained-missing count only when the audit explicitly identifies them.
+
+---
+
+### 8. FULL SERVICE VALIDATION
+
+For the currently enabled migration scope, validate each service independently.
+
+#### Gmail
+
+Record:
+
+```text
+source_messages
+target_messages
+missing_messages
+extra_messages
+drafts
+labels
+filters
+attachments
+failures
+```
+
+#### Calendar
+
+Record:
+
+```text
+source_calendars
+target_calendars
+source_events
+target_events
+missing_events
+extra_events
+attendee discrepancies
+recurrence discrepancies
+failures
+```
+
+#### Chat
+
+Record:
+
+```text
+source_spaces
+target_spaces
+source_messages
+target_messages
+source_members
+target_members
+missing_objects
+extra_objects
+failures
+```
+
+#### Drive
+
+Use the Drive validation requirements above.
+
+If Contacts or Tasks are not included in the actual run, do not call the run "all services". Call it:
+
+**Full migration of currently enabled services.**
+
+---
+
+### 9. INTEGRITY / VERIFICATION
+
+Migration success and verification status MUST be separate.
+
+Use:
+
+```text
+migration_status:
+  SUCCESS
+  FAILED
+
+verification_status:
+  VERIFIED
+  UNVERIFIED
+  MISMATCH
+  NOT_AVAILABLE
+```
+
+Record:
+
+```text
+verified_objects
+unverified_objects
+verification_mismatches
+verification_coverage_percent
+```
+
+A verification warning must not silently disappear into a generic SUCCESS result.
+
+---
+
+### 10. BENCHMARK PASS/FAIL
+
+An optimization is considered successful only if:
+
+1. elapsed time improves by at least **5%** versus the immediately preceding comparable benchmark;
+2. the improvement is reproducible across the two trials;
+3. no unexplained data loss is introduced;
+4. no unexplained ACL discrepancy is introduced;
+5. `unexpected_public_grants = 0`;
+6. `unexpected_anyone_grants = 0`;
+7. failures do not materially increase;
+8. verification quality does not materially regress.
+
+If performance improves but correctness/security regresses:
+
+```text
+RESULT = FAIL
+```
+
+The optimization must not be promoted to production.
+
+---
+
+### 11. REQUIRED BENCHMARK TABLE
+
+Update `BENCHMARKS.md` after each completed stage with:
+
+| Run | Change            | Trial | Elapsed | API calls | Req/s | 429s | Retries | Failures | Missing | ACL unexplained | Public grants | Verification |   |
+| --- | ----------------- | ----- | ------: | --------: | ----: | ---: | ------: | -------: | ------: | --------------: | ------------: | ------------ | - |
+| B0  | Baseline          | A     |         |           |       |      |         |          |         |                 |               |              |   |
+| B0  | Baseline          | B     |         |           |       |      |         |          |         |                 |               |              |   |
+| B1  | ACL batching      | A     |         |           |       |      |         |          |         |                 |               |              |   |
+| B1  | ACL batching      | B     |         |           |       |      |         |          |         |                 |               |              |   |
+| B2  | fields trim       | A     |         |           |       |      |         |          |         |                 |               |              |   |
+| B2  | fields trim       | B     |         |           |       |      |         |          |         |                 |               |              |   |
+| B3  | Next optimization | A     |         |           |       |      |         |          |         |                 |               |              |   |
+| B3  | Next optimization | B     |         |           |       |      |         |          |         |                 |               |              |   |
+| B4  | Final             | A     |         |           |       |      |         |          |         |                 |               |              |   |
+| B4  | Final             | B     |         |           |       |      |         |          |         |                 |               |              |   |
+
+Add a second table for service-level results.
+
+---
+
+### 12. FINAL BENCHMARK REPORT
+
+At completion of B4, publish:
+
+```text
+Baseline elapsed:
+Final elapsed:
+Time saved:
+Percentage improvement:
+
+Baseline API calls:
+Final API calls:
+API reduction:
+
+Baseline req/s:
+Final req/s:
+
+429 change:
+Retry change:
+Failure change:
+
+Drive completeness:
+Gmail completeness:
+Calendar completeness:
+Chat completeness:
+
+ACL unexplained discrepancies:
+Unexpected public grants:
+Unexpected anyone grants:
+
+Verification coverage:
+Verification mismatches:
+```
+
+Also record:
+
+```text
+baseline_commit_sha
+final_commit_sha
+baseline_config_hash
+final_config_hash
+```
+
+so the result is reproducible.
+
+---
+
+### 13. STOP RULE
+
+Stop further performance optimization when either:
+
+* the latest optimization produces <5% reproducible improvement, or
+* the optimization is blocked by an external quota/architectural ceiling, or
+* further optimization increases complexity without measurable improvement.
+
+When stopping, record the measured plateau and the reason.
+
+Do not continue speculative optimization merely to increase a benchmark number.
+
+---
+
+### 14. AGENT EXECUTION RULE
+
+Before running a benchmark:
+
+1. sync local repository with GitHub;
+2. record commit SHA;
+3. verify VPS code matches the intended commit;
+4. record configuration hash;
+5. verify target reset completed;
+6. verify migration ledger was correctly reset;
+7. verify source dataset/user count;
+8. start benchmark;
+9. collect performance metrics;
+10. run independent correctness/ACL/security validation;
+11. write results to `BENCHMARKS.md`;
+12. append the result to this coordination log.
+
+**No benchmark is considered complete until both performance AND validation results are recorded.**
+
+### FINAL DECISION RULE
+
+The objective is **not the highest possible requests/sec**.
+
+The objective is:
+
+> **The fastest reproducible migration that maintains complete data fidelity, zero unexplained ACL discrepancies, zero unexpected public permissions, and transparent verification status.**
+
+Performance improvements that violate those conditions are rejected regardless of elapsed-time improvement.
+######### aryan pal 
+target users deleted except admin for faster work
+
+
+---
+
+## 2026-08-10 — Claude (Sonnet) — B5 blocker resolved: deletion was deliberate; re-provisioning now
+
+User confirmed directly, in response to the abort report above:
+1. **The 10 target account deletions were deliberate** (user's own action, not
+   an incident).
+2. **Re-provision them.**
+3. **Target tenant confirmed correct** (`a.anupam-poudel.com.np`).
+
+Re-verified live before acting (target genuinely down to 1 account,
+`info@a`; source untouched at 10 accounts; nothing running on the VPS).
+
+**Provisioning now via `provision-users --tenant target`** — create-only,
+draws from `identity_map` (11 entries), never touches an existing account.
+Dry run confirms exactly the right 10 missing addresses, `info@a` correctly
+left alone. Running for real next; will log the result before touching B5.
