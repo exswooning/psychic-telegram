@@ -102,6 +102,8 @@ PROBES = {
     # -- drive: separate passes ---------------------------------------
     "Shared Drives (Team Drives)":
         lambda t: t.get("shared_drives", 0),
+    "Shared-with-me files owned OUTSIDE the org":
+        lambda t: t.get("external_shared_with_me", 0),
 
     # -- gmail --------------------------------------------------------
     "All messages including Spam and Trash":
@@ -156,6 +158,39 @@ def _count_shared_drives(auth: AuthManager, settings: Settings, user: str) -> in
                if not (prefix and (d.get("name") or "").lower().startswith(prefix)))
 
 
+def _count_external_shared_with_me(auth: AuthManager, settings: Settings,
+                                   user: str) -> int:
+    """Files shared INTO this user whose owners are all outside the org.
+
+    The one number on this report that is a live data-loss risk rather than
+    a coverage gap. Nobody inside the tenant owns these, so no user's
+    migration carries them, and with MIGRATE_EXTERNAL_SHARES off they are
+    silently dropped rather than deferred. A non-zero count here against a
+    default config means data will be lost on cutover.
+    """
+    domain = (settings.source_domain or "").lower()
+    n = 0
+    try:
+        svc = auth.source_drive(user)
+        token = None
+        while True:
+            resp = svc.files().list(
+                q="sharedWithMe = true and trashed = false", pageSize=200,
+                pageToken=token, fields="nextPageToken,files(owners(emailAddress))",
+                spaces="drive", supportsAllDrives=True).execute()
+            for f in resp.get("files", []):
+                owners = [o.get("emailAddress", "") for o in f.get("owners") or []]
+                if owners and all(
+                        (o.split("@")[-1].lower() != domain) for o in owners):
+                    n += 1
+            token = resp.get("nextPageToken")
+            if not token:
+                break
+    except Exception:      # noqa: BLE001
+        return 0
+    return n
+
+
 def _count_contacts(auth: AuthManager, user: str) -> int | None:
     """None means "could not ask" -- which is UNPROBED, not zero.
 
@@ -196,6 +231,7 @@ def collect(auth: AuthManager, settings: Settings, users: list[str]) -> dict:
         "gmail": {"messages": 0, "labels": 0, "drafts": 0},
         "calendar": {"calendars": 0, "events": 0},
         "shared_drives": 0,
+        "external_shared_with_me": 0,
         "contacts": None,
         "tasks": None,
         # None until something actually counts it. Chat is only scanned when
@@ -203,6 +239,10 @@ def collect(auth: AuthManager, settings: Settings, users: list[str]) -> dict:
         "chat": None,
         "perUser": {},
         "errors": {},
+        # Recorded so the report can tell "there are none" apart from "there
+        # are some and we are configured to drop them".
+        "migrate_external_shares": bool(
+            getattr(settings, "migrate_external_shares", False)),
     }
 
     for user in users:
@@ -239,6 +279,8 @@ def collect(auth: AuthManager, settings: Settings, users: list[str]) -> dict:
                               + ch.get("spaces", 0) + ch.get("messages", 0))
 
         totals["shared_drives"] += _count_shared_drives(auth, settings, user)
+        totals["external_shared_with_me"] += _count_external_shared_with_me(
+            auth, settings, user)
         for key, fn in (("contacts", _count_contacts), ("tasks", _count_tasks)):
             n = fn(auth, user)
             if n is not None:
@@ -303,6 +345,21 @@ def render(rows: list[dict], totals: dict) -> str:
     out.append("== COVERED ===============================================")
     for r in sorted(covered, key=lambda r: (r["service"], -(r["count"] or 0))):
         out.append(f"  [{r['service']:<8}] {r['item'][:56]:<56} {r['count']:>7}")
+
+    # Not a coverage gap -- a live data-loss risk, so it is called out
+    # separately rather than sitting in a list of things to seed.
+    ext = totals.get("external_shared_with_me") or 0
+    if ext and not totals.get("migrate_external_shares"):
+        out.append("")
+        out.append("== DATA LOSS RISK =======================================")
+        out.append(f"  {ext} file(s) are shared into these users by owners "
+                   f"OUTSIDE the org.")
+        out.append("  Nobody inside the tenant owns them, so no user's "
+                   "migration carries them,")
+        out.append("  and MIGRATE_EXTERNAL_SHARES is off -- they will be "
+                   "dropped, not deferred.")
+        out.append("  Set MIGRATE_EXTERNAL_SHARES=true to copy them into each "
+                   "recipient's My Drive.")
 
     if totals.get("errors"):
         out.append("")

@@ -110,9 +110,21 @@ DRIVE_SCOPE = [
               "organizer-first. Group and domain grants on a drive are NOT "
               "recreated — they need the group provisioned on the target "
               "first, and are logged SKIPPED_NOT_A_USER"),
-    ScopeItem("drive", "Files shared with the user but not owned", NONE,
-              "Skipped when OWNED_ONLY=true (default). They arrive via their "
-              "real owner's own migration"),
+    ScopeItem("drive", "Shared-with-me files owned by a COLLEAGUE", NONE,
+              "Skipped when OWNED_ONLY=true (default), and correctly so: the "
+              "owner's own migration carries the file, and the recipient's "
+              "access is restored by the ACL translation. Copying it here too "
+              "would store one file once per recipient"),
+    ScopeItem("drive", "Shared-with-me files owned OUTSIDE the org", PARTIAL,
+              "These have no owner inside the source tenant, so no user's "
+              "migration will ever carry them -- with MIGRATE_EXTERNAL_SHARES "
+              "off (the default) they are silently lost, not deferred. Set it "
+              "true to walk 'Shared with me' and copy items whose owners are "
+              "all external; they land in the target user's My Drive root, "
+              "since a shared-with-me file has no parent inside the user's "
+              "own tree to mirror. Off by default because on most tenants it "
+              "is a no-op that costs an extra listing per user -- confirm the "
+              "count is zero rather than assuming it"),
     ScopeItem("drive", "Trashed items", NONE,
               "Excluded by the trashed=false query filter"),
     ScopeItem("drive", "DLP / copy-protected files", NONE,

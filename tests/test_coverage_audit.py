@@ -160,3 +160,52 @@ class TestExitCode:
         out = cov.render(cov.assess(t), t)
         assert "COULD NOT SCAN" in out
         assert "3@src" in out
+
+
+class TestExternalSharedWithMeIsARisk:
+    """
+    The one row on this report that is a live data-loss risk rather than a
+    coverage gap.
+
+    A file shared into a user by an owner OUTSIDE the org has no owner
+    inside the tenant, so no user's migration carries it. With
+    MIGRATE_EXTERNAL_SHARES off -- the default -- it is dropped, not
+    deferred. A colleague-owned shared file is the opposite case and is
+    correctly skipped: its owner migrates it and the ACL translation
+    restores access.
+    """
+
+    def test_a_nonzero_count_with_the_flag_off_is_called_out(self):
+        t = _totals(external_shared_with_me=7, migrate_external_shares=False)
+        out = cov.render(cov.assess(t), t)
+        assert "DATA LOSS RISK" in out
+        assert "7 file(s)" in out
+        assert "MIGRATE_EXTERNAL_SHARES" in out
+
+    def test_the_flag_being_on_is_not_a_risk(self):
+        t = _totals(external_shared_with_me=7, migrate_external_shares=True)
+        assert "DATA LOSS RISK" not in cov.render(cov.assess(t), t)
+
+    def test_zero_is_not_a_risk(self):
+        t = _totals(external_shared_with_me=0, migrate_external_shares=False)
+        assert "DATA LOSS RISK" not in cov.render(cov.assess(t), t)
+
+    def test_colleague_owned_files_are_not_counted(self):
+        """Same-domain owners must not inflate this. Counting them would
+        turn a correct design decision into a false alarm on every tenant."""
+        class _Auth:
+            def source_drive(self, user):
+                class _D:
+                    def files(self): return self
+                    def list(self, **kw): return self
+                    def execute(self):
+                        return {"files": [
+                            {"owners": [{"emailAddress": "colleague@src.com"}]},
+                            {"owners": [{"emailAddress": "partner@other.com"}]},
+                        ]}
+                return _D()
+
+        class _S:
+            source_domain = "src.com"
+
+        assert cov._count_external_shared_with_me(_Auth(), _S(), "a@src.com") == 1
