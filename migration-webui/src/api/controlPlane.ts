@@ -220,8 +220,22 @@ export const startBenchmark = (body: StartBenchmarkBody) =>
 export const fetchBenchmarkResults = () =>
   cpFetch<BenchmarkResult[]>('/api/v2/benchmark/results')
 
+/** Live state of an in-flight benchmark. `phase` is derived server-side from
+ *  which child process is alive, so it stays right regardless of where the
+ *  run's own output was redirected. */
+export interface BenchmarkRunning {
+  running: boolean
+  pid?: number
+  label?: string
+  elapsedS?: number
+  phase?: 'starting' | 'wipe' | 'ledger' | 'migrate' | 'audit' | 'judging'
+  phaseLabel?: string
+  phases?: string[]
+  progress?: { files: number; folders: number; failed: number; aclFailed: number }
+}
+
 export const fetchBenchmarkRunning = () =>
-  cpFetch<{ running: boolean; pid?: number; label?: string }>('/api/v2/benchmark/running')
+  cpFetch<BenchmarkRunning>('/api/v2/benchmark/running')
 
 export const revertPublicShares = (reason: string, tenant = 'target') =>
   cpFetch<ActionResult>('/api/v2/emergency/revert-public', {

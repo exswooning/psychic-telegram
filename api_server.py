@@ -614,22 +614,72 @@ async def benchmark_results():
     return await _off_loop(_read)
 
 
+# Phases in the order benchmark_run.py runs them, each identified by the
+# subprocess it shells out to. Derived from the process table rather than by
+# parsing the benchmark's stdout: stdout goes wherever the launcher redirected
+# it, which the server does not know and must not have to guess.
+_BENCH_PHASES = [
+    ("wipe", "reset_target.py", "Emptying the target tenant"),
+    ("ledger", "reset_drive_ledger.py", "Resetting the Drive ledger"),
+    ("migrate", "main.py", "Migrating"),
+    ("audit", "acl_audit.py", "Auditing ACL fidelity"),
+]
+
+
+def _etime_seconds(etime: str) -> int:
+    """ps etime is [[DD-]HH:]MM:SS -- parsed rather than shown raw so the UI
+    can render a rate."""
+    days, _, rest = etime.strip().rpartition("-")
+    parts = [int(p) for p in rest.split(":")]
+    while len(parts) < 3:
+        parts.insert(0, 0)
+    total = parts[0] * 3600 + parts[1] * 60 + parts[2]
+    return total + (int(days) * 86400 if days else 0)
+
+
 @app.get("/api/v2/benchmark/running")
 async def benchmark_running():
-    """Is a benchmark in flight? Read from the process table rather than a
-    pidfile, which goes stale after a hard kill."""
+    """Is a benchmark in flight, and how far along?
+
+    Read from the process table rather than a pidfile, which goes stale after
+    a hard kill. The phase comes from which child process is alive, so it
+    stays accurate even when the benchmark's own output was redirected
+    somewhere this server cannot see.
+    """
     def _check() -> dict:
-        ps = subprocess.run(["ps", "-eo", "pid=,args="], capture_output=True,
-                            text=True).stdout
-        for line in ps.splitlines():
-            if "benchmark_run.py" in line and "grep" not in line:
-                pid, _, args = line.strip().partition(" ")
-                label = ""
+        ps = subprocess.run(["ps", "-eo", "pid=,etime=,args="],
+                            capture_output=True, text=True).stdout
+        lines = [ln.strip() for ln in ps.splitlines() if "grep" not in ln]
+
+        found = None
+        for line in lines:
+            if "benchmark_run.py" in line:
+                pid, etime, args = line.split(maxsplit=2)
                 parts = args.split()
-                if "--label" in parts:
-                    label = parts[parts.index("--label") + 1]
-                return {"running": True, "pid": int(pid), "label": label}
-        return {"running": False}
+                label = parts[parts.index("--label") + 1] if "--label" in parts else ""
+                found = {"running": True, "pid": int(pid), "label": label,
+                         "elapsedS": _etime_seconds(etime)}
+                break
+        if not found:
+            return {"running": False}
+
+        phase, phase_label = "starting", "Starting up"
+        for key, needle, human in _BENCH_PHASES:
+            if any(needle in ln and "benchmark_run.py" not in ln for ln in lines):
+                phase, phase_label = key, human
+                break
+        else:
+            # Every child has exited but the parent is alive: it is scoring
+            # the run. Saying "starting" there would be actively misleading
+            # at the one moment the operator most wants to know it is nearly
+            # done.
+            if found["elapsedS"] > 30:
+                phase, phase_label = "judging", "Judging the run"
+
+        found.update({"phase": phase, "phaseLabel": phase_label,
+                      "phases": [p[0] for p in _BENCH_PHASES],
+                      "progress": cpdb.drive_migrated_counts()})
+        return found
     return await _off_loop(_check)
 
 

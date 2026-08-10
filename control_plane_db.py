@@ -208,6 +208,32 @@ def identity_count() -> int:
         ).fetchone()["n"]
 
 
+def drive_migrated_counts() -> dict:
+    """Files and folders currently mapped, plus failures.
+
+    The live progress number for a running benchmark. Read from id_mapping
+    rather than the audit log because id_mapping is the exactly-once record
+    of what exists on the target -- audit_log counts attempts, so a retried
+    file would inflate it.
+    """
+    with ro() as conn:
+        rows = conn.execute(
+            "SELECT type, COUNT(*) n FROM id_mapping "
+            "WHERE type IN ('file','folder') GROUP BY type"
+        ).fetchall()
+        counts = {r["type"]: r["n"] for r in rows}
+        failed = conn.execute(
+            "SELECT COUNT(*) n FROM audit_log "
+            "WHERE status='FAILED' AND item_type IN ('file','folder')"
+        ).fetchone()["n"]
+        acl_failed = conn.execute(
+            "SELECT COUNT(*) n FROM audit_log "
+            "WHERE status='FAILED' AND item_type='acl'"
+        ).fetchone()["n"]
+    return {"files": counts.get("file", 0), "folders": counts.get("folder", 0),
+            "failed": failed, "aclFailed": acl_failed}
+
+
 def user_progress() -> list[dict]:
     """
     Per-user rollup. Explicitly models the Partial Failure state the spec

@@ -294,3 +294,78 @@ class TestFleetLiveness:
         assert cpdb.fleet(stale_after_s=90)[0]["healthy"] is True
         assert cpdb.fleet(stale_after_s=0)[0]["healthy"] is False
         os.unlink(path)
+
+
+class TestBenchmarkLiveStatus:
+    """
+    A benchmark takes hours. Before this, the UI showed one chip reading
+    "run in flight · pid 12345", which looks identical to a hung process for
+    the entire run -- so the two things an operator actually wants (which
+    stage, and is the file count still climbing) were only obtainable by
+    SSHing in.
+
+    Phase comes from the process table rather than from parsing the run's
+    stdout, because stdout goes wherever the launcher redirected it and the
+    server has no way to know where that was.
+    """
+
+    def test_etime_parses_every_ps_format(self):
+        """ps switches format as a run ages: MM:SS, then HH:MM:SS, then
+        DD-HH:MM:SS. A benchmark crosses all three boundaries, so getting
+        this wrong makes the elapsed time (and the files/sec derived from
+        it) silently wrong hours in."""
+        from api_server import _etime_seconds
+        assert _etime_seconds("05:09") == 309
+        assert _etime_seconds("01:05:09") == 3909
+        assert _etime_seconds("2-01:05:09") == 2 * 86400 + 3909
+        assert _etime_seconds("  05:09 ") == 309
+
+    def test_not_running_reports_nothing_else(self, cp):
+        """No phase, no progress, no stale numbers left on screen."""
+        r = cp.get("/api/v2/benchmark/running")
+        assert r.status_code == 200
+        body = r.json()
+        if not body["running"]:
+            assert "progress" not in body
+
+    def test_phase_order_matches_what_the_benchmark_actually_runs(self):
+        """The chips render in this order, so it has to be the real one:
+        wipe, reset ledger, migrate, audit. A reordering here would show an
+        operator a completed stage as pending."""
+        from api_server import _BENCH_PHASES
+        assert [p[0] for p in _BENCH_PHASES] == ["wipe", "ledger", "migrate", "audit"]
+        # Each phase is identified by the script it shells out to; if
+        # benchmark_run.py stops calling one, the phase silently never fires.
+        import benchmark_run  # noqa: F401
+        src = open(os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "benchmark_run.py")).read()
+        for _, needle, _ in _BENCH_PHASES:
+            assert needle in src, f"{needle} no longer invoked by benchmark_run.py"
+
+    def test_progress_counts_what_exists_not_what_was_attempted(self):
+        """`files` is the number of items with a live target id.
+
+        id_mapping is the right source because a row there means the object
+        exists on the target and its id is known. audit_log is keyed UNIQUE
+        on (source_user, item_id, item_type), so it holds one row per item
+        carrying its latest status -- a file that failed and was later fixed
+        reads SUCCESS there with no trace of the failure, which is fine for
+        an audit trail and wrong for "how much is on the target right now".
+        """
+        path = tempfile.mktemp(suffix=".db")
+        os.environ["MIGRATION_DB"] = path
+        d = MigrationDB(path)
+        cpdb.apply_migrations()
+        d.record_mapping("a@s.com", "f1", "tgt-1", "file")
+        d.record_mapping("a@s.com", "d1", "tgt-d1", "folder")
+        with d.write() as conn:
+            # Two other items that never landed, plus a lost ACL grant.
+            for item in ("f2", "f3"):
+                conn.execute("INSERT INTO audit_log (source_user,item_id,item_type,"
+                             "status) VALUES ('a@s.com',?,'file','FAILED')", (item,))
+            conn.execute("INSERT INTO audit_log (source_user,item_id,item_type,"
+                         "status) VALUES ('a@s.com','f1:bob','acl','FAILED')")
+        got = cpdb.drive_migrated_counts()
+        assert got == {"files": 1, "folders": 1, "failed": 2, "aclFailed": 1}
+        d.close()
+        os.unlink(path)

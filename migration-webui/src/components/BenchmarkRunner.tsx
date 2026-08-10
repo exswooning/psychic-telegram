@@ -1,12 +1,12 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import {
-  Alert, Box, Button, Chip, Divider, FormControlLabel, MenuItem, Paper,
-  Stack, Switch, Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
-  TextField, Tooltip, Typography,
+  Alert, Box, Button, Chip, Divider, FormControlLabel, LinearProgress, MenuItem,
+  Paper, Stack, Switch, Table, TableBody, TableCell, TableContainer, TableHead,
+  TableRow, TextField, Tooltip, Typography,
 } from '@mui/material'
 import { Speed as BenchIcon, Circle as DotIcon } from '@mui/icons-material'
 import {
-  BenchmarkResult, startBenchmark, fetchBenchmarkResults,
+  BenchmarkResult, BenchmarkRunning, startBenchmark, fetchBenchmarkResults,
   fetchBenchmarkRunning, getOperator,
 } from '@/api/controlPlane'
 import ReasonCodeDialog from './ReasonCodeDialog'
@@ -32,6 +32,99 @@ const WORKER_OPTIONS = [
   { v: 4, label: '4 — saturates the 3 writes/sec ceiling' },
 ]
 
+const PHASE_LABELS: Record<string, string> = {
+  wipe: 'Wipe target',
+  ledger: 'Reset ledger',
+  migrate: 'Migrate',
+  audit: 'Audit ACLs',
+}
+
+const fmtElapsed = (s: number) => {
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  return h > 0 ? `${h}h ${m}m` : `${m}m ${s % 60}s`
+}
+
+/**
+ * A benchmark in flight.
+ *
+ * Previously this was a single chip reading "run in flight · pid 12345",
+ * which is indistinguishable from a hung process for however many hours the
+ * run takes. The two questions an operator actually has are "which stage is
+ * it on" and "is the file count still going up", so those are the two things
+ * on screen.
+ *
+ * No percentage bar. The total file count is not known until the walk
+ * finishes, and inventing a denominator would put a number on screen that
+ * moves backwards when the walk finds more files than it guessed.
+ */
+const LiveRun: React.FC<{ run: BenchmarkRunning }> = ({ run }) => {
+  const p = run.progress
+  const elapsed = run.elapsedS ?? 0
+  // Migrate is the only phase whose rate means anything -- during the wipe
+  // the file count is falling, and during the audit it is static.
+  const rate = p && elapsed > 0 && run.phase === 'migrate'
+    ? (p.files / elapsed).toFixed(2) : null
+  const active = run.phases?.indexOf(run.phase ?? '') ?? -1
+
+  return (
+    <Box sx={{ mt: 2, p: 2, borderRadius: 2, bgcolor: 'action.hover' }}>
+      <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1.5, flexWrap: 'wrap', gap: 1 }}>
+        <Chip size="small" color="primary" icon={<DotIcon sx={{ fontSize: 10 }} />}
+              label={run.label || 'benchmark'} />
+        <Typography variant="body2" sx={{ fontWeight: 600 }}>
+          {run.phaseLabel ?? 'Running'}
+        </Typography>
+        <Box sx={{ flexGrow: 1 }} />
+        <Typography variant="caption" color="text.secondary"
+                    sx={{ fontVariantNumeric: 'tabular-nums' }}>
+          {fmtElapsed(elapsed)} elapsed · pid {run.pid}
+        </Typography>
+      </Stack>
+
+      <Stack direction="row" spacing={0.5} sx={{ mb: 1.5, flexWrap: 'wrap', gap: 0.5 }}>
+        {(run.phases ?? []).map((ph, i) => (
+          <Chip
+            key={ph} size="small"
+            label={PHASE_LABELS[ph] ?? ph}
+            color={i === active ? 'primary' : 'default'}
+            variant={i < active ? 'filled' : i === active ? 'filled' : 'outlined'}
+            sx={{ opacity: i < active ? 0.55 : 1 }}
+          />
+        ))}
+      </Stack>
+
+      <LinearProgress sx={{ mb: 1.5, height: 6, borderRadius: 1 }} />
+
+      {p && (
+        <Stack direction="row" spacing={3} sx={{ flexWrap: 'wrap', gap: 2 }}>
+          <Metric label="files" value={p.files.toLocaleString()} />
+          <Metric label="folders" value={p.folders.toLocaleString()} />
+          <Metric label="failed" value={p.failed.toLocaleString()}
+                  bad={p.failed > 0} />
+          <Metric label="acl failed" value={p.aclFailed.toLocaleString()}
+                  bad={p.aclFailed > 0} />
+          {rate && <Metric label="files/sec" value={rate} />}
+        </Stack>
+      )}
+    </Box>
+  )
+}
+
+const Metric: React.FC<{ label: string; value: string; bad?: boolean }> =
+  ({ label, value, bad }) => (
+    <Box>
+      <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+        {label}
+      </Typography>
+      <Typography variant="body2"
+                  color={bad ? 'error.main' : 'text.primary'}
+                  sx={{ fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
+        {value}
+      </Typography>
+    </Box>
+  )
+
 interface Props { targetDomain?: string }
 
 const BenchmarkRunner: React.FC<Props> = ({ targetDomain }) => {
@@ -45,7 +138,7 @@ const BenchmarkRunner: React.FC<Props> = ({ targetDomain }) => {
   const [error, setError] = useState<string | null>(null)
   const [msg, setMsg] = useState<string | null>(null)
   const [results, setResults] = useState<BenchmarkResult[]>([])
-  const [running, setRunning] = useState<{ running: boolean; label?: string; pid?: number }>({ running: false })
+  const [running, setRunning] = useState<BenchmarkRunning>({ running: false })
 
   const refresh = useCallback(() => {
     fetchBenchmarkResults().then(setResults).catch(() => {})
@@ -54,12 +147,13 @@ const BenchmarkRunner: React.FC<Props> = ({ targetDomain }) => {
 
   useEffect(() => {
     refresh()
-    // A benchmark takes hours and emits nothing until it finishes, so this
-    // is a slow liveness check, not a progress feed — per-user progress
-    // already arrives on the WebSocket.
-    const id = setInterval(refresh, 15_000)
+    // Two rates. A run takes hours, so polling the completed-results list
+    // that often would be waste; but while one is in flight the phase and
+    // file count are the only thing on screen that changes, and a 15s lag
+    // there reads as a hung benchmark.
+    const id = setInterval(refresh, running.running ? 5_000 : 20_000)
     return () => clearInterval(id)
-  }, [refresh])
+  }, [refresh, running.running])
 
   const launch = async (reason: string) => {
     setBusy(true); setError(null)
@@ -84,16 +178,14 @@ const BenchmarkRunner: React.FC<Props> = ({ targetDomain }) => {
       <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
         <BenchIcon color="action" />
         <Typography variant="h6" sx={{ flexGrow: 1 }}>Benchmarks</Typography>
-        {running.running && (
-          <Chip size="small" color="primary" icon={<DotIcon sx={{ fontSize: 10 }} />}
-                label={`${running.label || 'run'} in flight · pid ${running.pid}`} />
-        )}
       </Stack>
 
       <Typography variant="caption" color="text.secondary">
         Wipes the target, resets the Drive ledger, migrates, audits ACLs, then
         judges the run. A run that loses grants fails no matter how fast it was.
       </Typography>
+
+      {running.running && <LiveRun run={running} />}
 
       <Stack direction="row" sx={{ mt: 2, flexWrap: 'wrap', gap: 2 }}>
         <TextField size="small" label="Label" value={label} sx={{ width: { xs: '100%', sm: 110 } }}
