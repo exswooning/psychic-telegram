@@ -97,6 +97,9 @@ def fingerprint() -> dict:
         "userWorkers": s.user_workers,
         "driveFileWorkers": getattr(s, "drive_file_workers", 1),
         "driveWriteQps": getattr(s, "drive_write_qps", None),
+        # Drive reads have their own budget now; per_user_qps still paces the
+        # other engines, so both belong in a run's record.
+        "driveReadQps": getattr(s, "drive_read_qps", None),
         "perUserQps": s.per_user_qps,
         "aclBatchSize": getattr(s, "acl_batch_size", None),
         "verifyServerSideMd5": getattr(s, "verify_server_side_md5", None),

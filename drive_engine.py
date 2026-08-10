@@ -52,10 +52,24 @@ class DriveMigrator:
         self.tgt = auth.target_drive(target_user)
         # `limiter` stays the read/general bucket and keeps its name: it is
         # what _download_via charges once per call, and tests substitute it.
-        self.limiter = RateLimiter(settings.per_user_qps)
+        self.limiter = RateLimiter(settings.drive_read_qps)
         self._read_limiter = self.limiter
-        # The ceiling that actually bounds a migration. See _retry().
-        self._write_limiter = RateLimiter(settings.drive_write_qps)
+        # The ceiling that actually bounds a migration -- one bucket PER
+        # ACCOUNT, because that is the unit Google enforces it on.
+        #
+        # These are two different accounts, in two different tenants, under
+        # two different GCP projects: the copy is issued as the *source* user
+        # and everything after it (the staging->My Drive move, the grants,
+        # the modifiedTime restore) as the *target* user. A single shared
+        # bucket charged both against one 3/sec allowance and left the other
+        # account's identical allowance completely unspent -- roughly a third
+        # of the available write budget, permanently idle.
+        self._src_write_limiter = RateLimiter(settings.drive_write_qps)
+        self._tgt_write_limiter = RateLimiter(settings.drive_write_qps)
+        # Retained so a test (or anything else) that substitutes the old
+        # single bucket still throttles both sides rather than silently
+        # becoming unlimited.
+        self._write_limiter = self._tgt_write_limiter
         self.delta = False
         self.stats = {"folders": 0, "files": 0, "skipped": 0, "failed": 0,
                       "acl_failed": 0}
@@ -67,6 +81,13 @@ class DriveMigrator:
         self._stats_lock = threading.Lock()
         self._pending_shortcuts: list[tuple[dict, str]] = []
         self._staging_drive_id: str | None = None
+        # Set up properly by _open_file_pool() at the start of run(). Defined
+        # here too so a caller that drives _sync_files() directly -- several
+        # tests do -- gets the serial path rather than an AttributeError.
+        self._file_pool: futures.ThreadPoolExecutor | None = None
+        self._file_futures: list[futures.Future] = []
+        self._file_slots = threading.Semaphore(1)
+        self._quota_exc: QuotaExhausted | None = None
         # Set by shared_drives.py to point this engine at a shared drive
         # instead of the user's My Drive. Everything downstream -- the walk,
         # all three transfer modes, ACLs, comments, the modifiedTime restore
@@ -76,34 +97,41 @@ class DriveMigrator:
         self.target_drive_id: str | None = None
 
     # -- plumbing -----------------------------------------------------------
-    def _retry(self, fn, label=None, write: bool = True):
+    def _retry(self, fn, label=None, write: bool = True,
+               tenant: str = "target"):
         """
         Every Drive call goes through here, and every call is paced.
 
-        Two buckets, because Google prices the two kinds of call about two
-        orders of magnitude apart:
+        Three buckets, because Google meters these three things separately:
 
-          writes  3/sec sustained **per account**, and explicitly not
-                  raiseable on request. This is the real ceiling on a
-                  migration; ~4.4 of the ~5.7 calls per file are writes.
-          reads   part of the 20,000-per-100s pool (~200/sec, per user *and*
-                  per project). Effectively free at our volume.
+          source writes  3/sec sustained on the SOURCE account.
+          target writes  3/sec sustained on the TARGET account. A different
+                         account in a different tenant under a different GCP
+                         project, so its allowance is entirely its own.
+          reads          part of the 20,000-per-100s pool (~200/sec, per user
+                         *and* per project). Effectively free at our volume.
 
-        Sharing one 3/sec bucket between them -- which is what a single
-        limiter would do -- spends ~22% of the ceiling on reads that were
-        never charged against it.
+        The write ceiling is per account and explicitly not raiseable on
+        request (support.google.com/a/answer/10445916), so the only way to go
+        faster is to stop leaving one of the two accounts' allowances unspent.
+        Exactly one call in this engine is a source-side write -- files.copy
+        -- and it used to queue behind the target's move/grant/mtime traffic
+        in a single shared bucket for no reason.
 
-        `write=True` is the default deliberately: an uncategorised call is
-        paced at the safe rate. Mislabelling a write as a read is the
-        expensive mistake (it invites 429s); the reverse only costs a little
-        throughput.
-
-        This is load-bearing only under `drive_file_workers > 1`. On the
-        serial path a user runs at ~0.66 req/s and never approaches either
-        bucket -- which is exactly why the write path went unthrottled for
-        so long without anyone noticing.
+        `write=True, tenant="target"` are the defaults deliberately: an
+        uncategorised call is paced at the safe rate on the busier account.
+        Mislabelling a write as a read, or a target write as a source one,
+        is the expensive mistake (it invites 429s); the reverse only costs a
+        little throughput.
         """
-        (self._write_limiter if write else self._read_limiter).acquire()
+        if not write:
+            self._read_limiter.acquire()
+        elif tenant == "source":
+            self._src_write_limiter.acquire()
+        else:
+            # Not `_tgt_write_limiter` directly: tests substitute
+            # `_write_limiter`, and reading it here keeps that hook working.
+            self._write_limiter.acquire()
         return retry_on_google_error(
             max_retries=self.settings.max_retries,
             base_delay=self.settings.base_backoff,
@@ -186,10 +214,15 @@ class DriveMigrator:
         if self.server_side and not self.settings.dry_run:
             self._ensure_staging_drive()
         try:
-            self._walk(src_root, tgt_root, depth=1)
-            if (self.settings.migrate_external_shares
-                    and not self.shared_drive and not self.delta):
-                self._walk_shared_with_me(tgt_root)
+            self._open_file_pool()
+            try:
+                self._walk(src_root, tgt_root, depth=1)
+                if (self.settings.migrate_external_shares
+                        and not self.shared_drive and not self.delta):
+                    self._walk_shared_with_me(tgt_root)
+                self._drain_file_pool()
+            finally:
+                self._close_file_pool()
             self._fixup_shortcuts()
         finally:
             if self.server_side and not self.settings.dry_run:
@@ -439,57 +472,98 @@ class DriveMigrator:
                 files.append(item)
         self._sync_files(files, tgt_parent)
 
-    def _sync_files(self, files: list[dict], tgt_parent: str) -> None:
-        """
-        One folder's files, in parallel when `drive_file_workers > 1`.
-
-        Why this exists. Per file the server-side path issues ~5.7 API calls
-        (copy, permissions.list, the batched grant create, the staging move,
-        the modifiedTime restore) and each one blocks on its own round trip.
-        Measured on the live tenant: 5.25 req/s aggregate across 8 user
-        workers is 0.66 req/s *per user*, against a per-account ceiling of 3
-        sustained writes/sec -- so a user thread spends most of its life
-        waiting, at roughly a fifth of the rate Google would allow it.
-
-        Adding user workers does not fix that. The batch cannot finish before
-        its slowest single user does, and the slowest user is one thread: on
-        this corpus `alice` alone is 3,118 files, a ~164 min latency-bound
-        walk whose own write-ceiling floor is ~76 min. Only concurrency
-        *inside* a user shortens the critical path.
-
-        The ceiling is still respected: every call already passes through
-        `self.limiter`, one shared token bucket per user, so N workers
-        interleave into the same per-account rate instead of multiplying it.
-        This raises utilisation toward the ceiling; it cannot exceed it.
-
-        Default is 1 -- byte-identical to the serial path, so a benchmark
-        trial is never perturbed by merely deploying this.
-        """
+    # -- the file pool ---------------------------------------------------------
+    #
+    # One pool for the whole user, not one per folder.
+    #
+    # Why per file concurrency at all. The server-side path issues ~5.7 API
+    # calls per file (copy, permissions.list, the batched grant create, the
+    # staging move, the modifiedTime restore) and each blocks on its own round
+    # trip. Measured on the live tenant: 5.25 req/s aggregate across 8 user
+    # workers is 0.66 req/s *per user*, against a per-account ceiling of 3
+    # sustained writes/sec -- a user thread spends most of its life waiting,
+    # at roughly a fifth of the rate Google would allow it. Adding user
+    # workers cannot fix that: the batch cannot finish before its slowest
+    # single user, and that user is one thread.
+    #
+    # Why the pool spans the run rather than a folder. A per-folder pool
+    # rebuilt itself and then blocked until that folder drained, so the walk
+    # alternated between N-wide bursts and a strictly serial stretch of
+    # folder creates -- and a folder holding fewer files than there are
+    # workers could never fill them. Submitting into one long-lived pool as
+    # files are discovered keeps it fed across folder boundaries, which is
+    # what actually holds utilisation near the ceiling.
+    #
+    # The ceiling is still respected. Every call goes through the per-account
+    # token buckets in _retry(), so N workers interleave into the same
+    # per-account rate rather than multiplying it. This raises utilisation of
+    # a ceiling we are far below; it cannot exceed it.
+    def _open_file_pool(self) -> None:
         workers = max(1, int(getattr(self.settings, "drive_file_workers", 1)))
-        if workers == 1 or len(files) < 2:
+        self._quota_exc: QuotaExhausted | None = None
+        self._file_futures: list[futures.Future] = []
+        self._file_pool: futures.ThreadPoolExecutor | None = None
+        if workers <= 1:
+            return
+        self._file_pool = futures.ThreadPoolExecutor(
+            max_workers=workers,
+            thread_name_prefix=f"drive-{self.source_user.split('@')[0]}",
+        )
+        # Backpressure. Without it the walk runs ahead of the copies and the
+        # queue grows to the size of the whole corpus -- fine at 8k files,
+        # not at 500k. A few batches of slack is enough to keep the pool from
+        # ever going idle between folders.
+        self._file_slots = threading.Semaphore(workers * 8)
+
+    def _run_file_task(self, item: dict, tgt_parent: str) -> None:
+        try:
+            self._sync_file(item, tgt_parent)
+        except QuotaExhausted as exc:
+            # The 750 GB/day cap is spent. Record it so the walk stops
+            # submitting; continuing would just log failures against a wall.
+            self._quota_exc = exc
+        except Exception as exc:  # noqa: BLE001 - one file must not kill the run
+            log.exception("[%s] file task crashed: %s", self.source_user, exc)
+            self._bump("failed")
+        finally:
+            self._file_slots.release()
+
+    def _sync_files(self, files: list[dict], tgt_parent: str) -> None:
+        """Hand one folder's files to the pool, or copy them inline at 1."""
+        if self._file_pool is None:
             for item in files:
                 self._sync_file(item, tgt_parent)
             return
+        for item in files:
+            if self._quota_exc is not None:
+                raise self._quota_exc
+            self._file_slots.acquire()
+            self._file_futures.append(
+                self._file_pool.submit(self._run_file_task, item, tgt_parent))
+        # Futures accumulate for the length of the run otherwise, purely to be
+        # counted at the end. The tasks already record their own outcomes.
+        if len(self._file_futures) > 4096:
+            self._file_futures = [f for f in self._file_futures if not f.done()]
 
-        with futures.ThreadPoolExecutor(
-            max_workers=min(workers, len(files)),
-            thread_name_prefix=f"drive-{self.source_user.split('@')[0]}",
-        ) as pool:
-            pending = [pool.submit(self._sync_file, item, tgt_parent)
-                       for item in files]
-            for fut in futures.as_completed(pending):
-                # QuotaExhausted must still abort the user, exactly as it does
-                # on the serial path -- it means the 750 GB/day cap is spent,
-                # and continuing would just log failures against a wall.
-                exc = fut.exception()
-                if isinstance(exc, QuotaExhausted):
-                    for p in pending:
-                        p.cancel()
-                    raise exc
-                if exc is not None:
-                    log.exception("[%s] file task crashed: %s",
-                                  self.source_user, exc)
-                    self._bump("failed")
+    def _drain_file_pool(self) -> None:
+        """Block until every submitted file has finished.
+
+        Must complete before _fixup_shortcuts(): a shortcut is resolved
+        against the target id of the file it points at, so resolving one
+        while its target is still mid-copy would find no mapping and drop
+        the link.
+        """
+        if self._file_pool is None:
+            return
+        futures.wait(self._file_futures)
+        self._file_futures = []
+        if self._quota_exc is not None:
+            raise self._quota_exc
+
+    def _close_file_pool(self) -> None:
+        if self._file_pool is not None:
+            self._file_pool.shutdown(wait=True)
+            self._file_pool = None
 
     # -- folders ---------------------------------------------------------------
     def _sync_folder(self, item: dict, tgt_parent: str) -> str | None:
@@ -612,7 +686,7 @@ class DriveMigrator:
             copied = self._retry(lambda: self.src.files().copy(
                 fileId=item["id"], body=body, supportsAllDrives=True,
                 fields="id,md5Checksum",
-            ).execute())
+            ).execute(), label="drive.files.copy", tenant="source")
         except (PermanentAPIError, RuntimeError) as exc:
             if size:
                 self.quota.refund(size)

@@ -304,16 +304,45 @@ class Settings:
     # through the one per-user RateLimiter, so workers interleave into the
     # same bucket. It raises *utilisation* of a ceiling we are far below.
     #
-    # Default 1 keeps the serial path byte-identical, so deploying this
-    # cannot perturb an in-flight benchmark trial.
+    # Default 4, which is where the arithmetic lands: ~3 target-account
+    # writes per file against a 3/sec ceiling means a single user thread
+    # needs ~4 files in flight to keep that ceiling fed while each one waits
+    # on its own round trip. Past that the limiter is the binding constraint
+    # and extra threads only add 429s and context switches, which is why
+    # api_server.py refuses a benchmark above 4.
+    #
+    # This was 1 -- byte-identical to the old serial path -- while the
+    # parallel path was being written and reviewed, so that deploying it
+    # could not perturb an in-flight benchmark. It was then never turned on,
+    # and the migration spent every run since at ~0.66 req/s per user
+    # against a ceiling of 3. Set DRIVE_FILE_WORKERS=1 to get the old serial
+    # behaviour back.
     drive_file_workers: int = field(
-        default_factory=lambda: max(1, int(os.getenv("DRIVE_FILE_WORKERS", "1")))
+        default_factory=lambda: max(1, int(os.getenv("DRIVE_FILE_WORKERS", "0"))
+                                    or _auto("drive_file_workers", 4))
+    )
+    # Sustained Drive **read** requests per second, per account.
+    #
+    # Reads used to be paced by `per_user_qps` (default 4/sec, and auto-tuned
+    # down to 3/sec on a small host) purely because that field predates the
+    # read/write split. Nothing justified it: reads come out of Drive's
+    # 20,000-per-100s pool -- ~200/sec -- not the 3/sec write ceiling, so the
+    # old value throttled them roughly 60x below what Google allows while
+    # every comment in drive_engine.py called them "effectively free".
+    #
+    # The 20,000/100s pool is metered per user *and* per project, and
+    # `user_workers` users share the project half of it. 12/sec each keeps
+    # even 8 concurrent users near 96/sec, comfortably inside 200/sec, with
+    # the rest of the headroom left for acl_audit and verify running
+    # alongside a migration.
+    drive_read_qps: float = field(
+        default_factory=lambda: float(os.getenv("DRIVE_READ_QPS", "0")) or 12.0
     )
     # Sustained Drive **write** requests per second, per account. Google's
     # documented ceiling is 3/sec and is explicitly not raiseable on request
     # (support.google.com/a/answer/10445916), so this is a real wall, not a
     # tuning knob -- raising it buys 429s and retry backoff, which is slower.
-    # Reads are governed by per_user_qps instead: they come out of the far
+    # Reads are governed by drive_read_qps above: they come out of the far
     # looser 20,000-per-100s pool (~200/sec) and must not be charged against
     # the write ceiling. See drive_engine._retry().
     drive_write_qps: float = field(

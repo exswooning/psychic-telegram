@@ -129,7 +129,10 @@ def scan_user(auth, db: MigrationDB, settings: Settings,
     """
     log.info("[%s] starting pre-migration discovery scan", source_user)
     drive = auth.source_drive(source_user)
-    limiter = RateLimiter(settings.per_user_qps)
+    # Read-only prescan, so it is paced by the read budget (~200/sec pool),
+    # not the 3/sec per-account write ceiling this used to inherit through
+    # per_user_qps. Nothing here writes.
+    limiter = RateLimiter(settings.drive_read_qps)
 
     @retry_on_google_error(max_retries=settings.max_retries)
     def _root():

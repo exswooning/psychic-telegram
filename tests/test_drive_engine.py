@@ -1299,10 +1299,34 @@ class TestIntraUserFileConcurrency:
         for i in range(n_files):
             src.add_binary(f"f{i}.bin")
 
-    def test_default_is_serial_and_byte_identical(self, migrator, auth, settings):
-        """Default 1 must not change the existing path at all -- deploying
-        this mid-benchmark has to be a no-op."""
-        assert settings.drive_file_workers == 1
+    def test_default_is_parallel(self, migrator, auth, settings):
+        """The default is parallel, not 1.
+
+        It shipped as 1 so that deploying the parallel path mid-benchmark
+        was a no-op, and then stayed 1 -- every run since went at ~0.66
+        req/s per user against a ceiling of 3. Asserting `> 1` rather than a
+        literal because the value is machine-derived (halved under memory
+        pressure); what must not regress is that it is concurrent at all.
+        """
+        assert settings.drive_file_workers > 1
+        self._tree(auth, 5)
+        migrator.run()
+        assert migrator.stats["files"] == 5
+        assert migrator.stats["failed"] == 0
+
+    def test_default_is_four_on_a_healthy_host(self):
+        """4 is where the write ceiling binds; under memory pressure it
+        halves, because download_upload's peak buffer is
+        user_workers x drive_file_workers x download_chunk_bytes."""
+        import resources
+        rec = resources.recommend()
+        healthy = not rec["resources"].under_memory_pressure
+        assert rec["drive_file_workers"] == (4 if healthy else 2)
+
+    def test_one_worker_is_still_a_clean_serial_path(self, migrator, auth, settings):
+        """DRIVE_FILE_WORKERS=1 is the documented escape hatch, so it has to
+        keep working: no pool, no semaphore, same result."""
+        settings.drive_file_workers = 1
         self._tree(auth, 5)
         migrator.run()
         assert migrator.stats["files"] == 5
@@ -1337,6 +1361,39 @@ class TestIntraUserFileConcurrency:
         self._tree(auth, 40)
         migrator.run()
         assert migrator.stats["files"] == 40
+
+    def test_files_from_different_folders_run_concurrently(self, migrator, auth,
+                                                           settings):
+        """The pool spans the whole walk, not one folder.
+
+        A per-folder pool blocked until that folder drained and skipped
+        parallelism entirely for a folder holding fewer files than there are
+        workers -- so a tree of single-file folders, which is an ordinary
+        shape, ran fully serially no matter how many workers were configured.
+
+        Deterministic rather than timing-based: the barrier can only trip if
+        two tasks from two different folders are genuinely in flight at once,
+        and times out into BrokenBarrierError if they are serialised.
+        """
+        import threading as _t
+
+        settings.drive_file_workers = 4
+        src = auth.source_drive(SRC_USER)
+        for i in range(4):
+            folder = src.add_folder(f"d{i}")
+            src.add_binary(f"f{i}.bin", parent=folder)
+
+        barrier = _t.Barrier(2, timeout=10)
+        original = migrator._sync_file
+
+        def _rendezvous(item, tgt_parent):
+            barrier.wait()          # raises BrokenBarrierError if never paired
+            return original(item, tgt_parent)
+
+        migrator._sync_file = _rendezvous
+        migrator.run()
+        assert migrator.stats["files"] == 4
+        assert migrator.stats["failed"] == 0
 
     def test_quota_exhaustion_still_aborts_the_user(self, migrator, auth,
                                                     settings, quota):
@@ -1388,3 +1445,41 @@ class TestWritePacing:
         A default above it would just buy 429s and retry backoff."""
         from config import Settings
         assert Settings().drive_write_qps == 3.0
+
+    def test_source_and_target_writes_use_separate_buckets(self, migrator, auth,
+                                                           settings):
+        """The ceiling is per *account*, and the copy is issued as the source
+        user while the move/grant/mtime writes are issued as the target user.
+
+        Charging both to one bucket -- which is what a single `_write_limiter`
+        did -- capped the pair at one account's allowance and left the other
+        account's identical allowance entirely unspent.
+
+        server_side specifically: it is the only mode with a source-side
+        write at all (files.copy). download_upload streams bytes through this
+        host and writes solely to the target, which is why the split buys
+        nothing there.
+        """
+        _server_side(settings)
+        src_b, tgt_b, r = self._Counting(), self._Counting(), self._Counting()
+        migrator._src_write_limiter = src_b
+        migrator._write_limiter = migrator._tgt_write_limiter = tgt_b
+        migrator._read_limiter = r
+        auth.source_drive(SRC_USER).add_binary("a.bin")
+        migrator.run()
+        assert src_b.n > 0, "files.copy was not charged to the source account"
+        assert tgt_b.n > 0, "the move/mtime writes were not charged to the target"
+
+    def test_the_two_write_buckets_are_independent(self, migrator):
+        """Aliasing them would silently reintroduce the shared ceiling."""
+        assert migrator._src_write_limiter is not migrator._tgt_write_limiter
+
+    def test_reads_are_not_paced_at_the_write_rate(self):
+        """Reads come from the 20,000-per-100s pool (~200/sec), not the 3/sec
+        write ceiling. They used to inherit `per_user_qps` -- 4/sec, auto-tuned
+        down to 3 on a small host -- throttling them ~60x below what Google
+        allows while every comment here called them effectively free."""
+        from config import Settings
+        s = Settings()
+        assert s.drive_read_qps > s.drive_write_qps
+        assert s.drive_read_qps == 12.0

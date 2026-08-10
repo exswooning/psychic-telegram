@@ -503,6 +503,18 @@ def recommend(r: SystemResources | None = None) -> dict:
         # then -- a machine already struggling should not also be racing to
         # fill a retry queue.
         "per_user_qps": 3.0 if not r.under_memory_pressure else 1.5,
+        # Concurrent file copies *inside* one user. 4 is where the write
+        # ceiling binds: ~3 target-account writes per file against 3/sec
+        # needs about that many in flight to keep the limiter fed while each
+        # waits on its round trip.
+        #
+        # Halved under memory pressure because in download_upload mode this
+        # multiplies: peak buffer is user_workers x drive_file_workers x
+        # download_chunk_bytes, and a machine already swapping is exactly the
+        # one that turns extra buffers into the socket timeouts this module
+        # exists to prevent. server_side streams no bytes through the host
+        # and does not care, but the budget has to hold for the worse mode.
+        "drive_file_workers": 4 if not r.under_memory_pressure else 2,
         "reason": "; ".join(why),
         "resources": r,
     }
