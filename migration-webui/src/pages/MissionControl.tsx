@@ -20,6 +20,7 @@ import EmergencyBrake from '@/components/EmergencyBrake'
 import ForensicModal from '@/components/ForensicModal'
 import BenchmarkRunner from '@/components/BenchmarkRunner'
 import ProvisionUsers from '@/components/ProvisionUsers'
+import AiDiagnostics from '@/components/AiDiagnostics'
 
 /**
  * Mission Control — one screen instead of six tabs.
@@ -245,6 +246,11 @@ const MissionControl: React.FC = () => {
           </Stack>
         </Box>
       )}
+
+      {/* High on the page on purpose: when something is wrong, "what is
+          going on" is the first question, and it reads the same ledger the
+          panels below render one facet of each. */}
+      <AiDiagnostics />
 
       <ProvisionUsers />
 

@@ -69,6 +69,7 @@ try:
 except ImportError:  # pragma: no cover - import guard, not logic
     sys.exit("control plane needs: pip install -r requirements-control-plane.txt")
 
+import ai_diagnostics
 import control_plane_db as cpdb
 
 PY = sys.executable
@@ -708,6 +709,110 @@ async def benchmark_running():
                       "progress": cpdb.drive_migrated_counts(since_iso=since)})
         return found
     return await _off_loop(_check)
+
+
+# ======================================================================
+# AI diagnostics
+#
+# Read-only and advisory. It reads the ledger, the process table and the
+# run log, and returns prose. Nothing it says gates a migration or triggers
+# an action -- an LLM that can be wrong is fine as a reader and
+# unacceptable as a control, so there is deliberately no endpoint here that
+# lets it *do* anything.
+# ======================================================================
+def _env_path() -> str:
+    return os.path.join(HERE, "env.sh")
+
+
+def _groq_key() -> str:
+    # Same env.sh entry webui.py's own panel uses, so a key saved in either
+    # UI works in both rather than the two disagreeing about whether one is
+    # configured.
+    return ai_diagnostics.read_key(_env_path())
+
+
+def _newest_log() -> str | None:
+    """The log most likely to describe what is happening now."""
+    candidates: list[tuple[float, str]] = []
+    for d in (os.path.join(HERE, "logs"), os.path.join(HERE, "benchmarks"), HERE):
+        if not os.path.isdir(d):
+            continue
+        for name in os.listdir(d):
+            if name.endswith(".log"):
+                p = os.path.join(d, name)
+                try:
+                    candidates.append((os.path.getmtime(p), p))
+                except OSError:
+                    continue
+    return max(candidates)[1] if candidates else None
+
+
+class SaveAiKey(WriteAction):
+    key: str = Field(min_length=10)
+
+
+class AnalyzeRequest(BaseModel):
+    prompt: str = ""
+    since_iso: str | None = None
+
+
+@app.get("/api/v2/ai/status")
+async def ai_status():
+    def _s() -> dict:
+        key = _groq_key()
+        return {"configured": bool(key),
+                "keyMask": (key[:4] + "•" * 10) if key else "",
+                "model": ai_diagnostics.DEFAULT_MODEL,
+                "logFile": os.path.basename(_newest_log() or "") or None}
+    return await _off_loop(_s)
+
+
+@app.post("/api/v2/ai/key")
+async def ai_save_key(body: SaveAiKey, op: Operator = Depends(operator)):
+    """Writes a credential to env.sh, so admin-only and audited like any
+    other write -- but it changes nothing in either tenant."""
+    def _save() -> tuple[bool, str]:
+        ai_diagnostics.write_key(_env_path(), body.key)
+        return True, "Groq key saved to env.sh"
+    return await _gated(op, "ai.save_key", body, "env.sh", _save)
+
+
+@app.post("/api/v2/ai/context")
+async def ai_context(body: AnalyzeRequest):
+    """The exact payload analyze would send, without sending it.
+
+    Separate endpoint on purpose: the log tail carries real user addresses
+    and real file names, and an operator is entitled to read what leaves
+    the building before it does.
+    """
+    def _c() -> dict:
+        ctx = ai_diagnostics.gather_context(
+            cpdb._db_path(), _newest_log(), body.since_iso)
+        return {"context": ctx, "chars": len(ctx)}
+    return await _off_loop(_c)
+
+
+@app.post("/api/v2/ai/analyze")
+async def ai_analyze(body: AnalyzeRequest, op: Operator = Depends(operator)):
+    """Read-only, so viewers may run it -- but it does ship log content to a
+    third party, so who ran it is recorded."""
+    def _run() -> dict:
+        key = _groq_key()
+        ctx = ai_diagnostics.gather_context(
+            cpdb._db_path(), _newest_log(), body.since_iso)
+        md, err = ai_diagnostics.analyze(ctx, key, body.prompt)
+        return {"markdown": md, "error": err, "context": ctx,
+                "model": ai_diagnostics.DEFAULT_MODEL,
+                "actor": op.name}
+    result = await _off_loop(_run)
+    try:
+        await _off_loop(
+            cpdb.begin_action, op.name, op.role, "ai.analyze",
+            f"sent {len(result['context'])} chars of live state to Groq",
+            "groq")
+    except Exception:  # noqa: BLE001 - the audit row must not break the panel
+        pass
+    return result
 
 
 @app.post("/api/v2/fleet/heartbeat")

@@ -243,6 +243,34 @@ export interface BenchmarkRunning {
 export const fetchBenchmarkRunning = () =>
   cpFetch<BenchmarkRunning>('/api/v2/benchmark/running')
 
+// -- AI diagnostics ---------------------------------------------------------
+export interface AiStatus {
+  configured: boolean; keyMask: string; model: string; logFile: string | null
+}
+export interface AiAnalysis {
+  markdown: string; error: string; context: string; model: string; actor: string
+}
+
+export const fetchAiStatus = () => cpFetch<AiStatus>('/api/v2/ai/status')
+
+export const saveAiKey = (reason: string, key: string) =>
+  cpFetch<ActionResult>('/api/v2/ai/key', {
+    method: 'POST', body: JSON.stringify({ reason, key }),
+  })
+
+/** The exact payload analyze() would send, without sending it. The log tail
+ *  contains real addresses and file names, so this exists to let an operator
+ *  read what leaves the building first. */
+export const fetchAiContext = (prompt = '') =>
+  cpFetch<{ context: string; chars: number }>('/api/v2/ai/context', {
+    method: 'POST', body: JSON.stringify({ prompt }),
+  })
+
+export const runAiAnalysis = (prompt = '') =>
+  cpFetch<AiAnalysis>('/api/v2/ai/analyze', {
+    method: 'POST', body: JSON.stringify({ prompt }),
+  })
+
 export const revertPublicShares = (reason: string, tenant = 'target') =>
   cpFetch<ActionResult>('/api/v2/emergency/revert-public', {
     method: 'POST',
