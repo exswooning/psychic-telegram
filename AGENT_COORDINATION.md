@@ -1583,3 +1583,51 @@ browser console, not a functional break.
 
 Still open, not touched this turn: `acl_audit.py` -> `public_share_watch`
 wiring, and launching the B5 benchmark itself.
+
+## 2026-08-10 — Claude: four throughput ceilings removed (commit e1da2e1)
+
+User asked whether the migration was running as fast as it could. It was
+not, by roughly 3x. Four independent caps, all now lifted:
+
+1. **`drive_file_workers` was still 1.** It shipped at 1 so deploying the
+   parallel path mid-benchmark was a no-op, and was then never turned on --
+   every run since went at the measured ~0.66 req/s per user against a
+   3 writes/sec/account ceiling. Now machine-derived via resources.py
+   (4 healthy / 2 under memory pressure, because download_upload's peak
+   buffer is user_workers x drive_file_workers x download_chunk_bytes).
+2. **One write limiter was shared across two accounts.** `files.copy` is
+   issued as the SOURCE user; the staging->My Drive move, the grants and
+   the modifiedTime restore as the TARGET user. Different tenants, different
+   GCP projects, separate 3/sec allowances -- and one bucket charged both,
+   leaving an entire account's budget permanently idle. Split per account.
+3. **Drive reads were paced at the write rate.** They inherited
+   `per_user_qps` (4/sec, auto-tuned to 3 here) purely because that field
+   predates the read/write split -- ~60x below the 20,000-per-100s pool they
+   actually come from, while the code's own comments called them free. New
+   `drive_read_qps` (12/sec, sized so 8 concurrent users stay near 96/sec
+   against the ~200/sec project pool). Also unthrottles discovery.py.
+4. **The file pool was per folder, with a barrier.** Rebuilt each folder and
+   blocked until it drained, so the walk alternated N-wide bursts with
+   serial folder creates, and any folder holding fewer files than workers
+   never parallelised at all. One pool now spans the user walk, with a
+   semaphore for backpressure.
+
+Verified: 902 tests pass (5 new -- split buckets, cross-folder concurrency
+via a deterministic rendezvous barrier rather than timing, and that
+DRIVE_FILE_WORKERS=1 still gives a clean serial path). Deployed; VPS now
+reports drive_file_workers=4, drive_read_qps=12, 6 writes/sec/user-pair
+where it had 3. Live dry-run migrate of alice (392 folders / 3,118 files)
+completed clean: 0 failures, 0 retries, 0 429s.
+
+**Not done, and deliberately so.** The binding constraint is now target-account
+writes at ~3 per file (move + grant batch + modifiedTime restore). The next
+lever is applying grants *before* the staging->My Drive move so the move's
+own modifiedTime is final, dropping 3 writes/file to 2 (~1.5x more). It is
+NOT implemented: grants would be applied while the file still sits in the
+staging shared drive, and _sync_acls' own docstring records that shared-drive
+permission semantics here are unverified. Shipping an unverified ACL
+reordering is precisely what produced B4's 20,714 silently-404ing grants.
+Needs an empirical check on a scratch file first.
+
+Also still open: `acl_audit.py` -> `public_share_watch` wiring, and the real
+B5 timing benchmark (needs a target wipe -- not run, awaiting the go-ahead).

@@ -63,7 +63,8 @@ Design rule: **saturate each account's 3 writes/sec; never exceed it.**
 > Why it matters more than cross-user scaling: a batch cannot finish before
 > its slowest single user, and that user is one thread. Raising
 > `user_workers` cannot shorten `alice`; only splitting `alice` can.
-> Implemented as `drive_file_workers` (default 1) — see §5.1.
+> Implemented as `drive_file_workers` (machine-derived, 4 on a healthy host)
+> — see §5.1.
 
 ## 2. Target architecture (one module = one responsibility)
 
@@ -168,10 +169,19 @@ V2 should inherit the shape rather than reinvent it):
 
 - Folders stay strictly serial and depth-first — a child's copy needs its
   parent's target id, so parallelising the tree would race the ordering the
-  mirror depends on. Only the *files within a folder* fan out.
-- Every call still passes through the one per-user `RateLimiter`, so workers
+  mirror depends on. Only the *files* fan out.
+- The pool spans the whole user walk, not one folder. A per-folder pool
+  blocked until that folder drained, so the walk alternated N-wide bursts
+  with serial folder creates, and a folder holding fewer files than there
+  are workers never parallelised at all. A semaphore supplies backpressure
+  so the queue cannot grow to the size of the corpus.
+- Every call still passes through a per-account `RateLimiter`, so workers
   interleave into the same per-account bucket. Utilisation rises; the ceiling
-  does not move.
+  does not move. There are **two** write buckets, not one: the copy is issued
+  as the source user and everything after it as the target user, and those
+  are separate accounts with separate 3/sec allowances. Reads have a third,
+  much looser budget (`drive_read_qps`), since they come from the
+  20,000-per-100s pool rather than the write ceiling.
 - `stats` moved behind `_bump()` + a lock. `d[k] += 1` is not atomic, and the
   lost update would have silently undercounted the failure counters a run is
   judged on.
