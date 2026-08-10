@@ -456,15 +456,20 @@ def test_modified_time_restore_runs_after_the_grants(migrator, auth, db, setting
 
     It is tempting to fold the restore into the staging->My Drive move (the
     move already accepts modifiedTime) and save a write per file -- ~1.5x on
-    a path where target-account writes are the binding constraint. Probed
-    against the live tenant on 2026-08-10: a parent-changing update cannot
-    reassert modifiedTime once a grant has bumped it. The file came back
-    stamped with the migration date. With the move last there is nothing left
-    to correct it, so every shared file would silently carry the wrong date.
+    a path where target-account writes are the binding constraint.
 
-    See contract_probe.probe_staging_acl_order. Asserting the order here
-    means the reorder cannot be reintroduced from the code side without a
-    red test pointing at the probe that ruled it out.
+    Measured against the live tenant on 2026-08-10, 15 trials: grant-then-move
+    silently lost modifiedTime 3 times out of 15, stamping the file with the
+    migration date. The current order held 14/14. A grant's modifiedTime bump
+    can land *after* a parent-changing update; the current order is immune
+    because its last write is a standalone metadata update that changes no
+    parents, so it deterministically wins.
+
+    The ~20% rate is what makes it worth a test rather than a comment: it
+    passes casual manual checking, and the damage -- a wrong date on a fifth
+    of all shared files -- is silent, unretried and absent from the audit log.
+
+    See contract_probe.probe_staging_acl_order.
     """
     from db import bulk_seed_identities
 
