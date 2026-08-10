@@ -58,6 +58,53 @@ class TestProbeKeysStayWiredUp:
         assert not (set(cov.PROBES) & none_items)
 
 
+class TestStagingDrivesAreNotCoverage:
+    """
+    server_side mode creates a MIGRATION-STAGING-<user> shared drive in the
+    target and adds the *source* user as an organizer, so it appears in that
+    user's drives().list(). Teardown deliberately refuses to delete one that
+    still holds files, so an interrupted run leaves it there for good.
+
+    Counted naively, the first live coverage run reported "Shared Drives:
+    2 COVERED" for a tenant whose only shared drives were the migrator's own
+    litter. Claiming a path is exercised when it is not is the single most
+    damaging thing this report can do -- an absent category is a to-do, a
+    falsely-covered one is a decision made on bad evidence.
+    """
+
+    class _Auth:
+        def __init__(self, names):
+            self.names = names
+
+        def source_drive(self, user):
+            outer = self
+
+            class _D:
+                def drives(self):
+                    return self
+
+                def list(self, **kw):
+                    return self
+
+                def execute(self):
+                    return {"drives": [{"id": n, "name": n} for n in outer.names]}
+            return _D()
+
+    class _Settings:
+        staging_drive_prefix = "MIGRATION-STAGING"
+
+    def test_staging_drives_do_not_count(self):
+        n = cov._count_shared_drives(
+            self._Auth(["MIGRATION-STAGING-alice"]), self._Settings(), "alice@s")
+        assert n == 0
+
+    def test_real_shared_drives_still_count(self):
+        n = cov._count_shared_drives(
+            self._Auth(["MIGRATION-STAGING-alice", "Engineering", "Legal"]),
+            self._Settings(), "alice@s")
+        assert n == 2
+
+
 class TestVerdicts:
     def test_a_supported_category_with_data_is_covered(self):
         rows = {r["item"]: r for r in cov.assess(_totals())}

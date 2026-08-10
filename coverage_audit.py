@@ -134,13 +134,26 @@ PROBES = {
 # ======================================================================
 # Extra live counts inventory.py does not already gather
 # ======================================================================
-def _count_shared_drives(auth: AuthManager, user: str) -> int:
+def _count_shared_drives(auth: AuthManager, settings: Settings, user: str) -> int:
+    """Genuine source shared drives, excluding our own staging drives.
+
+    server_side mode creates a `MIGRATION-STAGING-<user>` shared drive in the
+    target and adds the *source* user as an organizer, so it comes back in
+    that user's drives().list() -- and one left behind by an interrupted run
+    (teardown deliberately refuses to delete a non-empty staging drive) stays
+    there indefinitely. Counted naively, this reported "Shared Drives:
+    covered" for a tenant with no shared drives at all, which is the single
+    most misleading thing a coverage report can do: claim a path is exercised
+    when what it actually found was the migrator's own litter.
+    """
+    prefix = (getattr(settings, "staging_drive_prefix", "") or "").lower()
     try:
         drives = auth.source_drive(user).drives().list(
-            pageSize=100, fields="drives(id)").execute().get("drives", [])
-        return len(drives)
+            pageSize=100, fields="drives(id,name)").execute().get("drives", [])
     except Exception:      # noqa: BLE001 - absence is the answer, not an error
         return 0
+    return sum(1 for d in drives
+               if not (prefix and (d.get("name") or "").lower().startswith(prefix)))
 
 
 def _count_contacts(auth: AuthManager, user: str) -> int | None:
@@ -225,7 +238,7 @@ def collect(auth: AuthManager, settings: Settings, users: list[str]) -> dict:
             totals["chat"] = ((totals["chat"] or 0)
                               + ch.get("spaces", 0) + ch.get("messages", 0))
 
-        totals["shared_drives"] += _count_shared_drives(auth, user)
+        totals["shared_drives"] += _count_shared_drives(auth, settings, user)
         for key, fn in (("contacts", _count_contacts), ("tasks", _count_tasks)):
             n = fn(auth, user)
             if n is not None:
