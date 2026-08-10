@@ -382,6 +382,126 @@ def probe_drive_writes(p: Probe, drive, grantee: str) -> None:
             print(f"  ! could not delete scratch file {fid}: {exc}")
 
 
+def probe_staging_acl_order(p: Probe, auth, settings, source_user: str,
+                            target_user: str, grantee: str) -> None:
+    """
+    Can grants be applied while the copy is still in the staging shared
+    drive, so the staging->My Drive move can carry the final modifiedTime?
+
+    Why it matters. The server-side path currently spends three TARGET-account
+    writes per file -- move, grant batch, modifiedTime restore -- against a
+    3/sec per-account ceiling, and that is the binding constraint on the whole
+    migration. Granting before the move would fold the restore into the move
+    and drop it to two. That is ~1.5x, which is worth more than everything
+    else left on the table.
+
+    Answered, 2026-08-10, against the live tenant: **no, and this probe is
+    what keeps it from being retried.** The grant does survive the move, but
+    a parent-changing update cannot reassert modifiedTime once a grant has
+    bumped it -- the file came out stamped 2026-08-10 instead of 2019. In the
+    reordered design the move is last, so nothing would correct it, and every
+    shared file would silently carry the migration date. The separate restore
+    is load-bearing.
+
+    Two controls, because they fail differently: the same move with **no**
+    preceding grant does hold modifiedTime, which is why unshared files are
+    correct today even though `_restore_modified_time` never runs for them.
+
+    B4 recorded a clean run while 20,714 of 20,714 grants were 404ing, so
+    "it did not throw" is not evidence; this checks the resulting state.
+
+    Creates one scratch file and one staging drive, and removes both.
+    """
+    src = auth.source_drive(source_user)
+    tgt = auth.target_drive(target_user)
+    stamp = "2019-01-01T00:00:00.000Z"
+    drive_id = fid = copy_id = None
+
+    try:
+        drive_id = tgt.drives().create(
+            requestId=uuid.uuid4().hex,
+            body={"name": f"CONTRACT-PROBE-STAGING-{uuid.uuid4().hex[:8]}"},
+            fields="id").execute()["id"]
+        tgt.permissions().create(
+            fileId=drive_id, body={"type": "user", "role": "organizer",
+                                   "emailAddress": source_user},
+            supportsAllDrives=True, sendNotificationEmail=False,
+            fields="id").execute()
+
+        fid = src.files().create(
+            body={"name": f"CONTRACT-PROBE-{uuid.uuid4().hex[:8]}",
+                  "mimeType": "text/plain", "modifiedTime": stamp},
+            fields="id").execute()["id"]
+
+        copy_id = src.files().copy(
+            fileId=fid, body={"name": "probe-copy", "parents": [drive_id],
+                              "modifiedTime": stamp},
+            supportsAllDrives=True, fields="id").execute()["id"]
+
+        # 1. Does a grant on a file inside the staging shared drive stick?
+        granted = False
+        try:
+            tgt.permissions().create(
+                fileId=copy_id, body={"type": "user", "role": "reader",
+                                      "emailAddress": grantee},
+                supportsAllDrives=True, sendNotificationEmail=False,
+                fields="id").execute()
+            granted = True
+        except Exception as exc:      # noqa: BLE001
+            p.record("grant applies inside the staging drive",
+                     "drive_engine._sync_server_side (proposed reorder)",
+                     FAIL, str(exc)[:80])
+
+        if granted:
+            # 2. Does it survive the move out to My Drive, and does the move's
+            #    own modifiedTime hold now that a grant preceded it?
+            tgt.files().update(
+                fileId=copy_id, addParents="root", removeParents=drive_id,
+                body={"modifiedTime": stamp}, supportsAllDrives=True,
+                fields="id").execute()
+
+            after = tgt.files().get(
+                fileId=copy_id, fields="modifiedTime",
+                supportsAllDrives=True).execute().get("modifiedTime", "")
+            perms = tgt.permissions().list(
+                fileId=copy_id, fields="permissions(role,emailAddress)",
+                supportsAllDrives=True).execute().get("permissions", [])
+            kept = any(x.get("emailAddress") == grantee for x in perms)
+
+            p.record("grant survives the move to My Drive",
+                     "drive_engine._sync_server_side",
+                     PASS if kept else FAIL,
+                     f"grantee present after move: {kept}")
+            # PASS here means the move could NOT carry modifiedTime once a
+            # grant preceded it -- i.e. the standalone restore step is
+            # load-bearing and the reorder must not be done. Recorded this
+            # way round on purpose: an optimisation that is unsafe is a
+            # settled question, not a standing failure to look at every run.
+            stale = not after.startswith("2019")
+            p.record("post-grant move cannot carry modifiedTime",
+                     "drive_engine._restore_modified_time (why it exists)",
+                     PASS if stale else UNEXP,
+                     "restore step required"
+                     if stale else
+                     f"move DID hold 2019 -- reorder may now be viable "
+                     f"({after[:10]})")
+    except Exception as exc:          # noqa: BLE001
+        p.record("staging-drive ACL ordering", "-", SKIP, str(exc)[:90])
+    finally:
+        for svc, ident in ((tgt, copy_id), (src, fid)):
+            if ident:
+                try:
+                    svc.files().delete(fileId=ident,
+                                       supportsAllDrives=True).execute()
+                except Exception:     # noqa: BLE001
+                    pass
+        if drive_id:
+            try:
+                tgt.drives().delete(driveId=drive_id).execute()
+            except Exception as exc:  # noqa: BLE001
+                print(f"  ! could not delete probe staging drive {drive_id}: {exc}")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="Check tests/fakes.py assumptions against the real APIs.")
@@ -436,6 +556,8 @@ def main(argv: list[str] | None = None) -> int:
                 p.record("insert is searchable within one backoff",
                          "gmail_engine._insert_once before_retry", SKIP,
                          str(exc)[:90])
+            if rows:
+                probe_staging_acl_order(p, auth, settings, user, target, rows[0])
 
     return p.report(args.min_held)
 

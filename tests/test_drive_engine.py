@@ -451,6 +451,42 @@ def test_modified_time_survives_acl_application(migrator, auth, db):
     assert copied["modifiedTime"] == "2019-03-04T05:06:07Z"
 
 
+def test_modified_time_restore_runs_after_the_grants(migrator, auth, db, settings):
+    """Order, not just outcome: the restore must be the last write.
+
+    It is tempting to fold the restore into the staging->My Drive move (the
+    move already accepts modifiedTime) and save a write per file -- ~1.5x on
+    a path where target-account writes are the binding constraint. Probed
+    against the live tenant on 2026-08-10: a parent-changing update cannot
+    reassert modifiedTime once a grant has bumped it. The file came back
+    stamped with the migration date. With the move last there is nothing left
+    to correct it, so every shared file would silently carry the wrong date.
+
+    See contract_probe.probe_staging_acl_order. Asserting the order here
+    means the reorder cannot be reintroduced from the code side without a
+    red test pointing at the probe that ruled it out.
+    """
+    from db import bulk_seed_identities
+
+    _server_side(settings)
+    bulk_seed_identities(db, [("bob@tenanta.com", "bob@tenantb.com")])
+    src = auth.source_drive(SRC_USER)
+    fid = src.add_binary("shared.pdf", mtime="2019-03-04T05:06:07Z")
+    src.add_permission(fid, "user", "reader", email="bob@tenanta.com")
+
+    migrator.run()
+
+    names = [n for n, _ in auth.target_drive(TGT_USER).calls]
+    assert "permissions.create" in names, "precondition: a grant was applied"
+    mtime_updates = [i for i, (n, kw) in
+                     enumerate(auth.target_drive(TGT_USER).calls)
+                     if n == "files.update" and "modifiedTime" in str(kw.get("body"))
+                     and "addParents" not in kw]
+    assert mtime_updates, "no standalone modifiedTime restore was issued"
+    assert max(mtime_updates) > names.index("permissions.create"), \
+        "the restore ran before the grants, so the grant's bump would win"
+
+
 def test_modified_time_survives_acls_on_folders_too(migrator, auth, db):
     from db import bulk_seed_identities
 
