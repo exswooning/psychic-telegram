@@ -1631,3 +1631,44 @@ Needs an empirical check on a scratch file first.
 
 Also still open: `acl_audit.py` -> `public_share_watch` wiring, and the real
 B5 timing benchmark (needs a target wipe -- not run, awaiting the go-ahead).
+
+---
+
+## 2026-08-10 — DeepSeek — DWD consent now automatable (Playwright helper + UI button)
+
+User asked whether the tool could fully self-provision given only an admin
+login, and specifically whether a browser window could drive the Domain-Wide
+Delegation grant itself. Honest answer given first: no Google API accepts a
+password, so login stays a human step; DWD has no API at all. What CAN be
+automated is everything after login.
+
+Shipped `dwd_helper.py` + a webui button (this repo, not the Mission Control
+SPA):
+
+- `dwd_helper.py` launches a **headed** Playwright Chromium, opens
+  `admin.google.com/ac/owl/domainwidedelegation`, and waits up to `--timeout`
+  for the operator to sign in BY HAND (password/2FA/SSO/captcha are not
+  scriptable). Then it clicks Add new, fills Client ID + OAuth Scopes, clicks
+  Authorize, and verifies the entry appears. Fails loudly per step (keeps the
+  browser open) and reports multi-party-approval rather than crashing.
+  Selectors are best-effort against the current console DOM, so it prints the
+  manual path as fallback instead of blocking.
+- The webui runs headless on the VPS and cannot open a browser, so the button
+  (`POST /api/dwd/automate`, per-tenant, in the existing DWD panel next to
+  "Diagnose scopes") returns the exact `dwd_helper.py --client-id ... --scopes
+  ...` command for the OPERATOR's machine, pre-copied, with the scope line
+  derived from the same `dwd_payload()` the copy button already uses -- so the
+  automation line always matches the panel line.
+- Playwright is NOT installed anywhere yet (neither local nor VPS); the helper
+  prints `pip install playwright && playwright install chromium` when missing.
+  It is a one-time install on the machine with the browser.
+
+Verified on the live VPS: `/api/dwd/automate` returns ok with the correct
+client IDs (source 114344169573197353518, target 117866090214807989943) and
+mode-correct scope lines (source shows `drive` write under TRANSFER_MODE=
+server_side, matching `dwd_payload()`). webui.py restarted there (pid
+1312196) serving the new endpoint. NOT yet end-to-end browser-tested against
+a live console -- needs an operator to run the command on a real machine.
+
+No conflict with the four-ceiling work or Mission Control: this only touches
+webui.py's DWD panel + a new standalone file.

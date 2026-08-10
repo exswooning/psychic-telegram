@@ -2895,7 +2895,9 @@ function delegationBody(){
           editor replaces rather than appends</span></div>
       <pre class="copy">${esc(line||'(set the domains first)')}</pre>
       <button onclick="diagnoseScopes('${t.side}',this)">Diagnose scopes</button>
+      <button onclick="dwdAutomate('${t.side}',this)">Automate</button>
       <div id="diag-${t.side}" style="margin-top:6px"></div>
+      <div id="dwdauto-${t.side}" class="muted" style="margin-top:6px"></div>
       ${fullUnionBlock(t.side)}
     </div>`;
   });
@@ -3140,6 +3142,29 @@ async function recheckDWD(btn){
     btn.disabled=false;
     btn.innerHTML=o;
     if($('dwdmsg')) $('dwdmsg').textContent='Error: '+e;
+  }
+}
+
+async function dwdAutomate(tenant,btn){
+  const el=$('dwdauto-'+tenant);
+  if(!el) return;
+  btn.disabled=true;
+  el.textContent='Building automation command...';
+  try{
+    const r=await (await fetch('/api/dwd/automate',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({tenant})})).json();
+    btn.disabled=false;
+    if(!r.ok){ el.textContent=r.error||'failed'; return; }
+    // This webui runs headless (VPS), so the browser must open on the
+    // operator's machine. Show the command, pre-copied.
+    copy(r.command, btn);
+    el.innerHTML='<b>Run this on your machine (browser will open, sign in '
+      +'by hand, the tool clicks through DWD):</b><pre class="copy">'
+      +esc(r.command)+'</pre>';
+  }catch(e){
+    btn.disabled=false;
+    el.textContent='Error: '+e;
   }
 }
 
@@ -3976,6 +4001,46 @@ class Handler(BaseHTTPRequestHandler):
 
         if self.path == "/api/toggles":
             self._json(set_toggles(body))
+            return
+
+        if self.path == "/api/dwd/automate":
+            tenant = body.get("tenant", "")
+            if tenant not in ("source", "target"):
+                self._json({"ok": False,
+                            "error": "tenant must be source or target"}, 400)
+                return
+            from config import Settings
+            import dwd_helper
+
+            st = Settings()
+            base = os.path.dirname(os.path.abspath(__file__))
+            key = st.source_sa_key if tenant == "source" else st.target_sa_key
+            client_id = ""
+            try:
+                with open(key, encoding="utf-8") as fh:
+                    client_id = json.load(fh).get("client_id", "")
+            except Exception:  # noqa: BLE001 - absent key is an early state
+                pass
+            scopes = ""
+            try:
+                data = dwd_helper._load_payload(tenant)
+                scopes = data.get("scopes", "")
+            except Exception:  # noqa: BLE001 - never break the panel
+                pass
+            if not client_id:
+                self._json({"ok": False,
+                            "error": f"upload the {tenant} service-account "
+                                     f"key first (no client ID yet)"}, 400)
+                return
+            cmd = (f"cd {base} && "
+                   f"{sys.executable} dwd_helper.py --client-id {client_id} "
+                   f"--scopes {scopes!r}")
+            # This server is headless (VPS), so it cannot open the browser
+            # itself: hand the operator the exact command to run on a machine
+            # with a display. --headful is the default inside the helper.
+            self._json({"ok": True, "command": cmd, "client_id": client_id,
+                        "scopes": scopes, "tenant": tenant,
+                        "note": "run this on a machine with a browser"})
             return
 
         if self.path == "/api/authmode":
