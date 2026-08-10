@@ -492,3 +492,51 @@ class TestDwdStatus:
         body = r.json()
         assert body["checked"] is False
         assert "key" in body["error"]
+
+
+class TestApiServerLoadsEnvSh:
+    """
+    Every write this server launches is a subprocess started with
+    `dict(os.environ)` -- THIS process's own environment. The control plane
+    was started via start_control_plane.sh (which never sourced env.sh)
+    for this entire project, and the very first live check of the new
+    /api/v2/dwd/status endpoint proved it: SOURCE_ADMIN/TARGET_ADMIN came
+    back "not set" despite being correctly configured in env.sh the whole
+    time. Every subprocess this server ever launched -- migrate, benchmark,
+    provision, coverage -- would have failed the same way had it been
+    triggered through the API instead of by SSHing in and sourcing env.sh
+    by hand, which is how every one of them was actually tested.
+
+    webui.py has always self-loaded env.sh in its own main() for exactly
+    this reason; this pins api_server.py to the same behaviour.
+    """
+
+    def test_main_loads_env_sh_into_the_process_environment(self, tmp_path, monkeypatch):
+        import api_server
+
+        env_path = tmp_path / "env.sh"
+        env_path.write_text("export SOURCE_ADMIN=admin@example.com\n"
+                            "export SOURCE_DOMAIN=example.com\n")
+        monkeypatch.setattr(api_server, "HERE", str(tmp_path))
+        monkeypatch.delenv("SOURCE_ADMIN", raising=False)
+        monkeypatch.delenv("SOURCE_DOMAIN", raising=False)
+
+        ran = {}
+        monkeypatch.setattr(
+            "uvicorn.run", lambda *a, **kw: ran.setdefault("called", True))
+
+        api_server.main(["--port", "0"])
+
+        assert ran.get("called") is True
+        assert os.environ.get("SOURCE_ADMIN") == "admin@example.com"
+        assert os.environ.get("SOURCE_DOMAIN") == "example.com"
+
+    def test_a_missing_env_sh_does_not_crash_startup(self, tmp_path, monkeypatch):
+        """No env.sh yet (a fresh checkout, before setup.sh) must still let
+        the API start, just without config -- not raise past main()."""
+        import api_server
+
+        monkeypatch.setattr(api_server, "HERE", str(tmp_path))
+        monkeypatch.setattr(
+            "uvicorn.run", lambda *a, **kw: None)
+        assert api_server.main(["--port", "0"]) == 0

@@ -959,6 +959,27 @@ async def heartbeat(hb: Heartbeat):
 def main(argv: list[str] | None = None) -> int:
     import uvicorn
 
+    # Every write this server launches (migrate, benchmark, provision,
+    # coverage) is a subprocess started with `dict(os.environ)` -- this
+    # process's own environment. Started with a bare `python api_server.py`
+    # (or a systemd unit, or start_control_plane.sh before it grew the same
+    # fix) that never sourced env.sh, none of them would have
+    # SOURCE_DOMAIN/SOURCE_ADMIN/the SA key paths, and every subprocess
+    # would fail on missing config -- silently, since Settings() defaults
+    # most of it to empty strings rather than raising. webui.py has always
+    # loaded env.sh this way in its own main(); this brings api_server.py
+    # to parity rather than relying on whatever launched it to have done so.
+    try:
+        from wizard import load_env
+
+        loaded = load_env(os.path.join(HERE, "env.sh"))
+        for key, value in loaded.items():
+            os.environ.setdefault(key, value)
+        if loaded:
+            print(f"loaded {len(loaded)} setting(s) from env.sh")
+    except Exception as exc:  # noqa: BLE001 - the API should still start
+        print(f"could not read env.sh: {exc}", file=sys.stderr)
+
     ap = argparse.ArgumentParser(description="Migration Command Center API")
     ap.add_argument("--port", type=int, default=8090)
     ap.add_argument("--host", default="127.0.0.1")

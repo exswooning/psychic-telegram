@@ -17,6 +17,23 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 
+# Without this, api_server.py starts with none of env.sh's config --
+# SOURCE_DOMAIN, SOURCE_ADMIN, the SA key paths, TRANSFER_MODE, everything
+# main.py/benchmark_run.py/reset_target.py read via Settings(). It was
+# never caught because every subprocess this API launches (migrate,
+# benchmark, provision, coverage) inherits THIS process's environment via
+# `dict(os.environ)`, and every test of those features in this project so
+# far was run by SSHing in and sourcing env.sh by hand rather than through
+# the API -- so a write launched from the UI itself would have failed on
+# missing config the whole time, silently, since Settings() defaults most
+# of these to empty strings rather than raising.
+if [[ -f env.sh ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  . ./env.sh
+  set +a
+fi
+
 export CP_OPERATORS="${CP_OPERATORS:-aryan:admin}"
 PORT=8090
 mkdir -p logs
