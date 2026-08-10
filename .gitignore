@@ -44,3 +44,9 @@ oauth/
 # deployment. Not a credential, but it is somebody's real configuration and
 # there is no reason to publish it.
 env.sh
+
+# Generated at runtime by api_server.py / benchmark_run.py -- not source,
+# and would otherwise show up as untracked noise on every git status after
+# a benchmark or provisioning run.
+/logs/
+/benchmarks/

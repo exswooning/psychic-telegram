@@ -151,6 +151,20 @@ export const retryItem = (sourceUser: string, itemId: string, reason: string) =>
     body: JSON.stringify({ reason, source_user: sourceUser, item_id: itemId }),
   })
 
+export interface ProvisionStatus {
+  running: boolean; pid: number | null; created: number; failed: number
+  total: number; tail: string[]
+}
+
+export const startProvision = (reason: string, tenant: 'source' | 'target' = 'target', dryRun = false) =>
+  cpFetch<ActionResult>('/api/v2/provision/start', {
+    method: 'POST',
+    body: JSON.stringify({ reason, tenant, dry_run: dryRun }),
+  })
+
+export const fetchProvisionStatus = (tenant: 'source' | 'target' = 'target') =>
+  cpFetch<ProvisionStatus>(`/api/v2/provision/status?tenant=${tenant}`)
+
 export interface BenchmarkResult {
   file: string; label: string; startedAt: string; passed: boolean
   elapsedS: number; secPerFile: number; totalFiles: number

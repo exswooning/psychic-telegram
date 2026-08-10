@@ -197,6 +197,17 @@ def failure_feed(limit: int = 200, source_user: str | None = None) -> list[dict]
         return [dict(r) for r in conn.execute(q, args)]
 
 
+def identity_count() -> int:
+    """Denominator for provisioning progress -- every distinct target address
+    identity_map expects to exist. Same source `provision-users` itself reads
+    from, so the UI's progress bar and the CLI's own count can never disagree
+    about what "done" means."""
+    with ro() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) n FROM identity_map WHERE entity_type='user'"
+        ).fetchone()["n"]
+
+
 def user_progress() -> list[dict]:
     """
     Per-user rollup. Explicitly models the Partial Failure state the spec

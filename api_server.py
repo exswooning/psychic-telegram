@@ -53,6 +53,7 @@ import asyncio
 from contextlib import asynccontextmanager
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -145,6 +146,17 @@ class RetryItem(WriteAction):
 class RevertPublic(WriteAction):
     tenant: Literal["source", "target"] = "target"
     confirm: str = Field(description="must be the literal string REVERT")
+
+
+class StartProvision(WriteAction):
+    """Create missing accounts for identity_map entries on one tenant.
+
+    Mirrors `provision-users` exactly (create-only, never touches an
+    existing account) -- this is a UI front end for that command, not a
+    second implementation of it.
+    """
+    tenant: Literal["source", "target"] = "target"
+    dry_run: bool = False
 
 
 class StartBenchmark(WriteAction):
@@ -445,6 +457,65 @@ class Heartbeat(BaseModel):
     active_job: str | None = None
     job_pid: int | None = None
     transfer_mode: str | None = None
+
+
+@app.post("/api/v2/provision/start")
+async def provision_start(body: StartProvision, op: Operator = Depends(operator)):
+    """
+    Launch `main.py provision-users` detached, same as benchmark launches --
+    it survives the request, and progress is read back from the log rather
+    than held in this process's memory, so a restart does not lose it.
+    """
+    def _launch() -> tuple[bool, str]:
+        argv = [PY, "main.py", "provision-users", "--tenant", body.tenant, "--yes"]
+        if body.dry_run:
+            argv.append("--dry-run")
+        os.makedirs(os.path.join(HERE, "logs"), exist_ok=True)
+        log = os.path.join(HERE, "logs", f"provision-{body.tenant}.log")
+        with open(log, "wb") as fh:
+            proc = subprocess.Popen(argv, cwd=HERE, stdout=fh, stderr=fh,
+                                    stdin=subprocess.DEVNULL,
+                                    start_new_session=True)
+        return True, f"provisioning {body.tenant} started pid {proc.pid} -> {log}"
+    return await _gated(op, "provision.start", body, body.tenant, _launch)
+
+
+# Matches provision.py's own log lines exactly (`log.info("created %s", email)`
+# and the "could not create" warning), so the progress bar can never drift
+# from what the CLI itself considers done -- there is no second parser to
+# fall out of sync with a wording change in provision.py.
+_PROVISION_CREATED_RE = re.compile(r"provision:\s+created\s+(\S+)")
+_PROVISION_EXISTS_ERR_RE = re.compile(r"could not create (\S+)")
+
+
+@app.get("/api/v2/provision/status")
+async def provision_status(tenant: str = "target"):
+    """Running state + live progress, parsed from the log the launch wrote.
+
+    Total is `identity_count()` -- the same denominator provision-users
+    itself iterates -- not a guess, so "N of M" always means the same N/M
+    the CLI would print.
+    """
+    def _read() -> dict:
+        log_path = os.path.join(HERE, "logs", f"provision-{tenant}.log")
+        ps = subprocess.run(["ps", "-eo", "pid=,args="], capture_output=True,
+                            text=True).stdout
+        pid = None
+        for line in ps.splitlines():
+            if "provision-users" in line and f"--tenant {tenant}" in line                     and "grep" not in line:
+                pid = int(line.strip().split(None, 1)[0])
+                break
+        if not os.path.isfile(log_path):
+            return {"running": pid is not None, "pid": pid, "created": 0,
+                    "failed": 0, "total": cpdb.identity_count(), "tail": []}
+        with open(log_path, encoding="utf-8", errors="replace") as fh:
+            lines = fh.readlines()
+        created = sum(1 for ln in lines if _PROVISION_CREATED_RE.search(ln))
+        failed = sum(1 for ln in lines if _PROVISION_EXISTS_ERR_RE.search(ln))
+        return {"running": pid is not None, "pid": pid, "created": created,
+                "failed": failed, "total": cpdb.identity_count(),
+                "tail": [ln.rstrip() for ln in lines[-30:]]}
+    return await _off_loop(_read)
 
 
 @app.post("/api/v2/benchmark/start")

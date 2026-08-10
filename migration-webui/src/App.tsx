@@ -5,6 +5,7 @@ import Wizard from '@/pages/Wizard'
 import SeedWizard from '@/pages/SeedWizard'
 import Dashboard from '@/pages/Dashboard'
 import FleetDashboard from '@/pages/FleetDashboard'
+import MissionControl from '@/pages/MissionControl'
 import Users from '@/pages/Users'
 import UserDetail from '@/pages/UserDetail'
 import SystemHealth from '@/pages/SystemHealth'
@@ -28,7 +29,8 @@ const App: React.FC = () => {
   return (
     <Layout>
       <Routes>
-        <Route path="/" element={<Navigate to="/dashboard" replace />} />
+        <Route path="/" element={<Navigate to="/mission-control" replace />} />
+        <Route path="/mission-control" element={<MissionControl />} />
         <Route path="/wizard" element={<Wizard />} />
         <Route path="/seed-wizard" element={<SeedWizard />} />
         <Route path="/dashboard" element={<Dashboard />} />

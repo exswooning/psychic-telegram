@@ -129,6 +129,64 @@ class TestEveryAttemptIsAudited:
         assert "planned cutover" in row["reason"]
 
 
+class TestProvisioning:
+    """
+    The UI front end for `provision-users`. Progress is parsed from the same
+    log lines the CLI itself prints (`provision.py`'s `log.info("created
+    %s", email)`), so the bar can never disagree with what the command line
+    would report -- there is no second source of truth to drift.
+    """
+
+    def test_a_viewer_cannot_launch_provisioning(self, cp):
+        r = cp.post("/api/v2/provision/start",
+                    json={"reason": "curiosity", "tenant": "target"}, headers=VIEWER)
+        assert r.status_code == 403
+
+    def test_launch_is_audited_with_the_tenant_as_target(self, monkeypatch, cp):
+        import api_server
+
+        class _FakeProc:
+            pid = 4242
+        monkeypatch.setattr(api_server.subprocess, "Popen", lambda *a, **k: _FakeProc())
+
+        r = cp.post("/api/v2/provision/start",
+                    json={"reason": "reprovisioning after cleanup",
+                          "tenant": "target"}, headers=ADMIN)
+        assert r.status_code == 200
+        row = cp.get("/api/v2/actions").json()[0]
+        assert row["action"] == "provision.start"
+        assert row["target"] == "target"
+        assert row["outcome"] == "OK"
+
+    def test_status_reports_total_from_identity_map_not_a_guess(self, cp):
+        from db import bulk_seed_identities, MigrationDB
+        d = MigrationDB(os.environ["MIGRATION_DB"])
+        bulk_seed_identities(d, [("a@s.com", "a@t.com"), ("b@s.com", "b@t.com")])
+        d.close()
+        r = cp.get("/api/v2/provision/status?tenant=target").json()
+        assert r["total"] == 2
+        assert r["running"] is False
+
+    def test_progress_is_parsed_from_the_exact_provision_log_format(self, cp, tmp_path):
+        """Pins the regex against provision.py's actual wording -- a rename
+        of that log line would otherwise silently freeze the progress bar
+        at 0 with no test catching it."""
+        import api_server
+
+        os.makedirs(os.path.join(api_server.HERE, "logs"), exist_ok=True)
+        log = os.path.join(api_server.HERE, "logs", "provision-target.log")
+        with open(log, "w", encoding="utf-8") as fh:
+            fh.write("2026-01-01 00:00:00 INFO provision: created a@t.com\n")
+            fh.write("2026-01-01 00:00:01 INFO provision: created b@t.com\n")
+            fh.write("2026-01-01 00:00:02 WARNING provision: could not create c@t.com: 409\n")
+        try:
+            r = cp.get("/api/v2/provision/status?tenant=target").json()
+            assert r["created"] == 2
+            assert r["failed"] == 1
+        finally:
+            os.remove(log)
+
+
 class TestEmergencyBrake:
     def test_the_kill_switch_needs_a_typed_confirmation_too(self, cp):
         """Reason Code alone is not enough for the one action whose blast
