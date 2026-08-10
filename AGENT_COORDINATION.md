@@ -1672,3 +1672,60 @@ a live console -- needs an operator to run the command on a real machine.
 
 No conflict with the four-ceiling work or Mission Control: this only touches
 webui.py's DWD panel + a new standalone file.
+
+---
+
+## 2026-08-11 — Claude — DWD scopes granted live; dwd_helper.py fixed end-to-end
+
+Built on DeepSeek's dwd_helper.py (uncommitted at the time — merged their
+work rather than overwriting it) to actually grant DWD scopes on both
+tenants. Three real bugs found and fixed, all silent-failure shaped:
+
+1. **Verification was vacuous.** The original check was "does client_id
+   appear in the delegation list?" — true before AND after any change,
+   since the client is already listed on every real run (that's why
+   Overwrite/Edit is needed at all). Replaced with functional verification:
+   mint a token per scope, one at a time, and see which ones Google issues.
+   No API reads a DWD entry, so this is the only way to know. New file
+   `verify_scopes.py` does this and is reused by both the helper and by
+   hand: `python3 verify_scopes.py --tenant source|target`.
+
+2. **Overwrite silently revokes.** The console's only way to change an
+   existing entry via "Add new" is ticking "Overwrite existing client ID",
+   which replaces the scope list WHOLESALE. dwd_helper now reads the live
+   scope set first (via verify_scopes) and merges before submitting, so a
+   partial --scopes argument can never drop something already granted.
+   Also switched to the **Edit** button (select the row → Edit) in
+   preference to Add new+Overwrite when the client already exists — Edit
+   opens pre-populated with current scopes, which is the intended route.
+
+3. **Auto sign-in selectors were wrong.** `input[type="email"]` matches
+   ZERO elements on Google's sign-in page — the email box is
+   `type="text"` with `id="identifierId"`. Nothing was ever typed; the
+   tool sat waiting for a human at a page it could have filled. Fixed
+   selector, switched fill()->type() (the form needs real key events to
+   enable Next), and added an aria-label-based field lookup for the
+   Edit dialog (its Client ID field is `disabled`, so index-based fill
+   spun forever against it).
+
+Added optional unattended sign-in via `DWD_EMAIL`/`DWD_PASSWORD` env vars
+(never argv — readable via `ps` — and never logged). Best-effort only:
+Google can still throw a captcha/2FA/"not secure" prompt, at which point
+the existing wait-for-human loop is the fallback, unchanged.
+
+**Verified live, independently, both tenants:**
+- source: 17/17 scopes delegated (was 15/17 — missing contacts+tasks)
+- target: 13/13 scopes delegated (already complete, no action needed)
+
+Also found and fixed while assembling the scope list: `SEED_SCOPES` in
+data-generator/seed_sandbox.py was missing `contacts` and `tasks` —
+`build_people_tasks()` builds those clients with SEED_SCOPES, so
+`seed_contacts`/`seed_tasks` could only ever fail `unauthorized_client`,
+and both swallow the exception into a `note` field, so seeding reported
+success while producing nothing. This is why contacts/tasks have been
+UNPROBED on every coverage_audit run so far.
+
+Password used for the live grant is in this session's history — please
+rotate it once the sandbox is stable.
+
+dwd_helper.py, verify_scopes.py, seed_sandbox.py, tests all committed.
