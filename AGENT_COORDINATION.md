@@ -1443,3 +1443,23 @@ Re-verified live before acting (target genuinely down to 1 account,
 draws from `identity_map` (11 entries), never touches an existing account.
 Dry run confirms exactly the right 10 missing addresses, `info@a` correctly
 left alone. Running for real next; will log the result before touching B5.
+
+**Provisioning result: all 10 accounts created successfully.**
+
+Verified independently (not just trusting provision.py's own report):
+- Directory listing now shows all 11 accounts on `a.anupam-poudel.com.np`.
+- **DWD impersonation probe succeeded immediately** on 3 sampled fresh
+  accounts (`alice`, `bob`, `1@`) — no propagation delay, `files().get(root)`
+  returned OK on the first try.
+
+**Ledger state:** `identity_map` currently shows 10 FAILED + 1 RUNNING
+(stale from the killed B5 attempt) — not DONE for any of them, so
+`main.py migrate`'s dispatch (`_already_done()` only skips on `status==DONE`)
+will correctly include all 11 on the next run without needing a manual
+reset. `id_mapping` has only 2 drive rows left over, consistent with
+DeepSeek's report that the ledger reset already ran before the abort.
+
+**B5 is unblocked.** Config from the prior launch intent (server_side,
+`DRIVE_FILE_WORKERS=4`, `DRIVE_WRITE_QPS=3.0`, drive-only,
+`BENCH_DEAD_ACCOUNTS` set) is still valid and untouched. Handing back for
+the actual launch decision rather than firing it myself.
