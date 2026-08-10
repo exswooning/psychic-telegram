@@ -45,29 +45,86 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import Settings   # noqa: E402
 from db import MigrationDB    # noqa: E402
 
-DRIVE_TYPES = ("folder", "file", "shortcut")
+# `acl` and `comment` belong here even though the original Drive reset
+# omitted them. drive_engine writes both, and leaving them behind is why
+# B4's 20,714 ACL failure rows survived a full wipe-and-reset and then
+# showed up against B5 -- a run that had produced none of them. Nothing
+# reads these rows to decide what to skip (acl_audit.py compares the two
+# tenants live), so clearing them costs no resumability.
+DRIVE_TYPES = ("folder", "file", "shortcut", "acl", "comment")
+
+# The ledger row types each service owns. Everything the engine writes to
+# id_mapping/audit_log has to appear here, or a reset leaves rows behind
+# that the next run reads as "already migrated".
+#
+# The reason this is a table rather than just Drive: the target accounts
+# were deleted and re-provisioned mid-project, which invalidated *every*
+# service's mappings at once, not just Drive's. With only a Drive reset
+# available, the ledger went on reporting gmail/calendar/chat as DONE for
+# accounts that had been empty since the day they were recreated -- source
+# 799 messages, target 0, status DONE.
+#
+# Taken from what each engine actually passes to record_mapping/log_audit,
+# not from what the service is called: tasks_engine writes `task_list`, not
+# `tasklist`, and gmail_engine writes `filter`, not `label`. A name that is
+# merely plausible leaves its rows in place and the next run skips them.
+# tests/test_reset_drive_ledger.py asserts this table against the engines.
+SERVICE_TYPES: dict[str, tuple[str, ...]] = {
+    "drive": DRIVE_TYPES,
+    "gmail": ("message", "draft", "filter", "signature"),
+    "calendar": ("event", "calendar", "calendar_acl"),
+    "chat": ("chat_space", "chat_message", "chat_member"),
+    "contacts": ("contact", "contact_group"),
+    "tasks": ("task", "task_list"),
+}
 
 
-def reset_drive_ledger(db: MigrationDB, source_email: str) -> dict:
+def reset_service_ledger(db: MigrationDB, source_email: str,
+                         services: tuple[str, ...] = ("drive",)) -> dict:
+    """Clear resume state for the named services on one user.
+
+    Deliberately narrow: only the row types the named services own, and only
+    those services removed from `services_done`. Clearing more would discard
+    a completed service's record and make the next run redo work that is
+    genuinely on the target.
+    """
+    types: list[str] = []
+    for svc in services:
+        if svc not in SERVICE_TYPES:
+            raise ValueError(f"unknown service {svc!r}; "
+                             f"known: {', '.join(sorted(SERVICE_TYPES))}")
+        types.extend(SERVICE_TYPES[svc])
+
+    placeholders = ",".join("?" * len(types))
     with db.write() as conn:
         mapping_deleted = conn.execute(
-            "DELETE FROM id_mapping WHERE source_user=? AND type IN "
-            "(?,?,?)", (source_email, *DRIVE_TYPES)).rowcount
+            f"DELETE FROM id_mapping WHERE source_user=? AND type IN "
+            f"({placeholders})", (source_email, *types)).rowcount
         audit_deleted = conn.execute(
-            "DELETE FROM audit_log WHERE source_user=? AND item_type IN "
-            "(?,?,?)", (source_email, *DRIVE_TYPES)).rowcount
+            f"DELETE FROM audit_log WHERE source_user=? AND item_type IN "
+            f"({placeholders})", (source_email, *types)).rowcount
         row = conn.execute(
             "SELECT services_done FROM identity_map WHERE source_email=?",
             (source_email,)).fetchone()
         have = set((row["services_done"] or "").split(",")) if row else set()
         have.discard("")
-        had_drive = "drive" in have
-        have.discard("drive")
+        cleared = sorted(have & set(services))
+        have -= set(services)
         conn.execute(
             "UPDATE identity_map SET services_done=? WHERE source_email=?",
             (",".join(sorted(have)), source_email))
     return {"user": source_email, "id_mapping_rows": mapping_deleted,
-           "audit_log_rows": audit_deleted, "had_drive_marked_done": had_drive}
+            "audit_log_rows": audit_deleted,
+            "cleared_services": cleared,
+            # Kept so the original Drive-only callers keep reading the same
+            # key they always did.
+            "had_drive_marked_done": "drive" in cleared}
+
+
+def reset_drive_ledger(db: MigrationDB, source_email: str) -> dict:
+    """Drive-only reset. Retained as the name benchmark_run.py and the
+    existing tests already call."""
+    return reset_service_ledger(db, source_email, ("drive",))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -83,7 +140,18 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--user", action="append",
                     help="limit to specific source user(s); default is "
                          "every identity in the ledger")
+    ap.add_argument("--services", default="drive",
+                    help="comma-separated: drive,gmail,calendar,chat,"
+                         "contacts,tasks. Reset exactly what was wiped on "
+                         "the target -- resetting more makes the next run "
+                         "redo work that is genuinely already there")
     args = ap.parse_args(argv)
+
+    services = tuple(s.strip().lower() for s in args.services.split(",") if s.strip())
+    unknown = [s for s in services if s not in SERVICE_TYPES]
+    if unknown:
+        sys.exit(f"unknown service(s): {', '.join(unknown)}. "
+                 f"Known: {', '.join(sorted(SERVICE_TYPES))}")
 
     settings = Settings()
     domain = (settings.source_domain or "").strip().lower()
@@ -100,17 +168,18 @@ def main(argv: list[str] | None = None) -> int:
         print("identity_map is empty (or --user matched nothing) — nothing to do.")
         return 1
 
-    print(f"Clearing Drive resume state for {len(rows)} user(s):")
+    print(f"Clearing {'/'.join(services)} resume state for {len(rows)} user(s):")
     if not args.yes:
         if input("Type the source domain to confirm: ").strip() != settings.source_domain:
             print("Aborted.")
             return 1
 
     for r in rows:
-        result = reset_drive_ledger(db, r["source_email"])
+        result = reset_service_ledger(db, r["source_email"], services)
+        was = (f" (was marked done for {', '.join(result['cleared_services'])})"
+               if result["cleared_services"] else "")
         print(f"  {result['user']}: {result['id_mapping_rows']} mapping row(s), "
-              f"{result['audit_log_rows']} audit row(s) cleared"
-              f"{' (was marked drive-done)' if result['had_drive_marked_done'] else ''}")
+              f"{result['audit_log_rows']} audit row(s) cleared{was}")
     return 0
 
 

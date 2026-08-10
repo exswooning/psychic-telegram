@@ -11,8 +11,13 @@ nothing re-copied despite their target files being gone).
 
 from __future__ import annotations
 
+import os
+import tempfile
+
+import pytest
+
 import reset_drive_ledger
-from db import bulk_seed_identities
+from db import MigrationDB, bulk_seed_identities
 
 SRC = "alice@tenanta.com"
 
@@ -114,3 +119,69 @@ class TestCliGuards:
         fresh = __import__("db").MigrationDB(settings.db_path)
         assert fresh.services_done(SRC) == set()
         assert fresh.services_done("bob@tenanta.com") == {"drive"}
+
+
+class TestServiceTypeTable:
+    """
+    The reset is only as good as its list of row types. A type name that is
+    merely plausible -- `tasklist` for what tasks_engine calls `task_list`,
+    `label` for what gmail_engine calls `filter` -- leaves those rows in the
+    ledger, and the next run reads them as "already migrated" and skips.
+
+    That is not hypothetical: DRIVE_TYPES omitted `acl`, so B4's 20,714 ACL
+    rows survived a full wipe-and-reset and were still being counted against
+    B5 the next day.
+    """
+
+    ENGINES = {
+        "drive": "drive_engine.py",
+        "gmail": "gmail_engine.py",
+        "calendar": "calendar_engine.py",
+        "chat": "chat_engine.py",
+        "contacts": "contacts_engine.py",
+        "tasks": "tasks_engine.py",
+    }
+
+    def _types_written_by(self, filename: str) -> set[str]:
+        import re
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        src = open(os.path.join(root, filename), encoding="utf-8").read()
+        found = set()
+        for call in re.finditer(r"(?:record_mapping|log_audit)\((.{0,240}?)\)",
+                                src, re.S):
+            found.update(re.findall(r'"([a-z][a-z_]{2,})"', call.group(1)))
+        # Literals that appear inside the same call but are field names or
+        # values, not item types. Kept explicit so a genuinely new type is
+        # never quietly absorbed by a broad filter.
+        return found - {"id", "name", "type", "status", "error_message",
+                        "summary", "description", "location", "start", "end"}
+
+    def test_every_type_an_engine_writes_is_resettable(self):
+        """A row type no reset knows about can never be cleared, so the user
+        it belongs to is permanently un-resettable for that service."""
+        import reset_drive_ledger as r
+
+        covered = {t for types in r.SERVICE_TYPES.values() for t in types}
+        missing = {}
+        for svc, filename in self.ENGINES.items():
+            for t in self._types_written_by(filename) - covered:
+                missing.setdefault(svc, []).append(t)
+        assert not missing, (
+            f"engine row types no reset clears: {missing}. Add them to "
+            f"SERVICE_TYPES or they survive a wipe and get skipped.")
+
+    def test_acl_rows_are_cleared_with_drive(self):
+        """The specific omission that let B4's failures haunt B5."""
+        import reset_drive_ledger as r
+        assert "acl" in r.SERVICE_TYPES["drive"]
+
+    def test_unknown_service_is_rejected_not_silently_ignored(self):
+        """A typo'd service name must not report a successful reset of
+        nothing."""
+        import reset_drive_ledger as r
+        path = tempfile.mktemp(suffix=".db")
+        db = MigrationDB(path)
+        with pytest.raises(ValueError, match="unknown service"):
+            r.reset_service_ledger(db, "a@s.com", ("gmial",))
+        db.close()
+        os.unlink(path)
