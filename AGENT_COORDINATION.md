@@ -1536,3 +1536,50 @@ sha256 of built JS/HTML matches source and remote exactly. Pushed as
 Still open, not touched this turn: `acl_audit.py` → `public_share_watch`
 wiring (EmergencyBrake still shows green only because the table is empty,
 not because it's verified clean), and launching the B5 benchmark itself.
+
+## 2026-08-10 — Claude: browser-to-VPS path built (Mission Control was never actually reachable)
+
+User asked for "a wizard to connect with the VPS." Investigating what that
+needed surfaced three real, stacked gaps -- Mission Control (shipped
+earlier this session) had never actually been loaded in a browser, only
+tsc/build/curl-tested:
+
+1. **Nothing served the built React SPA.** webui.py has its own inline
+   wizard HTML at "/" plus JSON routes, but no static file serving --
+   `migration-webui/dist/` existed on disk (synced there) and nothing ever
+   read it over HTTP. Fixed: webui.py now serves it under `/app` (index.html
+   + client routes fall back to it; `/app/assets/*` read off disk with a
+   path-traversal guard verified against `../../../../etc/passwd`). `/app`
+   not `/`, so the existing setup wizard at "/" is untouched. vite.config.ts
+   got `base: '/app/'`, main.tsx's BrowserRouter got `basename="/app"`.
+2. **api_server.py had no CORS headers.** webui.py (8080) and api_server.py
+   (8090) are different origins as far as a browser is concerned even
+   tunnelled to the same "localhost" -- every fetch from the dashboard to
+   the control plane would have failed preflight before RBAC ever ran.
+   Fixed: `CORSMiddleware` restricted to `localhost`/`127.0.0.1` on any
+   port (harmless -- the server already binds 127.0.0.1 only).
+3. **No documented, idempotent way to open the tunnel** both of those run
+   through, beyond re-deriving an `ssh -L` command each time (this
+   session's own AGENT_COORDINATION history has that exact command copied
+   and re-run repeatedly). `connect_vps.sh` now does connect/--status/--stop,
+   refuses to touch a port some other process holds, and is safe to re-run.
+
+Also added: Settings' "VPS Connection" card -- makes the control-plane
+address runtime-configurable via `setCpBase`/`localStorage` (point at a
+different port without a rebuild) and a live test button against
+`/api/v2/whoami` with round-trip latency, so "is the tunnel actually up"
+has a real answer.
+
+Verified live end-to-end through the actual tunnel, not just curl-to-VPS:
+`/app` -> 200, `/app/mission-control` (client route) -> 200, built JS asset
+-> 200, `/api/v2/whoami` with `Origin: http://localhost:8080` header comes
+back with `access-control-allow-origin` set. `npx tsc --noEmit` clean,
+`pytest tests/` 896 passed, both `webui.py` and `api_server.py` restarted
+on the VPS and confirmed serving the new code. Pushed as `bf6b058`.
+
+One known cosmetic gap, not fixed: `index.html` references `/favicon.svg`
+at the origin root, which webui.py doesn't serve -- a harmless 404 in the
+browser console, not a functional break.
+
+Still open, not touched this turn: `acl_audit.py` -> `public_share_watch`
+wiring, and launching the B5 benchmark itself.
