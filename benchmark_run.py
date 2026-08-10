@@ -123,16 +123,31 @@ def fingerprint() -> dict:
 # ----------------------------------------------------------------------
 # Measurement
 # ----------------------------------------------------------------------
-def per_user_stats() -> dict:
-    rows = query("""
+def per_user_stats(since_iso: str | None = None) -> dict:
+    """Per-user totals, scoped to this run.
+
+    `reset_drive_ledger.py` clears Drive rows but leaves everything else in
+    audit_log, so an unscoped query mixes in every previous run: B5 came
+    back warning that 10 users had failed items when exactly one had, the
+    other nine carrying nothing but B4's 20,714 stale ACL failures from the
+    day before. The Drive numbers happened to be clean because the ledger
+    reset had removed the old ones -- that is luck, not a guarantee, and it
+    would not survive `--skip-wipe`.
+    """
+    where = "WHERE timestamp >= ?" if since_iso else ""
+    args = (since_iso,) if since_iso else ()
+    rows = query(f"""
         SELECT source_user,
                SUM(status='SUCCESS')                    AS ok,
                SUM(status='FAILED')                     AS failed,
                SUM(status LIKE 'SKIPPED%')              AS skipped,
                SUM(item_type='file'  AND status='SUCCESS') AS files,
                SUM(item_type='acl'   AND status='FAILED')  AS acl_failed,
+               SUM(item_type='acl'
+                   AND status='SKIPPED_UNMAPPED_IDENTITY') AS acl_unmapped,
                SUM(bytes_moved)                         AS bytes
-        FROM audit_log GROUP BY source_user ORDER BY source_user""")
+        FROM audit_log {where} GROUP BY source_user ORDER BY source_user""",
+                 args)
     return {r["source_user"]: dict(r) for r in rows}
 
 
@@ -377,7 +392,9 @@ def main(argv: list[str] | None = None) -> int:
     print("-- auditing ACLs (the gate B4 did not have) …")
     acl = run_acl_audit(f"{args.label}-{stamp}")
 
-    users = per_user_stats()
+    # `started_at` is stamped immediately before migrate runs, so this is
+    # exactly this run's window.
+    users = per_user_stats(since_iso=started_at)
     total_files = sum(s["files"] or 0 for s in users.values())
     total_bytes = sum(s["bytes"] or 0 for s in users.values())
     slowest = max(users.items(), key=lambda kv: kv[1]["files"] or 0,

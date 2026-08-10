@@ -21,7 +21,9 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import benchmark_run as _br      # noqa: E402
 from benchmark_run import judge  # noqa: E402
+from db import MigrationDB       # noqa: E402
 
 
 def _result(**over) -> dict:
@@ -112,3 +114,47 @@ class TestExistingGatesStillBite:
         r = _result(users={"gone@src": {"failed": 5, "files": 0}})
         judge(r, {"gone@src"})
         assert not r["warnings"]
+
+
+class TestStatsAreScopedToTheRun:
+    """
+    audit_log outlives a wipe. reset_drive_ledger.py clears Drive rows and
+    nothing else, so Gmail/Chat/Calendar rows and every previous run's ACL
+    failures are still sitting there when the next benchmark is judged.
+
+    B5 came back warning that 10 users had failed items when exactly one
+    had; the other nine carried only B4's 20,714 stale ACL failures from the
+    day before. The Drive counts happened to be clean because the ledger
+    reset had removed the old ones -- luck, not a guarantee, and it does not
+    survive --skip-wipe.
+    """
+
+    def test_unscoped_stats_see_everything(self, tmp_path, monkeypatch):
+        db = self._seed(tmp_path, monkeypatch)
+        rows = _br.per_user_stats()
+        assert rows["old@src"]["failed"] == 1, "control: the stale row exists"
+        assert set(rows) == {"old@src", "new@src"}
+        del db
+
+    def test_scoped_stats_exclude_previous_runs(self, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        rows = _br.per_user_stats(since_iso="2098-01-01T00:00:00Z")
+        assert "old@src" not in rows, "a previous run's user leaked into the report"
+        assert rows["new@src"]["failed"] == 1
+
+    @staticmethod
+    def _seed(tmp_path, monkeypatch):
+        import sqlite3
+        path = str(tmp_path / "m.db")
+        monkeypatch.setenv("MIGRATION_DB", path)
+        MigrationDB(path).close()
+        conn = sqlite3.connect(path)
+        conn.execute("INSERT INTO audit_log (source_user,item_id,item_type,status,"
+                     "timestamp) VALUES ('old@src','a','acl','FAILED',"
+                     "'2020-01-01T00:00:00Z')")
+        conn.execute("INSERT INTO audit_log (source_user,item_id,item_type,status,"
+                     "timestamp) VALUES ('new@src','b','file','FAILED',"
+                     "'2099-01-01T00:00:00Z')")
+        conn.commit()
+        conn.close()
+        return path
