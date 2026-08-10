@@ -598,15 +598,37 @@ async def benchmark_results():
             try:
                 with open(os.path.join(d, name), encoding="utf-8") as fh:
                     r = json.load(fh)
+                # Re-judge rather than trust the stored verdict.
+                #
+                # `passed` was written by whatever judge existed when the run
+                # finished, and that judge has had real gates added since --
+                # a crashed run that migrated 0 files is sitting in this
+                # directory recorded as PASS. Replaying the current gates
+                # over the stored numbers keeps history comparable instead of
+                # leaving a known-false green row to be compared against.
+                verdict, stale = r.get("passed"), False
+                try:
+                    import benchmark_run
+                    verdict, _ = benchmark_run.judge(
+                        dict(r), set(r.get("deadAccountsExcluded") or []))
+                    stale = bool(r.get("passed")) != bool(verdict)
+                except Exception:  # noqa: BLE001 - an unjudgeable old record
+                    # keeps its stored verdict rather than vanishing.
+                    pass
                 out.append({
                     "file": name, "label": r.get("label"),
-                    "startedAt": r.get("startedAt"), "passed": r.get("passed"),
+                    "startedAt": r.get("startedAt"), "passed": verdict,
+                    "verdictRestated": stale,
+                    "storedPassed": r.get("passed"),
                     "elapsedS": r.get("elapsedS"), "secPerFile": r.get("secPerFile"),
                     "totalFiles": r.get("totalFiles"),
                     "driveFileWorkers": (r.get("config") or {}).get("driveFileWorkers"),
                     "fidelityPct": (r.get("acl") or {}).get("fidelityPct"),
                     "extraGrants": (r.get("acl") or {}).get("extraGrants"),
+                    # From the re-judge above when it ran, so the reason a row
+                    # reads FAIL is the reason the current gates give.
                     "failures": r.get("failures", []),
+                    "migrateReturnCode": r.get("migrateReturnCode"),
                 })
             except (OSError, ValueError):
                 continue

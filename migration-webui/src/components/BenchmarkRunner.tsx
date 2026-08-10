@@ -272,11 +272,23 @@ const BenchmarkRunner: React.FC<Props> = ({ targetDomain }) => {
                 ) : '0'}
               </TableCell>
               <TableCell>
-                <Tooltip title={r.failures?.join(' · ') || ''}>
-                  <Chip size="small" label={r.passed ? 'PASS' : 'FAIL'}
-                        color={r.passed ? 'success' : 'error'}
-                        variant={r.passed ? 'outlined' : 'filled'} />
-                </Tooltip>
+                <Stack direction="row" spacing={0.5} alignItems="center">
+                  <Tooltip title={r.failures?.join(' · ') || ''}>
+                    <Chip size="small" label={r.passed ? 'PASS' : 'FAIL'}
+                          color={r.passed ? 'success' : 'error'}
+                          variant={r.passed ? 'outlined' : 'filled'} />
+                  </Tooltip>
+                  {r.verdictRestated && (
+                    <Tooltip title={
+                      `Recorded as ${r.storedPassed ? 'PASS' : 'FAIL'} at the time. ` +
+                      `Re-judged under the current gates: ` +
+                      (r.failures?.join(' · ') || 'no failures')
+                    }>
+                      <Chip size="small" variant="outlined" color="warning"
+                            label="re-judged" />
+                    </Tooltip>
+                  )}
+                </Stack>
               </TableCell>
             </TableRow>
           ))}

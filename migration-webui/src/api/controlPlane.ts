@@ -205,6 +205,12 @@ export interface BenchmarkResult {
   elapsedS: number; secPerFile: number; totalFiles: number
   driveFileWorkers: number | null; fidelityPct: number | null
   extraGrants: number | null; failures: string[]
+  migrateReturnCode: number | null
+  /** The verdict was recomputed under the current gates and disagrees with
+   *  the one stored at the time. Shown, not hidden: a row that silently
+   *  flipped from PASS to FAIL is indistinguishable from a bug in the table. */
+  verdictRestated?: boolean
+  storedPassed?: boolean
 }
 
 export interface StartBenchmarkBody {
