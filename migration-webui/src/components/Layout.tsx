@@ -383,8 +383,14 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
         component="main"
         sx={{
           flexGrow: 1,
-          p: 3,
-          pt: 10,
+          p: { xs: 1.5, sm: 3 },
+          pt: { xs: 9, sm: 10 },
+          // Nothing on this page should ever cause the page itself to
+          // scroll sideways -- a wide table/log is its own overflow
+          // container (TableContainer, or an explicit overflowX box), not
+          // this one. Guarding it here catches anything that slips through.
+          overflowX: 'hidden',
+          maxWidth: '100vw',
           transition: theme.transitions.create('margin', { easing: theme.transitions.easing.sharp, duration: 200 }),
           minHeight: '100vh',
           bgcolor: 'background.default',

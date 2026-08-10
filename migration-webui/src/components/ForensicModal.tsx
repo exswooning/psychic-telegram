@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react'
 import {
   Alert, Box, Button, Chip, CircularProgress, Dialog, DialogActions,
   DialogContent, DialogTitle, Divider, Stack, Table, TableBody, TableCell,
-  TableHead, TableRow, Typography,
+  TableContainer, TableHead, TableRow, Typography,
 } from '@mui/material'
 import { Replay as RetryIcon } from '@mui/icons-material'
 import {
@@ -136,6 +136,7 @@ const ForensicModal: React.FC<Props> = ({ open, sourceUser, itemId, onClose, onR
                 <Typography variant="overline" color="text.secondary">
                   Attempt history ({data.attempts.length})
                 </Typography>
+                <TableContainer sx={{ overflowX: 'auto' }}>
                 <Table size="small">
                   <TableHead>
                     <TableRow>
@@ -163,6 +164,7 @@ const ForensicModal: React.FC<Props> = ({ open, sourceUser, itemId, onClose, onR
                     ))}
                   </TableBody>
                 </Table>
+                </TableContainer>
               </Box>
 
               <Divider />

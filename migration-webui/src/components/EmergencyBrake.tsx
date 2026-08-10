@@ -101,7 +101,7 @@ const EmergencyBrake: React.FC<Props> = ({ shares, liveCount, onReverted }) => {
 
       <Collapse in={expanded && exposed}>
         <Box sx={{ mt: 1, border: '1px solid', borderColor: 'divider', borderRadius: 2,
-                   maxHeight: 300, overflow: 'auto' }}>
+                   maxHeight: 300, overflowY: 'auto', overflowX: 'auto' }}>
           <Table size="small" stickyHeader>
             <TableHead>
               <TableRow>

@@ -175,7 +175,7 @@ const MissionControl: React.FC = () => {
         <TextField
           size="small" label="Operator" value={operatorName}
           onChange={(e) => { setOperatorName(e.target.value); setOperator(e.target.value) }}
-          helperText="Recorded against every action" sx={{ width: 220 }}
+          helperText="Recorded against every action" sx={{ width: { xs: '100%', sm: 220 } }}
         />
       </Box>
 
@@ -254,19 +254,27 @@ const MissionControl: React.FC = () => {
 
       {/* Roster with search — Users.tsx, folded in */}
       <Paper variant="outlined" sx={{ borderRadius: 2, p: 2 }}>
-        <Stack direction="row" alignItems="center" spacing={2} sx={{ mb: 1.5 }}>
+        <Stack direction="row" alignItems="center" spacing={2} sx={{ mb: 1.5, flexWrap: 'wrap', gap: 1.5 }}>
           <Typography variant="h6" sx={{ flexGrow: 1 }}>Users ({filteredUsers.length})</Typography>
           <TextField size="small" placeholder="Filter by email…" value={userFilter}
-                     onChange={(e) => setUserFilter(e.target.value)} sx={{ width: 240 }} />
+                     onChange={(e) => setUserFilter(e.target.value)}
+                     sx={{ width: { xs: '100%', sm: 240 } }} />
         </Stack>
         <Stack spacing={0.5} sx={{ maxHeight: 320, overflow: 'auto' }}>
           {filteredUsers.map((u) => (
-            <Box key={u.email} sx={{ display: 'flex', alignItems: 'center', gap: 1.5, p: 1,
-                                     borderBottom: '1px solid', borderColor: 'divider' }}>
-              <Typography variant="body2" sx={{ fontWeight: 600, width: 220 }} noWrap>{u.email}</Typography>
-              <LinearProgress variant="determinate" value={u.progress} sx={{ flex: 1, height: 6 }} />
-              <Typography variant="caption" sx={{ width: 40, textAlign: 'right' }}>{u.progress}%</Typography>
-              <Chip size="small" label={u.status} variant="outlined" />
+            <Box key={u.email} sx={{
+              display: 'flex', flexDirection: { xs: 'column', sm: 'row' },
+              alignItems: { xs: 'flex-start', sm: 'center' }, gap: { xs: 0.5, sm: 1.5 }, p: 1,
+              borderBottom: '1px solid', borderColor: 'divider',
+            }}>
+              <Typography variant="body2" sx={{ fontWeight: 600, width: { xs: '100%', sm: 220 } }} noWrap>
+                {u.email}
+              </Typography>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, width: '100%', flex: { sm: 1 } }}>
+                <LinearProgress variant="determinate" value={u.progress} sx={{ flex: 1, height: 6 }} />
+                <Typography variant="caption" sx={{ width: 40, textAlign: 'right' }}>{u.progress}%</Typography>
+                <Chip size="small" label={u.status} variant="outlined" />
+              </Box>
             </Box>
           ))}
           {!filteredUsers.length && (

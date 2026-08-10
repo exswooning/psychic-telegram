@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import {
   Alert, Box, Button, Chip, Divider, FormControlLabel, MenuItem, Paper,
-  Stack, Switch, Table, TableBody, TableCell, TableHead, TableRow,
+  Stack, Switch, Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
   TextField, Tooltip, Typography,
 } from '@mui/material'
 import { Speed as BenchIcon, Circle as DotIcon } from '@mui/icons-material'
@@ -95,11 +95,11 @@ const BenchmarkRunner: React.FC<Props> = ({ targetDomain }) => {
         judges the run. A run that loses grants fails no matter how fast it was.
       </Typography>
 
-      <Stack direction="row" spacing={2} sx={{ mt: 2, flexWrap: 'wrap', gap: 2 }}>
-        <TextField size="small" label="Label" value={label} sx={{ width: 110 }}
+      <Stack direction="row" sx={{ mt: 2, flexWrap: 'wrap', gap: 2 }}>
+        <TextField size="small" label="Label" value={label} sx={{ width: { xs: '100%', sm: 110 } }}
                    onChange={(e) => setLabel(e.target.value)} />
         <TextField
-          size="small" label="Type the TARGET domain" sx={{ width: 260 }}
+          size="small" label="Type the TARGET domain" sx={{ width: { xs: '100%', sm: 260 } }}
           value={confirmDomain} onChange={(e) => setConfirmDomain(e.target.value)}
           placeholder={targetDomain || 'a.example.com'}
           error={!!confirmDomain && !!targetDomain && confirmDomain.trim().toLowerCase() !== targetDomain.toLowerCase()}
@@ -107,14 +107,14 @@ const BenchmarkRunner: React.FC<Props> = ({ targetDomain }) => {
         />
         <TextField
           select size="small" label="Drive file workers" value={workers}
-          sx={{ width: 280 }} onChange={(e) => setWorkers(Number(e.target.value))}
+          sx={{ width: { xs: '100%', sm: 280 } }} onChange={(e) => setWorkers(Number(e.target.value))}
         >
           {WORKER_OPTIONS.map((o) => (
             <MenuItem key={o.v} value={o.v}>{o.label}</MenuItem>
           ))}
         </TextField>
         <Tooltip title="Google's ceiling is 3/sec per account and is not raiseable. Above it you buy 429s and retry backoff, which is net slower.">
-          <TextField size="small" label="Write QPS" type="number" sx={{ width: 120 }}
+          <TextField size="small" label="Write QPS" type="number" sx={{ width: { xs: '100%', sm: 120 } }}
                      value={writeQps} onChange={(e) => setWriteQps(Number(e.target.value))}
                      inputProps={{ step: 0.5, min: 0.5, max: 10 }} />
         </Tooltip>
@@ -149,6 +149,7 @@ const BenchmarkRunner: React.FC<Props> = ({ targetDomain }) => {
       <Divider sx={{ my: 2 }} />
 
       <Typography variant="overline" color="text.secondary">Past runs</Typography>
+      <TableContainer sx={{ overflowX: 'auto' }}>
       <Table size="small">
         <TableHead>
           <TableRow>
@@ -198,6 +199,7 @@ const BenchmarkRunner: React.FC<Props> = ({ targetDomain }) => {
           )}
         </TableBody>
       </Table>
+      </TableContainer>
 
       <ReasonCodeDialog
         open={ask} destructive={!skipWipe} confirmPhrase={skipWipe ? undefined : 'WIPE'}
