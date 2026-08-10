@@ -86,8 +86,20 @@ def fingerprint() -> dict:
     from config import Settings
 
     s = Settings()
-    commit = sh(["git", "rev-parse", "--short", "HEAD"]).stdout.strip() or "unknown"
+    commit = sh(["git", "rev-parse", "--short", "HEAD"]).stdout.strip()
     dirty = bool(sh(["git", "status", "--porcelain"]).stdout.strip())
+    if not commit:
+        # The place a benchmark actually runs -- a deployed VPS -- is an
+        # rsync of the tree, not a git checkout, so `git rev-parse` finds
+        # nothing and every run there recorded "unknown". A benchmark whose
+        # commit is unknown cannot be compared to another one, which defeats
+        # the point of recording a fingerprint at all. sync_vps.sh writes
+        # DEPLOYED_COMMIT on the way out; fall back to it.
+        try:
+            with open(os.path.join(HERE, "DEPLOYED_COMMIT")) as fh:
+                commit = fh.read().strip() or "unknown"
+        except OSError:
+            commit = "unknown"
     return {
         "commit": commit,
         # A dirty tree means the code that ran is not the code in git, which

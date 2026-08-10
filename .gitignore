@@ -50,3 +50,7 @@ env.sh
 # a benchmark or provisioning run.
 /logs/
 /benchmarks/
+
+# Written by sync_vps.sh on the deploy target so benchmark_run.py can
+# report what commit a run actually measured. Never committed.
+/DEPLOYED_COMMIT

@@ -29,6 +29,17 @@ rsync -az -e "${SSH[*]}" \
   "$(cd "$(dirname "$0")" && pwd)/" "$TARGET:$DEST/" || exit 1
 echo "  synced to $TARGET:$DEST"
 
+# The remote is an rsync of the tree, not a git checkout, so anything there
+# that asks git what it is running gets no answer -- benchmark_run.py
+# recorded every VPS run as commit "unknown", which makes those runs
+# incomparable to each other. Stamp what we just shipped.
+COMMIT="$(cd "$(dirname "$0")" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+if [[ -n "$(cd "$(dirname "$0")" && git status --porcelain 2>/dev/null)" ]]; then
+  COMMIT="$COMMIT-dirty"
+fi
+"${SSH[@]}" "$TARGET" "printf '%s\n' '$COMMIT' > $DEST/DEPLOYED_COMMIT"
+echo "  stamped DEPLOYED_COMMIT=$COMMIT"
+
 # Restart, then PROVE the restart happened.
 #
 # Two failure modes, both of which report success:
