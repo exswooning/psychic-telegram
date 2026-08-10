@@ -100,6 +100,14 @@ SEED_SCOPES = [
     "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/chat.spaces",
     "https://www.googleapis.com/auth/chat.messages",
+    # build_people_tasks() builds the People and Tasks clients with this same
+    # list, so without these two `seed_contacts` and `seed_tasks` fail with
+    # unauthorized_client no matter what the Admin Console has authorised --
+    # and both are written to swallow their own exceptions into a `note`, so
+    # the run reports success and simply produces no contacts and no tasks.
+    # That is precisely the shape of gap coverage_audit exists to surface.
+    "https://www.googleapis.com/auth/contacts",
+    "https://www.googleapis.com/auth/tasks",
 ]
 
 # Not part of SEED_SCOPES on purpose. `--fit-to-licenses` is opt-in, and
