@@ -63,6 +63,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
     from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+    from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import JSONResponse
     from pydantic import BaseModel, Field
 except ImportError:  # pragma: no cover - import guard, not logic
@@ -228,6 +229,22 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Migration Command Center", version="1.0", lifespan=lifespan)
+
+# The browser loads the SPA from webui.py's origin (port 8080) and this
+# server answers on a different port (8090) -- different port means
+# different origin as far as CORS is concerned, even when both are
+# tunnelled to the same "localhost". Without this, every fetch from the
+# dashboard to the control plane fails preflight before RBAC ever sees it.
+# Restricted to localhost/127.0.0.1 on any port: this server binds
+# 127.0.0.1 only (see main() below), so nothing further away can reach it
+# regardless of what this list allows.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 def _envelope(event_type: str, data: Any) -> dict:

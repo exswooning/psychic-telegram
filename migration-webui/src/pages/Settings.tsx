@@ -29,13 +29,15 @@ import {
 } from '@mui/material'
 import {
   Settings as SettingsIcon, Save as SaveIcon, Refresh as RefreshIcon,
-  Security as SecurityIcon, Dns as DeployIcon,
+  Security as SecurityIcon, Dns as DeployIcon, Cable as ConnectIcon,
+  CheckCircle as OkIcon, Error as ErrIcon, ContentCopy as CopyIcon,
 } from '@mui/icons-material'
 import { useMigrationStore } from '@/store'
 import {
   fetchConfig, saveDeployConfig, runDeploy, DeployFields,
   fetchDeployHistory, DeployHistoryEntry,
 } from '@/api/client'
+import { getCpBase, setCpBase, checkConnection } from '@/api/controlPlane'
 import JobProgress from '@/components/JobProgress'
 
 const Settings: React.FC = () => {
@@ -105,6 +107,8 @@ const Settings: React.FC = () => {
         </CardContent>
       </Card>
 
+      <VpsConnectionCard />
+
       <DeployCard />
 
       <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 3 }}>
@@ -126,6 +130,102 @@ const Settings: React.FC = () => {
         </CardContent>
       </Card>
     </Box>
+  )
+}
+
+/**
+ * Reaching the control plane (api_server.py, port 8090) is different from
+ * reaching webui.py itself: this page is already loaded, so webui.py is
+ * reachable by definition, but 8090 is a second port that only answers over
+ * its own tunnel leg, and a browser cannot open an SSH tunnel on its own --
+ * that has to happen in a terminal first (./connect_vps.sh). This card is
+ * the missing feedback loop for that: it tells you whether the tunnel's
+ * second leg actually came up, without a trip to devtools' Network tab.
+ */
+const VpsConnectionCard: React.FC = () => {
+  const [base, setBase] = useState(getCpBase())
+  const [checking, setChecking] = useState(false)
+  const [result, setResult] = useState<Awaited<ReturnType<typeof checkConnection>> | null>(null)
+  const [copied, setCopied] = useState(false)
+
+  const test = async (urlToTest: string) => {
+    setChecking(true); setResult(null)
+    const r = await checkConnection(urlToTest)
+    setResult(r)
+    setChecking(false)
+  }
+
+  const save = () => {
+    setCpBase(base)
+    setResult(null)
+  }
+
+  const command = './connect_vps.sh'
+
+  const copyCommand = () => {
+    navigator.clipboard.writeText(command).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    })
+  }
+
+  return (
+    <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 3 }}>
+      <CardHeader title="VPS Connection" subheader="Reach the control plane through the SSH tunnel" avatar={<ConnectIcon />} />
+      <CardContent>
+        <Alert severity="info" sx={{ mb: 2 }}>
+          Both webui.py and api_server.py bind 127.0.0.1 on the VPS -- the
+          tunnel is the access control. Run this once per terminal session,
+          from the repo on your own machine (not the VPS):
+        </Alert>
+        <Box sx={{
+          display: 'flex', alignItems: 'center', gap: 1, mb: 2, p: 1.5,
+          bgcolor: 'action.hover', borderRadius: 1,
+          fontFamily: 'ui-monospace, monospace', fontSize: 13,
+        }}>
+          <Box component="code" sx={{ flexGrow: 1, wordBreak: 'break-all' }}>{command}</Box>
+          <Button size="small" startIcon={<CopyIcon />} onClick={copyCommand}>
+            {copied ? 'Copied' : 'Copy'}
+          </Button>
+        </Box>
+
+        <Stack direction="row" spacing={2} sx={{ flexWrap: 'wrap', gap: 2 }}>
+          <TextField
+            size="small" label="Control plane address" value={base}
+            onChange={(e) => setBase(e.target.value)}
+            sx={{ width: { xs: '100%', sm: 280 } }}
+            placeholder="http://localhost:8090"
+          />
+          <Button variant="outlined" disabled={checking} onClick={() => test(base)}>
+            {checking ? 'Testing…' : 'Test connection'}
+          </Button>
+          <Button variant="contained" disabled={base === getCpBase()} onClick={save}>
+            Use this address
+          </Button>
+        </Stack>
+
+        {result && (
+          <Alert
+            sx={{ mt: 2 }}
+            severity={result.ok ? 'success' : 'error'}
+            icon={result.ok ? <OkIcon /> : <ErrIcon />}
+          >
+            {result.ok
+              ? `Connected in ${result.ms}ms -- signed in as "${result.role}". `
+                + (result.role === 'viewer'
+                    ? 'No operator name is set, so writes are refused; set one in Mission Control.'
+                    : '')
+              : `Could not reach ${base}: ${result.error}. Is connect_vps.sh running, and does it forward this exact port?`}
+          </Alert>
+        )}
+
+        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 2 }}>
+          Saved address is used by Mission Control's dashboard and every
+          write action (provisioning, benchmarks, emergency revert) on this
+          browser only -- it does not change what the tunnel forwards.
+        </Typography>
+      </CardContent>
+    </Card>
   )
 }
 

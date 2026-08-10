@@ -18,7 +18,7 @@ const AppThemeProvider: React.FC<{ children: React.ReactNode }> = ({ children })
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <BrowserRouter>
+    <BrowserRouter basename="/app">
       <AppThemeProvider>
         <App />
       </AppThemeProvider>

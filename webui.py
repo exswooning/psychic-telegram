@@ -673,6 +673,13 @@ _EMAIL_RE = re.compile(rf"^[a-z0-9._%+-]{{1,64}}@(?:{_LABEL}\.)+[a-z]{{2,63}}$",
 _HOST_RE = re.compile(rf"^(?:{_LABEL}\.)*{_LABEL}$|^\d{{1,3}}(?:\.\d{{1,3}}){{3}}$", re.I)
 _USER_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$", re.I)
 
+# The React SPA (Mission Control) builds to here via `npm run build`. Served
+# under /app rather than at "/" because "/" is this file's own inline setup
+# wizard -- an existing, working flow that must not be displaced by a build
+# artifact that may not exist yet on a fresh checkout.
+SPA_DIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "migration-webui", "dist")
+
 ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "env.sh")
 
 # ----------------------------------------------------------------------
@@ -3755,6 +3762,37 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, obj, code: int = 200) -> None:
         self._send(code, json.dumps(obj).encode(), "application/json")
 
+    _ASSET_CTYPES = {
+        ".js": "application/javascript", ".css": "text/css",
+        ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon",
+        ".json": "application/json", ".woff2": "font/woff2",
+    }
+
+    def _serve_spa_index(self) -> None:
+        index = os.path.join(SPA_DIST_DIR, "index.html")
+        if not os.path.isfile(index):
+            self._send(404, b"migration-webui not built -- run "
+                             b"'npm run build' in migration-webui/ first",
+                       "text/plain; charset=utf-8")
+            return
+        with open(index, "rb") as f:
+            self._send(200, f.read(), "text/html; charset=utf-8")
+
+    def _serve_spa_asset(self, path: str) -> None:
+        # path looks like "/app/assets/index-XXXX.js" -- strip the "/app"
+        # prefix the SPA is mounted under, then resolve strictly inside
+        # SPA_DIST_DIR so ".." can never escape it onto the rest of the
+        # filesystem this process can read (it holds tenant credentials).
+        rel = path[len("/app/"):]
+        target = os.path.normpath(os.path.join(SPA_DIST_DIR, rel))
+        if os.path.commonpath([target, SPA_DIST_DIR]) != SPA_DIST_DIR or not os.path.isfile(target):
+            self._send(404, b"not found", "text/plain; charset=utf-8")
+            return
+        ext = os.path.splitext(target)[1]
+        ctype = self._ASSET_CTYPES.get(ext, "application/octet-stream")
+        with open(target, "rb") as f:
+            self._send(200, f.read(), ctype)
+
     def do_GET(self) -> None:
         path = self.path.split("?")[0]
         if path == "/":
@@ -3835,6 +3873,13 @@ class Handler(BaseHTTPRequestHandler):
             self._json(snap)
         elif path == "/api/deploy_history":
             self._json({"history": load_deploy_history()})
+        elif path.startswith("/app/assets/"):
+            self._serve_spa_asset(path)
+        elif path == "/app" or path == "/app/" or path.startswith("/app/"):
+            # Client-side routes (e.g. /app/mission-control) all resolve to
+            # the same index.html -- the SPA's own router takes it from
+            # there, same as any other client-routed single-page app.
+            self._serve_spa_index()
         else:
             self._json({"error": "not found"}, 404)
 

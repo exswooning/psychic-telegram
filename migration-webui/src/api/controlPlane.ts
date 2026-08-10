@@ -10,8 +10,19 @@
  * on a node that is only executing migrations.
  */
 
-const CP_BASE = import.meta.env.VITE_CP_BASE ?? 'http://localhost:8090'
-const CP_WS = CP_BASE.replace(/^http/, 'ws') + '/ws'
+// Overridable at runtime (not just at build time via VITE_CP_BASE) so a
+// dashboard already loaded in a browser can be pointed at a different
+// tunnel/port without a rebuild -- see the "VPS Connection" panel in
+// Settings, which is the only place this setter is called from.
+const CP_BASE_DEFAULT = import.meta.env.VITE_CP_BASE ?? 'http://localhost:8090'
+let CP_BASE = localStorage.getItem('cp_base') || CP_BASE_DEFAULT
+
+export const getCpBase = () => CP_BASE
+export const setCpBase = (url: string) => {
+  CP_BASE = url.replace(/\/+$/, '') || CP_BASE_DEFAULT
+  localStorage.setItem('cp_base', CP_BASE)
+}
+const cpWs = () => CP_BASE.replace(/^http/, 'ws') + '/ws'
 
 /** Set once at login. Sent on every request; the server resolves it to a
  *  role and records it against every action in operator_actions_log. */
@@ -21,6 +32,30 @@ export const setOperator = (name: string) => {
   localStorage.setItem('cp_operator', name)
 }
 export const getOperator = () => OPERATOR
+
+/**
+ * Probes an arbitrary base URL (not necessarily the one currently in use)
+ * so the Settings panel can test a candidate address before committing to
+ * it with setCpBase. /api/v2/whoami is the cheapest real round-trip: it
+ * needs no reason code, mutates nothing, and still proves RBAC and CORS are
+ * both working, not just that something is listening on the port.
+ */
+export async function checkConnection(base: string): Promise<{ ok: true; role: Role; ms: number } | { ok: false; error: string }> {
+  const url = base.replace(/\/+$/, '') || CP_BASE_DEFAULT
+  const started = performance.now()
+  try {
+    const res = await fetch(`${url}/api/v2/whoami`, {
+      headers: { 'X-Operator': OPERATOR },
+      signal: AbortSignal.timeout(5000),
+    })
+    const ms = Math.round(performance.now() - started)
+    if (!res.ok) return { ok: false, error: `HTTP ${res.status}` }
+    const op = (await res.json()) as Operator
+    return { ok: true, role: op.role, ms }
+  } catch (e: any) {
+    return { ok: false, error: e.name === 'TimeoutError' ? 'timed out after 5s' : e.message }
+  }
+}
 
 async function cpFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${CP_BASE}${path}`, {
@@ -220,7 +255,7 @@ export function connectCP(
 
   const open = () => {
     if (closed) return
-    ws = new WebSocket(CP_WS)
+    ws = new WebSocket(cpWs())
     ws.onopen = () => {
       attempt = 0
       onStatus?.(true)
