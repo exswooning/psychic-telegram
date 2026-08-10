@@ -48,8 +48,9 @@ class DriveMigrator:
         self.source_user = source_user
         self.target_user = target_user
         self.quota = quota
-        self.src = auth.source_drive(source_user)
-        self.tgt = auth.target_drive(target_user)
+        # NOT captured here -- see the `src`/`tgt` properties below.
+        self._src_override = None
+        self._tgt_override = None
         # `limiter` stays the read/general bucket and keeps its name: it is
         # what _download_via charges once per call, and tests substitute it.
         self.limiter = RateLimiter(settings.drive_read_qps)
@@ -95,6 +96,37 @@ class DriveMigrator:
         # getting a parallel one that would need every fix applied twice.
         self.shared_drive: str | None = None
         self.target_drive_id: str | None = None
+
+    # -- API clients ------------------------------------------------------
+    #
+    # Resolved per access, never captured on the instance.
+    #
+    # `httplib2.Http` is not thread-safe, which is why AuthManager._service
+    # caches per thread. Holding the result in `self.src` defeated that
+    # completely: __init__ runs on the walk thread, so every file-pool
+    # thread ended up driving that one thread's socket. It cost nothing
+    # while `drive_file_workers` defaulted to 1 and nobody ran it higher;
+    # the first real run at 4 died in 17 seconds with
+    # `free(): invalid next size (normal)` -- glibc heap corruption, SIGABRT,
+    # no Python traceback, 0 files migrated.
+    #
+    # The lookup is a thread-local dict hit after the first call per thread,
+    # so this is not on any hot path worth optimising back into a bug.
+    @property
+    def src(self):
+        return self._src_override or self.auth.source_drive(self.source_user)
+
+    @src.setter
+    def src(self, value):
+        self._src_override = value
+
+    @property
+    def tgt(self):
+        return self._tgt_override or self.auth.target_drive(self.target_user)
+
+    @tgt.setter
+    def tgt(self, value):
+        self._tgt_override = value
 
     # -- plumbing -----------------------------------------------------------
     def _retry(self, fn, label=None, write: bool = True,

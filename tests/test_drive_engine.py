@@ -1447,6 +1447,72 @@ class TestIntraUserFileConcurrency:
             migrator.run()
 
 
+class TestClientsAreResolvedPerThread:
+    """
+    `httplib2.Http` is not thread-safe. AuthManager._service caches per
+    thread for exactly that reason, and the engine used to defeat it by
+    capturing `self.src`/`self.tgt` in __init__ -- so every file-pool thread
+    drove the walk thread's socket.
+
+    It was invisible while drive_file_workers defaulted to 1. The first real
+    run at 4 died in 17s with `free(): invalid next size (normal)`: glibc
+    heap corruption, SIGABRT, no Python traceback, 0 files migrated, and a
+    benchmark that still printed PASS.
+    """
+
+    def test_clients_are_not_captured_on_the_instance(self, migrator):
+        """Each access must go back through auth, because that is where the
+        per-thread cache lives."""
+        seen: dict[str, int] = {}
+
+        class CountingAuth:
+            def source_drive(self, user):
+                seen["src"] = seen.get("src", 0) + 1
+                return object()
+
+            def target_drive(self, user):
+                seen["tgt"] = seen.get("tgt", 0) + 1
+                return object()
+
+        migrator.auth = CountingAuth()
+        migrator.src, migrator.tgt = None, None   # clear any override
+        for _ in range(3):
+            _, _ = migrator.src, migrator.tgt
+        assert seen == {"src": 3, "tgt": 3}, \
+            "a captured client would have consulted auth once, not per access"
+
+    def test_two_threads_get_two_different_clients(self, migrator):
+        """The property is only useful if a per-thread auth actually yields
+        a different object per thread -- that is the whole defect."""
+        import threading as _t
+
+        local = _t.local()
+
+        class PerThreadAuth:
+            def _svc(self):
+                if not hasattr(local, "svc"):
+                    local.svc = object()
+                return local.svc
+
+            source_drive = lambda self, user: self._svc()   # noqa: E731
+            target_drive = lambda self, user: self._svc()   # noqa: E731
+
+        migrator.auth = PerThreadAuth()
+        migrator.src = None
+        # Hold the objects, not their id()s: a dead object's address gets
+        # recycled, so comparing ids here reports "same client" for two
+        # genuinely different ones.
+        got: list = []
+        threads = [_t.Thread(target=lambda: got.append(migrator.src))
+                   for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert got[0] is not got[1], \
+            "both threads shared one client -- that is the heap-corruption bug"
+
+
 class TestWritePacing:
     """
     The write path was completely unthrottled: `_retry` never touched a

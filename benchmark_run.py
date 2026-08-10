@@ -199,6 +199,23 @@ def judge(result: dict, dead: set[str]) -> tuple[bool, list[str]]:
     warns: list[str] = []
     acl = result["acl"]
 
+    # 0. Did the run happen at all?
+    #
+    # Every gate below is a statement about what landed on the target, so a
+    # run that migrated nothing satisfies all of them vacuously. B5's first
+    # attempt proved it: the engine died after 17 seconds with
+    # `free(): invalid next size (normal)` (SIGABRT, rc=-6) having copied 0
+    # files, and this function returned PASS -- a green benchmark for a
+    # crashed migration. A judge that cannot fail an empty run is not a
+    # safety net, so these two come before anything about fidelity.
+    rc = result.get("migrateReturnCode")
+    if rc:
+        detail = f"signal {-rc}" if rc < 0 else f"exit {rc}"
+        fails.append(f"MIGRATE CRASHED: {detail} -- see {result.get('migrateLog')}")
+    if not result.get("totalFiles"):
+        fails.append("NOTHING MIGRATED: 0 files copied, so every fidelity "
+                     "check below passed vacuously")
+
     if acl.get("error"):
         fails.append(f"FIDELITY UNVERIFIED: {acl['error']}")
     else:
