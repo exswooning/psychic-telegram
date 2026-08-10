@@ -750,6 +750,31 @@ def cmd_backfill_services(args, settings: Settings, db: MigrationDB,
     print(f"\nBackfilled {changed} user(s); {skipped} had gaps left alone.")
 
 
+def cmd_coverage(args, settings: Settings, db: MigrationDB, auth: AuthManager):
+    """Which supported data types does the source actually contain?
+
+    `scope` says what the engine can migrate; this says which of those the
+    source has instances of. A supported category with zero instances is a
+    path the migration will report success on without ever running.
+    """
+    import coverage_audit
+
+    users = args.user or [r["source_email"] for r in db.all_identities()
+                          if r["entity_type"] == "user"]
+    if not users:
+        print("no users in identity_map — run init-db first")
+        return 2
+    totals = coverage_audit.collect(auth, settings, users)
+    rows = coverage_audit.assess(totals)
+    if args.format == "json":
+        import json as _json
+        print(_json.dumps({"rows": rows, "totals": totals}, indent=2, default=str))
+    else:
+        print(coverage_audit.render(rows, totals))
+    absent = [r for r in rows if r["verdict"] == coverage_audit.ABSENT]
+    return 1 if (absent and not args.allow_absent) else 0
+
+
 def cmd_scope(args, settings: Settings, db: MigrationDB, auth: AuthManager):
     """Print the migration scope manifest — what moves and what does not."""
     import scope as scope_mod
@@ -921,6 +946,14 @@ def build_parser() -> argparse.ArgumentParser:
                    type=lambda v: [x.strip() for x in v.split(",") if x.strip()],
                    help="comma-separated, e.g. drive")
     s.set_defaults(func=cmd_backfill_services)
+
+    s = sub.add_parser("coverage",
+                       help="which supported data types the source actually has")
+    s.add_argument("--user", action="append", help="limit to specific source user(s)")
+    s.add_argument("--format", default="text", choices=["text", "json"])
+    s.add_argument("--allow-absent", action="store_true",
+                   help="report gaps but still exit 0")
+    s.set_defaults(func=cmd_coverage)
 
     s = sub.add_parser("scope", help="print exactly what will and will not migrate")
     s.add_argument("--service", action="append",
