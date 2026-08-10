@@ -185,3 +185,69 @@ class TestServiceTypeTable:
             r.reset_service_ledger(db, "a@s.com", ("gmial",))
         db.close()
         os.unlink(path)
+
+
+class TestSideTables:
+    """
+    Not all resume state lives in id_mapping. label_map maps source label
+    ids to target label ids and is referenced by nothing else, so a gmail
+    reset that cleared only id_mapping/audit_log left every user pointing at
+    label ids from target accounts that had been deleted.
+
+    The next run failed 77 message inserts with
+    `HTTP 400 invalidArgument: Invalid label` -- one per message carrying a
+    user label -- and reported the remaining thousands as success.
+    """
+
+    def test_gmail_reset_clears_the_label_map(self, tmp_path):
+        import reset_drive_ledger as r
+
+        path = str(tmp_path / "m.db")
+        db = MigrationDB(path)
+        bulk_seed_identities(db, [(SRC, "alice@tenantb.com")])
+        db.record_label(SRC, "Label_1", "Label_tgt_1", "Projects")
+        assert db.get_label_map(SRC) == {"Label_1": "Label_tgt_1"}
+
+        out = r.reset_service_ledger(db, SRC, ("gmail",))
+        assert db.get_label_map(SRC) == {}, \
+            "stale target label ids survive -> 400 Invalid label on insert"
+        assert out["side_table_rows"] == 1
+        db.close()
+
+    def test_a_drive_reset_leaves_the_label_map_alone(self, tmp_path):
+        """Narrowness matters both ways: wiping Drive must not force Gmail
+        to rebuild labels that are still correct on the target."""
+        import reset_drive_ledger as r
+
+        path = str(tmp_path / "m.db")
+        db = MigrationDB(path)
+        bulk_seed_identities(db, [(SRC, "alice@tenantb.com")])
+        db.record_label(SRC, "Label_1", "Label_tgt_1", "Projects")
+        r.reset_service_ledger(db, SRC, ("drive",))
+        assert db.get_label_map(SRC) == {"Label_1": "Label_tgt_1"}
+        db.close()
+
+    def test_every_per_user_table_is_either_reset_or_deliberately_not(self):
+        """A new per-user mapping table that no reset knows about repeats
+        exactly the label_map bug. Listing the exemptions here forces that
+        decision to be made explicitly rather than by omission."""
+        import re
+
+        import reset_drive_ledger as r
+
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        schema = open(os.path.join(root, "db.py"), encoding="utf-8").read()
+        tables = set(re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", schema))
+        reset = {t for svc in r.SERVICE_SIDE_TABLES.values() for t, _ in svc}
+        exempt = {
+            "identity_map",   # the roster itself; services_done is edited in place
+            "id_mapping",     # cleared by type, not wholesale
+            "audit_log",      # cleared by type, not wholesale
+            "discovery",      # a read-only prescan, never consulted for skipping
+            "upload_ledger",  # the 750 GB/day cap: real bytes were really sent,
+                              # so a re-run must still be charged for them
+        }
+        unaccounted = tables - reset - exempt
+        assert not unaccounted, (
+            f"per-user tables no reset clears and no exemption explains: "
+            f"{unaccounted}")

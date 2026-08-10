@@ -78,6 +78,19 @@ SERVICE_TYPES: dict[str, tuple[str, ...]] = {
     "tasks": ("task", "task_list"),
 }
 
+# Per-service state that lives outside id_mapping/audit_log entirely.
+#
+# label_map translates source label ids to target label ids, and nothing in
+# id_mapping references it -- so clearing gmail's rows without it left every
+# user pointing at label ids belonging to target accounts that had been
+# deleted. The next run then failed 77 message inserts with
+# `HTTP 400 invalidArgument: Invalid label`, one per message carrying a user
+# label, while reporting the rest as success.
+SERVICE_SIDE_TABLES: dict[str, tuple[tuple[str, str], ...]] = {
+    # service -> ((table, user_column), ...)
+    "gmail": (("label_map", "source_user"),),
+}
+
 
 def reset_service_ledger(db: MigrationDB, source_email: str,
                          services: tuple[str, ...] = ("drive",)) -> dict:
@@ -103,6 +116,11 @@ def reset_service_ledger(db: MigrationDB, source_email: str,
         audit_deleted = conn.execute(
             f"DELETE FROM audit_log WHERE source_user=? AND item_type IN "
             f"({placeholders})", (source_email, *types)).rowcount
+        side_deleted = 0
+        for svc in services:
+            for table, col in SERVICE_SIDE_TABLES.get(svc, ()):
+                side_deleted += conn.execute(
+                    f"DELETE FROM {table} WHERE {col}=?", (source_email,)).rowcount
         row = conn.execute(
             "SELECT services_done FROM identity_map WHERE source_email=?",
             (source_email,)).fetchone()
@@ -115,6 +133,7 @@ def reset_service_ledger(db: MigrationDB, source_email: str,
             (",".join(sorted(have)), source_email))
     return {"user": source_email, "id_mapping_rows": mapping_deleted,
             "audit_log_rows": audit_deleted,
+            "side_table_rows": side_deleted,
             "cleared_services": cleared,
             # Kept so the original Drive-only callers keep reading the same
             # key they always did.
@@ -178,8 +197,10 @@ def main(argv: list[str] | None = None) -> int:
         result = reset_service_ledger(db, r["source_email"], services)
         was = (f" (was marked done for {', '.join(result['cleared_services'])})"
                if result["cleared_services"] else "")
+        side = (f", {result['side_table_rows']} label-map row(s)"
+                if result["side_table_rows"] else "")
         print(f"  {result['user']}: {result['id_mapping_rows']} mapping row(s), "
-              f"{result['audit_log_rows']} audit row(s) cleared{was}")
+              f"{result['audit_log_rows']} audit row(s){side} cleared{was}")
     return 0
 
 
