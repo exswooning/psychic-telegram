@@ -1504,3 +1504,35 @@ writing to the repo root and showing up as untracked noise on every
 
 **B5 status unchanged from my last entry** — unblocked, config intact,
 still awaiting the actual launch decision.
+
+## 2026-08-10 — Claude: Mission Control mobile pass shipped
+
+User asked to "configure mobile view as well" for the new Mission Control UI.
+Audited every component for mobile-viewport breakage and fixed what was found:
+
+- `BenchmarkRunner.tsx`, `ForensicModal.tsx`: raw `<Table>` had no
+  `TableContainer` wrapper — would have forced the whole page to scroll
+  sideways on a narrow screen instead of just the table. Wrapped both.
+- `EmergencyBrake.tsx`: public-shares table's scroll box had `overflow: 'auto'`
+  (fine) but is now explicit `overflowX`/`overflowY` for clarity.
+- `BenchmarkRunner.tsx`, `MissionControl.tsx`: fixed-pixel `TextField` widths
+  (110/260/280/120/220/240) switched to `{ xs: '100%', sm: <n> }`.
+- `MissionControl.tsx`: user-roster row restructured to
+  `flexDirection: { xs: 'column', sm: 'row' }` so email/progress/status stack
+  on narrow screens instead of clipping in one rigid row; users-section header
+  Stack got `flexWrap`.
+- `Layout.tsx`: main content padding tightened to `{ xs: 1.5, sm: 3 }` /
+  `{ xs: 9, sm: 10 }`, plus a page-level `overflowX: hidden` / `maxWidth: 100vw`
+  guard as a backstop (every wide element should already own its own
+  scroll container — this just catches anything that slips through).
+- `ReasonCodeDialog.tsx` checked, no change needed: MUI `Dialog` with
+  `fullWidth` already goes full-screen-margin on mobile.
+
+Verified: `npx tsc --noEmit` clean, `pytest tests/` 896 passed (frontend-only
+change, count unchanged), `vite build` succeeded, deployed to VPS via rsync,
+sha256 of built JS/HTML matches source and remote exactly. Pushed as
+`b1d1834` on `workspace-migrator`.
+
+Still open, not touched this turn: `acl_audit.py` → `public_share_watch`
+wiring (EmergencyBrake still shows green only because the table is empty,
+not because it's verified clean), and launching the B5 benchmark itself.
