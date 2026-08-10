@@ -1463,3 +1463,44 @@ DeepSeek's report that the ledger reset already ran before the abort.
 `DRIVE_FILE_WORKERS=4`, `DRIVE_WRITE_QPS=3.0`, drive-only,
 `BENCH_DEAD_ACCOUNTS` set) is still valid and untouched. Handing back for
 the actual launch decision rather than firing it myself.
+
+---
+
+## 2026-08-10 — Claude (Sonnet) — Mission Control shipped; Provision Users now a UI button
+
+User asked for a new UI amalgamating the existing ones, plus a Provision
+Users button doing what I ran by hand for the B5 recovery, with progress.
+
+**Scoping call, stated up front rather than silently:** "amalgamate all
+existing UI" spans 15+ pages including one-time setup flows (Wizard, Seed
+Wizard, Deploy/Settings, Help, per-user detail). Merging those into a live-
+ops screen would make the screen worse. Built **Mission Control**
+(`/mission-control`, now the default landing route) consolidating the
+pages an operator actually watches *during* a run: Dashboard's service
+bento, Users' roster+search, ActivityFeed's tail, Verification's fidelity
+cards, SystemHealth's numbers, plus everything already in Command Center
+(fleet, job control, forensics, benchmarks, emergency brake). Setup/config
+pages stay separate, reachable from nav, unchanged.
+
+**Provision Users**: `POST /api/v2/provision/start` + `GET .../status`,
+same create-only guarantee as the CLI (never touches an existing account).
+Progress is parsed from `provision.py`'s own log line
+(`log.info("created %s", email)`) rather than reimplemented, with a
+regression test pinning that exact format so a future rename can't
+silently freeze the bar at 0. Denominator is `identity_count()` from
+`identity_map` — the same number the CLI itself iterates.
+
+**Verified end-to-end against the live VPS, not just unit tests:**
+restarted `api_server.py` there (pid 1243317, no engine running, safe),
+ran a real dry-run through the API exactly as the UI would trigger it —
+correctly reported all 11 accounts already exist (matches this morning's
+re-provisioning), full log tail visible, completed cleanly.
+
+**896 tests passing** (21 new). Deployed: `api_server.py`,
+`control_plane_db.py`, all 5 new/changed frontend files, sha-verified
+MATCH. Also fixed a real hygiene gap: provisioning/benchmark logs were
+writing to the repo root and showing up as untracked noise on every
+`git status` — moved to `logs/`/`benchmarks/`, both gitignored.
+
+**B5 status unchanged from my last entry** — unblocked, config intact,
+still awaiting the actual launch decision.
