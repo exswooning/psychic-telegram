@@ -142,3 +142,33 @@ class TestAnalyzeFailsSoft:
         supplies plausible failures instead destroys that."""
         assert "Do not invent" in ai.SYSTEM_PROMPT
         assert "must appear in the input" in ai.SYSTEM_PROMPT
+
+
+class TestLogSelection:
+    """
+    The control plane and webui.py write their own logs beside the
+    migration's, and both are touched on every restart. A plain "newest
+    .log" therefore picked api_server.log -- so the panel would have
+    summarised the dashboard's own startup instead of the migration it
+    exists to explain, and looked like it was working while doing it.
+    """
+
+    def test_infrastructure_logs_are_not_chosen(self, tmp_path, monkeypatch):
+        import api_server
+
+        monkeypatch.setattr(api_server, "HERE", str(tmp_path))
+        logs = tmp_path / "logs"
+        logs.mkdir()
+        (logs / "full-migrate.log").write_text("migrating\n")
+        os.utime(logs / "full-migrate.log", (1000, 1000))
+        # Newer, but it is the server talking about itself.
+        (logs / "api_server.log").write_text("uvicorn running\n")
+        os.utime(logs / "api_server.log", (9999, 9999))
+
+        assert os.path.basename(api_server._newest_log()) == "full-migrate.log"
+
+    def test_no_logs_at_all_is_none_not_a_crash(self, tmp_path, monkeypatch):
+        import api_server
+
+        monkeypatch.setattr(api_server, "HERE", str(tmp_path))
+        assert api_server._newest_log() is None

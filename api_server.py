@@ -731,19 +731,27 @@ def _groq_key() -> str:
     return ai_diagnostics.read_key(_env_path())
 
 
+# This server and webui.py both write logs beside the migration's, and both
+# get touched on every restart -- so a plain "newest .log" picked
+# api_server.log, which describes the dashboard rather than the migration
+# the dashboard is for. Infrastructure logs are excluded by name.
+_INFRA_LOGS = {"api_server.log", "webui.log", "tunnel.log", "fleet_agent.log"}
+
+
 def _newest_log() -> str | None:
-    """The log most likely to describe what is happening now."""
+    """The newest log that is actually about a migration."""
     candidates: list[tuple[float, str]] = []
     for d in (os.path.join(HERE, "logs"), os.path.join(HERE, "benchmarks"), HERE):
         if not os.path.isdir(d):
             continue
         for name in os.listdir(d):
-            if name.endswith(".log"):
-                p = os.path.join(d, name)
-                try:
-                    candidates.append((os.path.getmtime(p), p))
-                except OSError:
-                    continue
+            if not name.endswith(".log") or name in _INFRA_LOGS:
+                continue
+            p = os.path.join(d, name)
+            try:
+                candidates.append((os.path.getmtime(p), p))
+            except OSError:
+                continue
     return max(candidates)[1] if candidates else None
 
 
