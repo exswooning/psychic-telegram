@@ -295,6 +295,37 @@ export const startCoverage = (reason: string) =>
 export const fetchCoverageStatus = () =>
   cpFetch<CoverageStatus>('/api/v2/coverage/status')
 
+// -- Cloud provisioning -------------------------------------------------------
+export interface GcpStep { name: string; status: string; detail: string }
+export interface GcpSide {
+  side: string; project: string; saEmail?: string; keyPath?: string
+  clientId: string; ok: boolean; steps: GcpStep[]
+}
+export interface GcpResult {
+  ok: boolean; error?: string; account?: string; org?: string
+  sides: GcpSide[]
+}
+export interface GcpStatus { running: boolean; result: GcpResult | null }
+
+export const startGcpProvision = (
+  reason: string, sourceDomain: string, targetDomain: string,
+  orgId = '', dryRun = true, force = false,
+) =>
+  cpFetch<ActionResult>('/api/v2/gcp/provision', {
+    method: 'POST',
+    body: JSON.stringify({
+      reason, source_domain: sourceDomain, target_domain: targetDomain,
+      org_id: orgId, dry_run: dryRun, force,
+    }),
+  })
+
+export const fetchGcpStatus = () => cpFetch<GcpStatus>('/api/v2/gcp/status')
+
+export const enableApis = (reason: string) =>
+  cpFetch<ActionResult>('/api/v2/apis/enable', {
+    method: 'POST', body: JSON.stringify({ reason }),
+  })
+
 // -- DWD scope status ---------------------------------------------------------
 export interface DwdStatus {
   tenant: string; checked: boolean; clientId?: string

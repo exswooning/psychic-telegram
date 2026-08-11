@@ -540,3 +540,64 @@ class TestApiServerLoadsEnvSh:
         monkeypatch.setattr(
             "uvicorn.run", lambda *a, **kw: None)
         assert api_server.main(["--port", "0"]) == 0
+
+
+class TestCloudProvisioning:
+    """
+    Provisioning creates real billable Cloud resources and writes private
+    keys to disk, so it is gated like any other write -- and defaults to a
+    dry run, because the safe option should be the one you get by not
+    thinking about it.
+    """
+
+    def test_a_viewer_cannot_provision(self, cp):
+        r = cp.post("/api/v2/gcp/provision",
+                    json={"reason": "curiosity", "source_domain": "c.example.com",
+                          "target_domain": "a.example.com"}, headers=VIEWER)
+        assert r.status_code == 403
+
+    def test_a_viewer_cannot_enable_apis(self, cp):
+        r = cp.post("/api/v2/apis/enable",
+                    json={"reason": "curiosity"}, headers=VIEWER)
+        assert r.status_code == 403
+
+    def test_domains_are_required_by_the_schema(self, cp):
+        """Provisioning without a target domain would create one project and
+        strand the run half-done."""
+        r = cp.post("/api/v2/gcp/provision",
+                    json={"reason": "no target"}, headers=ADMIN)
+        assert r.status_code == 422
+
+    def test_launch_is_audited_with_the_domain_pair_as_target(self, monkeypatch, cp):
+        import api_server
+
+        class _FakeProc:
+            pid = 5150
+        monkeypatch.setattr(api_server.subprocess, "Popen",
+                            lambda *a, **k: _FakeProc())
+
+        r = cp.post("/api/v2/gcp/provision",
+                    json={"reason": "new tenant pair", "dry_run": True,
+                          "source_domain": "c.example.com",
+                          "target_domain": "a.example.com"}, headers=ADMIN)
+        assert r.status_code == 200
+        row = cp.get("/api/v2/actions").json()[0]
+        assert row["action"] == "gcp.provision"
+        assert row["target"] == "c.example.com->a.example.com"
+        assert row["outcome"] == "OK"
+
+    def test_a_run_in_flight_is_not_reported_as_failed(self, cp, monkeypatch):
+        """provision_gcp writes its JSON in one go at the end, so a run in
+        flight leaves a .partial file that is not yet valid JSON. Surfacing
+        that as an error would flash 'failed' for the whole minute a project
+        takes to create."""
+        import api_server
+        d = tempfile.mkdtemp()
+        monkeypatch.setattr(api_server, "HERE", d)
+        os.makedirs(os.path.join(d, "logs"), exist_ok=True)
+        with open(os.path.join(d, "logs", "gcp-provision.json.partial"),
+                  "w", encoding="utf-8") as fh:
+            fh.write('{"sides": [')      # truncated mid-write
+        r = cp.get("/api/v2/gcp/status")
+        assert r.status_code == 200
+        assert r.json()["result"] is None

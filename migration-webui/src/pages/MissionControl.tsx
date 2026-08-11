@@ -22,6 +22,7 @@ import BenchmarkRunner from '@/components/BenchmarkRunner'
 import ProvisionUsers from '@/components/ProvisionUsers'
 import AiDiagnostics from '@/components/AiDiagnostics'
 import DwdSetup from '@/components/DwdSetup'
+import CloudSetup from '@/components/CloudSetup'
 import CoverageAudit from '@/components/CoverageAudit'
 
 /**
@@ -187,6 +188,8 @@ const MissionControl: React.FC = () => {
       {/* First, because every panel below fails with unauthorized_client
           if this is not done -- there is nothing more useful to show an
           operator ahead of a broken setup than the reason it is broken. */}
+      <CloudSetup />
+
       <DwdSetup />
 
       <EmergencyBrake shares={shares} liveCount={shareCount} onReverted={refreshLists} />

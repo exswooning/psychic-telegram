@@ -948,6 +948,118 @@ async def dwd_status(tenant: str = "source"):
     return await _off_loop(_check)
 
 
+# ======================================================================
+# Cloud provisioning
+#
+# Creates projects, enables APIs, makes service accounts and keys. Runs
+# detached and streams its progress to a JSON file, because it takes
+# minutes (project creation alone is a long-poll) and a browser tab must
+# not be what holds it open.
+#
+# Deliberately NOT a "wipe" style action, but still gated: it creates
+# billable Cloud resources under the operator's organisation and writes
+# credential files to disk.
+# ======================================================================
+class StartProvisionGcp(WriteAction):
+    source_domain: str = Field(min_length=3)
+    target_domain: str = Field(min_length=3)
+    org_id: str = ""
+    dry_run: bool = True
+    force: bool = False
+
+
+def _gcp_state_path() -> str:
+    d = os.path.join(HERE, "logs")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, "gcp-provision.json")
+
+
+@app.post("/api/v2/gcp/provision")
+async def gcp_provision(body: StartProvisionGcp, op: Operator = Depends(operator)):
+    def _launch() -> tuple[bool, str]:
+        out = _gcp_state_path()
+        argv = [PY, "provision_gcp.py",
+                "--source-domain", body.source_domain,
+                "--target-domain", body.target_domain, "--json"]
+        if body.org_id:
+            argv += ["--org-id", body.org_id]
+        if body.dry_run:
+            argv.append("--dry-run")
+        if body.force:
+            argv.append("--force")
+        # Truncate first: a stale result from a previous run left on disk
+        # would be served as this run's progress for as long as it takes
+        # gcloud to produce the first byte.
+        with open(out, "w", encoding="utf-8") as fh:
+            json.dump({"running": True, "startedAt": time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, fh)
+        err = os.path.join(HERE, "logs", "gcp-provision.err")
+        with open(out + ".partial", "wb") as o, open(err, "wb") as e:
+            proc = subprocess.Popen(argv, cwd=HERE, stdout=o, stderr=e,
+                                    stdin=subprocess.DEVNULL,
+                                    start_new_session=True)
+        return True, (f"provisioning started pid {proc.pid}"
+                      f"{' (dry run)' if body.dry_run else ''}")
+    return await _gated(op, "gcp.provision", body,
+                        f"{body.source_domain}->{body.target_domain}", _launch)
+
+
+@app.get("/api/v2/gcp/status")
+async def gcp_status():
+    """Progress of the most recent provisioning run.
+
+    provision_gcp.py writes its JSON in one go at the end, so a run in
+    flight has a `.partial` file that is not yet valid JSON. That is
+    reported as running rather than as an error -- the alternative is a UI
+    that flashes 'failed' for the whole minute a project takes to create.
+    """
+    def _read() -> dict:
+        running = any("provision_gcp.py" in ln and "grep" not in ln
+                      for ln in subprocess.run(
+                          ["ps", "-eo", "args="], capture_output=True,
+                          text=True).stdout.splitlines())
+        partial = _gcp_state_path() + ".partial"
+        result = None
+        for path in (partial, _gcp_state_path()):
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    data = json.load(fh)
+                if isinstance(data, dict) and "sides" in data:
+                    result = data
+            except (OSError, ValueError):
+                continue
+        return {"running": running, "result": result}
+    return await _off_loop(_read)
+
+
+@app.post("/api/v2/apis/enable")
+async def apis_enable(body: WriteAction, op: Operator = Depends(operator)):
+    """Turn on any Cloud API that is off, on both tenants.
+
+    Separate from provisioning because it is the common repair: an existing
+    deployment that gains a service (contacts, tasks, chat) needs the API
+    switched on, and nothing else. Needs the service account to hold
+    serviceusage.serviceUsageAdmin -- which provision_gcp grants, and
+    which older hand-made projects will not have.
+    """
+    def _run() -> tuple[bool, str]:
+        import ensure_apis
+        from config import Settings
+
+        s = Settings()
+        done, failed = [], []
+        for tenant in ("source", "target"):
+            res = ensure_apis.ensure(s, tenant, do_enable=True)
+            for api, err in (res.get("enabled_now") or {}).items():
+                (failed if err else done).append(f"{tenant}:{api}")
+        if failed:
+            return False, (f"enabled {len(done)}, could not enable: "
+                           f"{', '.join(failed[:4])}")
+        return True, (f"enabled {len(done)} API(s)" if done
+                      else "nothing to do — all required APIs already on")
+    return await _gated(op, "apis.enable", body, "both tenants", _run)
+
+
 @app.post("/api/v2/fleet/heartbeat")
 async def heartbeat(hb: Heartbeat):
     await _off_loop(cpdb.upsert_node, hb.node_id,
