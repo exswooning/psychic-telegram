@@ -326,6 +326,48 @@ export const enableApis = (reason: string) =>
     method: 'POST', body: JSON.stringify({ reason }),
   })
 
+// -- Full setup: one tenant, one call ------------------------------------------
+export interface FullSetupPhase { name: string; status: string; detail: string }
+export interface FullSetupResult {
+  side: string; ok: boolean; phases: FullSetupPhase[]
+  clientId?: string; missingScopes?: string[]
+}
+export interface FullSetupStatus { running: boolean; result: FullSetupResult | null }
+
+/**
+ * Project -> APIs -> service account -> key -> delegation -> verified, in
+ * one call. Only works wherever the control plane process itself has
+ * gcloud and a real browser -- it cannot run on a headless VPS, and fails
+ * cleanly there rather than hanging (see full_setup.py's own docstring).
+ *
+ * `adminPassword` is used exactly once by the server to fill dwd_helper's
+ * sign-in form and is never stored: not in this client, not in
+ * localStorage, not in the audit log (the API schema excludes it from
+ * serialization at the type level specifically so no future write endpoint
+ * can forget and log it in plaintext).
+ */
+export const startFullSetup = (
+  reason: string, side: 'source' | 'target', domain: string,
+  adminEmail: string, adminPassword: string, opts: {
+    orgId?: string; dryRun?: boolean; seed?: boolean; seedScale?: string
+    createUsers?: boolean; provisionUsers?: boolean
+  } = {},
+) =>
+  cpFetch<ActionResult>('/api/v2/full-setup/start', {
+    method: 'POST',
+    body: JSON.stringify({
+      reason, side, domain, admin_email: adminEmail,
+      admin_password: adminPassword,
+      org_id: opts.orgId ?? '', dry_run: opts.dryRun ?? true,
+      seed: opts.seed ?? false, seed_scale: opts.seedScale ?? 'small',
+      create_users: opts.createUsers ?? false,
+      provision_users: opts.provisionUsers ?? false,
+    }),
+  })
+
+export const fetchFullSetupStatus = (side: 'source' | 'target') =>
+  cpFetch<FullSetupStatus>(`/api/v2/full-setup/status?side=${side}`)
+
 // -- DWD scope status ---------------------------------------------------------
 export interface DwdStatus {
   tenant: string; checked: boolean; clientId?: string

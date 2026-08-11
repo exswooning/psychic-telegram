@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import {
   Box, Typography, Card, CardContent, Chip, Button, TextField, Grid, Alert,
-  MenuItem, Checkbox, FormControlLabel, LinearProgress, Stack,
+  MenuItem, Checkbox, FormControlLabel, LinearProgress, Stack, Collapse,
   Dialog, DialogActions, DialogContent, DialogTitle,
 } from '@mui/material'
 import { Refresh as RefreshIcon } from '@mui/icons-material'
@@ -13,6 +13,7 @@ import JobRunner from '@/components/JobRunner'
 import JobProgress from '@/components/JobProgress'
 import CloudSetup from '@/components/CloudSetup'
 import DwdSetup from '@/components/DwdSetup'
+import QuickTenantSetup from '@/components/QuickTenantSetup'
 import { DwdStatus, fetchDwdStatus } from '@/api/controlPlane'
 
 /**
@@ -32,6 +33,7 @@ import { DwdStatus, fetchDwdStatus } from '@/api/controlPlane'
  */
 
 const SeedWizard: React.FC = () => {
+  const [showManual, setShowManual] = useState(false)
   const [status, setStatus] = useState<StatusPayload | null>(null)
   const [actions, setActions] = useState<Record<string, ActionSpec>>({})
   const [dwd, setDwd] = useState<DwdPayload | null>(null)
@@ -97,23 +99,48 @@ const SeedWizard: React.FC = () => {
         tenants only -- none of this touches a production tenant's own data.
       </Typography>
 
-      <StepHeading n={1} title="Cloud project, APIs and service account keys"
-                   note="Creates both GCP projects, enables every API the
-                         engines use, and downloads the two keys. Needs gcloud
-                         on the machine serving this page — it refuses
-                         cleanly rather than half-running if that is missing." />
-      <CloudSetup />
+      <StepHeading n={1} title="Quick setup — domain, admin email, admin password"
+                   note="Runs project creation, API enablement, the service
+                         account and key, and domain-wide delegation as one
+                         call. Only works where THIS page's control plane has
+                         gcloud and a real browser -- it refuses cleanly, not
+                         a stuck spinner, wherever those are missing. If a
+                         sign-in needs 2FA or a captcha, use the step-by-step
+                         panels below instead: same result, but you watch the
+                         browser yourself." />
+      <Stack direction="row" spacing={2} sx={{ flexWrap: 'wrap', gap: 2, alignItems: 'flex-start' }}>
+        <Box sx={{ flex: '1 1 420px', minWidth: 0 }}>
+          <QuickTenantSetup side="source" showSeedOptions />
+        </Box>
+        <Box sx={{ flex: '1 1 420px', minWidth: 0 }}>
+          <QuickTenantSetup side="target" showProvisionUsers />
+        </Box>
+      </Stack>
 
       <Box sx={{ mt: 3 }} />
-      <StepHeading n={2} title="Domain-wide delegation"
-                   note="Authorises the client IDs from step 1 on each tenant.
-                         Verified by minting a token per scope, so green here
-                         means it genuinely works." />
-      <DwdSetup />
+      <Button size="small" onClick={() => setShowManual((v) => !v)} sx={{ mb: 1 }}>
+        {showManual ? 'Hide' : 'Show'} step-by-step setup (fallback for 2FA / captcha)
+      </Button>
+      <Collapse in={showManual}>
+        <StepHeading n={1} title="Cloud project, APIs and service account keys"
+                     note="Creates both GCP projects, enables every API the
+                           engines use, and downloads the two keys. Needs gcloud
+                           on the machine serving this page — it refuses
+                           cleanly rather than half-running if that is missing." />
+        <CloudSetup />
+
+        <Box sx={{ mt: 3 }} />
+        <StepHeading n={2} title="Domain-wide delegation"
+                     note="Authorises the client IDs from step 1 on each tenant.
+                           Verified by minting a token per scope, so green here
+                           means it genuinely works." />
+        <DwdSetup />
+      </Collapse>
 
       <Box sx={{ mt: 3 }} />
       <StepHeading n={3} title="Create users and seed data"
-                   note="Everything below writes into the SOURCE tenant." />
+                   note="For fine-grained control beyond Quick setup above.
+                         Everything below writes into the SOURCE tenant." />
 
       <SeedScopesCard dwd={dwd} />
 

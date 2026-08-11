@@ -756,7 +756,13 @@ def _newest_log() -> str | None:
 
 
 class SaveAiKey(WriteAction):
-    key: str = Field(min_length=10)
+    # exclude=True: same reasoning as StartFullSetup.admin_password below --
+    # _gated() logs body.model_dump() into operator_actions_log
+    # unconditionally, and that table is readable by any viewer via
+    # GET /api/v2/actions. Pre-existing bug, found while fixing the newer
+    # one: this key has been going into that log in plaintext since the AI
+    # diagnostics panel shipped.
+    key: str = Field(min_length=10, exclude=True)
 
 
 class AnalyzeRequest(BaseModel):
@@ -1075,6 +1081,111 @@ async def apis_enable(body: WriteAction, op: Operator = Depends(operator)):
         return True, (f"enabled {len(done)} API(s)" if done
                       else "nothing to do — all required APIs already on")
     return await _gated(op, "apis.enable", body, "both tenants", _run)
+
+
+class StartFullSetup(WriteAction):
+    """Password is passed straight to the subprocess environment and never
+    logged, written to migration.db, or echoed back in any response --
+    consumed once by dwd_helper's sign-in fill and dropped."""
+    side: Literal["source", "target"]
+    domain: str = Field(min_length=3)
+    admin_email: str = Field(min_length=3)
+    # exclude=True, not merely "don't print it": _gated() logs
+    # body.model_dump() into operator_actions_log.params_json UNCONDITIONALLY,
+    # on every write endpoint, including the REFUSED path -- and that table
+    # is read by GET /api/v2/actions with no role gate beyond being an
+    # authenticated operator. Without this the Workspace admin's password
+    # would sit in plaintext, readable by any viewer, forever (the log is
+    # append-only). Schema-level exclusion means every current and future
+    # caller of _gated is protected automatically, not just this handler.
+    admin_password: str = Field(min_length=1, exclude=True)
+    org_id: str = ""
+    dry_run: bool = True
+    seed: bool = False
+    seed_scale: str = "small"
+    create_users: bool = False
+    provision_users: bool = False
+
+
+def _full_setup_state_path(side: str) -> str:
+    d = os.path.join(HERE, "logs")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, f"full-setup-{side}.json")
+
+
+@app.post("/api/v2/full-setup/start")
+async def full_setup_start(body: StartFullSetup, op: Operator = Depends(operator)):
+    """Runs full_setup.py detached.
+
+    Only works where THIS process runs: full_setup drives a real browser
+    through dwd_helper and shells to gcloud, neither of which exist on the
+    headless VPS this control plane usually runs on. It fails the same clean
+    way provision_gcp already does there ("gcloud is not installed") rather
+    than hanging -- so pointing the UI at a VPS-hosted control plane for this
+    one action degrades to a clear error, not a stuck spinner.
+
+    The password goes to the child process's environment via subprocess env=,
+    never through a shell string, and is not present anywhere in this
+    handler's own logging.
+    """
+    def _launch() -> tuple[bool, str]:
+        out = _full_setup_state_path(body.side)
+        partial = out + ".partial"
+        argv = [PY, "full_setup.py", "--side", body.side,
+                "--domain", body.domain, "--admin", body.admin_email,
+                "--json"]
+        if body.org_id:
+            argv += ["--org-id", body.org_id]
+        if body.dry_run:
+            argv.append("--dry-run")
+        if body.seed and body.side == "source":
+            argv += ["--seed", "--scale", body.seed_scale]
+            if body.create_users:
+                argv.append("--create-users")
+        if body.provision_users and body.side == "target":
+            argv.append("--provision-users")
+
+        env = dict(os.environ)
+        env["DWD_PASSWORD"] = body.admin_password
+        # Truncate any previous result first, same reasoning as gcp-provision:
+        # a stale file would be served as this run's progress until gcloud
+        # produces its first byte.
+        with open(out, "w", encoding="utf-8") as fh:
+            json.dump({"running": True}, fh)
+        with open(partial, "wb") as o, \
+             open(os.path.join(HERE, "logs", f"full-setup-{body.side}.err"), "wb") as e:
+            proc = subprocess.Popen(argv, cwd=HERE, stdout=o, stderr=e,
+                                    stdin=subprocess.DEVNULL, env=env,
+                                    start_new_session=True)
+        return True, f"full setup started pid {proc.pid} for {body.side}"
+    # Target/domain names the tenant, never the password -- audited like
+    # every other write, minus the one field that must not be recorded.
+    return await _gated(op, "full_setup.start", body,
+                        f"{body.side}:{body.domain}", _launch)
+
+
+@app.get("/api/v2/full-setup/status")
+async def full_setup_status(side: str):
+    if side not in ("source", "target"):
+        raise HTTPException(400, "side must be source or target")
+
+    def _read() -> dict:
+        running = any(f"full_setup.py --side {side}" in ln and "grep" not in ln
+                      for ln in subprocess.run(
+                          ["ps", "-eo", "args="], capture_output=True,
+                          text=True).stdout.splitlines())
+        partial = _full_setup_state_path(side) + ".partial"
+        result = None
+        for path in (partial, _full_setup_state_path(side)):
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    data = json.load(fh)
+                if isinstance(data, dict) and "phases" in data:
+                    result = data
+            except (OSError, ValueError):
+                continue
+        return {"running": running, "result": result}
+    return await _off_loop(_read)
 
 
 @app.post("/api/v2/fleet/heartbeat")

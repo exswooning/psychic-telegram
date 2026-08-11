@@ -18,6 +18,7 @@ block the engine's writer mid-migration.
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import tempfile
@@ -601,3 +602,203 @@ class TestCloudProvisioning:
         r = cp.get("/api/v2/gcp/status")
         assert r.status_code == 200
         assert r.json()["result"] is None
+
+
+class TestFullSetup:
+    """
+    full_setup.py drives a real browser and shells to gcloud -- neither
+    exists on a headless VPS -- so this only works wherever the control
+    plane process itself has them. The endpoint's job is to launch it
+    correctly and never let the admin password leak into anything that
+    outlives the one subprocess that needs it.
+    """
+
+    def test_a_viewer_cannot_launch_it(self, cp):
+        r = cp.post("/api/v2/full-setup/start",
+                    json={"reason": "curiosity", "side": "source",
+                          "domain": "c.example.com",
+                          "admin_email": "admin@c.example.com",
+                          "admin_password": "x"}, headers=VIEWER)
+        assert r.status_code == 403
+
+    def test_password_is_required_by_the_schema(self, cp):
+        r = cp.post("/api/v2/full-setup/start",
+                    json={"reason": "no password", "side": "source",
+                          "domain": "c.example.com",
+                          "admin_email": "admin@c.example.com"}, headers=ADMIN)
+        assert r.status_code == 422
+
+    def test_the_password_is_never_recorded_in_the_audit_log(self, monkeypatch, cp):
+        """Target names the tenant being set up, never the credential."""
+        import api_server
+
+        class _FakeProc:
+            pid = 7777
+        monkeypatch.setattr(api_server.subprocess, "Popen",
+                            lambda *a, **k: _FakeProc())
+
+        cp.post("/api/v2/full-setup/start",
+                json={"reason": "fresh sandbox", "side": "source",
+                      "domain": "c.example.com",
+                      "admin_email": "admin@c.example.com",
+                      "admin_password": "hunter2-super-secret",
+                      "dry_run": True}, headers=ADMIN)
+        row = cp.get("/api/v2/actions").json()[0]
+        assert row["action"] == "full_setup.start"
+        assert row["target"] == "source:c.example.com"
+        blob = json.dumps(row)
+        assert "hunter2-super-secret" not in blob
+
+    def test_the_password_reaches_the_subprocess_env_not_the_command_line(
+            self, monkeypatch, cp):
+        """argv is visible to any process on the box via `ps`. The password
+        must travel through subprocess env=, never as a --flag.
+
+        Filtered to calls naming full_setup.py, not just "the last Popen
+        call": the app's own background tailer independently shells out to
+        `sysctl -n vm.swapusage` for memory metrics, and a blanket capture
+        of "whatever Popen was called with" is racy against that -- it
+        genuinely overwrote this assertion's dict with the wrong call.
+        """
+        import api_server
+
+        calls = []
+
+        class _FakeProc:
+            pid = 8888
+
+        def fake_popen(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return _FakeProc()
+
+        monkeypatch.setattr(api_server.subprocess, "Popen", fake_popen)
+        cp.post("/api/v2/full-setup/start",
+                json={"reason": "fresh sandbox", "side": "target",
+                      "domain": "a.example.com",
+                      "admin_email": "admin@a.example.com",
+                      "admin_password": "hunter2-super-secret",
+                      "dry_run": True}, headers=ADMIN)
+
+        ours = [(argv, kw) for argv, kw in calls if "full_setup.py" in argv]
+        assert ours, f"full_setup.py was never launched; saw {[c[0] for c in calls]}"
+        argv, kwargs = ours[0]
+        assert "hunter2-super-secret" not in argv
+        assert kwargs.get("env", {}).get("DWD_PASSWORD") == "hunter2-super-secret"
+
+    def test_seed_flag_is_ignored_for_the_target_side(self, monkeypatch, cp):
+        """--seed only ever makes sense for the source; silently accepting it
+        for target would be a confusing no-op at best.
+
+        Filtered to the full_setup.py call, not "whatever Popen saw last" --
+        the app's background tailer independently shells out to `sysctl` for
+        memory metrics, and an unfiltered capture is racy against it (this
+        exact test passed for the wrong reason before the filter: sysctl's
+        argv does not contain "--seed" either).
+        """
+        import api_server
+
+        calls = []
+
+        class _FakeProc:
+            pid = 9999
+
+        def fake_popen(argv, **kwargs):
+            calls.append(argv)
+            return _FakeProc()
+
+        monkeypatch.setattr(api_server.subprocess, "Popen", fake_popen)
+        cp.post("/api/v2/full-setup/start",
+                json={"reason": "test", "side": "target",
+                      "domain": "a.example.com",
+                      "admin_email": "admin@a.example.com",
+                      "admin_password": "x", "seed": True,
+                      "dry_run": True}, headers=ADMIN)
+        ours = [a for a in calls if "full_setup.py" in a]
+        assert ours, f"full_setup.py was never launched; saw {calls}"
+        assert "--seed" not in ours[0]
+
+    def test_status_reports_not_running_with_no_result_by_default(self, cp):
+        r = cp.get("/api/v2/full-setup/status?side=source")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["running"] is False
+        assert body["result"] is None
+
+    def test_an_unknown_side_is_rejected(self, cp):
+        r = cp.get("/api/v2/full-setup/status?side=sideways")
+        assert r.status_code == 400
+
+
+class TestSecretsNeverReachTheAuditLog:
+    """
+    _gated() logs body.model_dump() into operator_actions_log.params_json
+    UNCONDITIONALLY -- on the REFUSED path (a viewer's attempt) as well as
+    the OK/FAILED paths -- and that table is read by GET /api/v2/actions
+    with no role gate beyond being an authenticated operator. Any
+    WriteAction field holding a real credential has to be excluded at the
+    schema level, because there is exactly one call site (_gated) and
+    forgetting it there is silent: the write still succeeds, the secret
+    just sits in a permanent, viewer-readable table.
+
+    Found live: StartFullSetup.admin_password was about to do this while
+    being built; SaveAiKey.key had already been doing it since the AI
+    panel shipped (checked the deployed database -- 0 rows had actually
+    triggered it, so nothing needed scrubbing, but the bug was real).
+    """
+
+    def test_full_setup_password_never_reaches_params_json(self, monkeypatch, cp):
+        import api_server
+
+        class _FakeProc:
+            pid = 123
+        monkeypatch.setattr(api_server.subprocess, "Popen",
+                            lambda *a, **k: _FakeProc())
+        cp.post("/api/v2/full-setup/start",
+                json={"reason": "test", "side": "source",
+                      "domain": "c.example.com",
+                      "admin_email": "a@c.example.com",
+                      "admin_password": "correct-horse-battery-staple",
+                      "dry_run": True}, headers=ADMIN)
+        row = cp.get("/api/v2/actions").json()[0]
+        assert "correct-horse-battery-staple" not in json.dumps(row)
+
+    def test_ai_key_never_reaches_params_json(self, cp):
+        cp.post("/api/v2/ai/key",
+                json={"reason": "test", "key": "gsk_live_secret_value_xyz"},
+                headers=ADMIN)
+        row = cp.get("/api/v2/actions").json()[0]
+        assert "gsk_live_secret_value_xyz" not in json.dumps(row)
+
+    def test_a_refused_write_still_does_not_leak_the_password(self, cp):
+        """The REFUSED path logs body.model_dump() too -- a viewer probing
+        this endpoint must not be able to fish the admin password out of
+        their own denied attempt."""
+        cp.post("/api/v2/full-setup/start",
+                json={"reason": "curiosity", "side": "source",
+                      "domain": "c.example.com",
+                      "admin_email": "a@c.example.com",
+                      "admin_password": "should-never-appear-anywhere"},
+                headers=VIEWER)
+        row = cp.get("/api/v2/actions").json()[0]
+        assert row["outcome"] == "REFUSED"
+        assert "should-never-appear-anywhere" not in json.dumps(row)
+
+    def test_every_writeaction_with_a_secret_shaped_field_excludes_it(self):
+        """Structural guard against the next one: any field literally named
+        like a credential must opt out of serialization, not rely on
+        someone remembering at the call site."""
+        import inspect
+
+        import api_server as srv
+
+        secret_names = {"password", "admin_password", "key", "secret", "token"}
+        offenders = []
+        for name, obj in vars(srv).items():
+            if (inspect.isclass(obj) and issubclass(obj, srv.WriteAction)
+                    and obj is not srv.WriteAction):
+                for field_name, field in obj.model_fields.items():
+                    if field_name.lower() in secret_names and not field.exclude:
+                        offenders.append(f"{name}.{field_name}")
+        assert not offenders, (
+            f"secret-shaped field(s) not excluded from model_dump(): "
+            f"{offenders}")
