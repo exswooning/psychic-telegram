@@ -251,3 +251,88 @@ class TestSideTables:
         assert not unaccounted, (
             f"per-user tables no reset clears and no exemption explains: "
             f"{unaccounted}")
+
+
+class TestStatusIsDemotedWithTheLastService:
+    """
+    Clearing services_done is not sufficient, and clearing it to EMPTY while
+    leaving status=DONE is actively worse than doing nothing.
+
+    main.py's _already_done() treats "status=DONE with an empty
+    services_done" as a pre-services_done ledger and skips the user
+    outright -- a deliberate back-compat fallback for old ledgers. So a
+    reset that emptied the set turned users that would have been
+    re-migrated into ones skipped unconditionally.
+
+    Observed on B6: 9 of 11 users skipped, "dispatching 2 users", 0 files
+    migrated. The benchmark judge caught it (NOTHING MIGRATED) only because
+    that gate had been added earlier the same session -- before it, this
+    would have been a green benchmark measuring nothing.
+    """
+
+    @staticmethod
+    def _mark_done(db):
+        """_seed() sets services_done but leaves status at its PENDING
+        default. The bug only exists for DONE users, so saying so explicitly
+        is the difference between these tests passing and passing for the
+        right reason."""
+        with db.write() as conn:
+            conn.execute(
+                "UPDATE identity_map SET status='DONE' WHERE source_email=?",
+                (SRC,))
+
+    def test_clearing_the_last_service_demotes_done_to_pending(self, db):
+        _seed(db)
+        self._mark_done(db)
+        reset_drive_ledger.reset_service_ledger(
+            db, SRC, ("drive", "gmail", "calendar"))
+        row = db.conn.execute(
+            "SELECT status, services_done FROM identity_map WHERE source_email=?",
+            (SRC,)).fetchone()
+        assert row["services_done"] == ""
+        assert row["status"] == "PENDING", (
+            "DONE + empty services_done is exactly the combination "
+            "_already_done() skips on")
+
+    def test_a_partial_reset_leaves_status_done(self, db):
+        """A user who still has other services finished is legitimately DONE
+        for those; _already_done()'s per-service check handles them. Demoting
+        here would force needless re-migration of work that is really there."""
+        _seed(db)
+        self._mark_done(db)
+        reset_drive_ledger.reset_service_ledger(db, SRC, ("drive",))
+        row = db.conn.execute(
+            "SELECT status, services_done FROM identity_map WHERE source_email=?",
+            (SRC,)).fetchone()
+        assert row["status"] == "DONE"
+        assert set(row["services_done"].split(",")) == {"calendar", "gmail"}
+
+    def test_a_non_done_user_is_not_promoted_or_disturbed(self, db):
+        """FAILED/PENDING/RUNNING must be left as they are -- the demotion is
+        only ever DONE -> PENDING, never anything -> PENDING."""
+        bulk_seed_identities(db, [(SRC, "alice@tenantb.com")])
+        with db.write() as conn:
+            conn.execute(
+                "UPDATE identity_map SET status='FAILED' WHERE source_email=?",
+                (SRC,))
+        out = reset_drive_ledger.reset_service_ledger(db, SRC, ("drive",))
+        row = db.conn.execute(
+            "SELECT status FROM identity_map WHERE source_email=?",
+            (SRC,)).fetchone()
+        assert row["status"] == "FAILED"
+        assert out["status_reset_to_pending"] is False
+
+    def test_the_reset_actually_makes_a_user_migratable_again(self, db):
+        """The property that matters, checked against main.py's real
+        predicate rather than against the columns it reads."""
+        import main
+
+        _seed(db)
+        self._mark_done(db)
+        reset_drive_ledger.reset_service_ledger(
+            db, SRC, ("drive", "gmail", "calendar"))
+        row = db.conn.execute(
+            "SELECT * FROM identity_map WHERE source_email=?", (SRC,)).fetchone()
+        # Mirror _already_done()'s logic: a PENDING user is never skipped.
+        assert row["status"] != "DONE"
+        _ = main

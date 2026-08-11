@@ -128,13 +128,46 @@ def reset_service_ledger(db: MigrationDB, source_email: str,
         have.discard("")
         cleared = sorted(have & set(services))
         have -= set(services)
-        conn.execute(
-            "UPDATE identity_map SET services_done=? WHERE source_email=?",
-            (",".join(sorted(have)), source_email))
+
+        # Clearing services_done is not enough on its own, and clearing it
+        # to EMPTY actively makes things worse.
+        #
+        # main.py's _already_done() treats "status=DONE with an empty
+        # services_done" as a pre-services_done ledger and skips the user
+        # outright -- a deliberate back-compat fallback. So a reset that
+        # emptied the set while leaving status=DONE turned a user that
+        # would have been re-migrated into one that is skipped
+        # unconditionally. Observed exactly once, on B6: 9 of 11 users
+        # skipped, "dispatching 2 users", 0 files, and the benchmark
+        # correctly failed with NOTHING MIGRATED.
+        #
+        # Only demote when nothing is left. A user who still has other
+        # services done is legitimately DONE for those, and _already_done's
+        # per-service check handles them correctly.
+        status_reset = False
+        if not have:
+            # rowcount, not conn.total_changes -- the latter is cumulative
+            # for the whole connection and would report True every time.
+            cur = conn.execute(
+                "UPDATE identity_map SET services_done=?, status=? "
+                "WHERE source_email=? AND status='DONE'",
+                ("", "PENDING", source_email))
+            status_reset = cur.rowcount > 0
+            if not status_reset:
+                # Not DONE (PENDING/FAILED/RUNNING): leave status alone, but
+                # still clear the service set.
+                conn.execute(
+                    "UPDATE identity_map SET services_done=? WHERE source_email=?",
+                    ("", source_email))
+        else:
+            conn.execute(
+                "UPDATE identity_map SET services_done=? WHERE source_email=?",
+                (",".join(sorted(have)), source_email))
     return {"user": source_email, "id_mapping_rows": mapping_deleted,
             "audit_log_rows": audit_deleted,
             "side_table_rows": side_deleted,
             "cleared_services": cleared,
+            "status_reset_to_pending": status_reset,
             # Kept so the original Drive-only callers keep reading the same
             # key they always did.
             "had_drive_marked_done": "drive" in cleared}
@@ -199,8 +232,11 @@ def main(argv: list[str] | None = None) -> int:
                if result["cleared_services"] else "")
         side = (f", {result['side_table_rows']} label-map row(s)"
                 if result["side_table_rows"] else "")
+        demoted = (" [status DONE -> PENDING]"
+                   if result.get("status_reset_to_pending") else "")
         print(f"  {result['user']}: {result['id_mapping_rows']} mapping row(s), "
-              f"{result['audit_log_rows']} audit row(s){side} cleared{was}")
+              f"{result['audit_log_rows']} audit row(s){side} cleared"
+              f"{was}{demoted}")
     return 0
 
 
