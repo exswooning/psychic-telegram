@@ -1762,3 +1762,72 @@ Two untracked local files were NOT folded into this:
   Whoever wrote it: the failure was in the expect-script tempfile path in
   vps_connect.py, worth a look before it's committed.
 
+
+---
+
+## 2026-08-11 — Claude — new GCP projects + service accounts (People/Tasks unblocked)
+
+The old SAs (`workspace-migrator-503709` source, `migrator-501211` target)
+were owned by nobody `info@c.anupam-poudel.com.np` had IAM on — couldn't
+read *or* write `serviceusage`, couldn't enable People/Tasks, couldn't even
+`gcloud projects describe` them. User authorized replacing them outright
+rather than continuing to work around it.
+
+**New projects, under the real org** (`c.anupam-poudel.com.np`, org id
+`35602275582` — found via `gcloud organizations list`, which is why project
+creation worked at all this time):
+
+| | project | client_id | SA |
+|---|---|---|---|
+| source | `wsmig-src-30428` | `105525180282428106013` | `source-sa@wsmig-src-30428.iam.gserviceaccount.com` |
+| target | `wsmig-tgt-30557` | `105936740909777966956` | `target-sa@wsmig-tgt-30557.iam.gserviceaccount.com` |
+
+All 9 APIs in `ensure_apis.REQUIRED_APIS` enabled on both (individually —
+`gcloud services enable <9 apis at once>` failed with
+`SERVICE_CONFIG_NOT_FOUND_OR_PERMISSION_DENIED`, looping one at a time
+worked fine; **setup.sh's batched enable call may hit the same wall on a
+fresh org and should probably loop too**, not verified either way).
+
+**Hit and cleared `iam.managed.disableServiceAccountKeyCreation`**, a
+custom org policy blocking `gcloud iam service-accounts keys create`
+outright (`CUSTOM_ORG_POLICY_VIOLATION`, no key file produced, empty
+output). Overridden per-project via `gcloud org-policies set-policy` with
+`enforce: false` on `iam.managed.disableServiceAccountKeyCreation` for
+just these two projects — org-wide default untouched. Needed
+`orgpolicy.googleapis.com` enabled on *some* project first (gcloud's
+quota-project chicken-and-egg; used the new source project once it
+existed). **setup.sh does not handle this today** — a keyless org would
+need this same override or its existing `--keyless` flag, worth wiring
+the override in automatically as a fallback when key creation fails with
+this specific reason.
+
+Also granted `roles/serviceusage.serviceUsageAdmin` to both SAs on their
+own projects, so `ensure_apis.py --enable` now genuinely self-heals
+instead of reporting UNKNOWN — confirmed live, `ensure_apis.py --tenant
+both` reports 9/9 OK on both projects post-cutover, not UNKNOWN.
+
+**DWD granted via dwd_helper.py** (the automation from the previous
+session) for both new client IDs — source 17/17, target 13/13, both
+independently re-verified with `verify_scopes.py` after the fact.
+
+**The actual fix, verified directly**: minted a People-scoped and a
+Tasks-scoped token against both new SAs and called `people.connections.list`
+/ `tasklists.list` for real. All four succeeded. This is the thing that has
+been broken since the start of this session — SERVICE_DISABLED on
+project 881431668245 (the old source project's number) — and it is now
+fixed at the root rather than routed around.
+
+**Keys cut over**: old keys backed up to
+`keys/{source,target}-sa.OLD-20260811.bak` (gitignored, local only, never
+committed — confirmed `keys/` is in .gitignore before doing any of this).
+New keys deployed to the VPS at the same `keys/source-sa.json` /
+`keys/target-sa.json` paths env.sh already points at, so no config change
+needed anywhere. `main.py preflight` on the VPS: 9/11 OK on the new
+credentials, the 2 failures being the pre-existing `3@` (genuinely absent
+from source, 404) and `erin@` (exists, not suspended on either tenant,
+but Gmail says "Mail service not enabled" — license, not a credentials
+problem, unrelated to this cutover).
+
+No source changes from this entry — purely infrastructure. `ensure_apis.py`
+(added last session) is what proved the fix rather than another live
+6-API-scope guess-and-check.
