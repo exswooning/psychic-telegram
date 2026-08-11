@@ -1729,3 +1729,36 @@ Password used for the live grant is in this session's history — please
 rotate it once the sandbox is stable.
 
 dwd_helper.py, verify_scopes.py, seed_sandbox.py, tests all committed.
+
+---
+
+## 2026-08-11 — Claude — three-way reconciliation (local / GitHub / VPS)
+
+User asked to make the VPS, local checkout and GitHub match. They did not,
+subtly: DEPLOYED_COMMIT on the VPS said `5239408-dirty` while local HEAD
+was `fdba0f0` (the env.sh-loading fix), because that fix was pushed to the
+VPS via a direct `scp` of the two changed files rather than through
+`sync_vps.sh` -- so the files were actually current, only the stamp lied.
+`tests/test_control_plane.py` genuinely was stale on the VPS (the new
+LoadsEnv tests were never copied). Ran a real `rsync --dry-run -c`
+(checksum, not size+mtime) to verify byte-for-byte before trusting
+anything, then `./sync_vps.sh` + a control-plane restart. Re-verified with
+the same checksum diff afterward: empty output, confirmed identical.
+
+Local vs GitHub: already matched exactly (`git log HEAD..origin` and the
+reverse both empty).
+
+Two untracked local files were NOT folded into this:
+- `.claude/` -- local Claude Code tool permission cache, not project code.
+  Added to .gitignore rather than committed.
+- `vps_connect.py` (273 lines) -- a local-only tunnel launcher with a
+  password-entry web UI, not on the VPS or in git. Not authored by me this
+  session; its own first live run failed for the user
+  ("tunnel process exited immediately; see .../tunnel.log", an `expect`
+  temp script that never materialized) while I was working. Left exactly
+  as found -- not committed, not fixed, not deleted -- since committing
+  untested code I did not write, right after it visibly failed, would make
+  "the three match" true in name while shipping a known-broken script.
+  Whoever wrote it: the failure was in the expect-script tempfile path in
+  vps_connect.py, worth a look before it's committed.
+
