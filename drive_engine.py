@@ -1291,7 +1291,18 @@ class DriveMigrator:
             return 0
 
         applied = 0
-        for idx, (_, audit_key) in enumerate(requests):
+        # `requests` holds (audit_key, request) -- unpack it that way round.
+        # This loop had it reversed, binding the HttpRequest object into
+        # audit_log's item_id and raising sqlite3.InterfaceError ("Error
+        # binding parameter 1") the instant any batched grant failed. So a
+        # single rejected permission did not just go unrecorded: it killed
+        # the whole user's migration from inside the error handler.
+        #
+        # Invisible until now because it only fires when a grant actually
+        # fails, and no corpus had produced one -- the first shared-drive
+        # run did (teamDriveMembershipRequired), and migrated 0 files as a
+        # result.
+        for idx, (audit_key, _req) in enumerate(requests):
             exc = outcomes.get(str(idx))
             if exc is not None:
                 self.db.log_audit(self.source_user, audit_key, "acl", "FAILED", str(exc))

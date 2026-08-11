@@ -1623,3 +1623,60 @@ class TestWritePacing:
         s = Settings()
         assert s.drive_read_qps > s.drive_write_qps
         assert s.drive_read_qps == 12.0
+
+
+def test_a_failed_batched_grant_is_recorded_not_fatal(
+        migrator, auth, db, settings, monkeypatch):
+    """A rejected grant inside a batch must be logged, not crash the user.
+
+    `requests` holds (audit_key, request); the failure loop unpacked it as
+    (_, audit_key), so audit_key was actually the HttpRequest object. Passing
+    that to log_audit raised sqlite3.InterfaceError ("Error binding parameter
+    1") from inside the error handler -- so one rejected permission did not
+    merely go unrecorded, it aborted the whole user's migration.
+
+    Latent until a corpus produced a failing grant. Shared drives were the
+    first: `teamDriveMembershipRequired` on every folder, and the first real
+    run of shared_drives.py copied 0 files while reporting the sqlite error
+    as its only symptom.
+    """
+    from db import bulk_seed_identities
+
+    bulk_seed_identities(db, [("bob@tenanta.com", "bob@tenantb.com"),
+                              ("carol@tenanta.com", "carol@tenantb.com")])
+    src = auth.source_drive(SRC_USER)
+    fid = src.add_binary("shared.pdf")
+    # Two grants: a chunk of one takes the per-call path, which never had
+    # the reversed-unpacking bug.
+    src.add_permission(fid, "user", "reader", email="bob@tenanta.com")
+    src.add_permission(fid, "user", "writer", email="carol@tenanta.com")
+    auth.target_drive(TGT_USER)._http = object()
+
+    class RejectingBatch:
+        def __init__(self, callback=None, batch_uri=None, http=None):
+            self._requests = []
+
+        def add(self, request, request_id=None, callback=None):
+            self._requests.append((request_id, callback))
+
+        def execute(self, **kw):
+            # Google rejected every grant in the chunk, individually.
+            for request_id, callback in self._requests:
+                callback(request_id, None,
+                         Exception("403 teamDriveMembershipRequired"))
+
+    monkeypatch.setattr("googleapiclient.http.BatchHttpRequest", RejectingBatch)
+    settings.acl_batch_size = 20
+
+    migrator.run()   # must not raise
+
+    row = db.conn.execute(
+        "SELECT item_id, status FROM audit_log "
+        "WHERE source_user=? AND item_type='acl' AND status='FAILED'",
+        (SRC_USER,)).fetchone()
+    assert row is not None, "a rejected grant left no record"
+    assert isinstance(row["item_id"], str)
+    assert row["item_id"].startswith(fid), (
+        f"item_id should identify the file/grantee, got {row['item_id']!r}")
+    # The file itself still copied -- an ACL failure is not a file failure.
+    assert db.get_audit(SRC_USER, fid, "file")["status"] == "SUCCESS"
