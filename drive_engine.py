@@ -1129,12 +1129,30 @@ class DriveMigrator:
             # nothing for `report` or resolve_failures to act on, so a file
             # whose sharing never transferred looked identical to one with no
             # sharing at all.
-            log.warning("[%s] could not list permissions on %s: %s",
-                       self.source_user, source_id, exc)
+            #
+            # But "denied" is not "failed". A user who is merely a *reader*
+            # on someone else's file cannot enumerate its permissions --
+            # Google returns 403 insufficientFilePermissions, and that is
+            # correct behaviour, not an error. It happens on every
+            # externally-owned shared-with-me file, which MIGRATE_EXTERNAL_
+            # SHARES copies precisely because nobody inside the org owns
+            # them. B6 logged 18 of these against a run that was otherwise
+            # perfect, and a clean migration that reports 18 failures is how
+            # operators learn to ignore the failure count -- the same
+            # desensitising this project has already been bitten by.
+            #
+            # There is genuinely nothing to preserve: grants that cannot be
+            # read cannot be recreated, and the file itself copied fine.
+            denied = "insufficientFilePermissions" in str(exc)
+            status = "SKIPPED_NO_PERMISSION" if denied else "FAILED"
+            log.log(logging.INFO if denied else logging.WARNING,
+                    "[%s] could not list permissions on %s: %s",
+                    self.source_user, source_id, exc)
             self.db.log_audit(self.source_user, f"{source_id}:(list-failed)",
-                              "acl", "FAILED",
+                              "acl", status,
                               f"could not read source permissions: {exc}")
-            self._bump("acl_failed")
+            if not denied:
+                self._bump("acl_failed")
             return 0
 
         applied = 0

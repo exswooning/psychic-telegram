@@ -1109,6 +1109,39 @@ def test_unreadable_source_acl_is_recorded_not_just_warned(migrator, auth, db):
     assert migrator.stats["acl_failed"] >= 1
 
 
+def test_unreadable_acls_are_skipped_not_failed_when_merely_denied(migrator, db):
+    """403 insufficientFilePermissions is Google working correctly, not an error.
+
+    A user who is only a *reader* on someone else's file cannot enumerate its
+    permissions. That happens on every externally-owned shared-with-me file,
+    which MIGRATE_EXTERNAL_SHARES copies precisely because nobody inside the
+    org owns them -- so B6 logged 18 of these against an otherwise perfect
+    run. A clean migration reporting 18 failures is how operators learn to
+    ignore the failure count, which is the exact desensitising that let B4's
+    20,714 silently-404ing grants go unnoticed.
+
+    Still recorded, so nothing vanishes: SKIPPED_NO_PERMISSION, not silence.
+    """
+    class Denied:
+        def permissions(self):
+            return self
+
+        def list(self, **kw):
+            raise RuntimeError(
+                "HTTP 403 (insufficientFilePermissions): The user does not "
+                "have sufficient permissions for this file")
+
+    migrator.src = Denied()
+    assert migrator._sync_acls("src-file", "tgt-file") == 0
+
+    row = db.conn.execute(
+        "SELECT status FROM audit_log WHERE source_user=? AND item_type='acl'",
+        ("alice@tenanta.com",)).fetchone()
+    assert row["status"] == "SKIPPED_NO_PERMISSION"
+    assert migrator.stats["acl_failed"] == 0, (
+        "a permission we were never allowed to read is not a lost permission")
+
+
 def test_a_dropped_comment_reply_is_recorded(migrator):
     """A reply that could not be recreated simply vanished, so the thread came
     out shorter on the target with nothing anywhere saying so."""
