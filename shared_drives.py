@@ -216,8 +216,16 @@ class SharedDriveMigrator:
         try:
             result = engine.run()
         except Exception as exc:  # noqa: BLE001 - one drive must not lose the rest
+            # log.exception, not str(exc). The first real run of this module
+            # failed with "Error binding parameter 1 - probably unsupported
+            # type" -- a sqlite3 InterfaceError raised somewhere inside a
+            # full tree walk -- and the one-line message recorded here was
+            # the only trace of it. A bare str() on an exception from
+            # arbitrarily deep code names the symptom and hides the site,
+            # which turns a five-minute fix into a bisect.
+            log.exception("[%s] shared drive %r contents failed", name, src_id)
             self.db.log_audit(self.admin_user, src_id, "shared_drive",
-                              "FAILED", f"contents: {exc}")
+                              "FAILED", f"contents: {type(exc).__name__}: {exc}")
             self.stats["failed"] += 1
             return
         self.stats["files"] += result.get("files", 0)

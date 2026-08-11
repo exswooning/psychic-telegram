@@ -108,3 +108,43 @@ class TestReuseOfTheDriveEngine:
         # No files.get(fileId='root') on either side: a shared drive id is
         # already its own root folder id.
         assert engine.src.call_count("files.get") == 0
+
+
+class TestTheEngineActuallyWalksAsharedDrive:
+    """
+    TestReuseOfTheDriveEngine above stubs out _walk, so it proves the roots
+    are substituted and nothing more -- no test in this suite had ever run
+    the real tree walk with `shared_drive` set.
+
+    That is how the first live run of this module reached production
+    migrating 0 files: it created both target drives and all 10 memberships,
+    then died inside engine.run() with a sqlite3 InterfaceError ("Error
+    binding parameter 1 - probably unsupported type"), which _copy_contents
+    recorded as a one-line string with the traceback discarded.
+    """
+
+    def test_files_in_a_shared_drive_are_copied(self, auth, db, settings,
+                                                identity, quota):
+        import drive_engine
+
+        src = auth.source_drive(SRC_USER)
+        drive_id = "src-drive-1"
+        src.shared_drives[drive_id] = {"id": drive_id, "name": "Engineering"}
+        folder = src.add_folder("Specs", parent=drive_id)
+        src.add_binary("spec.pdf", parent=folder)
+        src.add_binary("notes.pdf", parent=drive_id)
+
+        tgt = auth.target_drive(TGT_USER)
+        tgt_drive = "tgt-drive-1"
+        tgt.shared_drives[tgt_drive] = {"id": tgt_drive, "name": "Engineering"}
+
+        engine = drive_engine.DriveMigrator(auth, db, settings, SRC_USER,
+                                            TGT_USER, quota)
+        engine.shared_drive = drive_id
+        engine.target_drive_id = tgt_drive
+
+        result = engine.run()
+
+        assert result["failed"] == 0, f"walk failed: {result}"
+        assert result["files"] == 2, f"expected both files, got {result}"
+        assert result["folders"] == 1
