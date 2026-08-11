@@ -54,3 +54,7 @@ env.sh
 # Written by sync_vps.sh on the deploy target so benchmark_run.py can
 # report what commit a run actually measured. Never committed.
 /DEPLOYED_COMMIT
+
+# Claude Code local tool state (permission cache) -- machine-specific,
+# not project source.
+/.claude/
