@@ -136,26 +136,34 @@ PROBES = {
 # ======================================================================
 # Extra live counts inventory.py does not already gather
 # ======================================================================
-def _count_shared_drives(auth: AuthManager, settings: Settings, user: str) -> int:
-    """Genuine source shared drives, excluding our own staging drives.
+def _shared_drive_ids(auth: AuthManager, settings: Settings, user: str) -> set[str]:
+    """IDs of genuine source shared drives this user can see.
 
-    server_side mode creates a `MIGRATION-STAGING-<user>` shared drive in the
-    target and adds the *source* user as an organizer, so it comes back in
-    that user's drives().list() -- and one left behind by an interrupted run
-    (teardown deliberately refuses to delete a non-empty staging drive) stays
-    there indefinitely. Counted naively, this reported "Shared Drives:
-    covered" for a tenant with no shared drives at all, which is the single
-    most misleading thing a coverage report can do: claim a path is exercised
-    when what it actually found was the migrator's own litter.
+    Returns IDs, not a count, because a shared drive is a TENANT-level
+    object: every member sees the same drive, so summing per-user counts
+    reports 2 drives shared with 5 people as "10". The caller unions these
+    across users instead. Per-user summing is right for My Drive files
+    (each belongs to exactly one owner) and wrong for anything shared, and
+    conflating the two is how a coverage report ends up quoting a number
+    five times larger than the thing it is counting.
+
+    Staging drives are excluded: server_side mode creates a
+    `MIGRATION-STAGING-<user>` drive in the target and adds the *source*
+    user as an organizer, so it comes back in that user's drives().list().
+    One left behind by an interrupted run (teardown refuses to delete a
+    non-empty staging drive) would otherwise report "Shared Drives:
+    covered" for a tenant that has none -- claiming a path is exercised
+    when what was found is the migrator's own litter.
     """
     prefix = (getattr(settings, "staging_drive_prefix", "") or "").lower()
     try:
         drives = auth.source_drive(user).drives().list(
             pageSize=100, fields="drives(id,name)").execute().get("drives", [])
     except Exception:      # noqa: BLE001 - absence is the answer, not an error
-        return 0
-    return sum(1 for d in drives
-               if not (prefix and (d.get("name") or "").lower().startswith(prefix)))
+        return set()
+    return {d["id"] for d in drives
+            if d.get("id")
+            and not (prefix and (d.get("name") or "").lower().startswith(prefix))}
 
 
 def _count_external_shared_with_me(auth: AuthManager, settings: Settings,
@@ -230,6 +238,10 @@ def collect(auth: AuthManager, settings: Settings, users: list[str]) -> dict:
                   "shared_externally": 0, "shared_with_anyone": 0},
         "gmail": {"messages": 0, "labels": 0, "drafts": 0},
         "calendar": {"calendars": 0, "events": 0},
+        # A set while collecting, collapsed to a count at the end: shared
+        # drives are tenant-level, so the union across users is the real
+        # number and the per-user sum is a multiple of it.
+        "_shared_drive_ids": set(),
         "shared_drives": 0,
         "external_shared_with_me": 0,
         "contacts": None,
@@ -278,7 +290,7 @@ def collect(auth: AuthManager, settings: Settings, users: list[str]) -> dict:
             totals["chat"] = ((totals["chat"] or 0)
                               + ch.get("spaces", 0) + ch.get("messages", 0))
 
-        totals["shared_drives"] += _count_shared_drives(auth, settings, user)
+        totals["_shared_drive_ids"] |= _shared_drive_ids(auth, settings, user)
         totals["external_shared_with_me"] += _count_external_shared_with_me(
             auth, settings, user)
         for key, fn in (("contacts", _count_contacts), ("tasks", _count_tasks)):
@@ -288,6 +300,9 @@ def collect(auth: AuthManager, settings: Settings, users: list[str]) -> dict:
 
         totals["perUser"][user] = row
 
+    # Collapse the deduplicated set into the count the probes read. A set is
+    # also not JSON-serialisable, so it must not survive into --json output.
+    totals["shared_drives"] = len(totals.pop("_shared_drive_ids"))
     return totals
 
 

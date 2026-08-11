@@ -94,15 +94,28 @@ class TestStagingDrivesAreNotCoverage:
         staging_drive_prefix = "MIGRATION-STAGING"
 
     def test_staging_drives_do_not_count(self):
-        n = cov._count_shared_drives(
+        ids = cov._shared_drive_ids(
             self._Auth(["MIGRATION-STAGING-alice"]), self._Settings(), "alice@s")
-        assert n == 0
+        assert ids == set()
 
     def test_real_shared_drives_still_count(self):
-        n = cov._count_shared_drives(
+        ids = cov._shared_drive_ids(
             self._Auth(["MIGRATION-STAGING-alice", "Engineering", "Legal"]),
             self._Settings(), "alice@s")
-        assert n == 2
+        assert ids == {"Engineering", "Legal"}
+
+    def test_a_drive_seen_by_many_members_is_counted_once(self):
+        """A shared drive is a TENANT-level object -- every member's
+        drives().list() returns the same one. Summing per user reported the
+        2 seeded drives as 10 (2 drives x 5 members), which is the same
+        false-precision failure as counting staging drives as coverage:
+        the verdict was right and the number was fiction.
+        """
+        auth = self._Auth(["Engineering", "Legal"])
+        seen: set[str] = set()
+        for user in ("alice@s", "bob@s", "carol@s", "dave@s", "erin@s"):
+            seen |= cov._shared_drive_ids(auth, self._Settings(), user)
+        assert len(seen) == 2
 
 
 class TestVerdicts:
