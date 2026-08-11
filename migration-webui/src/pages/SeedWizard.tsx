@@ -11,6 +11,9 @@ import {
 } from '@/api/client'
 import JobRunner from '@/components/JobRunner'
 import JobProgress from '@/components/JobProgress'
+import CloudSetup from '@/components/CloudSetup'
+import DwdSetup from '@/components/DwdSetup'
+import { DwdStatus, fetchDwdStatus } from '@/api/controlPlane'
 
 /**
  * Sandbox rehearsal tools: seed a throwaway source tenant with test data,
@@ -89,10 +92,28 @@ const SeedWizard: React.FC = () => {
         <Button size="small" startIcon={<RefreshIcon />} onClick={refresh}>Refresh</Button>
       </Box>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-        Rehearsal tools for test tenants only -- separate from the Setup
-        Wizard's real, one-time migration setup. None of this touches a
-        production tenant's own data.
+        The whole path for a fresh sandbox, in order: Cloud project and keys,
+        then delegation, then users and data. Rehearsal tools for test
+        tenants only -- none of this touches a production tenant's own data.
       </Typography>
+
+      <StepHeading n={1} title="Cloud project, APIs and service account keys"
+                   note="Creates both GCP projects, enables every API the
+                         engines use, and downloads the two keys. Needs gcloud
+                         on the machine serving this page — it refuses
+                         cleanly rather than half-running if that is missing." />
+      <CloudSetup />
+
+      <Box sx={{ mt: 3 }} />
+      <StepHeading n={2} title="Domain-wide delegation"
+                   note="Authorises the client IDs from step 1 on each tenant.
+                         Verified by minting a token per scope, so green here
+                         means it genuinely works." />
+      <DwdSetup />
+
+      <Box sx={{ mt: 3 }} />
+      <StepHeading n={3} title="Create users and seed data"
+                   note="Everything below writes into the SOURCE tenant." />
 
       <SeedScopesCard dwd={dwd} />
 
@@ -132,12 +153,14 @@ const SeedWizard: React.FC = () => {
         </Card>
       )}
 
-      <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 2 }}>
-        <CardContent sx={{ p: 3 }}>
-          <Typography variant="h6" sx={{ fontWeight: 600, mb: 1.5 }}>Seed the source tenant</Typography>
-          <SeedStep />
-        </CardContent>
-      </Card>
+      <DelegationGate>
+        <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 2 }}>
+          <CardContent sx={{ p: 3 }}>
+            <Typography variant="h6" sx={{ fontWeight: 600, mb: 1.5 }}>Seed the source tenant</Typography>
+            <SeedStep />
+          </CardContent>
+        </Card>
+      </DelegationGate>
 
       <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>
         <CardContent sx={{ p: 3 }}>
@@ -146,6 +169,82 @@ const SeedWizard: React.FC = () => {
         </CardContent>
       </Card>
     </Box>
+  )
+}
+
+/** A numbered step marker. The order is not cosmetic: seeding needs WRITE
+ *  scopes on the source (gmail.insert, contacts, tasks), which only exist
+ *  after steps 1 and 2. Run out of order and seed_contacts/seed_tasks fail
+ *  per user, swallow the error into a `note`, and the run reports success
+ *  having created nothing -- which is exactly how contacts and tasks stayed
+ *  at zero here across several full seeding runs. */
+const StepHeading: React.FC<{ n: number; title: string; note: string }> =
+  ({ n, title, note }) => (
+    <Box sx={{ mb: 1 }}>
+      <Stack direction="row" alignItems="center" spacing={1.5}>
+        <Box sx={{
+          width: 26, height: 26, borderRadius: '50%', flexShrink: 0,
+          bgcolor: 'primary.main', color: 'primary.contrastText',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          fontSize: 13, fontWeight: 700,
+        }}>{n}</Box>
+        <Typography variant="h6" sx={{ fontWeight: 600 }}>{title}</Typography>
+      </Stack>
+      <Typography variant="caption" color="text.secondary"
+                  sx={{ display: 'block', ml: 5 }}>
+        {note}
+      </Typography>
+    </Box>
+  )
+
+/**
+ * Blocks the seed controls until delegation is actually in place.
+ *
+ * This is the one gate worth enforcing rather than documenting. Seeding
+ * with incomplete write scopes does not fail loudly -- seed_contacts and
+ * seed_tasks catch their own exception into a `note` field, so the run
+ * prints a summary, exits zero, and produces zero contacts and zero tasks.
+ * That shape cost this project several full seeding runs before anyone
+ * noticed the two zeroes in the totals.
+ */
+const DelegationGate: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [source, setSource] = useState<DwdStatus | null>(null)
+  const [checked, setChecked] = useState(false)
+
+  useEffect(() => {
+    fetchDwdStatus('source')
+      .then(setSource)
+      .catch(() => {})
+      .finally(() => setChecked(true))
+  }, [])
+
+  const missing = source?.checked ? (source.missing?.length ?? 0) : 0
+  // Only block on a *confirmed* gap. If the control plane is unreachable or
+  // the check could not run, fall through rather than locking an operator
+  // out of seeding over a failed status call.
+  const blocked = !!source?.checked && missing > 0
+
+  return (
+    <>
+      {blocked && (
+        <Alert severity="error" sx={{ mb: 2 }}>
+          <strong>{missing} scope(s) still missing on the source.</strong>{' '}
+          Seeding needs write access (gmail.insert, contacts, tasks). Without
+          it the seeder does not fail — it writes nothing and still reports
+          success. Finish step 2 first.
+        </Alert>
+      )}
+      {checked && !source?.checked && (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          Could not verify delegation ({source?.error ?? 'control plane unreachable'}).
+          Seeding is still available, but check step 2 if contacts or tasks
+          come back as zero.
+        </Alert>
+      )}
+      <Box sx={{ opacity: blocked ? 0.5 : 1, pointerEvents: blocked ? 'none' : 'auto' }}>
+        {children}
+      </Box>
+    </>
   )
 }
 
