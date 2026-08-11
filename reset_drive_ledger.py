@@ -221,6 +221,37 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(f"Clearing {'/'.join(services)} resume state for {len(rows)} user(s):")
+
+    # Resetting the ledger without wiping the same service on the target
+    # DUPLICATES data on the next run, silently.
+    #
+    # The engine answers "have I already migrated this?" from the ledger, not
+    # by asking the target. gmail_engine's dedup guard is deliberately
+    # retry-only ("nothing here changes the first attempt"), so a fresh
+    # insert of a message that is already on the target simply inserts it
+    # again. Measured here after several reset-and-rerun cycles: alice's
+    # target held 938 messages against a 325-message source, with 360
+    # Message-IDs appearing more than once and one appearing 19 times.
+    #
+    # benchmark_run.py gets this right because it always wipes and resets
+    # together. Anyone calling this script by hand has to be told, because
+    # nothing about the outcome looks wrong until you count.
+    reversible = [s for s in services if s in ("drive", "gmail", "calendar", "chat")]
+    if reversible:
+        print()
+        print("  NOTE: this clears the record of what was migrated, not the "
+              "data itself.")
+        print(f"  If {'/'.join(reversible)} data is still on the TARGET, the "
+              f"next run will insert")
+        print("  it a second time -- the engine dedups from this ledger, not "
+              "by asking the target")
+        print("  (gmail's own duplicate check only fires on retry, never on a "
+              "first insert).")
+        print("  Wipe the target for the same services first:")
+        print(f"    python3 reset_target.py --confirm-domain <TARGET> "
+              f"--services {','.join(reversible)}")
+        print()
+
     if not args.yes:
         if input("Type the source domain to confirm: ").strip() != settings.source_domain:
             print("Aborted.")

@@ -336,3 +336,45 @@ class TestStatusIsDemotedWithTheLastService:
         # Mirror _already_done()'s logic: a PENDING user is never skipped.
         assert row["status"] != "DONE"
         _ = main
+
+
+class TestDuplicationWarning:
+    """
+    Resetting the ledger without wiping the target duplicates data on the
+    next run, and nothing about the result looks wrong until you count.
+
+    The engine answers "already migrated?" from the ledger, never by asking
+    the target -- gmail_engine's dedup guard is retry-only by design
+    ("nothing here changes the first attempt"). Measured live after several
+    reset-and-rerun cycles: alice's target held 938 messages against a
+    325-message source, 360 Message-IDs appearing more than once, one
+    appearing 19 times.
+
+    benchmark_run.py is safe because it always wipes and resets together.
+    A human running this script by hand gets no such pairing, so the script
+    has to say so.
+    """
+
+    def test_the_warning_names_the_wipe_command(self, monkeypatch, settings, db, capsys):
+        bulk_seed_identities(db, [(SRC, "alice@tenantb.com")])
+        monkeypatch.setattr(reset_drive_ledger, "Settings", lambda: settings)
+        reset_drive_ledger.main(
+            ["--confirm-domain", settings.source_domain, "--yes",
+             "--services", "gmail"])
+        out = capsys.readouterr().out
+        assert "insert" in out and "second time" in out
+        assert "reset_target.py" in out
+        assert "--services gmail" in out
+
+    def test_the_warning_lists_only_the_services_being_reset(
+            self, monkeypatch, settings, db, capsys):
+        """Naming services the operator did not ask for would send them to
+        wipe target data that is still wanted."""
+        bulk_seed_identities(db, [(SRC, "alice@tenantb.com")])
+        monkeypatch.setattr(reset_drive_ledger, "Settings", lambda: settings)
+        reset_drive_ledger.main(
+            ["--confirm-domain", settings.source_domain, "--yes",
+             "--services", "drive"])
+        out = capsys.readouterr().out
+        assert "--services drive" in out
+        assert "gmail" not in out.split("reset_target.py")[1]
