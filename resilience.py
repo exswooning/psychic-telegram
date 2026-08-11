@@ -25,6 +25,7 @@ import functools
 import json
 import logging
 import random
+import re
 import threading
 import time
 from typing import Callable, TypeVar
@@ -119,6 +120,35 @@ def _status_of(exc: HttpError) -> int:
         return int(exc.resp.status)
     except Exception:  # noqa: BLE001
         return 0
+
+
+def _service_disabled_hint(exc: Exception, reason: str) -> str:
+    """Turn Google's SERVICE_DISABLED wall of text into the one line that fixes it.
+
+    Google's own message is technically complete and practically useless: it
+    quotes a project *number* ("project 881431668245"), which nobody
+    recognises, buries the API name in a URL, and says nothing about the
+    distinction that actually matters here -- that this is API enablement in
+    the Cloud console, NOT a domain-wide delegation scope. That confusion cost
+    this project a full seeding run: DWD showed 17/17 scopes live on the
+    source while People and Tasks were never enabled on the project, so
+    contacts and tasks produced nothing and the run reported success.
+
+    Best-effort and additive: if the shape of the error changes, the original
+    message is still there in full.
+    """
+    if reason not in ("SERVICE_DISABLED", "accessNotConfigured"):
+        return ""
+    blob = str(exc)
+    api = re.search(r"([a-z0-9-]+\.googleapis\.com)", blob)
+    proj = re.search(r"projects?[/ =]([A-Za-z0-9-]+)", blob)
+    api_name = api.group(1) if api else "the API"
+    project = proj.group(1) if proj else "<project>"
+    return (f"\n  This is Cloud API ENABLEMENT, not a DWD scope -- a granted "
+            f"scope does not switch the API on.\n"
+            f"  Fix:  gcloud services enable {api_name} --project={project}\n"
+            f"  Then: python3 ensure_apis.py --tenant <source|target>  "
+            f"(re-checks, and can enable when permitted)")
 
 
 def _is_permanent(status: int, reason: str) -> bool:
@@ -225,6 +255,7 @@ def retry_on_google_error(
                     if _is_permanent(status, reason):
                         raise PermanentAPIError(
                             f"HTTP {status} ({reason or 'unknown reason'}): {exc}"
+                            + _service_disabled_hint(exc, reason)
                         ) from exc
 
                     attempt += 1

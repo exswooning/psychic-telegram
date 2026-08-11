@@ -516,6 +516,27 @@ def cmd_preflight(args, settings: Settings, db: MigrationDB, auth: AuthManager):
               f"    python3 main.py init-db --auto-map")
         sys.exit(1)
 
+    # API enablement before delegation. They are separate gates in separate
+    # consoles and a granted scope does not switch an API on -- this project
+    # ran a full seeding pass with 17/17 DWD scopes live and People/Tasks
+    # never enabled, producing zero contacts and zero tasks while reporting
+    # success. Checking here costs one call per API and catches it before a
+    # multi-hour run rather than inside one.
+    try:
+        import ensure_apis
+
+        for tenant in ("source", "target"):
+            res = ensure_apis.ensure(settings, tenant, do_enable=False)
+            if res.get("disabled"):
+                print(f"\nWARNING: {tenant} project {res['project']} has "
+                      f"DISABLED API(s): {', '.join(res['disabled'])}")
+                print("Calls to these fail with SERVICE_DISABLED no matter "
+                      "what DWD grants.")
+                print(ensure_apis.advice(res["project"], res["disabled"]))
+                print()
+    except Exception as exc:  # noqa: BLE001 - advisory; never block preflight
+        log.debug("API enablement check skipped: %s", exc)
+
     failures = 0
     for r in rows:
         ok_s, msg_s = auth.verify_delegation("source", r["source_email"])
