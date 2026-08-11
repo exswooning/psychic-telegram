@@ -330,6 +330,9 @@ export const enableApis = (reason: string) =>
 export interface DwdStatus {
   tenant: string; checked: boolean; clientId?: string
   live?: number; total?: number; missing?: string[]; error?: string
+  /** APIs that report ENABLED but still need a manual console step before
+   *  they work at all (Chat needs an app configured, or every call 404s). */
+  caveats?: { api: string; note: string }[]
 }
 
 export const fetchDwdStatus = (tenant: 'source' | 'target') =>

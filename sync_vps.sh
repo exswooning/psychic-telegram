@@ -33,6 +33,22 @@ echo "  synced to $TARGET:$DEST"
 # that asks git what it is running gets no answer -- benchmark_run.py
 # recorded every VPS run as commit "unknown", which makes those runs
 # incomparable to each other. Stamp what we just shipped.
+# Syntax-check with the TARGET's interpreter before anything restarts.
+#
+# The dev machine and the VPS do not run the same Python (3.14 vs 3.10 here),
+# and newer syntax parses locally while being a SyntaxError there -- nested
+# same-type quotes in an f-string (PEP 701, 3.12+) did exactly this: the file
+# imported fine in every local test and the VPS refused to parse it at all.
+# A restart on top of that gives you a service that is down for a reason
+# nothing in the deploy output mentions.
+if ! "${SSH[@]}" "$TARGET" "cd $DEST && .venv/bin/python3 -m compileall -q . \
+        -x '(\.venv|node_modules|migration-webui)'"; then
+  echo "  DEPLOY ABORTED: the synced code does not compile under the target's Python." >&2
+  echo "  Nothing was restarted; the previous version is still running." >&2
+  exit 1
+fi
+echo "  syntax ok under the target's Python"
+
 COMMIT="$(cd "$(dirname "$0")" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 if [[ -n "$(cd "$(dirname "$0")" && git status --porcelain 2>/dev/null)" ]]; then
   COMMIT="$COMMIT-dirty"

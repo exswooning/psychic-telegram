@@ -136,6 +136,17 @@ const DwdSetup: React.FC = () => {
           </Typography>
           <Row label="Source tenant" tenant="source" status={source} />
           <Row label="Target tenant" tenant="target" status={target} />
+
+          {/* An API can be ENABLED and still 404 every call. Chat needs an
+              app configured in the Cloud console, which has no API -- so a
+              panel showing only scopes would read all-green over a service
+              that cannot make a single request. */}
+          {[source, target].flatMap((s) => (s?.caveats ?? []).map((c) => (
+            <Alert key={`${s!.tenant}-${c.api}`} severity="warning" sx={{ mt: 1 }}>
+              <strong>{s!.tenant}: {c.api}</strong> is enabled but not yet
+              usable. {c.note}
+            </Alert>
+          )))}
           {!bothComplete && (
             <Alert severity="info" sx={{ mt: 1 }}>
               Run the copied command on a machine with a browser and a

@@ -387,9 +387,13 @@ def provision(source_domain: str, target_domain: str, org: str = "",
 def render(result: dict) -> str:
     if result.get("error"):
         return f"REFUSING: {result['error']}"
+    # Built outside the f-string: nested same-type quotes inside an f-string
+    # are PEP 701 (Python 3.12+), and the deploy target runs 3.10 -- where
+    # this is a SyntaxError at import, not a runtime failure. Caught only
+    # because the VPS refused to parse the file at all.
+    org = result.get("org") or "(none detected — created outside an org)"
     out = [f"gcloud account : {result.get('account')}",
-           f"organisation   : {result.get('org') or '(none detected — projects '
-                                                    'will be created outside an org)'}", ""]
+           f"organisation   : {org}", ""]
     for side in result["sides"]:
         out.append(f"== {side['side'].upper()} — project {side['project']} ==")
         for st in side["steps"]:

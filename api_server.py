@@ -940,9 +940,26 @@ async def dwd_status(tenant: str = "source"):
                     client_id = json.load(fh).get("client_id", "")
             except (OSError, ValueError):
                 pass
+
+            # An API can be ENABLED and still unusable -- Chat needs an app
+            # configured in the console before it stops 404ing. Surfaced
+            # here so the panel does not show all-green over a service that
+            # cannot make a single call.
+            caveats = []
+            try:
+                import ensure_apis
+                api_res = ensure_apis.ensure(s, tenant, do_enable=False)
+                caveats = [
+                    {"api": api, "note": note}
+                    for api, note in ensure_apis.NEEDS_CONSOLE_CONFIG.items()
+                    if api_res.get("states", {}).get(api) == "ENABLED"
+                ]
+            except Exception:      # noqa: BLE001 - advisory only
+                pass
+
             return {"tenant": tenant, "checked": True, "clientId": client_id,
                     "live": len(rows) - len(missing), "total": len(rows),
-                    "missing": missing}
+                    "missing": missing, "caveats": caveats}
         except Exception as exc:      # noqa: BLE001 - report, do not 500
             return {"tenant": tenant, "checked": False, "error": str(exc)[:200]}
     return await _off_loop(_check)

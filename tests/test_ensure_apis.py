@@ -128,3 +128,40 @@ class TestServiceDisabledHint:
         assert resilience._service_disabled_hint(
             Exception("403 insufficientFilePermissions"),
             "insufficientFilePermissions") == ""
+
+
+class TestEnabledIsNotAlwaysUsable:
+    """
+    `gcloud services enable chat.googleapis.com` succeeds, serviceusage
+    reports ENABLED, and every Chat call still returns
+    `404 Google Chat app not found` until a Chat *app* is configured in the
+    Cloud console -- a step with no API and no gcloud command.
+
+    Found by provisioning fresh projects: contacts and tasks started
+    working (they were the whole point) and Chat stopped, because the old
+    hand-made project had the app configured years earlier and the new one
+    did not. "ENABLED" alone would have been a green light onto a 404.
+    """
+
+    def test_chat_carries_its_manual_step(self):
+        assert "chat.googleapis.com" in ea.NEEDS_CONSOLE_CONFIG
+        note = ea.NEEDS_CONSOLE_CONFIG["chat.googleapis.com"]
+        assert "404" in note and "hangouts-chat" in note
+
+    def test_the_caveat_is_shown_when_chat_is_enabled(self):
+        res = {"tenant": "source", "project": "p1",
+               "states": {a: "ENABLED" for a in ea.REQUIRED_APIS},
+               "disabled": [], "unknown": [], "enabled_now": {}}
+        out = ea.render(res)
+        assert "NOT yet usable" in out
+        assert "chat.googleapis.com" in out
+
+    def test_no_caveat_when_chat_is_off(self):
+        """A disabled API is already reported under DISABLED; repeating it
+        as a caveat would imply two separate problems."""
+        states = {a: "ENABLED" for a in ea.REQUIRED_APIS}
+        states["chat.googleapis.com"] = "DISABLED"
+        res = {"tenant": "source", "project": "p1", "states": states,
+               "disabled": ["chat.googleapis.com"], "unknown": [],
+               "enabled_now": {}}
+        assert "NOT yet usable" not in ea.render(res)

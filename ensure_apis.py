@@ -74,6 +74,24 @@ REQUIRED_APIS = {
 
 CLOUD_PLATFORM = "https://www.googleapis.com/auth/cloud-platform"
 
+# APIs where enabling the service is necessary but NOT sufficient, with the
+# manual step that is still required and the error you get without it.
+#
+# Chat is the one that bites: `gcloud services enable chat.googleapis.com`
+# reports success and `serviceusage` reports ENABLED, but every call returns
+# `404 Google Chat app not found` until a Chat *app* is configured in the
+# Cloud console (display name, avatar, enabled state). There is no API and no
+# gcloud command for that configuration, so a freshly provisioned project has
+# Chat "enabled" and completely unusable -- observed directly when new
+# projects replaced hand-made ones that had it configured years earlier.
+NEEDS_CONSOLE_CONFIG = {
+    "chat.googleapis.com": (
+        "Chat also needs an app configured (name + avatar + enabled) at "
+        "console.cloud.google.com/apis/api/chat.googleapis.com/hangouts-chat "
+        "-- without it every call returns 404 'Google Chat app not found' "
+        "even though the API reports ENABLED."),
+}
+
 
 def key_path(settings: Settings, tenant: str) -> str:
     return settings.source_sa_key if tenant == "source" else settings.target_sa_key
@@ -199,6 +217,14 @@ def render(result: dict) -> str:
                   "  regardless of how many DWD scopes are granted:"]
         lines += [f"    {a}" for a in result["disabled"]]
         lines += ["", advice(result["project"], result["disabled"])]
+    caveats = [(api, note) for api, note in NEEDS_CONSOLE_CONFIG.items()
+               if result["states"].get(api) == "ENABLED"]
+    if caveats:
+        lines += ["", "  Enabled, but NOT yet usable without a manual step:"]
+        for api, note in caveats:
+            lines.append(f"    {api}")
+            lines.append(f"      {note}")
+
     if result["unknown"]:
         lines += ["", "  Could not determine (this is not the same as 'off'):"]
         lines += [f"    {a}" for a in result["unknown"]]
