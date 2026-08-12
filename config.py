@@ -574,14 +574,24 @@ class Settings:
             raise ValueError(
                 f"no tenant_configs rows for account_id={self.account_id} -- "
                 "was accounts_auth.create_account() ever called for it?")
+        # account_id 1 is, specifically and only, the bootstrapped legacy
+        # deployment (accounts_auth.bootstrap_legacy_account) -- its whole
+        # point is to track env.sh live, since that file is still this
+        # account's real source of truth. Every OTHER account's row starts
+        # NULL until its own Quick Setup fills it in, and NULL there must
+        # mean "not configured yet", not "borrow account 1's domain" --
+        # falling through to the env-derived default here leaked the live
+        # production tenant's domain into a brand-new account's error
+        # messages before a single tenant_configs row had been written.
+        is_legacy = self.account_id == 1
         for row in rows:
             if row["side"] == "source":
-                self.source_domain = row["domain"] or self.source_domain
-                self.source_admin = row["admin_email"] or self.source_admin
+                self.source_domain = row["domain"] or (self.source_domain if is_legacy else "")
+                self.source_admin = row["admin_email"] or (self.source_admin if is_legacy else "")
                 self.source_sa_key = row["sa_key_path"] or self.source_sa_key
             elif row["side"] == "target":
-                self.target_domain = row["domain"] or self.target_domain
-                self.target_admin = row["admin_email"] or self.target_admin
+                self.target_domain = row["domain"] or (self.target_domain if is_legacy else "")
+                self.target_admin = row["admin_email"] or (self.target_admin if is_legacy else "")
                 self.target_sa_key = row["sa_key_path"] or self.target_sa_key
             # Both rows carry the same db_path (one ledger per account, not
             # per side) -- take it from whichever row has it set.

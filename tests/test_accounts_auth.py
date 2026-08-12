@@ -238,6 +238,26 @@ class TestSettingsAccountScoping:
         assert new.db_path != legacy.db_path
         assert new.source_sa_key != legacy.source_sa_key
 
+    def test_a_fresh_account_with_no_setup_yet_never_sees_the_legacy_domain(self, db, monkeypatch):
+        """Regression: before this, a brand-new account's unconfigured
+        source_domain fell through to the env-derived default -- which on
+        a real deployment is the LIVE production tenant's domain, not
+        'unset'. A new customer's error messages must say 'not configured
+        yet', never name another account's tenant."""
+        monkeypatch.setenv("SOURCE_DOMAIN", "production-legacy-tenant.com")
+        monkeypatch.setenv("TARGET_DOMAIN", "production-legacy-target.com")
+        aa.bootstrap_legacy_account()
+        account_id = aa.create_account("fresh@example.com", "hunter22222", "Fresh User")
+
+        from config import Settings
+
+        fresh = Settings(account_id=account_id)
+        assert fresh.source_domain == ""
+        assert fresh.target_domain == ""
+        assert fresh.source_admin == ""
+        assert fresh.target_admin == ""
+        assert "production-legacy-tenant.com" not in (fresh.source_domain, fresh.target_domain)
+
     def test_an_unknown_account_id_raises_rather_than_silently_falling_back(self, db):
         from config import Settings
 
