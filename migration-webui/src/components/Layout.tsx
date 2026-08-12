@@ -47,6 +47,10 @@ import {
 } from '@mui/icons-material'
 import { useMigrationStore } from '@/store'
 import { fetchConfig, fetchJob, ConfigPayload, HostInfo, JobStatus, stopJob } from '@/api/client'
+import { getOperator, setOperator } from '@/api/controlPlane'
+import Menu from '@mui/material/Menu'
+import MenuItem from '@mui/material/MenuItem'
+import Logout from '@mui/icons-material/Logout'
 
 // DriveMigration/ErrorHandling/HelpSystem existed as files with no route and
 // no nav entry -- reachable by typing a URL nobody would guess, effectively
@@ -91,7 +95,14 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   const [authMode, setAuthMode] = useState('')
   const [job, setJob] = useState<JobStatus | null>(null)
   const isDesktop = useMediaQuery('(min-width:960px)')
-  const notifications = 3
+  const operatorName = getOperator()
+  const [notifAnchor, setNotifAnchor] = useState<null | HTMLElement>(null)
+  const [profileAnchor, setProfileAnchor] = useState<null | HTMLElement>(null)
+  const handleSignOut = () => {
+    setProfileAnchor(null)
+    setOperator('')
+    navigate('/login', { replace: true })
+  }
 
   // Fetched once, not polled: a process's own hostname/code path/pid never
   // change while it is running (see webui.py's host_info(), which caches
@@ -162,7 +173,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
         {sidebarOpen && (
           <Box sx={{ minWidth: 0 }}>
             <Typography variant="h5" noWrap sx={{ color: 'primary.main', fontWeight: 700, lineHeight: 1.2 }}>
-              Migration Console
+              Bitport
             </Typography>
             <Typography variant="caption" color="text.secondary" noWrap sx={{ display: 'block' }}>
               Source: {cfg?.source_domain || 'not set'}
@@ -227,7 +238,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
             <MenuIcon />
           </IconButton>
           <Typography variant="h6" noWrap component="div" sx={{ fontWeight: 700, mr: 1 }}>
-            Migration Console
+            Bitport
           </Typography>
 
           {/* Route chip: source -> target -> auth mode, exactly what the
@@ -332,17 +343,78 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
               </IconButton>
             </Tooltip>
           )}
-          <Badge badgeContent={notifications} color="error">
-            <IconButton color="inherit">
-              <NotificationsIcon />
-            </IconButton>
-          </Badge>
+          {(() => {
+            const items: string[] = []
+            if (jobRunning) items.push(`${job!.name} is running (${progressIndeterminate ? 'in progress' : `${progressPct}%`})`)
+            if (memoryPct >= 85) items.push(`Memory at ${memoryPct}% — approaching the limit`)
+            if (!operatorName) items.push('No operator name set — writes will be refused')
+            return (
+              <>
+                <Badge badgeContent={items.length} color="error" invisible={items.length === 0}>
+                  <IconButton color="inherit" onClick={(e) => setNotifAnchor(e.currentTarget)}>
+                    <NotificationsIcon />
+                  </IconButton>
+                </Badge>
+                <Menu
+                  anchorEl={notifAnchor}
+                  open={Boolean(notifAnchor)}
+                  onClose={() => setNotifAnchor(null)}
+                  anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+                  transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+                >
+                  <Box sx={{ px: 2, py: 1, minWidth: 260 }}>
+                    <Typography variant="body2" sx={{ fontWeight: 700 }}>Notifications</Typography>
+                  </Box>
+                  <Divider />
+                  {items.length === 0 ? (
+                    <MenuItem disabled>Nothing to report</MenuItem>
+                  ) : items.map((text) => (
+                    <MenuItem key={text} onClick={() => setNotifAnchor(null)} sx={{ whiteSpace: 'normal', maxWidth: 300 }}>
+                      {text}
+                    </MenuItem>
+                  ))}
+                </Menu>
+              </>
+            )
+          })()}
           <Tooltip title={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}>
             <IconButton onClick={toggleDarkMode} color="inherit">
               {darkMode ? <LightModeIcon /> : <DarkModeIcon />}
             </IconButton>
           </Tooltip>
-          <Avatar sx={{ width: 32, height: 32, bgcolor: 'primary.main', fontWeight: 700 }}>A</Avatar>
+          <Tooltip title={operatorName || 'No operator set'}>
+            <IconButton onClick={(e) => setProfileAnchor(e.currentTarget)} sx={{ p: 0.25 }}>
+              <Avatar sx={{ width: 32, height: 32, bgcolor: 'primary.main', fontWeight: 700 }}>
+                {(operatorName || '?').charAt(0).toUpperCase()}
+              </Avatar>
+            </IconButton>
+          </Tooltip>
+          <Menu
+            anchorEl={profileAnchor}
+            open={Boolean(profileAnchor)}
+            onClose={() => setProfileAnchor(null)}
+            anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+            transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+          >
+            <Box sx={{ px: 2, py: 1.25, minWidth: 200 }}>
+              <Typography variant="body2" sx={{ fontWeight: 700 }}>{operatorName || 'No operator set'}</Typography>
+              <Typography variant="caption" color="text.secondary">Every action is logged against this name</Typography>
+            </Box>
+            <Divider />
+            <MenuItem onClick={() => { setProfileAnchor(null); navigate('/settings') }}>
+              <ListItemIcon><SettingsIcon fontSize="small" /></ListItemIcon>
+              Settings
+            </MenuItem>
+            <MenuItem onClick={() => { setProfileAnchor(null); navigate('/help') }}>
+              <ListItemIcon><HelpIconNav fontSize="small" /></ListItemIcon>
+              Help &amp; documentation
+            </MenuItem>
+            <Divider />
+            <MenuItem onClick={handleSignOut} sx={{ color: 'error.main' }}>
+              <ListItemIcon><Logout fontSize="small" color="error" /></ListItemIcon>
+              Sign out
+            </MenuItem>
+          </Menu>
         </Toolbar>
       </AppBar>
       <Box component="nav" sx={{ width: isDesktop ? (sidebarOpen ? 260 : 72) : 0, flexShrink: { md: 0 } }}>
