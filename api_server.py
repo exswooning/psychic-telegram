@@ -1403,6 +1403,86 @@ async def full_setup_status(side: str, op: Operator = Depends(operator)):
     return await _off_loop(_read)
 
 
+# ======================================================================
+# Client-side Cloud provisioning handoff.
+#
+# provision_gcp.py needs an identity with org-level project-creation
+# rights -- this process, running on a shared VPS, deliberately never
+# holds one (that used to mean Quick Setup's Cloud-provisioning phase
+# just failed here with "gcloud is not installed"). Instead, the admin
+# runs provision_gcp.py themselves, on their own machine, with their own
+# gcloud identity, and the browser -- already holding a real signed-in
+# session, unlike a script POSTing with a separately-issued token --
+# uploads only the narrow result: a service-account JSON key.
+# ======================================================================
+class UploadCredentials(WriteAction):
+    side: Literal["source", "target"]
+    domain: str = Field(min_length=3)
+    # exclude=True: same reasoning as StartFullSetup.admin_password above
+    # -- _gated() logs body.model_dump() into operator_actions_log
+    # unconditionally, and a private key sitting in that viewer-readable
+    # table forever is exactly the leak that field already exists to
+    # prevent for a password.
+    service_account_key: dict = Field(exclude=True)
+
+
+_SA_KEY_REQUIRED_FIELDS = ("client_email", "client_id", "private_key", "project_id")
+
+
+@app.post("/api/v2/setup/credentials")
+async def upload_credentials(body: UploadCredentials, op: Operator = Depends(operator)):
+    require_login(op)
+    key = body.service_account_key
+    if key.get("type") != "service_account":
+        raise HTTPException(400, "that file's \"type\" is not \"service_account\" -- "
+                                 "make sure you uploaded the key provision_gcp.py "
+                                 "produced, not some other JSON file")
+    missing = [f for f in _SA_KEY_REQUIRED_FIELDS if not key.get(f)]
+    if missing:
+        raise HTTPException(400, f"key is missing field(s): {', '.join(missing)}")
+
+    def _save() -> tuple[bool, str]:
+        key_dir = os.path.join(HERE, "keys", str(op.account_id))
+        os.makedirs(key_dir, exist_ok=True)
+        key_path = os.path.join(key_dir, f"{body.side}-sa.json")
+        with open(key_path, "w", encoding="utf-8") as fh:
+            json.dump(key, fh)
+        os.chmod(key_path, 0o600)
+        accounts_auth.update_tenant_config(
+            op.account_id, body.side, domain=body.domain, sa_key_path=key_path)
+        return True, key["client_id"]
+    return await _gated(op, "setup.upload_credentials", body,
+                        f"{body.side}:{body.domain}", _save)
+
+
+@app.get("/api/v2/setup/tenant-config")
+async def get_tenant_config_status(side: str, op: Operator = Depends(operator)):
+    if side not in ("source", "target"):
+        raise HTTPException(400, "side must be source or target")
+    require_login(op)
+
+    def _read() -> dict:
+        cfg = accounts_auth.get_tenant_config(op.account_id, side) or {}
+        has_key = bool(cfg.get("sa_key_path")) and os.path.isfile(cfg["sa_key_path"])
+        client_id = ""
+        scopes: list[str] = []
+        if has_key:
+            import provision_gcp
+            import verify_scopes
+            from config import Settings
+
+            client_id = provision_gcp.client_id_of(cfg["sa_key_path"])
+            try:
+                scopes = verify_scopes.required_scopes(
+                    Settings(account_id=op.account_id), side)
+            except Exception:      # noqa: BLE001 - advisory only
+                scopes = []
+        return {"side": side, "domain": cfg.get("domain") or "",
+                "adminEmail": cfg.get("admin_email") or "",
+                "hasKey": has_key, "clientId": client_id, "scopes": scopes}
+    return await _off_loop(_read)
+
+
 @app.post("/api/v2/fleet/heartbeat")
 async def heartbeat(hb: Heartbeat):
     await _off_loop(cpdb.upsert_node, hb.node_id,

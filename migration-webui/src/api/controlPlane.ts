@@ -394,6 +394,31 @@ export const startFullSetup = (
 export const fetchFullSetupStatus = (side: 'source' | 'target') =>
   cpFetch<FullSetupStatus>(`/api/v2/full-setup/status?side=${side}`)
 
+// -- Client-side Cloud provisioning handoff ----------------------------------
+// The Cloud project itself is created on the admin's own machine (their own
+// gcloud identity, their own org permissions -- see provision_gcp.py, which
+// runs standalone). This browser tab's already-authenticated session is what
+// uploads the resulting service-account key; no separate token ever touches
+// a terminal.
+export interface TenantConfigStatus {
+  side: 'source' | 'target'; domain: string; adminEmail: string
+  hasKey: boolean; clientId: string; scopes: string[]
+}
+
+export const fetchTenantConfigStatus = (side: 'source' | 'target') =>
+  cpFetch<TenantConfigStatus>(`/api/v2/setup/tenant-config?side=${side}`)
+
+export const uploadCredentials = (
+  reason: string, side: 'source' | 'target', domain: string,
+  serviceAccountKey: Record<string, unknown>,
+) =>
+  cpFetch<ActionResult>('/api/v2/setup/credentials', {
+    method: 'POST',
+    body: JSON.stringify({
+      reason, side, domain, service_account_key: serviceAccountKey,
+    }),
+  })
+
 // -- DWD scope status ---------------------------------------------------------
 export interface DwdStatus {
   tenant: string; checked: boolean; clientId?: string

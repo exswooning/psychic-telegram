@@ -450,6 +450,19 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
+    # Only offer this from the CLI, not from provision()/provision_side()
+    # themselves -- those are also called non-interactively (full_setup.py,
+    # the control plane), where a blocking input() would hang a request
+    # with no tty to answer it. This script is meant to run on the admin's
+    # own machine specifically because that is where a real terminal and
+    # browser exist to complete gcloud's OAuth consent screen -- the VPS
+    # this project also runs on deliberately never gets here.
+    ready, detail = gcloud_ready()
+    if not ready and "not installed" not in detail and sys.stdin.isatty():
+        answer = input(f"{detail}\nRun 'gcloud auth login' now? [Y/n] ").strip().lower()
+        if answer in ("", "y", "yes"):
+            subprocess.run(["gcloud", "auth", "login"])
+
     result = provision(args.source_domain, args.target_domain, args.org_id,
                        args.source_project, args.target_project,
                        args.keys_dir, args.dry_run, args.force)

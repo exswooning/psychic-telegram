@@ -152,6 +152,21 @@ def update_tenant_config(account_id: int, side: str, *, domain: str | None = Non
         )
 
 
+def get_tenant_config(account_id: int, side: str) -> dict | None:
+    """The read half of update_tenant_config -- None if the account/side
+    combination doesn't exist (an unknown account id, not just an
+    unconfigured one; create_account() always inserts both rows up
+    front, so None here means the account itself is wrong)."""
+    if side not in ("source", "target"):
+        raise ValueError(f"side must be 'source' or 'target', got {side!r}")
+    with cpdb.ro() as conn:
+        row = conn.execute(
+            "SELECT domain, admin_email, sa_key_path, db_path FROM tenant_configs "
+            "WHERE account_id=? AND side=?", (account_id, side),
+        ).fetchone()
+    return dict(row) if row else None
+
+
 def get_account(account_id: int) -> dict | None:
     with cpdb.ro() as conn:
         row = conn.execute(

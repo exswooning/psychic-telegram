@@ -96,36 +96,59 @@ def run_full_setup(
     phases: list[Phase] = []
 
     # -- 1. Cloud project, APIs, service account, key ----------------------
-    # provision_side(), not provision(): the latter always creates BOTH
-    # source and target in one call, which is wrong here on two counts --
-    # it does work for a side the caller did not ask for, and (worse) it
-    # would have made this function's own "source" lookup wrong for a
-    # target call, silently reading the other tenant's project and key.
+    # Skipped entirely when this account already has a real key uploaded
+    # for this side (see api_server.py's POST /api/v2/setup/credentials).
+    # Cloud project creation needs an identity with org-level
+    # project-creation rights, which this process -- running on a shared
+    # VPS -- deliberately never holds; the admin runs provision_gcp.py
+    # themselves, on their own machine, with their own gcloud identity,
+    # and hands over only the narrow service-account key it produces.
+    # account_id is None (the legacy/local-gcloud caller) skips none of
+    # this -- provision_side() is already idempotent and safe to re-run,
+    # exactly as it always was before this branch existed.
+    existing = (accounts_auth.get_tenant_config(account_id, side)
+                if account_id is not None else None)
+    uploaded_key = existing["sa_key_path"] if existing else None
+    key_path = uploaded_key or os.path.join(keys_dir, f"{side}-sa.json")
+
     p = Phase(f"provision Cloud project ({side})")
     phases.append(p)
-    ready, account_or_err = provision_gcp.gcloud_ready()
-    if not ready:
-        p.status, p.detail = "failed", account_or_err
-        return {"side": side, "ok": False, "phases": [x.as_dict() for x in phases]}
+    if uploaded_key and os.path.isfile(uploaded_key):
+        client_id = provision_gcp.client_id_of(uploaded_key)
+        if not client_id:
+            p.status, p.detail = "failed", (
+                f"{uploaded_key} exists but has no client_id in it -- "
+                "re-upload the key")
+            return {"side": side, "ok": False, "phases": [x.as_dict() for x in phases]}
+        p.status, p.detail = "skipped", "using an uploaded service-account key"
+    else:
+        # provision_side(), not provision(): the latter always creates BOTH
+        # source and target in one call, which is wrong here on two counts --
+        # it does work for a side the caller did not ask for, and (worse) it
+        # would have made this function's own "source" lookup wrong for a
+        # target call, silently reading the other tenant's project and key.
+        ready, account_or_err = provision_gcp.gcloud_ready()
+        if not ready:
+            p.status, p.detail = "failed", account_or_err
+            return {"side": side, "ok": False, "phases": [x.as_dict() for x in phases]}
 
-    org = org_id or provision_gcp.detect_org()
-    # "src"/"tgt", matching provision_gcp.provision()'s own naming --
-    # side[:3] would give "sou"/"tar" instead, a second convention for the
-    # same thing that makes project names harder to eyeball together in
-    # the Cloud console.
-    abbrev = "src" if side == "source" else "tgt"
-    project = f"wsmig-{abbrev}-{random.randint(10000, 99999)}"
-    key_path = os.path.join(keys_dir, f"{side}-sa.json")
-    result = provision_gcp.provision_side(side, project, org, key_path,
-                                          dry_run, force=False)
-    if not result.get("ok"):
-        p.status = "failed"
-        p.detail = "; ".join(s["detail"] for s in result["steps"]
-                             if s["status"] == "failed") or "see steps"
-        return {"side": side, "ok": False, "phases": [x.as_dict() for x in phases],
-                "gcpSteps": result["steps"]}
-    p.status, p.detail = "ok", f"project {project}"
-    client_id = provision_gcp.client_id_of(key_path)
+        org = org_id or provision_gcp.detect_org()
+        # "src"/"tgt", matching provision_gcp.provision()'s own naming --
+        # side[:3] would give "sou"/"tar" instead, a second convention for the
+        # same thing that makes project names harder to eyeball together in
+        # the Cloud console.
+        abbrev = "src" if side == "source" else "tgt"
+        project = f"wsmig-{abbrev}-{random.randint(10000, 99999)}"
+        result = provision_gcp.provision_side(side, project, org, key_path,
+                                              dry_run, force=False)
+        if not result.get("ok"):
+            p.status = "failed"
+            p.detail = "; ".join(s["detail"] for s in result["steps"]
+                                 if s["status"] == "failed") or "see steps"
+            return {"side": side, "ok": False, "phases": [x.as_dict() for x in phases],
+                    "gcpSteps": result["steps"]}
+        p.status, p.detail = "ok", f"project {project}"
+        client_id = provision_gcp.client_id_of(key_path)
 
     if dry_run:
         phases.append(Phase("domain-wide delegation (skipped: dry run)"))
