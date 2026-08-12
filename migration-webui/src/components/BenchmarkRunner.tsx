@@ -7,7 +7,7 @@ import {
 import { Speed as BenchIcon, Circle as DotIcon } from '@mui/icons-material'
 import {
   BenchmarkResult, BenchmarkRunning, startBenchmark, fetchBenchmarkResults,
-  fetchBenchmarkRunning, getOperator,
+  fetchBenchmarkRunning,
 } from '@/api/controlPlane'
 import ReasonCodeDialog from './ReasonCodeDialog'
 
@@ -170,8 +170,7 @@ const BenchmarkRunner: React.FC<Props> = ({ targetDomain }) => {
     }
   }
 
-  const isAdmin = !!getOperator()
-  const canLaunch = isAdmin && label.trim() && confirmDomain.trim() && !running.running
+  const canLaunch = label.trim() && confirmDomain.trim() && !running.running
 
   return (
     <Paper variant="outlined" sx={{ borderRadius: 2, p: 2 }}>
@@ -229,11 +228,6 @@ const BenchmarkRunner: React.FC<Props> = ({ targetDomain }) => {
         <Button variant="contained" disabled={!canLaunch} onClick={() => setAsk(true)}>
           {running.running ? 'Benchmark already running' : 'Run benchmark'}
         </Button>
-        {!isAdmin && (
-          <Typography variant="caption" color="text.secondary" sx={{ alignSelf: 'center' }}>
-            Set an operator name to launch.
-          </Typography>
-        )}
       </Stack>
 
       {msg && <Alert severity="success" sx={{ mt: 2 }} onClose={() => setMsg(null)}>{msg}</Alert>}

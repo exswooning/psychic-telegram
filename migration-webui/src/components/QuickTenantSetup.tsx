@@ -5,7 +5,7 @@ import {
 } from '@mui/material'
 import { RocketLaunch as QuickIcon, Grass as SeedIcon } from '@mui/icons-material'
 import {
-  FullSetupStatus, startFullSetup, fetchFullSetupStatus, getOperator,
+  FullSetupStatus, startFullSetup, fetchFullSetupStatus,
   startProvision, fetchProvisionStatus, ProvisionStatus,
 } from '@/api/controlPlane'
 import { runSeed } from '@/api/client'
@@ -107,9 +107,7 @@ const QuickTenantSetup: React.FC<{
     }
   }
 
-  const isAdmin = !!getOperator()
-  const canLaunch = isAdmin && domain.trim() && email.trim() && password
-                    && !status?.running
+  const canLaunch = domain.trim() && email.trim() && password && !status?.running
   const result = status?.result
   const setUpOk = !!result?.ok && !status?.running
 
@@ -225,11 +223,6 @@ const QuickTenantSetup: React.FC<{
               onClick={() => setAsk(true)}>
         {status?.running ? 'Running…' : dryRun ? 'Preview' : `Set up ${side}`}
       </Button>
-      {!isAdmin && (
-        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
-          Set an operator name to run this.
-        </Typography>
-      )}
       {error && <Alert severity="error" sx={{ mt: 2 }}>{error}</Alert>}
 
       {result && (

@@ -12,7 +12,6 @@ import {
 import {
   CPEvent, FleetNode, UserProgress, PublicShare, FailureRow,
   connectCP, fetchFleet, fetchUsers, fetchPublicShares, fetchFailures,
-  getOperator, setOperator,
 } from '@/api/controlPlane'
 import { useMigrationStore } from '@/store'
 import { MigrationStatus, ServiceProgress } from '@/types'
@@ -125,7 +124,6 @@ const MissionControl: React.FC = () => {
   const [failures, setFailures] = useState<FailureRow[]>([])
   const [connected, setConnected] = useState(false)
   const [alert, setAlert] = useState<string | null>(null)
-  const [operatorName, setOperatorName] = useState(getOperator())
   const [forensic, setForensic] = useState<{ user: string; item: string } | null>(null)
 
   const refreshLists = useCallback(() => {
@@ -177,11 +175,6 @@ const MissionControl: React.FC = () => {
             </Typography>
           </Stack>
         </Box>
-        <TextField
-          size="small" label="Operator" value={operatorName}
-          onChange={(e) => { setOperatorName(e.target.value); setOperator(e.target.value) }}
-          helperText="Recorded against every action" sx={{ width: { xs: '100%', sm: 220 } }}
-        />
       </Box>
 
       <Alert severity="info" action={

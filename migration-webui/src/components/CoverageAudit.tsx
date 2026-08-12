@@ -6,7 +6,7 @@ import {
 } from '@mui/material'
 import { FactCheck as CoverageIcon } from '@mui/icons-material'
 import {
-  CoverageStatus, startCoverage, fetchCoverageStatus, getOperator,
+  CoverageStatus, startCoverage, fetchCoverageStatus,
 } from '@/api/controlPlane'
 import ReasonCodeDialog from './ReasonCodeDialog'
 
@@ -62,7 +62,6 @@ const CoverageAudit: React.FC = () => {
     }
   }
 
-  const isAdmin = !!getOperator()
   const result = status?.result
 
   return (
@@ -74,7 +73,7 @@ const CoverageAudit: React.FC = () => {
           <Chip size="small" color="primary" icon={<CircularProgress size={10} />}
                 label="scanning…" />
         )}
-        <Button variant="outlined" size="small" disabled={!isAdmin || status?.running}
+        <Button variant="outlined" size="small" disabled={status?.running}
                 onClick={() => setAsk(true)}>
           {status?.running ? 'Running…' : 'Run audit'}
         </Button>
@@ -86,11 +85,6 @@ const CoverageAudit: React.FC = () => {
         code that handles it ever running.
       </Typography>
 
-      {!isAdmin && (
-        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
-          Set an operator name to run it.
-        </Typography>
-      )}
       {error && <Alert severity="error" sx={{ mt: 2 }}>{error}</Alert>}
 
       {result && (

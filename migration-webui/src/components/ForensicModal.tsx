@@ -6,7 +6,7 @@ import {
 } from '@mui/material'
 import { Replay as RetryIcon } from '@mui/icons-material'
 import {
-  ForensicDetail, fetchForensics, retryItem, getOperator,
+  ForensicDetail, fetchForensics, retryItem,
 } from '@/api/controlPlane'
 import ReasonCodeDialog from './ReasonCodeDialog'
 
@@ -195,7 +195,7 @@ const ForensicModal: React.FC<Props> = ({ open, sourceUser, itemId, onClose, onR
           <Button onClick={onClose}>Close</Button>
           <Button
             variant="contained" startIcon={<RetryIcon />}
-            disabled={!data || data.supersededBySuccess || !getOperator()}
+            disabled={!data || data.supersededBySuccess}
             onClick={() => setAskReason(true)}
           >
             Fix &amp; Retry

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import {
-  Alert, Box, Chip, LinearProgress, Paper, Stack, TextField, Tooltip, Typography,
+  Alert, Box, Chip, LinearProgress, Paper, Stack, Tooltip, Typography,
 } from '@mui/material'
 import {
   Dns as NodeIcon, Circle as DotIcon, Bolt as LiveIcon,
@@ -8,7 +8,6 @@ import {
 import {
   CPEvent, FleetNode, UserProgress, PublicShare, FailureRow,
   connectCP, fetchFleet, fetchUsers, fetchPublicShares, fetchFailures,
-  getOperator, setOperator,
 } from '@/api/controlPlane'
 import JobController from '@/components/JobController'
 import EmergencyBrake from '@/components/EmergencyBrake'
@@ -95,7 +94,6 @@ const FleetDashboard: React.FC = () => {
   const [failures, setFailures] = useState<FailureRow[]>([])
   const [connected, setConnected] = useState(false)
   const [alert, setAlert] = useState<string | null>(null)
-  const [operatorName, setOperatorName] = useState(getOperator())
   const [forensic, setForensic] = useState<{ user: string; item: string } | null>(null)
 
   const refreshLists = useCallback(() => {
@@ -137,15 +135,6 @@ const FleetDashboard: React.FC = () => {
             </Typography>
           </Stack>
         </Box>
-        {/* Identity is a plain field, not auth: the real access control is the
-            SSH tunnel. This exists so every action has a name attached in
-            operator_actions_log. */}
-        <TextField
-          size="small" label="Operator" value={operatorName}
-          onChange={(e) => { setOperatorName(e.target.value); setOperator(e.target.value) }}
-          helperText="Recorded against every action"
-          sx={{ width: 220 }}
-        />
       </Box>
 
       {alert && <Alert severity="warning" onClose={() => setAlert(null)}>{alert}</Alert>}

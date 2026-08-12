@@ -8,7 +8,7 @@ import {
   ExpandMore, ExpandLess,
 } from '@mui/icons-material'
 import {
-  GcpStatus, startGcpProvision, fetchGcpStatus, enableApis, getOperator,
+  GcpStatus, startGcpProvision, fetchGcpStatus, enableApis,
 } from '@/api/controlPlane'
 import ReasonCodeDialog from './ReasonCodeDialog'
 
@@ -97,10 +97,8 @@ const CloudSetup: React.FC = () => {
     })
   }
 
-  const isAdmin = !!getOperator()
   const result = status?.result
-  const canProvision = isAdmin && sourceDomain.trim() && targetDomain.trim()
-                       && !status?.running
+  const canProvision = sourceDomain.trim() && targetDomain.trim() && !status?.running
 
   return (
     <Paper variant="outlined" sx={{ borderRadius: 2, p: 2 }}>
@@ -158,18 +156,12 @@ const CloudSetup: React.FC = () => {
               {status?.running ? 'Running…'
                 : dryRun ? 'Preview provisioning' : 'Provision Cloud setup'}
             </Button>
-            <Button variant="outlined" disabled={!isAdmin || status?.running}
+            <Button variant="outlined" disabled={status?.running}
                     onClick={() => setAsk('apis')}>
               Enable missing APIs
             </Button>
           </Stack>
 
-          {!isAdmin && (
-            <Typography variant="caption" color="text.secondary"
-                        sx={{ display: 'block', mt: 1 }}>
-              Set an operator name to run these.
-            </Typography>
-          )}
           {msg && <Alert severity="success" sx={{ mt: 2 }}
                          onClose={() => setMsg(null)}>{msg}</Alert>}
           {error && <Alert severity="error" sx={{ mt: 2 }}>{error}</Alert>}

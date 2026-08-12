@@ -882,6 +882,26 @@ class TestAccountAuth:
         assert who["role"] == "admin"
         assert who["account_id"] is not None
 
+    def test_actions_are_logged_against_the_accounts_name_and_email(self, cp, monkeypatch):
+        """The whole point of removing the free-text operator field: a
+        signed-in account's real identity, not a name someone typed once
+        and forgot about, ends up in operator_actions_log.actor."""
+        import api_server
+
+        cp.post("/api/v2/auth/signup",
+                json={"email": "attrib@example.com", "password": "hunter22222",
+                      "name": "Attrib User"})
+
+        class _FakeProc:
+            pid = 555
+        monkeypatch.setattr(api_server.subprocess, "Popen", lambda *a, **k: _FakeProc())
+        cp.post("/api/v2/gcp/provision",
+                json={"reason": "test", "source_domain": "c.example.com",
+                      "target_domain": "a.example.com", "dry_run": True})
+
+        row = cp.get("/api/v2/actions").json()[0]
+        assert row["actor"] == "Attrib User <attrib@example.com>"
+
     def test_password_never_appears_in_the_signup_response(self, cp):
         r = cp.post("/api/v2/auth/signup",
                     json={"email": "resp@example.com",

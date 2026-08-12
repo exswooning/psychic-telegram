@@ -8,7 +8,7 @@ import {
 } from '@mui/icons-material'
 import {
   AiStatus, AiAnalysis, fetchAiStatus, saveAiKey, fetchAiContext,
-  runAiAnalysis, getOperator,
+  runAiAnalysis,
 } from '@/api/controlPlane'
 import ReasonCodeDialog from './ReasonCodeDialog'
 
@@ -190,8 +190,6 @@ const AiDiagnostics: React.FC = () => {
     }
   }
 
-  const isAdmin = !!getOperator()
-
   return (
     <Paper variant="outlined" sx={{ borderRadius: 2, p: 2 }}>
       <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1, flexWrap: 'wrap', gap: 1 }}>
@@ -226,17 +224,12 @@ const AiDiagnostics: React.FC = () => {
             />
             <Button
               variant="contained"
-              disabled={!isAdmin || keyInput.trim().length < 10}
+              disabled={keyInput.trim().length < 10}
               onClick={() => setAskReason(true)}
             >
               Save key
             </Button>
           </Stack>
-          {!isAdmin && (
-            <Typography variant="caption" color="text.secondary">
-              Set an operator name to save a key.
-            </Typography>
-          )}
         </Box>
       )}
 

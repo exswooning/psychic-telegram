@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react'
 import {
-  Alert, Box, Button, Checkbox, Chip, LinearProgress, Paper, Stack, Table,
+  Box, Button, Checkbox, Chip, LinearProgress, Paper, Stack, Table,
   TableBody, TableCell, TableContainer, TableHead, TableRow, ToggleButton,
   ToggleButtonGroup, Tooltip, Typography,
 } from '@mui/material'
@@ -9,7 +9,7 @@ import {
   Science as DryRunIcon,
 } from '@mui/icons-material'
 import {
-  UserProgress, FleetNode, startMigration, stopJob, getOperator,
+  UserProgress, FleetNode, startMigration, stopJob,
 } from '@/api/controlPlane'
 import ReasonCodeDialog from './ReasonCodeDialog'
 
@@ -61,7 +61,6 @@ const JobController: React.FC<Props> = ({ users, nodes, onChanged }) => {
   )
 
   const runningJob = nodes.find((n) => n.active_job && n.job_pid)
-  const isAdmin = !!getOperator()
 
   const toggle = (email: string) => setSelected((prev) => {
     const next = new Set(prev)
@@ -144,34 +143,19 @@ const JobController: React.FC<Props> = ({ users, nodes, onChanged }) => {
 
         <Box sx={{ flexGrow: 1 }} />
 
-        <Tooltip title={isAdmin ? '' : 'Set an operator name to act'}>
-          <span>
-            <Button size="small" startIcon={<DryRunIcon />} disabled={!isAdmin}
-                    onClick={() => askStart(true)}>Dry run</Button>
-          </span>
-        </Tooltip>
-        <Tooltip title={isAdmin ? '' : 'Set an operator name to act'}>
-          <span>
-            <Button size="small" variant="contained" startIcon={<StartIcon />}
-                    disabled={!isAdmin} onClick={() => askStart(false)}>
-              {selected.size ? `Migrate ${selected.size}` : 'Migrate all'}
-            </Button>
-          </span>
-        </Tooltip>
+        <Button size="small" startIcon={<DryRunIcon />}
+                onClick={() => askStart(true)}>Dry run</Button>
+        <Button size="small" variant="contained" startIcon={<StartIcon />}
+                onClick={() => askStart(false)}>
+          {selected.size ? `Migrate ${selected.size}` : 'Migrate all'}
+        </Button>
         <Tooltip title={runningJob ? '' : 'Nothing running'}>
           <span>
             <Button size="small" color="error" variant="outlined" startIcon={<StopIcon />}
-                    disabled={!isAdmin || !runningJob} onClick={askStop}>Stop</Button>
+                    disabled={!runningJob} onClick={askStop}>Stop</Button>
           </span>
         </Tooltip>
       </Box>
-
-      {!isAdmin && (
-        <Alert severity="info" sx={{ mx: 2, mb: 2 }}>
-          Read-only: no operator identity set. Controls unlock once you identify
-          yourself — every action is recorded against that name.
-        </Alert>
-      )}
 
       <TableContainer sx={{ maxHeight: 480 }}>
         <Table size="small" stickyHeader>
@@ -190,7 +174,7 @@ const JobController: React.FC<Props> = ({ users, nodes, onChanged }) => {
               <TableRow key={u.source_email} hover selected={selected.has(u.source_email)}>
                 <TableCell padding="checkbox">
                   <Checkbox size="small" checked={selected.has(u.source_email)}
-                            onChange={() => toggle(u.source_email)} disabled={!isAdmin} />
+                            onChange={() => toggle(u.source_email)} />
                 </TableCell>
                 <TableCell>
                   <Typography variant="body2" sx={{ fontWeight: 600 }}>{u.source_email}</Typography>

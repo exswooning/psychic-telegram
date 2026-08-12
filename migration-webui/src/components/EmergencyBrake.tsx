@@ -6,7 +6,7 @@ import {
 import {
   GppMaybe as ShieldIcon, ExpandMore, ExpandLess,
 } from '@mui/icons-material'
-import { PublicShare, revertPublicShares, getOperator } from '@/api/controlPlane'
+import { PublicShare, revertPublicShares } from '@/api/controlPlane'
 import ReasonCodeDialog from './ReasonCodeDialog'
 
 /**
@@ -65,7 +65,6 @@ const EmergencyBrake: React.FC<Props> = ({ shares, liveCount, onReverted }) => {
           exposed ? (
             <Button
               color="inherit" variant="outlined" size="small"
-              disabled={!getOperator()}
               onClick={() => setAskReason(true)}
               sx={{ borderColor: 'currentColor', fontWeight: 700 }}
             >

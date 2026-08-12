@@ -213,7 +213,7 @@ const VpsConnectionCard: React.FC = () => {
             {result.ok
               ? `Connected in ${result.ms}ms -- signed in as "${result.role}". `
                 + (result.role === 'viewer'
-                    ? 'No operator name is set, so writes are refused; set one in Mission Control.'
+                    ? 'No account session or recognized operator on this connection, so writes are refused.'
                     : '')
               : `Could not reach ${base}: ${result.error}. Is connect_vps.sh running, and does it forward this exact port?`}
           </Alert>

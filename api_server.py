@@ -131,7 +131,12 @@ async def operator(x_operator: str = Header(default=""),
         account_id = accounts_auth.resolve_session(bp_session)
         if account_id is not None:
             account = accounts_auth.get_account(account_id)
-            name = account["name"] if account else f"account #{account_id}"
+            # Both name and email in the one actor string this ends up
+            # logged under (operator_actions_log.actor is a single TEXT
+            # column) -- a name alone is not unique across accounts, an
+            # email alone loses the human-readable part of "who did this".
+            name = (f"{account['name']} <{account['email']}>" if account
+                    else f"account #{account_id}")
             # An account is always "admin" of its own resources -- there is
             # no team/role concept yet (see accounts_auth.py's docstring);
             # role here governs THIS account's own data only, never anyone

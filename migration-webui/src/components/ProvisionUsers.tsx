@@ -5,7 +5,7 @@ import {
 } from '@mui/material'
 import { PersonAdd as ProvisionIcon } from '@mui/icons-material'
 import {
-  ProvisionStatus, startProvision, fetchProvisionStatus, getOperator,
+  ProvisionStatus, startProvision, fetchProvisionStatus,
 } from '@/api/controlPlane'
 import ReasonCodeDialog from './ReasonCodeDialog'
 
@@ -67,7 +67,6 @@ const ProvisionUsers: React.FC = () => {
     }
   }
 
-  const isAdmin = !!getOperator()
   const pct = status && status.total > 0
     ? Math.round((status.created / status.total) * 100) : 0
   const missing = status ? Math.max(0, status.total - status.created) : 0
@@ -97,16 +96,11 @@ const ProvisionUsers: React.FC = () => {
           <MenuItem value="source">source</MenuItem>
         </TextField>
         <Button
-          variant="contained" disabled={!isAdmin || status?.running}
+          variant="contained" disabled={status?.running}
           onClick={() => setAsk(true)}
         >
           {status?.running ? 'Provisioning…' : 'Provision missing users'}
         </Button>
-        {!isAdmin && (
-          <Typography variant="caption" color="text.secondary">
-            Set an operator name to launch.
-          </Typography>
-        )}
       </Stack>
 
       {status && status.total > 0 && (
