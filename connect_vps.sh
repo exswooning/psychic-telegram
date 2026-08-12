@@ -2,17 +2,25 @@
 # connect_vps.sh
 # ==============
 # Open (or check, or close) the SSH tunnel that lets a browser on this
-# machine reach the VPS's webui.py (8080) and api_server.py (8090), both of
-# which bind 127.0.0.1-only on the VPS on purpose -- the tunnel is the
-# access control, not a firewall rule to remember. This came up repeatedly
-# in this session as "the tunnel dropped again"; this script exists so
-# reconnecting is one idempotent command instead of re-deriving the ssh -L
-# incantation each time.
+# machine reach the VPS's webui.py (8080), api_server.py (8090), and the
+# VNC server (5900) watching the virtual display dwd_helper.py's real
+# Chrome runs on -- all three bind 127.0.0.1-only on the VPS on purpose,
+# the tunnel is the access control, not a firewall rule to remember. This
+# came up repeatedly in this session as "the tunnel dropped again"; this
+# script exists so reconnecting is one idempotent command instead of
+# re-deriving the ssh -L incantation each time.
 #
-#   ./connect_vps.sh                          # connect with defaults
-#   ./connect_vps.sh user@host [key] [ui] [cp] # override host/key/ports
-#   ./connect_vps.sh --status                  # is it up right now?
-#   ./connect_vps.sh --stop                    # tear it down
+# The VNC port matters specifically for 2FA/captcha during a Quick Setup
+# DWD run: dwd_helper.py's browser is real but invisible (Xvfb has no
+# physical screen), and email/password auto-fill stops at whatever prompt
+# comes after the password. Point any VNC client at localhost:5900 (with
+# the password from /root/.vnc/passwd on the VPS) to watch and finish it
+# by hand.
+#
+#   ./connect_vps.sh                              # connect with defaults
+#   ./connect_vps.sh user@host [key] [ui] [cp] [vnc] # override host/key/ports
+#   ./connect_vps.sh --status                      # is it up right now?
+#   ./connect_vps.sh --stop                        # tear it down
 #
 # Re-running while already connected is a no-op that reports success --
 # safe to put in a "just in case" step before opening the dashboard.
@@ -23,6 +31,7 @@ DEFAULT_TARGET="root@78.47.176.120"
 DEFAULT_KEY="$HOME/.ssh/workspace_migrator_vps"
 DEFAULT_UI_PORT=8080
 DEFAULT_CP_PORT=8090
+DEFAULT_VNC_PORT=5900
 
 STATE_DIR="$HOME/.workspace_migrator"
 PIDFILE="$STATE_DIR/tunnel.pid"
@@ -62,10 +71,11 @@ TARGET="${1:-$DEFAULT_TARGET}"
 KEY="${2:-$DEFAULT_KEY}"
 UI_PORT="${3:-$DEFAULT_UI_PORT}"
 CP_PORT="${4:-$DEFAULT_CP_PORT}"
+VNC_PORT="${5:-$DEFAULT_VNC_PORT}"
 
 echo "  target : $TARGET"
 echo "  key    : $KEY"
-echo "  ports  : $UI_PORT (webui) + $CP_PORT (control plane) -> localhost"
+echo "  ports  : $UI_PORT (webui) + $CP_PORT (control plane) + $VNC_PORT (VNC) -> localhost"
 echo
 
 if [[ ! -f "$KEY" ]]; then
@@ -87,7 +97,7 @@ fi
 
 # A process we didn't start may already hold these ports (another terminal,
 # a previous session). Don't kill something this script doesn't own.
-for p in "$UI_PORT" "$CP_PORT"; do
+for p in "$UI_PORT" "$CP_PORT" "$VNC_PORT"; do
   holder="$(lsof -ti "tcp:$p" -sTCP:LISTEN 2>/dev/null | head -1)"
   if [[ -n "$holder" ]]; then
     echo "  ERROR: port $p is already in use by pid $holder, and it isn't this script's tunnel." >&2
@@ -108,6 +118,7 @@ echo "  SSH OK"
 nohup ssh -i "$KEY" -N \
   -L "$UI_PORT:localhost:$UI_PORT" \
   -L "$CP_PORT:localhost:$CP_PORT" \
+  -L "$VNC_PORT:localhost:$VNC_PORT" \
   -o ExitOnForwardFailure=yes \
   -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
   -o StrictHostKeyChecking=accept-new \
@@ -132,6 +143,8 @@ fi
 if port_alive "$UI_PORT"; then
   echo "  connected: pid $NEW_PID"
   echo "  open http://localhost:$UI_PORT"
+  echo "  VNC (watch/complete 2FA during a DWD run): vnc://localhost:$VNC_PORT"
+  echo "  password is in /root/.vnc/passwd on the VPS"
 else
   echo "  tunnel process is running (pid $NEW_PID) but $UI_PORT isn't answering yet."
   echo "  webui.py may just be slow to start on the far end -- check again with --status,"
