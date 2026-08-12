@@ -56,6 +56,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # not exist until the function actually ran). These three ARE the seams
 # tests replace to exercise every branch without gcloud, a browser, or a
 # live tenant.
+import accounts_auth    # noqa: E402
 import dwd_helper       # noqa: E402
 import provision_gcp    # noqa: E402
 import verify_scopes    # noqa: E402
@@ -77,8 +78,18 @@ def run_full_setup(
     org_id: str = "", keys_dir: str = "keys", dry_run: bool = False,
     seed: bool = False, seed_scale: str = "small", create_users: bool = False,
     provision_users: bool = False, timeout: int = 900,
+    account_id: int | None = None,
 ) -> dict:
-    """side is 'source' or 'target'. Returns {phases: [...], ok: bool, ...}."""
+    """side is 'source' or 'target'. Returns {phases: [...], ok: bool, ...}.
+
+    account_id is None for the legacy/single-tenant caller (writes land in
+    env.sh, exactly as before this parameter existed) and set for a SaaS
+    account's own Quick Setup run (writes land in that account's
+    tenant_configs row instead -- see phase 3b). It plays no part in the
+    provisioning or DWD-verification phases above: those already get the
+    right domain/admin via the transient os.environ override a few lines
+    down, which works identically regardless of which account is calling.
+    """
     if side not in ("source", "target"):
         raise ValueError("side must be 'source' or 'target'")
 
@@ -179,23 +190,32 @@ def run_full_setup(
     # from) had not moved. Reuses webui.write_config_raw rather than a
     # second env.sh writer, so this and the Setup Wizard's own save button
     # can never disagree about the file format.
-    p = Phase(f"point env.sh at the {side} tenant")
+    p = Phase(f"point env.sh at the {side} tenant" if account_id is None
+              else f"save {side} tenant config for account {account_id}")
     phases.append(p)
     try:
-        from webui import write_config_raw
+        if account_id is not None:
+            accounts_auth.update_tenant_config(
+                account_id, side, domain=domain, admin_email=admin_email,
+                sa_key_path=key_path)
+            p.status, p.detail = "ok", "tenant_configs row updated"
+        else:
+            from webui import write_config_raw
 
-        write_config_raw({
-            f"{side.upper()}_DOMAIN": domain,
-            f"{side.upper()}_ADMIN": admin_email,
-            f"{side.upper()}_SA_KEY": key_path,
-        })
-        p.status, p.detail = "ok", f"{side.upper()}_DOMAIN/_ADMIN/_SA_KEY written"
+            write_config_raw({
+                f"{side.upper()}_DOMAIN": domain,
+                f"{side.upper()}_ADMIN": admin_email,
+                f"{side.upper()}_SA_KEY": key_path,
+            })
+            p.status, p.detail = "ok", f"{side.upper()}_DOMAIN/_ADMIN/_SA_KEY written"
     except Exception as exc:      # noqa: BLE001 - advisory: setup itself
         # already succeeded, this just means one more manual step
         p.status, p.detail = "failed", (
             f"{exc} -- set {side.upper()}_DOMAIN={domain}, "
             f"{side.upper()}_ADMIN={admin_email}, "
-            f"{side.upper()}_SA_KEY={key_path} in env.sh by hand")
+            f"{side.upper()}_SA_KEY={key_path} "
+            + ("in env.sh by hand" if account_id is None
+               else f"in tenant_configs for account {account_id} by hand"))
 
     # -- 4. Optional: seed (source) or provision users (target) ------------
     if seed and side == "source":
@@ -249,6 +269,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--provision-users", action="store_true",
                     help="target only: create accounts from identity_map "
                          "after delegation")
+    # Present in argv (not just passed as a plain kwarg) on purpose: the
+    # control plane's *_status polling identifies a running process by
+    # grepping `ps -eo args=` for its own launch command, and two different
+    # accounts both provisioning "source" at once need that grep to tell
+    # them apart -- a bare `--side source` matches both.
+    ap.add_argument("--account-id", type=int, default=None,
+                    help="SaaS account this run belongs to, if any")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
@@ -258,7 +285,7 @@ def main(argv: list[str] | None = None) -> int:
     result = run_full_setup(
         args.side, args.domain, args.admin, password, args.org_id,
         args.keys_dir, args.dry_run, args.seed, args.scale, args.create_users,
-        args.provision_users)
+        args.provision_users, account_id=args.account_id)
     password = None  # noqa: F841
 
     if args.json:

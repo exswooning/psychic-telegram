@@ -505,11 +505,26 @@ class Settings:
     # -- run mode --------------------------------------------------------------
     dry_run: bool = False
 
+    # -- SaaS account scoping ---------------------------------------------
+    # None (every call site before this field existed, and every call site
+    # since that has no reason to be account-scoped -- CLI scripts, the
+    # bootstrapped legacy deployment) means "behave exactly as before":
+    # read tenant config from the environment/env.sh. Set, it means "this
+    # request belongs to one SaaS customer" -- domains, admins, key paths
+    # and db_path all get overridden from that account's own
+    # tenant_configs row in __post_init__ below, instead of os.environ.
+    # Deliberately NOT a `field(default_factory=...)` reading an env var:
+    # there is no sane environment variable for "which of many customers is
+    # this", it has to come from whoever resolved a session/request.
+    account_id: int | None = None
+
     def effective_upload_cap(self) -> int:
         """The per-target-user daily upload ceiling, in bytes."""
         return int(self.daily_upload_cap_gb * 1024**3)
 
     def __post_init__(self) -> None:
+        if self.account_id is not None:
+            self._load_account_tenant_config()
         # An unrecognised transfer mode used to be accepted and silently behave
         # as download_upload, because every check was `== "server_side"`. So a
         # typo, or a mode that is documented but not yet wired, quietly
@@ -533,4 +548,43 @@ class Settings:
             val = getattr(self, attr)
             if val and not os.path.isabs(val):
                 setattr(self, attr, os.path.abspath(os.path.join(root, val)))
+
+    def _load_account_tenant_config(self) -> None:
+        """Override tenant fields from this account's own tenant_configs
+        rows, in place of env.sh/os.environ. Runs before the path-resolution
+        loop above, so anything it sets (db_path, the sa_key paths) still
+        goes through the same relative->absolute handling every other call
+        site gets.
+
+        Lazy import: control_plane_db is control-plane-only machinery
+        (imports the stdlib sqlite3 wrapper, nothing heavier), and config.py
+        is imported by CLI scripts that have no reason to pull it in when
+        account_id is never set -- the same lazy-import shape
+        control_plane_db.py itself already uses for `from config import
+        Settings` inside `_db_path()`.
+        """
+        import control_plane_db as cpdb
+
+        with cpdb.ro() as conn:
+            rows = conn.execute(
+                "SELECT side, domain, admin_email, sa_key_path, db_path "
+                "FROM tenant_configs WHERE account_id=?", (self.account_id,)
+            ).fetchall()
+        if not rows:
+            raise ValueError(
+                f"no tenant_configs rows for account_id={self.account_id} -- "
+                "was accounts_auth.create_account() ever called for it?")
+        for row in rows:
+            if row["side"] == "source":
+                self.source_domain = row["domain"] or self.source_domain
+                self.source_admin = row["admin_email"] or self.source_admin
+                self.source_sa_key = row["sa_key_path"] or self.source_sa_key
+            elif row["side"] == "target":
+                self.target_domain = row["domain"] or self.target_domain
+                self.target_admin = row["admin_email"] or self.target_admin
+                self.target_sa_key = row["sa_key_path"] or self.target_sa_key
+            # Both rows carry the same db_path (one ledger per account, not
+            # per side) -- take it from whichever row has it set.
+            if row["db_path"]:
+                self.db_path = row["db_path"]
 

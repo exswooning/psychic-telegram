@@ -229,19 +229,21 @@ class TestLedgerSafety:
         path = tempfile.mktemp(suffix=".db")
         os.environ["MIGRATION_DB"] = path
         MigrationDB(path)
-        assert cpdb.apply_migrations() == ["001_control_plane.sql"]
-        assert cpdb.apply_migrations() == ["001_control_plane.sql"]   # no error
+        expected = ["001_control_plane.sql", "002_accounts.sql"]
+        assert cpdb.apply_migrations() == expected
+        assert cpdb.apply_migrations() == expected   # no error
         os.unlink(path)
 
     def test_migrations_do_not_touch_engine_tables(self):
         """The DDL must be additive. Anything else risks the live ledger."""
-        with open(os.path.join(os.path.dirname(os.path.dirname(
-                os.path.abspath(__file__))), "migrations",
-                "001_control_plane.sql"), encoding="utf-8") as fh:
-            sql = fh.read().upper()
-        for forbidden in ("DROP ", "ALTER TABLE ID_MAPPING", "ALTER TABLE AUDIT_LOG",
-                          "DELETE FROM", "ALTER TABLE IDENTITY_MAP"):
-            assert forbidden not in sql, f"migration contains {forbidden!r}"
+        migrations_dir = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "migrations")
+        for name in ("001_control_plane.sql", "002_accounts.sql"):
+            with open(os.path.join(migrations_dir, name), encoding="utf-8") as fh:
+                sql = fh.read().upper()
+            for forbidden in ("DROP ", "ALTER TABLE ID_MAPPING", "ALTER TABLE AUDIT_LOG",
+                              "DELETE FROM", "ALTER TABLE IDENTITY_MAP"):
+                assert forbidden not in sql, f"{name} contains {forbidden!r}"
 
 
 class TestPartialFailureModelling:
@@ -802,3 +804,156 @@ class TestSecretsNeverReachTheAuditLog:
         assert not offenders, (
             f"secret-shaped field(s) not excluded from model_dump(): "
             f"{offenders}")
+
+
+class TestAccountAuth:
+    """Real signup/login/logout, layered on top of the operator-RBAC
+    machinery above rather than replacing it -- see api_server.py's
+    operator() dependency, which now checks a bp_session cookie before
+    falling back to the X-Operator header everything above this class
+    still exercises."""
+
+    def test_signup_creates_an_account_and_signs_it_in(self, cp):
+        r = cp.post("/api/v2/auth/signup",
+                    json={"email": "new@example.com", "password": "hunter22222",
+                          "name": "New User"})
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+        assert "bp_session" in r.cookies
+        # The cookie just set is honored on the very next request.
+        me = cp.get("/api/v2/auth/me")
+        assert me.status_code == 200
+        assert me.json()["email"] == "new@example.com"
+
+    def test_signup_with_a_duplicate_email_is_rejected(self, cp):
+        cp.post("/api/v2/auth/signup",
+                json={"email": "dupe@example.com", "password": "hunter22222",
+                      "name": "First"})
+        r = cp.post("/api/v2/auth/signup",
+                    json={"email": "dupe@example.com", "password": "different99",
+                          "name": "Second"})
+        assert r.status_code == 400
+
+    def test_signup_with_a_short_password_is_rejected_by_the_schema(self, cp):
+        r = cp.post("/api/v2/auth/signup",
+                    json={"email": "short@example.com", "password": "short",
+                          "name": "Short Pw"})
+        assert r.status_code == 422
+
+    def test_login_with_correct_credentials_succeeds(self, cp):
+        cp.post("/api/v2/auth/signup",
+                json={"email": "login@example.com", "password": "hunter22222",
+                      "name": "Login User"})
+        cp.post("/api/v2/auth/logout")
+        r = cp.post("/api/v2/auth/login",
+                    json={"email": "login@example.com", "password": "hunter22222"})
+        assert r.status_code == 200
+        assert cp.get("/api/v2/auth/me").json()["email"] == "login@example.com"
+
+    def test_login_with_wrong_password_fails(self, cp):
+        cp.post("/api/v2/auth/signup",
+                json={"email": "wrongpw@example.com", "password": "hunter22222",
+                      "name": "User"})
+        cp.post("/api/v2/auth/logout")
+        r = cp.post("/api/v2/auth/login",
+                    json={"email": "wrongpw@example.com", "password": "not-it"})
+        assert r.status_code == 401
+
+    def test_me_without_a_session_is_unauthorized(self, cp):
+        r = cp.get("/api/v2/auth/me")
+        assert r.status_code == 401
+
+    def test_logout_ends_the_session(self, cp):
+        cp.post("/api/v2/auth/signup",
+                json={"email": "out@example.com", "password": "hunter22222",
+                      "name": "Out User"})
+        assert cp.get("/api/v2/auth/me").status_code == 200
+        cp.post("/api/v2/auth/logout")
+        assert cp.get("/api/v2/auth/me").status_code == 401
+
+    def test_a_signed_in_account_is_always_admin_of_its_own_resources(self, cp):
+        """No team/role concept yet -- see accounts_auth.py. whoami must
+        reflect that, since require_admin() downstream trusts op.role
+        as-is."""
+        cp.post("/api/v2/auth/signup",
+                json={"email": "owner@example.com", "password": "hunter22222",
+                      "name": "Owner"})
+        who = cp.get("/api/v2/whoami").json()
+        assert who["role"] == "admin"
+        assert who["account_id"] is not None
+
+    def test_password_never_appears_in_the_signup_response(self, cp):
+        r = cp.post("/api/v2/auth/signup",
+                    json={"email": "resp@example.com",
+                          "password": "should-never-be-echoed-back",
+                          "name": "Resp User"})
+        assert "should-never-be-echoed-back" not in r.text
+
+    def test_password_never_appears_in_the_login_response(self, cp):
+        cp.post("/api/v2/auth/signup",
+                json={"email": "resp2@example.com", "password": "hunter22222",
+                      "name": "Resp User"})
+        cp.post("/api/v2/auth/logout")
+        r = cp.post("/api/v2/auth/login",
+                    json={"email": "resp2@example.com",
+                          "password": "should-never-be-echoed-back-2"})
+        assert "should-never-be-echoed-back-2" not in r.text
+
+
+class TestPerAccountIsolation:
+    """The actual point of this whole feature: two different customers'
+    concurrent setup runs must never share a state file, a log path, or a
+    database -- see full_setup.py's phase 3b and api_server.py's
+    _full_setup_state_path/_gcp_state_path."""
+
+    def test_two_accounts_full_setup_state_files_never_collide(self, monkeypatch):
+        """Both land on the SAME shared control-plane db (one MIGRATION_DB
+        for this whole test, unlike most tests here) -- the state-file path
+        is what has to keep them apart, not separate databases."""
+        path = tempfile.mktemp(suffix=".db")
+        monkeypatch.setenv("MIGRATION_DB", path)
+        monkeypatch.setenv("CP_OPERATORS", "")
+        MigrationDB(path)
+        cpdb.apply_migrations()
+
+        import api_server
+
+        class _FakeProc:
+            pid = 4242
+
+        monkeypatch.setattr(api_server.subprocess, "Popen", lambda *a, **k: _FakeProc())
+
+        with TestClient(api_server.app) as client:
+            client.post("/api/v2/auth/signup",
+                        json={"email": "acct1@example.com", "password": "hunter22222",
+                              "name": "Acct One"})
+            r1 = client.post("/api/v2/full-setup/start",
+                             json={"reason": "test", "side": "source",
+                                   "domain": "one.example.com",
+                                   "admin_email": "admin@one.example.com",
+                                   "admin_password": "x", "dry_run": True})
+            assert r1.status_code == 200
+            path1 = api_server._full_setup_state_path("source", 1)
+
+            client.post("/api/v2/auth/logout")
+            client.post("/api/v2/auth/signup",
+                        json={"email": "acct2@example.com", "password": "hunter22222",
+                              "name": "Acct Two"})
+            r2 = client.post("/api/v2/full-setup/start",
+                             json={"reason": "test", "side": "source",
+                                   "domain": "two.example.com",
+                                   "admin_email": "admin@two.example.com",
+                                   "admin_password": "x", "dry_run": True})
+            assert r2.status_code == 200
+            path2 = api_server._full_setup_state_path("source", 2)
+
+        assert path1 != path2
+        os.unlink(path)
+
+    def test_the_legacy_x_operator_path_is_unaffected_by_account_scoping(self, cp):
+        """A caller with no bp_session cookie at all -- the SSH-tunnel/
+        CP_OPERATORS path every test above this class already exercises --
+        must see account_id=None, exactly as before this feature existed."""
+        who = cp.get("/api/v2/whoami", headers=ADMIN).json()
+        assert who["account_id"] is None
+        assert who["role"] == "admin"

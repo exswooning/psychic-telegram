@@ -54,6 +54,8 @@ from typing import Callable
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import accounts_auth  # stdlib-only itself; does not break the no-pip-install promise
+
 try:
     from wizard import State, build_steps
 except Exception:  # noqa: BLE001 - the UI should still load and say why
@@ -395,7 +397,24 @@ class Job:
         }
 
 
-JOB = Job()
+JOBS: dict[int | None, Job] = {}
+
+
+def get_job(account_id: int | None) -> Job:
+    """One Job instance per account, lazily created -- see the class
+    docstring above for what a Job actually is. Only /api/seed,
+    /api/reset_target, and the /api/job poller are account-scoped today;
+    every other endpoint that launches or reads a Job (Setup Wizard,
+    Deploy, stages/report payloads) still reads the plain `JOB` name below,
+    which is simply JOBS[None] -- the legacy, single-tenant behaviour this
+    had before per-account isolation existed, unchanged for account #1 and
+    every caller with no account context to give."""
+    if account_id not in JOBS:
+        JOBS[account_id] = Job()
+    return JOBS[account_id]
+
+
+JOB = get_job(None)
 # Which tenant the in-flight consent belongs to, so the callback knows.
 _PENDING: dict[str, str] = {}
 
@@ -1286,11 +1305,21 @@ def live_check(kind: str) -> dict:
 SEED_SCALES = ("tiny", "small", "medium", "large", "huge")
 
 
-def seed_argv(body: dict) -> tuple[list[str], dict, str]:
-    """Build the seeder command, or return why it must not run."""
+def seed_argv(body: dict, account_id: int | None = None) -> tuple[list[str], dict, str]:
+    """Build the seeder command, or return why it must not run.
+
+    account_id=None (every caller before this parameter existed) reads the
+    domain/env exactly as before, from Settings()/env.sh. Set, it reads
+    that account's own tenant_configs row instead, and overlays the
+    matching SOURCE_*/MIGRATION_DB env vars onto the child process -- seed_
+    sandbox.py itself reads some of these straight from os.environ rather
+    than through a Settings object (see data-generator/seed_sandbox.py),
+    so the override has to happen at the environment, not just the domain
+    check below.
+    """
     from config import Settings
 
-    st = Settings()
+    st = Settings(account_id=account_id)
     domain = (st.source_domain or "").strip().lower()
     typed = (body.get("confirm_domain") or "").strip().lower()
 
@@ -1342,10 +1371,13 @@ def seed_argv(body: dict) -> tuple[list[str], dict, str]:
     # Set here rather than asking the operator to export it: the value carries
     # no judgement, the typed domain above is what actually gates this.
     env["SANDBOX_MODE"] = "true"
+    if account_id is not None:
+        env.update(SOURCE_DOMAIN=st.source_domain, SOURCE_ADMIN=st.source_admin,
+                   SOURCE_SA_KEY=st.source_sa_key, MIGRATION_DB=st.db_path)
     return argv, env, ""
 
 
-def reset_target_argv(body: dict) -> tuple[list[str], dict, str]:
+def reset_target_argv(body: dict, account_id: int | None = None) -> tuple[list[str], dict, str]:
     """
     Build the reset_target command, or return why it must not run.
 
@@ -1358,7 +1390,7 @@ def reset_target_argv(body: dict) -> tuple[list[str], dict, str]:
     """
     from config import Settings
 
-    st = Settings()
+    st = Settings(account_id=account_id)
     domain = (st.target_domain or "").strip().lower()
     typed = (body.get("confirm_domain") or "").strip().lower()
 
@@ -1386,6 +1418,9 @@ def reset_target_argv(body: dict) -> tuple[list[str], dict, str]:
         argv += ["--services", services if isinstance(services, str) else ",".join(services)]
     env = gcloud_env()
     env["SANDBOX_MODE"] = "true"
+    if account_id is not None:
+        env.update(TARGET_DOMAIN=st.target_domain, TARGET_ADMIN=st.target_admin,
+                   TARGET_SA_KEY=st.target_sa_key, MIGRATION_DB=st.db_path)
     return argv, env, ""
 
 
@@ -2425,11 +2460,13 @@ pre.out{height:230px}
 .feedbar button{padding:5px 9px;font-size:12px}
 </style></head><body>
 <header>
-  <h1>Workspace Migration</h1>
+  <h1>Workspace Migration <span style="font-size:10px;background:var(--accent);color:#04182e;padding:2px 7px;border-radius:99px;font-weight:700">v2.0</span></h1>
   <span class="muted" id="route"></span>
   <span class="muted" id="hostbadge" style="font-family:ui-monospace,monospace;cursor:default"></span>
-    <span class="muted" style="margin-left:auto;display:flex;gap:8px;align-items:center"
+    <span class="muted" style="margin-left:auto;display:flex;gap:10px;align-items:center"
     title="127.0.0.1 only · SSH tunnel">
+    <button onclick="toggleTheme()" style="padding:3px 8px;font-size:11px">☀️ Theme</button>
+    <button onclick="toggleVerbose()" style="padding:3px 8px;font-size:11px">💡 Verbose</button>
     <span class="dot" id="dot"></span><b id="jname">idle</b>
     <span id="jmeta"></span></span>
 </header>
@@ -2449,6 +2486,10 @@ pre.out{height:230px}
   <span class="muted" id="progtxt">no migration yet</span>
 </div>
 
+<div style="padding:8px 22px;background:var(--panel);border-bottom:1px solid var(--line);display:flex;gap:10px;align-items:center">
+  <input type="text" id="action-search" placeholder="🔍 Search commands & tools (e.g. migrate, preflight, inventory, seed, undo, verify...)" oninput="filterToolbar(this.value)" style="margin:0;flex:1">
+</div>
+
 <div class="toolbar" id="tb">Loading commands&hellip;</div>
 
 <div class="tabs" id="tabs">
@@ -2457,6 +2498,9 @@ pre.out{height:230px}
   <button data-tab="deploy">Deploy</button>
   <button data-tab="dashboard">Dashboard</button>
   <button data-tab="users">Users</button>
+  <button data-tab="identities">Identities</button>
+  <button data-tab="audit">Audit & Inventory</button>
+  <button data-tab="maintenance">Maintenance</button>
   <button data-tab="failures">Failures</button>
   <button data-tab="scope">Scope</button>
   <button data-tab="logs">Logs</button>
@@ -2476,6 +2520,9 @@ pre.out{height:230px}
 <div class="view" id="view-deploy"></div>
 <div class="view" id="view-dashboard"><div class="muted">Loading&hellip;</div></div>
 <div class="view" id="view-users"></div>
+<div class="view" id="view-identities"></div>
+<div class="view" id="view-audit"></div>
+<div class="view" id="view-maintenance"></div>
 <div class="view" id="view-failures"></div>
 <div class="view" id="view-scope"></div>
 <div class="view" id="view-logs"></div>
@@ -3484,19 +3531,116 @@ function applyToggles(tg){
     const c=$('tog-'+k); if(c&&tg.services) c.checked=!!tg.services[k]; });
 }
 
+function toggleTheme() {
+  document.body.classList.toggle('light-theme');
+}
+
+function toggleVerbose() {
+  document.body.classList.toggle('hide-verbose');
+}
+
+function filterToolbar(q) {
+  const query = (q || '').toLowerCase();
+  document.querySelectorAll('#tb button').forEach(b => {
+    b.style.display = b.textContent.toLowerCase().includes(query) ? 'inline-block' : 'none';
+  });
+}
+
 function goSeed(){ setTab('seed'); }
+
+let identitiesList = [];
+async function fetchIdentities() {
+  try {
+    const r = await (await fetch('/api/identities')).json();
+    if (r.ok) {
+      identitiesList = r.csv_identities || [];
+      if (tab === 'identities') drawView();
+    }
+  } catch(e){}
+}
+
+async function saveIdentitiesCSV() {
+  try {
+    const r = await (await fetch('/api/identities/save', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({identities: identitiesList})
+    })).json();
+    alert(r.msg || r.error);
+  } catch(e){ alert(e); }
+}
+
+function showAddIdentityPair() {
+  const src = prompt("Source Email (user@src.com):");
+  if (!src) return;
+  const tgt = prompt("Target Email (user@dst.com):");
+  if (!tgt) return;
+  identitiesList.push({source_email: src, target_email: tgt, entity_type: 'user'});
+  drawView();
+}
+
+function identitiesHTML() {
+  return `<h2>👥 Directory Identity Mapping</h2>
+    <div class="warnbox">Map users, groups, and aliases between source domain (${esc((cfg||{}).source_domain || 'source')}) and target domain (${esc((cfg||{}).target_domain || 'target')}).</div>
+    <div style="display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap">
+      <button class="primary" onclick="run('init_db_auto')">⚡ Auto-Map Mappings by Directory</button>
+      <button onclick="run('init_db')">📥 Reload identities.csv into DB</button>
+      <button onclick="showAddIdentityPair()">➕ Add Single Identity Pair</button>
+      <button onclick="saveIdentitiesCSV()">💾 Save to identities.csv</button>
+    </div>
+    <table>
+      <thead><tr><th>Source Email</th><th>Target Email</th><th>Entity Type</th><th>Status</th></tr></thead>
+      <tbody>
+        ${identitiesList.map(i => `
+          <tr>
+            <td><code>${esc(i.source_email)}</code></td>
+            <td><code>${esc(i.target_email)}</code></td>
+            <td><span class="pill">${esc(i.entity_type)}</span></td>
+            <td><span class="pill done">MAPPED</span></td>
+          </tr>
+        `).join('') || '<tr><td colspan="4" class="muted">No mappings loaded yet. Click Auto-Map above.</td></tr>'}
+      </tbody>
+    </table>`;
+}
+
+function auditHTML() {
+  return `<h2>🔍 Pre-Migration Inventory & Audit Suite</h2>
+    <div class="note">Deep data integrity check tools comparing source vs target corpora.</div>
+    <div class="acts" style="margin-top:14px">
+      <button class="primary" onclick="run('inventory')">📦 Tenant Inventory<small>Breakdown of native Docs, Sheets, Gmail threads, Calendar events per user</small></button>
+      <button class="primary" onclick="run('acl_audit')">🔒 Share Access ACL Audit<small>File-by-file grant comparison across domains</small></button>
+      <button onclick="run('verify')">🔍 Sample Verification<small>Spot-check 25 random samples</small></button>
+      <button onclick="run('verify_scopes')">🛡️ Verify API Scopes<small>Explicit scope check on source & target keys</small></button>
+    </div>`;
+}
+
+function maintenanceHTML() {
+  return `<h2>🛠️ Maintenance, Retry & Targeted Rollback</h2>
+    <div class="note">Resolve failure ledgers, repair Drive file dates, or delete migrated items.</div>
+    <div class="acts" style="margin-top:14px">
+      <button onclick="run('resolve_dry')">🔍 Resolve Failures (Dry Run)<small>Preview items that would be retried</small></button>
+      <button class="primary" onclick="run('resolve')">⚡ Retry Failed Items<small>Retry FAILED items with current code</small></button>
+      <button onclick="run('repair_modified_times')">🕒 Repair Drive Timestamps<small>Restore original file creation and modified dates</small></button>
+      <button onclick="run('backfill_drive')">📥 Backfill Drive Ledger<small>Mark Drive complete on pre-existing ledgers</small></button>
+      <button class="danger" onclick="run('undo_dry')">🔍 Undo Rollback (Dry Run)<small>Count items target undo would delete</small></button>
+      <button class="danger" onclick="run('undo')">🗑️ Execute Targeted Rollback<small>Delete migrated items recorded in id_mapping</small></button>
+      <button class="danger" onclick="run('reset_drive_ledger')">🔄 Reset Drive Ledger<small>Clear Drive audit records to force re-migration</small></button>
+    </div>`;
+}
 
 function setTab(t){
   tab=t;
   document.querySelectorAll('.tabs button').forEach(b=>
     b.classList.toggle('on',b.dataset.tab===t));
   const views={setup:$('setup'),seed:$('view-seed'),deploy:$('view-deploy'),
-    dashboard:$('view-dashboard'),users:$('view-users'),failures:$('view-failures'),
+    dashboard:$('view-dashboard'),users:$('view-users'),identities:$('view-identities'),
+    audit:$('view-audit'),maintenance:$('view-maintenance'),failures:$('view-failures'),
     scope:$('view-scope'),logs:$('view-logs'),output:$('view-output')};
   Object.keys(views).forEach(k=>{ const el=views[k]; if(!el) return;
     el.style.display=(k===t)?(k==='setup'?'grid':'block'):'none'; });
   if(t!=='setup'){
     if(!S) refresh();
+    if(t==='identities') fetchIdentities();
     if(t==='scope'&&!scopeLines.length) fetchScope();
     if(t==='logs'&&!logLines.length) fetchLogs();
     if(t==='deploy') fetchDeployHistory();
@@ -3514,6 +3658,9 @@ function drawView(){
   else if(tab==='deploy') h=deployTabHTML();
   else if(tab==='dashboard') h=dashboardHTML();
   else if(tab==='users') h=usersHTML();
+  else if(tab==='identities') h=identitiesHTML();
+  else if(tab==='audit') h=auditHTML();
+  else if(tab==='maintenance') h=maintenanceHTML();
   else if(tab==='failures') h=failuresHTML();
   else if(tab==='scope') h=scopeHTML();
   else if(tab==='logs') h=logsHTML();
@@ -3787,6 +3934,29 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, obj, code: int = 200) -> None:
         self._send(code, json.dumps(obj).encode(), "application/json")
 
+    def _account_id(self) -> int | None:
+        """None for the legacy path (no cookie, or one that doesn't resolve
+        -- same handling api_server.py's operator() dependency gives an
+        absent/invalid bp_session). Stdlib http.cookies rather than a hand
+        rolled split on ';', for the same reason api_server.py leans on
+        FastAPI's Cookie() instead of parsing the header itself: cookie
+        syntax has enough edge cases (quoting, extra attributes) that a
+        one-line split silently mis-parses some of them."""
+        import http.cookies
+
+        raw = self.headers.get("Cookie")
+        if not raw:
+            return None
+        jar = http.cookies.SimpleCookie()
+        try:
+            jar.load(raw)
+        except http.cookies.CookieError:
+            return None
+        morsel = jar.get("bp_session")
+        if morsel is None:
+            return None
+        return accounts_auth.resolve_session(morsel.value)
+
     _ASSET_CTYPES = {
         ".js": "application/javascript", ".css": "text/css",
         ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon",
@@ -3890,7 +4060,7 @@ class Handler(BaseHTTPRequestHandler):
                     since = int(self.path.split("since=")[1].split("&")[0])
                 except ValueError:
                     since = 0
-            snap = JOB.snapshot(since)
+            snap = get_job(self._account_id()).snapshot(since)
             if not snap["running"]:
                 ext = _external_job_snapshot()
                 if ext is not None:
@@ -3945,11 +4115,12 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if self.path == "/api/seed":
-            argv, env, err = seed_argv(body)
+            account_id = self._account_id()
+            argv, env, err = seed_argv(body, account_id)
             if err:
                 self._json({"ok": False, "error": err}, 400)
                 return
-            ok, msg = JOB.start(
+            ok, msg = get_job(account_id).start(
                 "seed", argv, env=env,
                 cwd=os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                  "data-generator"))
@@ -3957,12 +4128,13 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if self.path == "/api/reset_target":
-            argv, env, err = reset_target_argv(body)
+            account_id = self._account_id()
+            argv, env, err = reset_target_argv(body, account_id)
             if err:
                 self._json({"ok": False, "error": err}, 400)
                 return
             # reset_target.py lives at the repo root, unlike the seeder.
-            ok, msg = JOB.start("reset target", argv, env=env)
+            ok, msg = get_job(account_id).start("reset target", argv, env=env)
             self._json({"ok": ok, "error": "" if ok else msg})
             return
 

@@ -75,6 +75,37 @@ def _reset_chat_shared_state():
     FakeChat.reset_shared()
 
 
+@pytest.fixture(autouse=True)
+def _cleanup_account_dirs():
+    """accounts_auth.create_account() writes real directories under
+    data/accounts/{id}/ and keys/{id}/, relative to the actual repo
+    checkout (accounts_auth.HERE) -- not a tmp_path, because the whole
+    point is that they need to exist at a stable path across process
+    restarts. Every test that signs up an account (directly or through
+    api_server.py's /api/v2/auth/signup) would otherwise leave numbered
+    directories behind in the real repo on every run. Snapshot which
+    numeric dirs exist before, sweep anything new after.
+    """
+    import shutil
+
+    import accounts_auth
+
+    def _numeric_dirs(base: str) -> set[str]:
+        if not os.path.isdir(base):
+            return set()
+        return {name for name in os.listdir(base) if name.isdigit()}
+
+    data_accounts = os.path.join(accounts_auth.HERE, "data", "accounts")
+    keys_dir = os.path.join(accounts_auth.HERE, "keys")
+    before_data = _numeric_dirs(data_accounts)
+    before_keys = _numeric_dirs(keys_dir)
+    yield
+    for name in _numeric_dirs(data_accounts) - before_data:
+        shutil.rmtree(os.path.join(data_accounts, name), ignore_errors=True)
+    for name in _numeric_dirs(keys_dir) - before_keys:
+        shutil.rmtree(os.path.join(keys_dir, name), ignore_errors=True)
+
+
 @pytest.fixture
 def auth(settings, monkeypatch) -> FakeAuth:
     """

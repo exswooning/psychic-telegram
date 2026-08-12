@@ -65,10 +65,39 @@ def apply_migrations(db_path: str | None = None) -> list[str]:
             with open(os.path.join(MIGRATIONS_DIR, name), encoding="utf-8") as fh:
                 conn.executescript(fh.read())
             applied.append(name)
+        _apply_column_upgrades(conn)
         conn.commit()
     finally:
         conn.close()
     return applied
+
+
+def _apply_column_upgrades(conn: sqlite3.Connection) -> None:
+    """SQLite has no `ADD COLUMN IF NOT EXISTS`, so inspect PRAGMA table_info
+    and add what is missing -- same idiom as db.py's MigrationDB, applied
+    here for columns that only make sense once 002_accounts.sql's tables
+    exist. Kept out of the .sql files themselves because `executescript`
+    would abort on the second, idempotent run once the column already
+    exists (a bare ALTER TABLE ADD COLUMN is not re-runnable the way
+    CREATE ... IF NOT EXISTS is)."""
+    upgrades = {
+        # Lets new writes attribute an action to a SaaS account without
+        # breaking every row written before accounts existed -- NULL means
+        # "predates multi-tenancy", not "unknown account".
+        "operator_actions_log": [
+            ("account_id", "INTEGER"),
+        ],
+    }
+    for table, cols in upgrades.items():
+        # Positional index, not row_factory["name"]: this connection (from
+        # apply_migrations, above) is a plain sqlite3.connect() without
+        # row_factory=sqlite3.Row set, unlike rw()/ro() elsewhere in this
+        # module -- PRAGMA table_info's columns are (cid, name, type,
+        # notnull, dflt_value, pk).
+        existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for name, decl in cols:
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
 
 @contextmanager
@@ -100,7 +129,7 @@ def rw() -> Iterator[sqlite3.Connection]:
 # ----------------------------------------------------------------------
 def begin_action(actor: str, actor_role: str, action: str, reason: str,
                  target: str | None = None, params: dict | None = None,
-                 node_id: str | None = None) -> int:
+                 node_id: str | None = None, account_id: int | None = None) -> int:
     """
     Record intent and return the row id. Call this BEFORE doing the thing.
 
@@ -111,6 +140,10 @@ def begin_action(actor: str, actor_role: str, action: str, reason: str,
 
     `reason` is validated here as well as in the schema -- a whitespace-only
     string satisfies NOT NULL but is not a reason.
+
+    `account_id` is None for the operator-RBAC path (CP_OPERATORS, unchanged)
+    and set for anything a logged-in SaaS account did -- lets the audit log
+    answer "what has this customer's account done" without a second table.
     """
     reason = (reason or "").strip()
     if not reason:
@@ -118,10 +151,10 @@ def begin_action(actor: str, actor_role: str, action: str, reason: str,
     with rw() as conn:
         cur = conn.execute(
             "INSERT INTO operator_actions_log "
-            "(actor, actor_role, action, target, params_json, reason, node_id) "
-            "VALUES (?,?,?,?,?,?,?)",
+            "(actor, actor_role, action, target, params_json, reason, node_id, account_id) "
+            "VALUES (?,?,?,?,?,?,?,?)",
             (actor, actor_role, action, target,
-             json.dumps(params or {}, default=str), reason, node_id),
+             json.dumps(params or {}, default=str), reason, node_id, account_id),
         )
         return int(cur.lastrowid)
 

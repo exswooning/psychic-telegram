@@ -46,6 +46,7 @@ export async function checkConnection(base: string): Promise<{ ok: true; role: R
   try {
     const res = await fetch(`${url}/api/v2/whoami`, {
       headers: { 'X-Operator': OPERATOR },
+      credentials: 'include',
       signal: AbortSignal.timeout(5000),
     })
     const ms = Math.round(performance.now() - started)
@@ -60,6 +61,12 @@ export async function checkConnection(base: string): Promise<{ ok: true; role: R
 async function cpFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${CP_BASE}${path}`, {
     ...init,
+    // Carries the bp_session cookie an account signed in with -- it lives
+    // on this server's own origin (CP_BASE), a different one than the page
+    // itself (webui.py's), so the browser needs this opt-in to send it at
+    // all. See api_server.py's CORS setup: allow_credentials=True exists
+    // specifically to accept it back.
+    credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
       'X-Operator': OPERATOR,
@@ -81,7 +88,26 @@ async function cpFetch<T>(path: string, init?: RequestInit): Promise<T> {
 
 // -- types -----------------------------------------------------------------
 export type Role = 'admin' | 'viewer'
-export interface Operator { name: string; role: Role }
+export interface Operator { name: string; role: Role; account_id: number | null }
+
+// -- SaaS accounts -----------------------------------------------------------
+export interface Account { id: number; email: string; name: string; plan: string }
+
+export const signup = (email: string, password: string, name: string, plan = 'trial') =>
+  cpFetch<{ ok: boolean; accountId: number }>('/api/v2/auth/signup', {
+    method: 'POST',
+    body: JSON.stringify({ email, password, name, plan }),
+  })
+
+export const login = (email: string, password: string) =>
+  cpFetch<{ ok: boolean; accountId: number }>('/api/v2/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ email, password }),
+  })
+
+export const logout = () => cpFetch<{ ok: boolean }>('/api/v2/auth/logout', { method: 'POST' })
+
+export const fetchMe = () => cpFetch<Account>('/api/v2/auth/me')
 
 export interface FleetNode {
   node_id: string

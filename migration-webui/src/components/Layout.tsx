@@ -47,7 +47,7 @@ import {
 } from '@mui/icons-material'
 import { useMigrationStore } from '@/store'
 import { fetchConfig, fetchJob, ConfigPayload, HostInfo, JobStatus, stopJob } from '@/api/client'
-import { getOperator, setOperator } from '@/api/controlPlane'
+import { fetchMe, logout, Account } from '@/api/controlPlane'
 import Menu from '@mui/material/Menu'
 import MenuItem from '@mui/material/MenuItem'
 import Logout from '@mui/icons-material/Logout'
@@ -95,13 +95,21 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   const [authMode, setAuthMode] = useState('')
   const [job, setJob] = useState<JobStatus | null>(null)
   const isDesktop = useMediaQuery('(min-width:960px)')
-  const operatorName = getOperator()
+  const [account, setAccount] = useState<Account | null>(null)
   const [notifAnchor, setNotifAnchor] = useState<null | HTMLElement>(null)
   const [profileAnchor, setProfileAnchor] = useState<null | HTMLElement>(null)
+
+  // Fetched once: App.tsx already proved a session exists before Layout
+  // ever mounts (that's the whole point of its own fetchMe() gate), so
+  // this call is just for the name/email/plan to show, not a second
+  // authorization check.
+  useEffect(() => {
+    fetchMe().then(setAccount).catch(() => setAccount(null))
+  }, [])
+
   const handleSignOut = () => {
     setProfileAnchor(null)
-    setOperator('')
-    navigate('/login', { replace: true })
+    logout().finally(() => navigate('/login', { replace: true }))
   }
 
   // Fetched once, not polled: a process's own hostname/code path/pid never
@@ -347,7 +355,6 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
             const items: string[] = []
             if (jobRunning) items.push(`${job!.name} is running (${progressIndeterminate ? 'in progress' : `${progressPct}%`})`)
             if (memoryPct >= 85) items.push(`Memory at ${memoryPct}% — approaching the limit`)
-            if (!operatorName) items.push('No operator name set — writes will be refused')
             return (
               <>
                 <Badge badgeContent={items.length} color="error" invisible={items.length === 0}>
@@ -382,10 +389,10 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
               {darkMode ? <LightModeIcon /> : <DarkModeIcon />}
             </IconButton>
           </Tooltip>
-          <Tooltip title={operatorName || 'No operator set'}>
+          <Tooltip title={account ? `${account.name} (${account.email})` : 'Loading…'}>
             <IconButton onClick={(e) => setProfileAnchor(e.currentTarget)} sx={{ p: 0.25 }}>
               <Avatar sx={{ width: 32, height: 32, bgcolor: 'primary.main', fontWeight: 700 }}>
-                {(operatorName || '?').charAt(0).toUpperCase()}
+                {(account?.name || '?').charAt(0).toUpperCase()}
               </Avatar>
             </IconButton>
           </Tooltip>
@@ -397,8 +404,8 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
             transformOrigin={{ vertical: 'top', horizontal: 'right' }}
           >
             <Box sx={{ px: 2, py: 1.25, minWidth: 200 }}>
-              <Typography variant="body2" sx={{ fontWeight: 700 }}>{operatorName || 'No operator set'}</Typography>
-              <Typography variant="caption" color="text.secondary">Every action is logged against this name</Typography>
+              <Typography variant="body2" sx={{ fontWeight: 700 }}>{account?.name || 'Loading…'}</Typography>
+              <Typography variant="caption" color="text.secondary">{account?.email}</Typography>
             </Box>
             <Divider />
             <MenuItem onClick={() => { setProfileAnchor(null); navigate('/settings') }}>

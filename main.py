@@ -907,6 +907,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true",
                    help="log every intended write without performing it")
     p.add_argument("--workers", type=int, help="override concurrent user count")
+    # Internal: set by api_server.py when a request came from a signed-in
+    # SaaS account, never by a human. Makes Settings() resolve that
+    # account's own domains/keys/db_path from tenant_configs instead of
+    # env.sh -- see config.py's Settings._load_account_tenant_config --
+    # and doubles as the marker api_server.py's status polling greps
+    # `ps -eo args=` for, so two accounts' concurrent runs never look like
+    # the same process to it.
+    p.add_argument("--account-id", type=int, default=None, help=argparse.SUPPRESS)
     sub = p.add_subparsers(dest="command", required=True)
 
     s = sub.add_parser("init-db", help="create schema and load identity_map")
@@ -997,7 +1005,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
-    settings = Settings()
+    settings = Settings(account_id=args.account_id)
     if args.db:
         settings.db_path = args.db
     if args.dry_run:

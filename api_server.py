@@ -54,6 +54,7 @@ from contextlib import asynccontextmanager
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import time
@@ -62,15 +63,19 @@ from typing import Any, Literal
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
-    from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+    from fastapi import (Cookie, Depends, FastAPI, Header, HTTPException,
+                         Response, WebSocket, WebSocketDisconnect)
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import JSONResponse
     from pydantic import BaseModel, Field
 except ImportError:  # pragma: no cover - import guard, not logic
     sys.exit("control plane needs: pip install -r requirements-control-plane.txt")
 
+import accounts_auth
 import ai_diagnostics
 import control_plane_db as cpdb
+
+SESSION_COOKIE = "bp_session"
 
 PY = sys.executable
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -107,16 +112,49 @@ def _roles() -> dict[str, Role]:
 class Operator(BaseModel):
     name: str
     role: Role
+    # Set when this request carries a valid Bitport account session
+    # (bp_session cookie), None on the older X-Operator/SSH-tunnel path.
+    # Every existing endpoint already takes `op: Operator = Depends(operator)`
+    # -- adding this field here, rather than a second dependency, means
+    # every one of them gets account scoping for free the moment it starts
+    # reading op.account_id, with no change to its own signature.
+    account_id: int | None = None
 
 
-async def operator(x_operator: str = Header(default="")) -> Operator:
+async def operator(x_operator: str = Header(default=""),
+                   bp_session: str = Cookie(default="")) -> Operator:
+    # A real signed-in account always wins over the header: the header is
+    # the honor-system SSH-tunnel path, the cookie is an actual verified
+    # credential. A request presenting both is trusting the cookie, not the
+    # header claim of who it is.
+    if bp_session:
+        account_id = accounts_auth.resolve_session(bp_session)
+        if account_id is not None:
+            account = accounts_auth.get_account(account_id)
+            name = account["name"] if account else f"account #{account_id}"
+            # An account is always "admin" of its own resources -- there is
+            # no team/role concept yet (see accounts_auth.py's docstring);
+            # role here governs THIS account's own data only, never anyone
+            # else's, which is what actually keeps require_admin() safe to
+            # reuse unchanged for account-scoped write endpoints.
+            return Operator(name=name, role="admin", account_id=account_id)
     name = (x_operator or "").strip() or "anonymous"
-    return Operator(name=name, role=_roles().get(name, "viewer"))
+    return Operator(name=name, role=_roles().get(name, "viewer"), account_id=None)
 
 
 def require_admin(op: Operator) -> None:
     if op.role != "admin":
         raise HTTPException(403, f"{op.name!r} is a viewer; this action needs admin")
+
+
+def require_login(op: Operator) -> None:
+    """For endpoints that only make sense for a signed-in SaaS account
+    (nothing to provision/seed for an anonymous request), as distinct from
+    require_admin -- an unauthenticated caller on the legacy X-Operator path
+    can still be role='viewer', which require_admin already rejects, but
+    that rejection message ("needs admin") would be misleading here."""
+    if op.account_id is None:
+        raise HTTPException(401, "sign in required")
 
 
 # ======================================================================
@@ -222,6 +260,10 @@ async def lifespan(_: FastAPI):
     broadcasting to sockets that are already gone.
     """
     await _off_loop(cpdb.apply_migrations)
+    # Idempotent: only inserts account id=1 the very first time this ever
+    # runs against a given migration.db. Must come after apply_migrations,
+    # not before -- it writes into tables that migration just created.
+    await _off_loop(accounts_auth.bootstrap_legacy_account)
     task = asyncio.create_task(_tailer())
     try:
         yield
@@ -239,10 +281,18 @@ app = FastAPI(title="Migration Command Center", version="1.0", lifespan=lifespan
 # Restricted to localhost/127.0.0.1 on any port: this server binds
 # 127.0.0.1 only (see main() below), so nothing further away can reach it
 # regardless of what this list allows.
+#
+# allow_credentials=True (was False): the bp_session cookie that carries a
+# signed-in account has to ride along on the cross-origin fetch from
+# webui.py's origin (8080) to this one (8090), and browsers refuse to send
+# cookies cross-origin at all unless the server opts in here. Starlette
+# only allows this together with a specific origin, never "*" -- which
+# `allow_origin_regex` already gives us by reflecting the one matched
+# origin, so nothing about the actual access boundary changes.
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -312,6 +362,82 @@ async def ws_endpoint(ws: WebSocket) -> None:
 
 
 # ======================================================================
+# SaaS accounts -- signup, login, logout, whoami.
+#
+# Deliberately not a WriteAction/_gated() endpoint: that pattern is for an
+# already-identified operator acting on migration data (reason codes,
+# audit rows keyed to an actor who already exists). Signing up IS how an
+# actor starts existing, so there is nothing to attribute it to yet.
+# ======================================================================
+class SignupRequest(BaseModel):
+    email: str = Field(min_length=3)
+    password: str = Field(min_length=8, exclude=True)
+    name: str = Field(min_length=2)
+    plan: str = "trial"
+
+
+class LoginRequest(BaseModel):
+    email: str = Field(min_length=3)
+    password: str = Field(min_length=1, exclude=True)
+
+
+def _set_session_cookie(response: Response, token: str) -> None:
+    # secure=False: this server binds 127.0.0.1 and is reached over an SSH
+    # tunnel (plain http to the tunnel endpoint), matching its existing
+    # security posture -- a Secure cookie would simply never be sent over
+    # that connection. Revisit this the moment the deployment model changes
+    # to a real public HTTPS origin; it has not, in this pass.
+    response.set_cookie(
+        SESSION_COOKIE, token, httponly=True, samesite="lax",
+        max_age=accounts_auth.SESSION_LIFETIME_S, secure=False,
+    )
+
+
+@app.post("/api/v2/auth/signup")
+async def auth_signup(body: SignupRequest, response: Response):
+    try:
+        account_id = await _off_loop(
+            accounts_auth.create_account, body.email, body.password, body.name, body.plan)
+    except accounts_auth.AccountError as exc:
+        raise HTTPException(400, str(exc))
+    token = await _off_loop(accounts_auth.create_session, account_id)
+    _set_session_cookie(response, token)
+    return {"ok": True, "accountId": account_id}
+
+
+@app.post("/api/v2/auth/login")
+async def auth_login(body: LoginRequest, response: Response):
+    account_id = await _off_loop(accounts_auth.authenticate, body.email, body.password)
+    if account_id is None:
+        # Same message for "no such email" and "wrong password" -- a
+        # distinguishing error lets a login form enumerate registered
+        # emails one guess at a time.
+        raise HTTPException(401, "wrong email or password")
+    token = await _off_loop(accounts_auth.create_session, account_id)
+    _set_session_cookie(response, token)
+    return {"ok": True, "accountId": account_id}
+
+
+@app.post("/api/v2/auth/logout")
+async def auth_logout(response: Response, bp_session: str = Cookie(default="")):
+    if bp_session:
+        await _off_loop(accounts_auth.delete_session, bp_session)
+    response.delete_cookie(SESSION_COOKIE)
+    return {"ok": True}
+
+
+@app.get("/api/v2/auth/me")
+async def auth_me(op: Operator = Depends(operator)):
+    if op.account_id is None:
+        raise HTTPException(401, "not signed in")
+    account = await _off_loop(accounts_auth.get_account, op.account_id)
+    if account is None:  # session outlived the account row somehow
+        raise HTTPException(401, "not signed in")
+    return {"id": account["id"], "email": account["email"],
+            "name": account["name"], "plan": account["plan"]}
+
+
+# ======================================================================
 # Read endpoints
 # ======================================================================
 @app.get("/api/v2/fleet")
@@ -365,14 +491,16 @@ async def _gated(op: Operator, action: str, body: WriteAction,
     except HTTPException as exc:
         try:
             aid = await _off_loop(cpdb.begin_action, op.name, op.role, action,
-                                  body.reason, target, body.model_dump(), None)
+                                  body.reason, target, body.model_dump(), None,
+                                  op.account_id)
             await _off_loop(cpdb.finish_action, aid, "REFUSED", exc.detail)
         except ValueError:
             pass   # no reason given AND not admin -- nothing worth logging
         raise
 
     action_id = await _off_loop(cpdb.begin_action, op.name, op.role, action,
-                                body.reason, target, body.model_dump(), None)
+                                body.reason, target, body.model_dump(), None,
+                                op.account_id)
     try:
         ok, detail = await _off_loop(fn)
     except Exception as exc:  # noqa: BLE001
@@ -389,17 +517,34 @@ async def _gated(op: Operator, action: str, body: WriteAction,
     return JSONResponse({"ok": ok, "actionId": action_id, "detail": detail})
 
 
-def _spawn(argv: list[str]) -> tuple[bool, str]:
-    """Detached subprocess. Rule 1 -- engines never run in this loop."""
+def _spawn(argv: list[str], env: dict[str, str] | None = None) -> tuple[bool, str]:
+    """Detached subprocess. Rule 1 -- engines never run in this loop.
+
+    env=None means "inherit this process's own environment unchanged" --
+    Popen's own default, and exactly today's behaviour for every caller
+    that has no account to scope to.
+    """
     proc = subprocess.Popen(argv, cwd=HERE, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                            text=True)
+                            text=True, env=env)
     return True, f"started pid {proc.pid}: {' '.join(argv[1:4])}"
+
+
+def _account_argv(account_id: int | None) -> list[str]:
+    """main.py's own --account-id makes it construct Settings(account_id=...)
+    itself and resolve its domains/keys/db_path from that account's
+    tenant_configs row -- see config.py. Simpler and more robust than
+    overlaying environment variables from out here: one source of truth
+    (the DB row), read fresh by the process that actually needs it,
+    instead of a snapshot taken at launch time. [] for the legacy/
+    superadmin path -- main.py behaves exactly as it did before this
+    argument existed."""
+    return [] if account_id is None else ["--account-id", str(account_id)]
 
 
 @app.post("/api/v2/migrate/start")
 async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
-    argv = [PY, "main.py"]
+    argv = [PY, "main.py"] + _account_argv(op.account_id)
     if body.dry_run:
         argv.append("--dry-run")
     argv += ["migrate", "--services", ",".join(body.services)]
@@ -429,12 +574,32 @@ async def retry_item(body: RetryItem, op: Operator = Depends(operator)):
     previous re-run silently no-op.
     """
     def _retry() -> tuple[bool, str]:
-        with cpdb.rw() as conn:
-            n = conn.execute(
-                "DELETE FROM audit_log WHERE source_user=? AND item_id=? "
-                "AND status='FAILED'", (body.source_user, body.item_id)).rowcount
-        argv = [PY, "main.py", "delta", "--services", "drive",
-                "--user", body.source_user]
+        # audit_log lives in the SHARED control-plane db only for the
+        # legacy account (account_id is None or 1, where that has always
+        # been the same file) -- a real SaaS account's own audit_log is in
+        # its own data/accounts/{id}/migration.db, a different file
+        # entirely. cpdb.rw() always points at the shared file, so it is
+        # only correct here when there is no account to scope to.
+        if op.account_id is None:
+            with cpdb.rw() as conn:
+                n = conn.execute(
+                    "DELETE FROM audit_log WHERE source_user=? AND item_id=? "
+                    "AND status='FAILED'", (body.source_user, body.item_id)).rowcount
+        else:
+            from config import Settings
+
+            db_path = Settings(account_id=op.account_id).db_path
+            conn = sqlite3.connect(db_path, timeout=30.0)
+            try:
+                conn.execute("PRAGMA busy_timeout=30000")
+                n = conn.execute(
+                    "DELETE FROM audit_log WHERE source_user=? AND item_id=? "
+                    "AND status='FAILED'", (body.source_user, body.item_id)).rowcount
+                conn.commit()
+            finally:
+                conn.close()
+        argv = ([PY, "main.py"] + _account_argv(op.account_id)
+                + ["delta", "--services", "drive", "--user", body.source_user])
         ok, detail = _spawn(argv)
         return ok, f"cleared {n} failed row(s); {detail}"
     return await _gated(op, "item.retry", body,
@@ -477,6 +642,13 @@ class Heartbeat(BaseModel):
     transfer_mode: str | None = None
 
 
+def _provision_log_path(tenant: str, account_id: int | None) -> str:
+    d = os.path.join(HERE, "logs") if account_id is None \
+        else os.path.join(HERE, "logs", str(account_id))
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, f"provision-{tenant}.log")
+
+
 @app.post("/api/v2/provision/start")
 async def provision_start(body: StartProvision, op: Operator = Depends(operator)):
     """
@@ -485,11 +657,11 @@ async def provision_start(body: StartProvision, op: Operator = Depends(operator)
     than held in this process's memory, so a restart does not lose it.
     """
     def _launch() -> tuple[bool, str]:
-        argv = [PY, "main.py", "provision-users", "--tenant", body.tenant, "--yes"]
+        argv = ([PY, "main.py"] + _account_argv(op.account_id)
+                + ["provision-users", "--tenant", body.tenant, "--yes"])
         if body.dry_run:
             argv.append("--dry-run")
-        os.makedirs(os.path.join(HERE, "logs"), exist_ok=True)
-        log = os.path.join(HERE, "logs", f"provision-{body.tenant}.log")
+        log = _provision_log_path(body.tenant, op.account_id)
         with open(log, "wb") as fh:
             proc = subprocess.Popen(argv, cwd=HERE, stdout=fh, stderr=fh,
                                     stdin=subprocess.DEVNULL,
@@ -507,20 +679,31 @@ _PROVISION_EXISTS_ERR_RE = re.compile(r"could not create (\S+)")
 
 
 @app.get("/api/v2/provision/status")
-async def provision_status(tenant: str = "target"):
+async def provision_status(tenant: str = "target", op: Operator = Depends(operator)):
     """Running state + live progress, parsed from the log the launch wrote.
 
     Total is `identity_count()` -- the same denominator provision-users
     itself iterates -- not a guess, so "N of M" always means the same N/M
     the CLI would print.
+
+    identity_count() itself still reads the SHARED control-plane db
+    (cpdb.ro()) -- correct for the legacy account, an approximation for a
+    real SaaS account until identity_count() also learns to take an
+    account_id. Flagged here rather than silently shipped as exact: a
+    provisioning progress bar reading the wrong denominator is confusing,
+    not dangerous, and this endpoint already has no per-account identity
+    table to read from yet.
     """
     def _read() -> dict:
-        log_path = os.path.join(HERE, "logs", f"provision-{tenant}.log")
+        log_path = _provision_log_path(tenant, op.account_id)
         ps = subprocess.run(["ps", "-eo", "pid=,args="], capture_output=True,
                             text=True).stdout
         pid = None
+        needle = (f"--account-id {op.account_id}" if op.account_id is not None else None)
         for line in ps.splitlines():
-            if "provision-users" in line and f"--tenant {tenant}" in line                     and "grep" not in line:
+            if ("provision-users" in line and f"--tenant {tenant}" in line
+                    and "grep" not in line
+                    and (needle is None or needle in line)):
                 pid = int(line.strip().split(None, 1)[0])
                 break
         if not os.path.isfile(log_path):
@@ -991,8 +1174,12 @@ class StartProvisionGcp(WriteAction):
     force: bool = False
 
 
-def _gcp_state_path() -> str:
-    d = os.path.join(HERE, "logs")
+def _gcp_state_path(account_id: int | None) -> str:
+    # None -> unchanged legacy path (logs/gcp-provision.json). Set -> its
+    # own subdirectory, so two accounts provisioning at once never share a
+    # state file -- the collision the fixed-path version of this had.
+    d = os.path.join(HERE, "logs") if account_id is None \
+        else os.path.join(HERE, "logs", str(account_id))
     os.makedirs(d, exist_ok=True)
     return os.path.join(d, "gcp-provision.json")
 
@@ -1000,7 +1187,7 @@ def _gcp_state_path() -> str:
 @app.post("/api/v2/gcp/provision")
 async def gcp_provision(body: StartProvisionGcp, op: Operator = Depends(operator)):
     def _launch() -> tuple[bool, str]:
-        out = _gcp_state_path()
+        out = _gcp_state_path(op.account_id)
         argv = [PY, "provision_gcp.py",
                 "--source-domain", body.source_domain,
                 "--target-domain", body.target_domain, "--json"]
@@ -1010,13 +1197,23 @@ async def gcp_provision(body: StartProvisionGcp, op: Operator = Depends(operator
             argv.append("--dry-run")
         if body.force:
             argv.append("--force")
+        if op.account_id is not None:
+            # --account-id: present in argv, not just used to pick the
+            # output path, so the status endpoint's ps-grep can tell two
+            # accounts' provisioning runs apart. --keys-dir: writes this
+            # account's key files under its own keys/{id}/, matching where
+            # accounts_auth.create_account already pointed its
+            # tenant_configs rows, instead of the shared keys/ two-slot
+            # default every account would otherwise collide on.
+            argv += ["--account-id", str(op.account_id),
+                     "--keys-dir", os.path.join("keys", str(op.account_id))]
         # Truncate first: a stale result from a previous run left on disk
         # would be served as this run's progress for as long as it takes
         # gcloud to produce the first byte.
         with open(out, "w", encoding="utf-8") as fh:
             json.dump({"running": True, "startedAt": time.strftime(
                 "%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, fh)
-        err = os.path.join(HERE, "logs", "gcp-provision.err")
+        err = os.path.join(os.path.dirname(out), "gcp-provision.err")
         with open(out + ".partial", "wb") as o, open(err, "wb") as e:
             proc = subprocess.Popen(argv, cwd=HERE, stdout=o, stderr=e,
                                     stdin=subprocess.DEVNULL,
@@ -1028,7 +1225,7 @@ async def gcp_provision(body: StartProvisionGcp, op: Operator = Depends(operator
 
 
 @app.get("/api/v2/gcp/status")
-async def gcp_status():
+async def gcp_status(op: Operator = Depends(operator)):
     """Progress of the most recent provisioning run.
 
     provision_gcp.py writes its JSON in one go at the end, so a run in
@@ -1037,13 +1234,15 @@ async def gcp_status():
     that flashes 'failed' for the whole minute a project takes to create.
     """
     def _read() -> dict:
-        running = any("provision_gcp.py" in ln and "grep" not in ln
+        needle = (f"--account-id {op.account_id}" if op.account_id is not None
+                  else "provision_gcp.py")
+        running = any("provision_gcp.py" in ln and needle in ln and "grep" not in ln
                       for ln in subprocess.run(
                           ["ps", "-eo", "args="], capture_output=True,
                           text=True).stdout.splitlines())
-        partial = _gcp_state_path() + ".partial"
+        partial = _gcp_state_path(op.account_id) + ".partial"
         result = None
-        for path in (partial, _gcp_state_path()):
+        for path in (partial, _gcp_state_path(op.account_id)):
             try:
                 with open(path, encoding="utf-8") as fh:
                     data = json.load(fh)
@@ -1107,8 +1306,9 @@ class StartFullSetup(WriteAction):
     provision_users: bool = False
 
 
-def _full_setup_state_path(side: str) -> str:
-    d = os.path.join(HERE, "logs")
+def _full_setup_state_path(side: str, account_id: int | None) -> str:
+    d = os.path.join(HERE, "logs") if account_id is None \
+        else os.path.join(HERE, "logs", str(account_id))
     os.makedirs(d, exist_ok=True)
     return os.path.join(d, f"full-setup-{side}.json")
 
@@ -1129,7 +1329,7 @@ async def full_setup_start(body: StartFullSetup, op: Operator = Depends(operator
     handler's own logging.
     """
     def _launch() -> tuple[bool, str]:
-        out = _full_setup_state_path(body.side)
+        out = _full_setup_state_path(body.side, op.account_id)
         partial = out + ".partial"
         argv = [PY, "full_setup.py", "--side", body.side,
                 "--domain", body.domain, "--admin", body.admin_email,
@@ -1144,6 +1344,13 @@ async def full_setup_start(body: StartFullSetup, op: Operator = Depends(operator
                 argv.append("--create-users")
         if body.provision_users and body.side == "target":
             argv.append("--provision-users")
+        if op.account_id is not None:
+            # --account-id: makes the ps-grep in full_setup_status below
+            # unambiguous between two accounts both setting up the same
+            # side. --keys-dir: this account's own key files, matching
+            # where its tenant_configs rows already point.
+            argv += ["--account-id", str(op.account_id),
+                     "--keys-dir", os.path.join("keys", str(op.account_id))]
 
         env = dict(os.environ)
         env["DWD_PASSWORD"] = body.admin_password
@@ -1153,7 +1360,7 @@ async def full_setup_start(body: StartFullSetup, op: Operator = Depends(operator
         with open(out, "w", encoding="utf-8") as fh:
             json.dump({"running": True}, fh)
         with open(partial, "wb") as o, \
-             open(os.path.join(HERE, "logs", f"full-setup-{body.side}.err"), "wb") as e:
+             open(os.path.join(os.path.dirname(out), f"full-setup-{body.side}.err"), "wb") as e:
             proc = subprocess.Popen(argv, cwd=HERE, stdout=o, stderr=e,
                                     stdin=subprocess.DEVNULL, env=env,
                                     start_new_session=True)
@@ -1165,18 +1372,21 @@ async def full_setup_start(body: StartFullSetup, op: Operator = Depends(operator
 
 
 @app.get("/api/v2/full-setup/status")
-async def full_setup_status(side: str):
+async def full_setup_status(side: str, op: Operator = Depends(operator)):
     if side not in ("source", "target"):
         raise HTTPException(400, "side must be source or target")
 
     def _read() -> dict:
-        running = any(f"full_setup.py --side {side}" in ln and "grep" not in ln
+        needle = (f"--account-id {op.account_id}" if op.account_id is not None
+                  else "full_setup.py")
+        running = any(f"full_setup.py --side {side}" in ln and needle in ln
+                      and "grep" not in ln
                       for ln in subprocess.run(
                           ["ps", "-eo", "args="], capture_output=True,
                           text=True).stdout.splitlines())
-        partial = _full_setup_state_path(side) + ".partial"
+        partial = _full_setup_state_path(side, op.account_id) + ".partial"
         result = None
-        for path in (partial, _full_setup_state_path(side)):
+        for path in (partial, _full_setup_state_path(side, op.account_id)):
             try:
                 with open(path, encoding="utf-8") as fh:
                     data = json.load(fh)

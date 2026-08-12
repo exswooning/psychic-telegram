@@ -1,13 +1,20 @@
 import React, { useState } from 'react'
-import { useNavigate, Link as RouterLink } from 'react-router-dom'
+import { useNavigate, useSearchParams, Link as RouterLink } from 'react-router-dom'
 import {
-  Box, Paper, Typography, TextField, Button, Stack, Alert, Link,
+  Box, Paper, Typography, TextField, Button, Stack, Alert, Link, Chip,
 } from '@mui/material'
 import { RocketLaunch as BrandIcon, CheckCircle as CheckIcon } from '@mui/icons-material'
-import { login } from '@/api/controlPlane'
+import { signup } from '@/api/controlPlane'
 
-const Login: React.FC = () => {
+const PLAN_LABELS: Record<string, string> = {
+  trial: 'Free trial', starter: 'Starter', growth: 'Growth', scale: 'Scale',
+}
+
+const Signup: React.FC = () => {
   const navigate = useNavigate()
+  const [params] = useSearchParams()
+  const plan = params.get('plan') || 'trial'
+  const [name, setName] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
@@ -16,15 +23,17 @@ const Login: React.FC = () => {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setError('')
+    if (password.length < 8) {
+      setError('Password must be at least 8 characters.')
+      return
+    }
     setBusy(true)
     try {
-      await login(email.trim(), password)
+      await signup(email.trim(), password, name.trim(), plan)
       navigate('/mission-control', { replace: true })
     } catch (err: any) {
-      setError(err.message || 'sign in failed')
+      setError(err.message || 'could not create account')
     } finally {
-      // Cleared on every path, success or failure -- the field never holds
-      // a password that has already been sent.
       setPassword('')
       setBusy(false)
     }
@@ -41,7 +50,7 @@ const Login: React.FC = () => {
            ${t.palette.background.default}`,
     }}>
       <Paper variant="outlined" sx={{
-        display: 'flex', width: '100%', maxWidth: 880, minHeight: 460,
+        display: 'flex', width: '100%', maxWidth: 880, minHeight: 500,
         borderRadius: 4, overflow: 'hidden',
       }}>
         <Box sx={{
@@ -65,17 +74,17 @@ const Login: React.FC = () => {
           </Stack>
           <Box sx={{ position: 'relative' }}>
             <Typography variant="h4" sx={{ fontWeight: 700, maxWidth: '22ch', color: 'inherit', mb: 1.5 }}>
-              Move a Workspace tenant with proof, not promises.
+              Every account gets its own tenants, keys, and ledger.
             </Typography>
             <Typography variant="body2" sx={{ color: 'rgba(255,255,255,.85)', maxWidth: '32ch' }}>
-              Provision tenants, run migrations, and verify every file and permission that lands — before you call it done.
+              Nothing you set up here is visible to, or shared with, any other Bitport account.
             </Typography>
           </Box>
           <Stack spacing={1.25} sx={{ position: 'relative' }}>
             {[
-              'Functional OAuth scope verification, not a checkbox',
-              'Every write action attributed and logged with a reason',
-              'Resumable, per-service migration ledger',
+              'Your own service-account keys, isolated by account',
+              'Your own migration ledger and database',
+              'Jobs run independently — no queueing behind other customers',
             ].map((line) => (
               <Stack key={line} direction="row" spacing={1} alignItems="flex-start">
                 <CheckIcon sx={{ fontSize: 16, mt: 0.25, color: 'rgba(255,255,255,.85)' }} />
@@ -87,9 +96,12 @@ const Login: React.FC = () => {
 
         <Box sx={{ flex: 1, p: 5, display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 2.5 }}>
           <Box>
-            <Typography variant="h4" sx={{ fontWeight: 700 }}>Sign in</Typography>
-            <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-              Enter your Bitport account to open the console.
+            <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 0.5 }}>
+              <Typography variant="h4" sx={{ fontWeight: 700 }}>Create your account</Typography>
+              <Chip size="small" label={PLAN_LABELS[plan] || plan} color="primary" variant="outlined" />
+            </Stack>
+            <Typography variant="body2" color="text.secondary">
+              No card required to start.
             </Typography>
           </Box>
 
@@ -97,26 +109,29 @@ const Login: React.FC = () => {
 
           <Box component="form" onSubmit={handleSubmit} sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
             <TextField
+              label="Your name" placeholder="e.g. Aryan Paul" value={name}
+              onChange={(e) => setName(e.target.value)} autoFocus fullWidth
+              autoComplete="name"
+            />
+            <TextField
               label="Email" type="email" placeholder="you@company.com" value={email}
-              onChange={(e) => setEmail(e.target.value)} autoFocus fullWidth
+              onChange={(e) => setEmail(e.target.value)} fullWidth
               autoComplete="username"
             />
             <TextField
-              label="Password" type="password" value={password}
+              label="Password" type="password" value={password} helperText="At least 8 characters"
               onChange={(e) => setPassword(e.target.value)} fullWidth
-              autoComplete="current-password"
+              autoComplete="new-password"
             />
             <Button type="submit" variant="contained" size="large" sx={{ py: 1.25 }}
-                    disabled={busy || !email.trim() || !password}>
-              {busy ? 'Signing in…' : 'Sign in'}
+                    disabled={busy || !name.trim() || !email.trim() || password.length < 8}>
+              {busy ? 'Creating account…' : 'Create account'}
             </Button>
           </Box>
 
           <Typography variant="body2" color="text.secondary">
-            New to Bitport?{' '}
-            <Link component={RouterLink} to="/signup" underline="hover">Create an account</Link>
-            {' · '}
-            <Link component={RouterLink} to="/pricing" underline="hover">View pricing</Link>
+            Already have an account?{' '}
+            <Link component={RouterLink} to="/login" underline="hover">Sign in</Link>
           </Typography>
         </Box>
       </Paper>
@@ -124,4 +139,4 @@ const Login: React.FC = () => {
   )
 }
 
-export default Login
+export default Signup

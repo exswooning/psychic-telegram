@@ -1,7 +1,9 @@
-import React from 'react'
+import React, { useEffect, useState } from 'react'
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import Layout from '@/components/Layout'
 import Login from '@/pages/Login'
+import Signup from '@/pages/Signup'
+import Pricing from '@/pages/Pricing'
 import Wizard from '@/pages/Wizard'
 import SeedWizard from '@/pages/SeedWizard'
 import Dashboard from '@/pages/Dashboard'
@@ -18,25 +20,42 @@ import DriveMigration from '@/pages/DriveMigration'
 import ErrorHandling from '@/pages/ErrorHandling'
 import HelpSystem from '@/pages/HelpSystem'
 import useMigration from '@/hooks/useMigration'
-import { getOperator } from '@/api/controlPlane'
+import { fetchMe, Account } from '@/api/controlPlane'
+
+// Routes reachable with no session at all -- a real signed-in account
+// still lands on /login or /signup only via an explicit Navigate below,
+// never gets stuck on them.
+const PUBLIC_PATHS = ['/login', '/signup', '/pricing']
 
 const App: React.FC = () => {
   // Mounted once, at the root, so every routed page shares one poll loop
   // rather than each page starting (and losing) its own on navigation.
-  // Previously this hook existed but nothing called it anywhere in the app --
-  // confirmed by grep: zero references outside its own file -- so even the
-  // fabricated Math.random() progress it used to generate never actually ran.
   useMigration()
 
-  // Forces this component to re-render on every navigation (React Router
-  // context changes don't otherwise propagate up to a parent that isn't
-  // itself calling a router hook) so that the getOperator() read below picks
-  // up the name Login.tsx just wrote to localStorage, not a stale empty
-  // string captured on first mount.
   const location = useLocation()
-  const operator = getOperator()
+  // undefined = "haven't asked the server yet" (distinct from null, "asked
+  // and there is no session") -- lets a first load on a protected route
+  // hold rendering for one round trip instead of flashing the app shell
+  // and then yanking it away the instant fetchMe() comes back 401.
+  const [account, setAccount] = useState<Account | null | undefined>(undefined)
 
-  if (!operator && location.pathname !== '/login') {
+  // Checked once on mount, not on every navigation: this is a real network
+  // round trip to api_server.py, and re-running it on every in-app click
+  // would flash a loading state for no reason. Login.tsx and Signup.tsx
+  // already know their own call succeeded before they navigate away from
+  // themselves -- this check exists for "did I already have a session"
+  // (a page refresh, a bookmark), not to re-verify every route change.
+  useEffect(() => {
+    fetchMe().then(setAccount).catch(() => setAccount(null))
+  }, [])
+
+  const isPublic = PUBLIC_PATHS.includes(location.pathname)
+
+  if (account === undefined && !isPublic) {
+    return null
+  }
+
+  if (!account && !isPublic) {
     return (
       <Routes>
         <Route path="*" element={<Navigate to="/login" replace />} />
@@ -46,7 +65,9 @@ const App: React.FC = () => {
 
   return (
     <Routes>
-      <Route path="/login" element={operator ? <Navigate to="/mission-control" replace /> : <Login />} />
+      <Route path="/login" element={account ? <Navigate to="/mission-control" replace /> : <Login />} />
+      <Route path="/signup" element={account ? <Navigate to="/mission-control" replace /> : <Signup />} />
+      <Route path="/pricing" element={<Pricing />} />
       <Route path="/*" element={
         <Layout>
           <Routes>

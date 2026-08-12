@@ -431,6 +431,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--force", action="store_true",
                     help="replace existing key files")
+    # Not read by provision() below -- accepted purely so it shows up in
+    # `ps -eo args=`. api_server.py's gcp_status polls that to tell two
+    # different accounts' concurrent provisioning runs apart, since neither
+    # this process's stdout/stderr redirection nor its output file path is
+    # visible to a ps listing.
+    ap.add_argument("--account-id", default="")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
