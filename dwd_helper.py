@@ -94,9 +94,19 @@ def _installed_browser_launch(p, headful: bool):
     app may not be secure") because it carries an automation fingerprint and
     no real Google support. Chrome/Edge via Playwright channels, or Brave
     via executable_path, look like a normal user's browser and get past it.
+
+    On a headless VPS this also needs a real (virtual) display -- headful
+    is not optional, see run()'s docstring -- and, run as root (the normal
+    account on a single-purpose VPS), Chrome/Chromium refuse to start at
+    all without --no-sandbox: the Linux sandbox setuid helper assumes a
+    non-root user and Chrome treats "root with no sandbox flag" as unsafe
+    rather than silently downgrading. --no-sandbox is standard practice for
+    exactly this kind of dedicated automation host, not a security
+    regression for a browser session that only ever visits accounts.google.com.
     """
     import shutil
 
+    root_args = ["--no-sandbox"] if hasattr(os, "geteuid") and os.geteuid() == 0 else []
     launch = None
     candidates = []
     chrome = (shutil.which("google-chrome")
@@ -105,20 +115,20 @@ def _installed_browser_launch(p, headful: bool):
     brave = "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"
     if os.path.exists(chrome):
         candidates.append(("chrome", p.chromium.launch(
-            channel="chrome", headless=not headful)))
+            channel="chrome", headless=not headful, args=root_args)))
     if os.path.exists(edge):
         candidates.append(("edge", p.chromium.launch(
-            channel="msedge", headless=not headful)))
+            channel="msedge", headless=not headful, args=root_args)))
     if os.path.exists(brave):
         candidates.append(("brave", p.chromium.launch(
-            executable_path=brave, headless=not headful)))
+            executable_path=brave, headless=not headful, args=root_args)))
     if candidates:
         launch = candidates[0]
         log(f"using installed browser: {launch[0]}")
         return launch[1]
     log("no real Chrome/Edge/Brave found; falling back to bundled Chromium "
         "(Google may reject the sign-in as 'not secure')")
-    return p.chromium.launch(headless=not headful)
+    return p.chromium.launch(headless=not headful, args=root_args)
 
 
 def run(client_id: str, scopes: str, timeout: int, headful: bool,

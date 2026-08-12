@@ -125,7 +125,17 @@ def gcloud_ready() -> tuple[bool, str]:
                        "already has it and is already authenticated.")
     rc, out = run(["gcloud", "auth", "list", "--filter=status:ACTIVE",
                    "--format=value(account)"])
-    account = out.strip().splitlines()[0] if out.strip() else ""
+    # run() returns COMBINED stdout+stderr, and an empty auth list makes
+    # this exact gcloud version print a diagnostic line ("WARNING: The
+    # following filter keys were not present in any resource : status")
+    # instead of just empty output. Without this filter that warning was
+    # read as the account name -- gcloud_ready() reported True with no
+    # real authenticated account at all, a false positive that would only
+    # surface as a much more confusing failure the first time something
+    # actually tried to use "account" WARNING:....
+    lines = [ln.strip() for ln in out.strip().splitlines()
+             if ln.strip() and not ln.strip().upper().startswith(("WARNING", "ERROR"))]
+    account = lines[0] if lines else ""
     if rc != 0 or not account:
         return False, "no active gcloud account -- run: gcloud auth login"
     return True, account

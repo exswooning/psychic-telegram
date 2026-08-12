@@ -29,6 +29,57 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import provision_gcp as pg  # noqa: E402
 
 
+class TestGcloudReadyDetection:
+    """gcloud_ready() decides whether Quick Setup even attempts to run --
+    a false "ready" here surfaces as a much more confusing failure deep
+    inside provision_side() instead of the clean, actionable message this
+    function exists to give up front."""
+
+    def _fake_run(self, monkeypatch, stdout: str, returncode: int = 0):
+        def fake_run(argv, capture_output, text, timeout, stdin, env=None):
+            class R:
+                pass
+            r = R()
+            r.returncode = returncode
+            r.stdout = stdout
+            r.stderr = ""
+            return r
+        monkeypatch.setattr(pg.subprocess, "run", fake_run)
+        monkeypatch.setattr(pg.shutil, "which", lambda name: "/usr/bin/gcloud")
+
+    def test_a_real_active_account_is_recognised(self, monkeypatch):
+        self._fake_run(monkeypatch, "someone@example.com\n")
+        ready, account = pg.gcloud_ready()
+        assert ready is True
+        assert account == "someone@example.com"
+
+    def test_a_gcloud_warning_line_is_not_mistaken_for_an_account(self, monkeypatch):
+        """Regression: an empty `gcloud auth list` on some gcloud versions
+        prints a diagnostic line to the combined stdout+stderr this reads
+        ("WARNING: The following filter keys were not present in any
+        resource : status") instead of just being blank -- that line was
+        being read as if it were the account name, reporting ready=True
+        with no real authenticated account at all."""
+        self._fake_run(
+            monkeypatch,
+            "WARNING: The following filter keys were not present in any resource : status\n")
+        ready, detail = pg.gcloud_ready()
+        assert ready is False
+        assert "no active gcloud account" in detail
+
+    def test_truly_empty_output_is_not_ready(self, monkeypatch):
+        self._fake_run(monkeypatch, "")
+        ready, detail = pg.gcloud_ready()
+        assert ready is False
+        assert "no active gcloud account" in detail
+
+    def test_gcloud_not_on_path_fails_before_any_gcloud_call(self, monkeypatch):
+        monkeypatch.setattr(pg.shutil, "which", lambda name: None)
+        ready, detail = pg.gcloud_ready()
+        assert ready is False
+        assert "not installed" in detail
+
+
 class TestGcloudIsNeverInteractive:
     """A prompt with no tty is a job that hangs to its timeout with nothing
     in the log explaining why. From a UI button that is indistinguishable
