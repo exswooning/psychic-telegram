@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
-  Alert, Box, Chip, LinearProgress, Paper, Stack, TextField, Tooltip,
+  Alert, Box, Button, Chip, LinearProgress, Paper, Stack, TextField, Tooltip,
   Typography, Divider,
 } from '@mui/material'
 import {
@@ -115,6 +116,7 @@ const NodeCard: React.FC<{ node: FleetNode }> = ({ node }) => (
 )
 
 const MissionControl: React.FC = () => {
+  const navigate = useNavigate()
   // -- control plane (:8090) ------------------------------------------------
   const [nodes, setNodes] = useState<FleetNode[]>([])
   const [cpUsers, setCpUsers] = useState<UserProgress[]>([])
@@ -181,6 +183,14 @@ const MissionControl: React.FC = () => {
           helperText="Recorded against every action" sx={{ width: { xs: '100%', sm: 220 } }}
         />
       </Box>
+
+      <Alert severity="info" action={
+        <Button color="inherit" size="small" onClick={() => navigate('/seed-wizard')}>
+          Open Seed Wizard
+        </Button>
+      }>
+        Need a test tenant seeded first?
+      </Alert>
 
       {alert && <Alert severity="warning" onClose={() => setAlert(null)}>{alert}</Alert>}
 
