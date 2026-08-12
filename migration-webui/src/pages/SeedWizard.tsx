@@ -108,14 +108,9 @@ const SeedWizard: React.FC = () => {
                          sign-in needs 2FA or a captcha, use the step-by-step
                          panels below instead: same result, but you watch the
                          browser yourself." />
-      <Stack direction="row" spacing={2} sx={{ flexWrap: 'wrap', gap: 2, alignItems: 'flex-start' }}>
-        <Box sx={{ flex: '1 1 420px', minWidth: 0 }}>
-          <QuickTenantSetup side="source" showSeedOptions />
-        </Box>
-        <Box sx={{ flex: '1 1 420px', minWidth: 0 }}>
-          <QuickTenantSetup side="target" showProvisionUsers />
-        </Box>
-      </Stack>
+      <Box sx={{ maxWidth: 480 }}>
+        <QuickTenantSetup side="source" showSeedOptions />
+      </Box>
 
       <Box sx={{ mt: 3 }} />
       <Button size="small" onClick={() => setShowManual((v) => !v)} sx={{ mb: 1 }}>
