@@ -3,10 +3,12 @@ import {
   Alert, Box, Button, Chip, CircularProgress, Collapse,
   FormControlLabel, MenuItem, Paper, Stack, Switch, TextField, Typography,
 } from '@mui/material'
-import { RocketLaunch as QuickIcon } from '@mui/icons-material'
+import { RocketLaunch as QuickIcon, Grass as SeedIcon } from '@mui/icons-material'
 import {
   FullSetupStatus, startFullSetup, fetchFullSetupStatus, getOperator,
+  startProvision, fetchProvisionStatus, ProvisionStatus,
 } from '@/api/controlPlane'
+import { runSeed } from '@/api/client'
 import ReasonCodeDialog from './ReasonCodeDialog'
 
 /**
@@ -53,6 +55,19 @@ const QuickTenantSetup: React.FC<{
   const [error, setError] = useState<string | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
+  // Standalone "do it now" actions, separate from the setup dialog above --
+  // these run after Quick Setup has already succeeded, and hit the same
+  // password-free endpoints the step-by-step panels below already use
+  // (webui.py's /api/seed, main.py provision-users), not a re-run of
+  // full_setup.py. Re-running full_setup.py to seed would force a second,
+  // unnecessary browser-based DWD sign-in for something that needs neither
+  // a browser nor a password.
+  const [postAction, setPostAction] = useState<'seed' | 'provision' | null>(null)
+  const [postBusy, setPostBusy] = useState(false)
+  const [postError, setPostError] = useState<string | null>(null)
+  const [postDone, setPostDone] = useState<string | null>(null)
+  const [provisionStatus, setProvisionStatus] = useState<ProvisionStatus | null>(null)
+
   const poll = useCallback(() => {
     fetchFullSetupStatus(side).then(setStatus).catch(() => {})
   }, [side])
@@ -96,6 +111,32 @@ const QuickTenantSetup: React.FC<{
   const canLaunch = isAdmin && domain.trim() && email.trim() && password
                     && !status?.running
   const result = status?.result
+  const setUpOk = !!result?.ok && !status?.running
+
+  useEffect(() => {
+    if (side !== 'target' || !showProvisionUsers) return
+    fetchProvisionStatus('target').then(setProvisionStatus).catch(() => {})
+  }, [side, showProvisionUsers, postDone])
+
+  const runPostAction = async (reason: string) => {
+    setPostBusy(true); setPostError(null)
+    try {
+      if (postAction === 'seed') {
+        const r = await runSeed(domain.trim(), seedScale, createUsers, false)
+        if (!r.ok) throw new Error(r.error || 'seed failed')
+        setPostDone('seed complete')
+      } else if (postAction === 'provision') {
+        await startProvision(reason, 'target', false)
+        setPostDone('provisioning started')
+        fetchProvisionStatus('target').then(setProvisionStatus).catch(() => {})
+      }
+      setPostAction(null)
+    } catch (e: any) {
+      setPostError(e.message)
+    } finally {
+      setPostBusy(false)
+    }
+  }
 
   return (
     <Paper variant="outlined" sx={{ borderRadius: 2, p: 2 }}>
@@ -219,6 +260,57 @@ const QuickTenantSetup: React.FC<{
         </Box>
       )}
 
+      {setUpOk && showSeedOptions && side === 'source' && (
+        <Box sx={{ mt: 2, pt: 2, borderTop: '1px solid', borderColor: 'divider' }}>
+          <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>
+            Setup done — seed it
+          </Typography>
+          <Stack direction="row" spacing={2} sx={{ flexWrap: 'wrap', gap: 1, alignItems: 'center' }}>
+            <TextField select size="small" label="Scale" value={seedScale}
+                       onChange={(e) => setSeedScale(e.target.value)}
+                       sx={{ width: 110 }}>
+              {['tiny', 'small', 'medium', 'large', 'huge'].map((s) => (
+                <MenuItem key={s} value={s}>{s}</MenuItem>
+              ))}
+            </TextField>
+            <FormControlLabel
+              control={<Switch checked={createUsers}
+                               onChange={(e) => setCreateUsers(e.target.checked)} />}
+              label={<Typography variant="body2">Create users</Typography>}
+            />
+            <Button variant="contained" startIcon={<SeedIcon />}
+                    disabled={postBusy || !domain.trim()}
+                    onClick={() => setPostAction('seed')}>
+              Seed now
+            </Button>
+          </Stack>
+        </Box>
+      )}
+
+      {setUpOk && showProvisionUsers && side === 'target' && (
+        <Box sx={{ mt: 2, pt: 2, borderTop: '1px solid', borderColor: 'divider' }}>
+          <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>
+            Setup done — provision accounts
+          </Typography>
+          <Stack direction="row" spacing={2} sx={{ flexWrap: 'wrap', gap: 1, alignItems: 'center' }}>
+            <Button variant="contained" startIcon={<SeedIcon />}
+                    disabled={postBusy || provisionStatus?.running}
+                    onClick={() => setPostAction('provision')}>
+              {provisionStatus?.running ? 'Running…' : 'Provision users now'}
+            </Button>
+            {provisionStatus && (provisionStatus.created || provisionStatus.total) && (
+              <Typography variant="caption" color="text.secondary">
+                {provisionStatus.created}/{provisionStatus.total} created
+                {provisionStatus.failed ? `, ${provisionStatus.failed} failed` : ''}
+              </Typography>
+            )}
+          </Stack>
+        </Box>
+      )}
+
+      {postDone && <Alert severity="success" sx={{ mt: 2 }}>{postDone}</Alert>}
+      {postError && <Alert severity="error" sx={{ mt: 2 }}>{postError}</Alert>}
+
       <ReasonCodeDialog
         open={ask} busy={busy} error={error}
         destructive={!dryRun}
@@ -242,6 +334,25 @@ const QuickTenantSetup: React.FC<{
         }
         onCancel={() => { setAsk(false); setError(null) }}
         onConfirm={launch}
+      />
+
+      <ReasonCodeDialog
+        open={postAction !== null} busy={postBusy} error={postError}
+        destructive={postAction === 'seed'}
+        confirmPhrase={postAction === 'seed' ? 'SEED' : undefined}
+        title={postAction === 'seed' ? `Seed ${domain || 'the source tenant'}`
+                                      : 'Provision target accounts'}
+        description={
+          postAction === 'seed' ? (
+            <>Writes test data into <strong>{domain || 'the source tenant'}</strong>.
+            No password needed — uses the service account key from setup.</>
+          ) : (
+            <>Creates Workspace accounts on the target from the identity map.
+            No password needed — uses the service account key from setup.</>
+          )
+        }
+        onCancel={() => { setPostAction(null); setPostError(null) }}
+        onConfirm={runPostAction}
       />
     </Paper>
   )

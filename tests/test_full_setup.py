@@ -132,6 +132,74 @@ class TestPasswordNeverLeaks:
         assert os.environ["DWD_PASSWORD"] == "unrelated-preexisting-value"
 
 
+class TestEnvShIsUpdated:
+    """After a successful setup, the rest of the tool (webui.py's /api/seed,
+    main.py, the Setup Wizard's own status page) must be pointed at the
+    tenant that was just built -- otherwise a "Seed now" button that looks
+    right ends up acting on whatever tenant env.sh happened to already
+    name."""
+
+    def _ok_common(self, monkeypatch):
+        monkeypatch.setattr(fs.provision_gcp, "gcloud_ready", lambda: (True, "me"))
+        monkeypatch.setattr(fs.provision_gcp, "detect_org", lambda: "")
+        monkeypatch.setattr(fs.provision_gcp, "provision_side", _fake_provision_side())
+        monkeypatch.setattr(fs.provision_gcp, "client_id_of", lambda p: "42")
+        monkeypatch.setattr(fs.dwd_helper, "run", lambda *a, **k: 0)
+        monkeypatch.setattr(fs.verify_scopes, "required_scopes",
+                            lambda settings, tenant: ["scope-a"])
+        monkeypatch.setattr(fs.verify_scopes, "verify",
+                            lambda settings, tenant, scopes: [
+                                {"scope": s, "ok": True} for s in scopes])
+
+    def test_source_success_writes_source_keys(self, monkeypatch):
+        self._ok_common(monkeypatch)
+        written = {}
+        monkeypatch.setattr("webui.write_config_raw", lambda pairs: written.update(pairs))
+
+        res = fs.run_full_setup("source", "c.example.com",
+                                "admin@c.example.com", "pw")
+        assert res["ok"] is True
+        assert written["SOURCE_DOMAIN"] == "c.example.com"
+        assert written["SOURCE_ADMIN"] == "admin@c.example.com"
+        assert "source-sa.json" in written["SOURCE_SA_KEY"]
+        assert "TARGET_DOMAIN" not in written
+
+    def test_target_success_writes_target_keys(self, monkeypatch):
+        self._ok_common(monkeypatch)
+        written = {}
+        monkeypatch.setattr("webui.write_config_raw", lambda pairs: written.update(pairs))
+
+        fs.run_full_setup("target", "a.example.com", "admin@a.example.com", "pw")
+        assert written["TARGET_DOMAIN"] == "a.example.com"
+        assert written["TARGET_ADMIN"] == "admin@a.example.com"
+        assert "SOURCE_DOMAIN" not in written
+
+    def test_dry_run_never_writes_env_sh(self, monkeypatch):
+        self._ok_common(monkeypatch)
+        called = {"n": 0}
+        monkeypatch.setattr("webui.write_config_raw", lambda pairs: called.__setitem__("n", called["n"] + 1))
+
+        fs.run_full_setup("source", "c.example.com", "admin@c.example.com",
+                          "pw", dry_run=True)
+        assert called["n"] == 0
+
+    def test_write_failure_is_reported_but_does_not_flip_overall_ok(self, monkeypatch):
+        """The tenant itself is already fully set up by this point -- a
+        broken env.sh write is a real problem worth surfacing, but it
+        shouldn't be reported as though provisioning or delegation failed."""
+        self._ok_common(monkeypatch)
+
+        def boom(pairs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr("webui.write_config_raw", boom)
+        res = fs.run_full_setup("source", "c.example.com",
+                                "admin@c.example.com", "pw")
+        env_phase = next(p for p in res["phases"] if "env.sh" in p["name"])
+        assert env_phase["status"] == "failed"
+        assert "SOURCE_DOMAIN=c.example.com" in env_phase["detail"]
+
+
 class TestFailureModes:
     def test_provisioning_failure_stops_before_dwd(self, monkeypatch):
         monkeypatch.setattr(fs.provision_gcp, "gcloud_ready", lambda: (True, "me"))

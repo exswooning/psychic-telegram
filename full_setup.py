@@ -169,6 +169,34 @@ def run_full_setup(
                 "clientId": client_id, "missingScopes": missing}
     p.status, p.detail = "ok", f"{len(rows)}/{len(rows)} scopes confirmed live"
 
+    # -- 3b. Point the REST of the tool at what was just built ---------------
+    # Without this, everything downstream -- seeding, migrate, the Setup
+    # Wizard's own status page -- keeps reading whatever tenant env.sh
+    # already pointed at, because nothing else here writes it. That is
+    # a real gap this had at first: Quick Setup finished green and the
+    # UI still had no way to seed the tenant it had just built, because
+    # env.sh (which webui.py's /api/seed reads SOURCE_DOMAIN/SOURCE_ADMIN
+    # from) had not moved. Reuses webui.write_config_raw rather than a
+    # second env.sh writer, so this and the Setup Wizard's own save button
+    # can never disagree about the file format.
+    p = Phase(f"point env.sh at the {side} tenant")
+    phases.append(p)
+    try:
+        from webui import write_config_raw
+
+        write_config_raw({
+            f"{side.upper()}_DOMAIN": domain,
+            f"{side.upper()}_ADMIN": admin_email,
+            f"{side.upper()}_SA_KEY": key_path,
+        })
+        p.status, p.detail = "ok", f"{side.upper()}_DOMAIN/_ADMIN/_SA_KEY written"
+    except Exception as exc:      # noqa: BLE001 - advisory: setup itself
+        # already succeeded, this just means one more manual step
+        p.status, p.detail = "failed", (
+            f"{exc} -- set {side.upper()}_DOMAIN={domain}, "
+            f"{side.upper()}_ADMIN={admin_email}, "
+            f"{side.upper()}_SA_KEY={key_path} in env.sh by hand")
+
     # -- 4. Optional: seed (source) or provision users (target) ------------
     if seed and side == "source":
         p = Phase("seed source tenant")
