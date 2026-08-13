@@ -80,8 +80,8 @@ PORT_UI=8080
   NEW=\$!; echo \$NEW > webui.pid; sleep 4; \
   LIVE=\$(ss -ltnp 'sport = :$PORT_UI' 2>/dev/null | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2); \
   CODE=\$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:$PORT_UI/); \
-  if [ \"\${LIVE:-}\" = \"\$NEW\" ] && [ \"\$CODE\" = 200 ]; then \
-    echo \"  restarted: pid \$NEW serving HTTP 200\"; \
+  if [ \"\${LIVE:-}\" = \"\$NEW\" ] && { [ \"\$CODE\" = 200 ] || [ \"\$CODE\" = 302 ]; }; then \
+    echo \"  restarted: pid \$NEW serving HTTP \$CODE\"; \
   else \
     echo \"  RESTART DID NOT TAKE: started \$NEW but pid \${LIVE:-none} owns the port (HTTP \$CODE)\"; \
     tail -5 webui.log; exit 1; \
