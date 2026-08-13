@@ -39,6 +39,85 @@ def _fake_provision_side(ok=True, client_id="999", detail=""):
     return fn
 
 
+class TestSkipsProvisioningWhenKeyAlreadyExists:
+    """Cloud project creation needs an identity with org-level rights this
+    process never holds (see the comment above phase 1 in full_setup.py) --
+    when an account already has a real key file uploaded for a side,
+    phase 1 must skip past gcloud entirely rather than trying and failing
+    with 'gcloud is not installed' on every single run."""
+
+    def _common(self, monkeypatch):
+        monkeypatch.setattr(fs.dwd_helper, "run", lambda *a, **k: 0)
+        monkeypatch.setattr(fs.verify_scopes, "required_scopes",
+                            lambda settings, tenant: ["scope-a"])
+        monkeypatch.setattr(fs.verify_scopes, "verify",
+                            lambda settings, tenant, scopes: [
+                                {"scope": s, "ok": True} for s in scopes])
+        monkeypatch.setattr(fs.accounts_auth, "update_tenant_config", lambda *a, **k: None)
+
+    def test_provision_side_is_never_called_when_a_key_exists(self, monkeypatch, tmp_path):
+        key_path = tmp_path / "source-sa.json"
+        key_path.write_text('{"client_id": "existing-client-id"}')
+        self._common(monkeypatch)
+
+        called = {"gcloud_ready": False, "provision_side": False}
+        monkeypatch.setattr(fs.accounts_auth, "get_tenant_config",
+                            lambda account_id, side: {"sa_key_path": str(key_path)})
+        monkeypatch.setattr(fs.provision_gcp, "gcloud_ready",
+                            lambda: called.update(gcloud_ready=True) or (True, "me"))
+        monkeypatch.setattr(fs.provision_gcp, "provision_side",
+                            lambda *a, **k: called.update(provision_side=True) or {})
+
+        res = fs.run_full_setup("source", "c.example.com", "admin@c.example.com",
+                                "pw", account_id=7)
+
+        assert called == {"gcloud_ready": False, "provision_side": False}
+        assert res["ok"] is True
+        assert res["clientId"] == "existing-client-id"
+        phase1 = res["phases"][0]
+        assert phase1["status"] == "skipped"
+
+    def test_falls_back_to_provisioning_when_no_key_file_exists_yet(self, monkeypatch, tmp_path):
+        """tenant_configs.sa_key_path is reserved at account creation time,
+        before any key is ever uploaded (accounts_auth.create_account sets
+        it immediately) -- the FILE existing, not just the path being
+        non-null, is what has to gate the skip."""
+        missing_path = tmp_path / "not-uploaded-yet.json"
+        monkeypatch.setattr(fs.accounts_auth, "get_tenant_config",
+                            lambda account_id, side: {"sa_key_path": str(missing_path)})
+        monkeypatch.setattr(fs.provision_gcp, "gcloud_ready",
+                            lambda: (False, "gcloud is not installed"))
+
+        res = fs.run_full_setup("source", "c.example.com", "admin@c.example.com",
+                                "pw", account_id=7)
+        assert res["ok"] is False
+        assert "gcloud is not installed" in res["phases"][0]["detail"]
+
+    def test_a_key_file_with_no_client_id_fails_clearly(self, monkeypatch, tmp_path):
+        key_path = tmp_path / "source-sa.json"
+        key_path.write_text("{}")  # valid JSON, but no client_id in it
+        monkeypatch.setattr(fs.accounts_auth, "get_tenant_config",
+                            lambda account_id, side: {"sa_key_path": str(key_path)})
+
+        res = fs.run_full_setup("source", "c.example.com", "admin@c.example.com",
+                                "pw", account_id=7)
+        assert res["ok"] is False
+        assert "no client_id" in res["phases"][0]["detail"]
+
+    def test_the_legacy_local_gcloud_caller_is_completely_unaffected(self, monkeypatch):
+        """account_id=None (the default) must never even look at
+        tenant_configs -- confirmed by get_tenant_config never being
+        called, not just by behaviour looking the same."""
+        called = {"get_tenant_config": False}
+        monkeypatch.setattr(fs.accounts_auth, "get_tenant_config",
+                            lambda *a, **k: called.update(get_tenant_config=True) or None)
+        monkeypatch.setattr(fs.provision_gcp, "gcloud_ready",
+                            lambda: (False, "gcloud is not installed"))
+
+        fs.run_full_setup("source", "c.example.com", "admin@c.example.com", "pw")
+        assert called["get_tenant_config"] is False
+
+
 class TestSideSelectionIsCorrect:
     """The bug that would have silently used the wrong tenant's project."""
 

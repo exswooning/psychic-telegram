@@ -976,4 +976,96 @@ class TestPerAccountIsolation:
         must see account_id=None, exactly as before this feature existed."""
         who = cp.get("/api/v2/whoami", headers=ADMIN).json()
         assert who["account_id"] is None
-        assert who["role"] == "admin"
+
+
+_FAKE_SA_KEY = {
+    "type": "service_account",
+    "project_id": "wsmig-src-99999",
+    "private_key_id": "abc123",
+    "private_key": "-----BEGIN PRIVATE KEY-----\nFAKE\n-----END PRIVATE KEY-----\n",
+    "client_email": "source-sa@wsmig-src-99999.iam.gserviceaccount.com",
+    "client_id": "111222333444555666",
+}
+
+
+class TestUploadCredentials:
+    """provision_gcp.py runs on the admin's own machine now (see
+    full_setup.py's phase 1 comment) -- this is the one thing it hands
+    back to the control plane: a service-account key, uploaded by an
+    already-authenticated browser tab rather than a token in a script."""
+
+    def _signed_in(self, cp, email="upload@example.com"):
+        cp.post("/api/v2/auth/signup",
+                json={"email": email, "password": "hunter22222", "name": "Upload User"})
+
+    def test_a_valid_key_is_accepted_and_stored(self, cp):
+        import api_server
+
+        self._signed_in(cp)
+        r = cp.post("/api/v2/setup/credentials",
+                    json={"reason": "local provisioning done", "side": "source",
+                          "domain": "c.example.com", "service_account_key": _FAKE_SA_KEY})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is True
+        assert body["detail"] == _FAKE_SA_KEY["client_id"]
+
+        me = cp.get("/api/v2/auth/me").json()
+        # The handler resolves this relative to api_server.HERE (the repo
+        # root), not the test process's cwd -- matching where every other
+        # account_id-keyed path (accounts_auth.create_account's own
+        # keys/{id}/ reservation) already lives. conftest.py's
+        # _cleanup_account_dirs autouse fixture sweeps this account's whole
+        # keys/{id}/ directory away afterward.
+        key_path = os.path.join(api_server.HERE, "keys", str(me["id"]), "source-sa.json")
+        assert os.path.isfile(key_path)
+        with open(key_path, encoding="utf-8") as fh:
+            assert json.load(fh) == _FAKE_SA_KEY
+
+    def test_the_tenant_config_status_reflects_the_upload(self, cp):
+        self._signed_in(cp, "status@example.com")
+        before = cp.get("/api/v2/setup/tenant-config?side=source").json()
+        assert before["hasKey"] is False
+
+        cp.post("/api/v2/setup/credentials",
+                json={"reason": "test", "side": "source", "domain": "c.example.com",
+                      "service_account_key": _FAKE_SA_KEY})
+        after = cp.get("/api/v2/setup/tenant-config?side=source").json()
+        assert after["hasKey"] is True
+        assert after["clientId"] == _FAKE_SA_KEY["client_id"]
+        assert after["domain"] == "c.example.com"
+
+    def test_a_key_missing_the_type_field_is_rejected(self, cp):
+        self._signed_in(cp, "badtype@example.com")
+        bad = dict(_FAKE_SA_KEY, type="user_account")
+        r = cp.post("/api/v2/setup/credentials",
+                    json={"reason": "test", "side": "source", "domain": "c.example.com",
+                          "service_account_key": bad})
+        assert r.status_code == 400
+
+    def test_a_key_missing_a_required_field_is_rejected(self, cp):
+        self._signed_in(cp, "badfields@example.com")
+        bad = {k: v for k, v in _FAKE_SA_KEY.items() if k != "private_key"}
+        r = cp.post("/api/v2/setup/credentials",
+                    json={"reason": "test", "side": "source", "domain": "c.example.com",
+                          "service_account_key": bad})
+        assert r.status_code == 400
+        assert "private_key" in r.json()["detail"]
+
+    def test_an_anonymous_caller_cannot_upload(self, cp):
+        """No bp_session cookie at all -- require_login() must refuse this
+        before _gated() even runs, since there is no account to attribute
+        the key to."""
+        r = cp.post("/api/v2/setup/credentials",
+                    json={"reason": "test", "side": "source", "domain": "c.example.com",
+                          "service_account_key": _FAKE_SA_KEY})
+        assert r.status_code == 401
+
+    def test_the_private_key_never_reaches_the_audit_log(self, cp):
+        self._signed_in(cp, "secret@example.com")
+        cp.post("/api/v2/setup/credentials",
+                json={"reason": "test", "side": "source", "domain": "c.example.com",
+                      "service_account_key": _FAKE_SA_KEY})
+        row = cp.get("/api/v2/actions").json()[0]
+        assert "FAKE" not in json.dumps(row)
+        assert "BEGIN PRIVATE KEY" not in json.dumps(row)

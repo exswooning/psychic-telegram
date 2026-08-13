@@ -275,3 +275,23 @@ class TestSettingsAccountScoping:
                 "WHERE account_id=? AND side='source'", (account_id,)).fetchone()
         assert row["domain"] == "first.com"
         assert row["admin_email"] == "admin@first.com"
+
+    def test_get_tenant_config_round_trips_what_update_wrote(self, db):
+        account_id = aa.create_account("read@example.com", "hunter22222", "Read User")
+        aa.update_tenant_config(account_id, "target", domain="t.example.com",
+                                admin_email="admin@t.example.com")
+        cfg = aa.get_tenant_config(account_id, "target")
+        assert cfg["domain"] == "t.example.com"
+        assert cfg["admin_email"] == "admin@t.example.com"
+        # sa_key_path/db_path were set at account creation, not by the
+        # update above -- still present, not clobbered to NULL.
+        assert cfg["sa_key_path"] == os.path.join("keys", str(account_id), "target-sa.json")
+        assert cfg["db_path"] == os.path.join("data", "accounts", str(account_id), "migration.db")
+
+    def test_get_tenant_config_for_an_unknown_account_returns_none(self, db):
+        assert aa.get_tenant_config(999999, "source") is None
+
+    def test_get_tenant_config_rejects_a_bad_side(self, db):
+        account_id = aa.create_account("badside@example.com", "hunter22222", "XX")
+        with pytest.raises(ValueError, match="side must be"):
+            aa.get_tenant_config(account_id, "sideways")
