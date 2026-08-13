@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 import secrets
 import string
+import time
 
 from googleapiclient.errors import HttpError
 
@@ -113,7 +114,36 @@ def ensure_users(directory, emails: list[str], dry_run: bool = False) -> dict:
     return result
 
 
-def create_until_full(directory, candidates, dry_run: bool = False) -> dict:
+_TRANSIENT_STATUSES = (500, 502, 503, 504)
+
+
+def _is_transient(exc: HttpError) -> bool:
+    """5xx means the Directory API itself is having a bad moment -- a real
+    backend outage or blip, not Google telling us anything about this
+    account or this tenant's licences. 4xx (403/quotaExceeded included) is
+    Google's actual answer and must never be retried away."""
+    return exc.resp.status in _TRANSIENT_STATUSES
+
+
+def _call_with_retry(fn, max_retries: int, retry_delay: float, sleep):
+    """Run `fn()`, retrying only on a transient 5xx, up to `max_retries`
+    times with a linear backoff. Re-raises immediately on anything else
+    (4xx especially -- see _is_transient), and re-raises the last error
+    once retries are exhausted."""
+    attempt = 0
+    while True:
+        try:
+            return fn()
+        except HttpError as exc:
+            if not _is_transient(exc) or attempt >= max_retries:
+                raise
+            attempt += 1
+            sleep(retry_delay * attempt)
+
+
+def create_until_full(directory, candidates, dry_run: bool = False,
+                       max_retries: int = 3, retry_delay: float = 5.0,
+                       sleep=time.sleep) -> dict:
     """Keep creating accounts from `candidates` until the Directory API
     itself refuses one.
 
@@ -129,20 +159,28 @@ def create_until_full(directory, candidates, dry_run: bool = False) -> dict:
     Google "can I have one more" until it says no needs no lagging report
     at all.
 
-    Stops at the FIRST failure, whatever it is -- continuing to burn
-    through `candidates` after the account limit is hit would just
-    produce a wall of identical errors instead of one clear stopping
-    point.
+    Stops at the first *real* failure -- but a transient 5xx (a backend
+    blip, not a licence answer) is retried a few times first rather than
+    treated as one. Live on source.rohitrokaya.com.np, a single 503
+    "backendError" on an existence check ended a run at 122 accounts with
+    no idea whether that was the actual ceiling or just Google hiccuping --
+    exactly the failure mode this retry exists to rule out. The real
+    signal this is built to reach is a 4xx (403/quotaExceeded and
+    similar) on the *insert* call itself.
     """
     result: dict = {"created": [], "existing": [], "stopped_reason": ""}
     for email in candidates:
         try:
-            if user_exists(directory, email):
-                result["existing"].append(email)
-                continue
+            exists = _call_with_retry(
+                lambda: user_exists(directory, email),
+                max_retries, retry_delay, sleep)
         except HttpError as exc:
-            result["stopped_reason"] = f"could not check {email}: {exc}"
+            result["stopped_reason"] = (
+                f"could not check {email} after retrying: {exc}")
             break
+        if exists:
+            result["existing"].append(email)
+            continue
 
         if dry_run:
             result["created"].append(email)
@@ -158,7 +196,9 @@ def create_until_full(directory, candidates, dry_run: bool = False) -> dict:
             "changePasswordAtNextLogin": False,
         }
         try:
-            directory.users().insert(body=body).execute()
+            _call_with_retry(
+                lambda: directory.users().insert(body=body).execute(),
+                max_retries, retry_delay, sleep)
             result["created"].append(email)
             log.info("create_until_full: created %s", email)
         except HttpError as exc:
