@@ -170,10 +170,46 @@ def get_tenant_config(account_id: int, side: str) -> dict | None:
 def get_account(account_id: int) -> dict | None:
     with cpdb.ro() as conn:
         row = conn.execute(
-            "SELECT id, email, name, plan, created_at FROM accounts WHERE id=?",
+            "SELECT id, email, name, plan, created_at, subscription_active, "
+            "is_superadmin FROM accounts WHERE id=?",
             (account_id,)
         ).fetchone()
     return dict(row) if row else None
+
+
+def list_accounts() -> list[dict]:
+    """Every account, newest first -- the admin dashboard's one query."""
+    with cpdb.ro() as conn:
+        rows = conn.execute(
+            "SELECT id, email, name, plan, created_at, subscription_active, "
+            "is_superadmin FROM accounts ORDER BY id DESC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def set_subscription_active(account_id: int, active: bool) -> None:
+    """The manual toggle standing in for a real payment webhook -- see
+    accounts_auth.py's module docstring and Pricing.tsx: v1 billing is an
+    operator flipping this by hand, not a Stripe integration."""
+    with cpdb.rw() as conn:
+        conn.execute(
+            "UPDATE accounts SET subscription_active=? WHERE id=?",
+            (1 if active else 0, account_id),
+        )
+
+
+def promote_to_superadmin(email: str) -> None:
+    """One-time, run by hand on the VPS: sign up through the public UI like
+    any other client, then call this to flip that same account into the
+    admin dashboard's superadmin gate. Deliberately reuses create_account()
+    rather than a second bootstrap path -- account id=1
+    (bootstrap_legacy_account) has an intentionally unusable password and
+    was never meant to be logged into."""
+    email = email.strip().lower()
+    with cpdb.rw() as conn:
+        cur = conn.execute("UPDATE accounts SET is_superadmin=1 WHERE email=?", (email,))
+        if cur.rowcount == 0:
+            raise AccountError(f"no account with email {email!r} -- sign up first")
 
 
 # ----------------------------------------------------------------------

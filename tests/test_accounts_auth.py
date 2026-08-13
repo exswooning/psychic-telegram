@@ -132,6 +132,54 @@ class TestAuthenticate:
         assert aa.authenticate("nobody@example.com", "whatever123") is None
 
 
+class TestSubscriptionAndSuperadmin:
+    """The manual v1 billing gate (accounts.subscription_active) and the
+    superadmin flag that drives the admin dashboard -- see
+    require_active_subscription/require_superadmin in api_server.py for
+    where these actually get enforced."""
+
+    def test_a_new_account_starts_with_an_active_subscription(self, db):
+        """Signup still grants immediate access -- see Pricing.tsx's "no
+        card required to start"; the manual step is deciding who *stays*
+        active, not gating the trial itself."""
+        account_id = aa.create_account("new@example.com", "hunter22222", "New User")
+        account = aa.get_account(account_id)
+        assert account["subscription_active"] == 1
+        assert account["is_superadmin"] == 0
+
+    def test_set_subscription_active_round_trips(self, db):
+        account_id = aa.create_account("toggle@example.com", "hunter22222", "Toggle")
+        aa.set_subscription_active(account_id, False)
+        assert aa.get_account(account_id)["subscription_active"] == 0
+        aa.set_subscription_active(account_id, True)
+        assert aa.get_account(account_id)["subscription_active"] == 1
+
+    def test_promote_to_superadmin_round_trips(self, db):
+        aa.create_account("owner@example.com", "hunter22222", "Owner")
+        aa.promote_to_superadmin("owner@example.com")
+        account = aa.get_account(aa.authenticate("owner@example.com", "hunter22222"))
+        assert account["is_superadmin"] == 1
+
+    def test_promote_to_superadmin_is_case_insensitive(self, db):
+        aa.create_account("mixedcase@example.com", "hunter22222", "Mixed")
+        aa.promote_to_superadmin("MixedCase@Example.com")
+        account_id = aa.authenticate("mixedcase@example.com", "hunter22222")
+        assert aa.get_account(account_id)["is_superadmin"] == 1
+
+    def test_promote_to_superadmin_on_an_unknown_email_raises(self, db):
+        with pytest.raises(aa.AccountError, match="sign up first"):
+            aa.promote_to_superadmin("nobody@example.com")
+
+    def test_list_accounts_returns_everything_newest_first(self, db):
+        first = aa.create_account("first@example.com", "hunter22222", "First")
+        second = aa.create_account("second@example.com", "hunter22222", "Second")
+        rows = aa.list_accounts()
+        ids = [r["id"] for r in rows]
+        assert ids.index(second) < ids.index(first)
+        assert {r["email"] for r in rows} == {"first@example.com", "second@example.com"}
+        assert "subscription_active" in rows[0] and "is_superadmin" in rows[0]
+
+
 class TestSessions:
     def test_a_new_session_resolves_to_its_account(self, db):
         account_id = aa.create_account("sess@example.com", "hunter22222", "Sess User")

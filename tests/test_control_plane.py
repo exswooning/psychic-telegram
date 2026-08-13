@@ -978,6 +978,148 @@ class TestPerAccountIsolation:
         assert who["account_id"] is None
 
 
+class TestSubscriptionEnforcement:
+    """The manual v1 billing gate: accounts.subscription_active, checked in
+    _gated() alongside require_admin(). No Stripe webhook yet -- an
+    operator flips this by hand (accounts_auth.set_subscription_active),
+    which is exactly what these tests do instead of adding a payment flow
+    just to reach the code path."""
+
+    def test_an_inactive_subscription_blocks_a_gated_write(self, cp):
+        import accounts_auth
+
+        cp.post("/api/v2/auth/signup",
+                json={"email": "inactive@example.com", "password": "hunter22222",
+                      "name": "Inactive User"})
+        me = cp.get("/api/v2/auth/me").json()
+        accounts_auth.set_subscription_active(me["id"], False)
+
+        r = cp.post("/api/v2/migrate/start",
+                    json={"reason": "should be blocked", "services": ["drive"]})
+        assert r.status_code == 402
+        assert "subscription" in r.json()["detail"]
+
+    def test_reactivating_restores_access(self, monkeypatch, cp):
+        import accounts_auth
+        import api_server
+
+        monkeypatch.setattr(api_server, "_spawn", lambda argv: (True, "started pid 999"))
+        cp.post("/api/v2/auth/signup",
+                json={"email": "reactivate@example.com", "password": "hunter22222",
+                      "name": "Reactivate User"})
+        me = cp.get("/api/v2/auth/me").json()
+        accounts_auth.set_subscription_active(me["id"], False)
+        assert cp.post("/api/v2/migrate/start",
+                       json={"reason": "test reason", "services": ["drive"]}).status_code == 402
+
+        accounts_auth.set_subscription_active(me["id"], True)
+        r = cp.post("/api/v2/migrate/start",
+                    json={"reason": "test reason", "services": ["drive"], "dry_run": True})
+        assert r.status_code == 200
+
+    def test_reads_still_work_while_inactive(self, cp):
+        """Nothing here touches reads -- an inactive account can still see
+        its own data, only privileged writes are blocked."""
+        import accounts_auth
+
+        cp.post("/api/v2/auth/signup",
+                json={"email": "readonly@example.com", "password": "hunter22222",
+                      "name": "Read Only"})
+        me = cp.get("/api/v2/auth/me").json()
+        accounts_auth.set_subscription_active(me["id"], False)
+        assert cp.get("/api/v2/auth/me").status_code == 200
+        assert cp.get("/api/v2/users").status_code == 200
+
+    def test_the_legacy_x_operator_path_is_exempt(self, monkeypatch, cp):
+        """account_id=None (the SSH-tunnel/CP_OPERATORS path) is the
+        operator himself, never a billed client -- nothing to deactivate
+        him against."""
+        import api_server
+
+        monkeypatch.setattr(api_server, "_spawn", lambda argv: (True, "started pid 999"))
+        r = cp.post("/api/v2/migrate/start",
+                    json={"reason": "test reason", "services": ["drive"], "dry_run": True},
+                    headers=ADMIN)
+        assert r.status_code == 200
+
+    def test_a_refused_write_from_an_inactive_account_is_still_audited(self, cp):
+        """Same principle as TestEveryAttemptIsAudited above, extended to
+        this new refusal reason."""
+        import accounts_auth
+
+        cp.post("/api/v2/auth/signup",
+                json={"email": "audited@example.com", "password": "hunter22222",
+                      "name": "Audited User"})
+        me = cp.get("/api/v2/auth/me").json()
+        accounts_auth.set_subscription_active(me["id"], False)
+        cp.post("/api/v2/migrate/start",
+                json={"reason": "should be refused", "services": ["drive"]})
+
+        rows = cp.get("/api/v2/actions").json()
+        assert rows[0]["outcome"] == "REFUSED"
+
+
+class TestSuperadminAdminEndpoints:
+    """The admin dashboard's backend: listing every account and toggling
+    one client's subscription. require_admin (which every signed-in client
+    already passes for their own data) is deliberately not enough here --
+    require_superadmin is a stronger, separate check."""
+
+    def _signed_in(self, cp, email):
+        cp.post("/api/v2/auth/signup",
+                json={"email": email, "password": "hunter22222", "name": "User"})
+        return cp.get("/api/v2/auth/me").json()["id"]
+
+    def test_a_regular_client_cannot_list_accounts(self, cp):
+        self._signed_in(cp, "regular@example.com")
+        assert cp.get("/api/v2/admin/accounts").status_code == 403
+
+    def test_a_superadmin_can_list_every_account(self, cp):
+        import accounts_auth
+
+        self._signed_in(cp, "other@example.com")
+        cp.post("/api/v2/auth/logout")
+        self._signed_in(cp, "boss2@example.com")
+        accounts_auth.promote_to_superadmin("boss2@example.com")
+        # promote happens after the session was already issued -- op's
+        # is_superadmin comes from operator()'s own accounts_auth.get_account
+        # call on *this* request, so no re-login is needed for it to see
+        # the fresh flag.
+        r = cp.get("/api/v2/admin/accounts")
+        assert r.status_code == 200
+        emails = {row["email"] for row in r.json()}
+        assert {"other@example.com", "boss2@example.com"} <= emails
+
+    def test_a_regular_client_cannot_toggle_anyones_subscription(self, cp):
+        target_id = self._signed_in(cp, "target@example.com")
+        cp.post("/api/v2/auth/logout")
+        self._signed_in(cp, "attacker@example.com")
+        r = cp.post(f"/api/v2/admin/accounts/{target_id}/subscription",
+                    json={"reason": "trying my luck", "active": False})
+        assert r.status_code == 403
+
+    def test_a_superadmin_can_deactivate_a_clients_subscription(self, cp):
+        import accounts_auth
+
+        target_id = self._signed_in(cp, "client@example.com")
+        cp.post("/api/v2/auth/logout")
+        self._signed_in(cp, "realboss@example.com")
+        accounts_auth.promote_to_superadmin("realboss@example.com")
+        r = cp.post(f"/api/v2/admin/accounts/{target_id}/subscription",
+                    json={"reason": "trial ended", "active": False})
+        assert r.status_code == 200
+        assert accounts_auth.get_account(target_id)["subscription_active"] == 0
+
+    def test_a_refused_admin_action_is_still_audited(self, cp):
+        target_id = self._signed_in(cp, "victim@example.com")
+        cp.post("/api/v2/auth/logout")
+        self._signed_in(cp, "attacker2@example.com")
+        cp.post(f"/api/v2/admin/accounts/{target_id}/subscription",
+                json={"reason": "should be refused", "active": False})
+        rows = cp.get("/api/v2/actions").json()
+        assert rows[0]["outcome"] == "REFUSED"
+
+
 _FAKE_SA_KEY = {
     "type": "service_account",
     "project_id": "wsmig-src-99999",

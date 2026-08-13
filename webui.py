@@ -415,6 +415,22 @@ def get_job(account_id: int | None) -> Job:
 
 
 JOB = get_job(None)
+
+
+def _subscription_ok(account_id: int | None) -> bool:
+    """The manual v1 billing gate -- webui.py's side of
+    api_server.py's require_active_subscription(). No _gated()-equivalent
+    exists here to hook once (this is stdlib http.server, not FastAPI), so
+    each of the two account-scoped POST handlers checks inline.
+
+    account_id in (None, 1) exempt for the same reason as the FastAPI
+    side: that's the operator's own SSH-tunnel/legacy path, not a client."""
+    if account_id in (None, 1):
+        return True
+    account = accounts_auth.get_account(account_id)
+    return bool(account) and bool(account["subscription_active"])
+
+
 # Which tenant the in-flight consent belongs to, so the callback knows.
 _PENDING: dict[str, str] = {}
 
@@ -4133,6 +4149,9 @@ class Handler(BaseHTTPRequestHandler):
 
         if self.path == "/api/seed":
             account_id = self._account_id()
+            if not _subscription_ok(account_id):
+                self._json({"ok": False, "error": "subscription inactive"}, 402)
+                return
             argv, env, err = seed_argv(body, account_id)
             if err:
                 self._json({"ok": False, "error": err}, 400)
@@ -4146,6 +4165,9 @@ class Handler(BaseHTTPRequestHandler):
 
         if self.path == "/api/reset_target":
             account_id = self._account_id()
+            if not _subscription_ok(account_id):
+                self._json({"ok": False, "error": "subscription inactive"}, 402)
+                return
             argv, env, err = reset_target_argv(body, account_id)
             if err:
                 self._json({"ok": False, "error": err}, 400)

@@ -91,7 +91,10 @@ export type Role = 'admin' | 'viewer'
 export interface Operator { name: string; role: Role; account_id: number | null }
 
 // -- SaaS accounts -----------------------------------------------------------
-export interface Account { id: number; email: string; name: string; plan: string }
+export interface Account {
+  id: number; email: string; name: string; plan: string
+  subscription_active: boolean; is_superadmin: boolean
+}
 
 export const signup = (email: string, password: string, name: string, plan = 'trial') =>
   cpFetch<{ ok: boolean; accountId: number }>('/api/v2/auth/signup', {
@@ -103,6 +106,15 @@ export const login = (email: string, password: string) =>
   cpFetch<{ ok: boolean; accountId: number }>('/api/v2/auth/login', {
     method: 'POST',
     body: JSON.stringify({ email, password }),
+  })
+
+// -- Admin (superadmin only -- see require_superadmin in api_server.py) -----
+export const fetchAdminAccounts = () => cpFetch<Account[]>('/api/v2/admin/accounts')
+
+export const setAccountSubscription = (accountId: number, active: boolean, reason: string) =>
+  cpFetch<ActionResult>(`/api/v2/admin/accounts/${accountId}/subscription`, {
+    method: 'POST',
+    body: JSON.stringify({ reason, active }),
   })
 
 export const logout = () => cpFetch<{ ok: boolean }>('/api/v2/auth/logout', { method: 'POST' })

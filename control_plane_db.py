@@ -87,6 +87,15 @@ def _apply_column_upgrades(conn: sqlite3.Connection) -> None:
         "operator_actions_log": [
             ("account_id", "INTEGER"),
         ],
+        # DEFAULT 1 so every account created before this column existed
+        # keeps working unchanged -- the operator deactivates individually
+        # going forward, matching Pricing.tsx's "no card required to start"
+        # framing (signup still grants access; the manual step is deciding
+        # who *stays* active, not gating the trial itself).
+        "accounts": [
+            ("subscription_active", "INTEGER NOT NULL DEFAULT 1"),
+            ("is_superadmin", "INTEGER NOT NULL DEFAULT 0"),
+        ],
     }
     for table, cols in upgrades.items():
         # Positional index, not row_factory["name"]: this connection (from

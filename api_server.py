@@ -58,7 +58,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -119,6 +119,15 @@ class Operator(BaseModel):
     # every one of them gets account scoping for free the moment it starts
     # reading op.account_id, with no change to its own signature.
     account_id: int | None = None
+    # Both populated straight from the same accounts row operator() already
+    # fetches below to resolve account_id -- a second query in
+    # require_active_subscription()/require_superadmin() would just re-read
+    # what's already in hand. True/False (not "unknown") for the
+    # X-Operator/SSH-tunnel path: that's the operator himself, never a
+    # billed client, so neither check should ever have anything to refuse
+    # him for.
+    subscription_active: bool = True
+    is_superadmin: bool = False
 
 
 async def operator(x_operator: str = Header(default=""),
@@ -142,7 +151,15 @@ async def operator(x_operator: str = Header(default=""),
             # role here governs THIS account's own data only, never anyone
             # else's, which is what actually keeps require_admin() safe to
             # reuse unchanged for account-scoped write endpoints.
-            return Operator(name=name, role="admin", account_id=account_id)
+            return Operator(
+                name=name, role="admin", account_id=account_id,
+                # account can be None if the session outlived its account
+                # row (see auth_me's own comment on the same situation) --
+                # default to the operator-safe True/False rather than
+                # crashing on a dict index into None.
+                subscription_active=bool(account["subscription_active"]) if account else True,
+                is_superadmin=bool(account["is_superadmin"]) if account else False,
+            )
     name = (x_operator or "").strip() or "anonymous"
     return Operator(name=name, role=_roles().get(name, "viewer"), account_id=None)
 
@@ -160,6 +177,34 @@ def require_login(op: Operator) -> None:
     that rejection message ("needs admin") would be misleading here."""
     if op.account_id is None:
         raise HTTPException(401, "sign in required")
+
+
+def require_active_subscription(op: Operator) -> None:
+    """The manual v1 billing gate -- see accounts_auth.set_subscription_active
+    and Pricing.tsx's "no card required to start" copy: an operator flips
+    this by hand, there is no Stripe webhook yet. An account with
+    subscription_active=0 can still sign in and view its own data (nothing
+    here touches reads), it just cannot start a privileged write action.
+
+    account_id in (None, 1) is exempt -- that's the operator's own
+    SSH-tunnel/legacy path, not a client. account 1
+    (bootstrap_legacy_account) can never actually be logged into anyway --
+    its password is intentionally unusable -- but the exemption is kept
+    explicit rather than relying on that being true forever.
+    """
+    if op.account_id in (None, 1):
+        return
+    if not op.subscription_active:
+        raise HTTPException(402, "subscription inactive")
+
+
+def require_superadmin(op: Operator) -> None:
+    """Stronger than require_admin: that just means 'admin of my own
+    account's data', which every signed-in client already is. This is for
+    the small number of endpoints that touch *other* accounts (the admin
+    dashboard's subscription toggle) -- being logged in is not enough."""
+    if not op.is_superadmin:
+        raise HTTPException(403, f"{op.name!r} is not a superadmin")
 
 
 # ======================================================================
@@ -439,7 +484,35 @@ async def auth_me(op: Operator = Depends(operator)):
     if account is None:  # session outlived the account row somehow
         raise HTTPException(401, "not signed in")
     return {"id": account["id"], "email": account["email"],
-            "name": account["name"], "plan": account["plan"]}
+            "name": account["name"], "plan": account["plan"],
+            "subscription_active": bool(account["subscription_active"]),
+            "is_superadmin": bool(account["is_superadmin"])}
+
+
+# ======================================================================
+# Admin -- superadmin only, touches *other* accounts. See
+# require_superadmin()'s docstring for why this needs a stronger check
+# than require_admin (which every signed-in client already passes for
+# their own data).
+# ======================================================================
+class SetSubscription(WriteAction):
+    active: bool
+
+
+@app.get("/api/v2/admin/accounts")
+async def admin_list_accounts(op: Operator = Depends(operator)):
+    require_superadmin(op)
+    return await _off_loop(accounts_auth.list_accounts)
+
+
+@app.post("/api/v2/admin/accounts/{account_id}/subscription")
+async def admin_set_subscription(account_id: int, body: SetSubscription,
+                                 op: Operator = Depends(operator)):
+    def _set() -> tuple[bool, str]:
+        accounts_auth.set_subscription_active(account_id, body.active)
+        return True, f"subscription_active={body.active}"
+    return await _gated(op, "admin.set_subscription", body,
+                        f"account:{account_id}", _set, extra_check=require_superadmin)
 
 
 # ======================================================================
@@ -484,15 +557,25 @@ async def whoami(op: Operator = Depends(operator)):
 # Write endpoints -- all four go through the same gate.
 # ======================================================================
 async def _gated(op: Operator, action: str, body: WriteAction,
-                 target: str | None, fn) -> JSONResponse:
+                 target: str | None, fn,
+                 *, extra_check: Callable[[Operator], None] | None = None) -> JSONResponse:
     """
     RBAC -> log intent -> execute -> patch outcome.
 
     `fn` runs off-loop and returns (ok, detail). A refusal is logged too:
     "who tried to do the dangerous thing" is as interesting as who did it.
+
+    extra_check, when given, runs alongside require_admin/
+    require_active_subscription inside the same try -- a refusal from it
+    (e.g. require_superadmin on the admin endpoints, which touch *other*
+    accounts) gets the identical REFUSED audit-log treatment as every other
+    gate here, rather than a second, differently-shaped rejection path.
     """
     try:
         require_admin(op)
+        require_active_subscription(op)
+        if extra_check is not None:
+            extra_check(op)
     except HTTPException as exc:
         try:
             aid = await _off_loop(cpdb.begin_action, op.name, op.role, action,
