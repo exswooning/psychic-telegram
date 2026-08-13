@@ -454,22 +454,26 @@ def recommend(r: SystemResources | None = None) -> dict:
     """
     Worker counts this machine can actually sustain.
 
-    Memory is meant to be the binding constraint, not CPU -- the pools are
-    I/O-bound (each worker mostly waits on the network, not the CPU), and
-    Google's own Drive migration guidance recommends distributing work
-    across many per-user workers (10-50) precisely because the real ceiling
-    is per-user API quota, not compute. A x2 core multiplier used to
-    contradict that on small machines: a 2-logical-core VPS capped at 4
-    workers even when RAM had headroom for many more, because by_cpu bound
-    before by_ram ever got a say. x4 keeps by_cpu from binding except on the
-    smallest machines, letting RAM (or Google's own per-user ceiling, via
-    HARD_CAP) be the real limit instead.
+    CPU is not part of this calculation at all. The pools are I/O-bound
+    (each worker mostly waits on the network, not the CPU), and Google's own
+    Drive migration guidance recommends distributing work across many
+    per-user workers (10-50) precisely because the real ceiling is per-user
+    API quota, not compute. A core-count multiplier used to cap this anyway
+    -- x2, then x4 after x2 still bound before RAM or HARD_CAP got a say --
+    and live evidence showed x4 was *still* too conservative: an 8-worker
+    run this sized itself (2 logical cores x4) on a 2-core VPS sustained
+    under 7% CPU for a full 9-hour, 40-user run. CPU was never close to
+    binding; the multiplier was just guessing, and guessing wrong in the
+    same direction twice is a sign the axis itself doesn't belong here. The
+    two real limits now: usable RAM (a genuine OOM risk on a swapless box,
+    not something to estimate away) and HARD_CAP (the point past which
+    Google's own per-user quota binds regardless of what the hardware could
+    otherwise sustain -- the actual API limit this is meant to respect).
     """
     r = r or probe()
 
     by_ram = int((r.ram_usable_gb * 1024) // MB_PER_WORKER)
-    by_cpu = max(r.cpu_logical, 1) * 4          # I/O-bound: oversubscribe cores
-    workers = max(MIN_WORKERS, min(by_ram, by_cpu, HARD_CAP))
+    workers = max(MIN_WORKERS, min(by_ram, HARD_CAP))
 
     why = []
     if r.under_memory_pressure:
@@ -482,12 +486,10 @@ def recommend(r: SystemResources | None = None) -> dict:
             f"— holding at {MIN_WORKERS} worker to avoid swap stalls that surface "
             f"as socket timeouts"
         )
-    elif by_ram < by_cpu:
+    elif by_ram < HARD_CAP:
         why.append(f"memory-bound: {r.ram_usable_gb:.1f} GB usable / "
                    f"{MB_PER_WORKER} MB per worker = {by_ram}")
     else:
-        why.append(f"cpu-bound: {r.cpu_logical} logical cores x4 = {by_cpu}")
-    if workers == HARD_CAP:
         why.append(f"capped at {HARD_CAP}; past this Google's per-user quotas bind first")
 
     return {

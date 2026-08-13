@@ -62,11 +62,17 @@ class TestSizing:
         assert rec["user_workers"] == int(2.0 * 1024 // resources.MB_PER_WORKER)
         assert "memory-bound" in rec["reason"]
 
-    def test_cpu_binds_when_memory_is_plentiful(self):
-        r = make(ram_usable=64.0, cores=2, swap_used=0.0)
+    def test_cpu_never_binds_even_with_a_single_core(self):
+        """CPU was dropped from the formula entirely: a core-count
+        multiplier (x2, then x4) capped this in both generations, and live
+        evidence showed x4 was still wrong -- an 8-worker run this same
+        formula sized (2 cores x4) sustained under 7% CPU for a full
+        9-hour, 40-user seeding run. A single-core box with generous RAM
+        must now reach HARD_CAP, not stop at some multiple of its cores."""
+        r = make(ram_usable=64.0, cores=1, swap_used=0.0)
         rec = resources.recommend(r)
-        assert rec["user_workers"] == 8          # 2 cores x4, I/O-bound
-        assert "cpu-bound" in rec["reason"]
+        assert rec["user_workers"] == resources.HARD_CAP
+        assert "cpu" not in rec["reason"].lower()
 
     def test_a_big_machine_is_capped_by_api_quota_not_hardware(self):
         """Past the cap Google's per-user limits bind first, so more workers
@@ -74,18 +80,19 @@ class TestSizing:
         rec = resources.recommend(make(ram_usable=256.0, cores=64, swap_used=0.0))
         assert rec["user_workers"] == resources.HARD_CAP
 
-    def test_a_small_vps_is_not_needlessly_held_below_its_real_ram_headroom(self):
-        """The exact case found live: a 2-logical-core, ~3.7 GB VPS capped at
-        4 workers under the old x2 multiplier even though RAM had headroom
-        for 8 -- the work is I/O-bound (each worker mostly waits on the
-        network), and Google's own migration guidance recommends
-        distributing across many more per-user workers than raw core count
-        would suggest, since per-user API quota is the real ceiling, not
-        compute."""
+    def test_a_small_vps_gets_its_real_ram_headroom_not_a_cpu_guess(self):
+        """The exact case found live: a 2-logical-core, ~3.7 GB VPS. Two
+        generations of CPU multiplier (x2, then x4) both held this below
+        what RAM actually allowed -- the x4 ceiling of 8 itself ran a
+        9-hour, 40-user seeding job under 7% CPU the whole time. CPU is no
+        longer part of the calculation, so this box's real constraint
+        (usable RAM) governs directly instead of a guessed-at core
+        multiple."""
         r = make(ram_usable=3.0, cores=2, swap_used=0.0)
         rec = resources.recommend(r)
-        assert rec["user_workers"] == 8          # 2 cores x4, not the old x2's 4
-        assert "cpu-bound" in rec["reason"]
+        assert rec["user_workers"] == 9          # 3.0 GB * 1024 // 320 MB
+        assert "memory-bound" in rec["reason"]
+        assert "cpu" not in rec["reason"].lower()
 
     def test_seed_and_migrate_pools_agree(self):
         rec = resources.recommend(make())
