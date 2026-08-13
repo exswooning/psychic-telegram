@@ -1,0 +1,11 @@
+[Unit]
+Description=Virtual framebuffer X server for headful browser automation (dwd_helper.py)
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/Xvfb :99 -screen 0 1280x1024x24 -nolisten tcp
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

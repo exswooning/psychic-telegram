@@ -1,0 +1,16 @@
+[Unit]
+Description=Bitport web UI (webui.py, port 8080)
+After=network.target xvfb.service
+
+[Service]
+WorkingDirectory=/root/migration
+# dwd_helper.py's browser automation runs in-process here too (the
+# /api/dwd/automate path) as well as via subprocess from api_server.py --
+# both need a real DISPLAY to launch Chrome against Xvfb.
+Environment=DISPLAY=:99
+ExecStart=/root/migration/.venv/bin/python webui.py --port 8080
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

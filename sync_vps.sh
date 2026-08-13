@@ -56,9 +56,26 @@ fi
 "${SSH[@]}" "$TARGET" "printf '%s\n' '$COMMIT' > $DEST/DEPLOYED_COMMIT"
 echo "  stamped DEPLOYED_COMMIT=$COMMIT"
 
-# Restart, then PROVE the restart happened.
+# Restart both servers, then PROVE each restart happened.
 #
-# Two failure modes, both of which report success:
+# Prefers systemd (see systemd/README.md) when bitport-webui.service is
+# installed -- real supervision (auto-restart on crash, starts on boot)
+# beats the nohup+pid-file+kill-by-port dance this replaces, which stays
+# below only as a fallback for a box that hasn't had systemd/*.service
+# copied onto it yet.
+if "${SSH[@]}" "$TARGET" "systemctl list-unit-files bitport-webui.service >/dev/null 2>&1"; then
+  "${SSH[@]}" "$TARGET" "systemctl restart bitport-webui bitport-api; sleep 2; \
+    if systemctl is-active --quiet bitport-webui && systemctl is-active --quiet bitport-api; then \
+      echo '  restarted via systemd: bitport-webui, bitport-api both active'; \
+    else \
+      echo '  RESTART DID NOT TAKE: one or both services failed to start' >&2; \
+      systemctl status bitport-webui bitport-api --no-pager -l | tail -30; exit 1; \
+    fi"
+  exit $?
+fi
+
+# Fallback: no systemd units on this box. Two failure modes the PID-file
+# approach alone misses, both of which report success:
 #
 #  * Killing by PID file misses an instance started some other way. The new
 #    process then cannot bind the port and dies, while curl still gets 200

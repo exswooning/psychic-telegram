@@ -1,0 +1,12 @@
+[Unit]
+Description=VNC server attached to the Xvfb virtual display, for watching/completing 2FA during dwd_helper.py runs
+After=xvfb.service
+Requires=xvfb.service
+
+[Service]
+ExecStart=/usr/bin/x11vnc -display :99 -rfbauth /root/.vnc/passwd -forever -shared -rfbport 5900 -localhost -noxdamage -o /var/log/x11vnc.log
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,26 @@
+[Unit]
+Description=Bitport control plane API (api_server.py, port 8090)
+After=network.target xvfb.service
+
+[Service]
+WorkingDirectory=/root/migration
+Environment=DISPLAY=:99
+# Without this, api_server.py's own operator() falls back to CP_OPERATORS
+# being empty and every X-Operator/SSH-tunnel caller ends up role='viewer'
+# -- see start_control_plane.sh's own docstring for why that script existed
+# in the first place (a bare `python3 api_server.py &` is easy to run
+# without exporting this). systemd is now what start_control_plane.sh used
+# to be; this line carries the same requirement forward.
+Environment=CP_OPERATORS=aryan:admin
+# secure=True on the session cookie only makes sense once this is actually
+# reached over real HTTPS (Caddy, in front of this on 8090) -- see
+# api_server.py's _set_session_cookie(). Left unset (defaulting to
+# secure=False) anywhere this unit isn't the one being used, e.g. a bare
+# `python3 api_server.py` run for local/tunnel-only testing.
+Environment=BITPORT_COOKIE_SECURE=1
+ExecStart=/root/migration/.venv/bin/python api_server.py --port 8090
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

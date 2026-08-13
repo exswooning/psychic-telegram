@@ -341,9 +341,16 @@ app = FastAPI(title="Migration Command Center", version="1.0", lifespan=lifespan
 # only allows this together with a specific origin, never "*" -- which
 # `allow_origin_regex` already gives us by reflecting the one matched
 # origin, so nothing about the actual access boundary changes.
+#
+# The public domain (see the Caddyfile) proxies both servers under one
+# origin, so browser fetches from it are same-origin and never hit CORS at
+# all in normal use -- this entry is defense in depth for anything that
+# ever calls api_server.py directly (a tunnel to 8090, testing) rather than
+# through the proxy.
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_origin_regex=(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
+                        r"|^https://everything\.nishantbohara\.com\.np$"),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -433,15 +440,22 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, exclude=True)
 
 
+# Env-gated, not hardcoded: this same process still runs two genuinely
+# different ways -- a bare `python3 api_server.py` for local/tunnel-only
+# testing (plain HTTP the whole way, where a Secure cookie would just never
+# be sent at all), and systemd's bitport-api.service in front of Caddy's
+# real HTTPS (see the Caddyfile and systemd/README.md), which sets this.
+# Defaults to the old, tunnel-safe False rather than guessing from the
+# request -- Caddy talks to this process over plain HTTP internally either
+# way, so nothing about the connection *to* this process reveals which
+# case it is.
+_COOKIE_SECURE = os.getenv("BITPORT_COOKIE_SECURE", "") == "1"
+
+
 def _set_session_cookie(response: Response, token: str) -> None:
-    # secure=False: this server binds 127.0.0.1 and is reached over an SSH
-    # tunnel (plain http to the tunnel endpoint), matching its existing
-    # security posture -- a Secure cookie would simply never be sent over
-    # that connection. Revisit this the moment the deployment model changes
-    # to a real public HTTPS origin; it has not, in this pass.
     response.set_cookie(
         SESSION_COOKIE, token, httponly=True, samesite="lax",
-        max_age=accounts_auth.SESSION_LIFETIME_S, secure=False,
+        max_age=accounts_auth.SESSION_LIFETIME_S, secure=_COOKIE_SECURE,
     )
 
 
