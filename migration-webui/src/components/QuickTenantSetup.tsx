@@ -159,12 +159,17 @@ const QuickTenantSetup: React.FC<{
   const launch = async (reason: string) => {
     setBusy(true); setError(null)
     try {
-      await startFullSetup(reason, side, domain.trim(), email.trim(), password, {
+      // ok:false on an HTTP 200 (a capacity refusal from job_admission.py,
+      // or any other execution-time failure _gated() reports this way) is
+      // not thrown by cpFetch -- only a non-2xx status is. Has to be
+      // checked explicitly, same reason as JobController.tsx's askStart.
+      const r = await startFullSetup(reason, side, domain.trim(), email.trim(), password, {
         orgId: orgId.trim(), dryRun,
         seed: showSeedOptions ? seed : false, seedScale,
         createUsers: showSeedOptions ? createUsers : false,
         provisionUsers: showProvisionUsers ? provisionUsers : false,
       })
+      if (!r.ok) throw new Error(r.detail || 'could not start')
       setAsk(false)
       poll()
     } catch (e: any) {

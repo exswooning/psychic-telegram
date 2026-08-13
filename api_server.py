@@ -56,6 +56,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import threading
 import sys
 import time
 from typing import Any, Callable, Literal
@@ -72,6 +73,7 @@ except ImportError:  # pragma: no cover - import guard, not logic
     sys.exit("control plane needs: pip install -r requirements-control-plane.txt")
 
 import accounts_auth
+import job_admission
 import ai_diagnostics
 import control_plane_db as cpdb
 
@@ -619,6 +621,36 @@ def _spawn(argv: list[str], env: dict[str, str] | None = None) -> tuple[bool, st
     return True, f"started pid {proc.pid}: {' '.join(argv[1:4])}"
 
 
+def _run_admitted(argv: list[str], account_id: int | None, job_name: str,
+                  env: dict[str, str] | None = None) -> tuple[bool, str]:
+    """Like _spawn, but resource-aware -- for migrate_start and
+    full_setup_start only (see job_admission.py's module docstring for why
+    just these two, not every _spawn caller).
+
+    Admits against job_admission's cross-account cap before launching.
+    _spawn's detached, fire-and-forget shape never learns when its process
+    exits, so nothing would otherwise free the slot just reserved -- a
+    background thread here waits on it and releases the moment it does.
+
+    Returns (False, reason) rather than raising on a refused admission: the
+    same (ok, detail) contract every other _gated() fn already returns, so
+    a capacity refusal logs and responds exactly like any other execution
+    failure, with no change needed to _gated() itself.
+    """
+    admitted, msg = job_admission.try_admit(account_id, job_name)
+    if not admitted:
+        return False, msg
+    proc = subprocess.Popen(argv, cwd=HERE, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                            text=True, env=env)
+
+    def _wait_then_release() -> None:
+        proc.wait()
+        job_admission.release(account_id, job_name)
+    threading.Thread(target=_wait_then_release, daemon=True).start()
+    return True, f"started pid {proc.pid}: {' '.join(argv[1:4])}"
+
+
 def _account_argv(account_id: int | None) -> list[str]:
     """main.py's own --account-id makes it construct Settings(account_id=...)
     itself and resolve its domains/keys/db_path from that account's
@@ -640,7 +672,8 @@ async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
     for u in body.users:
         argv += ["--user", u]
     target = ",".join(body.users) if body.users else "ALL"
-    return await _gated(op, "migrate.start", body, target, lambda: _spawn(argv))
+    return await _gated(op, "migrate.start", body, target,
+                        lambda: _run_admitted(argv, op.account_id, "migrate"))
 
 
 @app.post("/api/v2/jobs/{pid}/stop")
@@ -1418,6 +1451,14 @@ async def full_setup_start(body: StartFullSetup, op: Operator = Depends(operator
     handler's own logging.
     """
     def _launch() -> tuple[bool, str]:
+        # Inlined rather than routed through _run_admitted: this launch's
+        # Popen call is already bespoke (file-redirected output,
+        # start_new_session=True), unlike migrate_start's plain PIPE case
+        # that helper was written for -- forcing both through one shape
+        # would cost more than it shares.
+        admitted, admit_msg = job_admission.try_admit(op.account_id, "full_setup")
+        if not admitted:
+            return False, admit_msg
         out = _full_setup_state_path(body.side, op.account_id)
         partial = out + ".partial"
         argv = [PY, "full_setup.py", "--side", body.side,
@@ -1453,6 +1494,11 @@ async def full_setup_start(body: StartFullSetup, op: Operator = Depends(operator
             proc = subprocess.Popen(argv, cwd=HERE, stdout=o, stderr=e,
                                     stdin=subprocess.DEVNULL, env=env,
                                     start_new_session=True)
+
+        def _wait_then_release() -> None:
+            proc.wait()
+            job_admission.release(op.account_id, "full_setup")
+        threading.Thread(target=_wait_then_release, daemon=True).start()
         return True, f"full setup started pid {proc.pid} for {body.side}"
     # Target/domain names the tenant, never the password -- audited like
     # every other write, minus the one field that must not be recorded.

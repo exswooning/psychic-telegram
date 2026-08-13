@@ -55,6 +55,7 @@ from typing import Callable
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import accounts_auth  # stdlib-only itself; does not break the no-pip-install promise
+import job_admission  # same -- control_plane_db is stdlib-only too
 
 try:
     from wizard import State, build_steps
@@ -4156,10 +4157,20 @@ class Handler(BaseHTTPRequestHandler):
             if err:
                 self._json({"ok": False, "error": err}, 400)
                 return
+            admitted, admit_msg = job_admission.try_admit(account_id, "seed")
+            if not admitted:
+                self._json({"ok": False, "error": admit_msg}, 503)
+                return
             ok, msg = get_job(account_id).start(
                 "seed", argv, env=env,
                 cwd=os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                 "data-generator"))
+                                 "data-generator"),
+                on_finish=lambda rc: job_admission.release(account_id, "seed"))
+            if not ok:
+                # Job.start() refused (e.g. already running) before ever
+                # spawning a process -- _drain() (and so on_finish) never
+                # runs, so nothing else will free the slot just reserved.
+                job_admission.release(account_id, "seed")
             self._json({"ok": ok, "error": "" if ok else msg})
             return
 
@@ -4172,8 +4183,16 @@ class Handler(BaseHTTPRequestHandler):
             if err:
                 self._json({"ok": False, "error": err}, 400)
                 return
+            admitted, admit_msg = job_admission.try_admit(account_id, "reset target")
+            if not admitted:
+                self._json({"ok": False, "error": admit_msg}, 503)
+                return
             # reset_target.py lives at the repo root, unlike the seeder.
-            ok, msg = get_job(account_id).start("reset target", argv, env=env)
+            ok, msg = get_job(account_id).start(
+                "reset target", argv, env=env,
+                on_finish=lambda rc: job_admission.release(account_id, "reset target"))
+            if not ok:
+                job_admission.release(account_id, "reset target")
             self._json({"ok": ok, "error": "" if ok else msg})
             return
 

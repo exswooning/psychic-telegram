@@ -106,9 +106,9 @@ class TestEveryAttemptIsAudited:
         a log that only records successes is a scoreboard, not an audit."""
         import api_server
 
-        def _boom(argv):
+        def _boom(*a, **k):
             raise RuntimeError("subprocess died")
-        monkeypatch.setattr(api_server, "_spawn", _boom)
+        monkeypatch.setattr(api_server, "_run_admitted", _boom)
 
         r = cp.post("/api/v2/migrate/start",
                     json={"reason": "will crash", "services": ["drive"]}, headers=ADMIN)
@@ -120,7 +120,7 @@ class TestEveryAttemptIsAudited:
 
     def test_a_successful_action_records_actor_reason_and_outcome(self, monkeypatch, cp):
         import api_server
-        monkeypatch.setattr(api_server, "_spawn", lambda argv: (True, "started pid 999"))
+        monkeypatch.setattr(api_server, "_run_admitted", lambda *a, **k: (True, "started pid 999"))
         cp.post("/api/v2/migrate/start",
                 json={"reason": "planned cutover", "services": ["drive"],
                       "users": ["a@x.com"]}, headers=ADMIN)
@@ -229,7 +229,7 @@ class TestLedgerSafety:
         path = tempfile.mktemp(suffix=".db")
         os.environ["MIGRATION_DB"] = path
         MigrationDB(path)
-        expected = ["001_control_plane.sql", "002_accounts.sql"]
+        expected = ["001_control_plane.sql", "002_accounts.sql", "003_active_jobs.sql"]
         assert cpdb.apply_migrations() == expected
         assert cpdb.apply_migrations() == expected   # no error
         os.unlink(path)
@@ -238,7 +238,7 @@ class TestLedgerSafety:
         """The DDL must be additive. Anything else risks the live ledger."""
         migrations_dir = os.path.join(os.path.dirname(os.path.dirname(
             os.path.abspath(__file__))), "migrations")
-        for name in ("001_control_plane.sql", "002_accounts.sql"):
+        for name in ("001_control_plane.sql", "002_accounts.sql", "003_active_jobs.sql"):
             with open(os.path.join(migrations_dir, name), encoding="utf-8") as fh:
                 sql = fh.read().upper()
             for forbidden in ("DROP ", "ALTER TABLE ID_MAPPING", "ALTER TABLE AUDIT_LOG",
@@ -636,6 +636,8 @@ class TestFullSetup:
 
         class _FakeProc:
             pid = 7777
+            def wait(self):
+                return 0
         monkeypatch.setattr(api_server.subprocess, "Popen",
                             lambda *a, **k: _FakeProc())
 
@@ -668,6 +670,8 @@ class TestFullSetup:
 
         class _FakeProc:
             pid = 8888
+            def wait(self):
+                return 0
 
         def fake_popen(argv, **kwargs):
             calls.append((argv, kwargs))
@@ -703,6 +707,8 @@ class TestFullSetup:
 
         class _FakeProc:
             pid = 9999
+            def wait(self):
+                return 0
 
         def fake_popen(argv, **kwargs):
             calls.append(argv)
@@ -753,6 +759,8 @@ class TestSecretsNeverReachTheAuditLog:
 
         class _FakeProc:
             pid = 123
+            def wait(self):
+                return 0
         monkeypatch.setattr(api_server.subprocess, "Popen",
                             lambda *a, **k: _FakeProc())
         cp.post("/api/v2/full-setup/start",
@@ -940,6 +948,8 @@ class TestPerAccountIsolation:
 
         class _FakeProc:
             pid = 4242
+            def wait(self):
+                return 0
 
         monkeypatch.setattr(api_server.subprocess, "Popen", lambda *a, **k: _FakeProc())
 
@@ -1003,7 +1013,7 @@ class TestSubscriptionEnforcement:
         import accounts_auth
         import api_server
 
-        monkeypatch.setattr(api_server, "_spawn", lambda argv: (True, "started pid 999"))
+        monkeypatch.setattr(api_server, "_run_admitted", lambda *a, **k: (True, "started pid 999"))
         cp.post("/api/v2/auth/signup",
                 json={"email": "reactivate@example.com", "password": "hunter22222",
                       "name": "Reactivate User"})
@@ -1036,7 +1046,7 @@ class TestSubscriptionEnforcement:
         him against."""
         import api_server
 
-        monkeypatch.setattr(api_server, "_spawn", lambda argv: (True, "started pid 999"))
+        monkeypatch.setattr(api_server, "_run_admitted", lambda *a, **k: (True, "started pid 999"))
         r = cp.post("/api/v2/migrate/start",
                     json={"reason": "test reason", "services": ["drive"], "dry_run": True},
                     headers=ADMIN)
@@ -1057,6 +1067,58 @@ class TestSubscriptionEnforcement:
 
         rows = cp.get("/api/v2/actions").json()
         assert rows[0]["outcome"] == "REFUSED"
+
+
+class TestCrossAccountJobAdmission:
+    """migrate_start's use of job_admission.py -- see
+    tests/test_job_admission.py for the ledger's own unit tests. This is
+    just proving the wiring: a slot occupied by ANY account (including the
+    operator's own account_id=None jobs) refuses a real request through
+    the real endpoint, and _gated() reports that refusal the same way it
+    reports any other execution-time failure (ok:false, HTTP 200 -- this
+    is a capacity refusal, not an RBAC one, so it does not get the
+    REFUSED/402 treatment those get)."""
+
+    def test_a_slot_already_taken_by_another_account_blocks_migrate_start(self, cp):
+        import job_admission
+
+        job_admission.try_admit(999, "seed")
+        r = cp.post("/api/v2/migrate/start",
+                    json={"reason": "should be blocked", "services": ["drive"]},
+                    headers=ADMIN)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is False
+        assert "capacity is full" in body["detail"]
+        job_admission.release(999, "seed")
+
+    def test_the_slot_is_freed_once_the_process_exits(self, monkeypatch, cp):
+        """_run_admitted's wait-thread must actually call release() -- not
+        just admit and forget, which would permanently wedge the machine
+        at zero capacity after the very first migration."""
+        import api_server
+        import job_admission
+
+        class _FakeProc:
+            pid = 4242
+            def wait(self):
+                return 0
+        monkeypatch.setattr(api_server.subprocess, "Popen", lambda *a, **k: _FakeProc())
+
+        r = cp.post("/api/v2/migrate/start",
+                    json={"reason": "test reason", "services": ["drive"]}, headers=ADMIN)
+        assert r.json()["ok"] is True
+        # The wait-thread runs concurrently but _FakeProc.wait() returns
+        # immediately with nothing to actually wait on -- give it a moment
+        # to run before asserting the slot is free again.
+        import time
+        for _ in range(50):
+            with cpdb.ro() as conn:
+                if conn.execute("SELECT COUNT(*) n FROM active_jobs").fetchone()["n"] == 0:
+                    break
+            time.sleep(0.02)
+        with cpdb.ro() as conn:
+            assert conn.execute("SELECT COUNT(*) n FROM active_jobs").fetchone()["n"] == 0
 
 
 class TestSuperadminAdminEndpoints:

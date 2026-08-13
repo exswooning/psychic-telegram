@@ -97,7 +97,15 @@ const JobController: React.FC<Props> = ({ users, nodes, onChanged }) => {
           )}
         </>
       ),
-      run: async (reason) => { await startMigration(reason, ['drive'], targets, dryRun) },
+      run: async (reason) => {
+        // Unlike a real RBAC/subscription refusal (a non-2xx status,
+        // already thrown by cpFetch below), a capacity refusal from
+        // job_admission.py comes back as ok:false on an HTTP 200 -- the
+        // same "ran, but didn't succeed" shape _gated() uses for any
+        // other execution-time failure. Has to be checked explicitly here.
+        const r = await startMigration(reason, ['drive'], targets, dryRun)
+        if (!r.ok) throw new Error(r.detail || 'could not start')
+      },
     })
   }
 
