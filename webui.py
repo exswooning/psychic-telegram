@@ -3998,6 +3998,16 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path = self.path.split("?")[0]
         if path == "/":
+            # Bitport (the SPA at /app) is the primary UI. This used to serve
+            # PAGE directly -- an inline setup wizard from before accounts,
+            # login, and the SaaS pivot existed. Quick Setup + Seed Wizard in
+            # the SPA now cover that flow; PAGE stays reachable at /legacy
+            # rather than being deleted.
+            self.send_response(302)
+            self.send_header("Location", "/app")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        elif path == "/legacy":
             self._send(200, PAGE.encode(), "text/html; charset=utf-8")
         elif path == "/api/status":
             self._json(status_payload())
