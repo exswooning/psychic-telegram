@@ -113,6 +113,63 @@ def ensure_users(directory, emails: list[str], dry_run: bool = False) -> dict:
     return result
 
 
+def create_until_full(directory, candidates, dry_run: bool = False) -> dict:
+    """Keep creating accounts from `candidates` until the Directory API
+    itself refuses one.
+
+    Used by the sandbox seeder (seed_sandbox.py's --create-until-full),
+    not the real-migration path above -- `candidates` is a generated,
+    open-ended stream of sandbox usernames, not something bounded by
+    identity_map the way ensure_users()'s docstring rule requires.
+
+    This is the empirical alternative to querying licence counts up
+    front (the Reports API, admin.reports.usage.readonly): that API can
+    lag days behind real usage on a low-traffic tenant, making a
+    pre-flight seat count unusable exactly when it matters most. Asking
+    Google "can I have one more" until it says no needs no lagging report
+    at all.
+
+    Stops at the FIRST failure, whatever it is -- continuing to burn
+    through `candidates` after the account limit is hit would just
+    produce a wall of identical errors instead of one clear stopping
+    point.
+    """
+    result: dict = {"created": [], "existing": [], "stopped_reason": ""}
+    for email in candidates:
+        try:
+            if user_exists(directory, email):
+                result["existing"].append(email)
+                continue
+        except HttpError as exc:
+            result["stopped_reason"] = f"could not check {email}: {exc}"
+            break
+
+        if dry_run:
+            result["created"].append(email)
+            continue
+
+        given, family = _split_name(email)
+        body = {
+            "primaryEmail": email,
+            "name": {"givenName": given, "familyName": family},
+            "password": generate_password(),
+            # See module docstring: a forced password change silently
+            # breaks domain-wide delegation for this account.
+            "changePasswordAtNextLogin": False,
+        }
+        try:
+            directory.users().insert(body=body).execute()
+            result["created"].append(email)
+            log.info("create_until_full: created %s", email)
+        except HttpError as exc:
+            result["stopped_reason"] = str(exc)
+            log.info("create_until_full: stopped at %s: %s", email, exc)
+            break
+    else:
+        result["stopped_reason"] = "ran out of candidate names before hitting a limit"
+    return result
+
+
 def report(result: dict, dry_run: bool = False) -> None:
     verb = "Would create" if dry_run else "Created"
     if result["created"]:

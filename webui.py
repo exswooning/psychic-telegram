@@ -1352,6 +1352,13 @@ def seed_argv(body: dict, account_id: int | None = None) -> tuple[list[str], dic
     argv.append("--yes")
     if body.get("create_users"):
         argv.append("--create-users")
+    if body.get("create_until_full"):
+        # Generates and creates accounts one at a time until the Directory
+        # API itself refuses one -- the empirical stand-in for
+        # --fit-to-licenses when the Reports API is lagging (a low-usage
+        # tenant can go days without current data). seed_sandbox.py itself
+        # refuses to combine this with --all-users/--fit-to-licenses.
+        argv.append("--create-until-full")
     if body.get("all_users"):
         # Seeds every account that already exists in the tenant -- the real
         # headcount via the Directory API, not a fixed 5. seed_sandbox.py

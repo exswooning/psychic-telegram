@@ -652,6 +652,44 @@ def test_fit_generated_names_never_collide_with_requested():
     assert "fiona" in locals_ and len(set(locals_)) == 4
 
 
+class TestCreateUntilFullValidation:
+    """--create-until-full generates its own candidates and creates as it
+    goes, so it cannot be combined with the other user-selection modes --
+    these are argparse-level guards in main(), checked the same way the
+    rest of this file checks main()'s validation logic: by inspecting the
+    source for the sys.exit calls rather than driving the full CLI (main()
+    talks to live tenants past this point, same reason TestSeedExitCode
+    above does not invoke it either)."""
+
+    def test_requires_create_users(self):
+        import inspect
+
+        import seed_sandbox
+
+        src = inspect.getsource(seed_sandbox.main)
+        assert "create_until_full and not args.create_users" in src
+
+    def test_rejects_reset(self):
+        import inspect
+
+        import seed_sandbox
+
+        src = inspect.getsource(seed_sandbox.main)
+        assert "create_until_full and args.reset" in src
+
+    def test_rejects_the_other_selection_modes(self):
+        """Combining with --users/--all-users/--fit-to-licenses is
+        ambiguous -- --create-until-full builds its own entries and doesn't
+        consult a fixed candidate list at all."""
+        import inspect
+
+        import seed_sandbox
+
+        src = inspect.getsource(seed_sandbox.main)
+        assert ("create_until_full and (args.fit_to_licenses or "
+               "args.all_users or args.users)") in src
+
+
 def test_parse_seats_sums_across_editions():
     """The org holds exactly one edition, but the sum must be right either way."""
     import seed_sandbox as s

@@ -6,6 +6,7 @@ import {
 import {
   RocketLaunch as QuickIcon, Grass as SeedIcon, ContentCopy as CopyIcon,
   CheckCircle as OkIcon, UploadFile as UploadIcon, OpenInNew as OpenIcon,
+  PersonAddAlt as AddUsersIcon,
 } from '@mui/icons-material'
 import {
   FullSetupStatus, startFullSetup, fetchFullSetupStatus,
@@ -124,7 +125,7 @@ const QuickTenantSetup: React.FC<{
   // full_setup.py. Re-running full_setup.py to seed would force a second,
   // unnecessary browser-based DWD sign-in for something that needs neither
   // a browser nor a password.
-  const [postAction, setPostAction] = useState<'seed' | 'provision' | null>(null)
+  const [postAction, setPostAction] = useState<'seed' | 'provision' | 'maxUsers' | null>(null)
   const [postBusy, setPostBusy] = useState(false)
   const [postError, setPostError] = useState<string | null>(null)
   const [postDone, setPostDone] = useState<string | null>(null)
@@ -185,6 +186,13 @@ const QuickTenantSetup: React.FC<{
         const r = await runSeed(domain.trim(), seedScale, createUsers, false)
         if (!r.ok) throw new Error(r.error || 'seed failed')
         setPostDone('seed complete')
+      } else if (postAction === 'maxUsers') {
+        // createUsers forced true, allUsers left undefined -- seed_sandbox.py
+        // requires --create-users alongside --create-until-full and refuses
+        // it combined with --all-users/--users/--fit-to-licenses.
+        const r = await runSeed(domain.trim(), seedScale, true, false, undefined, true)
+        if (!r.ok) throw new Error(r.error || 'could not add users')
+        setPostDone('adding users until full — check Activity for how many landed')
       } else if (postAction === 'provision') {
         await startProvision(reason, 'target', false)
         setPostDone('provisioning started')
@@ -425,7 +433,18 @@ const QuickTenantSetup: React.FC<{
                     onClick={() => setPostAction('seed')}>
               Seed now
             </Button>
+            <Button variant="outlined" startIcon={<AddUsersIcon />}
+                    disabled={postBusy || !domain.trim()}
+                    onClick={() => setPostAction('maxUsers')}>
+              Add max users
+            </Button>
           </Stack>
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+            "Add max users" creates generated accounts one at a time until
+            Google itself refuses one (out of licences) — the reliable
+            alternative to a license-count check, which needs the Reports
+            API and can lag days behind on a low-usage tenant.
+          </Typography>
         </Box>
       )}
 
@@ -501,12 +520,22 @@ const QuickTenantSetup: React.FC<{
         open={postAction !== null} busy={postBusy} error={postError}
         destructive={postAction === 'seed'}
         confirmPhrase={postAction === 'seed' ? 'SEED' : undefined}
-        title={postAction === 'seed' ? `Seed ${domain || 'the source tenant'}`
-                                      : 'Provision target accounts'}
+        title={
+          postAction === 'seed' ? `Seed ${domain || 'the source tenant'}`
+          : postAction === 'maxUsers' ? `Add max users to ${domain || 'the source tenant'}`
+          : 'Provision target accounts'
+        }
         description={
           postAction === 'seed' ? (
             <>Writes test data into <strong>{domain || 'the source tenant'}</strong>.
             No password needed — uses the service account key from setup.</>
+          ) : postAction === 'maxUsers' ? (
+            <>Creates generated accounts one at a time in{' '}
+            <strong>{domain || 'the source tenant'}</strong> until Google itself
+            refuses one (out of licences, typically), then seeds data for
+            exactly the ones that succeeded. No pre-flight license count —
+            that API can lag days behind on a low-usage tenant, so this asks
+            Google directly instead.</>
           ) : (
             <>Creates Workspace accounts on the target from the identity map.
             No password needed — uses the service account key from setup.</>

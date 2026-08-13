@@ -105,6 +105,52 @@ def test_one_failure_does_not_stop_the_rest():
     assert [e for e, _ in res["failed"]] == ["blocked@x.com"]
 
 
+class TestCreateUntilFull:
+    """The empirical alternative to --fit-to-licenses: no pre-flight
+    Reports API call (which can lag days on a low-usage tenant), just
+    keep creating accounts until the Directory API itself says no."""
+
+    def test_stops_at_the_first_failure_and_never_pulls_past_it(self):
+        d = FakeDirectory(fail_on="blocked")
+        pulled = []
+
+        def candidates():
+            for email in ["ok1@x.com", "blocked@x.com", "ok2@x.com", "ok3@x.com"]:
+                pulled.append(email)
+                yield email
+
+        res = provision.create_until_full(d, candidates())
+        assert res["created"] == ["ok1@x.com"]
+        assert [b["primaryEmail"] for b in d.inserted] == ["ok1@x.com"]
+        # The candidates after the failure were never even generated --
+        # proof this stops immediately rather than plowing through the
+        # rest and reporting a wall of identical errors.
+        assert pulled == ["ok1@x.com", "blocked@x.com"]
+        assert res["stopped_reason"]
+
+    def test_existing_accounts_are_recorded_not_recreated(self):
+        d = FakeDirectory(existing=["alice@x.com"])
+        res = provision.create_until_full(d, iter(["alice@x.com", "bob@x.com"]))
+        assert res["existing"] == ["alice@x.com"]
+        assert res["created"] == ["bob@x.com"]
+        assert [b["primaryEmail"] for b in d.inserted] == ["bob@x.com"]
+
+    def test_dry_run_creates_nothing(self):
+        d = FakeDirectory()
+        res = provision.create_until_full(d, iter(["a@x.com", "b@x.com"]), dry_run=True)
+        assert d.inserted == []
+        assert res["created"] == ["a@x.com", "b@x.com"]
+
+    def test_exhausting_the_generator_without_a_failure_is_reported(self):
+        """A finite candidate stream that never hits a real limit is a
+        caller bug (too small a name pool), not a silent success --
+        the result must say so rather than implying it found the ceiling."""
+        d = FakeDirectory()
+        res = provision.create_until_full(d, iter(["a@x.com"]))
+        assert res["created"] == ["a@x.com"]
+        assert "ran out" in res["stopped_reason"]
+
+
 @pytest.mark.parametrize("email,expected", [
     ("alice.brown@x.com", ("Alice", "Brown")),
     ("bob@x.com", ("Bob", "User")),

@@ -1181,6 +1181,28 @@ def build_directory_readonly(settings: Settings, user: str):
     return build("admin", "directory_v1", http=http, cache_discovery=False)
 
 
+def _build_directory_readwrite(settings: Settings, user: str):
+    """A delegated Directory client that can create accounts -- for
+    --create-users and --create-until-full. Needs
+    provision.DIRECTORY_WRITE_SCOPE granted alongside the seeder's own
+    scopes, not just the read-only one build_directory_readonly() uses.
+    """
+    import google_auth_httplib2
+    import httplib2
+    import provision
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+
+    creds = service_account.Credentials.from_service_account_file(
+        _resolve_key_path(settings),
+        scopes=SEED_SCOPES + [provision.DIRECTORY_WRITE_SCOPE],
+    ).with_subject(user)
+    http = google_auth_httplib2.AuthorizedHttp(
+        creds, http=httplib2.Http(timeout=120)
+    )
+    return build("admin", "directory_v1", http=http, cache_discovery=False)
+
+
 # ======================================================================
 # Licence capacity
 # ======================================================================
@@ -1503,6 +1525,15 @@ def main(argv: list[str] | None = None) -> int:
                          "that already exist). Requires "
                          "admin.directory.user.readonly granted to "
                          "SEED_SA_KEY, and SOURCE_ADMIN set.")
+    ap.add_argument("--create-until-full", action="store_true",
+                    help="ignore --users/--all-users/--fit-to-licenses; "
+                         "generate and create accounts one at a time until "
+                         "the Directory API itself refuses one (out of "
+                         "licences, typically), then seed data for exactly "
+                         "the ones that succeeded. The empirical answer to "
+                         "'how many licences are actually free' when "
+                         "--fit-to-licenses's Reports API is lagging. "
+                         "Requires --create-users.")
     ap.add_argument("--reset", action="store_true", help="DELETE everything")
     ap.add_argument("--target-gb-per-user", type=float, default=None,
                     help="after normal seeding, add large filler files until "
@@ -1532,6 +1563,14 @@ def main(argv: list[str] | None = None) -> int:
                  "many accounts to create, so it only acts on that path.")
     if args.fit_to_licenses and args.reset:
         sys.exit("--fit-to-licenses makes no sense with --reset.")
+    if args.create_until_full and not args.create_users:
+        sys.exit("--create-until-full requires --create-users.")
+    if args.create_until_full and args.reset:
+        sys.exit("--create-until-full makes no sense with --reset.")
+    if args.create_until_full and (args.fit_to_licenses or args.all_users or args.users):
+        sys.exit("--create-until-full replaces --users/--all-users/"
+                 "--fit-to-licenses -- it generates its own candidates, "
+                 "pick one approach.")
     if args.all_users and args.users:
         sys.exit("--all-users and --users are mutually exclusive: "
                  "--all-users already means every existing user.")
@@ -1540,7 +1579,52 @@ def main(argv: list[str] | None = None) -> int:
                  "--all-users seeds accounts that already exist; "
                  "--fit-to-licenses creates new ones up to unused seats.")
 
-    if args.users:
+    if args.create_until_full:
+        # Handles both entry-building AND account creation in one branch,
+        # unlike every other mode below (which builds `entries` first,
+        # then optionally creates them in the shared --create-users block
+        # further down): there is no fixed candidate list to build entries
+        # from ahead of time here, since candidates are generated one at a
+        # time until the API stops accepting them.
+        import provision
+
+        admin = os.getenv("SOURCE_ADMIN")
+        if not admin:
+            sys.exit("SOURCE_ADMIN must be set to a super admin of "
+                     f"{settings.source_domain} to create accounts.")
+        directory = _build_directory_readwrite(settings, admin)
+        existing = _list_users(directory)
+        taken = {e.split("@")[0] for e in existing
+                if e.endswith("@" + settings.source_domain)}
+
+        def _candidates():
+            i = 0
+            while True:
+                lp = _generated_localpart(i, taken)
+                taken.add(lp)
+                yield f"{lp}@{settings.source_domain}"
+                i += 1
+
+        print(f"\n{len(existing)} account(s) already exist in "
+              f"{settings.source_domain}. Creating generated accounts "
+              f"until the API refuses one ...")
+        res = provision.create_until_full(directory, _candidates())
+        print(f"\nCreated {len(res['created'])} new account(s).")
+        print(f"Stopped: {res['stopped_reason']}")
+        if not res["created"]:
+            sys.exit("No new accounts were created; nothing to seed.")
+        entries = []
+        for i, email in enumerate(res["created"]):
+            template = ORG[i % len(ORG)]
+            entries.append({
+                "local": email.split("@")[0], "email": email,
+                "dept": template["dept"], "project": template["project"],
+            })
+        # Freshly created accounts take a moment before delegation works
+        # -- same wait the shared --create-users block below uses.
+        print("\nWaiting 20s for new accounts to become usable ...")
+        time.sleep(20)
+    elif args.users:
         locals_ = [u.strip() for u in args.users.split(",")]
         entries = []
         for i, lp in enumerate(locals_):
@@ -1587,25 +1671,17 @@ def main(argv: list[str] | None = None) -> int:
     all_users = [e["email"] for e in entries]
 
     # --- Optionally create the accounts first ----------------------------
-    if args.create_users and not args.reset:
+    # --create-until-full already created its accounts (and built `entries`
+    # from exactly what succeeded) in its own branch above -- this block is
+    # the shared path for the other create-first modes only.
+    if args.create_users and not args.reset and not args.create_until_full:
         import provision
-        from google.oauth2 import service_account
-        import google_auth_httplib2, httplib2
-        from googleapiclient.discovery import build
 
         admin = os.getenv("SOURCE_ADMIN")
         if not admin:
             sys.exit("SOURCE_ADMIN must be set to a super admin of "
                      f"{settings.source_domain} to create accounts.")
-        creds = service_account.Credentials.from_service_account_file(
-            _resolve_key_path(settings),
-            scopes=SEED_SCOPES + [provision.DIRECTORY_WRITE_SCOPE],
-        ).with_subject(admin)
-        directory = build(
-            "admin", "directory_v1",
-            http=google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=120)),
-            cache_discovery=False,
-        )
+        directory = _build_directory_readwrite(settings, admin)
 
         if args.fit_to_licenses:
             existing = _list_users(directory)
