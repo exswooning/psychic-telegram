@@ -485,6 +485,7 @@ async def auth_me(op: Operator = Depends(operator)):
         raise HTTPException(401, "not signed in")
     return {"id": account["id"], "email": account["email"],
             "name": account["name"], "plan": account["plan"],
+            "created_at": account["created_at"],
             "subscription_active": bool(account["subscription_active"]),
             "is_superadmin": bool(account["is_superadmin"])}
 

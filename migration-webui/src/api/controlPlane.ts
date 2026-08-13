@@ -92,7 +92,7 @@ export interface Operator { name: string; role: Role; account_id: number | null 
 
 // -- SaaS accounts -----------------------------------------------------------
 export interface Account {
-  id: number; email: string; name: string; plan: string
+  id: number; email: string; name: string; plan: string; created_at: string
   subscription_active: boolean; is_superadmin: boolean
 }
 

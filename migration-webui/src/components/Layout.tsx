@@ -44,6 +44,7 @@ import {
   Shield as CommandIcon,
   Hub as MissionIcon,
   StopCircle as InterruptIcon,
+  AdminPanelSettings as AdminIconNav,
 } from '@mui/icons-material'
 import { useMigrationStore } from '@/store'
 import { fetchConfig, fetchJob, ConfigPayload, HostInfo, JobStatus, stopJob } from '@/api/client'
@@ -96,6 +97,14 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   const [job, setJob] = useState<JobStatus | null>(null)
   const isDesktop = useMediaQuery('(min-width:960px)')
   const [account, setAccount] = useState<Account | null>(null)
+  // Superadmin-only entry appended, never part of the static list -- a
+  // regular client (every account but the one Aryan promotes on the VPS)
+  // must not even see this exists. The backend refuses the underlying
+  // calls regardless (require_superadmin), but there is no reason to
+  // advertise a page that will just 403.
+  const navItems = account?.is_superadmin
+    ? [...NAV_ITEMS, { path: '/admin/accounts', label: 'Accounts (admin)', icon: <AdminIconNav /> }]
+    : NAV_ITEMS
   const [notifAnchor, setNotifAnchor] = useState<null | HTMLElement>(null)
   const [profileAnchor, setProfileAnchor] = useState<null | HTMLElement>(null)
 
@@ -191,7 +200,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
       </Box>
       <Divider />
       <List sx={{ pt: 1, px: 1, flex: 1, overflowY: 'auto' }}>
-        {NAV_ITEMS.map((item) => {
+        {navItems.map((item) => {
           const isActive = location.pathname === item.path
           return (
             <ListItemButton

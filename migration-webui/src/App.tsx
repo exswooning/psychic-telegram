@@ -19,6 +19,7 @@ import ActivityFeed from '@/pages/ActivityFeed'
 import DriveMigration from '@/pages/DriveMigration'
 import ErrorHandling from '@/pages/ErrorHandling'
 import HelpSystem from '@/pages/HelpSystem'
+import AdminAccounts from '@/pages/AdminAccounts'
 import useMigration from '@/hooks/useMigration'
 import { fetchMe, Account } from '@/api/controlPlane'
 
@@ -87,6 +88,7 @@ const App: React.FC = () => {
             <Route path="/errors" element={<ErrorHandling />} />
             <Route path="/help" element={<HelpSystem />} />
             <Route path="/settings" element={<Settings />} />
+            <Route path="/admin/accounts" element={<AdminAccounts />} />
           </Routes>
         </Layout>
       } />
