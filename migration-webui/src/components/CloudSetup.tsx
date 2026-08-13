@@ -124,6 +124,14 @@ const CloudSetup: React.FC = () => {
 
       <Collapse in={expanded}>
         <Box sx={{ mt: 2 }}>
+          <Alert severity="info" sx={{ mb: 2 }}>
+            This only works if <strong>this server itself</strong> has an
+            authenticated gcloud (rare on a shared VPS, common on a local
+            dev machine). Most accounts should use the "Cloud project &amp;
+            service account key" step in Quick Setup above instead — run
+            provision_gcp.py on your own machine, drop the resulting key
+            into the dropzone there.
+          </Alert>
           <Stack direction="row" spacing={2} sx={{ flexWrap: 'wrap', gap: 2 }}>
             <TextField size="small" label="Source domain" value={sourceDomain}
                        onChange={(e) => setSourceDomain(e.target.value)}
