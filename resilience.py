@@ -100,6 +100,23 @@ class QuotaExhausted(Exception):
 TRANSIENT_403_REASONS = {"rateLimitExceeded", "userRateLimitExceeded", "quotaExceeded"}
 RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 
+# A freshly created Workspace account is not always immediately ready to be
+# impersonated over domain-wide delegation -- confirmed live on
+# seeduser382@source.rohitrokaya.com.np, created by create_until_full
+# moments earlier, which failed its very first Drive call this way despite
+# already being created with changePasswordAtNextLogin=False (the *other*,
+# permanent cause of this exact message -- see provision.py's docstring).
+# A 401 is normally treated as permanent (a bad/expired credential retrying
+# will never fix), so this carve-out is narrowed to that one literal message
+# rather than retrying every 401 -- an actually-revoked or never-delegated
+# credential returns the same string and simply exhausts max_retries instead
+# of hanging forever, surfacing as a failure the same as it always did.
+_ACTIVE_SESSION_INVALID = "active session is invalid"
+
+
+def _is_transient_401(reason: str, exc: HttpError) -> bool:
+    return reason == "authError" and _ACTIVE_SESSION_INVALID in str(exc).lower()
+
 
 def _extract_reason(exc: HttpError) -> str:
     try:
@@ -151,9 +168,11 @@ def _service_disabled_hint(exc: Exception, reason: str) -> str:
             f"(re-checks, and can enable when permitted)")
 
 
-def _is_permanent(status: int, reason: str) -> bool:
+def _is_permanent(status: int, reason: str, exc: HttpError | None = None) -> bool:
     if status == 403:
         return reason not in TRANSIENT_403_REASONS
+    if status == 401 and exc is not None and _is_transient_401(reason, exc):
+        return False
     if status in RETRYABLE_STATUSES:
         return False
     return True
@@ -252,7 +271,7 @@ def retry_on_google_error(
                                    ok=False)
                     status = _status_of(exc)
                     reason = _extract_reason(exc)
-                    if _is_permanent(status, reason):
+                    if _is_permanent(status, reason, exc):
                         raise PermanentAPIError(
                             f"HTTP {status} ({reason or 'unknown reason'}): {exc}"
                             + _service_disabled_hint(exc, reason)

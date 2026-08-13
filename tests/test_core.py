@@ -189,6 +189,47 @@ def test_4xx_client_errors_are_not_retried():
         assert calls["n"] == 1, f"HTTP {status} must not be retried"
 
 
+def test_active_session_invalid_401_is_retried():
+    """A freshly created Workspace account is not always immediately ready
+    for DWD impersonation -- confirmed live on a brand-new sandbox account,
+    which failed its very first Drive call this way despite already being
+    created with changePasswordAtNextLogin=False (the other, permanent
+    cause of this exact message). Must self-resolve on retry rather than
+    killing the whole seeding run for one account."""
+    calls = {"n": 0}
+
+    @retry_on_google_error(max_retries=3, base_delay=0.001, max_delay=0.002)
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise http_error(401, "authError",
+                             "Active session is invalid. Error code: 4")
+        return "ok"
+
+    assert flaky() == "ok"
+    assert calls["n"] == 3
+
+
+def test_other_401s_still_fail_immediately():
+    """The active-session carve-out is scoped to that one literal message --
+    a genuinely bad or revoked credential must still fail fast, not retry
+    for a minute before reporting what a first attempt already knew."""
+    for reason, message in (
+        ("authError", "Invalid Credentials"),
+        ("required", "Login Required"),
+    ):
+        calls = {"n": 0}
+
+        @retry_on_google_error(max_retries=5, base_delay=0.001)
+        def bad():
+            calls["n"] += 1
+            raise http_error(401, reason, message)
+
+        with pytest.raises(PermanentAPIError):
+            bad()
+        assert calls["n"] == 1, f"401 {reason}/{message!r} must not be retried"
+
+
 def test_5xx_and_429_are_retried_then_give_up():
     for status in (429, 500, 502, 503, 504):
         calls = {"n": 0}

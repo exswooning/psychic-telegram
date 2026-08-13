@@ -15,6 +15,7 @@ import {
 } from '@/api/controlPlane'
 import { runSeed } from '@/api/client'
 import ReasonCodeDialog from './ReasonCodeDialog'
+import JobProgress from './JobProgress'
 
 const REPO_CLONE_CMD =
   'git clone https://github.com/exswooning/psychic-telegram -b workspace-migrator && cd psychic-telegram'
@@ -129,6 +130,12 @@ const QuickTenantSetup: React.FC<{
   const [postBusy, setPostBusy] = useState(false)
   const [postError, setPostError] = useState<string | null>(null)
   const [postDone, setPostDone] = useState<string | null>(null)
+  // Drives JobProgress below -- "Seed now" and "Add max users" both start
+  // webui.py's Job under the name "seed" (see /api/seed in webui.py), so one
+  // live-log panel covers both instead of each button getting its own static
+  // "started, check Activity" message and nothing further ever appearing here.
+  const [jobActive, setJobActive] = useState(false)
+  const [seedJobRunning, setSeedJobRunning] = useState(false)
   const [provisionStatus, setProvisionStatus] = useState<ProvisionStatus | null>(null)
 
   const poll = useCallback(() => {
@@ -183,16 +190,20 @@ const QuickTenantSetup: React.FC<{
     setPostBusy(true); setPostError(null)
     try {
       if (postAction === 'seed') {
+        setJobActive(false)
         const r = await runSeed(domain.trim(), seedScale, createUsers, false)
         if (!r.ok) throw new Error(r.error || 'seed failed')
-        setPostDone('seed complete')
+        setJobActive(true)
+        setPostDone('seed started — live output below')
       } else if (postAction === 'maxUsers') {
         // createUsers forced true, allUsers left undefined -- seed_sandbox.py
         // requires --create-users alongside --create-until-full and refuses
         // it combined with --all-users/--users/--fit-to-licenses.
+        setJobActive(false)
         const r = await runSeed(domain.trim(), seedScale, true, false, undefined, true)
         if (!r.ok) throw new Error(r.error || 'could not add users')
-        setPostDone('adding users until full — check Activity for how many landed')
+        setJobActive(true)
+        setPostDone('adding users until full — live output below')
       } else if (postAction === 'provision') {
         await startProvision(reason, 'target', false)
         setPostDone('provisioning started')
@@ -429,12 +440,12 @@ const QuickTenantSetup: React.FC<{
               label={<Typography variant="body2">Create users</Typography>}
             />
             <Button variant="contained" startIcon={<SeedIcon />}
-                    disabled={postBusy || !domain.trim()}
+                    disabled={postBusy || seedJobRunning || !domain.trim()}
                     onClick={() => setPostAction('seed')}>
               Seed now
             </Button>
             <Button variant="outlined" startIcon={<AddUsersIcon />}
-                    disabled={postBusy || !domain.trim()}
+                    disabled={postBusy || seedJobRunning || !domain.trim()}
                     onClick={() => setPostAction('maxUsers')}>
               Add max users
             </Button>
@@ -445,6 +456,7 @@ const QuickTenantSetup: React.FC<{
             alternative to a license-count check, which needs the Reports
             API and can lag days behind on a low-usage tenant.
           </Typography>
+          <JobProgress active={jobActive} expectedName="seed" onRunningChange={setSeedJobRunning} />
         </Box>
       )}
 
