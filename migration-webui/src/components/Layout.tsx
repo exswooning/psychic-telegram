@@ -39,7 +39,6 @@ import {
   School as WizardIconNav,
   Science as SeedWizardIconNav,
   Reorder as StagesIconNav,
-  ArrowForward as ArrowForwardIcon,
   Dns as HostIcon,
   Shield as CommandIcon,
   Hub as MissionIcon,
@@ -93,7 +92,6 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   const [mobileOpen, setMobileOpen] = useState(false)
   const [host, setHost] = useState<HostInfo | null>(null)
   const [cfg, setCfg] = useState<ConfigPayload['config'] | null>(null)
-  const [authMode, setAuthMode] = useState('')
   const [job, setJob] = useState<JobStatus | null>(null)
   const isDesktop = useMediaQuery('(min-width:960px)')
   const [account, setAccount] = useState<Account | null>(null)
@@ -139,7 +137,6 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
     fetchConfig().then((c) => {
       setHost(c.host)
       setCfg(c.config)
-      setAuthMode(c.auth_mode)
     }).catch(() => {})
   }, [])
 
@@ -269,27 +266,6 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
           <Typography variant="h6" noWrap component="div" sx={{ fontWeight: 700, mr: 1 }}>
             Bitport
           </Typography>
-
-          {/* Route chip: source -> target -> auth mode, exactly what the
-             reference mockup's top bar leads with -- the one fact every
-             other number on this page is relative to. */}
-          {cfg?.source_domain && (
-            <Box sx={{
-              display: { xs: 'none', sm: 'flex' }, alignItems: 'center', gap: 0.75,
-              bgcolor: 'action.hover', borderRadius: 999, px: 1.5, py: 0.5,
-              border: '1px solid', borderColor: 'divider',
-            }}>
-              <Typography variant="caption" color="text.secondary">{cfg.source_domain}</Typography>
-              <ArrowForwardIcon sx={{ fontSize: 14, color: 'text.secondary' }} />
-              <Typography variant="caption" color="text.secondary">{cfg.target_domain}</Typography>
-              {authMode && (
-                <>
-                  <Box sx={{ width: 3, height: 3, borderRadius: '50%', bgcolor: 'text.disabled' }} />
-                  <Typography variant="caption" sx={{ color: 'primary.main', fontWeight: 600 }}>{authMode}</Typography>
-                </>
-              )}
-            </Box>
-          )}
 
           {/* Live job indicator: same running/name/progress/eta/elapsed the
              inline UI's header dot shows, so both surfaces read the same
