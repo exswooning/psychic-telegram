@@ -33,7 +33,9 @@ const Signup: React.FC = () => {
       // identical fix for why: App.tsx's own account state is fetched only
       // once on mount, so a client-side route change here would bounce
       // straight back to /login before the fresh session is ever seen.
-      window.location.href = '/mission-control'
+      // /app prefix required -- see Login.tsx's comment: this is a raw
+      // browser navigation, not routed through react-router's basename.
+      window.location.href = '/app/mission-control'
     } catch (err: any) {
       setError(err.message || 'could not create account')
     } finally {

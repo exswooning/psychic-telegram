@@ -25,7 +25,13 @@ const Login: React.FC = () => {
       // straight back to /login before the new session is ever seen. A
       // full page load remounts App.tsx and re-runs fetchMe() against the
       // now-valid cookie instead.
-      window.location.href = '/mission-control'
+      //
+      // /app prefix required: window.location.href is a raw browser
+      // navigation, not routed through react-router's basename="/app"
+      // (main.tsx) the way <Navigate>/navigate() are -- webui.py's own
+      // top-level routing only serves the SPA under /app and /app/*, so
+      // the bare path 404s at the server before React ever sees it.
+      window.location.href = '/app/mission-control'
     } catch (err: any) {
       setError(err.message || 'sign in failed')
     } finally {

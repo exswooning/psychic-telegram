@@ -124,7 +124,9 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
     // leave it stale and still truthy, and /login's own route guard
     // (`account ? <Navigate to="/mission-control"/> : <Login/>`) would
     // bounce straight back into the app the session that just ended.
-    logout().finally(() => { window.location.href = '/login' })
+    // /app prefix required -- see Login.tsx's comment: this is a raw
+    // browser navigation, not routed through react-router's basename.
+    logout().finally(() => { window.location.href = '/app/login' })
   }
 
   // Fetched once, not polled: a process's own hostname/code path/pid never
