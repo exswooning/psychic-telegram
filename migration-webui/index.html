@@ -4,12 +4,19 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#1976d2" />
+    <meta name="theme-color" content="#1a73e8" />
     <meta name="description" content="Google Workspace Migration Tool - Enterprise-grade migration dashboard" />
     <title>Bitport</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <!-- Google Sans Flex (Google's own brand typeface, publicly released on
+         Google Fonts) for headings; Roboto for body -- the same pairing
+         Workspace Admin Console and most Google products actually use.
+         Roboto Mono for logs/code, replacing JetBrains Mono for the same
+         reason. All three declared with real fallbacks in theme/index.ts,
+         so a slow/blocked font request degrades to a system font rather
+         than an invisible one. -->
+    <link href="https://fonts.googleapis.com/css2?family=Google+Sans+Flex:opsz,wght@6..144,1..1000&family=Roboto:wght@300;400;500;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
   </head>
   <body>
     <div id="root"></div>

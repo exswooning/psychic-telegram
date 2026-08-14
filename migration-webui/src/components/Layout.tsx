@@ -219,10 +219,14 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
               }}
               sx={{
                 mb: 0.25,
-                bgcolor: isActive ? 'secondary.light' : 'transparent',
-                color: isActive ? 'secondary.dark' : 'text.secondary',
+                // primary (blue), not secondary (green) -- green is
+                // Google's success/status color, not its nav-active color;
+                // every real Google product (Gmail, Drive, Admin Console)
+                // highlights the active nav item in its brand blue.
+                bgcolor: isActive ? 'primary.light' : 'transparent',
+                color: isActive ? 'primary.dark' : 'text.secondary',
                 fontWeight: isActive ? 700 : 400,
-                '&:hover': { bgcolor: isActive ? 'secondary.light' : 'action.hover' },
+                '&:hover': { bgcolor: isActive ? 'primary.light' : 'action.hover' },
               }}
             >
               <ListItemIcon sx={{ color: 'inherit', minWidth: 40 }}>
