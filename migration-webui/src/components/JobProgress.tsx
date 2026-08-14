@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Box, Button, Chip, LinearProgress, Typography } from '@mui/material'
 import { Stop as StopIcon } from '@mui/icons-material'
-import { fetchJob, stopJob } from '@/api/client'
+import { fetchJob, fetchJobHistory, JobResult, stopJob } from '@/api/client'
 
 /**
  * Live output + progress for the one background job webui.py can run at a
@@ -26,6 +26,13 @@ import { fetchJob, stopJob } from '@/api/client'
  * JOB.start()'s `name` argument ("seed", "reset target", "deploy") is
  * echoed back by /api/job, so this only ever renders output that actually
  * belongs to it, never a different tool's job that happens to be running.
+ *
+ * Live state only ever covers "since this server process last started" --
+ * a restart (redeploy, crash, VPS reboot) minutes after a run finished
+ * used to make it as if the run never happened at all, even though it had
+ * already succeeded. If polling never finds a live/just-finished job of
+ * this name, a one-time fetch of /api/job_history fills that gap from
+ * what Job._save_result() wrote to disk when it actually finished.
  */
 const JobProgress: React.FC<{
   active: boolean; expectedName: string
@@ -36,6 +43,7 @@ const JobProgress: React.FC<{
   const [lines, setLines] = useState<string[]>([])
   const [rc, setRc] = useState<number | null>(null)
   const [progressPct, setProgressPct] = useState<number | null>(null)
+  const [history, setHistory] = useState<JobResult | null>(null)
   const sinceRef = useRef(0)
   const wasRunning = useRef(false)
   const donePosted = useRef(false)
@@ -72,6 +80,15 @@ const JobProgress: React.FC<{
     return () => clearInterval(id)
   }, [poll])
 
+  // Once, on mount: the saved result of the LAST completed run, in case
+  // nothing is currently live. Not re-fetched on every poll tick -- a
+  // fresh `active` start (below) already resets the transcript to a live
+  // one, and the saved result cannot change again until this component's
+  // own run finishes and re-saves it.
+  useEffect(() => {
+    fetchJobHistory(expectedName).then(setHistory).catch(() => {})
+  }, [expectedName])
+
   // A fresh explicit start from *this* component: reset the transcript so
   // a previous run's output doesn't linger under the new one, and show the
   // panel immediately rather than waiting for the next poll tick.
@@ -84,7 +101,39 @@ const JobProgress: React.FC<{
     donePosted.current = false
   }, [active])   // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (!visible) return null
+  if (!visible) {
+    if (!history) return null
+    // Nothing live matches this job name, but a past run's result was
+    // saved to disk -- show that instead of rendering nothing, which used
+    // to be indistinguishable from "this has never run".
+    return (
+      <Box sx={{ mt: 2 }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+          <Chip
+            size="small"
+            label={`last run: ${history.rc === 0 ? 'finished -- exit 0' : `failed -- exit ${history.rc}`}`}
+            color={history.rc === 0 ? 'success' : 'error'}
+          />
+          <Typography variant="caption" color="text.secondary">
+            {new Date(history.finished * 1000).toLocaleString()} · {history.elapsed}s
+          </Typography>
+        </Box>
+        {history.lines.length > 0 && (
+          <Box
+            component="pre"
+            sx={{
+              p: 1.5, bgcolor: 'background.default', borderRadius: 1,
+              border: '1px solid', borderColor: 'divider', maxHeight: 320,
+              overflow: 'auto', fontSize: 12, fontFamily: 'ui-monospace, monospace',
+              whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+            }}
+          >
+            {history.lines.join('\n')}
+          </Box>
+        )}
+      </Box>
+    )
+  }
 
   return (
     <Box sx={{ mt: 2 }}>

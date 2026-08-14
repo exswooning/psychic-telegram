@@ -334,7 +334,18 @@ def open_public_shares(tenant: str | None = None) -> list[dict]:
 # fleet_nodes
 # ----------------------------------------------------------------------
 def upsert_node(node_id: str, **fields: Any) -> None:
-    cols = {k: v for k, v in fields.items() if v is not None}
+    # cpu_pct/ram_pct/disk_pct/hostname/location/code_commit/transfer_mode
+    # are best-effort (see fleet_agent.py's _pct_cpu_ram_disk() docstring) --
+    # a single failed measurement (None) must not blank out a real prior
+    # value. active_job/job_pid are different: None there means "nothing is
+    # running", a real state, not a failed measurement -- dropping it here
+    # left a node's last job "active" forever. Confirmed live: a preflight
+    # run that had long since exited kept showing as vps-garud's active_job
+    # across dozens of fresh, on-time heartbeats, because this filter
+    # silently excluded the two columns the agent WAS correctly reporting
+    # as cleared from every UPDATE.
+    ALWAYS_WRITE = {"active_job", "job_pid"}
+    cols = {k: v for k, v in fields.items() if v is not None or k in ALWAYS_WRITE}
     cols["last_seen"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     names = ", ".join(cols)
     marks = ", ".join("?" for _ in cols)

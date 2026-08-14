@@ -298,6 +298,42 @@ class TestFleetLiveness:
         assert cpdb.fleet(stale_after_s=0)[0]["healthy"] is False
         os.unlink(path)
 
+    def test_a_finished_job_actually_clears_from_the_dashboard(self):
+        """Live bug: fleet_agent.py correctly detects a job has exited and
+        sends active_job=None, but a preflight run that had long since
+        finished kept showing as vps-garud's active_job across dozens of
+        fresh heartbeats -- upsert_node's `if v is not None` filter was
+        silently excluding the clear-to-None update, so the last real
+        value never got overwritten."""
+        path = tempfile.mktemp(suffix=".db")
+        os.environ["MIGRATION_DB"] = path
+        MigrationDB(path)
+        cpdb.apply_migrations()
+        cpdb.upsert_node("vps-1", active_job="preflight", job_pid=4242)
+        assert cpdb.fleet()[0]["active_job"] == "preflight"
+
+        cpdb.upsert_node("vps-1", active_job=None, job_pid=None)
+        row = cpdb.fleet()[0]
+        assert row["active_job"] is None
+        assert row["job_pid"] is None
+        os.unlink(path)
+
+    def test_best_effort_metrics_still_hold_their_last_value_on_a_miss(self):
+        """The other half of the same fix: cpu_pct/ram_pct/disk_pct are
+        genuinely best-effort (see fleet_agent.py's _pct_cpu_ram_disk()) --
+        a single failed measurement must still be ignored, not written over
+        a real prior reading as if the host suddenly reported nothing."""
+        path = tempfile.mktemp(suffix=".db")
+        os.environ["MIGRATION_DB"] = path
+        MigrationDB(path)
+        cpdb.apply_migrations()
+        cpdb.upsert_node("vps-1", cpu_pct=12.5, ram_pct=40.0)
+        cpdb.upsert_node("vps-1", cpu_pct=None, ram_pct=None)
+        row = cpdb.fleet()[0]
+        assert row["cpu_pct"] == 12.5
+        assert row["ram_pct"] == 40.0
+        os.unlink(path)
+
 
 class TestBenchmarkLiveStatus:
     """

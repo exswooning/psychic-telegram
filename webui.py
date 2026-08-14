@@ -48,6 +48,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
@@ -281,7 +282,8 @@ def _seed_progress_pct(lines: list[str]) -> int | None:
 # One job at a time, with its output buffered for streaming to the page.
 # ----------------------------------------------------------------------
 class Job:
-    def __init__(self) -> None:
+    def __init__(self, account_id: int | None = None) -> None:
+        self.account_id = account_id
         self.lock = threading.Lock()
         self.proc: subprocess.Popen | None = None
         self.name = ""
@@ -339,6 +341,7 @@ class Job:
                     del self.lines[:1000]
         self.rc = self.proc.wait()
         self.finished = time.time()
+        self._save_result()
         if self._on_finish is not None:
             try:
                 self._on_finish(self.rc)
@@ -397,6 +400,59 @@ class Job:
             "etaSeconds": eta,
         }
 
+    def _save_result(self) -> None:
+        """Durable record of the last completed run of this job name, for
+        this account. Job otherwise lives only in this process's memory --
+        a redeploy or restart minutes (or seconds) after a seed/reset-
+        target/deploy run finished loses the entire result with nothing to
+        show for it, even though the run itself succeeded. Mirrors
+        api_server.py's full_setup_start, which already writes its own
+        result to logs/{account_id}/... for the same reason.
+
+        Best-effort: a failed save must not take down the drain thread or
+        hide the job's own outcome from /api/job, which already has it.
+        """
+        try:
+            with self.lock:
+                payload = {
+                    "name": self.name, "rc": self.rc,
+                    "started": self.started, "finished": self.finished,
+                    "elapsed": round(self.finished - self.started, 1) if self.started else 0,
+                    # Capped independently of the 4000-line in-memory trim --
+                    # this file is read back in one GET, not streamed, so it
+                    # stays well under what a browser tab wants to render.
+                    "lines": self.lines[-2000:],
+                }
+            path = job_result_path(self.account_id, self.name)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh)
+            os.replace(tmp, path)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def job_result_path(account_id: int | None, name: str) -> str:
+    """One file per (account, job name) -- only the *last* completed run is
+    kept, not a history. operator_actions_log already covers audit/history
+    for gated actions; this is just "what did the thing I just ran actually
+    do", which a restart must not be able to erase.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    d = os.path.join(here, "logs", "jobs", "_none" if account_id is None else str(account_id))
+    safe_name = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "job"
+    return os.path.join(d, f"{safe_name}.json")
+
+
+def load_job_result(account_id: int | None, name: str) -> dict | None:
+    path = job_result_path(account_id, name)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return None
+
 
 JOBS: dict[int | None, Job] = {}
 
@@ -411,7 +467,7 @@ def get_job(account_id: int | None) -> Job:
     had before per-account isolation existed, unchanged for account #1 and
     every caller with no account context to give."""
     if account_id not in JOBS:
-        JOBS[account_id] = Job()
+        JOBS[account_id] = Job(account_id)
     return JOBS[account_id]
 
 
@@ -4100,6 +4156,17 @@ class Handler(BaseHTTPRequestHandler):
                 if ext is not None:
                     snap = ext
             self._json(snap)
+        elif path == "/api/job_history":
+            # The last COMPLETED run of a given job name, read back from
+            # disk -- covers exactly the gap /api/job can't: a browser tab
+            # opened (or refreshed) after the server itself already
+            # restarted, where nothing is running and nothing is left in
+            # memory to report. See Job._save_result().
+            name = ""
+            if "name=" in self.path:
+                name = urllib.parse.unquote(self.path.split("name=")[1].split("&")[0])
+            result = load_job_result(self._account_id(), name) if name else None
+            self._json({"result": result})
         elif path == "/api/deploy_history":
             self._json({"history": load_deploy_history()})
         elif path.startswith("/app/assets/"):

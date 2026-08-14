@@ -126,6 +126,25 @@ export async function fetchJob(since = 0): Promise<JobStatus> {
   return getJSON<JobStatus>(`/api/job?since=${since}`)
 }
 
+export interface JobResult {
+  name: string
+  rc: number | null
+  started: number
+  finished: number
+  elapsed: number
+  lines: string[]
+}
+
+// The last COMPLETED run of `name`, read back from disk -- covers what
+// /api/job can't: a tab opened (or refreshed) after the server itself
+// restarted, where nothing is running and nothing is left in memory.
+// null when that job has never completed at all (or never run).
+export async function fetchJobHistory(name: string): Promise<JobResult | null> {
+  const { result } = await getJSON<{ result: JobResult | null }>(
+    `/api/job_history?name=${encodeURIComponent(name)}`)
+  return result
+}
+
 export async function setToggles(
   services: Record<string, boolean>,
   dryRun?: boolean
