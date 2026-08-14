@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { useNavigate, useSearchParams, Link as RouterLink } from 'react-router-dom'
+import { useSearchParams, Link as RouterLink } from 'react-router-dom'
 import {
   Box, Paper, Typography, TextField, Button, Stack, Alert, Link, Chip,
 } from '@mui/material'
@@ -11,7 +11,6 @@ const PLAN_LABELS: Record<string, string> = {
 }
 
 const Signup: React.FC = () => {
-  const navigate = useNavigate()
   const [params] = useSearchParams()
   const plan = params.get('plan') || 'trial'
   const [name, setName] = useState('')
@@ -30,7 +29,11 @@ const Signup: React.FC = () => {
     setBusy(true)
     try {
       await signup(email.trim(), password, name.trim(), plan)
-      navigate('/mission-control', { replace: true })
+      // Hard navigation, not react-router's navigate() -- see Login.tsx's
+      // identical fix for why: App.tsx's own account state is fetched only
+      // once on mount, so a client-side route change here would bounce
+      // straight back to /login before the fresh session is ever seen.
+      window.location.href = '/mission-control'
     } catch (err: any) {
       setError(err.message || 'could not create account')
     } finally {

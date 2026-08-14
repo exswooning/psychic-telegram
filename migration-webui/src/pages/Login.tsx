@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { useNavigate, Link as RouterLink } from 'react-router-dom'
+import { Link as RouterLink } from 'react-router-dom'
 import {
   Box, Paper, Typography, TextField, Button, Stack, Alert, Link,
 } from '@mui/material'
@@ -7,7 +7,6 @@ import { RocketLaunch as BrandIcon, CheckCircle as CheckIcon } from '@mui/icons-
 import { login } from '@/api/controlPlane'
 
 const Login: React.FC = () => {
-  const navigate = useNavigate()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
@@ -19,7 +18,14 @@ const Login: React.FC = () => {
     setBusy(true)
     try {
       await login(email.trim(), password)
-      navigate('/mission-control', { replace: true })
+      // A hard navigation, not react-router's navigate(): App.tsx's own
+      // `account` state is only fetched once, on mount -- a client-side
+      // route change to /mission-control leaves it still null, so its own
+      // route guard (`if (!account && !isPublic)`) immediately bounces
+      // straight back to /login before the new session is ever seen. A
+      // full page load remounts App.tsx and re-runs fetchMe() against the
+      // now-valid cookie instead.
+      window.location.href = '/mission-control'
     } catch (err: any) {
       setError(err.message || 'sign in failed')
     } finally {

@@ -118,7 +118,13 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
 
   const handleSignOut = () => {
     setProfileAnchor(null)
-    logout().finally(() => navigate('/login', { replace: true }))
+    // Hard navigation, not react-router's navigate() -- same reason as
+    // Login.tsx/Signup.tsx's fix: App.tsx's own `account` state is only
+    // fetched once on mount, so a client-side route change here would
+    // leave it stale and still truthy, and /login's own route guard
+    // (`account ? <Navigate to="/mission-control"/> : <Login/>`) would
+    // bounce straight back into the app the session that just ended.
+    logout().finally(() => { window.location.href = '/login' })
   }
 
   // Fetched once, not polled: a process's own hostname/code path/pid never
