@@ -53,6 +53,7 @@ const G_FIELD_SX = {
   },
   '& .MuiInputLabel-root': { color: G_TEXT_DIM },
   '& .MuiInputLabel-root.Mui-focused': { color: '#a8c7fa' },
+  '& .MuiFormHelperText-root': { color: G_TEXT_DIM },
 }
 // MUI's default disabled-contained-button style (a faint rgba(0,0,0,..)
 // wash) assumes a light surface behind it -- against G_BG it was nearly
@@ -106,6 +107,21 @@ const GoogleStyleAuth: React.FC<{
   const [step, setStep] = useState<0 | 1>(0)
   const [showPassword, setShowPassword] = useState(false)
   const [showAdvanced, setShowAdvanced] = useState(false)
+  // A Workspace super admin's email is, in the overwhelming majority of
+  // cases, on the domain being administered -- so ask for just the email,
+  // like Google's own sign-in does, and derive the domain from it instead
+  // of making the user type the same thing twice. Stops auto-deriving the
+  // moment the domain field itself gets touched (in advanced options
+  // below), so a manual correction for the rare domain-alias case sticks
+  // instead of being silently overwritten on the next keystroke in email.
+  const domainEditedRef = useRef(false)
+  const handleEmailChange = (v: string) => {
+    setEmail(v)
+    if (!domainEditedRef.current) {
+      const at = v.lastIndexOf('@')
+      setDomain(at >= 0 ? v.slice(at + 1).trim() : '')
+    }
+  }
 
   return (
     <Dialog
@@ -130,17 +146,18 @@ const GoogleStyleAuth: React.FC<{
         <>
           <Stack spacing={2.5}>
             <TextField
-              fullWidth label={`${side} domain`} value={domain}
-              onChange={(e) => setDomain(e.target.value)}
-              placeholder={side === 'source' ? 'c.example.com' : 'a.example.com'}
+              fullWidth label="Super admin email" value={email}
+              onChange={(e) => handleEmailChange(e.target.value)}
+              placeholder={side === 'source' ? 'admin@c.example.com' : 'admin@a.example.com'}
               autoFocus sx={G_FIELD_SX}
             />
-            <TextField
-              fullWidth label="Super admin email" value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder={`admin@${domain || 'example.com'}`}
-              sx={G_FIELD_SX}
-            />
+            {domain.trim() && (
+              <Typography variant="caption" sx={{ color: G_TEXT_DIM, mt: -1.5 }}>
+                {side} domain: <Box component="span" sx={{ color: G_TEXT, fontWeight: 500 }}>
+                  {domain.trim()}
+                </Box>
+              </Typography>
+            )}
           </Stack>
           <Box sx={{ display: 'flex', justifyContent: 'flex-end', mt: 4 }}>
             <Button
@@ -191,6 +208,12 @@ const GoogleStyleAuth: React.FC<{
           </Button>
           <Collapse in={showAdvanced}>
             <Stack spacing={1.5} sx={{ mt: 2 }}>
+              <TextField
+                fullWidth size="small" label={`${side} domain`} value={domain}
+                onChange={(e) => { domainEditedRef.current = true; setDomain(e.target.value) }}
+                helperText="auto-filled from your email -- edit if the Workspace domain differs"
+                sx={G_FIELD_SX}
+              />
               <TextField
                 fullWidth size="small" label="Org ID (optional)" value={orgId}
                 onChange={(e) => setOrgId(e.target.value)} sx={G_FIELD_SX}
