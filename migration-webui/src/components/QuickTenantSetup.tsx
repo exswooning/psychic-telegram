@@ -265,11 +265,18 @@ const GoogleStyleAuth: React.FC<{
  */
 const QuickTenantSetup: React.FC<{
   side: 'source' | 'target'
+  /** 'automated' shows only the Sign in with Google trigger, its dialog,
+   * and the direct feedback (running/result/error) from that one action.
+   * Everything else -- the Cloud project & key section, the seed/provision
+   * toggles, and the post-setup quick actions -- only renders in 'manual',
+   * so the automated route stays a single, uncluttered button and every
+   * other control lives in one predictable place instead of both. */
+  view: 'automated' | 'manual'
   /** Only meaningful for side="source". */
   showSeedOptions?: boolean
   /** Only meaningful for side="target". */
   showProvisionUsers?: boolean
-}> = ({ side, showSeedOptions, showProvisionUsers }) => {
+}> = ({ side, view, showSeedOptions, showProvisionUsers }) => {
   const [domain, setDomain] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -462,9 +469,10 @@ const QuickTenantSetup: React.FC<{
       </Stack>
 
       {/* -- Cloud project & service account key -- */}
+      {view === 'manual' && (
       <Box sx={{ mb: 2 }}>
         <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 0.5 }}>
-          1. Cloud project & service account key
+          Cloud project & service account key
         </Typography>
 
         {tenantCfg?.hasKey ? (
@@ -545,52 +553,61 @@ const QuickTenantSetup: React.FC<{
         />
         {uploadError && <Alert severity="error" sx={{ mt: 1 }}>{uploadError}</Alert>}
       </Box>
+      )}
 
-      <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 0.5 }}>
-        2. Domain-wide delegation
-      </Typography>
-      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 2 }}>
-        Needs a display for the sign-in step — if it stalls waiting on 2FA
-        or a captcha, connect over VNC to watch the browser directly (see
-        connect_vps.sh). This drives a real Google sign-in, so the step
-        below is styled to match it.
-      </Typography>
+      {view === 'automated' ? (
+        <>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            Signs in as the Workspace super admin and grants domain-wide
+            delegation automatically — creates the Cloud project too, if one
+            isn't already on file. Needs a real browser; if it stalls on 2FA
+            or a captcha, use the Manual tab instead.
+          </Typography>
 
-      <Button
-        variant="outlined"
-        onClick={() => setAuthDialogOpen(true)}
-        startIcon={<GoogleG size={18} />}
-        sx={{
-          textTransform: 'none', fontWeight: 500, borderRadius: '4px',
-          borderColor: 'divider', color: 'text.primary', px: 2.5, py: 1,
-          bgcolor: 'background.paper',
-          '&:hover': { borderColor: 'text.secondary', bgcolor: 'action.hover' },
-        }}
-      >
-        {domain.trim() && email.trim() ? `Continue as ${email.trim()}` : 'Sign in with Google'}
-      </Button>
-      {domain.trim() && email.trim() && (
-        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
-          {domain.trim()} — click to change or enter the password
+          <Button
+            variant="outlined"
+            onClick={() => setAuthDialogOpen(true)}
+            startIcon={<GoogleG size={18} />}
+            sx={{
+              textTransform: 'none', fontWeight: 500, borderRadius: '4px',
+              borderColor: 'divider', color: 'text.primary', px: 2.5, py: 1,
+              bgcolor: 'background.paper',
+              '&:hover': { borderColor: 'text.secondary', bgcolor: 'action.hover' },
+            }}
+          >
+            {domain.trim() && email.trim() ? `Continue as ${email.trim()}` : 'Sign in with Google'}
+          </Button>
+          {domain.trim() && email.trim() && (
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+              {domain.trim()} — click to change or enter the password
+            </Typography>
+          )}
+
+          <GoogleStyleAuth
+            open={authDialogOpen}
+            onClose={() => setAuthDialogOpen(false)}
+            side={side}
+            domain={domain} setDomain={setDomain}
+            email={email} setEmail={setEmail}
+            password={password} setPassword={setPassword}
+            orgId={orgId} setOrgId={setOrgId}
+            dryRun={dryRun} setDryRun={setDryRun}
+            canSubmit={!!canLaunch}
+            submitLabel={status?.running ? 'Running…' : dryRun ? 'Preview' : `Set up ${side}`}
+            onSubmit={() => { setAuthDialogOpen(false); setAsk(true) }}
+          />
+        </>
+      ) : (
+        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+          Prefer the automated Google sign-in? Switch to the Automated tab —
+          it handles delegation (and the Cloud project, if needed) in one
+          step. Use the panels below if that stalls on 2FA/a captcha, or
+          you'd rather drive Admin Console yourself.
         </Typography>
       )}
 
-      <GoogleStyleAuth
-        open={authDialogOpen}
-        onClose={() => setAuthDialogOpen(false)}
-        side={side}
-        domain={domain} setDomain={setDomain}
-        email={email} setEmail={setEmail}
-        password={password} setPassword={setPassword}
-        orgId={orgId} setOrgId={setOrgId}
-        dryRun={dryRun} setDryRun={setDryRun}
-        canSubmit={!!canLaunch}
-        submitLabel={status?.running ? 'Running…' : dryRun ? 'Preview' : `Set up ${side}`}
-        onSubmit={() => { setAuthDialogOpen(false); setAsk(true) }}
-      />
-
-      {showSeedOptions && (
-        <Stack direction="row" spacing={2} sx={{ mt: 0.5, flexWrap: 'wrap', gap: 1, alignItems: 'center' }}>
+      {view === 'manual' && showSeedOptions && (
+        <Stack direction="row" spacing={2} sx={{ mt: 1.5, flexWrap: 'wrap', gap: 1, alignItems: 'center' }}>
           <FormControlLabel
             control={<Switch checked={seed} onChange={(e) => setSeed(e.target.checked)} />}
             label={<Typography variant="body2">Also seed this tenant</Typography>}
@@ -614,7 +631,7 @@ const QuickTenantSetup: React.FC<{
         </Stack>
       )}
 
-      {showProvisionUsers && (
+      {view === 'manual' && showProvisionUsers && (
         <FormControlLabel
           sx={{ mt: 0.5, display: 'block' }}
           control={<Switch checked={provisionUsers}
@@ -657,7 +674,7 @@ const QuickTenantSetup: React.FC<{
         </Box>
       )}
 
-      {setUpOk && showSeedOptions && side === 'source' && (
+      {view === 'manual' && setUpOk && showSeedOptions && side === 'source' && (
         <Box sx={{ mt: 2, pt: 2, borderTop: '1px solid', borderColor: 'divider' }}>
           <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>
             Setup done — seed it
@@ -696,7 +713,7 @@ const QuickTenantSetup: React.FC<{
         </Box>
       )}
 
-      {setUpOk && showProvisionUsers && side === 'target' && (
+      {view === 'manual' && setUpOk && showProvisionUsers && side === 'target' && (
         <Box sx={{ mt: 2, pt: 2, borderTop: '1px solid', borderColor: 'divider' }}>
           <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>
             Setup done — provision accounts
@@ -717,8 +734,8 @@ const QuickTenantSetup: React.FC<{
         </Box>
       )}
 
-      {postDone && <Alert severity="success" sx={{ mt: 2 }}>{postDone}</Alert>}
-      {postError && <Alert severity="error" sx={{ mt: 2 }}>{postError}</Alert>}
+      {view === 'manual' && postDone && <Alert severity="success" sx={{ mt: 2 }}>{postDone}</Alert>}
+      {view === 'manual' && postError && <Alert severity="error" sx={{ mt: 2 }}>{postError}</Alert>}
 
       <ReasonCodeDialog
         open={ask} busy={busy} error={error}

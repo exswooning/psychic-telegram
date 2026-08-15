@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import {
   Box, Typography, Card, CardContent, Chip, Button, TextField, Grid, Alert,
-  MenuItem, Checkbox, FormControlLabel, LinearProgress, Stack, Collapse,
+  MenuItem, Checkbox, FormControlLabel, LinearProgress, Stack, Tabs, Tab,
   Dialog, DialogActions, DialogContent, DialogTitle,
 } from '@mui/material'
 import { Refresh as RefreshIcon } from '@mui/icons-material'
@@ -33,7 +33,7 @@ import { DwdStatus, fetchDwdStatus } from '@/api/controlPlane'
  */
 
 const SeedWizard: React.FC = () => {
-  const [showManual, setShowManual] = useState(false)
+  const [route, setRoute] = useState<'automated' | 'manual'>('automated')
   const [status, setStatus] = useState<StatusPayload | null>(null)
   const [actions, setActions] = useState<Record<string, ActionSpec>>({})
   const [dwd, setDwd] = useState<DwdPayload | null>(null)
@@ -94,102 +94,98 @@ const SeedWizard: React.FC = () => {
         <Button size="small" startIcon={<RefreshIcon />} onClick={refresh}>Refresh</Button>
       </Box>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-        The whole path for a fresh sandbox, in order: Cloud project and keys,
-        then delegation, then users and data. Rehearsal tools for test
-        tenants only -- none of this touches a production tenant's own data.
+        Sandbox rehearsal tools for test tenants only -- none of this touches
+        a production tenant's own data. Automated signs in and handles the
+        Cloud project, delegation, and (optionally) seeding in one step;
+        Manual walks through each part by hand -- use it if the automated
+        sign-in stalls on 2FA or a captcha.
       </Typography>
 
-      <StepHeading n={1} title="Quick setup — domain, admin email, admin password"
-                   note="Runs project creation, API enablement, the service
-                         account and key, and domain-wide delegation as one
-                         call. Only works where THIS page's control plane has
-                         gcloud and a real browser -- it refuses cleanly, not
-                         a stuck spinner, wherever those are missing. If a
-                         sign-in needs 2FA or a captcha, use the step-by-step
-                         panels below instead: same result, but you watch the
-                         browser yourself." />
-      <Box sx={{ maxWidth: 480 }}>
-        <QuickTenantSetup side="source" showSeedOptions />
+      <Tabs value={route} onChange={(_, v) => setRoute(v)} sx={{ mb: 3, borderBottom: '1px solid', borderColor: 'divider' }}>
+        <Tab value="automated" label="Automated" />
+        <Tab value="manual" label="Manual" />
+      </Tabs>
+
+      <Box sx={{ maxWidth: route === 'automated' ? 480 : undefined }}>
+        <QuickTenantSetup side="source" view={route} showSeedOptions />
       </Box>
 
-      <Box sx={{ mt: 3 }} />
-      <Button size="small" onClick={() => setShowManual((v) => !v)} sx={{ mb: 1 }}>
-        {showManual ? 'Hide' : 'Show'} step-by-step setup (fallback for 2FA / captcha)
-      </Button>
-      <Collapse in={showManual}>
-        <StepHeading n={1} title="Cloud project, APIs and service account keys"
-                     note="Creates both GCP projects, enables every API the
-                           engines use, and downloads the two keys. Needs gcloud
-                           on the machine serving this page — it refuses
-                           cleanly rather than half-running if that is missing." />
-        <CloudSetup />
+      {route === 'manual' && (
+        <>
+          <Box sx={{ mt: 3 }} />
+          <StepHeading n={1} title="Cloud project, APIs and service account keys"
+                       note="Creates both GCP projects, enables every API the
+                             engines use, and downloads the two keys. Needs gcloud
+                             on the machine serving this page — it refuses
+                             cleanly rather than half-running if that is missing." />
+          <CloudSetup />
 
-        <Box sx={{ mt: 3 }} />
-        <StepHeading n={2} title="Domain-wide delegation"
-                     note="Authorises the client IDs from step 1 on each tenant.
-                           Verified by minting a token per scope, so green here
-                           means it genuinely works." />
-        <DwdSetup />
-      </Collapse>
+          <Box sx={{ mt: 3 }} />
+          <StepHeading n={2} title="Domain-wide delegation"
+                       note="Authorises the client IDs from step 1 on each tenant.
+                             Verified by minting a token per scope, so green here
+                             means it genuinely works." />
+          <DwdSetup />
 
-      <Box sx={{ mt: 3 }} />
-      <StepHeading n={3} title="Create users and seed data"
-                   note="For fine-grained control beyond Quick setup above.
-                         Everything below writes into the SOURCE tenant." />
+          <Box sx={{ mt: 3 }} />
+          <StepHeading n={3} title="Create users and seed data"
+                       note="Everything below writes into the SOURCE tenant." />
 
-      <SeedScopesCard dwd={dwd} />
+          <SeedScopesCard dwd={dwd} />
 
-      {seedStep && (
-        <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 2 }}>
-          <CardContent sx={{ p: 2.5 }}>
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
-              <Typography variant="h6" sx={{ fontWeight: 600 }}>{seedStep.title}</Typography>
-              <Chip
-                size="small" label={seedStep.state}
-                color={seedStep.state === 'done' ? 'success' : seedStep.state === 'manual' ? 'warning' : 'default'}
-              />
-            </Box>
-            {seedStep.note && (
-              <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>{seedStep.note}</Typography>
-            )}
-            {/* check_seed_accounts is what actually lists every account the
-               seeder will target -- discover_tenant_entries()'s live
-               Directory lookup, printed OK/MISS per address -- not
-               something /api/status can show on a poll (see
-               webui_spa.py's module docstring on why nothing here makes a
-               live Google API call outside an explicit action). */}
-            {seedStep.actions.length > 0 && (
-              <Stack spacing={2} sx={{ mt: 1.5, mb: 1.5 }}>
-                {seedStep.actions.map((key) => actions[key] && (
-                  <JobRunner key={key} name={key} spec={actions[key]} onDone={refresh} />
-                ))}
-              </Stack>
-            )}
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mt: 1 }}>
-              <Button variant="outlined" size="small" onClick={handleCheck} disabled={checking}>
-                Check this step
-              </Button>
-              {checkResult && <Typography variant="caption">{checkResult}</Typography>}
-            </Box>
-          </CardContent>
-        </Card>
+          {seedStep && (
+            <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 2 }}>
+              <CardContent sx={{ p: 2.5 }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
+                  <Typography variant="h6" sx={{ fontWeight: 600 }}>{seedStep.title}</Typography>
+                  <Chip
+                    size="small" label={seedStep.state}
+                    color={seedStep.state === 'done' ? 'success' : seedStep.state === 'manual' ? 'warning' : 'default'}
+                  />
+                </Box>
+                {seedStep.note && (
+                  <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>{seedStep.note}</Typography>
+                )}
+                {/* check_seed_accounts is what actually lists every account the
+                   seeder will target -- discover_tenant_entries()'s live
+                   Directory lookup, printed OK/MISS per address -- not
+                   something /api/status can show on a poll (see
+                   webui_spa.py's module docstring on why nothing here makes a
+                   live Google API call outside an explicit action). */}
+                {seedStep.actions.length > 0 && (
+                  <Stack spacing={2} sx={{ mt: 1.5, mb: 1.5 }}>
+                    {seedStep.actions.map((key) => actions[key] && (
+                      <JobRunner key={key} name={key} spec={actions[key]} onDone={refresh} />
+                    ))}
+                  </Stack>
+                )}
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mt: 1 }}>
+                  <Button variant="outlined" size="small" onClick={handleCheck} disabled={checking}>
+                    Check this step
+                  </Button>
+                  {checkResult && <Typography variant="caption">{checkResult}</Typography>}
+                </Box>
+              </CardContent>
+            </Card>
+          )}
+
+          <DelegationGate>
+            <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 2 }}>
+              <CardContent sx={{ p: 3 }}>
+                <Typography variant="h6" sx={{ fontWeight: 600, mb: 1.5 }}>Seed the source tenant</Typography>
+                <SeedStep />
+              </CardContent>
+            </Card>
+          </DelegationGate>
+
+          <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>
+            <CardContent sx={{ p: 3 }}>
+              <Typography variant="h6" sx={{ fontWeight: 600, mb: 1.5 }}>Reset the target tenant</Typography>
+              <ResetTargetStep />
+            </CardContent>
+          </Card>
+        </>
       )}
-
-      <DelegationGate>
-        <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 2 }}>
-          <CardContent sx={{ p: 3 }}>
-            <Typography variant="h6" sx={{ fontWeight: 600, mb: 1.5 }}>Seed the source tenant</Typography>
-            <SeedStep />
-          </CardContent>
-        </Card>
-      </DelegationGate>
-
-      <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>
-        <CardContent sx={{ p: 3 }}>
-          <Typography variant="h6" sx={{ fontWeight: 600, mb: 1.5 }}>Reset the target tenant</Typography>
-          <ResetTargetStep />
-        </CardContent>
-      </Card>
     </Box>
   )
 }
