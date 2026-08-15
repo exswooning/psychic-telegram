@@ -31,7 +31,7 @@ class _Phase:
 
 
 def _fake_provision_side(ok=True, client_id="999", detail=""):
-    def fn(side, project, org, key_dest, dry_run, force):
+    def fn(side, project, org, key_dest, dry_run, force, env=None):
         return {"side": side, "project": project, "ok": ok,
                 "steps": [{"name": "x", "status": "ok" if ok else "failed",
                           "detail": detail}],
@@ -81,17 +81,20 @@ class TestSkipsProvisioningWhenKeyAlreadyExists:
         """tenant_configs.sa_key_path is reserved at account creation time,
         before any key is ever uploaded (accounts_auth.create_account sets
         it immediately) -- the FILE existing, not just the path being
-        non-null, is what has to gate the skip."""
+        non-null, is what has to gate the skip. No ambient gcloud identity
+        and a failed browser sign-in together are the genuine dead end."""
         missing_path = tmp_path / "not-uploaded-yet.json"
         monkeypatch.setattr(fs.accounts_auth, "get_tenant_config",
                             lambda account_id, side: {"sa_key_path": str(missing_path)})
         monkeypatch.setattr(fs.provision_gcp, "gcloud_ready",
-                            lambda: (False, "gcloud is not installed"))
+                            lambda: (False, "no active gcloud account"))
+        monkeypatch.setattr(fs.gcloud_browser_auth, "login",
+                            lambda email, password, timeout: (False, "no display available", ""))
 
         res = fs.run_full_setup("source", "c.example.com", "admin@c.example.com",
                                 "pw", account_id=7)
         assert res["ok"] is False
-        assert "gcloud is not installed" in res["phases"][0]["detail"]
+        assert "no display available" in res["phases"][1]["detail"]
 
     def test_a_key_file_with_no_client_id_fails_clearly(self, monkeypatch, tmp_path):
         key_path = tmp_path / "source-sa.json"
@@ -113,6 +116,11 @@ class TestSkipsProvisioningWhenKeyAlreadyExists:
                             lambda *a, **k: called.update(get_tenant_config=True) or None)
         monkeypatch.setattr(fs.provision_gcp, "gcloud_ready",
                             lambda: (False, "gcloud is not installed"))
+        # Must not reach a real gcloud/browser call either -- this only
+        # matters for what get_tenant_config does, not for the (failed)
+        # sign-in attempt that follows.
+        monkeypatch.setattr(fs.gcloud_browser_auth, "login",
+                            lambda email, password, timeout: (False, "gcloud is not installed", ""))
 
         fs.run_full_setup("source", "c.example.com", "admin@c.example.com", "pw")
         assert called["get_tenant_config"] is False
@@ -122,21 +130,30 @@ class TestSideSelectionIsCorrect:
     """The bug that would have silently used the wrong tenant's project."""
 
     def test_target_call_provisions_a_target_named_project(self, monkeypatch):
+        """gcloud_ready=True (an ambient identity) exercises the real naming
+        path -- dry_run now skips provision_side entirely (see the elif
+        dry_run branch in full_setup.py), so it can no longer stand in for
+        a real run here the way it used to."""
         seen = {}
 
-        def fake_provision_side(side, project, org, key_dest, dry_run, force):
+        def fake_provision_side(side, project, org, key_dest, dry_run, force, env=None):
             seen["side"] = side
             seen["project"] = project
             seen["key_dest"] = key_dest
             return {"side": side, "project": project, "ok": True, "steps": []}
 
         monkeypatch.setattr(fs.provision_gcp, "gcloud_ready", lambda: (True, "me"))
-        monkeypatch.setattr(fs.provision_gcp, "detect_org", lambda: "")
+        monkeypatch.setattr(fs.provision_gcp, "detect_org", lambda env=None: "")
         monkeypatch.setattr(fs.provision_gcp, "provision_side", fake_provision_side)
         monkeypatch.setattr(fs.provision_gcp, "client_id_of", lambda p: "42")
+        monkeypatch.setattr(fs.dwd_helper, "run", lambda *a, **k: 0)
+        monkeypatch.setattr(fs.verify_scopes, "verify",
+                            lambda settings, tenant, scopes: [
+                                {"scope": s, "ok": True} for s in scopes])
+        monkeypatch.setattr(fs.verify_scopes, "required_scopes",
+                            lambda settings, tenant: ["scope-a"])
 
-        fs.run_full_setup("target", "a.example.com", "admin@a.example.com",
-                          "pw", dry_run=True)
+        fs.run_full_setup("target", "a.example.com", "admin@a.example.com", "pw")
 
         assert seen["side"] == "target"
         assert "tgt" in seen["project"]
@@ -145,16 +162,21 @@ class TestSideSelectionIsCorrect:
     def test_source_call_never_touches_the_target_project_name(self, monkeypatch):
         seen = {}
         monkeypatch.setattr(fs.provision_gcp, "gcloud_ready", lambda: (True, "me"))
-        monkeypatch.setattr(fs.provision_gcp, "detect_org", lambda: "")
+        monkeypatch.setattr(fs.provision_gcp, "detect_org", lambda env=None: "")
         monkeypatch.setattr(fs.provision_gcp, "provision_side",
                             lambda side, project, *a, **k: (
                                 seen.setdefault("project", project),
                                 {"side": side, "project": project, "ok": True,
                                  "steps": []})[1])
         monkeypatch.setattr(fs.provision_gcp, "client_id_of", lambda p: "42")
+        monkeypatch.setattr(fs.dwd_helper, "run", lambda *a, **k: 0)
+        monkeypatch.setattr(fs.verify_scopes, "verify",
+                            lambda settings, tenant, scopes: [
+                                {"scope": s, "ok": True} for s in scopes])
+        monkeypatch.setattr(fs.verify_scopes, "required_scopes",
+                            lambda settings, tenant: ["scope-a"])
 
-        fs.run_full_setup("source", "c.example.com", "admin@c.example.com",
-                          "pw", dry_run=True)
+        fs.run_full_setup("source", "c.example.com", "admin@c.example.com", "pw")
         assert "src" in seen["project"]
         assert "tgt" not in seen["project"]
 
@@ -165,7 +187,7 @@ class TestPasswordNeverLeaks:
         returns, DWD_PASSWORD must be restored to whatever it was before --
         never left holding this call's secret for a later, unrelated step."""
         monkeypatch.setattr(fs.provision_gcp, "gcloud_ready", lambda: (True, "me"))
-        monkeypatch.setattr(fs.provision_gcp, "detect_org", lambda: "")
+        monkeypatch.setattr(fs.provision_gcp, "detect_org", lambda env=None: "")
         monkeypatch.setattr(fs.provision_gcp, "provision_side",
                             _fake_provision_side())
         monkeypatch.setattr(fs.provision_gcp, "client_id_of", lambda p: "42")
@@ -195,7 +217,7 @@ class TestPasswordNeverLeaks:
         """If the caller's shell already had DWD_PASSWORD set for some other
         reason, this must not clobber it permanently."""
         monkeypatch.setattr(fs.provision_gcp, "gcloud_ready", lambda: (True, "me"))
-        monkeypatch.setattr(fs.provision_gcp, "detect_org", lambda: "")
+        monkeypatch.setattr(fs.provision_gcp, "detect_org", lambda env=None: "")
         monkeypatch.setattr(fs.provision_gcp, "provision_side",
                             _fake_provision_side())
         monkeypatch.setattr(fs.provision_gcp, "client_id_of", lambda p: "42")
@@ -220,7 +242,7 @@ class TestEnvShIsUpdated:
 
     def _ok_common(self, monkeypatch):
         monkeypatch.setattr(fs.provision_gcp, "gcloud_ready", lambda: (True, "me"))
-        monkeypatch.setattr(fs.provision_gcp, "detect_org", lambda: "")
+        monkeypatch.setattr(fs.provision_gcp, "detect_org", lambda env=None: "")
         monkeypatch.setattr(fs.provision_gcp, "provision_side", _fake_provision_side())
         monkeypatch.setattr(fs.provision_gcp, "client_id_of", lambda p: "42")
         monkeypatch.setattr(fs.dwd_helper, "run", lambda *a, **k: 0)
@@ -282,7 +304,7 @@ class TestEnvShIsUpdated:
 class TestFailureModes:
     def test_provisioning_failure_stops_before_dwd(self, monkeypatch):
         monkeypatch.setattr(fs.provision_gcp, "gcloud_ready", lambda: (True, "me"))
-        monkeypatch.setattr(fs.provision_gcp, "detect_org", lambda: "")
+        monkeypatch.setattr(fs.provision_gcp, "detect_org", lambda env=None: "")
         monkeypatch.setattr(fs.provision_gcp, "provision_side",
                             _fake_provision_side(ok=False, detail="quota exceeded"))
 
@@ -296,19 +318,23 @@ class TestFailureModes:
         assert called["dwd"] is False, "DWD ran despite a failed provisioning step"
 
     def test_no_gcloud_fails_before_any_write(self, monkeypatch):
+        """Neither an ambient identity NOR the browser-driven fallback is
+        available -- the genuine dead end, not just a missing key file."""
         monkeypatch.setattr(fs.provision_gcp, "gcloud_ready",
                             lambda: (False, "gcloud is not installed"))
+        monkeypatch.setattr(fs.gcloud_browser_auth, "login",
+                            lambda email, password, timeout: (False, "gcloud is not installed", ""))
         res = fs.run_full_setup("source", "c.example.com",
                                 "admin@c.example.com", "pw")
         assert res["ok"] is False
-        assert "gcloud" in res["phases"][0]["detail"]
+        assert "gcloud" in res["phases"][1]["detail"]
 
     def test_missing_scopes_after_grant_is_reported_not_assumed_ok(self, monkeypatch):
         """dwd_helper can exit 0 (submitted) while a scope still fails to
         verify -- propagation lag, or a partial grant. That must surface,
         not be swallowed into a plain success."""
         monkeypatch.setattr(fs.provision_gcp, "gcloud_ready", lambda: (True, "me"))
-        monkeypatch.setattr(fs.provision_gcp, "detect_org", lambda: "")
+        monkeypatch.setattr(fs.provision_gcp, "detect_org", lambda env=None: "")
         monkeypatch.setattr(fs.provision_gcp, "provision_side",
                             _fake_provision_side())
         monkeypatch.setattr(fs.provision_gcp, "client_id_of", lambda p: "42")
@@ -324,3 +350,148 @@ class TestFailureModes:
                                 "admin@c.example.com", "pw")
         assert res["ok"] is False
         assert res["missingScopes"] == ["scope-b"]
+
+
+class TestBrowserAuthFallback:
+    """When no ambient gcloud identity exists (the normal state on a shared
+    VPS) and no key is on file yet, phase 1 must fall back to driving a
+    real browser through gcloud's own OAuth consent with the SAME admin
+    credentials already given for delegation -- not just fail with 'no
+    active gcloud account' the way it used to."""
+
+    def _common(self, monkeypatch):
+        monkeypatch.setattr(fs.provision_gcp, "gcloud_ready", lambda: (False, "no active gcloud account"))
+        monkeypatch.setattr(fs.provision_gcp, "detect_org", lambda env=None: "")
+        monkeypatch.setattr(fs.provision_gcp, "client_id_of", lambda p: "42")
+        monkeypatch.setattr(fs.dwd_helper, "run", lambda *a, **k: 0)
+        monkeypatch.setattr(fs.verify_scopes, "required_scopes",
+                            lambda settings, tenant: ["scope-a"])
+        monkeypatch.setattr(fs.verify_scopes, "verify",
+                            lambda settings, tenant, scopes: [
+                                {"scope": s, "ok": True} for s in scopes])
+        # account_id=7 with no key uploaded yet -- the exact state that
+        # should fall through to the browser-auth path.
+        monkeypatch.setattr(fs.accounts_auth, "get_tenant_config", lambda account_id, side: None)
+        monkeypatch.setattr(fs.accounts_auth, "update_tenant_config", lambda *a, **k: None)
+
+    def test_falls_back_to_browser_auth_using_the_same_admin_credentials(self, monkeypatch):
+        seen = {}
+
+        def fake_login(email, password, timeout):
+            seen["email"] = email
+            seen["password"] = password
+            return True, "You are now logged in as x", "/tmp/fake-cloudsdk-config"
+
+        monkeypatch.setattr(fs.gcloud_browser_auth, "login", fake_login)
+        monkeypatch.setattr(fs.gcloud_browser_auth, "cleanup", lambda d: None)
+        monkeypatch.setattr(fs.provision_gcp, "provision_side", _fake_provision_side())
+        self._common(monkeypatch)
+
+        res = fs.run_full_setup("source", "c.example.com", "admin@c.example.com",
+                                "super-secret-pw", account_id=7)
+
+        assert res["ok"] is True
+        assert seen["email"] == "admin@c.example.com"
+        assert seen["password"] == "super-secret-pw"
+
+    def test_provision_side_runs_with_the_ephemeral_cloudsdk_config(self, monkeypatch):
+        """The whole point of the isolated login is that every gcloud call
+        this makes on the tenant's behalf actually uses it -- not the
+        process's own ambient (and, on this box, empty) config."""
+        seen = {}
+        monkeypatch.setattr(fs.gcloud_browser_auth, "login",
+                            lambda email, password, timeout: (True, "ok", "/tmp/fake-cloudsdk-config"))
+        monkeypatch.setattr(fs.gcloud_browser_auth, "cleanup", lambda d: None)
+
+        def fake_provision_side(side, project, org, key_dest, dry_run, force, env=None):
+            seen["env"] = env
+            return {"side": side, "project": project, "ok": True, "steps": [], "clientId": "42"}
+
+        monkeypatch.setattr(fs.provision_gcp, "provision_side", fake_provision_side)
+        self._common(monkeypatch)
+
+        fs.run_full_setup("source", "c.example.com", "admin@c.example.com",
+                          "pw", account_id=7)
+
+        assert seen["env"]["CLOUDSDK_CONFIG"] == "/tmp/fake-cloudsdk-config"
+
+    def test_cleanup_runs_after_a_successful_provision(self, monkeypatch):
+        cleaned = []
+        monkeypatch.setattr(fs.gcloud_browser_auth, "login",
+                            lambda email, password, timeout: (True, "ok", "/tmp/fake-cloudsdk-config"))
+        monkeypatch.setattr(fs.gcloud_browser_auth, "cleanup", cleaned.append)
+        monkeypatch.setattr(fs.provision_gcp, "provision_side", _fake_provision_side())
+        self._common(monkeypatch)
+
+        fs.run_full_setup("source", "c.example.com", "admin@c.example.com",
+                          "pw", account_id=7)
+
+        assert cleaned == ["/tmp/fake-cloudsdk-config"]
+
+    def test_cleanup_runs_even_when_provisioning_itself_fails(self, monkeypatch):
+        """The ephemeral credential must not outlive this call just because
+        something downstream (a quota, an org policy) went wrong."""
+        cleaned = []
+        monkeypatch.setattr(fs.gcloud_browser_auth, "login",
+                            lambda email, password, timeout: (True, "ok", "/tmp/fake-cloudsdk-config"))
+        monkeypatch.setattr(fs.gcloud_browser_auth, "cleanup", cleaned.append)
+        monkeypatch.setattr(fs.provision_gcp, "provision_side",
+                            _fake_provision_side(ok=False, detail="quota exceeded"))
+        self._common(monkeypatch)
+
+        res = fs.run_full_setup("source", "c.example.com", "admin@c.example.com",
+                                "pw", account_id=7)
+
+        assert res["ok"] is False
+        assert cleaned == ["/tmp/fake-cloudsdk-config"]
+
+    def test_a_failed_browser_sign_in_never_calls_provision_side(self, monkeypatch):
+        called = {"provision_side": False}
+        monkeypatch.setattr(fs.gcloud_browser_auth, "login",
+                            lambda email, password, timeout: (False, "stalled on 2FA", ""))
+        monkeypatch.setattr(fs.provision_gcp, "provision_side",
+                            lambda *a, **k: called.update(provision_side=True) or {})
+        self._common(monkeypatch)
+
+        res = fs.run_full_setup("source", "c.example.com", "admin@c.example.com",
+                                "pw", account_id=7)
+
+        assert res["ok"] is False
+        assert called["provision_side"] is False
+        assert "stalled on 2FA" in res["phases"][1]["detail"]
+
+    def test_dry_run_never_drives_a_browser_sign_in(self, monkeypatch):
+        """Preview needs no live credential at all -- see the elif dry_run
+        branch in full_setup.py."""
+        called = {"login": False}
+        monkeypatch.setattr(fs.gcloud_browser_auth, "login",
+                            lambda *a, **k: called.update(login=True) or (True, "ok", "/tmp/x"))
+        self._common(monkeypatch)
+
+        res = fs.run_full_setup("source", "c.example.com", "admin@c.example.com",
+                                "pw", account_id=7, dry_run=True)
+
+        assert called["login"] is False
+        assert res["ok"] is True
+
+    def test_an_ambient_ready_identity_never_drives_a_browser_sign_in(self, monkeypatch):
+        """The legacy/local-gcloud caller (or any box that already has an
+        authenticated gcloud) must keep working exactly as before -- the
+        browser fallback only ever kicks in when gcloud_ready() says no."""
+        called = {"login": False}
+        monkeypatch.setattr(fs.provision_gcp, "gcloud_ready", lambda: (True, "me"))
+        monkeypatch.setattr(fs.gcloud_browser_auth, "login",
+                            lambda *a, **k: called.update(login=True) or (True, "ok", "/tmp/x"))
+        monkeypatch.setattr(fs.provision_gcp, "detect_org", lambda env=None: "")
+        monkeypatch.setattr(fs.provision_gcp, "provision_side", _fake_provision_side())
+        monkeypatch.setattr(fs.provision_gcp, "client_id_of", lambda p: "42")
+        monkeypatch.setattr(fs.dwd_helper, "run", lambda *a, **k: 0)
+        monkeypatch.setattr(fs.verify_scopes, "required_scopes",
+                            lambda settings, tenant: ["scope-a"])
+        monkeypatch.setattr(fs.verify_scopes, "verify",
+                            lambda settings, tenant, scopes: [
+                                {"scope": s, "ok": True} for s in scopes])
+
+        fs.run_full_setup("source", "c.example.com", "admin@c.example.com", "pw")
+
+        assert called["login"] is False

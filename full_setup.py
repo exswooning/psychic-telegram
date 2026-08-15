@@ -19,18 +19,32 @@ tenants in one call, which is wrong for a function whose whole point is
 
 The one thing this cannot paper over
 -------------------------------------
-dwd_helper.run() drives a REAL browser through the sign-in flow. That needs
-a display and, for anything beyond best-effort auto-fill, a human available
-for 2FA/captcha. It cannot run on a headless VPS -- which is exactly why
-provision_gcp.py already refuses cleanly there ("gcloud is not installed").
-This script inherits that constraint rather than hiding it: call it from
-wherever dwd_helper.py already works.
+dwd_helper.run() (and, when no Cloud project exists yet, gcloud_browser_auth
+too) drives a REAL browser through a sign-in flow. That needs a display
+and, for anything beyond best-effort auto-fill, a human available for
+2FA/captcha -- this runs on the Xvfb+Chrome virtual display already set up
+for exactly this on the VPS (see connect_vps.sh to watch/finish it by hand
+if it stalls).
 
-The admin password is used exactly once, to fill the sign-in form, and
-never touches disk: it flows from function argument -> os.environ for the
-dwd_helper subprocess-equivalent call -> browser keystrokes, and out of
-scope the moment this function returns. Nothing here logs it, and the
-underlying dwd_helper.log() calls never receive it either.
+Cloud project creation needs an identity with org-level project-creation
+rights. Phase 1 below prefers whatever ambient gcloud identity this
+process already has (the legacy/local-gcloud caller, running on an
+operator's own already-authenticated machine); failing that, it drives
+gcloud's own OAuth consent through gcloud_browser_auth using the SAME
+admin_email/admin_password as delegation below, so the project ends up
+owned by the tenant's OWN identity -- never a shared operator one -- and
+the credential is revoked and discarded the moment provisioning for this
+tenant finishes.
+
+The admin password is used exactly once per phase it is needed in, and
+never touches disk: for delegation it flows from function argument ->
+os.environ for the dwd_helper subprocess-equivalent call -> browser
+keystrokes, and out of scope the moment this function returns; for Cloud
+provisioning it flows the same way into gcloud_browser_auth.login(), whose
+own OAuth token lives only in a throwaway CLOUDSDK_CONFIG directory that
+cleanup() deletes (after revoking it on Google's side) once this call is
+done. Nothing here logs it, and the underlying dwd_helper.log() /
+gcloud_browser_auth.log() calls never receive it either.
 
     python3 full_setup.py --side source --domain c.example.com \
         --admin admin@c.example.com --org-id 12345 \
@@ -56,10 +70,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # not exist until the function actually ran). These three ARE the seams
 # tests replace to exercise every branch without gcloud, a browser, or a
 # live tenant.
-import accounts_auth    # noqa: E402
-import dwd_helper       # noqa: E402
-import provision_gcp    # noqa: E402
-import verify_scopes    # noqa: E402
+import accounts_auth        # noqa: E402
+import dwd_helper           # noqa: E402
+import gcloud_browser_auth  # noqa: E402
+import provision_gcp        # noqa: E402
+import verify_scopes        # noqa: E402
 from config import Settings  # noqa: E402
 
 
@@ -99,10 +114,14 @@ def run_full_setup(
     # Skipped entirely when this account already has a real key uploaded
     # for this side (see api_server.py's POST /api/v2/setup/credentials).
     # Cloud project creation needs an identity with org-level
-    # project-creation rights, which this process -- running on a shared
-    # VPS -- deliberately never holds; the admin runs provision_gcp.py
-    # themselves, on their own machine, with their own gcloud identity,
-    # and hands over only the narrow service-account key it produces.
+    # project-creation rights. Preferred order: (a) an ambient identity
+    # this process already has (the legacy/local-gcloud caller, running on
+    # an operator's own already-authenticated machine); (b) failing that,
+    # gcloud_browser_auth drives a real browser through gcloud's own OAuth
+    # consent using the SAME admin_email/admin_password already being used
+    # for delegation below -- so a fresh tenant with no key on file yet
+    # still needs nothing from the admin beyond the one sign-in, and the
+    # project ends up owned by THEIR identity, not a shared operator one.
     # account_id is None (the legacy/local-gcloud caller) skips none of
     # this -- provision_side() is already idempotent and safe to re-run,
     # exactly as it always was before this branch existed.
@@ -121,26 +140,54 @@ def run_full_setup(
                 "re-upload the key")
             return {"side": side, "ok": False, "phases": [x.as_dict() for x in phases]}
         p.status, p.detail = "skipped", "using an uploaded service-account key"
+    elif dry_run:
+        # A dry run touches no real gcloud state at all -- every
+        # provision_gcp step already no-ops under dry_run and reports
+        # nothing beyond "ok"/"project X" either way, so driving a real
+        # browser sign-in (or even requiring an ambient gcloud identity)
+        # just to immediately skip every step it would unlock is pure
+        # waste. Preview needs no live credential at all. If a key from an
+        # earlier real run already happens to sit at this exact path (the
+        # legacy/local-gcloud caller's fixed keys/{side}-sa.json), surface
+        # its client ID same as before -- otherwise there is none yet.
+        p.status, p.detail = "skipped", "dry run"
+        client_id = (provision_gcp.client_id_of(key_path)
+                    if os.path.isfile(key_path) else "")
     else:
         # provision_side(), not provision(): the latter always creates BOTH
         # source and target in one call, which is wrong here on two counts --
         # it does work for a side the caller did not ask for, and (worse) it
         # would have made this function's own "source" lookup wrong for a
         # target call, silently reading the other tenant's project and key.
+        env = None
+        cloudsdk_config = ""
         ready, account_or_err = provision_gcp.gcloud_ready()
         if not ready:
-            p.status, p.detail = "failed", account_or_err
-            return {"side": side, "ok": False, "phases": [x.as_dict() for x in phases]}
+            auth_phase = Phase(f"authenticate gcloud as {admin_email}")
+            phases.append(auth_phase)
+            ok, detail, cloudsdk_config = gcloud_browser_auth.login(
+                admin_email, admin_password, timeout=timeout)
+            if not ok:
+                auth_phase.status, auth_phase.detail = "failed", detail
+                p.status, p.detail = "failed", "gcloud sign-in did not complete"
+                return {"side": side, "ok": False, "phases": [x.as_dict() for x in phases]}
+            auth_phase.status, auth_phase.detail = "ok", detail
+            env = dict(os.environ, CLOUDSDK_CONFIG=cloudsdk_config)
 
-        org = org_id or provision_gcp.detect_org()
-        # "src"/"tgt", matching provision_gcp.provision()'s own naming --
-        # side[:3] would give "sou"/"tar" instead, a second convention for the
-        # same thing that makes project names harder to eyeball together in
-        # the Cloud console.
-        abbrev = "src" if side == "source" else "tgt"
-        project = f"wsmig-{abbrev}-{random.randint(10000, 99999)}"
-        result = provision_gcp.provision_side(side, project, org, key_path,
-                                              dry_run, force=False)
+        try:
+            org = org_id or provision_gcp.detect_org(env=env)
+            # "src"/"tgt", matching provision_gcp.provision()'s own naming --
+            # side[:3] would give "sou"/"tar" instead, a second convention for
+            # the same thing that makes project names harder to eyeball
+            # together in the Cloud console.
+            abbrev = "src" if side == "source" else "tgt"
+            project = f"wsmig-{abbrev}-{random.randint(10000, 99999)}"
+            result = provision_gcp.provision_side(side, project, org, key_path,
+                                                  dry_run, force=False, env=env)
+        finally:
+            if cloudsdk_config:
+                gcloud_browser_auth.cleanup(cloudsdk_config)
+
         if not result.get("ok"):
             p.status = "failed"
             p.detail = "; ".join(s["detail"] for s in result["steps"]

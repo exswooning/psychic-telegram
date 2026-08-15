@@ -118,13 +118,13 @@ def run(argv: list[str], timeout: int = 300, env: dict | None = None
         return 124, f"timed out after {timeout}s"
 
 
-def gcloud_ready() -> tuple[bool, str]:
+def gcloud_ready(env: dict | None = None) -> tuple[bool, str]:
     if not shutil.which("gcloud"):
         return False, ("gcloud is not installed. https://cloud.google.com/sdk "
                        "-- or run this whole thing from Cloud Shell, which "
                        "already has it and is already authenticated.")
     rc, out = run(["gcloud", "auth", "list", "--filter=status:ACTIVE",
-                   "--format=value(account)"])
+                   "--format=value(account)"], env=env)
     # run() returns COMBINED stdout+stderr, and an empty auth list makes
     # this exact gcloud version print a diagnostic line ("WARNING: The
     # following filter keys were not present in any resource : status")
@@ -141,7 +141,7 @@ def gcloud_ready() -> tuple[bool, str]:
     return True, account
 
 
-def detect_org() -> str:
+def detect_org(env: dict | None = None) -> str:
     """The org id, if this account can see exactly one.
 
     Worth automating: a project created outside an org cannot inherit the
@@ -150,23 +150,23 @@ def detect_org() -> str:
     empty rather than guessed -- picking the wrong org silently is worse
     than asking.
     """
-    rc, out = run(["gcloud", "organizations", "list", "--format=value(ID)"])
+    rc, out = run(["gcloud", "organizations", "list", "--format=value(ID)"], env=env)
     if rc != 0:
         return ""
     ids = [ln.strip() for ln in out.splitlines() if ln.strip()]
     return ids[0] if len(ids) == 1 else ""
 
 
-def project_exists(project: str) -> bool:
-    rc, _ = run(["gcloud", "projects", "describe", project])
+def project_exists(project: str, env: dict | None = None) -> bool:
+    rc, _ = run(["gcloud", "projects", "describe", project], env=env)
     return rc == 0
 
 
 def ensure_project(project: str, org: str, steps: list[Step],
-                   dry_run: bool) -> bool:
+                   dry_run: bool, env: dict | None = None) -> bool:
     s = Step(f"project {project}")
     steps.append(s)
-    if project_exists(project):
+    if project_exists(project, env=env):
         s.status, s.detail = "skipped", "already exists"
         return True
     if dry_run:
@@ -175,7 +175,7 @@ def ensure_project(project: str, org: str, steps: list[Step],
     argv = ["gcloud", "projects", "create", project, f"--name={project}"]
     if org:
         argv.append(f"--organization={org}")
-    rc, out = run(argv, timeout=600)
+    rc, out = run(argv, timeout=600, env=env)
     if rc != 0:
         s.status, s.detail = "failed", out.strip()[-300:]
         return False
@@ -184,7 +184,7 @@ def ensure_project(project: str, org: str, steps: list[Step],
 
 
 def enable_apis(project: str, apis: list[str], steps: list[Step],
-                dry_run: bool) -> bool:
+                dry_run: bool, env: dict | None = None) -> bool:
     """One API per call, deliberately.
 
     `gcloud services enable a b c ...` fails on a freshly created project
@@ -201,7 +201,7 @@ def enable_apis(project: str, apis: list[str], steps: list[Step],
             s.status, s.detail = "skipped", "dry run"
             continue
         rc, out = run(["gcloud", "services", "enable", api,
-                       f"--project={project}"], timeout=300)
+                       f"--project={project}"], timeout=300, env=env)
         if rc == 0:
             s.status = "ok"
         else:
@@ -210,7 +210,8 @@ def enable_apis(project: str, apis: list[str], steps: list[Step],
     return ok
 
 
-def relax_key_policy(project: str, steps: list[Step], dry_run: bool) -> None:
+def relax_key_policy(project: str, steps: list[Step], dry_run: bool,
+                     env: dict | None = None) -> None:
     """Allow SA key creation on THIS project only.
 
     Newer Workspace orgs enforce `iam.managed.disableServiceAccountKeyCreation`
@@ -237,11 +238,15 @@ def relax_key_policy(project: str, steps: list[Step], dry_run: bool) -> None:
         # gcloud bills it to whatever quota project is configured -- which on
         # a fresh install is a project the caller may not own. Point it at
         # the project being provisioned, which we know exists and is ours.
-        env = dict(os.environ, CLOUDSDK_CORE_PROJECT=project)
+        # Based on the CALLER's env (not a bare os.environ), so a per-tenant
+        # CLOUDSDK_CONFIG override from an ephemeral browser-auth login
+        # survives into this call instead of silently falling back to
+        # whatever config directory this process would otherwise default to.
+        policy_env = dict(env or os.environ, CLOUDSDK_CORE_PROJECT=project)
         run(["gcloud", "services", "enable", "orgpolicy.googleapis.com",
-             f"--project={project}"], timeout=300)
+             f"--project={project}"], timeout=300, env=policy_env)
         rc, out = run(["gcloud", "org-policies", "set-policy", path],
-                      timeout=300, env=env)
+                      timeout=300, env=policy_env)
         if rc == 0:
             s.status, s.detail = "ok", "key creation permitted on this project"
         else:
@@ -258,7 +263,7 @@ def relax_key_policy(project: str, steps: list[Step], dry_run: bool) -> None:
 
 
 def ensure_service_account(project: str, sa: str, steps: list[Step],
-                           dry_run: bool) -> str:
+                           dry_run: bool, env: dict | None = None) -> str:
     email = f"{sa}@{project}.iam.gserviceaccount.com"
     s = Step(f"service account {sa}")
     steps.append(s)
@@ -266,19 +271,19 @@ def ensure_service_account(project: str, sa: str, steps: list[Step],
         s.status, s.detail = "skipped", "dry run"
         return email
     rc, _ = run(["gcloud", "iam", "service-accounts", "describe", email,
-                 f"--project={project}"])
+                 f"--project={project}"], env=env)
     if rc == 0:
         s.status, s.detail = "skipped", "already exists"
         return email
     rc, out = run(["gcloud", "iam", "service-accounts", "create", sa,
                    f"--project={project}",
-                   "--display-name=workspace migration"], timeout=300)
+                   "--display-name=workspace migration"], timeout=300, env=env)
     s.status, s.detail = ("ok", email) if rc == 0 else ("failed", out.strip()[-200:])
     return email
 
 
 def grant_service_usage(project: str, sa_email: str, steps: list[Step],
-                        dry_run: bool) -> None:
+                        dry_run: bool, env: dict | None = None) -> None:
     """Let the service account read and repair its own API enablement.
 
     Without this, ensure_apis.py can only ever report UNKNOWN -- it cannot
@@ -297,7 +302,7 @@ def grant_service_usage(project: str, sa_email: str, steps: list[Step],
         rc, out = run(["gcloud", "projects", "add-iam-policy-binding", project,
                        f"--member=serviceAccount:{sa_email}",
                        "--role=roles/serviceusage.serviceUsageAdmin",
-                       "--condition=None"], timeout=300)
+                       "--condition=None"], timeout=300, env=env)
         if rc == 0:
             s.status, s.detail = "ok", "ensure_apis can now self-heal"
             return
@@ -306,7 +311,7 @@ def grant_service_usage(project: str, sa_email: str, steps: list[Step],
 
 
 def create_key(project: str, sa_email: str, dest: str, steps: list[Step],
-               dry_run: bool, force: bool) -> bool:
+               dry_run: bool, force: bool, env: dict | None = None) -> bool:
     s = Step(f"key -> {dest}")
     steps.append(s)
     if dry_run:
@@ -321,7 +326,7 @@ def create_key(project: str, sa_email: str, dest: str, steps: list[Step],
     os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
     rc, out = run(["gcloud", "iam", "service-accounts", "keys", "create", dest,
                    f"--iam-account={sa_email}", f"--project={project}"],
-                  timeout=300)
+                  timeout=300, env=env)
     # gcloud leaves a zero-byte file behind when the org policy blocks this,
     # so existence is not success -- check the content is real JSON.
     if rc == 0 and os.path.isfile(dest) and os.path.getsize(dest) > 0:
@@ -349,19 +354,19 @@ def client_id_of(key_path: str) -> str:
 
 
 def provision_side(side: str, project: str, org: str, key_dest: str,
-                   dry_run: bool, force: bool) -> dict:
+                   dry_run: bool, force: bool, env: dict | None = None) -> dict:
     steps: list[Step] = []
     sa = f"{side}-sa"
 
-    if not ensure_project(project, org, steps, dry_run):
+    if not ensure_project(project, org, steps, dry_run, env=env):
         return {"side": side, "project": project, "ok": False,
                 "steps": [s.as_dict() for s in steps], "clientId": ""}
 
-    enable_apis(project, SUPPORT_APIS + APIS, steps, dry_run)
-    sa_email = ensure_service_account(project, sa, steps, dry_run)
-    grant_service_usage(project, sa_email, steps, dry_run)
-    relax_key_policy(project, steps, dry_run)
-    created = create_key(project, sa_email, key_dest, steps, dry_run, force)
+    enable_apis(project, SUPPORT_APIS + APIS, steps, dry_run, env=env)
+    sa_email = ensure_service_account(project, sa, steps, dry_run, env=env)
+    grant_service_usage(project, sa_email, steps, dry_run, env=env)
+    relax_key_policy(project, steps, dry_run, env=env)
+    created = create_key(project, sa_email, key_dest, steps, dry_run, force, env=env)
 
     return {"side": side, "project": project, "saEmail": sa_email,
             "keyPath": key_dest,

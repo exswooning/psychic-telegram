@@ -562,26 +562,13 @@ const QuickTenantSetup: React.FC<{
         <>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
             Signs in as the Workspace super admin and grants domain-wide
-            delegation automatically — creates the Cloud project too, if one
-            isn't already on file. Needs a real browser; if it stalls on 2FA
-            or a captcha, use the Manual tab instead.
+            delegation automatically. {tenantCfg && !tenantCfg.hasKey && (
+              <>No Cloud project is on file for {side} yet, so this same
+              sign-in also creates it under the admin's own Google account —
+              nothing extra to run or upload. </>
+            )}Needs a real browser; if it stalls on 2FA or a captcha, use
+            the Manual tab instead.
           </Typography>
-
-          {tenantCfg && !tenantCfg.hasKey && (
-            <Alert severity="info" sx={{ mb: 2 }}
-              action={onRequestManual && (
-                <Button color="inherit" size="small" onClick={onRequestManual}>
-                  Go to Manual
-                </Button>
-              )}
-            >
-              No service-account key on file for {side} yet — signing in will
-              try to create the Cloud project from this server, which only
-              works if this VPS has its own authenticated gcloud. If it
-              doesn't, upload a key on the Manual tab first (from running
-              provision_gcp.py on your own machine).
-            </Alert>
-          )}
 
           <Button
             variant="outlined"
@@ -691,7 +678,9 @@ const QuickTenantSetup: React.FC<{
             </Alert>
           )}
           {view === 'automated' && !result.ok
-            && result.phases.some((p) => p.status === 'failed' && p.detail.includes('gcloud')) && (
+            && result.phases.some((p) => p.status === 'failed'
+              && (p.name.startsWith('provision Cloud project')
+                || p.name.startsWith('authenticate gcloud'))) && (
             <Alert severity="warning" sx={{ mt: 1 }}
               action={onRequestManual && (
                 <Button color="inherit" size="small" onClick={onRequestManual}>
@@ -699,10 +688,10 @@ const QuickTenantSetup: React.FC<{
                 </Button>
               )}
             >
-              This VPS has no authenticated gcloud of its own, so it can't
-              create the Cloud project for you. Upload a service-account key
-              on the Manual tab (from running provision_gcp.py on your own
-              machine) — after that, signing in only needs to grant
+              Couldn't finish setting up the Cloud project automatically
+              (see the failed step above). Upload a service-account key on
+              the Manual tab instead (from running provision_gcp.py on your
+              own machine) — after that, signing in only needs to grant
               delegation, not create the project.
             </Alert>
           )}
@@ -792,10 +781,12 @@ const QuickTenantSetup: React.FC<{
           ) : (
             <>
               No service-account key is on file yet for this tenant, so this
-              will try to create the Cloud project <strong>from this
-              server</strong> — which will fail here unless it happens to
-              have its own authenticated gcloud. Upload a key in step 1
-              above first if that's not the case.{' '}
+              opens a browser, signs in as <strong>{email || 'the admin'}</strong>{' '}
+              to create the Cloud project under their own Google account,
+              then continues straight into domain-wide delegation — nothing
+              to run or upload separately.{' '}
+              {showSeedOptions && seed && 'Also seeds this tenant with test data. '}
+              {showProvisionUsers && provisionUsers && 'Also creates target accounts. '}
               The password is used once and never stored.
             </>
           )

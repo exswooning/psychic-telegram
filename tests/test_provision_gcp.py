@@ -267,3 +267,146 @@ class TestDryRunTouchesNothing:
         pg.grant_service_usage("p1", "sa@p1", steps, dry_run=True)
         assert all(s.status == "skipped" for s in steps)
         assert not os.path.exists("/tmp/nope.json")
+
+
+class TestEnvPropagation:
+    """gcloud_browser_auth.login() hands full_setup.py an isolated
+    CLOUDSDK_CONFIG per tenant so two clients' credentials on this shared
+    box can never cross-contaminate each other -- which only actually
+    works if every one of these functions passes the `env` it was given
+    all the way down to the real subprocess.run() call, not just to the
+    first gcloud invocation each makes."""
+
+    def _fake_run(self, monkeypatch, seen: list):
+        def fake_run(argv, capture_output, text, timeout, stdin, env=None):
+            seen.append(env)
+
+            class R:
+                returncode = 0
+                stdout = "ok\n"
+                stderr = ""
+            return R()
+        monkeypatch.setattr(pg.subprocess, "run", fake_run)
+
+    def test_gcloud_ready_passes_env_through(self, monkeypatch):
+        seen: list = []
+        self._fake_run(monkeypatch, seen)
+        monkeypatch.setattr(pg.shutil, "which", lambda name: "/usr/bin/gcloud")
+        marker = {"CLOUDSDK_CONFIG": "/tmp/tenant-a"}
+        pg.gcloud_ready(env=marker)
+        assert seen == [marker]
+
+    def test_detect_org_passes_env_through(self, monkeypatch):
+        seen: list = []
+        self._fake_run(monkeypatch, seen)
+        marker = {"CLOUDSDK_CONFIG": "/tmp/tenant-a"}
+        pg.detect_org(env=marker)
+        assert seen == [marker]
+
+    def test_ensure_project_passes_env_through_both_the_describe_and_the_create_call(self, monkeypatch):
+        seen: list = []
+        self._fake_run(monkeypatch, seen)
+        monkeypatch.setattr(pg.subprocess, "run", lambda argv, **kw: (
+            seen.append(kw.get("env")), type("R", (), {
+                "returncode": 1 if "describe" in argv else 0,
+                "stdout": "", "stderr": "",
+            })())[1])
+        marker = {"CLOUDSDK_CONFIG": "/tmp/tenant-a"}
+        steps: list[pg.Step] = []
+        pg.ensure_project("p1", "", steps, dry_run=False, env=marker)
+        assert seen == [marker, marker]
+
+    def test_enable_apis_passes_env_through_every_call(self, monkeypatch):
+        seen: list = []
+        self._fake_run(monkeypatch, seen)
+        marker = {"CLOUDSDK_CONFIG": "/tmp/tenant-a"}
+        steps: list[pg.Step] = []
+        pg.enable_apis("p1", ["a.googleapis.com", "b.googleapis.com"], steps,
+                       dry_run=False, env=marker)
+        assert seen == [marker, marker]
+
+    def test_ensure_service_account_passes_env_through(self, monkeypatch):
+        seen: list = []
+        self._fake_run(monkeypatch, seen)
+        marker = {"CLOUDSDK_CONFIG": "/tmp/tenant-a"}
+        steps: list[pg.Step] = []
+        pg.ensure_service_account("p1", "src-sa", steps, dry_run=False, env=marker)
+        assert marker in seen
+
+    def test_grant_service_usage_passes_env_through(self, monkeypatch):
+        seen: list = []
+        self._fake_run(monkeypatch, seen)
+        marker = {"CLOUDSDK_CONFIG": "/tmp/tenant-a"}
+        steps: list[pg.Step] = []
+        pg.grant_service_usage("p1", "sa@p1.iam.gserviceaccount.com", steps,
+                               dry_run=False, env=marker)
+        assert seen == [marker]
+
+    def test_relax_key_policy_uses_the_given_env_not_a_bare_os_environ(self, monkeypatch):
+        """Regression: this function used to build its own env from a bare
+        os.environ, silently dropping any CLOUDSDK_CONFIG override the
+        caller passed in -- gcloud would then fall back to whatever config
+        directory this process defaults to instead of the tenant's
+        ephemeral one."""
+        seen: list = []
+        self._fake_run(monkeypatch, seen)
+        marker = {"CLOUDSDK_CONFIG": "/tmp/tenant-a"}
+        steps: list[pg.Step] = []
+        pg.relax_key_policy("p1", steps, dry_run=False, env=marker)
+        assert seen, "no gcloud call observed"
+        assert all(e is not None and e.get("CLOUDSDK_CONFIG") == "/tmp/tenant-a"
+                  for e in seen)
+
+    def test_create_key_passes_env_through(self, monkeypatch, tmp_path):
+        seen: list = []
+
+        def fake_run(argv, **kw):
+            seen.append(kw.get("env"))
+            # Emulate `gcloud ... keys create <dest> ...` writing a real key.
+            dest = argv[6]
+            with open(dest, "w", encoding="utf-8") as fh:
+                fh.write('{"client_id": "42"}')
+
+            class R:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+            return R()
+
+        monkeypatch.setattr(pg.subprocess, "run", fake_run)
+        marker = {"CLOUDSDK_CONFIG": "/tmp/tenant-a"}
+        steps: list[pg.Step] = []
+        dest = str(tmp_path / "key.json")
+        ok = pg.create_key("p1", "sa@p1.iam.gserviceaccount.com", dest, steps,
+                           dry_run=False, force=False, env=marker)
+        assert ok is True
+        assert seen == [marker]
+
+    def test_provision_side_threads_env_into_every_step(self, monkeypatch, tmp_path):
+        """The end-to-end path gcloud_browser_auth's caller actually uses --
+        every gcloud call this makes for one tenant must land in that
+        tenant's own isolated config, not a shared/default one."""
+        seen: list = []
+
+        def fake_run(argv, **kw):
+            seen.append(kw.get("env"))
+            if "describe" in argv:
+                return type("R", (), {"returncode": 1, "stdout": "", "stderr": ""})()
+            if argv[:4] == ["gcloud", "--quiet", "iam", "service-accounts"] and "keys" in argv:
+                dest = argv[argv.index("create") + 1]
+                with open(dest, "w", encoding="utf-8") as fh:
+                    fh.write('{"client_id": "42"}')
+            return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+        monkeypatch.setattr(pg.subprocess, "run", fake_run)
+        marker = {"CLOUDSDK_CONFIG": "/tmp/tenant-a"}
+        dest = str(tmp_path / "key.json")
+        result = pg.provision_side("source", "p1", "", dest, dry_run=False,
+                                   force=False, env=marker)
+        assert result["ok"] is True
+        assert seen, "no gcloud call observed"
+        # relax_key_policy() legitimately layers CLOUDSDK_CORE_PROJECT on
+        # top for two of these calls -- CLOUDSDK_CONFIG surviving into
+        # every single one is the actual property that matters here.
+        assert all(e is not None and e.get("CLOUDSDK_CONFIG") == "/tmp/tenant-a"
+                  for e in seen)
