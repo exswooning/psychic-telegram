@@ -1,12 +1,13 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Alert, Avatar, Box, Button, Checkbox, Chip, CircularProgress, Collapse,
-  FormControlLabel, MenuItem, Paper, Stack, Switch, TextField, Typography,
+  Dialog, FormControlLabel, IconButton, MenuItem, Paper, Stack, Switch,
+  TextField, Typography,
 } from '@mui/material'
 import {
   RocketLaunch as QuickIcon, Grass as SeedIcon, ContentCopy as CopyIcon,
   CheckCircle as OkIcon, UploadFile as UploadIcon, OpenInNew as OpenIcon,
-  PersonAddAlt as AddUsersIcon, ArrowBack as BackIcon,
+  PersonAddAlt as AddUsersIcon, ArrowBack as BackIcon, Close as CloseIcon,
 } from '@mui/icons-material'
 import {
   FullSetupStatus, startFullSetup, fetchFullSetupStatus,
@@ -73,12 +74,22 @@ const G_PILL_BUTTON_SX = {
  * nothing further to configure by hand, which is the whole point of the
  * "automatic" route as opposed to the step-by-step manual one below it.
  *
+ * A modal, not an inline card: the real thing is never embedded mid-page
+ * next to unrelated content -- it's a focused overlay. An earlier version
+ * inlined this dark card directly into the light "2. Domain-wide
+ * delegation" section and it read as a broken/foreign element sitting in
+ * the page rather than an intentional sign-in moment. A centered dialog
+ * with real elevation is both more authentic to what it's imitating and
+ * looks like a deliberate surface instead of a stray black rectangle.
+ *
  * Two steps, matching Google's own "which account, then password" flow:
  * domain+email first, password (plus the org ID/dry-run/seed options that
  * were already part of this form) second. All state is lifted to the
  * parent -- this component only owns which step it's showing.
  */
 const GoogleStyleAuth: React.FC<{
+  open: boolean
+  onClose: () => void
   side: 'source' | 'target'
   domain: string; setDomain: (v: string) => void
   email: string; setEmail: (v: string) => void
@@ -89,7 +100,7 @@ const GoogleStyleAuth: React.FC<{
   submitLabel: string
   onSubmit: () => void
   extraOptions?: React.ReactNode
-}> = ({ side, domain, setDomain, email, setEmail, password, setPassword,
+}> = ({ open, onClose, side, domain, setDomain, email, setEmail, password, setPassword,
        orgId, setOrgId, dryRun, setDryRun, canSubmit, submitLabel, onSubmit,
        extraOptions }) => {
   const [step, setStep] = useState<0 | 1>(0)
@@ -97,7 +108,19 @@ const GoogleStyleAuth: React.FC<{
   const [showAdvanced, setShowAdvanced] = useState(false)
 
   return (
-    <Box sx={{ bgcolor: G_BG, borderRadius: 3, p: 4, maxWidth: 450 }}>
+    <Dialog
+      open={open} onClose={onClose} maxWidth="xs" fullWidth
+      PaperProps={{ sx: {
+        bgcolor: G_BG, borderRadius: 4, p: 4,
+        boxShadow: '0 24px 60px rgba(0,0,0,0.45)',
+      } }}
+    >
+      <IconButton
+        onClick={onClose} size="small"
+        sx={{ position: 'absolute', top: 12, right: 12, color: G_TEXT_DIM }}
+      >
+        <CloseIcon fontSize="small" />
+      </IconButton>
       <GoogleG />
       <Typography variant="h4" sx={{ fontWeight: 500, color: G_TEXT, mt: 3, mb: 3 }}>
         Welcome
@@ -195,7 +218,7 @@ const GoogleStyleAuth: React.FC<{
           </Box>
         </>
       )}
-    </Box>
+    </Dialog>
   )
 }
 
@@ -229,6 +252,7 @@ const QuickTenantSetup: React.FC<{
   const [password, setPassword] = useState('')
   const [orgId, setOrgId] = useState('')
   const [dryRun, setDryRun] = useState(true)
+  const [authDialogOpen, setAuthDialogOpen] = useState(false)
   const [seed, setSeed] = useState(false)
   const [seedScale, setSeedScale] = useState('small')
   const [createUsers, setCreateUsers] = useState(false)
@@ -509,7 +533,28 @@ const QuickTenantSetup: React.FC<{
         below is styled to match it.
       </Typography>
 
+      <Button
+        variant="outlined"
+        onClick={() => setAuthDialogOpen(true)}
+        startIcon={<GoogleG size={18} />}
+        sx={{
+          textTransform: 'none', fontWeight: 500, borderRadius: '4px',
+          borderColor: 'divider', color: 'text.primary', px: 2.5, py: 1,
+          bgcolor: 'background.paper',
+          '&:hover': { borderColor: 'text.secondary', bgcolor: 'action.hover' },
+        }}
+      >
+        {domain.trim() && email.trim() ? `Continue as ${email.trim()}` : 'Sign in with Google'}
+      </Button>
+      {domain.trim() && email.trim() && (
+        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+          {domain.trim()} — click to change or enter the password
+        </Typography>
+      )}
+
       <GoogleStyleAuth
+        open={authDialogOpen}
+        onClose={() => setAuthDialogOpen(false)}
         side={side}
         domain={domain} setDomain={setDomain}
         email={email} setEmail={setEmail}
@@ -518,7 +563,7 @@ const QuickTenantSetup: React.FC<{
         dryRun={dryRun} setDryRun={setDryRun}
         canSubmit={!!canLaunch}
         submitLabel={status?.running ? 'Running…' : dryRun ? 'Preview' : `Set up ${side}`}
-        onSubmit={() => setAsk(true)}
+        onSubmit={() => { setAuthDialogOpen(false); setAsk(true) }}
       />
 
       {showSeedOptions && (
