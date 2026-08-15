@@ -1,12 +1,12 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  Alert, Box, Button, Chip, CircularProgress, Collapse,
+  Alert, Avatar, Box, Button, Checkbox, Chip, CircularProgress, Collapse,
   FormControlLabel, MenuItem, Paper, Stack, Switch, TextField, Typography,
 } from '@mui/material'
 import {
   RocketLaunch as QuickIcon, Grass as SeedIcon, ContentCopy as CopyIcon,
   CheckCircle as OkIcon, UploadFile as UploadIcon, OpenInNew as OpenIcon,
-  PersonAddAlt as AddUsersIcon,
+  PersonAddAlt as AddUsersIcon, ArrowBack as BackIcon,
 } from '@mui/icons-material'
 import {
   FullSetupStatus, startFullSetup, fetchFullSetupStatus,
@@ -19,6 +19,185 @@ import JobProgress from './JobProgress'
 
 const REPO_CLONE_CMD =
   'git clone https://github.com/exswooning/psychic-telegram -b workspace-migrator && cd psychic-telegram'
+
+/** Google's own four-color "G" -- the standard mark used on any real
+ * "Sign in with Google" surface. Reproduced here because this literally
+ * *is* the front end for automating a real Google sign-in (dwd_helper.py
+ * drives the actual accounts.google.com login with what gets typed into
+ * this form) -- not a generic brand reference. */
+const GoogleG: React.FC<{ size?: number }> = ({ size = 40 }) => (
+  <svg width={size} height={size} viewBox="0 0 48 48" aria-hidden="true">
+    <path fill="#4285F4" d="M45.12 24.5c0-1.56-.14-3.06-.4-4.5H24v8.51h11.84c-.51 2.75-2.06 5.08-4.39 6.64v5.52h7.11c4.16-3.83 6.56-9.47 6.56-16.17z" />
+    <path fill="#34A853" d="M24 46c5.94 0 10.92-1.97 14.56-5.33l-7.11-5.52c-1.97 1.32-4.49 2.1-7.45 2.1-5.73 0-10.58-3.87-12.31-9.07H4.34v5.7C7.96 41.07 15.4 46 24 46z" />
+    <path fill="#FBBC05" d="M11.69 28.18C11.25 26.86 11 25.45 11 24s.25-2.86.69-4.18v-5.7H4.34C2.85 17.09 2 20.45 2 24s.85 6.91 2.34 9.88l7.35-5.7z" />
+    <path fill="#EA4335" d="M24 10.75c3.23 0 6.13 1.11 8.41 3.29l6.31-6.31C34.91 4.18 29.93 2 24 2 15.4 2 7.96 6.93 4.34 14.12l7.35 5.7c1.73-5.2 6.58-9.07 12.31-9.07z" />
+  </svg>
+)
+
+// Google's own real sign-in screens render dark regardless of the calling
+// app's own theme (the popup/redirect looks the same whether the site
+// embedding it is light or dark) -- these are deliberately hardcoded, not
+// pulled from Bitport's own theme tokens, so this card matches the actual
+// Google sign-in screenshot it was built from rather than drifting with
+// whatever theme Bitport itself is in.
+const G_BG = '#131314'
+const G_TEXT = '#e3e3e3'
+const G_TEXT_DIM = '#9aa0a6'
+const G_FIELD_SX = {
+  '& .MuiOutlinedInput-root': {
+    color: G_TEXT,
+    '& fieldset': { borderColor: '#5f6368' },
+    '&:hover fieldset': { borderColor: '#8e918f' },
+    '&.Mui-focused fieldset': { borderColor: '#a8c7fa' },
+  },
+  '& .MuiInputLabel-root': { color: G_TEXT_DIM },
+  '& .MuiInputLabel-root.Mui-focused': { color: '#a8c7fa' },
+}
+// MUI's default disabled-contained-button style (a faint rgba(0,0,0,..)
+// wash) assumes a light surface behind it -- against G_BG it was nearly
+// invisible, with no visible button at all where "Next"/submit should be
+// until every field was filled. Real Google sign-in's own disabled "Next"
+// stays a legible, if muted, pill -- this reproduces that instead.
+const G_PILL_BUTTON_SX = {
+  borderRadius: 999, px: 4,
+  '&.Mui-disabled': { bgcolor: 'rgba(255,255,255,0.12)', color: 'rgba(255,255,255,0.3)' },
+}
+
+/**
+ * The automatic route's sign-in step -- styled to match Google's own real
+ * sign-in screen (dark card, G mark, one field-group per step, pill
+ * button) rather than a generic form, since what happens after submitting
+ * genuinely is a real Google sign-in: dwd_helper.py drives an actual
+ * accounts.google.com login with this email/password, then grants
+ * domain-wide delegation and every service scope in one automated pass --
+ * nothing further to configure by hand, which is the whole point of the
+ * "automatic" route as opposed to the step-by-step manual one below it.
+ *
+ * Two steps, matching Google's own "which account, then password" flow:
+ * domain+email first, password (plus the org ID/dry-run/seed options that
+ * were already part of this form) second. All state is lifted to the
+ * parent -- this component only owns which step it's showing.
+ */
+const GoogleStyleAuth: React.FC<{
+  side: 'source' | 'target'
+  domain: string; setDomain: (v: string) => void
+  email: string; setEmail: (v: string) => void
+  password: string; setPassword: (v: string) => void
+  orgId: string; setOrgId: (v: string) => void
+  dryRun: boolean; setDryRun: (v: boolean) => void
+  canSubmit: boolean
+  submitLabel: string
+  onSubmit: () => void
+  extraOptions?: React.ReactNode
+}> = ({ side, domain, setDomain, email, setEmail, password, setPassword,
+       orgId, setOrgId, dryRun, setDryRun, canSubmit, submitLabel, onSubmit,
+       extraOptions }) => {
+  const [step, setStep] = useState<0 | 1>(0)
+  const [showPassword, setShowPassword] = useState(false)
+  const [showAdvanced, setShowAdvanced] = useState(false)
+
+  return (
+    <Box sx={{ bgcolor: G_BG, borderRadius: 3, p: 4, maxWidth: 450 }}>
+      <GoogleG />
+      <Typography variant="h4" sx={{ fontWeight: 500, color: G_TEXT, mt: 3, mb: 3 }}>
+        Welcome
+      </Typography>
+
+      {step === 0 ? (
+        <>
+          <Stack spacing={2.5}>
+            <TextField
+              fullWidth label={`${side} domain`} value={domain}
+              onChange={(e) => setDomain(e.target.value)}
+              placeholder={side === 'source' ? 'c.example.com' : 'a.example.com'}
+              autoFocus sx={G_FIELD_SX}
+            />
+            <TextField
+              fullWidth label="Super admin email" value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder={`admin@${domain || 'example.com'}`}
+              sx={G_FIELD_SX}
+            />
+          </Stack>
+          <Box sx={{ display: 'flex', justifyContent: 'flex-end', mt: 4 }}>
+            <Button
+              variant="contained" sx={G_PILL_BUTTON_SX}
+              disabled={!domain.trim() || !email.trim()}
+              onClick={() => setStep(1)}
+            >
+              Next
+            </Button>
+          </Box>
+        </>
+      ) : (
+        <>
+          <Chip
+            avatar={<Avatar sx={{ bgcolor: 'primary.main', color: '#fff' }}>
+              {email.charAt(0).toUpperCase()}
+            </Avatar>}
+            label={email}
+            onClick={() => setStep(0)}
+            deleteIcon={<BackIcon sx={{ fontSize: 16 }} />}
+            onDelete={() => setStep(0)}
+            sx={{
+              mb: 3, bgcolor: 'rgba(255,255,255,0.08)', color: G_TEXT,
+              '& .MuiChip-deleteIcon': { color: G_TEXT_DIM },
+            }}
+          />
+          <TextField
+            fullWidth label="Enter your password"
+            type={showPassword ? 'text' : 'password'}
+            value={password} onChange={(e) => setPassword(e.target.value)}
+            autoComplete="off" autoFocus sx={G_FIELD_SX}
+          />
+          <FormControlLabel
+            sx={{ mt: 1, color: G_TEXT_DIM, '& .MuiTypography-root': { fontSize: 14 } }}
+            control={
+              <Checkbox
+                size="small" checked={showPassword}
+                onChange={(e) => setShowPassword(e.target.checked)}
+                sx={{ color: G_TEXT_DIM, '&.Mui-checked': { color: '#a8c7fa' } }}
+              />
+            }
+            label="Show password"
+          />
+
+          <Button size="small" onClick={() => setShowAdvanced((v) => !v)}
+                  sx={{ display: 'block', mt: 1, color: '#a8c7fa' }}>
+            {showAdvanced ? 'Hide' : 'Show'} advanced options
+          </Button>
+          <Collapse in={showAdvanced}>
+            <Stack spacing={1.5} sx={{ mt: 2 }}>
+              <TextField
+                fullWidth size="small" label="Org ID (optional)" value={orgId}
+                onChange={(e) => setOrgId(e.target.value)} sx={G_FIELD_SX}
+              />
+              <FormControlLabel
+                sx={{ color: G_TEXT_DIM, '& .MuiTypography-root': { fontSize: 14 } }}
+                control={
+                  <Switch size="small" checked={dryRun}
+                          onChange={(e) => setDryRun(e.target.checked)} />
+                }
+                label="Dry run first (recommended)"
+              />
+              {extraOptions}
+            </Stack>
+          </Collapse>
+
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mt: 4 }}>
+            <Button onClick={() => setStep(0)} sx={{ color: '#a8c7fa' }}>Back</Button>
+            <Button
+              variant="contained" sx={G_PILL_BUTTON_SX}
+              disabled={!canSubmit} onClick={onSubmit}
+            >
+              {submitLabel}
+            </Button>
+          </Box>
+        </>
+      )}
+    </Box>
+  )
+}
 
 /**
  * Domain, admin email, admin password -- but the Cloud project itself is no
@@ -323,35 +502,23 @@ const QuickTenantSetup: React.FC<{
       <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 0.5 }}>
         2. Domain-wide delegation
       </Typography>
-      <Typography variant="caption" color="text.secondary">
+      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 2 }}>
         Needs a display for the sign-in step — if it stalls waiting on 2FA
         or a captcha, connect over VNC to watch the browser directly (see
-        connect_vps.sh).
+        connect_vps.sh). This drives a real Google sign-in, so the step
+        below is styled to match it.
       </Typography>
 
-      <Stack direction="row" spacing={2} sx={{ mt: 2, flexWrap: 'wrap', gap: 2 }}>
-        <TextField size="small" label={`${side} domain`} value={domain}
-                   onChange={(e) => setDomain(e.target.value)}
-                   placeholder={side === 'source' ? 'c.example.com' : 'a.example.com'}
-                   sx={{ width: { xs: '100%', sm: 200 } }} />
-        <TextField size="small" label="Super admin email" value={email}
-                   onChange={(e) => setEmail(e.target.value)}
-                   placeholder={`admin@${domain || 'example.com'}`}
-                   sx={{ width: { xs: '100%', sm: 220 } }} />
-        <TextField size="small" label="Admin password" type="password"
-                   value={password} onChange={(e) => setPassword(e.target.value)}
-                   autoComplete="off"
-                   helperText="sent once, never stored"
-                   sx={{ width: { xs: '100%', sm: 200 } }} />
-        <TextField size="small" label="Org ID (optional)" value={orgId}
-                   onChange={(e) => setOrgId(e.target.value)}
-                   sx={{ width: { xs: '100%', sm: 160 } }} />
-      </Stack>
-
-      <FormControlLabel
-        sx={{ mt: 1, display: 'block' }}
-        control={<Switch checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} />}
-        label={<Typography variant="body2">Dry run first (recommended)</Typography>}
+      <GoogleStyleAuth
+        side={side}
+        domain={domain} setDomain={setDomain}
+        email={email} setEmail={setEmail}
+        password={password} setPassword={setPassword}
+        orgId={orgId} setOrgId={setOrgId}
+        dryRun={dryRun} setDryRun={setDryRun}
+        canSubmit={!!canLaunch}
+        submitLabel={status?.running ? 'Running…' : dryRun ? 'Preview' : `Set up ${side}`}
+        onSubmit={() => setAsk(true)}
       />
 
       {showSeedOptions && (
@@ -392,10 +559,6 @@ const QuickTenantSetup: React.FC<{
         />
       )}
 
-      <Button variant="contained" sx={{ mt: 2 }} disabled={!canLaunch}
-              onClick={() => setAsk(true)}>
-        {status?.running ? 'Running…' : dryRun ? 'Preview' : `Set up ${side}`}
-      </Button>
       {error && <Alert severity="error" sx={{ mt: 2 }}>{error}</Alert>}
 
       {result && (
