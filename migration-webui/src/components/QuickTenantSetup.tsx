@@ -276,7 +276,10 @@ const QuickTenantSetup: React.FC<{
   showSeedOptions?: boolean
   /** Only meaningful for side="target". */
   showProvisionUsers?: boolean
-}> = ({ side, view, showSeedOptions, showProvisionUsers }) => {
+  /** Lets the automated view's "no key yet" notice jump straight to the
+   * Manual tab instead of just telling the user where to look. */
+  onRequestManual?: () => void
+}> = ({ side, view, showSeedOptions, showProvisionUsers, onRequestManual }) => {
   const [domain, setDomain] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -564,6 +567,22 @@ const QuickTenantSetup: React.FC<{
             or a captcha, use the Manual tab instead.
           </Typography>
 
+          {tenantCfg && !tenantCfg.hasKey && (
+            <Alert severity="info" sx={{ mb: 2 }}
+              action={onRequestManual && (
+                <Button color="inherit" size="small" onClick={onRequestManual}>
+                  Go to Manual
+                </Button>
+              )}
+            >
+              No service-account key on file for {side} yet — signing in will
+              try to create the Cloud project from this server, which only
+              works if this VPS has its own authenticated gcloud. If it
+              doesn't, upload a key on the Manual tab first (from running
+              provision_gcp.py on your own machine).
+            </Alert>
+          )}
+
           <Button
             variant="outlined"
             onClick={() => setAuthDialogOpen(true)}
@@ -669,6 +688,22 @@ const QuickTenantSetup: React.FC<{
               are not live: {result.missingScopes.map((s) => s.split('/').pop()).join(', ')}.
               Check the Domain-Wide Delegation panel — propagation can lag a
               minute or two, or this may need a manual re-run.
+            </Alert>
+          )}
+          {view === 'automated' && !result.ok
+            && result.phases.some((p) => p.status === 'failed' && p.detail.includes('gcloud')) && (
+            <Alert severity="warning" sx={{ mt: 1 }}
+              action={onRequestManual && (
+                <Button color="inherit" size="small" onClick={onRequestManual}>
+                  Go to Manual
+                </Button>
+              )}
+            >
+              This VPS has no authenticated gcloud of its own, so it can't
+              create the Cloud project for you. Upload a service-account key
+              on the Manual tab (from running provision_gcp.py on your own
+              machine) — after that, signing in only needs to grant
+              delegation, not create the project.
             </Alert>
           )}
         </Box>

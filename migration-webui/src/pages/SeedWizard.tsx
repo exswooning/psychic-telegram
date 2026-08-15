@@ -107,7 +107,8 @@ const SeedWizard: React.FC = () => {
       </Tabs>
 
       <Box sx={{ maxWidth: route === 'automated' ? 480 : undefined }}>
-        <QuickTenantSetup side="source" view={route} showSeedOptions />
+        <QuickTenantSetup side="source" view={route} showSeedOptions
+                           onRequestManual={() => setRoute('manual')} />
       </Box>
 
       {route === 'manual' && (
