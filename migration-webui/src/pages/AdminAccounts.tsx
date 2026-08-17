@@ -4,20 +4,26 @@ import {
   TableBody, TableCell, TableContainer, TableHead, TableRow, Typography,
 } from '@mui/material'
 import { AdminPanelSettings as AdminIcon } from '@mui/icons-material'
-import { Account, fetchAdminAccounts, setAccountSubscription } from '@/api/controlPlane'
+import { Account, fetchAdminAccounts, setAccountSubscription, setAccountSeedEnabled } from '@/api/controlPlane'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
+
+type Pending = { id: number; email: string } & (
+  | { kind: 'subscription'; active: boolean }
+  | { kind: 'seed'; enabled: boolean }
+)
 
 /**
  * Superadmin only (see require_superadmin in api_server.py) -- everyone
  * else never sees the nav entry that links here, and the backend refuses
  * the underlying calls regardless. The v1 billing gate is a manual toggle,
  * not a Stripe webhook (see accounts_auth.set_subscription_active): this
- * page is that toggle's whole UI.
+ * page is that toggle's whole UI. Seed enabled is the same idea, opposite
+ * default (opt-in, not opt-out) -- see accounts_auth.set_seed_enabled.
  */
 const AdminAccounts: React.FC = () => {
   const [accounts, setAccounts] = useState<Account[] | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [pending, setPending] = useState<{ id: number; active: boolean; email: string } | null>(null)
+  const [pending, setPending] = useState<Pending | null>(null)
   const [busy, setBusy] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
 
@@ -31,8 +37,10 @@ const AdminAccounts: React.FC = () => {
     if (!pending) return
     setBusy(true); setActionError(null)
     try {
-      const r = await setAccountSubscription(pending.id, pending.active, reason)
-      if (!r.ok) throw new Error(r.detail || 'could not update subscription')
+      const r = pending.kind === 'subscription'
+        ? await setAccountSubscription(pending.id, pending.active, reason)
+        : await setAccountSeedEnabled(pending.id, pending.enabled, reason)
+      if (!r.ok) throw new Error(r.detail || 'could not update')
       setPending(null)
       refresh()
     } catch (e: any) {
@@ -68,6 +76,7 @@ const AdminAccounts: React.FC = () => {
                 <TableCell>Signed up</TableCell>
                 <TableCell align="center">Superadmin</TableCell>
                 <TableCell align="center">Subscription active</TableCell>
+                <TableCell align="center">Seed enabled</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
@@ -85,14 +94,25 @@ const AdminAccounts: React.FC = () => {
                       size="small"
                       checked={a.subscription_active}
                       onClick={() => setPending({
-                        id: a.id, active: !a.subscription_active, email: a.email,
+                        id: a.id, email: a.email,
+                        kind: 'subscription', active: !a.subscription_active,
+                      })}
+                    />
+                  </TableCell>
+                  <TableCell align="center">
+                    <Switch
+                      size="small"
+                      checked={a.seed_enabled}
+                      onClick={() => setPending({
+                        id: a.id, email: a.email,
+                        kind: 'seed', enabled: !a.seed_enabled,
                       })}
                     />
                   </TableCell>
                 </TableRow>
               ))}
               {accounts.length === 0 && (
-                <TableRow><TableCell colSpan={6}>No accounts yet.</TableCell></TableRow>
+                <TableRow><TableCell colSpan={7}>No accounts yet.</TableCell></TableRow>
               )}
             </TableBody>
           </Table>
@@ -103,14 +123,24 @@ const AdminAccounts: React.FC = () => {
         open={!!pending}
         busy={busy}
         error={actionError}
-        title={pending?.active
-          ? `Reactivate ${pending.email}`
-          : `Deactivate ${pending?.email}`}
-        description={pending?.active ? (
-          <>Restores access to privileged actions (seeding, migrating, provisioning) for this account.</>
-        ) : (
-          <>Blocks this account from starting any privileged write action. It can still sign in and view its own data — this is a pause, not a delete.</>
-        )}
+        title={
+          pending?.kind === 'subscription'
+            ? (pending.active ? `Reactivate ${pending.email}` : `Deactivate ${pending.email}`)
+            : pending?.kind === 'seed'
+              ? (pending.enabled ? `Enable seeding for ${pending.email}` : `Disable seeding for ${pending.email}`)
+              : ''
+        }
+        description={
+          pending?.kind === 'subscription' ? (
+            pending.active
+              ? <>Restores access to privileged actions (seeding, migrating, provisioning) for this account.</>
+              : <>Blocks this account from starting any privileged write action. It can still sign in and view its own data — this is a pause, not a delete.</>
+          ) : pending?.kind === 'seed' ? (
+            pending.enabled
+              ? <>Lets this account write fabricated test data into its own source tenant, from the Setup Wizard's Seed option.</>
+              : <>Removes this account's ability to seed a tenant with fabricated data. Does not affect a real migration.</>
+          ) : null
+        }
         onCancel={() => { setPending(null); setActionError(null) }}
         onConfirm={confirm}
       />

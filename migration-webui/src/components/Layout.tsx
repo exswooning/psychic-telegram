@@ -21,9 +21,8 @@ import {
   ListItemText,
 } from '@mui/material'
 import {
-  Dashboard as DashboardIcon,
-  People as PeopleIcon,
   Settings as SettingsIcon,
+  People as PeopleIcon,
   BarChart as BarChartIcon,
   CheckCircle as VerifyIcon,
   Assessment as ReportIcon,
@@ -33,17 +32,19 @@ import {
   DarkMode as DarkModeIcon,
   LightMode as LightModeIcon,
   RocketLaunch as DeployIcon,
-  Cloud as DriveIconNav,
   ErrorOutline as ErrorsIconNav,
   HelpOutline as HelpIconNav,
   School as WizardIconNav,
-  Science as SeedWizardIconNav,
-  Reorder as StagesIconNav,
   Dns as HostIcon,
-  Shield as CommandIcon,
   Hub as MissionIcon,
+  WorkHistory as JobsIconNav,
   StopCircle as InterruptIcon,
   AdminPanelSettings as AdminIconNav,
+  SwapHoriz as IdentitiesIconNav,
+  Build as MaintenanceIconNav,
+  Rule as ScopeIconNav,
+  Terminal as LogsIconNav,
+  DeleteForever as TeardownIconNav,
 } from '@mui/icons-material'
 import { useMigrationStore } from '@/store'
 import { fetchConfig, fetchJob, ConfigPayload, HostInfo, JobStatus, stopJob } from '@/api/client'
@@ -52,24 +53,38 @@ import Menu from '@mui/material/Menu'
 import MenuItem from '@mui/material/MenuItem'
 import Logout from '@mui/icons-material/Logout'
 
-// DriveMigration/ErrorHandling/HelpSystem existed as files with no route and
-// no nav entry -- reachable by typing a URL nobody would guess, effectively
-// unshipped. Added here alongside the App.tsx routes that now serve them.
+// Overview (legacy)/Command Center (legacy)/Drive Migration are gone --
+// MissionControl is a strict superset of the first two, and the third had
+// no distinct real backend of its own (its numbers were 100% fabricated;
+// see git history). Seed Wizard merged into Setup Wizard as one doorway
+// with a Seed/Migrate choice (see Wizard.tsx) -- one nav entry, not two.
+// Role-aware entries (operator/superadmin-only pages) are appended in
+// Layout below, not listed here.
 const NAV_ITEMS = [
   { path: '/wizard', label: 'Setup Wizard', icon: <WizardIconNav /> },
-  { path: '/seed-wizard', label: 'Seed Wizard', icon: <SeedWizardIconNav /> },
+  { path: '/jobs', label: 'Jobs', icon: <JobsIconNav /> },
   { path: '/mission-control', label: 'Mission Control', icon: <MissionIcon /> },
-  { path: '/dashboard', label: 'Overview (legacy)', icon: <DashboardIcon /> },
-  { path: '/command', label: 'Command Center (legacy)', icon: <CommandIcon /> },
   { path: '/users', label: 'Users', icon: <PeopleIcon /> },
-  { path: '/drive', label: 'Drive Migration', icon: <DriveIconNav /> },
   { path: '/activity', label: 'Activity', icon: <ActivityIcon /> },
   { path: '/system-health', label: 'System Health', icon: <BarChartIcon /> },
   { path: '/verification', label: 'Verification', icon: <VerifyIcon /> },
   { path: '/errors', label: 'Failures', icon: <ErrorsIconNav /> },
   { path: '/report', label: 'Final Report', icon: <ReportIcon /> },
   { path: '/help', label: 'Help', icon: <HelpIconNav /> },
-  { path: '/settings', label: 'Deploy', icon: <DeployIcon /> },
+]
+
+// Operator/superadmin-only -- the deeper ops surface a SaaS client
+// self-serving one tenant never needs (deploying the tool itself,
+// repairing another tenant's ledger, tearing down someone's throwaway
+// GCP project). Appended only for account?.is_superadmin, same gate
+// /admin/accounts already uses below.
+const OPERATOR_NAV_ITEMS = [
+  { path: '/deploy', label: 'Deploy', icon: <DeployIcon /> },
+  { path: '/identities', label: 'Identities', icon: <IdentitiesIconNav /> },
+  { path: '/maintenance', label: 'Maintenance', icon: <MaintenanceIconNav /> },
+  { path: '/scope', label: 'Scope', icon: <ScopeIconNav /> },
+  { path: '/logs', label: 'Logs', icon: <LogsIconNav /> },
+  { path: '/gcp-teardown', label: 'GCP Teardown', icon: <TeardownIconNav /> },
 ]
 
 const formatEta = (seconds: number): string => {
@@ -95,13 +110,14 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   const [job, setJob] = useState<JobStatus | null>(null)
   const isDesktop = useMediaQuery('(min-width:960px)')
   const [account, setAccount] = useState<Account | null>(null)
-  // Superadmin-only entry appended, never part of the static list -- a
+  // Superadmin-only entries appended, never part of the static list -- a
   // regular client (every account but the one Aryan promotes on the VPS)
-  // must not even see this exists. The backend refuses the underlying
+  // must not even see these exist. The backend refuses the underlying
   // calls regardless (require_superadmin), but there is no reason to
-  // advertise a page that will just 403.
+  // advertise pages that will just 403.
   const navItems = account?.is_superadmin
-    ? [...NAV_ITEMS, { path: '/admin/accounts', label: 'Accounts (admin)', icon: <AdminIconNav /> }]
+    ? [...NAV_ITEMS, ...OPERATOR_NAV_ITEMS,
+       { path: '/admin/accounts', label: 'Accounts (admin)', icon: <AdminIconNav /> }]
     : NAV_ITEMS
   const [notifAnchor, setNotifAnchor] = useState<null | HTMLElement>(null)
   const [profileAnchor, setProfileAnchor] = useState<null | HTMLElement>(null)

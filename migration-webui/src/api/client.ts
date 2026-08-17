@@ -240,6 +240,15 @@ export interface HostInfo {
   pid: number
 }
 
+export interface LogsPayload {
+  path: string
+  lines: string[]
+}
+
+export async function fetchLogs(): Promise<LogsPayload> {
+  return getJSON<LogsPayload>('/api/logs')
+}
+
 export interface ConfigPayload {
   config: ConfigFields
   env_path: string
@@ -419,6 +428,57 @@ export async function runResetTarget(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ confirm_domain: confirmDomain }),
+  })
+  return res.json()
+}
+
+/** Mirrors runResetTarget exactly, against reset_drive_ledger.py --
+ *  always the SOURCE domain (see reset_drive_ledger_argv's own docstring
+ *  in webui.py: it operates on source_email keys regardless of which
+ *  tenant's files were actually wiped). */
+export async function runResetDriveLedger(
+  confirmDomain: string, services?: string
+): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetch('/api/reset_drive_ledger', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ confirm_domain: confirmDomain, services }),
+  })
+  return res.json()
+}
+
+// -- scope matrix -------------------------------------------------------------
+export interface ScopePayload {
+  lines: string[]
+  totals: Record<string, Record<string, number>>
+  volume: Record<string, number>
+}
+
+export async function fetchScope(): Promise<ScopePayload> {
+  return getJSON<ScopePayload>('/api/scope')
+}
+
+// -- identities ----------------------------------------------------------------
+export interface IdentityRow {
+  source_email: string
+  target_email: string
+  entity_type: string
+  status: string
+}
+
+export async function fetchIdentities(): Promise<IdentityRow[]> {
+  const data = await getJSON<{ error: string; rows: IdentityRow[] }>('/api/identities')
+  if (data.error) throw new Error(data.error)
+  return data.rows
+}
+
+export async function saveIdentityPair(
+  sourceEmail: string, targetEmail: string
+): Promise<{ ok: boolean; error?: string; total?: number }> {
+  const res = await fetch('/api/identities/save', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source_email: sourceEmail, target_email: targetEmail }),
   })
   return res.json()
 }

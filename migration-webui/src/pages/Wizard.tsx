@@ -1,50 +1,166 @@
 import React, { useCallback, useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useSearchParams } from 'react-router-dom'
 import {
-  Box, Typography, Stepper, Step, StepButton, StepLabel, Card, CardContent,
+  Box, Typography, Card, CardContent, CardActionArea,
   Chip, Button, TextField, Grid, Alert, Divider, RadioGroup, FormControlLabel,
-  Radio, LinearProgress, Stack,
+  Radio, LinearProgress, Stack, IconButton, Tooltip, Tabs, Tab,
 } from '@mui/material'
 import {
-  CheckCircle as DoneIcon, RadioButtonUnchecked as TodoIcon,
-  WarningAmber as ManualIcon, Refresh as RefreshIcon,
+  Refresh as RefreshIcon, Grass as SeedIcon, RocketLaunch as MigrateIcon,
+  ArrowBack as BackIcon,
 } from '@mui/icons-material'
 import {
   fetchStatus, checkStep, fetchConfig, saveConfig, setRunMode, fetchActions,
   uploadCredential, fetchDwd, checkDwdNow, diagnoseScopes, ActionSpec,
   StatusPayload, ConfigFields, ConfigPayload, DwdPayload, ScopeDiagnosis, UploadKind,
 } from '@/api/client'
+import { fetchMe } from '@/api/controlPlane'
 import JobRunner from '@/components/JobRunner'
+import SeedWizard from '@/pages/SeedWizard'
+import QuickTenantSetup from '@/components/QuickTenantSetup'
 
 /**
- * The guided setup path, in the React app -- for a real migration's one-time
- * setup only. wizard.py's build_steps() still reports 9 steps (its step 7,
- * "Source seeded (test tenants only)", is how RUN_MODES tracks seed_only /
- * seed_and_migrate skip logic on the backend), but this page filters that
- * one out of the stepper it renders: seeding and resetting a sandbox tenant
- * are rehearsal tools for test tenants, not part of what a production
- * migration needs, and living inside the same linear stepper as "Domain-Wide
- * Delegation authorised" implied otherwise. See pages/SeedWizard.tsx, which
- * now owns that step's UI.
+ * One doorway for both "I need a real migration set up" and "I need a test
+ * tenant seeded first" -- these used to be two separate pages/nav entries
+ * (Setup Wizard, Seed Wizard). Merged so the choice is the first thing you
+ * see here, instead of the two purposes living behind unrelated nav items.
+ * wizard.py's build_steps() still reports 9 steps (its step 7, "Source
+ * seeded (test tenants only)", is how RUN_MODES tracks seed_only /
+ * seed_and_migrate skip logic on the backend); the Migrate path below still
+ * filters that one out of its own progress bar, since SeedWizard (rendered
+ * for the Seed path) already owns that step's real UI.
  *
- * Every action button here is the same whitelisted ACTIONS entry the
- * operator dashboard's toolbar fires; this page only arranges them behind a
- * state machine that says which one makes sense next.
+ * The Seed choice is gated on account.seed_enabled (opt-in per account, see
+ * accounts_auth.set_seed_enabled) -- writing fabricated data into a tenant
+ * is a rehearsal tool most real production accounts have no reason to want.
+ *
+ * Every action button in the Migrate path is the same whitelisted ACTIONS
+ * entry the operator dashboard's toolbar fires; this page only arranges
+ * them behind a state machine that says which one makes sense next.
  */
 
-// wizard.py's step 7. Filtered out of this page's stepper -- see the
-// module docstring above and pages/SeedWizard.tsx.
+// wizard.py's step 7. Filtered out of the Migrate path's own progress bar
+// -- SeedWizard.tsx owns that step's real UI.
 const SEED_STEP_TITLE_MARKER = 'seeded'
 
-const STATE_ICON: Record<string, React.ReactElement> = {
-  done: <DoneIcon color="success" fontSize="small" />,
-  manual: <ManualIcon color="warning" fontSize="small" />,
-  todo: <TodoIcon color="disabled" fontSize="small" />,
-  skip: <TodoIcon color="disabled" fontSize="small" />,
-}
+type Mode = 'choose' | 'seed' | 'migrate'
 
 const Wizard: React.FC = () => {
-  const navigate = useNavigate()
+  const [params] = useSearchParams()
+  // Always starts on the choice screen, even for a ?mode=seed deep link --
+  // that link only takes effect once seedEnabled is confirmed true below.
+  // Setting it from the URL param directly here would let a deep link (an
+  // old bookmark to /seed-wizard, MissionControl's own "Open Setup Wizard"
+  // button) bypass the seed_enabled gate entirely, since the URL is
+  // client-controlled and the account's real entitlement is not known yet
+  // on the very first render.
+  const [mode, setMode] = useState<Mode>('choose')
+  const [seedEnabled, setSeedEnabled] = useState(false)
+
+  useEffect(() => {
+    fetchMe().then((a) => setSeedEnabled(a.seed_enabled)).catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    if (seedEnabled && params.get('mode') === 'seed') setMode('seed')
+  }, [seedEnabled, params])
+
+  if (mode === 'choose') {
+    return (
+      <Box>
+        <Typography variant="h4" sx={{ fontWeight: 700, mb: 0.5 }}>Setup Wizard</Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+          What do you want to do?
+        </Typography>
+        <Grid container spacing={2}>
+          {seedEnabled && (
+            <Grid item xs={12} sm={6}>
+              <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>
+                <CardActionArea onClick={() => setMode('seed')} sx={{ p: 1 }}>
+                  <CardContent>
+                    <SeedIcon color="action" sx={{ fontSize: 32, mb: 1 }} />
+                    <Typography variant="h6" sx={{ fontWeight: 600 }}>Seed a test tenant</Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      Populate a sandbox source tenant with fabricated test
+                      data for rehearsal -- none of this touches real data.
+                    </Typography>
+                  </CardContent>
+                </CardActionArea>
+              </Card>
+            </Grid>
+          )}
+          <Grid item xs={12} sm={6}>
+            <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>
+              <CardActionArea onClick={() => setMode('migrate')} sx={{ p: 1 }}>
+                <CardContent>
+                  <MigrateIcon color="action" sx={{ fontSize: 32, mb: 1 }} />
+                  <Typography variant="h6" sx={{ fontWeight: 600 }}>Set up for a real migration</Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    gcloud, projects, credentials, domain-wide delegation,
+                    and the real copy.
+                  </Typography>
+                </CardContent>
+              </CardActionArea>
+            </Card>
+          </Grid>
+        </Grid>
+      </Box>
+    )
+  }
+
+  return (
+    <Box>
+      <Button size="small" startIcon={<BackIcon />} onClick={() => setMode('choose')} sx={{ mb: 1 }}>
+        Change
+      </Button>
+      {mode === 'seed' ? <SeedWizard /> : <MigrateWizard />}
+    </Box>
+  )
+}
+
+/** Automated (Sign in with Google, drives full_setup.py end to end) vs.
+ * Manual (the step-by-step flow below) -- same choice SeedWizard.tsx
+ * already offers, brought here since a real migration needs the same
+ * gcloud + Cloud project + domain-wide delegation work SeedWizard's
+ * QuickTenantSetup already automates, just for BOTH tenants instead of
+ * only the source. Manual stays the fallback for when the automated
+ * sign-in stalls on 2FA/captcha, same reasoning as SeedWizard's own. */
+const MigrateWizard: React.FC = () => {
+  const [route, setRoute] = useState<'automated' | 'manual'>('automated')
+
+  return (
+    <Box>
+      <Typography variant="h4" sx={{ fontWeight: 700, mb: 0.5 }}>Set up for a real migration</Typography>
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+        Automated signs in and handles the Cloud project and delegation for
+        both tenants; Manual walks through each part by hand -- use it if
+        the automated sign-in stalls on 2FA or a captcha.
+      </Typography>
+
+      <Tabs value={route} onChange={(_, v) => setRoute(v)} sx={{ mb: 3, borderBottom: '1px solid', borderColor: 'divider' }}>
+        <Tab value="automated" label="Automated" />
+        <Tab value="manual" label="Manual" />
+      </Tabs>
+
+      {route === 'automated' && (
+        <Grid container spacing={2}>
+          <Grid item xs={12} md={6}>
+            <QuickTenantSetup side="source" view="automated"
+                             onRequestManual={() => setRoute('manual')} />
+          </Grid>
+          <Grid item xs={12} md={6}>
+            <QuickTenantSetup side="target" view="automated" showProvisionUsers
+                             onRequestManual={() => setRoute('manual')} />
+          </Grid>
+        </Grid>
+      )}
+
+      {route === 'manual' && <ManualMigrateSteps />}
+    </Box>
+  )
+}
+
+const ManualMigrateSteps: React.FC = () => {
   const [status, setStatus] = useState<StatusPayload | null>(null)
   const [active, setActive] = useState(1)
   const [actions, setActions] = useState<Record<string, ActionSpec>>({})
@@ -90,63 +206,54 @@ const Wizard: React.FC = () => {
 
   if (loadError) {
     return (
-      <Box>
-        <Typography variant="h4" sx={{ fontWeight: 700, mb: 2 }}>Setup Wizard</Typography>
-        <Alert severity="warning">
-          {loadError}. Nothing here is broken -- this page reads live state from
-          the migration engine, and it has nothing to read yet.
-        </Alert>
-      </Box>
+      <Alert severity="warning">
+        {loadError}. Nothing here is broken -- this page reads live state from
+        the migration engine, and it has nothing to read yet.
+      </Alert>
     )
   }
 
   if (!status) return <LinearProgress sx={{ mt: 4 }} />
 
-  // Real migration setup only -- see the module docstring for why step 7
-  // (sandbox seeding) is excluded here and lives on its own page instead.
+  // Real migration setup only -- see the module docstring above for why
+  // step 7 (sandbox seeding) is excluded here and lives in the Seed path
+  // instead.
   const setupSteps = status.steps.filter(
     (s) => !s.title.toLowerCase().includes(SEED_STEP_TITLE_MARKER))
   const stepIdx = Math.max(0, setupSteps.findIndex((s) => s.n === active))
   const step = setupSteps[stepIdx] ?? setupSteps[0]
   const done = setupSteps.filter((s) => s.state === 'done').length
   const total = setupSteps.filter((s) => s.state !== 'skip').length
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0
 
   return (
     <Box>
-      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
-        <Typography variant="h4" sx={{ fontWeight: 700 }}>Setup Wizard</Typography>
-        <Button size="small" startIcon={<RefreshIcon />} onClick={refresh}>Refresh</Button>
+      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', mb: 1 }}>
+        <Typography variant="body2" color="text.secondary" sx={{ flexGrow: 1 }}>
+          {done} of {total} steps satisfied
+          {status.users_total > 0 && ` · ${status.users_done} of ${status.users_total} users done`}
+        </Typography>
+        <Tooltip title="Refresh">
+          <IconButton size="small" onClick={refresh}><RefreshIcon fontSize="small" /></IconButton>
+        </Tooltip>
       </Box>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-        {done} of {total} steps satisfied
-        {status.users_total > 0 && ` · ${status.users_done} of ${status.users_total} users done`}
-        {' · '}
-        <Box component="span" onClick={() => navigate('/seed-wizard')}
-             sx={{ color: 'primary.main', cursor: 'pointer', textDecoration: 'underline' }}>
-          Need a test tenant seeded first? Open the Seed Wizard →
-        </Box>
-      </Typography>
 
       <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 2 }}>
         <CardContent sx={{ p: 2 }}>
-          <Stepper nonLinear activeStep={stepIdx} alternativeLabel>
-            {setupSteps.map((s) => (
-              <Step key={s.n} completed={s.state === 'done'}>
-                <StepButton onClick={() => setActive(s.n)}>
-                  <StepLabel
-                    icon={STATE_ICON[s.state]}
-                    optional={s.skipped ? (
-                      <Typography variant="caption" color="text.secondary">skipped</Typography>
-                    ) : undefined}
-                  >
-                    <Typography variant="caption" sx={{ fontWeight: active === s.n ? 700 : 400 }}>
-                      {s.title}
-                    </Typography>
-                  </StepLabel>
-                </StepButton>
-              </Step>
-            ))}
-          </Stepper>
+          <LinearProgress variant="determinate" value={pct} sx={{ height: 8, borderRadius: 4 }} />
+          <Stack direction="row" justifyContent="space-between" sx={{ mt: 0.75 }}>
+            <Typography variant="body2" sx={{ fontWeight: 600 }}>
+              Step {step.n} of {total}: {step.title}
+              {step.skipped && (
+                <Typography component="span" variant="caption" color="text.secondary" sx={{ ml: 1 }}>
+                  skipped
+                </Typography>
+              )}
+            </Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ fontVariantNumeric: 'tabular-nums' }}>
+              {pct}%
+            </Typography>
+          </Stack>
         </CardContent>
       </Card>
 

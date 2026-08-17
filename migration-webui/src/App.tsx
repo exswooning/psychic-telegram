@@ -5,9 +5,7 @@ import Login from '@/pages/Login'
 import Signup from '@/pages/Signup'
 import Pricing from '@/pages/Pricing'
 import Wizard from '@/pages/Wizard'
-import SeedWizard from '@/pages/SeedWizard'
-import Dashboard from '@/pages/Dashboard'
-import FleetDashboard from '@/pages/FleetDashboard'
+import Jobs from '@/pages/Jobs'
 import MissionControl from '@/pages/MissionControl'
 import Users from '@/pages/Users'
 import UserDetail from '@/pages/UserDetail'
@@ -16,10 +14,15 @@ import Verification from '@/pages/Verification'
 import FinalReport from '@/pages/FinalReport'
 import Settings from '@/pages/Settings'
 import ActivityFeed from '@/pages/ActivityFeed'
-import DriveMigration from '@/pages/DriveMigration'
 import ErrorHandling from '@/pages/ErrorHandling'
 import HelpSystem from '@/pages/HelpSystem'
 import AdminAccounts from '@/pages/AdminAccounts'
+import Deploy from '@/pages/Deploy'
+import Identities from '@/pages/Identities'
+import Maintenance from '@/pages/Maintenance'
+import Scope from '@/pages/Scope'
+import Logs from '@/pages/Logs'
+import GcpTeardown from '@/pages/GcpTeardown'
 import useMigration from '@/hooks/useMigration'
 import { fetchMe, Account } from '@/api/controlPlane'
 
@@ -74,13 +77,13 @@ const App: React.FC = () => {
           <Routes>
             <Route path="/" element={<Navigate to="/mission-control" replace />} />
             <Route path="/mission-control" element={<MissionControl />} />
+            <Route path="/jobs" element={<Jobs />} />
             <Route path="/wizard" element={<Wizard />} />
-            <Route path="/seed-wizard" element={<SeedWizard />} />
-            <Route path="/dashboard" element={<Dashboard />} />
-            <Route path="/command" element={<FleetDashboard />} />
+            {/* Setup Wizard and Seed Wizard merged into one doorway --
+               old bookmarks/links still land on the Seed path directly. */}
+            <Route path="/seed-wizard" element={<Navigate to="/wizard?mode=seed" replace />} />
             <Route path="/users" element={<Users />} />
             <Route path="/users/:email" element={<UserDetail />} />
-            <Route path="/drive" element={<DriveMigration />} />
             <Route path="/system-health" element={<SystemHealth />} />
             <Route path="/verification" element={<Verification />} />
             <Route path="/report" element={<FinalReport />} />
@@ -88,6 +91,16 @@ const App: React.FC = () => {
             <Route path="/errors" element={<ErrorHandling />} />
             <Route path="/help" element={<HelpSystem />} />
             <Route path="/settings" element={<Settings />} />
+            {/* Operator/superadmin-only: hidden from nav for a regular
+               account (see Layout.tsx's navItems), not route-blocked --
+               same UX-only-gate precedent as /admin/accounts below, the
+               real boundary is server-side (require_superadmin). */}
+            <Route path="/deploy" element={<Deploy />} />
+            <Route path="/identities" element={<Identities />} />
+            <Route path="/maintenance" element={<Maintenance />} />
+            <Route path="/scope" element={<Scope />} />
+            <Route path="/logs" element={<Logs />} />
+            <Route path="/gcp-teardown" element={<GcpTeardown />} />
             <Route path="/admin/accounts" element={<AdminAccounts />} />
           </Routes>
         </Layout>

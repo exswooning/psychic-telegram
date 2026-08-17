@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Alert, Avatar, Box, Button, Checkbox, Chip, CircularProgress, Collapse,
-  Dialog, FormControlLabel, IconButton, MenuItem, Paper, Stack, Switch,
-  TextField, Typography,
+  Dialog, FormControlLabel, IconButton, LinearProgress, MenuItem, Paper,
+  Stack, Switch, TextField, Typography,
 } from '@mui/material'
 import {
   RocketLaunch as QuickIcon, Grass as SeedIcon, ContentCopy as CopyIcon,
@@ -293,6 +293,15 @@ const QuickTenantSetup: React.FC<{
   const [status, setStatus] = useState<FullSetupStatus | null>(null)
   const [ask, setAsk] = useState(false)
   const [busy, setBusy] = useState(false)
+  // Covers the click-to-first-poll gap, which status?.running cannot: a
+  // dry run does no real work at all, so the backend subprocess routinely
+  // exits before the frontend's own first status fetch even lands -- ps
+  // never catches it "running", and the page jumped straight from the
+  // button to a populated Result with nothing in between. Cleared once
+  // that first poll actually resolves, by which point either status
+  // reflects a real run in flight (and the block below takes over) or
+  // the dry-run result is already in and there is nothing left to cover.
+  const [justLaunched, setJustLaunched] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -375,7 +384,7 @@ const QuickTenantSetup: React.FC<{
   const [provisionStatus, setProvisionStatus] = useState<ProvisionStatus | null>(null)
 
   const poll = useCallback(() => {
-    fetchFullSetupStatus(side).then(setStatus).catch(() => {})
+    return fetchFullSetupStatus(side).then(setStatus).catch(() => {})
   }, [side])
 
   useEffect(() => {
@@ -393,7 +402,7 @@ const QuickTenantSetup: React.FC<{
   }, [status?.running, poll])
 
   const launch = async (reason: string) => {
-    setBusy(true); setError(null)
+    setBusy(true); setError(null); setJustLaunched(true)
     try {
       // ok:false on an HTTP 200 (a capacity refusal from job_admission.py,
       // or any other execution-time failure _gated() reports this way) is
@@ -407,7 +416,10 @@ const QuickTenantSetup: React.FC<{
       })
       if (!r.ok) throw new Error(r.detail || 'could not start')
       setAsk(false)
-      poll()
+      // Awaited, not fire-and-forget: justLaunched must stay true (so the
+      // fallback indicator below stays up) until status genuinely reflects
+      // this run one way or the other.
+      await poll()
     } catch (e: any) {
       setError(e.message)
     } finally {
@@ -415,6 +427,7 @@ const QuickTenantSetup: React.FC<{
       // a password that has already been sent.
       setPassword('')
       setBusy(false)
+      setJustLaunched(false)
     }
   }
 
@@ -470,6 +483,50 @@ const QuickTenantSetup: React.FC<{
                 label="running…" />
         )}
       </Stack>
+
+      {/* Real, not simulated: full_setup.py writes {pct, label} to a
+       * progress file after every meaningful step (see run_full_setup's
+       * _progress() and provision_gcp.provision_side()'s on_step
+       * callback), so this tracks the actual gcloud/DWD automation, not a
+       * fake animated bar. Scoped to the automated view -- that's the
+       * only view that ever starts this job. */}
+      {view === 'automated' && status?.running && (
+        <Box sx={{ mb: 2 }}>
+          {typeof status.progressPct === 'number' ? (
+            <LinearProgress variant="determinate" value={status.progressPct} />
+          ) : (
+            <LinearProgress />
+          )}
+          <Stack direction="row" justifyContent="space-between" sx={{ mt: 0.5 }}>
+            <Typography variant="caption" color="text.secondary">
+              {status.progressLabel || 'working…'}
+            </Typography>
+            {typeof status.progressPct === 'number' && (
+              <Typography variant="caption" color="text.secondary"
+                          sx={{ fontVariantNumeric: 'tabular-nums' }}>
+                {status.progressPct}%
+              </Typography>
+            )}
+          </Stack>
+        </Box>
+      )}
+
+      {/* Covers a dry run, which the block above never catches: it does no
+       * real work, so the backend is routinely already done by the time
+       * the first poll lands, and status?.running never once observes
+       * true. justLaunched is purely local -- true from the moment the
+       * button is clicked until that first poll resolves either way -- so
+       * this always renders for at least one round trip, giving a preview
+       * (or a real run's own slower start) a visible "something happened"
+       * beat instead of jumping straight from button to Result. */}
+      {view === 'automated' && justLaunched && !status?.running && (
+        <Box sx={{ mb: 2 }}>
+          <LinearProgress />
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+            {dryRun ? 'previewing…' : 'starting…'}
+          </Typography>
+        </Box>
+      )}
 
       {/* -- Cloud project & service account key -- */}
       {view === 'manual' && (
@@ -612,7 +669,13 @@ const QuickTenantSetup: React.FC<{
         </Typography>
       )}
 
-      {view === 'manual' && showSeedOptions && (
+      {/* Not view-gated: the Automated launch() call already threads
+       * seed/seedScale/createUsers through to startFullSetup() regardless
+       * of view (see below), so Automated needs the same way to set them
+       * before a single-click run -- gating this to Manual only left the
+       * automated path with no way to opt into seeding in the same run,
+       * silently seeding nothing. */}
+      {showSeedOptions && (
         <Stack direction="row" spacing={2} sx={{ mt: 1.5, flexWrap: 'wrap', gap: 1, alignItems: 'center' }}>
           <FormControlLabel
             control={<Switch checked={seed} onChange={(e) => setSeed(e.target.checked)} />}
@@ -637,7 +700,7 @@ const QuickTenantSetup: React.FC<{
         </Stack>
       )}
 
-      {view === 'manual' && showProvisionUsers && (
+      {showProvisionUsers && (
         <FormControlLabel
           sx={{ mt: 0.5, display: 'block' }}
           control={<Switch checked={provisionUsers}
@@ -698,7 +761,7 @@ const QuickTenantSetup: React.FC<{
         </Box>
       )}
 
-      {view === 'manual' && setUpOk && showSeedOptions && side === 'source' && (
+      {setUpOk && showSeedOptions && side === 'source' && (
         <Box sx={{ mt: 2, pt: 2, borderTop: '1px solid', borderColor: 'divider' }}>
           <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>
             Setup done — seed it
@@ -737,7 +800,7 @@ const QuickTenantSetup: React.FC<{
         </Box>
       )}
 
-      {view === 'manual' && setUpOk && showProvisionUsers && side === 'target' && (
+      {setUpOk && showProvisionUsers && side === 'target' && (
         <Box sx={{ mt: 2, pt: 2, borderTop: '1px solid', borderColor: 'divider' }}>
           <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>
             Setup done — provision accounts
@@ -758,8 +821,8 @@ const QuickTenantSetup: React.FC<{
         </Box>
       )}
 
-      {view === 'manual' && postDone && <Alert severity="success" sx={{ mt: 2 }}>{postDone}</Alert>}
-      {view === 'manual' && postError && <Alert severity="error" sx={{ mt: 2 }}>{postError}</Alert>}
+      {postDone && <Alert severity="success" sx={{ mt: 2 }}>{postDone}</Alert>}
+      {postError && <Alert severity="error" sx={{ mt: 2 }}>{postError}</Alert>}
 
       <ReasonCodeDialog
         open={ask} busy={busy} error={error}

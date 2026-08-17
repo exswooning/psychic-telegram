@@ -94,6 +94,9 @@ export interface Operator { name: string; role: Role; account_id: number | null 
 export interface Account {
   id: number; email: string; name: string; plan: string; created_at: string
   subscription_active: boolean; is_superadmin: boolean
+  /** Opt-in per account (default off) -- whether this account may seed a
+   *  tenant with fabricated test data. See accounts_auth.set_seed_enabled. */
+  seed_enabled: boolean
 }
 
 export const signup = (email: string, password: string, name: string, plan = 'trial') =>
@@ -115,6 +118,12 @@ export const setAccountSubscription = (accountId: number, active: boolean, reaso
   cpFetch<ActionResult>(`/api/v2/admin/accounts/${accountId}/subscription`, {
     method: 'POST',
     body: JSON.stringify({ reason, active }),
+  })
+
+export const setAccountSeedEnabled = (accountId: number, enabled: boolean, reason: string) =>
+  cpFetch<ActionResult>(`/api/v2/admin/accounts/${accountId}/seed`, {
+    method: 'POST',
+    body: JSON.stringify({ reason, enabled }),
   })
 
 export const logout = () => cpFetch<{ ok: boolean }>('/api/v2/auth/logout', { method: 'POST' })
@@ -370,7 +379,14 @@ export interface FullSetupResult {
   side: string; ok: boolean; phases: FullSetupPhase[]
   clientId?: string; missingScopes?: string[]
 }
-export interface FullSetupStatus { running: boolean; result: FullSetupResult | null }
+export interface FullSetupStatus {
+  running: boolean; result: FullSetupResult | null
+  /** Live progress while running -- null before the first checkpoint, and
+   * whenever nothing is currently running (see api_server.py's
+   * full_setup_status: a finished/crashed run's last checkpoint would
+   * otherwise read as this run's own progress). */
+  progressPct?: number | null; progressLabel?: string | null
+}
 
 /**
  * Project -> APIs -> service account -> key -> delegation -> verified, in
@@ -405,6 +421,35 @@ export const startFullSetup = (
 
 export const fetchFullSetupStatus = (side: 'source' | 'target') =>
   cpFetch<FullSetupStatus>(`/api/v2/full-setup/status?side=${side}`)
+
+// -- GCP / DWD teardown -- the reverse of full-setup ---------------------------
+export interface TeardownResult {
+  ok: boolean
+  phases: FullSetupPhase[]
+}
+
+export interface TeardownStatus {
+  running: boolean; result: TeardownResult | null
+  progressPct?: number | null; progressLabel?: string | null
+}
+
+/** Superadmin-only server-side (require_superadmin) -- deletes a real GCP
+ *  project (soft-deleted, 30-day recovery) and/or revokes a real,
+ *  non-undoable Admin Console delegation entry. Either can be omitted. */
+export const startTeardown = (
+  reason: string, adminEmail: string, adminPassword: string,
+  opts: { project?: string; clientId?: string } = {},
+) =>
+  cpFetch<ActionResult>('/api/v2/teardown/start', {
+    method: 'POST',
+    body: JSON.stringify({
+      reason, admin_email: adminEmail, admin_password: adminPassword,
+      project: opts.project ?? '', client_id: opts.clientId ?? '',
+    }),
+  })
+
+export const fetchTeardownStatus = () =>
+  cpFetch<TeardownStatus>('/api/v2/teardown/status')
 
 // -- Client-side Cloud provisioning handoff ----------------------------------
 // The Cloud project itself is created on the admin's own machine (their own
@@ -442,6 +487,20 @@ export interface DwdStatus {
 
 export const fetchDwdStatus = (tenant: 'source' | 'target') =>
   cpFetch<DwdStatus>(`/api/v2/dwd/status?tenant=${tenant}`)
+
+// -- Verified domains ---------------------------------------------------------
+// Which domain(s) this account has actually finished setting up and can use
+// right now -- the same functional scope check as DwdStatus above, but
+// scoped to whoever is asking (not always the legacy env.sh tenant) and
+// covering both sides in one call.
+export interface VerifiedDomain {
+  side: 'source' | 'target'; domain: string; adminEmail: string
+  status: 'verified' | 'pending' | 'not_verified' | 'not_set_up' | 'error'
+  live: number; total: number; error?: string
+}
+
+export const fetchVerifiedDomains = () =>
+  cpFetch<{ domains: VerifiedDomain[] }>('/api/v2/setup/verified-domains')
 
 export const revertPublicShares = (reason: string, tenant = 'target') =>
   cpFetch<ActionResult>('/api/v2/emergency/revert-public', {

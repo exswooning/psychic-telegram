@@ -178,8 +178,8 @@ const MissionControl: React.FC = () => {
       </Box>
 
       <Alert severity="info" action={
-        <Button color="inherit" size="small" onClick={() => navigate('/seed-wizard')}>
-          Open Seed Wizard
+        <Button color="inherit" size="small" onClick={() => navigate('/wizard?mode=seed')}>
+          Open Setup Wizard
         </Button>
       }>
         Need a test tenant seeded first?

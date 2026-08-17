@@ -1,13 +1,9 @@
-import React from 'react'
+import React, { useCallback, useEffect, useState } from 'react'
 import {
   Box,
   Typography,
   Card,
   CardContent,
-  CardHeader,
-  Alert,
-  AlertTitle,
-  Button,
   Stack,
   Chip,
   Paper,
@@ -17,142 +13,150 @@ import {
   TableContainer,
   TableHead,
   TableRow,
-  Avatar,
+  Button,
+  TextField,
+  IconButton,
+  Tooltip,
 } from '@mui/material'
-import {
-  Error as ErrorIcon,
-  Warning as WarningIcon,
-  Refresh as RefreshIcon,
-  Lightbulb as LightbulbIcon,
-  Block as BlockIcon,
-  Schedule as ScheduleIcon,
-} from '@mui/icons-material'
+import { Refresh as RefreshIcon } from '@mui/icons-material'
+import { fetchFailures, FailureRow } from '@/api/controlPlane'
+import ForensicModal from '@/components/ForensicModal'
 
+/**
+ * A dedicated, filterable failures triage view -- distinct from Mission
+ * Control's own "Recent failures" section, which is a short scrollable
+ * list meant for watching a run live, not for working through a large
+ * backlog. Same real data (fetchFailures/ForensicModal), just room to
+ * group by error type and search across everything on file.
+ */
 const ErrorHandling: React.FC = () => {
-  const errors = [
-    {
-      id: 1,
-      type: 'Rate Limited',
-      description: 'Google temporarily asked us to slow down.',
-      explanation: 'The Google API returned a 429 (Too Many Requests) error. This is normal during large migrations — Google protects its servers from being overwhelmed.',
-      resolution: 'The migration will automatically retry in 35 seconds. No action is required.',
-      status: 'auto-retrying',
-      autoFix: true,
-    },
-    {
-      id: 2,
-      type: 'Permission Denied',
-      description: 'The source user does not have access to a shared drive.',
-      explanation: 'The migration attempted to copy a file from a shared drive, but the source user\'s permissions do not include access to that drive.',
-      resolution: 'Grant the source user access to the shared drive, or exclude the file from migration.',
-      status: 'needs_attention',
-      autoFix: false,
-      actionRequired: 'Grant access in Admin Console > Drive > Sharing settings',
-    },
-    {
-      id: 3,
-      type: 'Quota Exceeded',
-      description: 'The daily Google API quota has been reached.',
-      explanation: 'Google imposes daily limits on API calls per project. When the quota is reached, new requests are rejected.',
-      resolution: 'The migration will pause and resume automatically when the quota resets (typically after 24 hours).',
-      status: 'paused',
-      autoFix: false,
-      actionRequired: 'Wait for quota reset, or request a quota increase in Google Cloud Console',
-    },
-    {
-      id: 4,
-      type: 'Network Timeout',
-      description: 'The connection to Google Drive timed out.',
-      explanation: 'A network interruption caused the API request to exceed the timeout threshold.',
-      resolution: 'The migration will automatically retry the failed request.',
-      status: 'retrying',
-      autoFix: true,
-    },
-  ]
+  const [failures, setFailures] = useState<FailureRow[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [filter, setFilter] = useState('')
+  const [forensic, setForensic] = useState<{ user: string; item: string } | null>(null)
+
+  const refresh = useCallback(() => {
+    setLoading(true); setError(null)
+    fetchFailures()
+      .then(setFailures)
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setLoading(false))
+  }, [])
+
+  useEffect(() => { refresh() }, [refresh])
+
+  const needle = filter.trim().toLowerCase()
+  const visible = needle
+    ? failures.filter((f) =>
+        f.source_user.toLowerCase().includes(needle)
+        || f.item_type.toLowerCase().includes(needle)
+        || (f.error_message ?? '').toLowerCase().includes(needle))
+    : failures
+
+  const byType = new Map<string, number>()
+  for (const f of failures) byType.set(f.item_type, (byType.get(f.item_type) ?? 0) + 1)
 
   return (
     <Box>
-      <Typography variant="h4" sx={{ fontWeight: 700, mb: 0.5 }}>Error Handling</Typography>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>Friendly error cards with clear explanations and resolution steps</Typography>
-
-      <Stack spacing={2} sx={{ mb: 3 }}>
-        {errors.map((error) => (
-          <Card key={error.id} elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>
-            <CardContent>
-              <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 2 }}>
-                <Avatar sx={{ bgcolor: error.status === 'auto-retrying' || error.status === 'retrying' ? 'warning.light' : error.status === 'paused' ? 'default' : 'error.light', color: error.status === 'paused' ? 'text.secondary' : 'error.contrastText', flexShrink: 0 }}>
-                  {error.status === 'auto-retrying' || error.status === 'retrying' ? <ScheduleIcon /> : error.status === 'paused' ? <BlockIcon /> : <ErrorIcon />}
-                </Avatar>
-                <Box sx={{ flexGrow: 1 }}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
-                    <Typography variant="subtitle1" fontWeight={600}>{error.type}</Typography>
-                    <Chip
-                      label={error.status === 'auto-retrying' ? 'Auto-Retrying' : error.status === 'retrying' ? 'Retrying' : error.status === 'paused' ? 'Paused' : 'Needs Attention'}
-                      size="small"
-                      color={error.status === 'auto-retrying' || error.status === 'retrying' ? 'warning' : error.status === 'paused' ? 'default' : 'error'}
-                      variant="outlined"
-                    />
-                  </Box>
-                  <Typography variant="body2" sx={{ mb: 1 }}>{error.description}</Typography>
-                  <Alert severity="info" sx={{ mb: 1, borderRadius: 2 }}>
-                    <AlertTitle>Why did this happen?</AlertTitle>
-                    {error.explanation}
-                  </Alert>
-                  <Alert severity="success" sx={{ borderRadius: 2 }}>
-                    <AlertTitle>How to fix it</AlertTitle>
-                    {error.resolution}
-                  </Alert>
-                  {!error.autoFix && error.actionRequired && (
-                    <Alert severity="warning" sx={{ borderRadius: 2, mt: 1 }}>
-                      <AlertTitle>Action Required</AlertTitle>
-                      {error.actionRequired}
-                      <Button variant="contained" color="warning" size="small" sx={{ ml: 2 }}>Fix Now</Button>
-                    </Alert>
-                  )}
-                </Box>
-              </Box>
-            </CardContent>
-          </Card>
-        ))}
+      <Stack direction="row" alignItems="center" sx={{ mb: 0.5 }}>
+        <Typography variant="h4" sx={{ fontWeight: 700, flexGrow: 1 }}>Failures</Typography>
+        <Tooltip title="Re-check">
+          <span>
+            <IconButton size="small" onClick={refresh} disabled={loading}>
+              <RefreshIcon fontSize="small" />
+            </IconButton>
+          </span>
+        </Tooltip>
       </Stack>
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+        Every FAILED item on file, across every user. Click a row for the
+        full attempt history and a scoped retry.
+      </Typography>
+
+      {error && (
+        <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'error.main', mb: 3 }}>
+          <CardContent>
+            <Typography variant="body2" color="error">{error}</Typography>
+          </CardContent>
+        </Card>
+      )}
+
+      <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 3 }}>
+        <CardContent>
+          <Typography variant="h6" sx={{ fontWeight: 600, mb: 2 }}>
+            By type ({failures.length} total)
+          </Typography>
+          {byType.size > 0 ? (
+            <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', gap: 1 }}>
+              {[...byType.entries()].sort((a, b) => b[1] - a[1]).map(([type, count]) => (
+                <Chip key={type} label={`${type} · ${count}`} size="small"
+                      color="error" variant="outlined"
+                      onClick={() => setFilter(type)} />
+              ))}
+            </Stack>
+          ) : (
+            <Typography variant="body2" color="text.secondary">
+              {loading ? 'Checking…' : 'No failures recorded.'}
+            </Typography>
+          )}
+        </CardContent>
+      </Card>
 
       <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>
         <CardContent>
-          <Typography variant="h6" sx={{ fontWeight: 600, mb: 2 }}>Error Summary</Typography>
-          <TableContainer>
-            <Table>
+          <Stack direction="row" spacing={2} alignItems="center" sx={{ mb: 2 }}>
+            <Typography variant="h6" sx={{ fontWeight: 600, flexGrow: 1 }}>
+              All failures {needle && `(${visible.length} matching)`}
+            </Typography>
+            <TextField size="small" placeholder="Filter by user, type, or message"
+                       value={filter} onChange={(e) => setFilter(e.target.value)}
+                       sx={{ width: 320 }} />
+            {filter && <Button size="small" onClick={() => setFilter('')}>Clear</Button>}
+          </Stack>
+          <TableContainer component={Paper} variant="outlined" sx={{ maxHeight: 520 }}>
+            <Table stickyHeader size="small">
               <TableHead>
                 <TableRow>
-                  <TableCell>Error Type</TableCell>
-                  <TableCell>Count</TableCell>
-                  <TableCell>Auto-Fix</TableCell>
-                  <TableCell>Status</TableCell>
+                  <TableCell sx={{ fontWeight: 600 }}>Time</TableCell>
+                  <TableCell sx={{ fontWeight: 600 }}>User</TableCell>
+                  <TableCell sx={{ fontWeight: 600 }}>Type</TableCell>
+                  <TableCell sx={{ fontWeight: 600 }}>Error</TableCell>
                 </TableRow>
               </TableHead>
               <TableBody>
-                <TableRow>
-                  <TableCell>Rate Limited (429)</TableCell>
-                  <TableCell>3</TableCell>
-                  <TableCell><Chip label="Yes" size="small" color="success" variant="outlined" /></TableCell>
-                  <TableCell><Chip label="Retrying" size="small" color="warning" variant="outlined" /></TableCell>
-                </TableRow>
-                <TableRow>
-                  <TableCell>Permission Denied (403)</TableCell>
-                  <TableCell>1</TableCell>
-                  <TableCell><Chip label="No" size="small" variant="outlined" /></TableCell>
-                  <TableCell><Chip label="Needs Attention" size="small" color="error" variant="outlined" /></TableCell>
-                </TableRow>
-                <TableRow>
-                  <TableCell>Quota Exceeded (403)</TableCell>
-                  <TableCell>1</TableCell>
-                  <TableCell><Chip label="No" size="small" variant="outlined" /></TableCell>
-                  <TableCell><Chip label="Paused" size="small" variant="outlined" /></TableCell>
-                </TableRow>
+                {visible.map((f) => (
+                  <TableRow key={f.id} hover sx={{ cursor: 'pointer' }}
+                            onClick={() => setForensic({ user: f.source_user, item: f.item_id })}>
+                    <TableCell sx={{ whiteSpace: 'nowrap' }}>
+                      {new Date(f.timestamp).toLocaleString()}
+                    </TableCell>
+                    <TableCell>{f.source_user}</TableCell>
+                    <TableCell>
+                      <Chip size="small" color="error" variant="outlined" label={f.item_type} />
+                    </TableCell>
+                    <TableCell sx={{ maxWidth: 480 }}>
+                      <Typography variant="body2" noWrap title={f.error_message ?? ''}>
+                        {f.error_message ?? '(no message)'}
+                      </Typography>
+                    </TableCell>
+                  </TableRow>
+                ))}
               </TableBody>
             </Table>
           </TableContainer>
+          {!loading && visible.length === 0 && (
+            <Typography variant="body2" color="text.secondary" sx={{ py: 3, textAlign: 'center' }}>
+              {failures.length === 0 ? 'No failures recorded.' : `Nothing matches "${filter}".`}
+            </Typography>
+          )}
         </CardContent>
       </Card>
+
+      <ForensicModal
+        open={!!forensic} sourceUser={forensic?.user ?? null} itemId={forensic?.item ?? null}
+        onClose={() => setForensic(null)} onRetried={refresh}
+      />
     </Box>
   )
 }
