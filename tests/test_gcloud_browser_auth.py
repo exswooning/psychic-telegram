@@ -288,3 +288,173 @@ class TestCleanup:
         monkeypatch.setattr(ga.subprocess, "run", lambda *a, **k: called.update(n=called["n"] + 1))
         ga.cleanup("")
         assert called["n"] == 0
+
+
+class _FakeCheckbox:
+    def __init__(self, container_text: str):
+        self._text = container_text
+        self._checked = False
+
+    def is_visible(self):
+        return True
+
+    def locator(self, xpath):
+        return self  # container == self is enough for inner_text() below
+
+    def inner_text(self, timeout=None):
+        return self._text
+
+    def is_checked(self):
+        return self._checked
+
+    def check(self, timeout=None):
+        self._checked = True
+
+
+class _FakeCheckboxLocator:
+    def __init__(self, texts: list):
+        self._boxes = [_FakeCheckbox(t) for t in texts]
+
+    def count(self):
+        return len(self._boxes)
+
+    def nth(self, i):
+        return self._boxes[i]
+
+
+class _FakeButton:
+    def __init__(self, matches: bool, page, starts_disabled: bool = False):
+        self._matches = matches
+        self._page = page
+        self._starts_disabled = starts_disabled
+
+    def count(self):
+        return 1 if self._matches else 0
+
+    @property
+    def first(self):
+        return self
+
+    def is_visible(self):
+        return True
+
+    def is_enabled(self):
+        return (not self._starts_disabled) or self._page.any_checkbox_checked()
+
+    def click(self):
+        self._page.clicked = True
+
+
+class _FakeTosPage:
+    """Just enough of a Playwright Page for _accept_cloud_console_tos's
+    own logic -- goto, one checkbox locator, one button-by-role lookup.
+    The real click-through against Google's actual console DOM is
+    exercised live (confirmed against a real, previously-blocked trial
+    account), same reasoning as this file's own module docstring.
+
+    The checkbox locator is built ONCE and reused, not rebuilt on every
+    `.locator()` call -- otherwise a checkbox checked on one poll of the
+    real function's loop would forget it was checked the next time
+    around, which a real Playwright locator never does."""
+
+    def __init__(self, checkbox_texts=(), continue_label=None, button_starts_disabled=False):
+        self._checkboxes = _FakeCheckboxLocator(list(checkbox_texts))
+        self.continue_label = continue_label
+        self.button_starts_disabled = button_starts_disabled
+        self.clicked = False
+        self.goto_calls = []
+
+    def any_checkbox_checked(self) -> bool:
+        return any(b.is_checked() for b in self._checkboxes._boxes)
+
+    def goto(self, url, wait_until=None, timeout=None):
+        self.goto_calls.append(url)
+
+    def locator(self, selector):
+        assert selector == 'input[type="checkbox"]'
+        return self._checkboxes
+
+    def get_by_role(self, role, name=None):
+        assert role == "button"
+        return _FakeButton(name == self.continue_label, self,
+                           starts_disabled=self.button_starts_disabled)
+
+    def wait_for_timeout(self, ms):
+        pass
+
+
+class TestAcceptCloudConsoleTos:
+    def _fast_forward(self, monkeypatch):
+        """_accept_cloud_console_tos tries multiple candidate URLs in
+        turn, each running its own independent copy of the same
+        wait-for-a-checkbox loop with its own freshly-captured `start` --
+        a fixed "0 then some big number" fake time.time() only works for
+        ONE such loop and spins forever on the second, since every call
+        after its own `start` would see zero elapsed time. A steadily
+        advancing clock instead guarantees both the 5s "no checkbox at
+        all" grace period and the overall `timeout` deadline eventually
+        clear, no matter how many times a fresh `start` gets captured."""
+        monkeypatch.setattr(ga.time, "sleep", lambda s: None)
+        state = {"t": 0.0}
+
+        def fake_time():
+            state["t"] += 2.0
+            return state["t"]
+        monkeypatch.setattr(ga.time, "time", fake_time)
+
+    def test_not_needed_when_no_tos_checkbox_ever_appears(self, monkeypatch):
+        """The ordinary case, every time after the very first: every
+        candidate URL just loads normally, nothing to accept anywhere."""
+        self._fast_forward(monkeypatch)
+        page = _FakeTosPage(checkbox_texts=[])
+        outcome = ga._accept_cloud_console_tos(page, timeout=30)
+        assert outcome == "not_needed"
+        assert page.goto_calls == list(ga._TOS_CANDIDATE_URLS)
+
+    def test_unrelated_checkboxes_are_left_alone(self, monkeypatch):
+        """A page with SOME checkbox that has nothing to do with the ToS
+        (e.g. an unrelated preference) must not be treated as the gate --
+        only text actually naming the Terms of Service counts."""
+        self._fast_forward(monkeypatch)
+        page = _FakeTosPage(checkbox_texts=["Send me product updates"])
+        outcome = ga._accept_cloud_console_tos(page, timeout=30)
+        assert outcome == "not_needed"
+
+    def test_accepts_when_a_tos_checkbox_and_button_are_present(self, monkeypatch):
+        page = _FakeTosPage(
+            checkbox_texts=["Yes, I have read and agree to the Terms of Service"],
+            continue_label="Agree and continue")
+        outcome = ga._accept_cloud_console_tos(page, timeout=30)
+        assert outcome == "accepted"
+        assert page.clicked is True
+
+    def test_a_button_disabled_until_checked_is_not_clicked_prematurely(self, monkeypatch):
+        """Confirmed live against Google's real "New Project" welcome
+        modal: "Agree and continue" renders disabled until the ToS
+        checkbox above it is checked. The button-only fallback branch
+        (for consent pages with no checkbox at all) used to try clicking
+        it on the very first pass regardless -- Playwright raises on a
+        click against a disabled element, which this must not do, and
+        must still reach "accepted" once the checkbox is actually
+        checked."""
+        page = _FakeTosPage(
+            checkbox_texts=["I agree to the Google Cloud Platform Terms of Service"],
+            continue_label="Agree and continue", button_starts_disabled=True)
+        outcome = ga._accept_cloud_console_tos(page, timeout=30)
+        assert outcome == "accepted"
+        assert page.clicked is True
+
+    def test_checkbox_found_but_no_matching_button_reports_could_not_find_prompt(self, monkeypatch):
+        """A future console redesign changing the button's wording must
+        degrade to a clear, distinguishable outcome -- not silently look
+        like success."""
+        page = _FakeTosPage(
+            checkbox_texts=["Terms of Service"], continue_label="Some New Wording")
+        outcome = ga._accept_cloud_console_tos(page, timeout=30)
+        assert outcome == "could_not_find_prompt"
+
+    def test_a_goto_failure_is_reported_not_raised(self, monkeypatch):
+        class BoomPage:
+            def goto(self, *a, **k):
+                raise Exception("net::ERR_CONNECTION_RESET")  # noqa: TRY002
+        assert ga._accept_cloud_console_tos(BoomPage(), timeout=5) == "could_not_find_prompt"

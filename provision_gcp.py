@@ -46,6 +46,7 @@ import random
 import shutil
 import subprocess
 import sys
+from typing import Callable
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -162,6 +163,64 @@ def project_exists(project: str, env: dict | None = None) -> bool:
     return rc == 0
 
 
+def delete_project(project: str, env: dict | None = None) -> tuple[bool, str]:
+    """Tear down a project this tool created.
+
+    `gcloud projects delete` only ever soft-deletes -- Google holds the
+    project (and everything in it: the service account, its key material,
+    billing history) for 30 days before actually purging it, recoverable
+    with `gcloud projects undelete` in the meantime. That is Google's
+    behaviour, not a guarantee made here; nothing in this codebase depends
+    on the 30-day window.
+
+    Deliberately does NOT check project_exists() first: a project that is
+    already gone (or already soft-deleted) makes `describe` fail exactly
+    the same way `delete` would have, so calling delete directly and
+    reading its own error is one fewer round trip and one fewer place for
+    the two checks to disagree about a project's state.
+    """
+    rc, out = run(["gcloud", "projects", "delete", project], timeout=120, env=env)
+    if rc == 0:
+        return True, f"{project} deleted (recoverable for 30 days via undelete)"
+    if "not found" in out.lower() or "does not exist" in out.lower():
+        return True, f"{project} already gone"
+    return False, out.strip()[-300:]
+
+
+# Known, real gates a brand-new Google account can hit here, none of
+# which look anything like "fix your gcloud command" -- matched by a
+# substring of gcloud's own error text so whoever reads the Result box
+# knows immediately whether this is something the automation should have
+# already cleared (ToS), something only the account owner can clear
+# (billing), or something that just needs time (quota).
+_KNOWN_PROJECT_CREATE_ERRORS = (
+    ("Callers must accept Terms of Service",
+     "This Google account has never used Google Cloud before, and Google "
+     "gates project creation on a one-time Terms of Service acceptance "
+     "that gcloud_browser_auth.py's sign-in step should already have "
+     "cleared automatically. Seeing this anyway means that step didn't "
+     "land -- visit https://console.cloud.google.com once as this "
+     "account, accept the terms shown there, then try again."),
+    ("billing account",
+     "This project needs a billing account, which is not something this "
+     "tool can create on your behalf (it needs real payment details). "
+     "Link one at https://console.cloud.google.com/billing for this "
+     "account, then try again."),
+    ("quota",
+     "This Google account has hit a project-creation quota -- common and "
+     "usually temporary for a brand-new account. Wait a while and try "
+     "again, or request an increase at "
+     "https://console.cloud.google.com/iam-admin/quotas."),
+)
+
+
+def _explain_project_create_failure(raw: str) -> str:
+    for needle, explanation in _KNOWN_PROJECT_CREATE_ERRORS:
+        if needle.lower() in raw.lower():
+            return f"{explanation} (raw: {raw[-200:]})"
+    return raw
+
+
 def ensure_project(project: str, org: str, steps: list[Step],
                    dry_run: bool, env: dict | None = None) -> bool:
     s = Step(f"project {project}")
@@ -177,14 +236,15 @@ def ensure_project(project: str, org: str, steps: list[Step],
         argv.append(f"--organization={org}")
     rc, out = run(argv, timeout=600, env=env)
     if rc != 0:
-        s.status, s.detail = "failed", out.strip()[-300:]
+        s.status, s.detail = "failed", _explain_project_create_failure(out.strip()[-300:])
         return False
     s.status, s.detail = "ok", f"created{' in org ' + org if org else ''}"
     return True
 
 
 def enable_apis(project: str, apis: list[str], steps: list[Step],
-                dry_run: bool, env: dict | None = None) -> bool:
+                dry_run: bool, env: dict | None = None,
+                on_step: Callable[[Step], None] | None = None) -> bool:
     """One API per call, deliberately.
 
     `gcloud services enable a b c ...` fails on a freshly created project
@@ -192,6 +252,10 @@ def enable_apis(project: str, apis: list[str], steps: list[Step],
     while the identical list enabled individually succeeds every time. It is
     slower and it works, which is the correct trade for a step that runs
     once per tenant.
+
+    on_step, called after each API (not each list), is what gives a caller
+    real per-API progress through the slowest part of provisioning instead
+    of one silent 20-second gap between "project created" and "APIs done".
     """
     ok = True
     for api in apis:
@@ -199,19 +263,71 @@ def enable_apis(project: str, apis: list[str], steps: list[Step],
         steps.append(s)
         if dry_run:
             s.status, s.detail = "skipped", "dry run"
-            continue
-        rc, out = run(["gcloud", "services", "enable", api,
-                       f"--project={project}"], timeout=300, env=env)
-        if rc == 0:
-            s.status = "ok"
         else:
-            s.status, s.detail = "failed", out.strip()[-200:]
-            ok = False
+            rc, out = run(["gcloud", "services", "enable", api,
+                           f"--project={project}"], timeout=300, env=env)
+            if rc == 0:
+                s.status = "ok"
+            else:
+                s.status, s.detail = "failed", out.strip()[-200:]
+                ok = False
+        if on_step:
+            on_step(s)
     return ok
 
 
+def _self_grant_orgpolicy_admin(org: str, steps: list[Step], dry_run: bool,
+                                env: dict | None = None) -> None:
+    """Close the gap this project hit live, automatically: a Workspace
+    super admin does NOT automatically hold roles/orgpolicy.policyAdmin --
+    it is a separate Cloud IAM role Google does not bundle with Workspace
+    admin rights, confirmed the hard way when a real provisioning run
+    retried key creation 7 times over ~180s and still failed with
+    CUSTOM_ORG_POLICY_VIOLATION, because the account relaxing the policy
+    was never actually allowed to.
+
+    What that same live investigation also confirmed: an account that is
+    the org's actual owner already holds
+    roles/resourcemanager.organizationAdmin (granted automatically), and
+    THAT role can self-grant orgpolicy.policyAdmin in one IAM call -- no
+    human, no second admin, no support ticket. This does that call
+    automatically, every run, before it would otherwise be needed:
+
+    * If the account already holds orgpolicy.policyAdmin, granting it
+      again is a no-op -- gcloud returns success immediately.
+    * If the account lacks organizationAdmin too, the grant fails with a
+      permission error, caught here and reported as "skipped" -- the
+      run falls through to the existing manual-intervention message
+      exactly as before this function existed. Never fatal on its own.
+    """
+    s = Step(f"self-grant orgpolicy.policyAdmin on org {org}" if org
+            else "self-grant orgpolicy.policyAdmin")
+    steps.append(s)
+    if dry_run:
+        s.status, s.detail = "skipped", "dry run"
+        return
+    if not org:
+        s.status, s.detail = "skipped", "no organization id known"
+        return
+    rc, out = run(["gcloud", "config", "get-value", "account"], env=env)
+    account = next((ln.strip() for ln in out.splitlines() if "@" in ln), "")
+    if rc != 0 or not account:
+        s.status, s.detail = "skipped", "could not determine the calling account"
+        return
+    rc, out = run(
+        ["gcloud", "organizations", "add-iam-policy-binding", org,
+         f"--member=user:{account}", "--role=roles/orgpolicy.policyAdmin"],
+        timeout=120, env=env)
+    if rc == 0:
+        s.status, s.detail = "ok", f"{account} now holds roles/orgpolicy.policyAdmin"
+    else:
+        s.status, s.detail = "skipped", (
+            f"{account} cannot grant IAM roles on this org -- "
+            f"{out.strip()[-150:]}")
+
+
 def relax_key_policy(project: str, steps: list[Step], dry_run: bool,
-                     env: dict | None = None) -> None:
+                     org: str = "", env: dict | None = None) -> None:
     """Allow SA key creation on THIS project only.
 
     Newer Workspace orgs enforce `iam.managed.disableServiceAccountKeyCreation`
@@ -223,6 +339,15 @@ def relax_key_policy(project: str, steps: list[Step], dry_run: bool,
     Scoped to the project rather than lifting it org-wide: the default is a
     good one, and a migration needs the exception in exactly two places.
     """
+    # Before even trying to relax the constraint: give the calling account
+    # every chance to already be allowed to. See
+    # _self_grant_orgpolicy_admin's own docstring for why this is both
+    # necessary (Workspace admin != orgpolicy.policyAdmin) and safe to
+    # attempt unconditionally on every run. Runs first (and is itself
+    # dry-run-aware) so the step count -- and so provision_side()'s own
+    # `total` estimate -- stays right in both modes, not just the real one.
+    _self_grant_orgpolicy_admin(org, steps, dry_run, env=env)
+
     s = Step(f"allow SA keys on {project}")
     steps.append(s)
     if dry_run:
@@ -243,15 +368,37 @@ def relax_key_policy(project: str, steps: list[Step], dry_run: bool,
         # survives into this call instead of silently falling back to
         # whatever config directory this process would otherwise default to.
         policy_env = dict(env or os.environ, CLOUDSDK_CORE_PROJECT=project)
-        run(["gcloud", "services", "enable", "orgpolicy.googleapis.com",
+        enable_rc, enable_out = run(
+            ["gcloud", "services", "enable", "orgpolicy.googleapis.com",
              f"--project={project}"], timeout=300, env=policy_env)
-        rc, out = run(["gcloud", "org-policies", "set-policy", path],
-                      timeout=300, env=policy_env)
+        # Confirmed live: enabling an API on a project created moments
+        # earlier in this SAME run can succeed and still not be usable
+        # yet -- the very next call fails SERVICE_DISABLED against the
+        # API this just turned on. Retrying set-policy specifically on
+        # that error (not e.g. a real syntax problem with the policy
+        # file) is what actually gets past a propagation gap instead of
+        # giving up one call too early.
+        rc, out = 1, ""
+        for attempt in range(4):
+            rc, out = run(["gcloud", "org-policies", "set-policy", path],
+                          timeout=300, env=policy_env)
+            if rc == 0 or "SERVICE_DISABLED" not in out or attempt == 3:
+                break
+            time.sleep(5 * (attempt + 1))
         if rc == 0:
             s.status, s.detail = "ok", "key creation permitted on this project"
+        elif not enable_rc == 0 and "SERVICE_DISABLED" in out:
+            # The enable call itself never succeeded (rare -- e.g. the API
+            # is org-blocked outright) -- say so plainly rather than the
+            # more general "not fatal" framing below, which assumes
+            # enablement worked and only enforcement is what's stale.
+            s.status, s.detail = "skipped", (
+                f"could not enable orgpolicy.googleapis.com: {enable_out.strip()[-150:]}")
         else:
-            # Not fatal: the org may not enforce it at all, in which case
-            # nothing needed doing and key creation will simply work.
+            # Not fatal: the org may not enforce the constraint at all, in
+            # which case nothing needed doing and key creation will simply
+            # work -- create_key()'s own retry covers the remaining case
+            # where THIS succeeded but enforcement is still catching up.
             s.status, s.detail = "skipped", out.strip()[-200:]
     except Exception as exc:      # noqa: BLE001
         s.status, s.detail = "skipped", str(exc)[:200]
@@ -310,6 +457,42 @@ def grant_service_usage(project: str, sa_email: str, steps: list[Step],
     s.status, s.detail = "failed", out.strip()[-200:]
 
 
+# Confirmed live: a brand-new org's Workspace super admin does not
+# automatically hold the GCP-side "Organization Policy Administrator"
+# role needed to relax iam.managed.disableServiceAccountKeyCreation --
+# Workspace admin and GCP IAM are separate permission systems, and being
+# the former never implies the latter. relax_key_policy() already treats
+# its own failure to set the policy as non-fatal (the org may simply not
+# enforce it, the common case) -- when it DOES enforce it and the relax
+# attempt was denied rather than merely absent, key creation fails here
+# with this exact shape, and no retry or different URL fixes it: it is a
+# real permissions gap, not a missing click.
+_KNOWN_KEY_CREATE_ERRORS = (
+    ("disableServiceAccountKeyCreation",
+     "This organization enforces a policy blocking service-account key "
+     "creation, and this account doesn't hold the Organization Policy "
+     "Administrator role needed to relax it for this one project (being "
+     "a Workspace super admin doesn't automatically grant that -- it's a "
+     "separate Google Cloud IAM role). Either have an Organization "
+     "Administrator grant this account roles/orgpolicy.policyAdmin (or "
+     "relax the constraint for this project directly) and try again, or "
+     "use the Manual tab instead: run provision_gcp.py on a machine "
+     "signed in as someone who already holds that role."),
+    ("IAM_PERMISSION_DENIED",
+     "This account doesn't have the IAM permissions this step needs. "
+     "Ask an Organization Administrator to grant the missing role, or "
+     "use the Manual tab to provision from a machine signed in as "
+     "someone who already holds it."),
+)
+
+
+def _explain_key_create_failure(raw: str) -> str:
+    for needle, explanation in _KNOWN_KEY_CREATE_ERRORS:
+        if needle.lower() in raw.lower():
+            return f"{explanation} (raw: {raw[-200:]})"
+    return raw
+
+
 def create_key(project: str, sa_email: str, dest: str, steps: list[Step],
                dry_run: bool, force: bool, env: dict | None = None) -> bool:
     s = Step(f"key -> {dest}")
@@ -324,24 +507,56 @@ def create_key(project: str, sa_email: str, dest: str, steps: list[Step],
         s.status, s.detail = "skipped", "key already present (use --force to replace)"
         return True
     os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
-    rc, out = run(["gcloud", "iam", "service-accounts", "keys", "create", dest,
-                   f"--iam-account={sa_email}", f"--project={project}"],
-                  timeout=300, env=env)
-    # gcloud leaves a zero-byte file behind when the org policy blocks this,
-    # so existence is not success -- check the content is real JSON.
-    if rc == 0 and os.path.isfile(dest) and os.path.getsize(dest) > 0:
-        try:
-            with open(dest, encoding="utf-8") as fh:
-                json.load(fh)
-            os.chmod(dest, 0o600)
-            s.status, s.detail = "ok", "created"
-            return True
-        except (OSError, ValueError) as exc:
-            s.status, s.detail = "failed", f"key file is not valid JSON: {exc}"
-            return False
-    if os.path.isfile(dest) and os.path.getsize(dest) == 0:
-        os.unlink(dest)     # do not leave an empty file that looks like a key
-    s.status, s.detail = "failed", out.strip()[-250:]
+
+    # relax_key_policy() runs immediately before this and can genuinely
+    # succeed -- confirmed live, the hard way: `gcloud org-policies
+    # describe --effective` read back enforce: false right after the
+    # override was applied, and the very next `keys create` call STILL
+    # hit CUSTOM_ORG_POLICY_VIOLATION. Google's org-policy ENFORCEMENT
+    # path lags behind its own READ path; a 30-second retry budget (four
+    # attempts, 5-20s apart) was not enough to see it clear even once in
+    # three separate live runs against a real org. This budget is
+    # generous on purpose -- Google's own guidance on org-policy
+    # propagation cites delays up to several minutes -- and, same as
+    # grant_service_usage()'s IAM-binding retry above, only fires for
+    # THIS specific error; a wrong project or missing service account
+    # fails on the first attempt exactly like it always did.
+    backoffs = (10, 15, 20, 30, 45, 60)  # ~3 minutes total if every attempt is denied
+    out = ""
+    retried = False
+    for attempt in range(len(backoffs) + 1):
+        rc, out = run(["gcloud", "iam", "service-accounts", "keys", "create", dest,
+                       f"--iam-account={sa_email}", f"--project={project}"],
+                      timeout=300, env=env)
+        # gcloud leaves a zero-byte file behind when the org policy blocks
+        # this, so existence is not success -- check the content is real JSON.
+        if rc == 0 and os.path.isfile(dest) and os.path.getsize(dest) > 0:
+            try:
+                with open(dest, encoding="utf-8") as fh:
+                    json.load(fh)
+                os.chmod(dest, 0o600)
+                s.status, s.detail = ("ok", "created") if not retried else (
+                    "ok", f"created (needed {attempt + 1} attempts -- org-policy "
+                          "enforcement took a moment to catch up with the override)")
+                return True
+            except (OSError, ValueError) as exc:
+                s.status, s.detail = "failed", f"key file is not valid JSON: {exc}"
+                return False
+        if os.path.isfile(dest) and os.path.getsize(dest) == 0:
+            os.unlink(dest)     # do not leave an empty file that looks like a key
+        if "disableServiceAccountKeyCreation" not in out or attempt == len(backoffs):
+            break
+        retried = True
+        time.sleep(backoffs[attempt])
+
+    explained = _explain_key_create_failure(out.strip()[-250:])
+    if retried:
+        explained = (
+            f"Retried {len(backoffs) + 1} times over ~{sum(backoffs)}s after the org-policy "
+            f"override was applied -- Google's enforcement still hadn't caught up. "
+            f"{explained} It may just need more time than this run waited; "
+            "re-running often succeeds on its own once propagation finishes.")
+    s.status, s.detail = "failed", explained
     return False
 
 
@@ -354,19 +569,38 @@ def client_id_of(key_path: str) -> str:
 
 
 def provision_side(side: str, project: str, org: str, key_dest: str,
-                   dry_run: bool, force: bool, env: dict | None = None) -> dict:
+                   dry_run: bool, force: bool, env: dict | None = None,
+                   on_step: Callable[[int, int, str], None] | None = None) -> dict:
+    """on_step(done, total, step_name), called after every single step --
+    not just once per function -- is what lets a caller show real,
+    smoothly-advancing progress through the slowest part of setup (a
+    dozen sequential API-enable calls) instead of one long silent gap
+    between "project created" and "APIs done"."""
     steps: list[Step] = []
     sa = f"{side}-sa"
+    # project, N APIs, SA, grant, self-grant-orgpolicy, relax, key
+    total = 6 + len(SUPPORT_APIS + APIS)
+
+    def _tick() -> None:
+        if on_step and steps:
+            on_step(len(steps), total, steps[-1].name)
 
     if not ensure_project(project, org, steps, dry_run, env=env):
+        _tick()
         return {"side": side, "project": project, "ok": False,
                 "steps": [s.as_dict() for s in steps], "clientId": ""}
+    _tick()
 
-    enable_apis(project, SUPPORT_APIS + APIS, steps, dry_run, env=env)
+    enable_apis(project, SUPPORT_APIS + APIS, steps, dry_run, env=env,
+               on_step=lambda s: on_step and on_step(len(steps), total, s.name))
     sa_email = ensure_service_account(project, sa, steps, dry_run, env=env)
+    _tick()
     grant_service_usage(project, sa_email, steps, dry_run, env=env)
-    relax_key_policy(project, steps, dry_run, env=env)
+    _tick()
+    relax_key_policy(project, steps, dry_run, org=org, env=env)
+    _tick()
     created = create_key(project, sa_email, key_dest, steps, dry_run, force, env=env)
+    _tick()
 
     return {"side": side, "project": project, "saEmail": sa_email,
             "keyPath": key_dest,
@@ -436,8 +670,12 @@ def render(result: dict) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[3])
-    ap.add_argument("--source-domain", required=True)
-    ap.add_argument("--target-domain", required=True)
+    # Not `required=True`: --delete-project needs neither, and argparse's
+    # own required-arg check runs before this function ever gets a chance
+    # to branch on --delete-project itself. Enforced by hand below instead,
+    # only on the path that actually needs them.
+    ap.add_argument("--source-domain", default="")
+    ap.add_argument("--target-domain", default="")
     ap.add_argument("--org-id", default="", help="auto-detected when the "
                                                  "account can see exactly one")
     ap.add_argument("--source-project", default="")
@@ -453,7 +691,21 @@ def main(argv: list[str] | None = None) -> int:
     # visible to a ps listing.
     ap.add_argument("--account-id", default="")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--delete-project", default="",
+                    help="tear down a project this tool created, instead "
+                         "of creating anything -- gcloud projects delete, "
+                         "soft-deleted and recoverable for 30 days")
     args = ap.parse_args(argv)
+
+    if args.delete_project:
+        ok, detail = delete_project(args.delete_project)
+        print(json.dumps({"ok": ok, "detail": detail}, indent=2)
+              if args.json else detail)
+        return 0 if ok else 1
+
+    if not args.source_domain or not args.target_domain:
+        ap.error("--source-domain and --target-domain are required "
+                 "(unless using --delete-project)")
 
     # Only offer this from the CLI, not from provision()/provision_side()
     # themselves -- those are also called non-interactively (full_setup.py,

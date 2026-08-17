@@ -48,12 +48,17 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 
 
 def log(msg: str) -> None:
-    print(f"[gcloud-auth] {msg}", flush=True)
+    # stderr, not stdout -- see dwd_helper.log()'s comment: full_setup.py
+    # --json prints its final structured result to stdout, and a caller
+    # capturing that stream would otherwise get it interleaved with these
+    # progress lines, making the whole thing unparseable.
+    print(f"[gcloud-auth] {msg}", file=sys.stderr, flush=True)
 
 
 _AUTH_URL_RE = re.compile(r"https://accounts\.google\.com/o/oauth2/auth\S+")
@@ -213,4 +218,176 @@ def _drive_browser(proc, url: str, email: str, password: str, timeout: int) -> N
                     pg.screenshot(path=f"/tmp/gcloud-auth-timeout-{i}.png")
             except Exception:      # noqa: BLE001 - diagnostics only
                 pass
+        else:
+            # gcloud caught the OAuth redirect -- sign-in genuinely
+            # succeeded. Same authenticated session, one more thing to
+            # clear before handing back to the caller: see
+            # _accept_cloud_console_tos()'s own docstring for why.
+            try:
+                outcome = _accept_cloud_console_tos(page, timeout=30)
+                log(f"  Cloud Console ToS check: {outcome}")
+            except Exception as exc:      # noqa: BLE001 - best-effort
+                log(f"  Cloud Console ToS check raised ({exc}) -- continuing anyway")
         browser.close()
+
+
+# Wording changes without notice (same caveat dwd_helper.py's own
+# selectors carry) -- matched by CONTENT near a checkbox rather than a
+# fixed id/aria-label, and every plausible submit-button label tried in
+# turn, so a future console redesign degrades to "did nothing" rather
+# than a crash.
+_TOS_CHECKBOX_HINTS = ("terms of service", "i have read and agree")
+_TOS_CONTINUE_LABELS = ("Agree and continue", "AGREE AND CONTINUE", "Agree and Continue",
+                        "I agree", "Accept", "Continue")
+
+# Confirmed live, the hard way, against a real never-used-GCP-before
+# account: neither the plain console homepage
+# (console.cloud.google.com/welcome/new, loads completely normally --
+# full nav, project picker, nothing to accept) nor the generic
+# console.developers.google.com/terms/universal page (reported "The
+# requested Terms of Service have already been accepted" -- a DIFFERENT,
+# already-satisfied agreement) is what gates `gcloud projects create`'s
+# "Callers must accept Terms of Service" (type: TOS, subject: cloud).
+# The real gate only renders as a "Welcome" modal -- country, a "Terms of
+# Service" checkbox for the actual Google Cloud Platform ToS, an
+# "Agree and continue" button disabled until it's checked -- on the
+# **Create Project** page specifically. The other two stay as harmless,
+# fast fallbacks in case Google ever also gates one of them.
+_TOS_CANDIDATE_URLS = (
+    "https://console.cloud.google.com/projectcreate",
+    "https://console.developers.google.com/terms/universal",
+    "https://console.cloud.google.com/",
+)
+
+
+def _accept_cloud_console_tos(page, timeout: int = 30) -> str:
+    """Best-effort: visits one or more known Google Terms-of-Service
+    consent pages, on the session the browser is already signed into, and
+    clicks through whichever one actually gates this identity if it has
+    never used GCP before.
+
+    Why this exists: `gcloud projects create` on a brand-new Google
+    account fails with "Callers must accept Terms of Service" -- a real
+    Google-side gate with no gcloud/API equivalent, only a web consent
+    screen, confirmed live against a fresh trial account. It never shows
+    again once accepted, so this costs a few seconds on a genuinely
+    first-time identity and is a same-page no-op every time after --
+    worth doing unconditionally rather than only after seeing the error
+    once, since the browser session needed to clear it is already open
+    right here and won't be by the time provision_gcp.py's plain `gcloud`
+    subprocess call hits that error on its own.
+
+    Returns "accepted" / "not_needed" / "could_not_find_prompt" -- logged
+    by the caller, never raised. A failure here must fall through to
+    provision_gcp.py's own (now more specific, see
+    _explain_project_create_failure) error rather than aborting sign-in,
+    since sign-in itself already succeeded.
+    """
+    saw_prompt_without_a_button = False
+    for url in _TOS_CANDIDATE_URLS:
+        outcome = _try_accept_tos_at(page, url, timeout)
+        if outcome == "accepted":
+            return outcome
+        if outcome == "could_not_find_prompt":
+            saw_prompt_without_a_button = True
+    # Distinguishing these matters for diagnosis: "not_needed" means every
+    # candidate genuinely had nothing to accept; "could_not_find_prompt"
+    # means at least one had a real ToS checkbox this couldn't find a
+    # matching submit button for -- collapsing the two into one outcome
+    # would hide a console redesign behind a log line that reads as fine.
+    return "could_not_find_prompt" if saw_prompt_without_a_button else "not_needed"
+
+
+def _try_accept_tos_at(page, url: str, timeout: int) -> str:
+    tag_base = re.sub(r"[^a-z0-9]+", "-", url.split("//", 1)[-1]).strip("-")[:40]
+
+    def _save_diagnostics(tag: str) -> None:
+        # Best-effort: this function's whole job is to be resilient to a
+        # console redesign, so the FIRST time it guesses wrong there needs
+        # to be something to look at other than a log line saying
+        # "not_needed" -- which is indistinguishable from actually true.
+        try:
+            page.screenshot(path=f"/tmp/gcloud-tos-{tag_base}-{tag}.png")
+            with open(f"/tmp/gcloud-tos-{tag_base}-{tag}.txt", "w", encoding="utf-8") as fh:
+                fh.write(f"URL: {page.url}\n\n{page.inner_text('body')[:3000]}")
+        except Exception:      # noqa: BLE001 - diagnostics only
+            pass
+
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
+        page.wait_for_timeout(2000)  # a client-rendered consent dialog needs a beat to appear
+    except Exception:      # noqa: BLE001
+        _save_diagnostics("goto-failed")
+        return "could_not_find_prompt"
+
+    # Always kept, not just on failure: an "accepted" outcome that turns
+    # out to have clicked the wrong thing (confirmed live -- see the
+    # comment on _TOS_CANDIDATE_URLS) is just as worth being able to see
+    # after the fact as an outright miss.
+    _save_diagnostics("before-click")
+
+    def _click_continue() -> bool:
+        # Confirmed live: the real button ("Agree and continue") starts
+        # disabled until the ToS checkbox above it is checked -- without
+        # is_enabled() here, the button-only fallback path below would try
+        # clicking it on the very first loop pass, before any checkbox has
+        # been checked, and Playwright raises (rather than no-ops) on a
+        # click against a disabled element.
+        for label in _TOS_CONTINUE_LABELS:
+            btn = page.get_by_role("button", name=label)
+            if btn.count() > 0 and btn.first.is_visible() and btn.first.is_enabled():
+                try:
+                    btn.first.click()
+                except Exception:      # noqa: BLE001 - try the next label
+                    continue
+                page.wait_for_timeout(2000)
+                _save_diagnostics("after-click")
+                return True
+        return False
+
+    start = time.time()
+    deadline = start + timeout
+    checked = False
+    while time.time() < deadline:
+        boxes = page.locator('input[type="checkbox"]')
+        n = boxes.count()
+        for i in range(min(n, 8)):
+            box = boxes.nth(i)
+            try:
+                if not box.is_visible():
+                    continue
+                container = box.locator(
+                    "xpath=ancestor::*[self::label or self::div][1]")
+                text = container.inner_text(timeout=500).lower()
+            except Exception:      # noqa: BLE001 - try the next checkbox
+                continue
+            if any(hint in text for hint in _TOS_CHECKBOX_HINTS):
+                try:
+                    if not box.is_checked():
+                        box.check(timeout=2000)
+                    checked = True
+                except Exception:      # noqa: BLE001
+                    pass
+        if checked:
+            break
+        # Some of Google's own consent pages are a single button with no
+        # checkbox at all -- a visible, known-labelled button is its own
+        # signal this is a consent screen worth clicking through.
+        if _click_continue():
+            return "accepted"
+        # Give the page a few seconds to finish loading before concluding
+        # there is genuinely nothing to accept here (the ordinary case:
+        # already accepted, or this candidate URL isn't the right gate).
+        if n == 0 and time.time() - start > 5:
+            _save_diagnostics("not-needed")
+            return "not_needed"
+        time.sleep(1)
+
+    if not checked:
+        _save_diagnostics("timed-out-unchecked")
+        return "not_needed"
+
+    if _click_continue():
+        return "accepted"
+    _save_diagnostics("checked-but-no-button")
+    return "could_not_find_prompt"

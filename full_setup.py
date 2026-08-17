@@ -62,6 +62,7 @@ import json
 import os
 import random
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -93,7 +94,7 @@ def run_full_setup(
     org_id: str = "", keys_dir: str = "keys", dry_run: bool = False,
     seed: bool = False, seed_scale: str = "small", create_users: bool = False,
     provision_users: bool = False, timeout: int = 900,
-    account_id: int | None = None,
+    account_id: int | None = None, progress_file: str | None = None,
 ) -> dict:
     """side is 'source' or 'target'. Returns {phases: [...], ok: bool, ...}.
 
@@ -104,11 +105,31 @@ def run_full_setup(
     provisioning or DWD-verification phases above: those already get the
     right domain/admin via the transient os.environ override a few lines
     down, which works identically regardless of which account is calling.
+
+    progress_file, when given, gets a live "how far along is this" signal
+    the caller couldn't otherwise have: the `phases` list above only ever
+    exists in full once this function returns, which for a real (non-dry)
+    run can be several minutes away -- long enough that a UI polling for
+    it sees nothing but "still running" the entire time. Best-effort by
+    design (see _progress()) -- a failed write must never take down the
+    run it's reporting on.
     """
     if side not in ("source", "target"):
         raise ValueError("side must be 'source' or 'target'")
 
+    def _progress(pct: int, label: str) -> None:
+        if not progress_file:
+            return
+        try:
+            tmp = progress_file + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump({"pct": pct, "label": label}, fh)
+            os.replace(tmp, progress_file)
+        except OSError:
+            pass
+
     phases: list[Phase] = []
+    _progress(2, "starting")
 
     # -- 1. Cloud project, APIs, service account, key ----------------------
     # Skipped entirely when this account already has a real key uploaded
@@ -161,10 +182,12 @@ def run_full_setup(
         # target call, silently reading the other tenant's project and key.
         env = None
         cloudsdk_config = ""
+        _progress(3, "checking for an existing gcloud sign-in")
         ready, account_or_err = provision_gcp.gcloud_ready()
         if not ready:
             auth_phase = Phase(f"authenticate gcloud as {admin_email}")
             phases.append(auth_phase)
+            _progress(5, f"signing in to Google Cloud as {admin_email}")
             ok, detail, cloudsdk_config = gcloud_browser_auth.login(
                 admin_email, admin_password, timeout=timeout)
             if not ok:
@@ -173,6 +196,7 @@ def run_full_setup(
                 return {"side": side, "ok": False, "phases": [x.as_dict() for x in phases]}
             auth_phase.status, auth_phase.detail = "ok", detail
             env = dict(os.environ, CLOUDSDK_CONFIG=cloudsdk_config)
+            _progress(18, "signed in -- creating the Cloud project")
 
         try:
             org = org_id or provision_gcp.detect_org(env=env)
@@ -182,8 +206,13 @@ def run_full_setup(
             # together in the Cloud console.
             abbrev = "src" if side == "source" else "tgt"
             project = f"wsmig-{abbrev}-{random.randint(10000, 99999)}"
-            result = provision_gcp.provision_side(side, project, org, key_path,
-                                                  dry_run, force=False, env=env)
+            # 18-75%: the slowest stretch, a project create plus a dozen
+            # sequential API-enable calls -- on_step fires after each one,
+            # so the bar actually moves through it instead of sitting still.
+            result = provision_gcp.provision_side(
+                side, project, org, key_path, dry_run, force=False, env=env,
+                on_step=lambda done, total, name: _progress(
+                    18 + int(57 * done / total), name))
         finally:
             if cloudsdk_config:
                 gcloud_browser_auth.cleanup(cloudsdk_config)
@@ -195,7 +224,30 @@ def run_full_setup(
             return {"side": side, "ok": False, "phases": [x.as_dict() for x in phases],
                     "gcpSteps": result["steps"]}
         p.status, p.detail = "ok", f"project {project}"
+        _progress(78, "Cloud project ready")
         client_id = provision_gcp.client_id_of(key_path)
+
+        # Confirmed live: DWD scope propagation can take much longer than
+        # phase 3's own retry budget below (one real grant took ~23
+        # minutes; the budget waits ~15). Saving the key path here, the
+        # moment it exists, rather than only after phase 3 succeeds (the
+        # only place this used to happen -- see phase 3b) is what makes a
+        # retry after that kind of "still propagating" failure cheap: the
+        # project/service-account/client-id created above are already
+        # real and already the target of whatever was just granted, so
+        # the NEXT run's own uploaded_key check above finds this and
+        # skips straight past this multi-minute branch entirely instead
+        # of creating yet another throwaway project and restarting
+        # propagation from zero on a brand new client ID. Best-effort:
+        # a failed save here must not fail a provisioning run that
+        # otherwise succeeded.
+        if account_id is not None:
+            try:
+                accounts_auth.update_tenant_config(
+                    account_id, side, domain=domain, admin_email=admin_email,
+                    sa_key_path=key_path)
+            except Exception:      # noqa: BLE001 - advisory only
+                pass
 
     if dry_run:
         phases.append(Phase("domain-wide delegation (skipped: dry run)"))
@@ -217,8 +269,29 @@ def run_full_setup(
     prev_pw = os.environ.get("DWD_PASSWORD")
     os.environ["DWD_EMAIL"] = admin_email
     os.environ["DWD_PASSWORD"] = admin_password
+    _progress(80, f"granting domain-wide delegation as {admin_email}")
+    # Confirmed live: an uncaught Playwright TimeoutError deep inside
+    # dwd_helper.run() (a re-click that raced a dialog closing under it)
+    # propagated all the way out here and crashed the whole subprocess --
+    # the caller's own status file was left reading {"running": true}
+    # forever, since the process that would have written "failed" was
+    # already dead. dwd_helper.py's own selectors are already
+    # best-effort against a console that "changes without notice" (see
+    # its module docstring); this makes THIS call site match that same
+    # assumption instead of trusting every one of ~450 lines of browser
+    # choreography to never raise.
+    # tenant=side deliberately NOT passed: dwd_helper.run() would then do
+    # its OWN functional verification internally, with no retry, and
+    # return a non-zero rc on ANY scope not yet live -- confirmed live,
+    # this short-circuited before phase 3 below (the same check, but
+    # retried) ever got to run, defeating that retry entirely. Phase 3 is
+    # the one and only verification gate now; this call only ever needs
+    # to know whether Authorize was accepted.
+    crash_detail = None
     try:
-        rc = dwd_helper.run(client_id, scopes, timeout, headful=True, tenant=side)
+        rc = dwd_helper.run(client_id, scopes, timeout, headful=True)
+    except Exception as exc:      # noqa: BLE001
+        rc, crash_detail = None, str(exc)[:200]
     finally:
         # Never leave the password sitting in this process's environment
         # longer than the one call that needs it.
@@ -229,6 +302,16 @@ def run_full_setup(
                 os.environ[var] = val
     admin_password = None  # noqa: F841 - drop the only local reference
 
+    if crash_detail is not None:
+        p.status, p.detail = "failed", (
+            f"dwd_helper crashed unexpectedly ({crash_detail}) -- likely "
+            "the Admin Console DOM shifted underneath it mid-click. Re-run "
+            f"dwd_helper.py --tenant {side} --client-id {client_id} by hand "
+            "to see the browser and finish it, or fix the selector it "
+            "choked on.")
+        return {"side": side, "ok": False, "phases": [x.as_dict() for x in phases],
+                "clientId": client_id}
+
     if rc != 0:
         p.status = "failed"
         p.detail = ("dwd_helper exited nonzero -- likely needs a human for "
@@ -238,17 +321,56 @@ def run_full_setup(
         return {"side": side, "ok": False, "phases": [x.as_dict() for x in phases],
                 "clientId": client_id}
     p.status = "ok"
+    _progress(90, "delegation granted -- verifying")
 
     # -- 3. Verify, functionally -------------------------------------------
     p = Phase(f"verify delegation ({side})")
     phases.append(p)
-    rows = verify_scopes.verify(Settings(), side, scopes.split(","))
-    missing = [r["scope"] for r in rows if not r["ok"]]
+    # Confirmed live: dwd_helper.run() itself already knows a freshly
+    # accepted grant checks as 0/N scopes live for "a minute or two" --
+    # its own log line says so ("re-run verify_scopes.py ... before
+    # assuming it failed") -- but nothing here ever acted on that advice,
+    # so a real run finishing at exactly the wrong moment reported a
+    # confirmed failure on a grant that was, in fact, still just
+    # propagating. Retrying is that same advice, automated.
+    #
+    # ~2.9 minutes (the original budget here) was NOT enough: confirmed
+    # live on the trial tenant, a grant that Admin Console accepted at
+    # 14:46:33 still showed 0/14 scopes live when the old budget gave up
+    # at ~190s in, and was only confirmed fully live (14/14) at 14:59 --
+    # comfortably over 3 minutes, nowhere near the old ceiling. This is a
+    # real, wider propagation window than the org-policy/key-creation
+    # delays elsewhere in this codebase, not the same delay reused --
+    # those cleared in well under a minute. Sized with margin past the
+    # slowest confirmed-live case rather than matching it exactly.
+    backoffs = (15, 20, 30, 45, 60, 90, 120, 150, 180, 210)  # ~15.3 min total
+    rows = missing = []
+    for attempt in range(len(backoffs) + 1):
+        rows = verify_scopes.verify(Settings(), side, scopes.split(","))
+        missing = [r["scope"] for r in rows if not r["ok"]]
+        if not missing or attempt == len(backoffs):
+            break
+        _progress(90, f"delegation granted -- waiting for it to propagate "
+                      f"({len(rows) - len(missing)}/{len(rows)} scopes live so far)")
+        time.sleep(backoffs[attempt])
     if missing:
-        p.status, p.detail = "failed", f"{len(missing)} scope(s) still not live"
+        # By this point the grant has had ~15 minutes to propagate and
+        # still has not -- rare (Google's own docs say this step can
+        # occasionally take longer still), but the Admin Console entry
+        # itself was already confirmed accepted back in phase 2, so this
+        # is "still settling," not "never happened." Re-verifying costs
+        # nothing (no browser, just a token probe per scope) -- point at
+        # that instead of implying the whole setup needs to be redone.
+        p.status, p.detail = "failed", (
+            f"{len(missing)} scope(s) still not live after ~15 minutes of "
+            "waiting -- the delegation itself was accepted by Admin Console "
+            "(see the phase above); this is Google still propagating it. "
+            f"Wait a few more minutes and re-run `python3 verify_scopes.py "
+            f"--tenant {side}` -- no need to redo delegation itself.")
         return {"side": side, "ok": False, "phases": [x.as_dict() for x in phases],
                 "clientId": client_id, "missingScopes": missing}
     p.status, p.detail = "ok", f"{len(rows)}/{len(rows)} scopes confirmed live"
+    _progress(97, "saving tenant configuration")
 
     # -- 3b. Point the REST of the tool at what was just built ---------------
     # Without this, everything downstream -- seeding, migrate, the Setup
@@ -289,6 +411,7 @@ def run_full_setup(
 
     # -- 4. Optional: seed (source) or provision users (target) ------------
     if seed and side == "source":
+        _progress(99, "seeding test data")
         p = Phase("seed source tenant")
         phases.append(p)
         import subprocess
@@ -306,6 +429,7 @@ def run_full_setup(
             p.status, p.detail = "ok", "seed complete -- see identities.csv"
 
     if provision_users and side == "target":
+        _progress(99, "provisioning target accounts")
         p = Phase("provision target users")
         phases.append(p)
         import subprocess
@@ -318,6 +442,7 @@ def run_full_setup(
         else:
             p.status, p.detail = "ok", "accounts created"
 
+    _progress(100, "done")
     return {"side": side, "ok": all(x.status != "failed" for x in phases),
             "phases": [x.as_dict() for x in phases], "clientId": client_id}
 
@@ -346,6 +471,9 @@ def main(argv: list[str] | None = None) -> int:
     # them apart -- a bare `--side source` matches both.
     ap.add_argument("--account-id", type=int, default=None,
                     help="SaaS account this run belongs to, if any")
+    ap.add_argument("--progress-file", default=None,
+                    help="live {pct, label} JSON written as this run "
+                         "progresses, for a caller polling from outside")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
@@ -355,7 +483,8 @@ def main(argv: list[str] | None = None) -> int:
     result = run_full_setup(
         args.side, args.domain, args.admin, password, args.org_id,
         args.keys_dir, args.dry_run, args.seed, args.scale, args.create_users,
-        args.provision_users, account_id=args.account_id)
+        args.provision_users, account_id=args.account_id,
+        progress_file=args.progress_file)
     password = None  # noqa: F841
 
     if args.json:
