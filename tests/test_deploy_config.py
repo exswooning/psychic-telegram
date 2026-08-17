@@ -725,6 +725,39 @@ class TestSameAccountInBothSlots:
         assert not status["target_key"].get("warning")
 
 
+class TestSeedEnabledGate:
+    """seed_enabled is opt-in per account (DEFAULT 0), the opposite polarity
+    from subscription_active (DEFAULT 1) -- see control_plane_db.py's
+    column-upgrade comment. Same operator exemption as _subscription_ok:
+    this tooling exists because the operator needed it first."""
+
+    def test_legacy_account_1_is_always_allowed(self, monkeypatch):
+        monkeypatch.setattr(webui.accounts_auth, "get_account",
+                            lambda aid: (_ for _ in ()).throw(
+                                AssertionError("must not look up account 1")))
+        assert webui._seed_ok(1) is True
+
+    def test_none_account_is_always_allowed(self, monkeypatch):
+        monkeypatch.setattr(webui.accounts_auth, "get_account",
+                            lambda aid: (_ for _ in ()).throw(
+                                AssertionError("must not look up a None account")))
+        assert webui._seed_ok(None) is True
+
+    def test_real_account_with_seed_disabled_is_refused(self, monkeypatch):
+        monkeypatch.setattr(webui.accounts_auth, "get_account",
+                            lambda aid: {"seed_enabled": 0})
+        assert webui._seed_ok(7) is False
+
+    def test_real_account_with_seed_enabled_is_allowed(self, monkeypatch):
+        monkeypatch.setattr(webui.accounts_auth, "get_account",
+                            lambda aid: {"seed_enabled": 1})
+        assert webui._seed_ok(7) is True
+
+    def test_missing_account_is_refused_not_crashed(self, monkeypatch):
+        monkeypatch.setattr(webui.accounts_auth, "get_account", lambda aid: None)
+        assert webui._seed_ok(7) is False
+
+
 class TestSeedFromTheUI:
     """
     Running the seeder from the browser.
@@ -1679,6 +1712,99 @@ class TestResetTargetFromTheUI:
         argv, _, _ = webui.reset_target_argv(
             {"confirm_domain": "sandbox-tgt.example", "services": ["drive", "gmail"]})
         assert argv[argv.index("--services") + 1] == "drive,gmail"
+
+
+class TestResetDriveLedgerFromTheUI:
+    """Running reset_drive_ledger.py from the browser -- new this pass, part
+    of retiring the legacy dashboard's dead 'Reset Drive Ledger' button
+    (it called an ACTIONS key, reset_drive_ledger, that never existed).
+    Mirrors TestResetTargetFromTheUI, but against SOURCE_DOMAIN always --
+    reset_drive_ledger.py operates on source_email keys regardless of which
+    tenant's files were actually wiped."""
+
+    @pytest.fixture(autouse=True)
+    def _env(self, monkeypatch):
+        monkeypatch.setenv("SOURCE_DOMAIN", "sandbox-src.example")
+        monkeypatch.setenv("TARGET_DOMAIN", "sandbox-tgt.example")
+
+    def test_correct_confirmation_builds_the_command(self):
+        argv, _, err = webui.reset_drive_ledger_argv(
+            {"confirm_domain": "sandbox-src.example"})
+        assert err == ""
+        assert argv[argv.index("--confirm-domain") + 1] == "sandbox-src.example"
+        assert "--yes" in argv
+
+    def test_nothing_typed_is_refused(self):
+        _, _, err = webui.reset_drive_ledger_argv({})
+        assert "type the source domain" in err
+
+    def test_a_mismatched_domain_is_refused(self):
+        _, _, err = webui.reset_drive_ledger_argv({"confirm_domain": "something-else.com"})
+        assert "does not match the source domain" in err
+
+    def test_typing_the_target_domain_is_refused_too(self):
+        """This always operates on the SOURCE tenant's identities -- typing
+        the target domain must not be accepted just because it is *a*
+        real domain in this config."""
+        _, _, err = webui.reset_drive_ledger_argv({"confirm_domain": "sandbox-tgt.example"})
+        assert "does not match the source domain" in err
+
+    def test_services_is_optional(self):
+        argv, _, _ = webui.reset_drive_ledger_argv({"confirm_domain": "sandbox-src.example"})
+        assert "--services" not in argv
+
+    def test_services_narrows_the_reset(self):
+        argv, _, _ = webui.reset_drive_ledger_argv(
+            {"confirm_domain": "sandbox-src.example", "services": "drive"})
+        assert argv[argv.index("--services") + 1] == "drive"
+
+
+class TestIdentitiesEndpoints:
+    """The legacy dashboard's identities tab called GET /api/identities and
+    POST /api/identities/save -- neither route existed server-side, both
+    404'd. Built for real here: identities_payload() reads identity_map
+    (what init-db already loaded); save_identity_pair() appends to
+    identities.csv (what init-db reads FROM), so the two stay the one
+    honest source of truth instead of identities_payload() silently
+    drifting from what a fresh init-db run would actually load."""
+
+    def test_no_database_yet_is_reported_not_a_crash(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("MIGRATION_DB", str(tmp_path / "does-not-exist.db"))
+        result = webui.identities_payload()
+        assert result["rows"] == []
+        assert "no database yet" in result["error"]
+
+    def test_save_rejects_a_malformed_source_address(self):
+        result = webui.save_identity_pair("not-an-email", "target@b.example")
+        assert result["ok"] is False
+        assert "source_email" in result["error"]
+
+    def test_save_rejects_a_malformed_target_address(self):
+        result = webui.save_identity_pair("source@a.example", "not-an-email")
+        assert result["ok"] is False
+        assert "target_email" in result["error"]
+
+    @pytest.fixture(autouse=True)
+    def _csv_path(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(webui, "IDENTITIES_CSV_PATH", str(tmp_path / "identities.csv"))
+
+    def test_save_appends_a_new_pair(self):
+        result = webui.save_identity_pair("a@src.example", "a@tgt.example")
+        assert result["ok"] is True
+        assert result["total"] == 1
+        rows = webui.read_identity_csv_domains_safe(webui.IDENTITIES_CSV_PATH)
+        assert rows == [{"source_email": "a@src.example", "target_email": "a@tgt.example"}]
+
+    def test_save_refuses_a_duplicate_source(self):
+        webui.save_identity_pair("a@src.example", "a@tgt.example")
+        result = webui.save_identity_pair("a@src.example", "b@tgt.example")
+        assert result["ok"] is False
+        assert "already in identities.csv" in result["error"]
+
+    def test_save_lowercases_addresses(self):
+        webui.save_identity_pair("A@SRC.example", "A@TGT.example")
+        rows = webui.read_identity_csv_domains_safe(webui.IDENTITIES_CSV_PATH)
+        assert rows == [{"source_email": "a@src.example", "target_email": "a@tgt.example"}]
 
 
 class TestDeployConfigPersistence:

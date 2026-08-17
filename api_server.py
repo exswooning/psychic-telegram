@@ -130,6 +130,11 @@ class Operator(BaseModel):
     # him for.
     subscription_active: bool = True
     is_superadmin: bool = False
+    # Same True-for-the-operator default and same populate site as the two
+    # fields above -- see accounts_auth.set_seed_enabled()'s own docstring
+    # for why this is opt-in (DEFAULT 0), the opposite polarity from
+    # subscription_active.
+    seed_enabled: bool = True
 
 
 async def operator(x_operator: str = Header(default=""),
@@ -161,6 +166,7 @@ async def operator(x_operator: str = Header(default=""),
                 # crashing on a dict index into None.
                 subscription_active=bool(account["subscription_active"]) if account else True,
                 is_superadmin=bool(account["is_superadmin"]) if account else False,
+                seed_enabled=bool(account["seed_enabled"]) if account else True,
             )
     name = (x_operator or "").strip() or "anonymous"
     return Operator(name=name, role=_roles().get(name, "viewer"), account_id=None)
@@ -503,7 +509,8 @@ async def auth_me(op: Operator = Depends(operator)):
             "name": account["name"], "plan": account["plan"],
             "created_at": account["created_at"],
             "subscription_active": bool(account["subscription_active"]),
-            "is_superadmin": bool(account["is_superadmin"])}
+            "is_superadmin": bool(account["is_superadmin"]),
+            "seed_enabled": bool(account["seed_enabled"])}
 
 
 # ======================================================================
@@ -514,6 +521,10 @@ async def auth_me(op: Operator = Depends(operator)):
 # ======================================================================
 class SetSubscription(WriteAction):
     active: bool
+
+
+class SetSeedEnabled(WriteAction):
+    enabled: bool
 
 
 @app.get("/api/v2/admin/accounts")
@@ -529,6 +540,16 @@ async def admin_set_subscription(account_id: int, body: SetSubscription,
         accounts_auth.set_subscription_active(account_id, body.active)
         return True, f"subscription_active={body.active}"
     return await _gated(op, "admin.set_subscription", body,
+                        f"account:{account_id}", _set, extra_check=require_superadmin)
+
+
+@app.post("/api/v2/admin/accounts/{account_id}/seed")
+async def admin_set_seed_enabled(account_id: int, body: SetSeedEnabled,
+                                 op: Operator = Depends(operator)):
+    def _set() -> tuple[bool, str]:
+        accounts_auth.set_seed_enabled(account_id, body.enabled)
+        return True, f"seed_enabled={body.enabled}"
+    return await _gated(op, "admin.set_seed_enabled", body,
                         f"account:{account_id}", _set, extra_check=require_superadmin)
 
 
@@ -1475,9 +1496,10 @@ async def full_setup_start(body: StartFullSetup, op: Operator = Depends(operator
             return False, admit_msg
         out = _full_setup_state_path(body.side, op.account_id)
         partial = out + ".partial"
+        progress = out + ".progress"
         argv = [PY, "full_setup.py", "--side", body.side,
                 "--domain", body.domain, "--admin", body.admin_email,
-                "--json"]
+                "--progress-file", progress, "--json"]
         if body.org_id:
             argv += ["--org-id", body.org_id]
         if body.dry_run:
@@ -1500,9 +1522,16 @@ async def full_setup_start(body: StartFullSetup, op: Operator = Depends(operator
         env["DWD_PASSWORD"] = body.admin_password
         # Truncate any previous result first, same reasoning as gcp-provision:
         # a stale file would be served as this run's progress until gcloud
-        # produces its first byte.
+        # produces its first byte. A stale .progress is worse than a stale
+        # result -- a leftover "97%, saving tenant configuration" from a
+        # PRIOR run would render as this run's progress for the several
+        # seconds before it writes its own first checkpoint.
         with open(out, "w", encoding="utf-8") as fh:
             json.dump({"running": True}, fh)
+        try:
+            os.remove(progress)
+        except OSError:
+            pass
         with open(partial, "wb") as o, \
              open(os.path.join(os.path.dirname(out), f"full-setup-{body.side}.err"), "wb") as e:
             proc = subprocess.Popen(argv, cwd=HERE, stdout=o, stderr=e,
@@ -1533,9 +1562,10 @@ async def full_setup_status(side: str, op: Operator = Depends(operator)):
                       for ln in subprocess.run(
                           ["ps", "-eo", "args="], capture_output=True,
                           text=True).stdout.splitlines())
-        partial = _full_setup_state_path(side, op.account_id) + ".partial"
+        out = _full_setup_state_path(side, op.account_id)
+        partial = out + ".partial"
         result = None
-        for path in (partial, _full_setup_state_path(side, op.account_id)):
+        for path in (partial, out):
             try:
                 with open(path, encoding="utf-8") as fh:
                     data = json.load(fh)
@@ -1543,7 +1573,123 @@ async def full_setup_status(side: str, op: Operator = Depends(operator)):
                     result = data
             except (OSError, ValueError):
                 continue
-        return {"running": running, "result": result}
+
+        progress_pct = progress_label = None
+        if running:
+            # Only meaningful while something is actually running -- once
+            # it isn't, this is the last checkpoint a (possibly crashed)
+            # run happened to reach, not the current state of anything.
+            try:
+                with open(out + ".progress", encoding="utf-8") as fh:
+                    prog = json.load(fh)
+                progress_pct = prog.get("pct")
+                progress_label = prog.get("label")
+            except (OSError, ValueError):
+                pass
+        return {"running": running, "result": result,
+                "progressPct": progress_pct, "progressLabel": progress_label}
+    return await _off_loop(_read)
+
+
+# ======================================================================
+# GCP / DWD teardown -- the reverse of full-setup. Superadmin-only: this
+# deletes real infrastructure (a GCP project, soft-deleted but real) and
+# revokes a real, non-undoable Admin Console grant. Not something a
+# regular SaaS client should ever be able to fire against another
+# tenant's project by guessing an id.
+# ======================================================================
+class StartTeardown(WriteAction):
+    """Mirrors StartFullSetup's password handling exactly -- passed to the
+    subprocess environment only, excluded from the audit log."""
+    project: str = ""
+    client_id: str = ""
+    admin_email: str = Field(min_length=3)
+    admin_password: str = Field(min_length=1, exclude=True)
+
+
+def _teardown_state_path(account_id: int | None) -> str:
+    d = os.path.join(HERE, "logs", str(account_id) if account_id is not None else "legacy")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, "teardown.json")
+
+
+@app.post("/api/v2/teardown/start")
+async def teardown_start(body: StartTeardown, op: Operator = Depends(operator)):
+    """Runs teardown_tenant.py detached -- same shape as full_setup_start,
+    reversed. Only works where this process runs (needs a real browser and
+    Xvfb), same caveat as full-setup."""
+    if not body.project and not body.client_id:
+        raise HTTPException(400, "need project, client_id, or both")
+
+    def _launch() -> tuple[bool, str]:
+        admitted, admit_msg = job_admission.try_admit(op.account_id, "teardown")
+        if not admitted:
+            return False, admit_msg
+        out = _teardown_state_path(op.account_id)
+        partial = out + ".partial"
+        progress = out + ".progress"
+        argv = [PY, "teardown_tenant.py", "--admin", body.admin_email,
+                "--progress-file", progress, "--json"]
+        if body.project:
+            argv += ["--project", body.project]
+        if body.client_id:
+            argv += ["--client-id", body.client_id]
+
+        env = dict(os.environ)
+        env["DWD_PASSWORD"] = body.admin_password
+        with open(out, "w", encoding="utf-8") as fh:
+            json.dump({"running": True}, fh)
+        try:
+            os.remove(progress)
+        except OSError:
+            pass
+        with open(partial, "wb") as o, \
+             open(os.path.join(os.path.dirname(out), "teardown.err"), "wb") as e:
+            proc = subprocess.Popen(argv, cwd=HERE, stdout=o, stderr=e,
+                                    stdin=subprocess.DEVNULL, env=env,
+                                    start_new_session=True)
+
+        def _wait_then_release() -> None:
+            proc.wait()
+            job_admission.release(op.account_id, "teardown")
+        threading.Thread(target=_wait_then_release, daemon=True).start()
+        return True, f"teardown started pid {proc.pid}"
+
+    return await _gated(op, "teardown.start", body,
+                        f"project={body.project} client_id={body.client_id}",
+                        _launch, extra_check=require_superadmin)
+
+
+@app.get("/api/v2/teardown/status")
+async def teardown_status(op: Operator = Depends(operator)):
+    def _read() -> dict:
+        running = any("teardown_tenant.py" in ln and "grep" not in ln
+                      for ln in subprocess.run(
+                          ["ps", "-eo", "args="], capture_output=True,
+                          text=True).stdout.splitlines())
+        out = _teardown_state_path(op.account_id)
+        partial = out + ".partial"
+        result = None
+        for path in (partial, out):
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    data = json.load(fh)
+                if isinstance(data, dict) and "phases" in data:
+                    result = data
+            except (OSError, ValueError):
+                continue
+
+        progress_pct = progress_label = None
+        if running:
+            try:
+                with open(out + ".progress", encoding="utf-8") as fh:
+                    prog = json.load(fh)
+                progress_pct = prog.get("pct")
+                progress_label = prog.get("label")
+            except (OSError, ValueError):
+                pass
+        return {"running": running, "result": result,
+                "progressPct": progress_pct, "progressLabel": progress_label}
     return await _off_loop(_read)
 
 
@@ -1624,6 +1770,73 @@ async def get_tenant_config_status(side: str, op: Operator = Depends(operator)):
         return {"side": side, "domain": cfg.get("domain") or "",
                 "adminEmail": cfg.get("admin_email") or "",
                 "hasKey": has_key, "clientId": client_id, "scopes": scopes}
+    return await _off_loop(_read)
+
+
+@app.get("/api/v2/setup/verified-domains")
+async def verified_domains(op: Operator = Depends(operator)):
+    """Every domain this caller has set up (source and/or target), with its
+    real functional DWD status -- the same token-per-scope check dwd_status
+    runs, just scoped to whoever is asking instead of always reading the
+    legacy env.sh globals, and covering both sides in one call instead of
+    one request per side.
+
+    This is what answers "which domains have I actually finished setting
+    up and can use" once Quick Setup has run -- reading it back needs no
+    browser and no re-running any part of the wizard, since delegation
+    itself was already granted; this only asks Google whether tokens for
+    it are live yet.
+
+    A side with no domain on file yet is left out of the list entirely --
+    "never set up" is not the same claim as "set up but not verified",
+    and showing it here as some kind of failure would be exactly that
+    conflation.
+    """
+    require_login(op)
+
+    def _check_side(side: str) -> dict | None:
+        import verify_scopes
+        from config import Settings
+
+        if op.account_id is not None:
+            cfg = accounts_auth.get_tenant_config(op.account_id, side) or {}
+            domain = cfg.get("domain") or ""
+            admin_email = cfg.get("admin_email") or ""
+            if not domain:
+                return None
+            s = Settings(account_id=op.account_id)
+        else:
+            # The legacy/tunnel caller has no tenant_configs row at all --
+            # env.sh is still its real source of truth (see full_setup.py's
+            # own account_id is None handling).
+            s = Settings()
+            domain = s.source_domain if side == "source" else s.target_domain
+            admin_email = s.source_admin if side == "source" else s.target_admin
+            if not domain:
+                return None
+
+        key, subject = verify_scopes._key_and_subject(s, side)
+        if not os.path.isfile(key) or not subject:
+            return {"side": side, "domain": domain, "adminEmail": admin_email,
+                    "status": "not_set_up", "live": 0, "total": 0}
+        try:
+            scopes = verify_scopes.required_scopes(s, side)
+            rows = verify_scopes.verify(s, side, scopes)
+            missing = [r["scope"] for r in rows if not r["ok"]]
+            live = len(rows) - len(missing)
+            status = ("verified" if not missing
+                      else "pending" if live > 0 else "not_verified")
+            return {"side": side, "domain": domain, "adminEmail": admin_email,
+                    "status": status, "live": live, "total": len(rows)}
+        except Exception as exc:      # noqa: BLE001 - report, do not 500
+            return {"side": side, "domain": domain, "adminEmail": admin_email,
+                    "status": "error", "live": 0, "total": 0,
+                    "error": str(exc)[:200]}
+
+    def _read() -> dict:
+        domains = [d for d in (_check_side("source"), _check_side("target"))
+                  if d is not None]
+        return {"domains": domains}
     return await _off_loop(_read)
 
 

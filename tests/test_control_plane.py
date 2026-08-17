@@ -1217,6 +1217,50 @@ class TestSuperadminAdminEndpoints:
         rows = cp.get("/api/v2/actions").json()
         assert rows[0]["outcome"] == "REFUSED"
 
+    def test_seed_enabled_defaults_off_for_a_new_account(self, cp):
+        target_id = self._signed_in(cp, "fresh@example.com")
+        cp.post("/api/v2/auth/logout")
+        self._signed_in(cp, "boss3@example.com")
+        import accounts_auth
+        accounts_auth.promote_to_superadmin("boss3@example.com")
+        row = next(r for r in cp.get("/api/v2/admin/accounts").json()
+                  if r["id"] == target_id)
+        assert row["seed_enabled"] == 0
+
+    def test_a_regular_client_cannot_toggle_anyones_seed_flag(self, cp):
+        target_id = self._signed_in(cp, "target2@example.com")
+        cp.post("/api/v2/auth/logout")
+        self._signed_in(cp, "attacker3@example.com")
+        r = cp.post(f"/api/v2/admin/accounts/{target_id}/seed",
+                    json={"reason": "trying my luck", "enabled": True})
+        assert r.status_code == 403
+
+    def test_a_superadmin_can_enable_seeding_for_a_client(self, cp):
+        import accounts_auth
+
+        target_id = self._signed_in(cp, "client2@example.com")
+        cp.post("/api/v2/auth/logout")
+        self._signed_in(cp, "realboss2@example.com")
+        accounts_auth.promote_to_superadmin("realboss2@example.com")
+        r = cp.post(f"/api/v2/admin/accounts/{target_id}/seed",
+                    json={"reason": "demo account", "enabled": True})
+        assert r.status_code == 200
+        assert accounts_auth.get_account(target_id)["seed_enabled"] == 1
+
+    def test_auth_me_reflects_seed_enabled(self, cp):
+        import accounts_auth
+
+        target_id = self._signed_in(cp, "seedme@example.com")
+        cp.post("/api/v2/auth/logout")
+        self._signed_in(cp, "realboss3@example.com")
+        accounts_auth.promote_to_superadmin("realboss3@example.com")
+        cp.post(f"/api/v2/admin/accounts/{target_id}/seed",
+               json={"reason": "demo", "enabled": True})
+        cp.post("/api/v2/auth/logout")
+        cp.post("/api/v2/auth/login",
+               json={"email": "seedme@example.com", "password": "hunter22222"})
+        assert cp.get("/api/v2/auth/me").json()["seed_enabled"] is True
+
 
 _FAKE_SA_KEY = {
     "type": "service_account",

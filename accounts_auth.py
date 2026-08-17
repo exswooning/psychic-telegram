@@ -171,7 +171,7 @@ def get_account(account_id: int) -> dict | None:
     with cpdb.ro() as conn:
         row = conn.execute(
             "SELECT id, email, name, plan, created_at, subscription_active, "
-            "is_superadmin FROM accounts WHERE id=?",
+            "is_superadmin, seed_enabled FROM accounts WHERE id=?",
             (account_id,)
         ).fetchone()
     return dict(row) if row else None
@@ -182,7 +182,7 @@ def list_accounts() -> list[dict]:
     with cpdb.ro() as conn:
         rows = conn.execute(
             "SELECT id, email, name, plan, created_at, subscription_active, "
-            "is_superadmin FROM accounts ORDER BY id DESC"
+            "is_superadmin, seed_enabled FROM accounts ORDER BY id DESC"
         ).fetchall()
     return [dict(r) for r in rows]
 
@@ -195,6 +195,17 @@ def set_subscription_active(account_id: int, active: bool) -> None:
         conn.execute(
             "UPDATE accounts SET subscription_active=? WHERE id=?",
             (1 if active else 0, account_id),
+        )
+
+
+def set_seed_enabled(account_id: int, enabled: bool) -> None:
+    """Whether this account may seed a tenant with fabricated test data --
+    opt-in per account (see control_plane_db.py's column default), toggled
+    the same way set_subscription_active() is."""
+    with cpdb.rw() as conn:
+        conn.execute(
+            "UPDATE accounts SET seed_enabled=? WHERE id=?",
+            (1 if enabled else 0, account_id),
         )
 
 

@@ -95,6 +95,11 @@ def _apply_column_upgrades(conn: sqlite3.Connection) -> None:
         "accounts": [
             ("subscription_active", "INTEGER NOT NULL DEFAULT 1"),
             ("is_superadmin", "INTEGER NOT NULL DEFAULT 0"),
+            # DEFAULT 0, the other way from subscription_active: seeding
+            # writes fabricated data into a tenant, which a real production
+            # account has no reason to want once they are live. Opt-in per
+            # account from AdminAccounts, not grandfathered in.
+            ("seed_enabled", "INTEGER NOT NULL DEFAULT 0"),
         ],
     }
     for table, cols in upgrades.items():
