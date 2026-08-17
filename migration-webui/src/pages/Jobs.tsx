@@ -1,18 +1,29 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import {
   Box, Typography, Card, CardContent, Stack, Chip, IconButton, Tooltip,
-  Collapse, LinearProgress, Divider, CircularProgress,
+  Collapse, LinearProgress, Divider, CircularProgress, Button, TextField,
+  MenuItem, FormControlLabel, FormGroup, Switch, Checkbox, Alert,
 } from '@mui/material'
 import {
   Refresh as RefreshIcon, ExpandMore as ExpandIcon, Language as DomainIcon,
   Grass as SeedIcon, Key as KeyIcon, VpnKey as ScopeIcon,
+  RocketLaunch as MigrateIcon, Science as DryRunIcon,
 } from '@mui/icons-material'
 import {
   fetchTenantConfigStatus, TenantConfigStatus,
   fetchVerifiedDomains, VerifiedDomain,
   fetchFullSetupStatus, FullSetupStatus,
+  fetchMe, startMigration,
 } from '@/api/controlPlane'
-import { fetchJob, fetchJobHistory, JobStatus, JobResult } from '@/api/client'
+import { fetchJob, fetchJobHistory, runSeed, JobStatus, JobResult } from '@/api/client'
+import ReasonCodeDialog from '@/components/ReasonCodeDialog'
+
+const SEED_SCALES = ['tiny', 'small', 'medium', 'large', 'huge']
+// main.py migrate --services help text is the source of truth: "drive,
+// gmail,calendar,chat,contacts,tasks -- or 'all' for every per-user
+// service." CLI default is drive,gmail,calendar.
+const MIGRATE_SERVICES = ['drive', 'gmail', 'calendar', 'chat', 'contacts', 'tasks']
+const DEFAULT_MIGRATE_SERVICES = ['drive', 'gmail', 'calendar']
 
 type Health = 'running' | 'healthy' | 'propagating' | 'attention' | 'not_set_up' | 'unknown'
 
@@ -60,6 +71,9 @@ const Jobs: React.FC = () => {
   const [seedHistory, setSeedHistory] = useState<JobResult | null>(null)
   const [expanded, setExpanded] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const [seedEnabled, setSeedEnabled] = useState(false)
+
+  useEffect(() => { fetchMe().then((a) => setSeedEnabled(a.seed_enabled)).catch(() => {}) }, [])
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -120,7 +134,10 @@ const Jobs: React.FC = () => {
       <Stack spacing={1.5}>
         {sides?.map((j) => (
           <SideJobCard key={j.side} job={j} open={expanded === j.side}
-                      onToggle={() => toggle(j.side)} />
+                      onToggle={() => toggle(j.side)}
+                      seedEnabled={seedEnabled}
+                      targetReady={sides.find((s) => s.side === 'target')?.cfg?.hasKey ?? false}
+                      onStarted={refresh} />
         ))}
 
         {(seedJob?.name === 'seed' || seedHistory) && (
@@ -132,8 +149,10 @@ const Jobs: React.FC = () => {
   )
 }
 
-const SideJobCard: React.FC<{ job: SideJob; open: boolean; onToggle: () => void }> =
-  ({ job, open, onToggle }) => {
+const SideJobCard: React.FC<{
+  job: SideJob; open: boolean; onToggle: () => void
+  seedEnabled: boolean; targetReady: boolean; onStarted: () => void
+}> = ({ job, open, onToggle, seedEnabled, targetReady, onStarted }) => {
     const { side, cfg, dwd, setup, health } = job
     const label = cfg?.domain || `${side} (not set up)`
 
@@ -232,10 +251,155 @@ const SideJobCard: React.FC<{ job: SideJob; open: boolean; onToggle: () => void 
                   </Box>
                 </Box>
               )}
+
+              {side === 'source' && cfg && cfg.hasKey && (
+                <>
+                  <Divider />
+                  {seedEnabled && <SeedPanel domain={cfg.domain} onStarted={onStarted} />}
+                  <MigratePanel domain={cfg.domain} targetReady={targetReady} onStarted={onStarted} />
+                </>
+              )}
             </Stack>
           </CardContent>
         </Collapse>
       </Card>
+    )
+  }
+
+const SeedPanel: React.FC<{ domain: string; onStarted: () => void }> = ({ domain, onStarted }) => {
+  const [scale, setScale] = useState('small')
+  const [createUsers, setCreateUsers] = useState(false)
+  const [ask, setAsk] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [done, setDone] = useState<string | null>(null)
+
+  const launch = async () => {
+    setBusy(true); setError(null)
+    try {
+      const r = await runSeed(domain, scale, createUsers, false)
+      if (!r.ok) throw new Error(r.error || 'seed failed')
+      setDone('Seed started -- see "Seed source tenant" below for live output.')
+      setAsk(false)
+      onStarted()
+    } catch (e: any) {
+      setError(e.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Box>
+      <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 0.5 }}>
+        <SeedIcon fontSize="small" color="action" />
+        <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>Seed this tenant</Typography>
+      </Stack>
+      <Stack direction="row" spacing={2} sx={{ flexWrap: 'wrap', gap: 1, alignItems: 'center' }}>
+        <TextField select size="small" label="Scale" value={scale}
+                   onChange={(e) => setScale(e.target.value)} sx={{ width: 110 }}>
+          {SEED_SCALES.map((s) => <MenuItem key={s} value={s}>{s}</MenuItem>)}
+        </TextField>
+        <FormControlLabel
+          control={<Switch checked={createUsers} onChange={(e) => setCreateUsers(e.target.checked)} />}
+          label={<Typography variant="body2">Create users</Typography>}
+        />
+        <Button size="small" variant="contained" startIcon={<SeedIcon />} onClick={() => setAsk(true)}>
+          Seed now
+        </Button>
+      </Stack>
+      {done && <Alert severity="success" sx={{ mt: 1 }} onClose={() => setDone(null)}>{done}</Alert>}
+
+      <ReasonCodeDialog
+        open={ask} busy={busy} error={error} destructive confirmPhrase="SEED"
+        title={`Seed ${domain}`}
+        description={
+          <>Writes test data into <strong>{domain}</strong> at the <strong>{scale}</strong> scale.
+          No password needed -- uses the service account key already on file.</>
+        }
+        onCancel={() => { setAsk(false); setError(null) }}
+        onConfirm={launch}
+      />
+    </Box>
+  )
+}
+
+const MigratePanel: React.FC<{ domain: string; targetReady: boolean; onStarted: () => void }> =
+  ({ domain, targetReady, onStarted }) => {
+    const [services, setServices] = useState<Set<string>>(new Set(DEFAULT_MIGRATE_SERVICES))
+    // null = dialog closed; true/false while open carries which mode was asked for.
+    const [ask, setAsk] = useState<boolean | null>(null)
+    const [busy, setBusy] = useState(false)
+    const [error, setError] = useState<string | null>(null)
+    const [done, setDone] = useState<string | null>(null)
+
+    const toggleService = (s: string) => setServices((prev) => {
+      const next = new Set(prev)
+      next.has(s) ? next.delete(s) : next.add(s)
+      return next
+    })
+
+    const launch = async (reason: string) => {
+      setBusy(true); setError(null)
+      try {
+        const r = await startMigration(reason, Array.from(services), [], ask === true)
+        if (!r.ok) throw new Error(r.detail || 'could not start')
+        setDone(`${ask ? 'Dry run' : 'Migration'} started -- track live per-user progress on Mission Control.`)
+        setAsk(null)
+        onStarted()
+      } catch (e: any) {
+        setError(e.message)
+      } finally {
+        setBusy(false)
+      }
+    }
+
+    return (
+      <Box>
+        <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 0.5 }}>
+          <MigrateIcon fontSize="small" color="action" />
+          <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>Migrate</Typography>
+        </Stack>
+        <FormGroup row sx={{ mb: 0.5 }}>
+          {MIGRATE_SERVICES.map((s) => (
+            <FormControlLabel key={s}
+              control={<Checkbox size="small" checked={services.has(s)} onChange={() => toggleService(s)} />}
+              label={<Typography variant="body2" sx={{ textTransform: 'capitalize' }}>{s}</Typography>}
+            />
+          ))}
+        </FormGroup>
+        <Stack direction="row" spacing={1} alignItems="center" sx={{ flexWrap: 'wrap', gap: 1 }}>
+          <Button size="small" startIcon={<DryRunIcon />} disabled={!services.size || !targetReady}
+                  onClick={() => setAsk(true)}>
+            Dry run
+          </Button>
+          <Button size="small" variant="contained" startIcon={<MigrateIcon />}
+                  disabled={!services.size || !targetReady} onClick={() => setAsk(false)}>
+            Start migration
+          </Button>
+          {!targetReady && (
+            <Typography variant="caption" color="text.secondary">
+              Target tenant isn't set up yet.
+            </Typography>
+          )}
+        </Stack>
+        {done && <Alert severity="success" sx={{ mt: 1 }} onClose={() => setDone(null)}>{done}</Alert>}
+
+        <ReasonCodeDialog
+          open={ask !== null} busy={busy} error={error}
+          title={ask ? 'Start dry run' : 'Start migration'}
+          description={
+            <>
+              {ask ? 'Logs every intended write and performs none. '
+                : <>Copies real data from <strong>{domain}</strong> into the target tenant,
+                  resuming any users already in progress. </>}
+              Services: <strong>{Array.from(services).join(', ') || 'none selected'}</strong>.
+            </>
+          }
+          onCancel={() => { setAsk(null); setError(null) }}
+          onConfirm={launch}
+        />
+      </Box>
     )
   }
 
