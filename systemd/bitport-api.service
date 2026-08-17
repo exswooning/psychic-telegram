@@ -21,6 +21,20 @@ Environment=BITPORT_COOKIE_SECURE=1
 ExecStart=/root/migration/.venv/bin/python api_server.py --port 8090
 Restart=always
 RestartSec=2
+# Confirmed live: the default (KillMode=control-group) sends SIGTERM to
+# EVERY process in this unit's cgroup on `systemctl restart` -- including
+# detached grandchildren like full_setup.py/teardown_tenant.py, which are
+# launched with subprocess's start_new_session=True specifically so they
+# keep running across a redeploy. start_new_session only detaches from the
+# controlling terminal/session; it does nothing to a process's cgroup
+# membership, which is the separate mechanism control-group kill actually
+# acts on. A real deploy mid-run silently killed a live tenant's DWD
+# propagation wait this way, ~17 minutes in, with no error -- the process
+# just stopped, no traceback, no final result written. KillMode=process
+# restricts the kill to the tracked main PID only, which is what every
+# comment in this codebase about "jobs survive a restart" already assumed
+# was already true.
+KillMode=process
 
 [Install]
 WantedBy=multi-user.target

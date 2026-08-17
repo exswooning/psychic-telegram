@@ -11,6 +11,11 @@ Environment=DISPLAY=:99
 ExecStart=/root/migration/.venv/bin/python webui.py --port 8080
 Restart=always
 RestartSec=2
+# See bitport-api.service's own comment: the default (control-group) kills
+# every detached child (Job.start()'s subprocesses, start_new_session=True)
+# on every redeploy, defeating the whole point of detaching them. Restrict
+# the kill to the tracked main PID only.
+KillMode=process
 
 [Install]
 WantedBy=multi-user.target
