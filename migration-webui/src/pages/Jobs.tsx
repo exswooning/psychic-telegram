@@ -13,6 +13,7 @@ import {
   fetchTenantConfigStatus, TenantConfigStatus,
   fetchVerifiedDomains, VerifiedDomain,
   fetchFullSetupStatus, FullSetupStatus,
+  fetchDwdStatus,
   fetchMe, startMigration,
 } from '@/api/controlPlane'
 import { fetchJob, fetchJobHistory, runSeed, JobStatus, JobResult } from '@/api/client'
@@ -42,6 +43,7 @@ interface SideJob {
   dwd: VerifiedDomain | null
   setup: FullSetupStatus | null
   health: Health
+  caveats: { api: string; note: string }[]
 }
 
 function deriveHealth(cfg: TenantConfigStatus | null, dwd: VerifiedDomain | null,
@@ -78,7 +80,7 @@ const Jobs: React.FC = () => {
   const refresh = useCallback(async () => {
     setLoading(true)
     try {
-      const [srcCfg, tgtCfg, dwd, srcSetup, tgtSetup, job, hist] = await Promise.all([
+      const [srcCfg, tgtCfg, dwd, srcSetup, tgtSetup, job, hist, srcDwdStatus, tgtDwdStatus] = await Promise.all([
         fetchTenantConfigStatus('source').catch(() => null),
         fetchTenantConfigStatus('target').catch(() => null),
         fetchVerifiedDomains().catch(() => ({ domains: [] as VerifiedDomain[] })),
@@ -86,13 +88,22 @@ const Jobs: React.FC = () => {
         fetchFullSetupStatus('target').catch(() => null),
         fetchJob(0).catch(() => null),
         fetchJobHistory('seed').catch(() => null),
+        // An API can report ENABLED and still 404 every call -- Chat needs
+        // an app configured in the Cloud console, which has no API, so this
+        // is the only way to know before a seed/migrate run hits it. Same
+        // check DwdSetup.tsx already surfaces in the Wizard; the Jobs page
+        // needs its own copy since a seed can also be launched from here.
+        fetchDwdStatus('source').catch(() => null),
+        fetchDwdStatus('target').catch(() => null),
       ])
       const byDwd = (side: 'source' | 'target') => dwd.domains.find((d) => d.side === side) ?? null
       setSides([
         { side: 'source', cfg: srcCfg, dwd: byDwd('source'), setup: srcSetup,
-         health: deriveHealth(srcCfg, byDwd('source'), srcSetup) },
+         health: deriveHealth(srcCfg, byDwd('source'), srcSetup),
+         caveats: srcDwdStatus?.caveats ?? [] },
         { side: 'target', cfg: tgtCfg, dwd: byDwd('target'), setup: tgtSetup,
-         health: deriveHealth(tgtCfg, byDwd('target'), tgtSetup) },
+         health: deriveHealth(tgtCfg, byDwd('target'), tgtSetup),
+         caveats: tgtDwdStatus?.caveats ?? [] },
       ])
       setSeedJob(job && job.name === 'seed' ? job : null)
       setSeedHistory(hist)
@@ -230,6 +241,11 @@ const SideJobCard: React.FC<{
                     : dwd.status === 'not_set_up' ? 'No delegation attempted yet.'
                     : dwd.error || `${dwd.total - dwd.live} scope(s) not live.`}
                 </Typography>
+                {job.caveats.map((c) => (
+                  <Alert key={c.api} severity="warning" sx={{ mt: 1 }}>
+                    <strong>{c.api}</strong> is enabled but not yet usable. {c.note}
+                  </Alert>
+                ))}
               </Box>
 
               {setup?.result && (
