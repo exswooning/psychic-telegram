@@ -346,6 +346,57 @@ def test_mailbox_has_cross_user_mail_in_every_state(seed, settings):
     assert len(senders & set(peers)) >= 3, "mail should come from several colleagues"
 
 
+class TestReseedingReusesExistingLabels:
+    """Create-only label handling meant every label 409'd on a tenant that
+    had been seeded before, leaving label_ids empty -- so `user_labels` was
+    empty and NOT ONE message got a nested label. Each user still reported
+    "done", so a re-seeded tenant silently produced a corpus with zero
+    nested-label assignments: exactly the data the migration's own label
+    handling exists to move. Confirmed live at ~1,200 warning lines across
+    201 users."""
+
+    def _preseeded(self):
+        gmail = FakeGmail("alice@tenanta.com", "source")
+        for name in __import__("seed_sandbox").SEED_LABELS:
+            gmail.add_user_label(name)
+        return gmail
+
+    def test_messages_still_get_nested_labels_on_a_reseed(self, seed, settings):
+        gmail = self._preseeded()
+        seed.seed_gmail(gmail, settings, "alice@tenanta.com",
+                        ["bob@tenanta.com"] * 4, "ext@example.com", count=80)
+
+        nested = {lb["id"] for lb in gmail.labels
+                  if "/" in (lb.get("name") or "")}
+        labelled = [msg for msg in gmail.messages.values()
+                    if nested & set(msg.get("labelIds") or [])]
+        assert labelled, "a re-seed produced no nested-label assignments at all"
+
+    def test_the_existing_labels_are_reused_not_duplicated(self, seed, settings):
+        gmail = self._preseeded()
+        before = len(gmail.labels)
+        m = seed.seed_gmail(gmail, settings, "alice@tenanta.com",
+                            ["bob@tenanta.com"] * 4, "ext@example.com", count=10)
+
+        assert len(gmail.labels) == before, "re-seeding should create no new labels"
+        # Reported as present, not skipped -- they are usable either way.
+        assert "Clients/Acme/2024" in m["labels"]
+
+    def test_a_reseed_creates_no_duplicate_label_calls(self, seed, settings):
+        gmail = self._preseeded()
+        seed.seed_gmail(gmail, settings, "alice@tenanta.com",
+                        ["bob@tenanta.com"] * 4, "ext@example.com", count=10)
+        assert gmail.calls_to("labels.create") == [], \
+            "an already-seeded tenant should not attempt a single label create"
+
+    def test_a_fresh_tenant_still_creates_them(self, seed, settings):
+        gmail = FakeGmail("alice@tenanta.com", "source")
+        m = seed.seed_gmail(gmail, settings, "alice@tenanta.com",
+                            ["bob@tenanta.com"] * 4, "ext@example.com", count=10)
+        assert "Clients/Acme/2024" in m["labels"]
+        assert gmail.calls_to("labels.create"), "a fresh tenant must still create labels"
+
+
 def test_seeded_mail_is_backdated(seed, settings):
     gmail = FakeGmail("alice@tenanta.com", "source")
     seed.seed_gmail(gmail, settings, "alice@tenanta.com",

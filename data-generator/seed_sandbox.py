@@ -393,8 +393,35 @@ def seed_gmail(gmail, settings: Settings, user: str, peers: list[str],
             internalDateSource="dateHeader",
         ).execute())()
 
+    # Look the labels up before creating any, exactly as seed_contacts does
+    # for its contact groups -- and for a consequence that is much worse
+    # than the duplicate-warning noise it also removes.
+    #
+    # Create-only meant every label 409'd ("Label name exists or conflicts")
+    # on a tenant that had been seeded before, leaving label_ids EMPTY. That
+    # makes user_labels empty, so the `rng.random() < 0.25 and user_labels`
+    # branch below never fires and not one message gets a nested label. A
+    # re-seeded tenant therefore produced a corpus with zero nested-label
+    # assignments -- silently, since each user still reported "done" -- and
+    # nested labels are precisely what the migration's own label handling
+    # exists to move. Confirmed live: ~1,200 warning lines across 201 users,
+    # and a corpus that could not exercise the feature it was seeded for.
+    def existing_labels() -> dict:
+        resp = retry(lambda: gmail.users().labels().list(userId="me").execute())()
+        return {lb["name"]: lb["id"] for lb in resp.get("labels", []) if lb.get("name")}
+
+    try:
+        found = existing_labels()
+    except Exception as exc:  # noqa: BLE001 - fall back to create-and-report
+        print(f"  ! could not list existing labels ({exc}); creating blind")
+        found = {}
+
     label_ids = {}
     for name in SEED_LABELS:
+        if name in found:
+            label_ids[name] = found[name]
+            m["labels"].append(name)
+            continue
         try:
             label_ids[name] = make_label(name)["id"]
             m["labels"].append(name)
