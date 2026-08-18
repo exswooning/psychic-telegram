@@ -15,6 +15,12 @@ import ReasonCodeDialog from '@/components/ReasonCodeDialog'
 
 interface RunningJob {
   key: string; label: string; detail: string; pct: number | null
+  // Only ever populated for the webui.py Job entry (seed/reset target/
+  // reset drive ledger) -- that's the one source here with real printed
+  // output. full-setup's own progress file only ever carries a
+  // pct+label checkpoint, not a transcript; fleet/cross-account entries
+  // have no output source at all.
+  lines?: string[]
   // Absent for a job admitted under a DIFFERENT account -- job_admission.py
   // never records a stoppable pid for seed/reset-target/full-setup (only
   // this account's own rich sources below know that), and stopping
@@ -86,7 +92,7 @@ function useRunningNow() {
       if (job?.running && job.name) {
         found.push({
           key: `webui-${job.name}`, label: job.name, detail: `${job.elapsed}s elapsed`,
-          pct: job.progressPct ?? null,
+          pct: job.progressPct ?? null, lines: job.lines,
           stop: async () => { await stopSeedJob() },
         })
       }
@@ -213,8 +219,18 @@ const RunningNow: React.FC = () => {
               )}
             </Box>
             {typeof j.pct === 'number' && (
-              <Box sx={{ px: 2, pb: 2 }}>
+              <Box sx={{ px: 2, pb: j.lines?.length ? 1 : 2 }}>
                 <LinearProgress variant="determinate" value={j.pct} sx={{ height: 6, borderRadius: 3 }} />
+              </Box>
+            )}
+            {j.lines && j.lines.length > 0 && (
+              <Box sx={{ px: 2, pb: 2 }}>
+                <Box component="pre" sx={{
+                  fontSize: 11, p: 1.5, bgcolor: 'action.hover', borderRadius: 1,
+                  overflowX: 'auto', maxHeight: 260, whiteSpace: 'pre-wrap', m: 0,
+                }}>
+                  {j.lines.join('\n')}
+                </Box>
               </Box>
             )}
           </Card>
