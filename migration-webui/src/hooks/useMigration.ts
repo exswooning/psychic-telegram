@@ -48,7 +48,17 @@ const useMigration = () => {
     if (inFlight.current) return
     inFlight.current = true
     try {
-      const [users, stages, metrics, activity, verification, report] = await Promise.all([
+      // allSettled, not all: this used to be one Promise.all, so a single
+      // endpoint throwing (a report with no data yet, a transient 500 on a
+      // busy host) rejected the WHOLE batch and skipped every setter --
+      // users, stages, metrics, activity, verification, and report all
+      // froze at their last good value together, silently, with no
+      // indication any of it was stale. Confirmed live: Users kept showing
+      // old data with nothing on screen to say a poll had ever failed.
+      // Each domain now succeeds or fails independently, matching what a
+      // human actually wants -- five live panels and one stale one beats
+      // six stale panels because of one.
+      const [users, stages, metrics, activity, verification, report] = await Promise.allSettled([
         fetchUsers(),
         fetchStages(),
         fetchMetrics(),
@@ -56,30 +66,47 @@ const useMigration = () => {
         fetchVerification(),
         fetchReport(),
       ])
-      history.current = [
-        ...history.current.slice(-(HISTORY_POINTS - 1)),
-        {
-          timestamp: Date.now(),
-          cpu: metrics.cpu,
-          ram: metrics.ram.percentage,
-          workers: metrics.workers.current,
-          uploadQueue: metrics.uploadQueue,
-          retryQueue: metrics.retryQueue,
-        },
-      ]
-      setUsers(users)
-      setStages(stages)
-      setMetrics({ ...metrics, history: history.current })
-      setActivities(activity)
-      setVerification(verification)
-      if (report) setReport(report)
+      const failures: string[] = []
+      const detail = (r: PromiseRejectedResult) =>
+        r.reason instanceof Error ? r.reason.message : String(r.reason)
+
+      if (users.status === 'fulfilled') setUsers(users.value)
+      else failures.push(`users: ${detail(users)}`)
+
+      if (stages.status === 'fulfilled') setStages(stages.value)
+      else failures.push(`stages: ${detail(stages)}`)
+
+      if (metrics.status === 'fulfilled') {
+        history.current = [
+          ...history.current.slice(-(HISTORY_POINTS - 1)),
+          {
+            timestamp: Date.now(),
+            cpu: metrics.value.cpu,
+            ram: metrics.value.ram.percentage,
+            workers: metrics.value.workers.current,
+            uploadQueue: metrics.value.uploadQueue,
+            retryQueue: metrics.value.retryQueue,
+          },
+        ]
+        setMetrics({ ...metrics.value, history: history.current })
+      } else {
+        failures.push(`metrics: ${detail(metrics)}`)
+      }
+
+      if (activity.status === 'fulfilled') setActivities(activity.value)
+      else failures.push(`activity: ${detail(activity)}`)
+
+      if (verification.status === 'fulfilled') setVerification(verification.value)
+      else failures.push(`verification: ${detail(verification)}`)
+
+      if (report.status === 'fulfilled') {
+        if (report.value) setReport(report.value)
+      } else {
+        failures.push(`report: ${detail(report)}`)
+      }
+
       setLastUpdate(new Date().toISOString())
-      setError(null)
-    } catch (e) {
-      // Keep showing the last good data rather than blanking the dashboard
-      // on one dropped poll -- a busy migration host can stall a single
-      // request without anything actually being wrong.
-      setError(e instanceof Error ? e.message : String(e))
+      setError(failures.length ? failures.join('; ') : null)
     } finally {
       // isLoading only ever gates the *first* paint (see store/index.ts) --
       // it drops to false whether this poll succeeded or failed, so a down

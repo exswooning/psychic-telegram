@@ -20,6 +20,7 @@ import {
   Card,
   CardContent,
   Grid,
+  Alert,
 } from '@mui/material'
 import { Search as SearchIcon, Person as PersonIcon, ArrowForward as ArrowForwardIcon } from '@mui/icons-material'
 import { useNavigate } from 'react-router-dom'
@@ -28,7 +29,7 @@ import { statusLabel, statusColor } from '@/utils/formatters'
 
 const Users: React.FC = () => {
   const navigate = useNavigate()
-  const { users } = useMigrationStore()
+  const { users, error, lastUpdate } = useMigrationStore()
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(0)
   const [rowsPerPage, setRowsPerPage] = useState(10)
@@ -49,6 +50,14 @@ const Users: React.FC = () => {
       <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
         Manage and monitor individual migration progress
       </Typography>
+
+      {error && (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          Last poll failed ({error}). Showing data from {lastUpdate
+            ? new Date(lastUpdate).toLocaleTimeString() : 'the last successful refresh'}
+          , not necessarily live.
+        </Alert>
+      )}
 
       <Grid container spacing={2} sx={{ mb: 3 }}>
         <Grid item xs={12} sm={4}>
