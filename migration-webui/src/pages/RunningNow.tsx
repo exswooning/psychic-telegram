@@ -8,15 +8,27 @@ import {
 } from '@mui/icons-material'
 import {
   fetchTenantConfigStatus, fetchFullSetupStatus, fetchFleet, FleetNode,
-  stopJob as stopFleetJob,
+  fetchActiveJobs, fetchMe, stopJob as stopFleetJob,
 } from '@/api/controlPlane'
 import { fetchJob, stopJob as stopSeedJob } from '@/api/client'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
 
 interface RunningJob {
   key: string; label: string; detail: string; pct: number | null
-  stop: (reason: string) => Promise<void>
+  // Absent for a job admitted under a DIFFERENT account -- job_admission.py
+  // never records a stoppable pid for seed/reset-target/full-setup (only
+  // this account's own rich sources below know that), and stopping
+  // someone else's job from here isn't a call this page should make anyway.
+  stop?: (reason: string) => Promise<void>
 }
+
+// job_admission.py job_name -> a readable label for the fallback,
+// cross-account entry (see below). 'migrate'/'delta'/'discover' are
+// deliberately absent: fleet_agent.py's ps scan already finds those for
+// ANY account, so they never need this fallback in the first place.
+const ACCOUNT_SCOPED_JOB_NAMES = new Set([
+  'seed', 'reset target', 'reset drive ledger', 'full_setup',
+])
 
 /**
  * job_admission.py caps the whole box at ONE heavy job (seed, reset
@@ -37,14 +49,17 @@ function useRunningNow() {
   const refresh = useCallback(async () => {
     setLoading(true)
     try {
-      const [srcCfg, tgtCfg, srcSetup, tgtSetup, job, nodes] = await Promise.all([
+      const [srcCfg, tgtCfg, srcSetup, tgtSetup, job, nodes, activeJobs, me] = await Promise.all([
         fetchTenantConfigStatus('source').catch(() => null),
         fetchTenantConfigStatus('target').catch(() => null),
         fetchFullSetupStatus('source').catch(() => null),
         fetchFullSetupStatus('target').catch(() => null),
         fetchJob(0).catch(() => null),
         fetchFleet().catch(() => [] as FleetNode[]),
+        fetchActiveJobs().catch(() => []),
+        fetchMe().catch(() => null),
       ])
+      const myAccountId = me?.id ?? null
       const found: RunningJob[] = []
       if (srcSetup?.running) {
         found.push({
@@ -86,6 +101,26 @@ function useRunningNow() {
           },
         })
       }
+
+      // Everything above only ever sees the VIEWER's own account (webui.py's
+      // per-account Job, full-setup/status's own ps scan) -- migrate is the
+      // one exception, already caught above regardless of account since
+      // fleet_agent.py's scan isn't account-scoped at all. So a seed/reset/
+      // full-setup job admitted under a DIFFERENT account -- exactly what a
+      // "capacity is full" refusal is usually caused by -- was invisible
+      // here entirely. job_admission's own table has no such blind spot.
+      for (const row of activeJobs) {
+        if (!ACCOUNT_SCOPED_JOB_NAMES.has(row.job_name)) continue
+        if (row.account_id === myAccountId) continue   // already shown above, richly
+        found.push({
+          key: `admission-${row.account_id}-${row.job_name}`,
+          label: row.job_name,
+          detail: `account #${row.account_id ?? 'legacy'} -- started ${new Date(row.started_at).toLocaleTimeString()}`,
+          pct: null,
+          // No stop: nothing here records a pid for another account's job,
+          // and stopping someone else's run isn't this page's call to make.
+        })
+      }
       setJobs(found)
     } finally {
       setLoading(false)
@@ -108,7 +143,7 @@ const RunningNow: React.FC = () => {
   const [stopError, setStopError] = useState<string | null>(null)
 
   const runStop = async (reason: string) => {
-    if (!stopTarget) return
+    if (!stopTarget?.stop) return
     setStopBusy(true); setStopError(null)
     try {
       await stopTarget.stop(reason)
@@ -170,10 +205,12 @@ const RunningNow: React.FC = () => {
                   {j.detail}{typeof j.pct === 'number' && ` — ${j.pct}%`}
                 </Typography>
               </Box>
-              <Button size="small" color="error" startIcon={<StopIcon />}
-                      onClick={() => setStopTarget(j)}>
-                Stop
-              </Button>
+              {j.stop && (
+                <Button size="small" color="error" startIcon={<StopIcon />}
+                        onClick={() => setStopTarget(j)}>
+                  Stop
+                </Button>
+              )}
             </Box>
             {typeof j.pct === 'number' && (
               <Box sx={{ px: 2, pb: 2 }}>

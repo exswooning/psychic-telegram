@@ -115,3 +115,34 @@ class TestAdmission:
         with cpdb.ro() as conn:
             rows = conn.execute("SELECT * FROM active_jobs").fetchall()
         assert rows == []
+
+
+class TestListActive:
+    """The one place a UI can learn what's occupying the shared slot
+    regardless of which account is asking -- see RunningNow.tsx, built
+    because a per-account view showed nothing running for account B while
+    account A's job was the very thing refusing account B's own launch."""
+
+    def test_empty_when_nothing_is_running(self, db):
+        assert ja.list_active() == []
+
+    def test_lists_a_running_job_with_its_account_and_pid(self, db):
+        ja.try_admit(7, "seed", pid=4242)
+        rows = ja.list_active()
+        assert len(rows) == 1
+        assert rows[0]["account_id"] == 7
+        assert rows[0]["job_name"] == "seed"
+        assert rows[0]["pid"] == 4242
+
+    def test_visible_regardless_of_which_account_is_asking(self, db):
+        """The whole point: this is not scoped by a caller identity at
+        all -- account 2 must see account 1's job just as plainly as
+        account 1 would."""
+        ja.try_admit(1, "migrate")
+        assert len(ja.list_active()) == 1
+        assert ja.list_active()[0]["account_id"] == 1
+
+    def test_a_released_job_no_longer_appears(self, db):
+        ja.try_admit(1, "seed")
+        ja.release(1, "seed")
+        assert ja.list_active() == []

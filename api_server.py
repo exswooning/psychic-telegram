@@ -309,6 +309,46 @@ class Hub:
 HUB = Hub()
 
 
+# job_admission.py job names THIS process admits (migrate_start's
+# _run_admitted, full_setup_start's inlined try_admit) -- the only ones
+# _reconcile_active_jobs below has any business releasing. Not 'delta' or
+# 'discover': nothing here ever admits those under those names today, but
+# they'd still show up in a live `ps` scan under "main.py" regardless.
+_OWNED_JOB_NAMES = {"migrate", "full_setup"}
+
+
+def _reconcile_active_jobs() -> None:
+    """Startup only, mirrors webui.py's own function of the same name: a
+    fresh process has admitted nothing itself, so any job_admission.py row
+    for a job type THIS process owns is orphaned unless the underlying
+    child (protected from the restart itself by KillMode=process) is still
+    actually alive. Without this, a restart mid-migrate or mid-full-setup
+    permanently wedges job_admission's one shared capacity slot -- every
+    later seed/migrate/full-setup attempt, from any account, refuses with
+    "capacity is full" for a job that finished (or died) long ago.
+    """
+    try:
+        active = job_admission.list_active()
+    except Exception:  # noqa: BLE001 - best-effort, must not block startup
+        return
+    owned = [row for row in active if row.get("job_name") in _OWNED_JOB_NAMES]
+    if not owned:
+        return
+    try:
+        ps_out = subprocess.run(["ps", "-eo", "args="], capture_output=True,
+                                text=True, timeout=5).stdout
+    except Exception:  # noqa: BLE001
+        return
+    for row in owned:
+        name = row["job_name"]
+        needle = "full_setup.py" if name == "full_setup" else "main.py"
+        if any(needle in ln and "grep" not in ln for ln in ps_out.splitlines()):
+            continue
+        job_admission.release(row.get("account_id"), name)
+        print(f"released orphaned job_admission row: account={row.get('account_id')} "
+              f"job={name!r} (no matching process found at startup)", flush=True)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     """Apply control-plane migrations, then start the single ledger tailer.
@@ -322,6 +362,7 @@ async def lifespan(_: FastAPI):
     # runs against a given migration.db. Must come after apply_migrations,
     # not before -- it writes into tables that migration just created.
     await _off_loop(accounts_auth.bootstrap_legacy_account)
+    await _off_loop(_reconcile_active_jobs)
     task = asyncio.create_task(_tailer())
     try:
         yield
@@ -559,6 +600,16 @@ async def admin_set_seed_enabled(account_id: int, body: SetSeedEnabled,
 @app.get("/api/v2/fleet")
 async def get_fleet():
     return await _off_loop(cpdb.fleet)
+
+
+@app.get("/api/v2/active-jobs")
+async def get_active_jobs():
+    """Every job_admission.py admission right now, across every account --
+    the account-scoped views (webui.py's per-account Job, full_setup_status's
+    ps scan) each only ever show the calling account's own job, so a
+    capacity refusal caused by a DIFFERENT account's run was invisible to
+    everyone else. This is the one place that actually knows."""
+    return await _off_loop(job_admission.list_active)
 
 
 @app.get("/api/v2/users")

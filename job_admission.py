@@ -57,6 +57,23 @@ def try_admit(account_id: int | None, job_name: str, pid: int | None = None) -> 
     return True, ""
 
 
+def list_active() -> list[dict]:
+    """Every row in the admission table right now -- the one place that
+    actually knows what's occupying the single shared slot, regardless of
+    which account is asking. Confirmed live: a UI that only checks its own
+    account's job state (webui.py's per-account Job, full_setup_status's
+    ps scan) shows nothing running for account B while account A's seed
+    job is the very thing making account B's own launch attempt come back
+    "capacity is full" -- there was no view of the table this function
+    reads that could have shown that.
+    """
+    with cpdb.ro() as conn:
+        rows = conn.execute(
+            "SELECT account_id, job_name, pid, started_at FROM active_jobs "
+            "ORDER BY started_at").fetchall()
+    return [dict(r) for r in rows]
+
+
 def release(account_id: int | None, job_name: str) -> None:
     """Free the slot try_admit reserved. Safe to call even if admission was
     never actually granted (e.g. a caller that admits then fails before

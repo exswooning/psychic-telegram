@@ -1184,6 +1184,27 @@ class TestCrossAccountJobAdmission:
         with cpdb.ro() as conn:
             assert conn.execute("SELECT COUNT(*) n FROM active_jobs").fetchone()["n"] == 0
 
+    def test_active_jobs_endpoint_shows_another_accounts_running_job(self, cp):
+        """The bug this endpoint exists to fix: RunningNow.tsx's other
+        sources (webui.py's per-account Job, full_setup_status's ps scan)
+        each only ever see the CALLING account's own job -- so a job
+        started under one account was invisible to every other account,
+        even though job_admission's cap meant it was exactly what was
+        blocking them. This is the one read that isn't scoped by caller."""
+        import job_admission
+
+        job_admission.try_admit(999, "seed", pid=4242)
+        try:
+            r = cp.get("/api/v2/active-jobs", headers=ADMIN)
+            assert r.status_code == 200
+            rows = r.json()
+            assert len(rows) == 1
+            assert rows[0]["account_id"] == 999
+            assert rows[0]["job_name"] == "seed"
+            assert rows[0]["pid"] == 4242
+        finally:
+            job_admission.release(999, "seed")
+
 
 class TestSuperadminAdminEndpoints:
     """The admin dashboard's backend: listing every account and toggling

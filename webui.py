@@ -591,8 +591,18 @@ def _external_processes() -> list[dict]:
             elapsed = int(etimes)
         except ValueError:
             continue
+        # (?:^|[\s/]), not (?:^|/) -- Job.start() invokes every one of these
+        # as [PY, "seed_sandbox.py", ...] (interpreter and script as
+        # separate argv elements), so the real `ps` line always reads
+        # "...python seed_sandbox.py ...": the script name is preceded by a
+        # SPACE, never a "/". The slash-only version only ever matched a
+        # direct path invocation ("/root/migration/seed_sandbox.py"), which
+        # is not what this process actually launches -- confirmed live,
+        # this silently never matched a single real seed/reset-target run,
+        # so _external_processes() always reported none of them as
+        # running. Same fix the main.py branch just below already has.
         name = next((label for script, label in _EXT_SCRIPTS.items()
-                     if re.search(r"(?:^|/)" + re.escape(script) + r"(?:\s|$)",
+                     if re.search(r"(?:^|[\s/])" + re.escape(script) + r"(?:\s|$)",
                                   args)), None)
         if name is None:
             m = re.search(r"(?:^|[\s/])main\.py\s+(\S+)", args)
@@ -603,6 +613,44 @@ def _external_processes() -> list[dict]:
         found.append({"pid": int(pid), "elapsed": elapsed, "name": name})
     found.sort(key=lambda x: (x["name"] != "migrate", -x["elapsed"], x["pid"]))
     return found
+
+
+# job_admission.py job names this process itself admits (see get_job()'s own
+# /api/seed, /api/reset_target, /api/reset_drive_ledger call sites) -- the
+# only ones _reconcile_active_jobs() below has any business releasing.
+_OWNED_JOB_NAMES = {"seed", "reset target", "reset drive ledger"}
+
+
+def _reconcile_active_jobs() -> None:
+    """Startup only: this process's own JOBS dict always starts empty, so
+    any job_admission.py row for a job type THIS process owns is orphaned
+    UNLESS the underlying child (protected from the restart itself by
+    KillMode=process) is still actually alive.
+
+    Confirmed live: a restart mid-seed left job_admission showing a seed
+    admitted forever -- the real seed_sandbox.py process had long since
+    exited, nothing in the new process ever calls release() for a job it
+    never started, and job_admission.MAX_CONCURRENT_TENANT_JOBS=1 meant
+    that phantom row permanently wedged the whole box at zero capacity --
+    every subsequent seed/migrate/full-setup attempt, from any account,
+    refused with "capacity is full" for a job that was not running at all.
+
+    Startup-only, not polled: this state can only go stale exactly AT a
+    restart, never in between -- reconciling on every request would just
+    be a `ps` scan nothing between restarts could ever change the answer to.
+    """
+    try:
+        active = job_admission.list_active()
+    except Exception:  # noqa: BLE001 - best-effort, must not block startup
+        return
+    still_alive = {p["name"] for p in _external_processes()}
+    for row in active:
+        name = row.get("job_name")
+        if name not in _OWNED_JOB_NAMES or name in still_alive:
+            continue
+        job_admission.release(row.get("account_id"), name)
+        print(f"released orphaned job_admission row: account={row.get('account_id')} "
+              f"job={name!r} (no matching process found at startup)", flush=True)
 
 
 def _external_job_snapshot() -> dict | None:
@@ -3086,6 +3134,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"loaded {len(loaded)} setting(s) from {ENV_PATH}")
     except Exception as exc:  # noqa: BLE001 - the UI should still start
         print(f"could not read {ENV_PATH}: {exc}")
+
+    _reconcile_active_jobs()
 
     if args.host not in ("127.0.0.1", "localhost"):
         print("\n*** WARNING ***")

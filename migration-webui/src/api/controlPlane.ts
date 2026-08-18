@@ -201,6 +201,17 @@ export interface OperatorAction {
 // -- reads -----------------------------------------------------------------
 export const fetchWhoami = () => cpFetch<Operator>('/api/v2/whoami')
 export const fetchFleet = () => cpFetch<FleetNode[]>('/api/v2/fleet')
+
+export interface ActiveJobRow {
+  account_id: number | null; job_name: string; pid: number | null; started_at: string
+}
+// job_admission.py's admission table, unscoped by caller -- the one place
+// that shows what's occupying the shared capacity slot regardless of which
+// account is asking. See RunningNow.tsx: the other sources here (webui.py's
+// per-account Job, full-setup/status's own ps scan) only ever see the
+// CALLING account's own job, so another account's run -- exactly what a
+// "capacity is full" refusal is usually caused by -- was invisible.
+export const fetchActiveJobs = () => cpFetch<ActiveJobRow[]>('/api/v2/active-jobs')
 export const fetchUsers = () => cpFetch<UserProgress[]>('/api/v2/users')
 export const fetchFailures = (user?: string) =>
   cpFetch<FailureRow[]>(`/api/v2/failures${user ? `?source_user=${encodeURIComponent(user)}` : ''}`)
