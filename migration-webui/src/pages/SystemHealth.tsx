@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useEffect, useState } from 'react'
 import {
   Box,
   Typography,
@@ -31,15 +31,35 @@ import {
   Error as ErrorIcon,
 } from '@mui/icons-material'
 import { useMigrationStore } from '@/store'
+import { fetchFleet, FleetNode } from '@/api/controlPlane'
 
 const SystemHealth: React.FC = () => {
   const { metrics } = useMigrationStore()
   const m = metrics
 
+  // Same host, read the same way Mission Control's own Fleet node card
+  // reads it (fleet_agent.py's ps scan) -- not webui.py's separate
+  // load-average snapshot (metrics.cpu/ram/disk), which used to make this
+  // page disagree with Mission Control on the exact same machine's CPU%,
+  // purely from the two being sampled at different moments by different
+  // processes. Falls back to the ledger-poller reading when no fleet node
+  // is registered (fleet_agent.py is optional tooling, not everywhere).
+  const [node, setNode] = useState<FleetNode | null>(null)
+  useEffect(() => {
+    const poll = () => fetchFleet().then((nodes) => setNode(nodes[0] ?? null)).catch(() => {})
+    poll()
+    const id = setInterval(poll, 5000)
+    return () => clearInterval(id)
+  }, [])
+
+  const cpu = node?.cpu_pct ?? m.cpu
+  const ramPct = node?.ram_pct ?? m.ram.percentage
+  const diskPct = node?.disk_pct ?? m.disk.percentage
+
   const metricCards = [
-    { title: 'CPU Usage', value: `${m.cpu}%`, icon: <SpeedIcon />, color: m.cpu > 80 ? 'error' : m.cpu > 60 ? 'warning' : 'success', progress: m.cpu },
-    { title: 'RAM Usage', value: `${m.ram.percentage}%`, icon: <MemoryIcon />, color: m.ram.percentage > 85 ? 'error' : m.ram.percentage > 70 ? 'warning' : 'success', progress: m.ram.percentage, subtitle: `${m.ram.used} MB / ${m.ram.total} MB` },
-    { title: 'Disk Usage', value: `${m.disk.percentage}%`, icon: <StorageIcon />, color: m.disk.percentage > 85 ? 'error' : m.disk.percentage > 70 ? 'warning' : 'success', progress: m.disk.percentage, subtitle: `${m.disk.used} GB / ${m.disk.total} GB` },
+    { title: 'CPU Usage', value: `${cpu}%`, icon: <SpeedIcon />, color: cpu > 80 ? 'error' : cpu > 60 ? 'warning' : 'success', progress: cpu },
+    { title: 'RAM Usage', value: `${ramPct}%`, icon: <MemoryIcon />, color: ramPct > 85 ? 'error' : ramPct > 70 ? 'warning' : 'success', progress: ramPct, subtitle: `${m.ram.used} MB / ${m.ram.total} MB` },
+    { title: 'Disk Usage', value: `${diskPct}%`, icon: <StorageIcon />, color: diskPct > 85 ? 'error' : diskPct > 70 ? 'warning' : 'success', progress: diskPct, subtitle: `${m.disk.used} GB / ${m.disk.total} GB` },
     { title: 'Network', value: `${m.network.down} MB/s`, icon: <NetworkIcon />, color: 'primary', progress: Math.min((m.network.down / 50) * 100, 100), subtitle: `↑ ${m.network.up} MB/s` },
     { title: 'API Health', value: m.apiHealth, icon: m.apiHealth === 'healthy' ? <HealthyIcon /> : <ErrorIcon />, color: m.apiHealth === 'healthy' ? 'success' : 'error', subtitle: 'Google API status' },
     { title: 'Google Quota', value: `${m.googleQuota.percentage}%`, icon: <QueueIcon />, color: m.googleQuota.percentage > 90 ? 'error' : m.googleQuota.percentage > 75 ? 'warning' : 'success', progress: m.googleQuota.percentage, subtitle: `${m.googleQuota.used}/${m.googleQuota.limit} requests` },

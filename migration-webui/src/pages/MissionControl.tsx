@@ -203,7 +203,16 @@ const MissionControl: React.FC = () => {
       <Box>
         <Typography variant="overline" color="text.secondary">
           Fleet ({nodes.length} node{nodes.length === 1 ? '' : 's'})
-          {metrics && ` · this host: CPU ${metrics.cpu}% · RAM ${metrics.ram.percentage}% · workers ${metrics.workers.current}/${metrics.workers.max}`}
+          {/* Not CPU/RAM here too -- each NodeCard below already shows its
+             own real reading (fleet_agent.py's ps scan). A second, separately
+             -timed CPU% computed here from the ledger poller (webui.py's own
+             load-average snapshot) drifts from the node card's number just
+             from being sampled at a different moment, which reads as a bug
+             ("System Health disagrees with Mission Control") rather than
+             what it actually is -- two honest but redundant measurements.
+             workers has no fleet equivalent, so it's the one number worth
+             keeping here. */}
+          {metrics && ` · workers ${metrics.workers.current}/${metrics.workers.max}`}
         </Typography>
         <Stack direction="row" spacing={2} sx={{ mt: 1, flexWrap: 'wrap', gap: 2 }}>
           {nodes.map((n) => <NodeCard key={n.node_id} node={n} />)}
