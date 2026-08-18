@@ -1,4 +1,5 @@
-import React, { useState } from 'react'
+import React, { useCallback, useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   Box,
   Typography,
@@ -17,6 +18,8 @@ import {
   Tooltip,
   Alert,
   LinearProgress,
+  Stack,
+  CircularProgress,
 } from '@mui/material'
 import {
   Search as SearchIcon,
@@ -29,9 +32,124 @@ import {
   Refresh as RetryingIcon,
   CloudDone as InProgressIcon,
   Refresh as RefreshIcon,
+  Bolt as RunningNowIcon,
 } from '@mui/icons-material'
 import { useMigrationStore } from '@/store'
 import { statusLabel, statusColor } from '@/utils/formatters'
+import {
+  fetchTenantConfigStatus, fetchFullSetupStatus, fetchFleet, FleetNode,
+} from '@/api/controlPlane'
+import { fetchJob, JobStatus } from '@/api/client'
+
+interface RunningNow { key: string; label: string; detail: string; pct: number | null }
+
+/**
+ * Every heavy job (seed, reset target, migrate, delta, full-setup) shares
+ * ONE capacity slot across the whole box -- job_admission.py's own
+ * MAX_CONCURRENT_TENANT_JOBS=1 -- so "capacity is full, another job is
+ * already running" is a real, common refusal, and until now there was
+ * nowhere on this page to see WHAT that job actually is. Same three
+ * sources Jobs.tsx already reads (full_setup's own progress file, webui.py's
+ * per-account Job, main.py found live via fleet_agent.py's ps scan) --
+ * no new backend surface.
+ */
+function useRunningNow(): { jobs: RunningNow[]; loading: boolean } {
+  const [jobs, setJobs] = useState<RunningNow[]>([])
+  const [loading, setLoading] = useState(false)
+
+  const refresh = useCallback(async () => {
+    setLoading(true)
+    try {
+      const [srcCfg, tgtCfg, srcSetup, tgtSetup, job, nodes] = await Promise.all([
+        fetchTenantConfigStatus('source').catch(() => null),
+        fetchTenantConfigStatus('target').catch(() => null),
+        fetchFullSetupStatus('source').catch(() => null),
+        fetchFullSetupStatus('target').catch(() => null),
+        fetchJob(0).catch(() => null as JobStatus | null),
+        fetchFleet().catch(() => [] as FleetNode[]),
+      ])
+      const found: RunningNow[] = []
+      if (srcSetup?.running) {
+        found.push({ key: 'setup-source', label: srcCfg?.domain || 'source',
+                    detail: srcSetup.progressLabel || 'setting up…', pct: srcSetup.progressPct ?? null })
+      }
+      if (tgtSetup?.running) {
+        found.push({ key: 'setup-target', label: tgtCfg?.domain || 'target',
+                    detail: tgtSetup.progressLabel || 'setting up…', pct: tgtSetup.progressPct ?? null })
+      }
+      if (job?.running && job.name) {
+        found.push({ key: `webui-${job.name}`, label: job.name, detail: `${job.elapsed}s elapsed`,
+                    pct: job.progressPct ?? null })
+      }
+      const fleet = nodes.find((n) => n.active_job && n.job_pid)
+      if (fleet) {
+        found.push({ key: `fleet-${fleet.job_pid}`, label: fleet.active_job!,
+                    detail: `pid ${fleet.job_pid} on ${fleet.hostname || fleet.node_id}`, pct: null })
+      }
+      setJobs(found)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    refresh()
+    const id = setInterval(refresh, 5000)
+    return () => clearInterval(id)
+  }, [refresh])
+
+  return { jobs, loading }
+}
+
+const RunningNowBanner: React.FC = () => {
+  const { jobs, loading } = useRunningNow()
+  const navigate = useNavigate()
+
+  if (!loading && jobs.length === 0) return null
+
+  return (
+    <Paper elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', p: 2, mb: 2 }}>
+      <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: jobs.length ? 1.5 : 0 }}>
+        <RunningNowIcon fontSize="small" color="action" />
+        <Typography variant="subtitle2" sx={{ fontWeight: 600, flexGrow: 1 }}>Running now</Typography>
+        {loading && jobs.length === 0 && <CircularProgress size={16} />}
+      </Stack>
+      {jobs.length > 0 && (
+        <Stack spacing={1}>
+          {jobs.map((j) => (
+            <Box key={j.key} onClick={() => navigate('/jobs')} sx={{
+              display: 'flex', alignItems: 'center', gap: 1.5, p: 1.25,
+              borderRadius: 1, bgcolor: 'action.hover', cursor: 'pointer', flexWrap: 'wrap',
+              '&:hover': { bgcolor: 'action.selected' },
+            }}>
+              <CircularProgress size={14} />
+              <Chip size="small" label={j.label} variant="outlined" sx={{ textTransform: 'capitalize' }} />
+              <Typography variant="body2" color="text.secondary" sx={{ flexGrow: 1, minWidth: 120 }}>
+                {j.detail}
+              </Typography>
+              {typeof j.pct === 'number' && (
+                <Box sx={{ width: 100 }}>
+                  <LinearProgress variant="determinate" value={j.pct} sx={{ height: 6, borderRadius: 3 }} />
+                </Box>
+              )}
+              {typeof j.pct === 'number' && (
+                <Typography variant="caption" color="text.secondary" sx={{ fontVariantNumeric: 'tabular-nums' }}>
+                  {j.pct}%
+                </Typography>
+              )}
+            </Box>
+          ))}
+        </Stack>
+      )}
+      {jobs.length > 0 && (
+        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+          Only one heavy job runs at a time -- a "capacity is full" refusal
+          means one of these. Click a row for the full breakdown on Jobs.
+        </Typography>
+      )}
+    </Paper>
+  )
+}
 
 const ActivityFeed: React.FC = () => {
   const { activities, error, isLoading } = useMigrationStore()
@@ -76,6 +194,8 @@ const ActivityFeed: React.FC = () => {
           because nothing has happened yet.
         </Alert>
       )}
+
+      <RunningNowBanner />
 
       <Paper elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', p: 2, mb: 2, display: 'flex', gap: 2, flexWrap: 'wrap', alignItems: 'center' }}>
         <TextField
