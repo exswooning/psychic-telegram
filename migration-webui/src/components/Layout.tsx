@@ -38,6 +38,7 @@ import {
   Dns as HostIcon,
   Hub as MissionIcon,
   WorkHistory as JobsIconNav,
+  Bolt as RunningNowIconNav,
   StopCircle as InterruptIcon,
   AdminPanelSettings as AdminIconNav,
   SwapHoriz as IdentitiesIconNav,
@@ -63,6 +64,7 @@ import Logout from '@mui/icons-material/Logout'
 const NAV_ITEMS = [
   { path: '/wizard', label: 'Setup Wizard', icon: <WizardIconNav /> },
   { path: '/jobs', label: 'Jobs', icon: <JobsIconNav /> },
+  { path: '/running-now', label: 'Running Now', icon: <RunningNowIconNav /> },
   { path: '/mission-control', label: 'Mission Control', icon: <MissionIcon /> },
   { path: '/users', label: 'Users', icon: <PeopleIcon /> },
   { path: '/activity', label: 'Activity', icon: <ActivityIcon /> },
