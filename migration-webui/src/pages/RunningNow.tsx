@@ -12,7 +12,7 @@ import {
 } from '@/api/controlPlane'
 import { fetchJob, stopJob as stopSeedJob } from '@/api/client'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
-import SeedUsersLog from '@/components/SeedUsersLog'
+import SeedRunDashboard from '@/components/SeedRunDashboard'
 
 interface RunningJob {
   key: string; label: string; detail: string; pct: number | null
@@ -22,6 +22,9 @@ interface RunningJob {
   // pct+label checkpoint, not a transcript; fleet/cross-account entries
   // have no output source at all.
   lines?: string[]
+  /** Wall-clock seconds so far, for the observed-throughput figures the
+   *  seed dashboard derives. Same source as `detail`, kept numeric. */
+  elapsedSec?: number
   // Absent for a job admitted under a DIFFERENT account -- job_admission.py
   // never records a stoppable pid for seed/reset-target/full-setup (only
   // this account's own rich sources below know that), and stopping
@@ -99,7 +102,7 @@ function useRunningNow() {
       if (job?.running && job.name && !job.external) {
         found.push({
           key: `webui-${job.name}`, label: job.name, detail: `${job.elapsed}s elapsed`,
-          pct: job.progressPct ?? null, lines: job.lines,
+          pct: job.progressPct ?? null, lines: job.lines, elapsedSec: job.elapsed,
           stop: async () => { await stopSeedJob() },
         })
       }
@@ -232,7 +235,7 @@ const RunningNow: React.FC = () => {
             )}
             {j.lines && j.lines.length > 0 && (
               <Box sx={{ px: 2, pb: 2 }}>
-                <SeedUsersLog lines={j.lines} />
+                <SeedRunDashboard lines={j.lines} elapsedSec={j.elapsedSec} />
                 <Box component="pre" sx={{
                   fontSize: 11, p: 1.5, bgcolor: 'action.hover', borderRadius: 1,
                   overflowX: 'auto', maxHeight: 260, whiteSpace: 'pre-wrap', m: 0, mt: 1.5,

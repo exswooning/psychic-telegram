@@ -21,7 +21,7 @@ import {
   stopJob as stopSeedJob,
 } from '@/api/client'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
-import SeedUsersLog from '@/components/SeedUsersLog'
+import SeedRunDashboard from '@/components/SeedRunDashboard'
 
 const SEED_SCALES = ['tiny', 'small', 'medium', 'large', 'huge']
 // main.py migrate --services help text is the source of truth: "drive,
@@ -587,7 +587,7 @@ const SeedJobCard: React.FC<{
         <CardContent sx={{ pt: 2 }}>
           {lines.length > 0 ? (
             <>
-              <SeedUsersLog lines={lines} />
+              <SeedRunDashboard lines={lines} elapsedSec={job?.elapsed ?? history?.elapsed} />
               <Box component="pre" sx={{
                 fontSize: 11, p: 1.5, bgcolor: 'action.hover', borderRadius: 1,
                 overflowX: 'auto', maxHeight: 260, whiteSpace: 'pre-wrap', m: 0, mt: 1.5,

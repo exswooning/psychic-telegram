@@ -292,10 +292,25 @@ class Job:
         self.finished = 0.0
         self.rc: int | None = None
         self._on_finish: Callable[[int | None], None] | None = None
+        # Set per run by start(); the on-disk transcript this job's output
+        # is written to, and the thing that makes its output survive a
+        # restart of this process. See start()'s own comment.
+        self.log_path = ""
+        self._log_offset = 0
+        self._log_fh = None
 
     @property
     def running(self) -> bool:
-        return self.proc is not None and self.proc.poll() is None
+        # Not `proc.poll() is None`: that flips the instant the child exits,
+        # which is BEFORE _drain() has read the child's last output, set rc,
+        # frozen `finished`, saved the result, or released the admission
+        # slot. Every caller here waits for `not running` and then reads
+        # exactly those -- so the old definition made all of them racy, and
+        # two tests caught it (a finished job whose duration kept growing,
+        # and an rc still reading None). rc is set once, by _drain, as the
+        # final step, so it is the honest "this job is completely done"
+        # signal.
+        return self.proc is not None and self.rc is None
 
     def start(self, name: str, argv: list[str],
               env: dict | None = None, cwd: str | None = None,
@@ -313,34 +328,106 @@ class Job:
             self._on_finish = on_finish
             env = dict(env or os.environ)
             env.setdefault("PYTHONUNBUFFERED", "1")
+            # A FILE, not subprocess.PIPE. A pipe's read end is held only by
+            # this process, and systemd's KillMode=process deliberately keeps
+            # these children alive across a webui restart -- so every deploy
+            # left a running job writing into a pipe whose only reader was
+            # gone. Three separate real failures came out of that:
+            #   * the job's entire transcript was unrecoverable after a
+            #     restart, and _process_output_tail() silently fell back to
+            #     an unrelated migration.log -- confirmed live, the UI streamed
+            #     a THREE-DAY-OLD log from a different job as a running seed's
+            #     "live" output;
+            #   * once the 64KB pipe buffer filled with nobody draining it,
+            #     the child would block forever on its next print();
+            #   * a write to a pipe with no reader raises BrokenPipeError,
+            #     which is the most likely explanation for the seed run that
+            #     vanished mid-deploy earlier with no OOM and no result file.
+            # A file has none of those properties, and it makes the on-disk
+            # transcript the single source of truth that survives anything.
+            self.log_path = job_log_path(self.account_id, name)
+            self._log_offset = 0
+            try:
+                os.makedirs(os.path.dirname(self.log_path), exist_ok=True)
+                # Truncated per run: this is "the current run's output", the
+                # same contract the in-memory list had. The previous run's
+                # transcript is already preserved by _save_result().
+                self._log_fh = open(self.log_path, "w", encoding="utf-8")
+            except OSError as exc:
+                return False, f"could not open job log {self.log_path}: {exc}"
             try:
                 self.proc = subprocess.Popen(
-                    argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    argv, stdout=self._log_fh, stderr=subprocess.STDOUT,
                     # A child must never block on a hidden interactive prompt:
                     # input() against the server's terminal hangs the job with
                     # no output, which reads as a stalled migration.
                     stdin=subprocess.DEVNULL,
-                    text=True, bufsize=1, env=env,
+                    env=env,
                     cwd=cwd or os.path.dirname(os.path.abspath(__file__)),
                 )
             except Exception as exc:  # noqa: BLE001
+                self._log_fh.close()
+                # `running` is (proc is not None and rc is None), so leaving
+                # a previous run's proc object here would report this job as
+                # permanently running after a failed launch.
+                self.proc = None
                 return False, str(exc)
             threading.Thread(target=self._drain, daemon=True).start()
             return True, "started"
 
-    def _drain(self) -> None:
-        assert self.proc and self.proc.stdout
-        for line in self.proc.stdout:
-            line = line.rstrip("\n")
-            # FutureWarnings from the google libraries drown everything else.
-            if "FutureWarning" in line or "warnings.warn" in line:
-                continue
-            with self.lock:
+    def _ingest_new_lines(self) -> None:
+        """Append whatever the child has written since the last read.
+
+        Offset-based rather than re-reading the file: a long migrate's log
+        runs to megabytes, and this is called on a timer for as long as the
+        job lives.
+        """
+        try:
+            with open(self.log_path, encoding="utf-8", errors="replace") as fh:
+                fh.seek(self._log_offset)
+                chunk = fh.read()
+                self._log_offset = fh.tell()
+        except OSError:
+            return
+        if not chunk:
+            return
+        # A trailing partial line (the child is mid-write) is left for the
+        # next pass rather than shown as a truncated line that then changes.
+        if not chunk.endswith("\n"):
+            keep = chunk.rfind("\n")
+            if keep == -1:
+                self._log_offset -= len(chunk.encode("utf-8", "replace"))
+                return
+            self._log_offset -= len(chunk[keep + 1:].encode("utf-8", "replace"))
+            chunk = chunk[:keep + 1]
+        with self.lock:
+            for line in chunk.splitlines():
+                # FutureWarnings from the google libraries drown everything else.
+                if "FutureWarning" in line or "warnings.warn" in line:
+                    continue
                 self.lines.append(line)
-                if len(self.lines) > 4000:
-                    del self.lines[:1000]
-        self.rc = self.proc.wait()
+            if len(self.lines) > 4000:
+                del self.lines[:len(self.lines) - 4000]
+
+    def _drain(self) -> None:
+        assert self.proc
+        # wait(), not a poll-and-sleep loop: this returns the moment the
+        # child exits, so `finished` is frozen at the real end time rather
+        # than up to a tick late (which showed up as a completed job whose
+        # reported duration kept growing). Nothing needs to be read on a
+        # timer here -- snapshot() ingests from the log itself, so live
+        # readers stay current without this thread doing anything.
+        rc = self.proc.wait()
+        # Before rc: `running` is derived from rc, and every caller that
+        # waits for `not running` then immediately reads the output. Reading
+        # the child's final lines first is what makes that safe.
+        self._ingest_new_lines()
+        try:
+            self._log_fh.close()
+        except Exception:  # noqa: BLE001
+            pass
         self.finished = time.time()
+        self.rc = rc
         self._save_result()
         if self._on_finish is not None:
             try:
@@ -363,6 +450,20 @@ class Job:
             return f"interrupt sent to {self.name}"
 
     def snapshot(self, since: int = 0) -> dict:
+        # Pull in anything the child wrote since the last read, rather than
+        # trusting the drain thread to have already done it. Two reasons,
+        # and the second is the one that matters:
+        #   * the drain thread ticks on a timer, so a poll landing between
+        #     ticks would report output as missing that is already on disk;
+        #   * `running` goes false the instant the process exits, which is
+        #     BEFORE the drain thread's final pass -- so a caller that
+        #     (correctly) stops polling once the job finishes could miss the
+        #     last lines permanently, and those are usually the summary or
+        #     the traceback, the part most worth seeing.
+        # Called outside the lock below: _ingest_new_lines takes it itself,
+        # and threading.Lock is not reentrant.
+        if self.log_path:
+            self._ingest_new_lines()
         # _job_progress() can open a sqlite connection (for migrate/delta/
         # discover's ledger-backed fraction) -- done after releasing the
         # lock below so a slow disk read never blocks start()/stop() for
@@ -443,6 +544,17 @@ def job_result_path(account_id: int | None, name: str) -> str:
     d = os.path.join(here, "logs", "jobs", "_none" if account_id is None else str(account_id))
     safe_name = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "job"
     return os.path.join(d, f"{safe_name}.json")
+
+
+def job_log_path(account_id: int | None, name: str) -> str:
+    """The live transcript of the CURRENT run, beside its saved result.
+
+    Separate from job_result_path's .json (which is only written once the
+    run finishes): this is the file the child process writes to directly
+    while it runs, so it is readable by anything, at any time, including a
+    freshly restarted server that never held this job in memory.
+    """
+    return job_result_path(account_id, name)[: -len(".json")] + ".log"
 
 
 def load_job_result(account_id: int | None, name: str) -> dict | None:
@@ -529,26 +641,27 @@ _EXT_TAIL_LEN: int = 2000
 _EXT_INITIAL_LINES: int = 120
 
 
-def _detached_log_path() -> str:
-    """The job log a detached main.py writes to -- migration.log in the repo
-    dir by default (see config.Settings.log_file)."""
-    try:
-        from config import Settings
-        lp = Settings().log_file
-    except Exception:  # noqa: BLE001 - default is right if config is unreadable
-        lp = "migration.log"
-    if os.path.isabs(lp):
-        return lp
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), lp)
+def _process_output_tail(pid: int, name: str = "",
+                         account_id: int | None = None) -> list[str]:
+    """The last _EXT_TAIL_LEN lines of a process's own output, or [] when
+    this process genuinely cannot see it.
 
+    Resolution order, most-specific first:
+      1. /proc/<pid>/fd/1, when stdout is redirected to a real file -- the
+         normal shape for a migrate run over SSH, and (since Job.start()
+         stopped using a pipe) for anything this server launched too.
+      2. This job name's own on-disk transcript, which covers a job whose
+         fd/1 is a now-dead pipe from a PREVIOUS server process.
+      3. Nothing.
 
-def _process_output_tail(pid: int) -> list[str]:
-    """The last _EXT_TAIL_LEN lines of a process's own output. Where stdout
-    is redirected to a file -- the normal way a migrate is run over SSH -- its
-    actual target is resolved through /proc/<pid>/fd/1, so the live feed
-    streams the real log the operator is used to seeing, not the static
-    migration.log a run may have stopped writing to. Falls back to that
-    migration.log when stdout is a pipe or the proc target is unreadable."""
+    Step 3 used to be "fall back to migration.log" -- confirmed live to be
+    actively misleading rather than merely unhelpful: a running seed's
+    stdout was an orphaned pipe, so the UI served a THREE-DAY-OLD log from
+    an unrelated migrate run as that seed's live output, with no indication
+    anything was wrong. An honest empty result lets the caller say "no
+    output available" instead of showing a different job's history as if it
+    were this one's.
+    """
     path = None
     try:
         tgt = os.readlink(f"/proc/{pid}/fd/1")
@@ -556,7 +669,12 @@ def _process_output_tail(pid: int) -> list[str]:
             path = tgt
     except OSError:
         pass
-    path = path or _detached_log_path()
+    if path is None and name:
+        candidate = job_log_path(account_id, name)
+        if os.path.exists(candidate):
+            path = candidate
+    if path is None:
+        return []
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
             return [ln.rstrip("\n") for ln in fh.readlines()[-_EXT_TAIL_LEN:]]
@@ -664,7 +782,12 @@ def _external_job_snapshot() -> dict | None:
     if not jobs:
         return None
     job = jobs[0]
-    tail = _process_output_tail(job["pid"])
+    # name/account: lets the fallback find this job's own on-disk transcript
+    # when fd/1 is a dead pipe left by a previous server process. account is
+    # the legacy slot deliberately -- _external_processes() is a machine-wide
+    # ps scan with no account context (see _job_snapshot's `external` flag),
+    # and JOBS[None] is where a detached run's log lands.
+    tail = _process_output_tail(job["pid"], job["name"], None)
     prev = _EXT_TAIL.get(job["pid"])
     _EXT_TAIL[job["pid"]] = tail
     if prev is None:
