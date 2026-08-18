@@ -31,6 +31,9 @@ import { useNavigate } from 'react-router-dom'
 import { useMigrationStore } from '@/store'
 import { statusLabel, statusColor } from '@/utils/formatters'
 import { fetchFleet, FleetNode } from '@/api/controlPlane'
+import { fetchJob } from '@/api/client'
+
+interface ActiveJobInfo { label: string; detail: string; writesToLedger: boolean }
 
 const Users: React.FC = () => {
   const navigate = useNavigate()
@@ -45,12 +48,34 @@ const Users: React.FC = () => {
   // is knowing WHETHER one is actually running right now: a user sitting at
   // "in_progress" could be mid-run, or could be a stale leftover from a run
   // interrupted hours ago -- nothing on this page could tell those apart.
-  // Same fleet_agent.py ps-scan detection Jobs.tsx/RunningNow.tsx already use.
-  const [activeJob, setActiveJob] = useState<FleetNode | null>(null)
+  //
+  // Two sources, not one: fleet_agent.py's ps scan only ever finds main.py
+  // (migrate/delta/discover/...) -- it does not look for seed_sandbox.py at
+  // all, so a running seed showed nothing here whatsoever. Reported live:
+  // "still not updating the users page, i am running a seed" -- the rows
+  // genuinely can't move (seed writes directly to the tenant via Google's
+  // APIs, never to migration.db), but with no seed detection at all, the
+  // page gave no explanation for why, which read as broken rather than as
+  // the honest, correct answer for what seed actually does.
+  const [activeJob, setActiveJob] = useState<ActiveJobInfo | null>(null)
   useEffect(() => {
-    const poll = () => fetchFleet()
-      .then((nodes) => setActiveJob(nodes.find((n) => n.active_job && n.job_pid) ?? null))
-      .catch(() => {})
+    const poll = async () => {
+      const [nodes, job] = await Promise.all([
+        fetchFleet().catch(() => [] as FleetNode[]),
+        fetchJob(0).catch(() => null),
+      ])
+      const fleetNode = nodes.find((n) => n.active_job && n.job_pid)
+      if (fleetNode) {
+        setActiveJob({
+          label: fleetNode.active_job!, detail: `pid ${fleetNode.job_pid}`,
+          writesToLedger: fleetNode.active_job === 'migrate' || fleetNode.active_job === 'delta',
+        })
+      } else if (job?.running && job.name) {
+        setActiveJob({ label: job.name, detail: `${job.elapsed}s elapsed`, writesToLedger: false })
+      } else {
+        setActiveJob(null)
+      }
+    }
     poll()
     const id = setInterval(poll, 5000)
     return () => clearInterval(id)
@@ -84,14 +109,16 @@ const Users: React.FC = () => {
       {activeJob && (
         <Alert severity="info" icon={<RunningIcon fontSize="inherit" />} sx={{ mb: 2 }}
           action={
-            <Button color="inherit" size="small" onClick={() => navigate('/mission-control')}>
-              Open Mission Control
+            <Button color="inherit" size="small"
+                    onClick={() => navigate(activeJob.writesToLedger ? '/mission-control' : '/running-now')}>
+              {activeJob.writesToLedger ? 'Open Mission Control' : 'Open Running Now'}
             </Button>
           }>
-          <strong>{activeJob.active_job}</strong> is running right now (pid {activeJob.job_pid}).
-          {(activeJob.active_job === 'migrate' || activeJob.active_job === 'delta')
+          <strong>{activeJob.label}</strong> is running right now ({activeJob.detail}).
+          {activeJob.writesToLedger
             ? ' The rows below are updating live as it writes to the ledger, not a stale snapshot.'
-            : ' It does not write to this ledger, so the rows below reflect the last real migrate/delta run, not this job.'}
+            : ` ${activeJob.label === 'seed' ? 'Seed writes directly to the tenant via Google’s APIs'
+                : 'It does not write to this ledger'}, so the rows below won't move for it -- see the users it's actually touching on Running Now.`}
         </Alert>
       )}
 
