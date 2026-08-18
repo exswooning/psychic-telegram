@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import {
   Box,
   Typography,
@@ -21,11 +21,16 @@ import {
   CardContent,
   Grid,
   Alert,
+  Button,
 } from '@mui/material'
-import { Search as SearchIcon, Person as PersonIcon, ArrowForward as ArrowForwardIcon } from '@mui/icons-material'
+import {
+  Search as SearchIcon, Person as PersonIcon, ArrowForward as ArrowForwardIcon,
+  Bolt as RunningIcon,
+} from '@mui/icons-material'
 import { useNavigate } from 'react-router-dom'
 import { useMigrationStore } from '@/store'
 import { statusLabel, statusColor } from '@/utils/formatters'
+import { fetchFleet, FleetNode } from '@/api/controlPlane'
 
 const Users: React.FC = () => {
   const navigate = useNavigate()
@@ -33,6 +38,23 @@ const Users: React.FC = () => {
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(0)
   const [rowsPerPage, setRowsPerPage] = useState(10)
+
+  // The rows below already reflect the CURRENT ledger state live -- audit_log
+  // gets new rows the moment an active migrate/delta job writes them, and
+  // this page is already polled every 4s (useMigration.ts). What's missing
+  // is knowing WHETHER one is actually running right now: a user sitting at
+  // "in_progress" could be mid-run, or could be a stale leftover from a run
+  // interrupted hours ago -- nothing on this page could tell those apart.
+  // Same fleet_agent.py ps-scan detection Jobs.tsx/RunningNow.tsx already use.
+  const [activeJob, setActiveJob] = useState<FleetNode | null>(null)
+  useEffect(() => {
+    const poll = () => fetchFleet()
+      .then((nodes) => setActiveJob(nodes.find((n) => n.active_job && n.job_pid) ?? null))
+      .catch(() => {})
+    poll()
+    const id = setInterval(poll, 5000)
+    return () => clearInterval(id)
+  }, [])
 
   const filtered = users.filter(
     (u) =>
@@ -56,6 +78,20 @@ const Users: React.FC = () => {
           Last poll failed ({error}). Showing data from {lastUpdate
             ? new Date(lastUpdate).toLocaleTimeString() : 'the last successful refresh'}
           , not necessarily live.
+        </Alert>
+      )}
+
+      {activeJob && (
+        <Alert severity="info" icon={<RunningIcon fontSize="inherit" />} sx={{ mb: 2 }}
+          action={
+            <Button color="inherit" size="small" onClick={() => navigate('/mission-control')}>
+              Open Mission Control
+            </Button>
+          }>
+          <strong>{activeJob.active_job}</strong> is running right now (pid {activeJob.job_pid}).
+          {(activeJob.active_job === 'migrate' || activeJob.active_job === 'delta')
+            ? ' The rows below are updating live as it writes to the ledger, not a stale snapshot.'
+            : ' It does not write to this ledger, so the rows below reflect the last real migrate/delta run, not this job.'}
         </Alert>
       )}
 
