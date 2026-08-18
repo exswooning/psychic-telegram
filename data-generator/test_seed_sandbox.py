@@ -346,6 +346,59 @@ def test_mailbox_has_cross_user_mail_in_every_state(seed, settings):
     assert len(senders & set(peers)) >= 3, "mail should come from several colleagues"
 
 
+class TestConcurrentLeafCreation:
+    """Leaf files are created on a small thread pool now, because doing them
+    one at a time left the account's Drive write budget 6.3x idle (measured
+    live: 0.47 writes/sec against Google's 3/sec per-account ceiling).
+
+    The risk that buys is a corpus that changes shape depending on timing --
+    `self.rng` is one Random consumed in a fixed order, so drawing from it
+    inside worker threads would both race and reassign content. _plan_leaf
+    draws everything serially and _exec_leaf only performs I/O, so these
+    pin the property that makes the optimisation safe: a seeded run is
+    identical whether it ran serial or concurrent."""
+
+    def _build(self, settings, workers):
+        settings.drive_file_workers = workers
+        drive = FakeDrive("alice@tenanta.com", "source")
+        b = CorpusBuilder(drive, settings, "alice@tenanta.com",
+                          ["bob@tenanta.com"] * 4, "ext@example.com",
+                          "small", _media, _retry, rng_seed=1234)
+        m = b.build("Engineering", "PRJ-001-Apollo", edge_cases=False)
+        return m, sorted(f["name"] for f in drive.store.values())
+
+    def test_a_seeded_run_is_identical_serial_or_concurrent(self, seed, settings):
+        serial_m, serial_names = self._build(settings, 1)
+        par_m, par_names = self._build(settings, 4)
+
+        assert serial_names == par_names, "concurrency changed which files exist"
+        for k in ("docs", "sheets", "slides", "binaries", "folders",
+                  "comments", "total_files"):
+            assert serial_m[k] == par_m[k], f"{k} differs under concurrency"
+        assert serial_m["grants"] == par_m["grants"]
+
+    def test_concurrency_is_switchable_back_off(self, seed, settings):
+        """drive_file_workers=1 must take the plain serial path -- the
+        escape hatch if a tenant ever rate-limits badly under parallelism."""
+        m, names = self._build(settings, 1)
+        assert m["total_files"] > 0 and names
+
+    def test_planning_draws_no_api_calls(self, seed, settings):
+        """_plan_leaf must stay pure: if it ever performed I/O, planning a
+        window of leaves up front would serialise exactly what this change
+        set out to parallelise."""
+        settings.drive_file_workers = 4
+        drive = FakeDrive("alice@tenanta.com", "source")
+        b = CorpusBuilder(drive, settings, "alice@tenanta.com",
+                          ["bob@tenanta.com"] * 4, "ext@example.com",
+                          "small", _media, _retry, rng_seed=1234)
+        before = len(drive.store)
+        plan = b._plan_leaf("root", "Engineering", "Runbooks", 0)
+
+        assert len(drive.store) == before, "planning hit the API"
+        assert plan["kind"] in {"doc", "sheet", "slides", "binary"}
+
+
 class TestReseedingReusesExistingLabels:
     """Create-only label handling meant every label 409'd on a tenant that
     had been seeded before, leaving label_ids empty -- so `user_labels` was

@@ -38,6 +38,18 @@ from dataclasses import dataclass, field
 # produces the swap-stall failure this module exists to prevent.
 MB_PER_WORKER = 320
 
+# The seeder's own figure, and deliberately not MB_PER_WORKER.
+#
+# That constant is derived from the MIGRATOR streaming a real file through
+# memory (see its comment above). The seeder does no such thing: it
+# generates small synthetic files, and its workers are threads sharing one
+# interpreter rather than separate processes. Measured on the live VPS
+# mid-run -- one seed process, 10 threads, 157 MB RSS total -- that is
+# ~17 MB per worker, so charging each one 320 MB under-sized the pool by
+# roughly 19x and left the run memory-bound at 9 workers on a box with
+# 2.9 GB free. 64 MB keeps a ~3.7x margin over what was actually observed.
+MB_PER_SEED_WORKER = 64
+
 # Above this fraction of swap in use, the machine is already trading disk for
 # memory and more concurrency makes it strictly worse.
 SWAP_DISTRESS = 0.60
@@ -51,6 +63,16 @@ PRESSURE_FLOOR_MB = 128
 PRESSURE_FLOOR_FRACTION = 0.05
 
 HARD_CAP = 16          # beyond this, Google's per-user quotas bind first
+
+# The seeder gets a higher ceiling than HARD_CAP because the quota that
+# sets HARD_CAP does not apply to it. HARD_CAP is about Google's PER-USER
+# limits, which bind when many workers act on behalf of the same account.
+# Every seeded user is a DIFFERENT account with its own 3 writes/sec Drive
+# ceiling, so those limits scale with the worker count instead of being
+# shared by it. What does bind is the per-PROJECT pool (~200 req/sec): at
+# the 0.85 writes/sec/user this seeder actually sustains, 32 workers is
+# ~27/sec, roughly 7x inside that pool.
+SEED_HARD_CAP = 32
 MIN_WORKERS = 1
 
 
@@ -494,8 +516,16 @@ def recommend(r: SystemResources | None = None) -> dict:
 
     return {
         "user_workers": workers,
-        # The seeder holds a whole corpus per user; give it the same ceiling.
-        "seed_workers": workers,
+        # Sized independently of user_workers -- see MB_PER_SEED_WORKER and
+        # SEED_HARD_CAP for why both of that figure's inputs are wrong for
+        # the seeder. Still held at MIN_WORKERS under real memory pressure:
+        # a swapping box is slower at any concurrency, whatever the job.
+        "seed_workers": (
+            MIN_WORKERS if r.under_memory_pressure
+            else max(MIN_WORKERS, min(
+                int((r.ram_usable_gb * 1024) // MB_PER_SEED_WORKER),
+                SEED_HARD_CAP))
+        ),
         # Requests/sec per user. Was 8.0/4.0 -- Google's own Drive migration
         # guidance recommends sustained writes around 3 requests/sec/account;
         # 8 ran hotter than that, spending Drive's per-user write quota on

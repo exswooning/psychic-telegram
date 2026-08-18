@@ -29,7 +29,9 @@ Verifying that equality is the whole point of seeding sharing.
 
 from __future__ import annotations
 
+import concurrent.futures as futures
 import os
+import threading
 import random
 from datetime import datetime, timedelta, timezone
 
@@ -173,6 +175,10 @@ class CorpusBuilder:
         self._media = media_factory
         self._retry = retry
         self.rng = random.Random(hash(user) & 0xFFFF if not rng_seed else rng_seed)
+        # _run_leaves creates files on several threads, and every counter
+        # below is a read-modify-write. Guarded rather than trusted to the
+        # GIL: `d[k] += 1` is three bytecodes, not one.
+        self._mlock = threading.Lock()
         self.m = {
             "folders": 0, "docs": 0, "sheets": 0, "slides": 0, "binaries": 0,
             "shortcuts": 0, "grants": {"user": 0, "domain": 0, "anyone": 0,
@@ -180,6 +186,20 @@ class CorpusBuilder:
             "grants_rejected": [], "oversized_native": 0, "items": {},
             "comments": 0,
         }
+
+    # -- thread-safe metric writes ---------------------------------------
+    def _bump(self, key: str, n: int = 1) -> None:
+        with self._mlock:
+            self.m[key] += n
+
+    def _bump_grant(self, kind: str) -> None:
+        with self._mlock:
+            self.m["grants"][kind] += 1
+
+    def _note_rejected(self, label: str) -> None:
+        with self._mlock:
+            if label not in self.m["grants_rejected"]:
+                self.m["grants_rejected"].append(label)
 
     # -- primitives ------------------------------------------------------
     def _create(self, body, media=None, fields="id,name"):
@@ -200,14 +220,12 @@ class CorpusBuilder:
                 ).execute()
             )
             fn()
-            self.m["grants"][kind] += 1
+            self._bump_grant(kind)
             return True
         except Exception as exc:  # noqa: BLE001
             # A tenant that blocks link or external sharing is a finding, not
             # something to swallow silently.
-            label = f"{kind}:{type(exc).__name__}"
-            if label not in self.m["grants_rejected"]:
-                self.m["grants_rejected"].append(label)
+            self._note_rejected(f"{kind}:{type(exc).__name__}")
             return False
 
     def folder(self, name: str, parent: str | None = None,
@@ -216,25 +234,27 @@ class CorpusBuilder:
                 "parents": [parent or "root"]}
         if days_ago is not None:
             body["modifiedTime"] = _iso(days_ago)
-        self.m["folders"] += 1
+        self._bump("folders")
         return self._create(body)["id"]
 
-    def doc(self, name: str, parent: str, dept: str) -> str:
-        seed = self.rng.randint(0, 10**9)
+    def doc(self, name: str, parent: str, dept: str,
+            seed: int | None = None) -> str:
+        # seed passed in by _plan_leaf; drawn here only for direct callers.
+        seed = self.rng.randint(0, 10**9) if seed is None else seed
         fid = self._create(
             {"name": name, "parents": [parent], "mimeType": DOC_MIME},
             media=self._media(_doc_text(name, dept, seed), "text/plain"),
         )["id"]
-        self.m["docs"] += 1
+        self._bump("docs")
         return fid
 
-    def sheet(self, name: str, parent: str) -> str:
-        seed = self.rng.randint(0, 10**9)
+    def sheet(self, name: str, parent: str, seed: int | None = None) -> str:
+        seed = self.rng.randint(0, 10**9) if seed is None else seed
         fid = self._create(
             {"name": name, "parents": [parent], "mimeType": SHEET_MIME},
             media=self._media(_sheet_csv(name, seed), "text/csv"),
         )["id"]
-        self.m["sheets"] += 1
+        self._bump("sheets")
         return fid
 
     def slides(self, name: str, parent: str) -> str:
@@ -243,7 +263,7 @@ class CorpusBuilder:
         fid = self._create(
             {"name": name, "parents": [parent], "mimeType": SLIDES_MIME}
         )["id"]
-        self.m["slides"] += 1
+        self._bump("slides")
         return fid
 
     def binary(self, name: str, parent: str, data: bytes,
@@ -252,7 +272,7 @@ class CorpusBuilder:
         body = {"name": name, "parents": [parent]}
         if days_ago is not None:
             body["modifiedTime"] = _iso(days_ago)
-        self.m["binaries"] += 1
+        self._bump("binaries")
         return self._create(body, media=self._media(data, mime))["id"]
 
     def comment(self, file_id: str, content: str,
@@ -272,7 +292,7 @@ class CorpusBuilder:
                 ).execute()
             )
             created = fn()
-            self.m["comments"] += 1
+            self._bump("comments")
             for r in replies:
                 try:
                     self._retry(lambda body=r, cid=created["id"]:
@@ -283,9 +303,7 @@ class CorpusBuilder:
                 except Exception:  # noqa: BLE001
                     pass
         except Exception as exc:  # noqa: BLE001
-            label = f"comment:{type(exc).__name__}"
-            if label not in self.m["grants_rejected"]:
-                self.m["grants_rejected"].append(label)
+            self._note_rejected(f"comment:{type(exc).__name__}")
 
     # -- sharing helpers --------------------------------------------------
     def share_domain(self, file_id: str, role: str = "reader") -> None:
@@ -365,58 +383,146 @@ class CorpusBuilder:
                           for a in ACCOUNTS[: cfg["accounts"]]]
 
             for leaf in leaves:
-                for i in range(cfg["per_leaf"]):
-                    self._leaf_file(leaf, dept, sub, i)
+                self._leaf_files(leaf, dept, sub, cfg["per_leaf"])
 
-    def _leaf_file(self, parent: str, dept: str, sub: str, i: int) -> None:
+    def _plan_leaf(self, parent: str, dept: str, sub: str, i: int) -> dict:
+        """Draw every random decision for one leaf file, making no API call.
+
+        Split from _exec_leaf so the API calls can run concurrently while
+        the randomness stays strictly serial. That ordering is the whole
+        point: `self.rng` is a single Random consumed in a fixed sequence,
+        so drawing from it inside worker threads would both race and change
+        which file gets which content. Planning here, in the original
+        order, keeps a seeded run byte-identical to the serial version --
+        only the timing of the writes changes.
+        """
         r = self.rng.random()
         age = self.rng.randint(5, 900)
+        plan: dict = {"parent": parent, "age": age}
         if r < 0.34:
-            fid = self.doc(f"{sub} — {dept} note {i+1:03d}", parent, dept)
+            plan.update(kind="doc", name=f"{sub} — {dept} note {i+1:03d}",
+                        dept=dept, seed=self.rng.randint(0, 10**9))
         elif r < 0.60:
-            fid = self.sheet(f"{sub} tracker {i+1:03d}", parent)
+            plan.update(kind="sheet", name=f"{sub} tracker {i+1:03d}",
+                        seed=self.rng.randint(0, 10**9))
         elif r < 0.68:
-            fid = self.slides(f"{sub} deck {i+1:03d}", parent)
+            plan.update(kind="slides", name=f"{sub} deck {i+1:03d}")
         elif r < 0.88:
-            fid = self.binary(f"{sub} report {i+1:03d}.pdf", parent,
-                              _pdf_bytes(sub, self.rng.randint(0, 10**9)),
-                              days_ago=age)
+            plan.update(kind="binary", name=f"{sub} report {i+1:03d}.pdf",
+                        data=_pdf_bytes(sub, self.rng.randint(0, 10**9)),
+                        mime="application/pdf")
         else:
-            kind = self.rng.choice([
+            ext, mime = self.rng.choice([
                 ("png", "image/png"), ("jpg", "image/jpeg"),
                 ("csv", "text/csv"), ("json", "application/json"),
                 ("zip", "application/zip"),
             ])
-            fid = self.binary(f"{sub} asset {i+1:03d}.{kind[0]}", parent,
-                              os.urandom(self.rng.randint(5_000, 250_000)),
-                              kind[1], days_ago=age)
+            plan.update(kind="binary", name=f"{sub} asset {i+1:03d}.{ext}",
+                        data=os.urandom(self.rng.randint(5_000, 250_000)),
+                        mime=mime)
 
         # ~12% of files carry a comment thread. Real Drives are full of
         # them, and they are the clearest example of a migration that
         # "succeeds" while quietly losing something users care about.
         if self.rng.random() < 0.12:
-            self.comment(
-                fid,
-                self.rng.choice([
-                    "Can we get sign-off on this before Friday?",
-                    "Numbers in row 12 look off to me.",
-                    "Superseded by the Q3 version — keeping for reference.",
-                    "Approved. Nice work.",
-                ]),
-                replies=(("Agreed, updating now.",)
-                        if self.rng.random() < 0.5 else ()),
-            )
+            plan["comment"] = self.rng.choice([
+                "Can we get sign-off on this before Friday?",
+                "Numbers in row 12 look off to me.",
+                "Superseded by the Q3 version — keeping for reference.",
+                "Approved. Nice work.",
+            ])
+            plan["replies"] = (("Agreed, updating now.",)
+                               if self.rng.random() < 0.5 else ())
 
         # ~18% of individual files carry their own grant on top of whatever
         # they inherit — the messy reality that inherited-ACL logic must handle.
         r2 = self.rng.random()
         if r2 < 0.13:
-            self.share_users(fid, [self.rng.choice(self.peers)],
+            plan["share"] = ("users", self.rng.choice(self.peers),
                              self.rng.choice(["writer", "commenter"]))
         elif r2 < 0.16:
-            self.share_external(fid)
+            plan["share"] = ("external", None, None)
         elif r2 < 0.18:
-            self.share_anyone(fid)
+            plan["share"] = ("anyone", None, None)
+        return plan
+
+    def _exec_leaf(self, plan: dict) -> None:
+        """Perform one planned leaf's API calls. Runs on a worker thread."""
+        parent, kind = plan["parent"], plan["kind"]
+        if kind == "doc":
+            fid = self.doc(plan["name"], parent, plan["dept"], seed=plan["seed"])
+        elif kind == "sheet":
+            fid = self.sheet(plan["name"], parent, seed=plan["seed"])
+        elif kind == "slides":
+            fid = self.slides(plan["name"], parent)
+        else:
+            fid = self.binary(plan["name"], parent, plan["data"],
+                              plan["mime"], days_ago=plan["age"])
+
+        if "comment" in plan:
+            self.comment(fid, plan["comment"], replies=plan["replies"])
+
+        if "share" in plan:
+            how, who, role = plan["share"]
+            if how == "users":
+                self.share_users(fid, [who], role)
+            elif how == "external":
+                self.share_external(fid)
+            else:
+                self.share_anyone(fid)
+
+    def _run_leaves(self, plans: list[dict]) -> None:
+        """Create planned leaves concurrently, bounded by drive_file_workers.
+
+        Each leaf is 1-3 API calls that spend nearly all their time waiting
+        on a round trip, so running them one at a time leaves most of the
+        account's write budget unused: measured on the live tenant at 0.47
+        Drive writes/sec against Google's 3/sec per-account ceiling -- a
+        6.3x gap that no amount of extra *user* workers can close, because
+        that ceiling is per account and one user is one thread.
+
+        This does not raise the ceiling. Every call still passes through
+        the same per-user limiter, so the threads interleave into one
+        bucket; it raises utilisation of a ceiling we sit far below. Same
+        reasoning, and the same knob, as drive_file_workers in the
+        migration engine -- see its comment in config.py, which describes
+        this identical finding on the migrate side.
+        """
+        n = max(1, int(getattr(self.settings, "drive_file_workers", 4) or 1))
+        if n == 1 or len(plans) <= 1:
+            for p in plans:
+                self._exec_leaf(p)
+            return
+        with futures.ThreadPoolExecutor(max_workers=n) as pool:
+            for fut in futures.as_completed(
+                    [pool.submit(self._exec_leaf, p) for p in plans]):
+                # Surface a genuine bug; a per-item API failure has already
+                # been recorded into self.m by the primitive that raised.
+                fut.result()
+
+    def _leaf_files(self, parent: str, dept: str, sub: str, count: int) -> None:
+        """Plan `count` leaves serially, then create them concurrently.
+
+        Chunked rather than planned all at once: a plan for a binary file
+        carries its bytes (up to 250 KB), so holding every plan for a large
+        folder in memory at once would undo the point of sizing worker
+        pools against RAM. A window of 4x the worker count is enough to
+        keep every thread fed.
+        """
+        n = max(1, int(getattr(self.settings, "drive_file_workers", 4) or 1))
+        window, batch = max(4, n * 4), []
+        for i in range(count):
+            batch.append(self._plan_leaf(parent, dept, sub, i))
+            if len(batch) >= window:
+                self._run_leaves(batch)
+                batch = []
+        if batch:
+            self._run_leaves(batch)
+
+    def _leaf_file(self, parent: str, dept: str, sub: str, i: int) -> None:
+        """One leaf, planned and created inline. Kept for callers that
+        create a single file outside a counted loop."""
+        self._exec_leaf(self._plan_leaf(parent, dept, sub, i))
 
     # -- project ----------------------------------------------------------
     def _build_project(self, root: str, project: str) -> None:
@@ -442,8 +548,8 @@ class CorpusBuilder:
         for sub in PROJECT_SUBFOLDERS:
             sub_id = self.folder(sub, proj_root,
                                  days_ago=self.rng.randint(10, 200))
-            for i in range(max(2, cfg["per_leaf"] // 2)):
-                self._leaf_file(sub_id, "Project", sub, i)
+            self._leaf_files(sub_id, "Project", sub,
+                             max(2, cfg["per_leaf"] // 2))
 
         # A deck the whole domain can see, plus an externally-shared spec —
         # the two shapes that trip target-tenant sharing policy.
@@ -534,7 +640,7 @@ class CorpusBuilder:
                 media=self._media(b"Lorem ipsum dolor sit amet.\n" * 50_000,
                                   "text/plain"),
             )
-            self.m["docs"] += 1
+            self._bump("docs")
             self.m["oversized_native"] = 1
 
         # Every ACL shape on one file

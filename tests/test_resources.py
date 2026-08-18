@@ -94,9 +94,35 @@ class TestSizing:
         assert "memory-bound" in rec["reason"]
         assert "cpu" not in rec["reason"].lower()
 
-    def test_seed_and_migrate_pools_agree(self):
-        rec = resources.recommend(make())
-        assert rec["seed_workers"] == rec["user_workers"]
+    def test_the_seed_pool_is_sized_larger_than_the_migrate_pool(self):
+        """These deliberately disagree now. They used to be equal on the
+        premise that "the seeder holds a whole corpus per user", which the
+        live numbers contradict: one seed process with 10 threads held
+        157 MB RSS in total (~17 MB/worker), because it generates small
+        synthetic files in shared threads rather than streaming real ones
+        through memory the way the migrator does. Charging it the
+        migrator's 320 MB left a 2.9 GB box memory-bound at 9 workers and
+        a 201-user run at ~32 hours."""
+        rec = resources.recommend(make(ram_usable=3.0, cores=2, swap_used=0.0))
+        assert rec["user_workers"] == 9           # 3.0 GB * 1024 // 320 MB
+        assert rec["seed_workers"] == 32          # capped by SEED_HARD_CAP
+        assert rec["seed_workers"] > rec["user_workers"]
+
+    def test_the_seed_pool_is_still_ram_bound_on_a_small_box(self):
+        """SEED_HARD_CAP is a ceiling, not a floor -- a genuinely small
+        machine must still come out below it rather than being handed 32
+        workers it cannot hold."""
+        rec = resources.recommend(make(ram_usable=1.0, cores=2, swap_used=0.0))
+        assert rec["seed_workers"] == 16          # 1.0 GB * 1024 // 64 MB
+
+    def test_memory_pressure_still_collapses_the_seed_pool(self):
+        """The one thing the larger ceiling must not do is override the
+        swap-stall guard -- a swapping box is slower at any concurrency."""
+        # 6 of 8 GB swap in use = 75%, past SWAP_DISTRESS (60%).
+        rec = resources.recommend(
+            make(ram_usable=3.0, cores=2, swap_used=6.0, swap_total=8.0))
+        assert rec["seed_workers"] == resources.MIN_WORKERS
+        assert rec["user_workers"] == resources.MIN_WORKERS
 
 
 class TestSettingsIntegration:
