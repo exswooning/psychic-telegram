@@ -49,6 +49,8 @@ class TestSkipsProvisioningWhenKeyAlreadyExists:
 
     def _common(self, monkeypatch):
         monkeypatch.setattr(fs.dwd_helper, "run", lambda *a, **k: 0)
+        monkeypatch.setattr(fs.gcloud_browser_auth, "configure_chat_app",
+                            lambda *a, **k: (True, "mocked"))
         monkeypatch.setattr(fs.verify_scopes, "required_scopes",
                             lambda settings, tenant: ["scope-a"])
         monkeypatch.setattr(fs.verify_scopes, "verify",
@@ -148,6 +150,8 @@ class TestSideSelectionIsCorrect:
         monkeypatch.setattr(fs.provision_gcp, "provision_side", fake_provision_side)
         monkeypatch.setattr(fs.provision_gcp, "client_id_of", lambda p: "42")
         monkeypatch.setattr(fs.dwd_helper, "run", lambda *a, **k: 0)
+        monkeypatch.setattr(fs.gcloud_browser_auth, "configure_chat_app",
+                            lambda *a, **k: (True, "mocked"))
         monkeypatch.setattr(fs.verify_scopes, "verify",
                             lambda settings, tenant, scopes: [
                                 {"scope": s, "ok": True} for s in scopes])
@@ -171,6 +175,8 @@ class TestSideSelectionIsCorrect:
                                  "steps": []})[1])
         monkeypatch.setattr(fs.provision_gcp, "client_id_of", lambda p: "42")
         monkeypatch.setattr(fs.dwd_helper, "run", lambda *a, **k: 0)
+        monkeypatch.setattr(fs.gcloud_browser_auth, "configure_chat_app",
+                            lambda *a, **k: (True, "mocked"))
         monkeypatch.setattr(fs.verify_scopes, "verify",
                             lambda settings, tenant, scopes: [
                                 {"scope": s, "ok": True} for s in scopes])
@@ -200,6 +206,8 @@ class TestPasswordNeverLeaks:
             return 0
 
         monkeypatch.setattr(fs.dwd_helper, "run", fake_dwd_run)
+        monkeypatch.setattr(fs.gcloud_browser_auth, "configure_chat_app",
+                            lambda *a, **k: (True, "mocked"))
         monkeypatch.setattr(fs.verify_scopes, "verify",
                             lambda settings, tenant, scopes: [
                                 {"scope": s, "ok": True} for s in scopes])
@@ -223,6 +231,8 @@ class TestPasswordNeverLeaks:
                             _fake_provision_side())
         monkeypatch.setattr(fs.provision_gcp, "client_id_of", lambda p: "42")
         monkeypatch.setattr(fs.dwd_helper, "run", lambda *a, **k: 0)
+        monkeypatch.setattr(fs.gcloud_browser_auth, "configure_chat_app",
+                            lambda *a, **k: (True, "mocked"))
         monkeypatch.setattr(fs.verify_scopes, "verify",
                             lambda settings, tenant, scopes: [
                                 {"scope": s, "ok": True} for s in scopes])
@@ -250,6 +260,8 @@ class TestDwdCrashIsRecoveredNotFatal:
         monkeypatch.setattr(fs.provision_gcp, "detect_org", lambda env=None: "")
         monkeypatch.setattr(fs.provision_gcp, "provision_side", _fake_provision_side())
         monkeypatch.setattr(fs.provision_gcp, "client_id_of", lambda p: "42")
+        monkeypatch.setattr(fs.gcloud_browser_auth, "configure_chat_app",
+                            lambda *a, **k: (True, "mocked"))
 
     def test_a_crash_becomes_a_clean_failed_phase_not_an_exception(self, monkeypatch):
         self._common(monkeypatch)
@@ -285,6 +297,8 @@ class TestDwdCrashIsRecoveredNotFatal:
         overwhelming common case where dwd_helper.run() just returns 0."""
         self._common(monkeypatch)
         monkeypatch.setattr(fs.dwd_helper, "run", lambda *a, **k: 0)
+        monkeypatch.setattr(fs.gcloud_browser_auth, "configure_chat_app",
+                            lambda *a, **k: (True, "mocked"))
         monkeypatch.setattr(fs.verify_scopes, "required_scopes",
                             lambda settings, tenant: ["scope-a"])
         monkeypatch.setattr(fs.verify_scopes, "verify",
@@ -308,6 +322,8 @@ class TestEnvShIsUpdated:
         monkeypatch.setattr(fs.provision_gcp, "provision_side", _fake_provision_side())
         monkeypatch.setattr(fs.provision_gcp, "client_id_of", lambda p: "42")
         monkeypatch.setattr(fs.dwd_helper, "run", lambda *a, **k: 0)
+        monkeypatch.setattr(fs.gcloud_browser_auth, "configure_chat_app",
+                            lambda *a, **k: (True, "mocked"))
         monkeypatch.setattr(fs.verify_scopes, "required_scopes",
                             lambda settings, tenant: ["scope-a"])
         monkeypatch.setattr(fs.verify_scopes, "verify",
@@ -402,6 +418,8 @@ class TestFailureModes:
                             _fake_provision_side())
         monkeypatch.setattr(fs.provision_gcp, "client_id_of", lambda p: "42")
         monkeypatch.setattr(fs.dwd_helper, "run", lambda *a, **k: 0)
+        monkeypatch.setattr(fs.gcloud_browser_auth, "configure_chat_app",
+                            lambda *a, **k: (True, "mocked"))
         monkeypatch.setattr(fs.verify_scopes, "required_scopes",
                             lambda settings, tenant: ["scope-a", "scope-b"])
         monkeypatch.setattr(fs.verify_scopes, "verify",
@@ -431,6 +449,8 @@ class TestScopeVerificationRetriesThroughPropagation:
         monkeypatch.setattr(fs.provision_gcp, "provision_side", _fake_provision_side())
         monkeypatch.setattr(fs.provision_gcp, "client_id_of", lambda p: "42")
         monkeypatch.setattr(fs.dwd_helper, "run", lambda *a, **k: 0)
+        monkeypatch.setattr(fs.gcloud_browser_auth, "configure_chat_app",
+                            lambda *a, **k: (True, "mocked"))
         monkeypatch.setattr(fs.verify_scopes, "required_scopes",
                             lambda settings, tenant: ["scope-a", "scope-b"])
         monkeypatch.setattr(fs.time, "sleep", lambda s: None)
@@ -531,6 +551,8 @@ class TestKeySavedEarlyEvenIfVerificationLaterFails:
         monkeypatch.setattr(fs.provision_gcp, "provision_side", _fake_provision_side())
         monkeypatch.setattr(fs.provision_gcp, "client_id_of", lambda p: "42")
         monkeypatch.setattr(fs.dwd_helper, "run", lambda *a, **k: 0)
+        monkeypatch.setattr(fs.gcloud_browser_auth, "configure_chat_app",
+                            lambda *a, **k: (True, "mocked"))
         monkeypatch.setattr(fs.verify_scopes, "required_scopes",
                             lambda settings, tenant: ["scope-a"])
         monkeypatch.setattr(fs.verify_scopes, "verify",
@@ -569,6 +591,8 @@ class TestBrowserAuthFallback:
         monkeypatch.setattr(fs.provision_gcp, "detect_org", lambda env=None: "")
         monkeypatch.setattr(fs.provision_gcp, "client_id_of", lambda p: "42")
         monkeypatch.setattr(fs.dwd_helper, "run", lambda *a, **k: 0)
+        monkeypatch.setattr(fs.gcloud_browser_auth, "configure_chat_app",
+                            lambda *a, **k: (True, "mocked"))
         monkeypatch.setattr(fs.verify_scopes, "required_scopes",
                             lambda settings, tenant: ["scope-a"])
         monkeypatch.setattr(fs.verify_scopes, "verify",
@@ -691,6 +715,8 @@ class TestBrowserAuthFallback:
         monkeypatch.setattr(fs.provision_gcp, "provision_side", _fake_provision_side())
         monkeypatch.setattr(fs.provision_gcp, "client_id_of", lambda p: "42")
         monkeypatch.setattr(fs.dwd_helper, "run", lambda *a, **k: 0)
+        monkeypatch.setattr(fs.gcloud_browser_auth, "configure_chat_app",
+                            lambda *a, **k: (True, "mocked"))
         monkeypatch.setattr(fs.verify_scopes, "required_scopes",
                             lambda settings, tenant: ["scope-a"])
         monkeypatch.setattr(fs.verify_scopes, "verify",
@@ -715,6 +741,8 @@ class TestProgressFile:
         monkeypatch.setattr(fs.provision_gcp, "provision_side", _fake_provision_side())
         monkeypatch.setattr(fs.provision_gcp, "client_id_of", lambda p: "42")
         monkeypatch.setattr(fs.dwd_helper, "run", lambda *a, **k: 0)
+        monkeypatch.setattr(fs.gcloud_browser_auth, "configure_chat_app",
+                            lambda *a, **k: (True, "mocked"))
         monkeypatch.setattr(fs.verify_scopes, "required_scopes",
                             lambda settings, tenant: ["scope-a"])
         monkeypatch.setattr(fs.verify_scopes, "verify",
@@ -807,6 +835,8 @@ class TestProgressFile:
         monkeypatch.setattr(fs.provision_gcp, "detect_org", lambda env=None: "")
         monkeypatch.setattr(fs.provision_gcp, "client_id_of", lambda p: "42")
         monkeypatch.setattr(fs.dwd_helper, "run", lambda *a, **k: 0)
+        monkeypatch.setattr(fs.gcloud_browser_auth, "configure_chat_app",
+                            lambda *a, **k: (True, "mocked"))
         monkeypatch.setattr(fs.verify_scopes, "required_scopes",
                             lambda settings, tenant: ["scope-a"])
         monkeypatch.setattr(fs.verify_scopes, "verify",

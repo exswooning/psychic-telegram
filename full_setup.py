@@ -227,6 +227,25 @@ def run_full_setup(
         _progress(78, "Cloud project ready")
         client_id = provision_gcp.client_id_of(key_path)
 
+        # Chat needs an app configured (name + status) before a single
+        # chat.spaces() call stops 404ing -- see configure_chat_app()'s own
+        # docstring. Not a one-time gate like the Cloud Console ToS above:
+        # every tenant setup mints a brand-new project, so without this,
+        # Chat would 404 on every new tenant forever. "skipped" rather than
+        # "failed" on a miss -- run_full_setup()'s own ok flag is
+        # all(status != "failed"), and Chat is one of several services this
+        # setup enables, not a reason to report the whole run as broken.
+        chat_phase = Phase(f"configure Chat app ({side})")
+        phases.append(chat_phase)
+        _progress(79, "configuring the Chat app")
+        try:
+            chat_ok, chat_detail = gcloud_browser_auth.configure_chat_app(
+                admin_email, admin_password, project, timeout=90)
+            chat_phase.status = "ok" if chat_ok else "skipped"
+            chat_phase.detail = chat_detail
+        except Exception as exc:      # noqa: BLE001 - never fail setup over this
+            chat_phase.status, chat_phase.detail = "skipped", str(exc)[:150]
+
         # Confirmed live: DWD scope propagation can take much longer than
         # phase 3's own retry budget below (one real grant took ~23
         # minutes; the budget waits ~15). Saving the key path here, the

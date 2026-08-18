@@ -391,3 +391,154 @@ def _try_accept_tos_at(page, url: str, timeout: int) -> str:
         return "accepted"
     _save_diagnostics("checked-but-no-button")
     return "could_not_find_prompt"
+
+
+# Confirmed live (ensure_apis.py's own NEEDS_CONSOLE_CONFIG comment):
+# `gcloud services enable chat.googleapis.com` reports success and
+# serviceusage reports ENABLED, but every chat.spaces().create() call still
+# 404s "Google Chat app not found" until an app (name + status) is
+# configured at this exact Console page. There is no API and no gcloud
+# command for it -- and unlike the ToS check above, this is NOT a one-time
+# per-identity gate: provision_gcp.py mints a brand-new GCP project
+# (`wsmig-{src,tgt}-NNNNN`) on every tenant setup, so without this, every
+# single seed/migration run needing chat_engine.py or seed_chat() would
+# 404 forever, on every new tenant, until someone clicked through this page
+# by hand -- exactly the "no step that needs a human to know which console
+# to open" tax this whole file exists to remove.
+_CHAT_NAME_SEL = ('input[aria-label*="app name" i]',
+                  'input[aria-label*="Name" i]')
+_CHAT_STATUS_LABELS = ("LIVE", "Live", "ON", "On")
+_CHAT_SAVE_LABELS = ("SAVE", "Save")
+
+
+def configure_chat_app(email: str, password: str, project: str,
+                       timeout: int = 90) -> tuple[bool, str]:
+    """Opens its own browser, signs in if needed, and delegates the actual
+    form-filling to _fill_chat_app_form() (kept separate so that logic is
+    directly testable with a fake page, the same split _accept_cloud_console_tos
+    already uses -- this half is just browser lifecycle, exercised live).
+
+    Needs its own fresh sign-in: the session gcloud_browser_auth.login()
+    opened to authenticate `gcloud auth login` is already closed and its
+    OAuth grant revoked by the time this runs (provision_gcp.py needs the
+    project to exist first, and that happens after login()/cleanup()).
+
+    Returns (ok, detail). Never raises -- a Chat app that isn't configured
+    should not fail a setup run that Chat is only one of many services in;
+    the caller logs detail and moves on, same as every other best-effort
+    step in this module.
+    """
+    from playwright.sync_api import sync_playwright  # noqa: PLC0415
+    import dwd_helper  # noqa: PLC0415 - reuse the real-browser launcher
+
+    url = (f"https://console.cloud.google.com/apis/api/"
+          f"chat.googleapis.com/hangouts-chat?project={project}")
+
+    with sync_playwright() as p:
+        browser = dwd_helper._installed_browser_launch(p, headful=True)
+        page = browser.new_page()
+
+        try:
+            page.goto(url, wait_until="domcontentloaded",
+                      timeout=max(timeout * 1000, 30000))
+        except Exception as exc:      # noqa: BLE001
+            browser.close()
+            return False, f"could not open the Chat config page: {exc}"
+
+        # Sign in if this identity has no existing Console session -- same
+        # dance as _drive_browser, targeting whichever page the redirect
+        # lands the browser on rather than a fixed URL.
+        typed_email = typed_pw = False
+        deadline = time.time() + timeout
+        while time.time() < deadline and "accounts.google.com" in page.url:
+            if not typed_email and _fill_visible(page, _EMAIL_SEL, email):
+                log("  entered the admin email")
+                page.wait_for_timeout(2500)
+                typed_email = True
+                continue
+            if typed_email and not typed_pw and _fill_visible(page, _PW_SEL, password):
+                log("  entered the password")
+                page.wait_for_timeout(4000)
+                typed_pw = True
+                continue
+            page.wait_for_timeout(500)
+
+        if "accounts.google.com" in page.url:
+            _save_chat_diagnostics(page, project, "stalled-signin")
+            browser.close()
+            return False, "sign-in did not complete (likely 2FA/captcha)"
+
+        page.wait_for_timeout(3000)  # client-rendered config form needs a beat
+        result = _fill_chat_app_form(page, project, timeout)
+        browser.close()
+        return result
+
+
+def _save_chat_diagnostics(page, project: str, tag: str) -> None:
+    try:
+        page.screenshot(path=f"/tmp/chat-app-config-{project}-{tag}.png")
+        with open(f"/tmp/chat-app-config-{project}-{tag}.txt",
+                 "w", encoding="utf-8") as fh:
+            fh.write(f"URL: {page.url}\n\n{page.inner_text('body')[:3000]}")
+    except Exception:      # noqa: BLE001 - diagnostics only
+        pass
+
+
+def _fill_chat_app_form(page, project: str, timeout: int) -> tuple[bool, str]:
+    """Best-effort, same shape as _accept_cloud_console_tos: types a
+    default app name, sets status to LIVE if that control is found, and
+    saves -- deliberately does NOT touch "Connection settings" (Pub/Sub
+    topic, App URL, Apps Script). This project's own use of Chat
+    (seed_chat(), chat_engine.py) only ever calls the API as itself, never
+    receives interactive events, so a live status app with no connection
+    configured is enough to stop the 404 -- and guessing at
+    infrastructure-specific connection fields that do not exist yet risks
+    leaving the form in an error state that blocks Save entirely.
+    """
+    _save_chat_diagnostics(page, project, "before-fill")
+
+    name_box = None
+    for sel in _CHAT_NAME_SEL:
+        loc = page.locator(sel)
+        if loc.count() > 0 and loc.first.is_visible():
+            name_box = loc.first
+            break
+
+    if name_box is None:
+        _save_chat_diagnostics(page, project, "no-name-field")
+        return False, "could not find the app name field -- console may have changed"
+
+    try:
+        existing_name = (name_box.input_value() or "").strip()
+        if not existing_name:
+            name_box.click()
+            name_box.type(f"{project} sandbox", delay=30)
+    except Exception as exc:      # noqa: BLE001
+        _save_chat_diagnostics(page, project, "name-fill-failed")
+        return False, f"could not set the app name: {exc}"
+
+    for label in _CHAT_STATUS_LABELS:
+        control = page.get_by_text(label, exact=True)
+        if control.count() > 0 and control.first.is_visible():
+            try:
+                control.first.click()
+            except Exception:      # noqa: BLE001 - status may already be set
+                pass
+            break
+
+    saved = False
+    for label in _CHAT_SAVE_LABELS:
+        btn = page.get_by_role("button", name=label)
+        if btn.count() > 0 and btn.first.is_visible() and btn.first.is_enabled():
+            try:
+                btn.first.click()
+                page.wait_for_timeout(2500)
+                saved = True
+            except Exception:      # noqa: BLE001 - try the next label
+                continue
+            break
+
+    _save_chat_diagnostics(page, project, "after-save" if saved else "no-save-button")
+    if not saved:
+        return False, "filled the form but could not find/click Save"
+    return True, f"configured a Chat app for {project}"

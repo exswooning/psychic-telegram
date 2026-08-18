@@ -458,3 +458,150 @@ class TestAcceptCloudConsoleTos:
             def goto(self, *a, **k):
                 raise Exception("net::ERR_CONNECTION_RESET")  # noqa: TRY002
         assert ga._accept_cloud_console_tos(BoomPage(), timeout=5) == "could_not_find_prompt"
+
+
+class _FakeNameField:
+    def __init__(self, existing_value: str = ""):
+        self._value = existing_value
+        self.typed = None
+
+    def is_visible(self):
+        return True
+
+    def input_value(self):
+        return self._value
+
+    def click(self):
+        pass
+
+    def type(self, text, delay=None):
+        self.typed = text
+        self._value = text
+
+
+class _FakeClickable:
+    def __init__(self, visible: bool = True, enabled: bool = True):
+        self.visible = visible
+        self.enabled = enabled
+        self.clicked = False
+
+    def is_visible(self):
+        return self.visible
+
+    def is_enabled(self):
+        return self.enabled
+
+    def click(self):
+        self.clicked = True
+
+
+class _FakeLocatorResult:
+    """Generic count()/first wrapper reused for the name-field locator,
+    get_by_text, and get_by_role results alike -- all three follow the
+    same Playwright shape."""
+    def __init__(self, target=None):
+        self._target = target
+
+    def count(self):
+        return 1 if self._target is not None else 0
+
+    @property
+    def first(self):
+        return self._target
+
+
+class _FakeChatFormPage:
+    """Just enough of a Playwright Page for _fill_chat_app_form's own
+    logic -- one name-field locator, one status control, one save button.
+    The real click-through against Google's actual Chat API config page is
+    exercised live once a real tenant needs it, same reasoning as this
+    file's own module docstring: a mocked Locator tests the mock, not
+    Google's console."""
+
+    def __init__(self, name_field=None, status_label=None, save_label=None,
+                save_enabled=True):
+        self.name_field = name_field
+        self.status_label = status_label
+        self.save_label = save_label
+        self.status_control = _FakeClickable() if status_label else None
+        self.save_button = _FakeClickable(enabled=save_enabled) if save_label else None
+        self.url = ("https://console.cloud.google.com/apis/api/"
+                   "chat.googleapis.com/hangouts-chat")
+
+    def locator(self, selector):
+        return _FakeLocatorResult(self.name_field)
+
+    def get_by_text(self, label, exact=True):
+        return _FakeLocatorResult(self.status_control if label == self.status_label else None)
+
+    def get_by_role(self, role, name=None):
+        assert role == "button"
+        return _FakeLocatorResult(self.save_button if name == self.save_label else None)
+
+    def wait_for_timeout(self, ms):
+        pass
+
+    def screenshot(self, path=None):
+        pass
+
+    def inner_text(self, selector):
+        return ""
+
+
+class TestFillChatAppForm:
+    def test_fills_an_empty_name_field_sets_status_and_saves(self):
+        page = _FakeChatFormPage(name_field=_FakeNameField(""),
+                                 status_label="LIVE", save_label="SAVE")
+        ok, detail = ga._fill_chat_app_form(page, "wsmig-src-12345", timeout=30)
+
+        assert ok is True
+        assert "wsmig-src-12345" in detail
+        assert page.name_field.typed == "wsmig-src-12345 sandbox"
+        assert page.status_control.clicked is True
+        assert page.save_button.clicked is True
+
+    def test_does_not_overwrite_an_existing_app_name(self):
+        """A retry against an already-configured project (every re-run of
+        a setup that failed for an unrelated later reason) must not
+        clobber a name an operator may have hand-edited since."""
+        page = _FakeChatFormPage(name_field=_FakeNameField("My Existing App"),
+                                 status_label="LIVE", save_label="SAVE")
+        ga._fill_chat_app_form(page, "wsmig-src-12345", timeout=30)
+        assert page.name_field.typed is None
+
+    def test_missing_name_field_reports_clearly_without_touching_anything_else(self):
+        """A console redesign that moves the name field must degrade to a
+        distinguishable failure, not silently click Save on a blank form."""
+        page = _FakeChatFormPage(name_field=None, status_label="LIVE", save_label="SAVE")
+        ok, detail = ga._fill_chat_app_form(page, "wsmig-src-12345", timeout=30)
+
+        assert ok is False
+        assert "app name field" in detail
+        assert page.status_control.clicked is False
+        assert page.save_button.clicked is False
+
+    def test_no_save_button_reports_the_form_was_filled_but_not_saved(self):
+        page = _FakeChatFormPage(name_field=_FakeNameField(""),
+                                 status_label="LIVE", save_label=None)
+        ok, detail = ga._fill_chat_app_form(page, "wsmig-src-12345", timeout=30)
+
+        assert ok is False
+        assert "Save" in detail
+
+    def test_a_disabled_save_button_is_not_clicked(self):
+        page = _FakeChatFormPage(name_field=_FakeNameField(""), status_label="LIVE",
+                                 save_label="SAVE", save_enabled=False)
+        ok, detail = ga._fill_chat_app_form(page, "wsmig-src-12345", timeout=30)
+
+        assert ok is False
+        assert page.save_button.clicked is False
+
+    def test_no_status_control_found_still_proceeds_to_save(self):
+        """The status may already read LIVE from a prior successful run --
+        finding no matching label must not block Save on that basis alone."""
+        page = _FakeChatFormPage(name_field=_FakeNameField(""),
+                                 status_label=None, save_label="SAVE")
+        ok, _ = ga._fill_chat_app_form(page, "wsmig-src-12345", timeout=30)
+
+        assert ok is True
+        assert page.save_button.clicked is True
