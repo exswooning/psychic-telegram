@@ -21,6 +21,7 @@ import {
   stopJob as stopSeedJob,
 } from '@/api/client'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
+import SeedUsersLog from '@/components/SeedUsersLog'
 
 const SEED_SCALES = ['tiny', 'small', 'medium', 'large', 'huge']
 // main.py migrate --services help text is the source of truth: "drive,
@@ -114,7 +115,13 @@ const Jobs: React.FC = () => {
          health: deriveHealth(tgtCfg, byDwd('target'), tgtSetup),
          caveats: tgtDwdStatus?.caveats ?? [] },
       ])
-      setSeedJob(job && job.name === 'seed' ? job : null)
+      // !job.external: a seed job admitted under a DIFFERENT account shows
+      // up here identically (same name, no account info) via webui.py's
+      // own system-wide ps-scan fallback -- rendering it here too would
+      // duplicate the account-attributed cross-account entry the source
+      // side's caveats/admission handling already covers, and would offer
+      // a Stop button for a job this account did not start.
+      setSeedJob(job && job.name === 'seed' && !job.external ? job : null)
       setSeedHistory(hist)
       setFleetJob(nodes.find((n) => n.active_job && n.job_pid) ?? null)
     } finally {
@@ -579,12 +586,15 @@ const SeedJobCard: React.FC<{
         <Divider />
         <CardContent sx={{ pt: 2 }}>
           {lines.length > 0 ? (
-            <Box component="pre" sx={{
-              fontSize: 11, p: 1.5, bgcolor: 'action.hover', borderRadius: 1,
-              overflowX: 'auto', maxHeight: 260, whiteSpace: 'pre-wrap', m: 0,
-            }}>
-              {lines.join('\n')}
-            </Box>
+            <>
+              <SeedUsersLog lines={lines} />
+              <Box component="pre" sx={{
+                fontSize: 11, p: 1.5, bgcolor: 'action.hover', borderRadius: 1,
+                overflowX: 'auto', maxHeight: 260, whiteSpace: 'pre-wrap', m: 0, mt: 1.5,
+              }}>
+                {lines.join('\n')}
+              </Box>
+            </>
           ) : (
             <Typography variant="body2" color="text.secondary">No output recorded.</Typography>
           )}

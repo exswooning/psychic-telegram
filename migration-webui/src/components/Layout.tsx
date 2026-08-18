@@ -359,7 +359,13 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
             </Box>
           </Box>
 
-          {jobRunning && (
+          {/* !job.external: job.running turning true can mean a DIFFERENT
+             account's job (webui.py's /api/job falls back to a system-wide
+             ps scan when this account's own slot is idle -- see JobStatus's
+             own comment). Progress/notification text above stays visible
+             either way (useful, harmless), but the interrupt control itself
+             must not offer to stop a job this account never started. */}
+          {jobRunning && !job?.external && (
             <Tooltip title="Interrupt the running job">
               <IconButton color="error" onClick={handleInterrupt}>
                 <InterruptIcon />

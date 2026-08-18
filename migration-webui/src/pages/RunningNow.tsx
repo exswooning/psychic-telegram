@@ -12,6 +12,7 @@ import {
 } from '@/api/controlPlane'
 import { fetchJob, stopJob as stopSeedJob } from '@/api/client'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
+import SeedUsersLog from '@/components/SeedUsersLog'
 
 interface RunningJob {
   key: string; label: string; detail: string; pct: number | null
@@ -89,7 +90,13 @@ function useRunningNow() {
           },
         })
       }
-      if (job?.running && job.name) {
+      // !job.external -- see JobStatus's own comment: a job admitted under
+      // a different account shows up here identically via webui.py's
+      // system-wide ps-scan fallback. Without excluding it, it duplicated
+      // the account-attributed entry the activeJobs loop below already
+      // renders, AND offered a Stop button for a job this account never
+      // started.
+      if (job?.running && job.name && !job.external) {
         found.push({
           key: `webui-${job.name}`, label: job.name, detail: `${job.elapsed}s elapsed`,
           pct: job.progressPct ?? null, lines: job.lines,
@@ -225,9 +232,10 @@ const RunningNow: React.FC = () => {
             )}
             {j.lines && j.lines.length > 0 && (
               <Box sx={{ px: 2, pb: 2 }}>
+                <SeedUsersLog lines={j.lines} />
                 <Box component="pre" sx={{
                   fontSize: 11, p: 1.5, bgcolor: 'action.hover', borderRadius: 1,
-                  overflowX: 'auto', maxHeight: 260, whiteSpace: 'pre-wrap', m: 0,
+                  overflowX: 'auto', maxHeight: 260, whiteSpace: 'pre-wrap', m: 0, mt: 1.5,
                 }}>
                   {j.lines.join('\n')}
                 </Box>

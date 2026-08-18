@@ -698,6 +698,34 @@ def _external_job_snapshot() -> dict | None:
         "pids": [j["pid"] for j in jobs],
     }
 
+
+def _job_snapshot(account_id: int | None, since: int) -> dict:
+    """/api/job's own logic, pulled out so it's callable without an HTTP
+    request -- see the `external` field's own purpose below.
+
+    external: true means this is NOT account_id's own job.
+    _external_job_snapshot() is a system-wide ps scan with no concept of
+    which account started what, so a job admitted under a DIFFERENT
+    account shows up here identically to the caller's own (same "seed"/
+    name, no account info at all). Confirmed live: a fresh account with
+    nothing of its own running saw another account's real seed job here,
+    Stop button included -- this flag is what lets a caller tell "mine"
+    from "someone else's, merely detected by scanning the process table"
+    apart, both for display (RunningNow.tsx's own account-attributed
+    job_admission.py entry would otherwise duplicate this one) and for
+    safety (Stop must not offer to kill a job this account never started).
+    """
+    snap = get_job(account_id).snapshot(since)
+    external = False
+    if not snap["running"]:
+        ext = _external_job_snapshot()
+        if ext is not None:
+            snap = ext
+            external = True
+    snap["external"] = external
+    return snap
+
+
 # ----------------------------------------------------------------------
 # OAuth: the flow a non-technical admin can actually complete.
 # ----------------------------------------------------------------------
@@ -2721,12 +2749,7 @@ class Handler(BaseHTTPRequestHandler):
                     since = int(self.path.split("since=")[1].split("&")[0])
                 except ValueError:
                     since = 0
-            snap = get_job(self._account_id()).snapshot(since)
-            if not snap["running"]:
-                ext = _external_job_snapshot()
-                if ext is not None:
-                    snap = ext
-            self._json(snap)
+            self._json(_job_snapshot(self._account_id(), since))
         elif path == "/api/job_history":
             # The last COMPLETED run of a given job name, read back from
             # disk -- covers exactly the gap /api/job can't: a browser tab

@@ -51,7 +51,12 @@ const JobProgress: React.FC<{
   const poll = useCallback(async () => {
     try {
       const job = await fetchJob(sinceRef.current)
-      if (job.name !== expectedName) return
+      // job.external means this is NOT the caller's own account's job --
+      // webui.py's /api/job falls back to a system-wide ps scan when this
+      // account's own slot is idle, so a DIFFERENT account's same-named
+      // job (e.g. another tenant's own "seed") would otherwise render here
+      // as if it were this account's own run, Stop button included.
+      if (job.name !== expectedName || job.external) return
       setVisible(true)
       if (job.lines.length) {
         setLines((prev) => [...prev, ...job.lines])

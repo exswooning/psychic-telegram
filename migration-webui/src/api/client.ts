@@ -120,6 +120,14 @@ export interface JobStatus {
   // while the job is actually running (see webui.py's Job.snapshot()); a
   // stopped job's "time left" is meaningless.
   etaSeconds: number | null
+  // true when this is NOT the caller's own account's job -- a system-wide
+  // ps-scan fallback for when nothing is running under this account, with
+  // no concept of which account actually started it. A caller that already
+  // shows a properly account-attributed entry for the same job elsewhere
+  // (job_admission.py's active_jobs, via fetchActiveJobs()) must not also
+  // render this one -- confirmed live, both rendered for the same real
+  // seed job simultaneously before this flag existed.
+  external: boolean
 }
 
 export async function fetchJob(since = 0): Promise<JobStatus> {
