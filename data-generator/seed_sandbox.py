@@ -83,14 +83,16 @@ from corpus import ORG, SCALES, CorpusBuilder  # noqa: E402
 # The labels seed_gmail() creates. Reset removes exactly these -- deleting
 # every user label would take labels the account's owner made themselves.
 #
-# Not "Archive": Gmail's labels().create() rejects that exact name outright
-# with a 400 invalidArgument on every account, 100% reproducible -- observed
-# live on a real tenant, not a permissions or quota issue. Gmail reserves it
-# even though it is not a documented system label ID (unlike INBOX, SENT,
-# TRASH, etc.), presumably because it collides with the "Archive" action's
-# own internal handling. "Archived" (past tense) is accepted.
+# Not "Archive", and not "Archived" either: both get labels().create()
+# rejected with a 400 invalidArgument on every account, 100% reproducible --
+# observed live on a real tenant (huge-scale run against
+# source.rohitrokaya.com.np, every one of 201 users) across two separate
+# sessions. Gmail appears to reserve anything resembling "archive" even
+# though it is not a documented system label ID (unlike INBOX, SENT, TRASH,
+# etc.), presumably because it collides with the Archive action's own
+# internal handling. "Filed" carries no relation to that word at all.
 SEED_LABELS = ["Clients", "Clients/Acme", "Clients/Acme/2024",
-               "Projects", "Projects/Apollo", "Archived", "Receipts"]
+               "Projects", "Projects/Apollo", "Filed", "Receipts"]
 
 SEED_SCOPES = [
     "https://www.googleapis.com/auth/drive",
@@ -601,12 +603,25 @@ def seed_contacts(people, settings: Settings, user: str, peers: list[str],
     last_names = ("Nakamura", "Silva", "Okafor", "Kowalski", "Haddad",
                   "Lindqvist", "Reyes", "Achebe", "Bianchi", "Petrov")
     domains = [external, "partner-co.example", "vendor-services.example"]
+    # A create-then-rescue-on-409 shape would work too, but a re-seed against
+    # an already-seeded tenant hits this on *every* user -- checking first
+    # means a normal re-run never even produces the conflict, rather than
+    # producing and then swallowing it 201 times.
+    def get_or_create_group(name):
+        resp = retry(lambda: people.contactGroups().list(
+            pageSize=100).execute())()
+        existing = next((g for g in resp.get("contactGroups", [])
+                         if g.get("name") == name), None)
+        if existing:
+            return existing["resourceName"]
+        created = retry(lambda n=name: people.contactGroups().create(
+            body={"contactGroup": {"name": n}}).execute())()
+        return created["resourceName"]
+
     try:
         group_ids = []
         for name in _CONTACT_GROUP_NAMES:
-            created = retry(lambda n=name: people.contactGroups().create(
-                body={"contactGroup": {"name": n}}).execute())()
-            group_ids.append(created["resourceName"])
+            group_ids.append(get_or_create_group(name))
             m["groups"] += 1
 
         rng = random.Random(hash(user) & 0xFFFFFFFF)

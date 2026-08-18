@@ -984,6 +984,26 @@ class TestSeedContacts:
         total_membership = sum(len(v) for v in people.group_members.values())
         assert total_membership == 10
 
+    def test_reseeding_reuses_an_existing_group_instead_of_failing(self, settings):
+        """Observed live at huge scale against an already-seeded tenant: the
+        group create 409s (it exists from the prior run) and, without a
+        lookup fallback, that single conflict aborted contacts for every one
+        of 201 users. A re-seed must reuse the existing group, not lose the
+        whole step to a name collision that isn't actually a problem."""
+        import seed_sandbox as s
+
+        people = FakePeople("alice@tenanta.com", "source")
+        people.add_group("Clients")
+        people.add_group("Vendors")
+
+        m = s.seed_contacts(people, settings, "alice@tenanta.com", [],
+                            "external.tester@example.com", count=6)
+
+        assert m["note"] == ""
+        assert m["contacts"] == 6
+        assert m["groups"] == 2
+        assert len(people.groups) == 2  # reused, not duplicated
+
     def test_a_missing_scope_is_recorded_not_raised(self, settings):
         """The whole reason this is isolated from build_services(): contacts
         write access is commonly granted on a different schedule than
