@@ -40,7 +40,7 @@ class TestJobSnapshotExternalFlag:
                   "total": 0, "lines": [], "progressPct": 10, "etaSeconds": 90}
         monkeypatch.setattr(webui, "get_job", lambda account_id: _FakeJob(running))
         monkeypatch.setattr(webui, "_external_job_snapshot",
-                            lambda: (_ for _ in ()).throw(
+                            lambda since=0: (_ for _ in ()).throw(
                                 AssertionError("must not even check when the caller's own job is running")))
 
         snap = webui._job_snapshot(7, 0)
@@ -51,7 +51,7 @@ class TestJobSnapshotExternalFlag:
 
     def test_an_idle_own_job_falls_back_to_a_detected_external_one(self, monkeypatch):
         monkeypatch.setattr(webui, "get_job", lambda account_id: _FakeJob(_IDLE))
-        monkeypatch.setattr(webui, "_external_job_snapshot", lambda: {
+        monkeypatch.setattr(webui, "_external_job_snapshot", lambda since=0: {
             "name": "seed", "running": True, "rc": None, "elapsed": 10, "total": 0,
             "lines": [], "progressPct": None, "etaSeconds": None, "detached": True,
             "pid": 4242, "pids": [4242],
@@ -65,7 +65,7 @@ class TestJobSnapshotExternalFlag:
 
     def test_nothing_running_anywhere_is_not_external(self, monkeypatch):
         monkeypatch.setattr(webui, "get_job", lambda account_id: _FakeJob(_IDLE))
-        monkeypatch.setattr(webui, "_external_job_snapshot", lambda: None)
+        monkeypatch.setattr(webui, "_external_job_snapshot", lambda since=0: None)
 
         snap = webui._job_snapshot(7, 0)
 
@@ -77,7 +77,7 @@ class TestJobSnapshotExternalFlag:
         fallback or the flag -- it is just another caller as far as this
         function is concerned."""
         monkeypatch.setattr(webui, "get_job", lambda account_id: _FakeJob(_IDLE))
-        monkeypatch.setattr(webui, "_external_job_snapshot", lambda: {
+        monkeypatch.setattr(webui, "_external_job_snapshot", lambda since=0: {
             "name": "migrate", "running": True, "rc": None, "elapsed": 30, "total": 0,
             "lines": [], "progressPct": 40, "etaSeconds": 120, "detached": True,
             "pid": 555, "pids": [555],

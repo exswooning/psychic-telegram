@@ -13,7 +13,7 @@ import {
   fetchTenantConfigStatus, TenantConfigStatus,
   fetchVerifiedDomains, VerifiedDomain,
   fetchFullSetupStatus, FullSetupStatus,
-  fetchDwdStatus, fetchFleet, FleetNode,
+  fetchDwdStatus, fetchFleet, FleetNode, fetchActiveJobs,
   fetchMe, startMigration, stopJob as stopFleetJob,
 } from '@/api/controlPlane'
 import {
@@ -89,7 +89,7 @@ const Jobs: React.FC = () => {
   const refresh = useCallback(async () => {
     setLoading(true)
     try {
-      const [srcCfg, tgtCfg, dwd, srcSetup, tgtSetup, job, hist, srcDwdStatus, tgtDwdStatus, nodes] = await Promise.all([
+      const [srcCfg, tgtCfg, dwd, srcSetup, tgtSetup, job, hist, srcDwdStatus, tgtDwdStatus, nodes, activeJobs, me] = await Promise.all([
         fetchTenantConfigStatus('source').catch(() => null),
         fetchTenantConfigStatus('target').catch(() => null),
         fetchVerifiedDomains().catch(() => ({ domains: [] as VerifiedDomain[] })),
@@ -105,6 +105,8 @@ const Jobs: React.FC = () => {
         fetchDwdStatus('source').catch(() => null),
         fetchDwdStatus('target').catch(() => null),
         fetchFleet().catch(() => [] as FleetNode[]),
+        fetchActiveJobs().catch(() => []),
+        fetchMe().catch(() => null),
       ])
       const byDwd = (side: 'source' | 'target') => dwd.domains.find((d) => d.side === side) ?? null
       setSides([
@@ -115,13 +117,17 @@ const Jobs: React.FC = () => {
          health: deriveHealth(tgtCfg, byDwd('target'), tgtSetup),
          caveats: tgtDwdStatus?.caveats ?? [] },
       ])
-      // !job.external: a seed job admitted under a DIFFERENT account shows
-      // up here identically (same name, no account info) via webui.py's
-      // own system-wide ps-scan fallback -- rendering it here too would
-      // duplicate the account-attributed cross-account entry the source
-      // side's caveats/admission handling already covers, and would offer
-      // a Stop button for a job this account did not start.
-      setSeedJob(job && job.name === 'seed' && !job.external ? job : null)
+      // `external` means "not in this server process's memory", NOT "not
+      // mine": every webui restart drops the in-memory Job while the child
+      // keeps running (KillMode=process), so an account's own seed reports
+      // external within minutes. job_admission is the real ownership
+      // record -- without consulting it, the account that started the seed
+      // saw no seed card at all.
+      const mine = job?.name
+        ? (activeJobs as { account_id: number | null; job_name: string }[])
+            .some((r) => r.account_id === (me?.id ?? null) && r.job_name === job.name)
+        : false
+      setSeedJob(job && job.name === 'seed' && (!job.external || mine) ? job : null)
       setSeedHistory(hist)
       setFleetJob(nodes.find((n) => n.active_job && n.job_pid) ?? null)
     } finally {

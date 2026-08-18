@@ -636,9 +636,7 @@ _EXT_SCRIPTS = {"seed_sandbox.py": "seed", "reset_target.py": "reset target",
 # Last-seen output tail per external pid, for the suffix-diff that turns the
 # unbounded migration.log into the same "just the new lines" contract the
 # webui-launched Job streams.
-_EXT_TAIL: dict[int, list[str]] = {}
 _EXT_TAIL_LEN: int = 2000
-_EXT_INITIAL_LINES: int = 120
 
 
 def _process_output_tail(pid: int, name: str = "",
@@ -677,9 +675,15 @@ def _process_output_tail(pid: int, name: str = "",
         return []
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
-            return [ln.rstrip("\n") for ln in fh.readlines()[-_EXT_TAIL_LEN:]]
+            lines = [ln.rstrip("\n") for ln in fh.readlines()[-_EXT_TAIL_LEN:]]
     except OSError:
         return []
+    # Same filter Job._ingest_new_lines applies to a job this process owns.
+    # Without it the two paths disagree about what a transcript contains,
+    # and a detached run's feed opens with a five-line google FutureWarning
+    # before any of its actual output.
+    return [ln for ln in lines
+            if "FutureWarning" not in ln and "warnings.warn" not in ln]
 
 
 def _external_processes() -> list[dict]:
@@ -771,14 +775,23 @@ def _reconcile_active_jobs() -> None:
               f"job={name!r} (no matching process found at startup)", flush=True)
 
 
-def _external_job_snapshot() -> dict | None:
+def _external_job_snapshot(since: int = 0) -> dict | None:
     """A Job.snapshot()-shaped view of the primary external process, or None
     when nothing is running outside the webui. progressPct/eta reuse the same
-    ledger-backed math a webui-launched migrate gets."""
+    ledger-backed math a webui-launched migrate gets.
+
+    `since` is honoured exactly as Job.snapshot() honours it: the caller's
+    own cursor into the transcript. This used to keep a single module-level
+    "what did I last send" per pid and return the diff against it, which
+    made the response depend on who polled last rather than on who is
+    asking -- so a browser opening the page fresh (since=0) received zero
+    lines, because an earlier poll in the same server process had already
+    "consumed" them. Confirmed live: a real seed's 21-line transcript was
+    on disk and resolvable, and a new client still rendered an empty feed.
+    Slicing by the caller's own cursor is both correct for concurrent
+    clients and the same contract the managed path already had.
+    """
     jobs = _external_processes()
-    live = {j["pid"] for j in jobs}
-    for stale in [pid for pid in _EXT_TAIL if pid not in live]:
-        del _EXT_TAIL[stale]
     if not jobs:
         return None
     job = jobs[0]
@@ -788,24 +801,7 @@ def _external_job_snapshot() -> dict | None:
     # ps scan with no account context (see _job_snapshot's `external` flag),
     # and JOBS[None] is where a detached run's log lands.
     tail = _process_output_tail(job["pid"], job["name"], None)
-    prev = _EXT_TAIL.get(job["pid"])
-    _EXT_TAIL[job["pid"]] = tail
-    if prev is None:
-        # Brand-new process: hand over a recent slice as history, so the live
-        # feed shows where the run already is -- not just lines added from
-        # this exact second forward.
-        lines = tail[-_EXT_INITIAL_LINES:]
-    else:
-        # Suffix-diff: the tail window always holds the newest lines, so the
-        # new ones are the trailing slice of tail after the longest prefix of
-        # tail that is still a suffix of the previous window. The descending
-        # search finds it on the first try in the steady states (no new
-        # output, or a log shorter than the window); only a window that rolled
-        # entirely over costs more than a couple of tries.
-        limit = min(len(prev), len(tail))
-        match = next((c for c in range(limit, 0, -1)
-                      if tail[:c] == prev[len(prev) - c:]), 0)
-        lines = tail[match:] if match < len(tail) else []
+    lines = tail[since:] if since < len(tail) else []
     pct, eta = _job_progress(job["name"], tail, job["elapsed"])
     return {
         "name": job["name"],
@@ -841,7 +837,7 @@ def _job_snapshot(account_id: int | None, since: int) -> dict:
     snap = get_job(account_id).snapshot(since)
     external = False
     if not snap["running"]:
-        ext = _external_job_snapshot()
+        ext = _external_job_snapshot(since)
         if ext is not None:
             snap = ext
             external = True

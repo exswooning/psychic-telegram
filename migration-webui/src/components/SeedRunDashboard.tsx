@@ -42,7 +42,10 @@ const dur = (sec: number): string => {
 const Stat: React.FC<{
   label: string; value: React.ReactNode; hint?: string; accent?: boolean
 }> = ({ label, value, hint, accent }) => (
-  <Box sx={{
+  // data-testid: several of these labels ("files", "contacts", ...) are
+  // also table column headers, so tests need to address the tile itself
+  // rather than any element that happens to contain the same word.
+  <Box data-testid={`stat-${label}`} sx={{
     px: 1.5, py: 1, borderRadius: 1, bgcolor: 'action.hover',
     minWidth: 104, flex: '1 1 104px',
   }}>

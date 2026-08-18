@@ -149,3 +149,41 @@ class TestExternalTailIsNeverAnotherJobsLog:
 
     def test_a_job_with_no_name_to_resolve_by_reports_nothing(self, job_dir):
         assert webui._process_output_tail(-1) == []
+
+
+class TestExternalSnapshotHonoursTheCallersCursor:
+    """A detached job's transcript used to be diffed against one
+    module-level "what did I last send" per pid, so the response depended
+    on who polled last rather than on who was asking. Confirmed live: a
+    real seed's 21-line transcript was on disk and resolvable, and a
+    browser opening the page fresh still rendered an empty feed, because
+    an earlier poll in the same server process had already consumed it.
+    """
+
+    def _fake_external(self, monkeypatch, lines):
+        monkeypatch.setattr(webui, "_external_processes",
+                            lambda: [{"pid": 4242, "elapsed": 10, "name": "seed"}])
+        monkeypatch.setattr(webui, "_process_output_tail",
+                            lambda pid, name="", account_id=None: list(lines))
+
+    def test_a_fresh_client_gets_the_whole_transcript(self, monkeypatch):
+        self._fake_external(monkeypatch, ["one", "two", "three"])
+        snap = webui._external_job_snapshot(since=0)
+        assert snap["lines"] == ["one", "two", "three"]
+        assert snap["total"] == 3
+
+    def test_a_second_client_is_unaffected_by_the_first(self, monkeypatch):
+        """The actual live symptom: two readers, and the second one saw
+        nothing because the first had already 'consumed' the lines."""
+        self._fake_external(monkeypatch, ["one", "two", "three"])
+        webui._external_job_snapshot(since=0)          # first reader drains
+        second = webui._external_job_snapshot(since=0)  # fresh page load
+        assert second["lines"] == ["one", "two", "three"]
+
+    def test_a_caller_mid_stream_gets_only_what_is_new_to_it(self, monkeypatch):
+        self._fake_external(monkeypatch, ["one", "two", "three"])
+        assert webui._external_job_snapshot(since=2)["lines"] == ["three"]
+
+    def test_a_caller_fully_caught_up_gets_nothing(self, monkeypatch):
+        self._fake_external(monkeypatch, ["one", "two", "three"])
+        assert webui._external_job_snapshot(since=3)["lines"] == []

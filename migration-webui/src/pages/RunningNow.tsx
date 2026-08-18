@@ -93,13 +93,21 @@ function useRunningNow() {
           },
         })
       }
-      // !job.external -- see JobStatus's own comment: a job admitted under
-      // a different account shows up here identically via webui.py's
-      // system-wide ps-scan fallback. Without excluding it, it duplicated
-      // the account-attributed entry the activeJobs loop below already
-      // renders, AND offered a Stop button for a job this account never
-      // started.
-      if (job?.running && job.name && !job.external) {
+      // `external` means "not in this server process's memory" -- NOT "not
+      // mine". Every webui restart (i.e. every deploy) drops the in-memory
+      // Job while systemd's KillMode=process keeps the child running, so an
+      // account's OWN job starts reporting external within minutes of
+      // starting it. job_admission is the actual ownership record, so ask
+      // it. Gating on `external` alone meant the owning account fell
+      // through both branches -- skipped here as "not mine", skipped below
+      // as "already shown above" -- and saw nothing at all for a seed it
+      // had started itself, which is the very failure this page exists to
+      // prevent.
+      const ownAdmission = job?.name
+        ? activeJobs.find((r) => r.account_id === myAccountId && r.job_name === job.name)
+        : undefined
+      const jobIsMine = !!job?.running && !!job.name && (!job.external || !!ownAdmission)
+      if (jobIsMine && job) {
         found.push({
           key: `webui-${job.name}`, label: job.name, detail: `${job.elapsed}s elapsed`,
           pct: job.progressPct ?? null, lines: job.lines, elapsedSec: job.elapsed,
@@ -127,7 +135,9 @@ function useRunningNow() {
       // here entirely. job_admission's own table has no such blind spot.
       for (const row of activeJobs) {
         if (!ACCOUNT_SCOPED_JOB_NAMES.has(row.job_name)) continue
-        if (row.account_id === myAccountId) continue   // already shown above, richly
+        // Skip only what was ACTUALLY rendered above, not everything
+        // belonging to this account -- see jobIsMine's own comment.
+        if (row.account_id === myAccountId && jobIsMine && row.job_name === job!.name) continue
         found.push({
           key: `admission-${row.account_id}-${row.job_name}`,
           label: row.job_name,
