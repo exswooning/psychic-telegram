@@ -767,6 +767,34 @@ class TestFullSetup:
         body = r.json()
         assert body["running"] is False
         assert body["result"] is None
+        assert body["pid"] is None
+
+    def test_status_reports_the_pid_of_a_running_setup(self, monkeypatch, cp):
+        """The pid is what makes a running setup stoppable -- see
+        /api/v2/jobs/{pid}/stop, a generic SIGINT-by-pid endpoint that only
+        works if something upstream can hand it a real pid first. Unlike
+        migrate/delta (which fleet_agent.py's own ps scan already finds),
+        nothing else anywhere records a full_setup.py run's pid."""
+        import api_server
+
+        class _FakeCompleted:
+            def __init__(self, stdout):
+                self.stdout = stdout
+
+        def fake_run(argv, **kwargs):
+            if argv[:2] == ["ps", "-eo"]:
+                return _FakeCompleted(
+                    "  1234 /root/migration/.venv/bin/python full_setup.py "
+                    "--side source --domain c.example.com "
+                    "--admin admin@c.example.com --json\n")
+            return _FakeCompleted("")
+
+        monkeypatch.setattr(api_server.subprocess, "run", fake_run)
+
+        r = cp.get("/api/v2/full-setup/status?side=source")
+        body = r.json()
+        assert body["running"] is True
+        assert body["pid"] == 1234
 
     def test_an_unknown_side_is_rejected(self, cp):
         r = cp.get("/api/v2/full-setup/status?side=sideways")

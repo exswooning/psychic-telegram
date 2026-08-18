@@ -1557,11 +1557,20 @@ async def full_setup_status(side: str, op: Operator = Depends(operator)):
     def _read() -> dict:
         needle = (f"--account-id {op.account_id}" if op.account_id is not None
                   else "full_setup.py")
-        running = any(f"full_setup.py --side {side}" in ln and needle in ln
-                      and "grep" not in ln
-                      for ln in subprocess.run(
-                          ["ps", "-eo", "args="], capture_output=True,
-                          text=True).stdout.splitlines())
+        # pid=,args= (not args= alone): a running setup could only ever be
+        # reported, never stopped, without it -- there is no other place
+        # that records this process's pid anywhere queryable later (unlike
+        # migrate/delta, which fleet_agent.py's own ps scan already finds).
+        pid = None
+        for ln in subprocess.run(["ps", "-eo", "pid=,args="], capture_output=True,
+                                 text=True).stdout.splitlines():
+            if (f"full_setup.py --side {side}" in ln and needle in ln
+                    and "grep" not in ln):
+                parts = ln.split(None, 1)
+                if parts and parts[0].isdigit():
+                    pid = int(parts[0])
+                break
+        running = pid is not None
         out = _full_setup_state_path(side, op.account_id)
         partial = out + ".partial"
         result = None
@@ -1586,7 +1595,7 @@ async def full_setup_status(side: str, op: Operator = Depends(operator)):
                 progress_label = prog.get("label")
             except (OSError, ValueError):
                 pass
-        return {"running": running, "result": result,
+        return {"running": running, "pid": pid, "result": result,
                 "progressPct": progress_pct, "progressLabel": progress_label}
     return await _off_loop(_read)
 

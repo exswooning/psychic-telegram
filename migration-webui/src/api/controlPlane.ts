@@ -386,6 +386,11 @@ export interface FullSetupStatus {
    * full_setup_status: a finished/crashed run's last checkpoint would
    * otherwise read as this run's own progress). */
   progressPct?: number | null; progressLabel?: string | null
+  /** The running process's pid, found by the same ps scan that sets
+   * `running` -- null whenever nothing is running. Nothing else records
+   * this anywhere queryable later, so it's what makes Stop possible via
+   * the generic /api/v2/jobs/{pid}/stop (SIGINT-by-pid). */
+  pid?: number | null
 }
 
 /**

@@ -7,16 +7,19 @@ import {
 import {
   Refresh as RefreshIcon, ExpandMore as ExpandIcon, Language as DomainIcon,
   Grass as SeedIcon, Key as KeyIcon, VpnKey as ScopeIcon,
-  RocketLaunch as MigrateIcon, Science as DryRunIcon,
+  RocketLaunch as MigrateIcon, Science as DryRunIcon, Stop as StopIcon,
 } from '@mui/icons-material'
 import {
   fetchTenantConfigStatus, TenantConfigStatus,
   fetchVerifiedDomains, VerifiedDomain,
   fetchFullSetupStatus, FullSetupStatus,
-  fetchDwdStatus,
-  fetchMe, startMigration,
+  fetchDwdStatus, fetchFleet, FleetNode,
+  fetchMe, startMigration, stopJob as stopFleetJob,
 } from '@/api/controlPlane'
-import { fetchJob, fetchJobHistory, runSeed, JobStatus, JobResult } from '@/api/client'
+import {
+  fetchJob, fetchJobHistory, runSeed, JobStatus, JobResult,
+  stopJob as stopSeedJob,
+} from '@/api/client'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
 
 const SEED_SCALES = ['tiny', 'small', 'medium', 'large', 'huge']
@@ -71,6 +74,11 @@ const Jobs: React.FC = () => {
   const [sides, setSides] = useState<SideJob[] | null>(null)
   const [seedJob, setSeedJob] = useState<JobStatus | null>(null)
   const [seedHistory, setSeedHistory] = useState<JobResult | null>(null)
+  // The migrate/delta/discover slot -- fleet_agent.py's own ps scan is what
+  // finds this (main.py's pid isn't recorded anywhere else queryable), the
+  // exact mechanism Mission Control's JobController already stops jobs
+  // through. Only ever one node in this deployment, but the shape is a list.
+  const [fleetJob, setFleetJob] = useState<FleetNode | null>(null)
   const [expanded, setExpanded] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [seedEnabled, setSeedEnabled] = useState(false)
@@ -80,7 +88,7 @@ const Jobs: React.FC = () => {
   const refresh = useCallback(async () => {
     setLoading(true)
     try {
-      const [srcCfg, tgtCfg, dwd, srcSetup, tgtSetup, job, hist, srcDwdStatus, tgtDwdStatus] = await Promise.all([
+      const [srcCfg, tgtCfg, dwd, srcSetup, tgtSetup, job, hist, srcDwdStatus, tgtDwdStatus, nodes] = await Promise.all([
         fetchTenantConfigStatus('source').catch(() => null),
         fetchTenantConfigStatus('target').catch(() => null),
         fetchVerifiedDomains().catch(() => ({ domains: [] as VerifiedDomain[] })),
@@ -95,6 +103,7 @@ const Jobs: React.FC = () => {
         // needs its own copy since a seed can also be launched from here.
         fetchDwdStatus('source').catch(() => null),
         fetchDwdStatus('target').catch(() => null),
+        fetchFleet().catch(() => [] as FleetNode[]),
       ])
       const byDwd = (side: 'source' | 'target') => dwd.domains.find((d) => d.side === side) ?? null
       setSides([
@@ -107,6 +116,7 @@ const Jobs: React.FC = () => {
       ])
       setSeedJob(job && job.name === 'seed' ? job : null)
       setSeedHistory(hist)
+      setFleetJob(nodes.find((n) => n.active_job && n.job_pid) ?? null)
     } finally {
       setLoading(false)
     }
@@ -148,24 +158,81 @@ const Jobs: React.FC = () => {
                       onToggle={() => toggle(j.side)}
                       seedEnabled={seedEnabled}
                       targetReady={sides.find((s) => s.side === 'target')?.cfg?.hasKey ?? false}
+                      seedJob={j.side === 'source' ? seedJob : null}
+                      fleetJob={j.side === 'source' ? fleetJob : null}
                       onStarted={refresh} />
         ))}
 
         {(seedJob?.name === 'seed' || seedHistory) && (
           <SeedJobCard job={seedJob} history={seedHistory}
-                      open={expanded === 'seed'} onToggle={() => toggle('seed')} />
+                      open={expanded === 'seed'} onToggle={() => toggle('seed')}
+                      onStopped={refresh} />
         )}
       </Stack>
     </Box>
   )
 }
 
+// Whatever's running for this side, regardless of which of the three
+// separate job systems owns it (full_setup.py's own progress file,
+// webui.py's per-account Job, or main.py found live via fleet_agent.py's ps
+// scan) -- so the collapsed header never has to be expanded just to learn
+// something is in flight, and Stop always has one consistent place to live.
+type ActiveRun = {
+  kind: 'setup' | 'seed' | 'fleet'; label: string; pct: number | null
+  stop: (reason: string) => Promise<void>
+}
+
 const SideJobCard: React.FC<{
   job: SideJob; open: boolean; onToggle: () => void
-  seedEnabled: boolean; targetReady: boolean; onStarted: () => void
-}> = ({ job, open, onToggle, seedEnabled, targetReady, onStarted }) => {
+  seedEnabled: boolean; targetReady: boolean
+  seedJob: JobStatus | null; fleetJob: FleetNode | null
+  onStarted: () => void
+}> = ({ job, open, onToggle, seedEnabled, targetReady, seedJob, fleetJob, onStarted }) => {
     const { side, cfg, dwd, setup, health } = job
     const label = cfg?.domain || `${side} (not set up)`
+    const [stopAsk, setStopAsk] = useState(false)
+    const [stopBusy, setStopBusy] = useState(false)
+    const [stopError, setStopError] = useState<string | null>(null)
+
+    const active: ActiveRun | null = setup?.running
+      ? {
+          kind: 'setup', pct: setup.progressPct ?? null,
+          label: setup.progressLabel || 'setting up…',
+          stop: async (reason) => {
+            if (!setup.pid) throw new Error('no pid recorded for this run yet -- try again shortly')
+            const r = await stopFleetJob(setup.pid, reason)
+            if (!r.ok) throw new Error(r.detail || 'could not stop')
+          },
+        }
+      : seedJob?.running
+      ? {
+          kind: 'seed', pct: seedJob.progressPct ?? null, label: 'seeding…',
+          stop: async () => { await stopSeedJob() },
+        }
+      : fleetJob
+      ? {
+          kind: 'fleet', pct: null, label: `${fleetJob.active_job} running…`,
+          stop: async (reason) => {
+            const r = await stopFleetJob(fleetJob.job_pid!, reason)
+            if (!r.ok) throw new Error(r.detail || 'could not stop')
+          },
+        }
+      : null
+
+    const runStop = async (reason: string) => {
+      if (!active) return
+      setStopBusy(true); setStopError(null)
+      try {
+        await active.stop(reason)
+        setStopAsk(false)
+        onStarted()
+      } catch (e: any) {
+        setStopError(e.message)
+      } finally {
+        setStopBusy(false)
+      }
+    }
 
     return (
       <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>
@@ -179,10 +246,9 @@ const SideJobCard: React.FC<{
               <Typography variant="body1" sx={{ fontWeight: 600 }} noWrap>{label}</Typography>
               <Chip size="small" label={side} variant="outlined" sx={{ textTransform: 'capitalize' }} />
             </Stack>
-            {setup?.running ? (
+            {active ? (
               <Typography variant="caption" color="text.secondary">
-                {setup.progressLabel || 'working…'}
-                {typeof setup.progressPct === 'number' && ` — ${setup.progressPct}%`}
+                {active.label}{typeof active.pct === 'number' && ` — ${active.pct}%`}
               </Typography>
             ) : (
               <Typography variant="caption" color="text.secondary">
@@ -191,21 +257,39 @@ const SideJobCard: React.FC<{
               </Typography>
             )}
           </Box>
-          {setup?.running && <CircularProgress size={16} />}
+          {active && <CircularProgress size={16} />}
+          {active && (
+            <Button size="small" color="error" startIcon={<StopIcon />}
+                    onClick={(e) => { e.stopPropagation(); setStopAsk(true) }}>
+              Stop
+            </Button>
+          )}
           <Chip size="small" label={HEALTH_LABEL[health]} color={HEALTH_COLOR[health]}
                variant={health === 'healthy' ? 'filled' : 'outlined'} />
           <ExpandIcon sx={{ transform: open ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }} />
         </Box>
 
-        {setup?.running && (
+        {active && (
           <Box sx={{ px: 2, pb: open ? 0 : 2 }}>
-            {typeof setup.progressPct === 'number' ? (
-              <LinearProgress variant="determinate" value={setup.progressPct} sx={{ height: 6, borderRadius: 3 }} />
+            {typeof active.pct === 'number' ? (
+              <LinearProgress variant="determinate" value={active.pct} sx={{ height: 6, borderRadius: 3 }} />
             ) : (
               <LinearProgress sx={{ height: 6, borderRadius: 3 }} />
             )}
           </Box>
         )}
+
+        <ReasonCodeDialog
+          open={stopAsk} busy={stopBusy} error={stopError} destructive
+          title={active ? `Stop ${active.kind === 'setup' ? 'setup' : active.kind === 'seed' ? 'seeding' : active.label.replace(' running…', '')}` : 'Stop'}
+          description={
+            <>Sends <strong>SIGINT</strong> to the running process for <strong>{label}</strong>.
+            It finishes the item in flight and commits, so nothing already done is lost --
+            this is a pause, not a rollback.</>
+          }
+          onCancel={() => { setStopAsk(false); setStopError(null) }}
+          onConfirm={runStop}
+        />
 
         <Collapse in={open}>
           <Divider />
@@ -421,12 +505,29 @@ const MigratePanel: React.FC<{ domain: string; targetReady: boolean; onStarted: 
 
 const SeedJobCard: React.FC<{
   job: JobStatus | null; history: JobResult | null; open: boolean; onToggle: () => void
-}> = ({ job, history, open, onToggle }) => {
+  onStopped: () => void
+}> = ({ job, history, open, onToggle, onStopped }) => {
   const running = !!job?.running
   const rc = job?.rc ?? history?.rc ?? null
   const label = running ? 'Running' : rc === 0 ? 'ok' : rc === null ? 'Unknown' : `exit ${rc}`
   const color = running ? 'info' : rc === 0 ? 'success' : rc === null ? 'default' : 'error'
   const lines = (running ? job?.lines : history?.lines) ?? []
+  const [stopAsk, setStopAsk] = useState(false)
+  const [stopBusy, setStopBusy] = useState(false)
+  const [stopError, setStopError] = useState<string | null>(null)
+
+  const runStop = async () => {
+    setStopBusy(true); setStopError(null)
+    try {
+      await stopSeedJob()
+      setStopAsk(false)
+      onStopped()
+    } catch (e: any) {
+      setStopError(e.message)
+    } finally {
+      setStopBusy(false)
+    }
+  }
 
   return (
     <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>
@@ -443,6 +544,12 @@ const SeedJobCard: React.FC<{
           </Typography>
         </Box>
         {running && <CircularProgress size={16} />}
+        {running && (
+          <Button size="small" color="error" startIcon={<StopIcon />}
+                  onClick={(e) => { e.stopPropagation(); setStopAsk(true) }}>
+            Stop
+          </Button>
+        )}
         <Chip size="small" label={label} color={color as any}
              variant={label === 'ok' ? 'filled' : 'outlined'} />
         <ExpandIcon sx={{ transform: open ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }} />
@@ -456,6 +563,18 @@ const SeedJobCard: React.FC<{
           )}
         </Box>
       )}
+
+      <ReasonCodeDialog
+        open={stopAsk} busy={stopBusy} error={stopError} destructive
+        title="Stop seeding"
+        description={
+          <>Stops the seed run against the source tenant. Users and data already
+          written stay -- this only stops writing more.</>
+        }
+        onCancel={() => { setStopAsk(false); setStopError(null) }}
+        onConfirm={runStop}
+      />
+
       <Collapse in={open}>
         <Divider />
         <CardContent sx={{ pt: 2 }}>
