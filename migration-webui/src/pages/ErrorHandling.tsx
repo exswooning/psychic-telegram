@@ -44,7 +44,15 @@ const ErrorHandling: React.FC = () => {
       .finally(() => setLoading(false))
   }, [])
 
-  useEffect(() => { refresh() }, [refresh])
+  // Auto-poll, not fetch-once-on-mount -- a page left open while a job is
+  // actively failing/retrying items showed the snapshot from whenever it
+  // was first opened, forever, until someone happened to click Re-check.
+  // Same 5s cadence Jobs.tsx/RunningNow.tsx already use.
+  useEffect(() => {
+    refresh()
+    const id = setInterval(refresh, 5000)
+    return () => clearInterval(id)
+  }, [refresh])
 
   const needle = filter.trim().toLowerCase()
   const visible = needle

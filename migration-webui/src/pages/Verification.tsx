@@ -68,7 +68,15 @@ const VerifiedDomains: React.FC = () => {
       .finally(() => setLoading(false))
   }, [])
 
-  useEffect(() => { refresh() }, [refresh])
+  // Auto-poll, not fetch-once -- DWD status (verified/pending/error) is
+  // exactly the kind of thing that changes while this page stays open
+  // (propagation finishing, a scope going live), and a one-shot fetch left
+  // it showing whatever was true at page load until a manual re-check.
+  useEffect(() => {
+    refresh()
+    const id = setInterval(refresh, 5000)
+    return () => clearInterval(id)
+  }, [refresh])
   useEffect(() => { fetchMe().then((a) => setSeedEnabled(a.seed_enabled)).catch(() => {}) }, [])
 
   if (domains !== null && domains.length === 0 && !error) return null
