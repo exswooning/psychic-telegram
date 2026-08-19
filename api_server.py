@@ -1311,7 +1311,7 @@ async def coverage_status():
 # needed at all.
 # ======================================================================
 @app.get("/api/v2/dwd/status")
-async def dwd_status(tenant: str = "source"):
+async def dwd_status(tenant: str = "source", op: Operator = Depends(operator)):
     if tenant not in ("source", "target"):
         raise HTTPException(400, "tenant must be source or target")
 
@@ -1320,7 +1320,17 @@ async def dwd_status(tenant: str = "source"):
             import verify_scopes
             from config import Settings
 
-            s = Settings()
+            # Scoped to the CALLER's account. This read bare Settings(), so
+            # every SaaS account was shown the legacy env.sh tenant's
+            # delegation instead of its own -- and since those are different
+            # tenants, the answer was a confident "0/N scopes live, all
+            # missing" for delegation that was demonstrably working.
+            # Confirmed live: this endpoint reported 0/14 for account 7's
+            # source while that same key impersonated two of its users and
+            # read their mailboxes in the same minute. The caveats block
+            # below shares the object, so the Chat warning was computed
+            # against the wrong tenant too.
+            s = Settings(account_id=op.account_id)
             key, subject = verify_scopes._key_and_subject(s, tenant)
             if not os.path.isfile(key):
                 return {"tenant": tenant, "checked": False,

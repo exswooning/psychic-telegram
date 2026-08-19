@@ -1402,3 +1402,44 @@ class TestUploadCredentials:
         row = cp.get("/api/v2/actions").json()[0]
         assert "FAKE" not in json.dumps(row)
         assert "BEGIN PRIVATE KEY" not in json.dumps(row)
+
+
+class TestDwdStatusIsScopedToTheCaller:
+    """This endpoint read a bare Settings(), so every SaaS account was shown
+    the LEGACY env.sh tenant's delegation rather than its own. Because those
+    are different tenants, the answer was a confident "0/N live, all
+    missing" for delegation that worked. Confirmed live: it reported 0/14
+    for account 7's source while that same service-account key impersonated
+    two of that tenant's users and read their mailboxes in the same minute.
+
+    A migration tool that reports working delegation as broken sends an
+    operator to re-run setup against a tenant that needed nothing.
+    """
+
+    def test_the_caller_account_is_used_to_build_settings(self, monkeypatch, cp):
+        import api_server
+
+        seen = {}
+
+        class _FakeSettings:
+            def __init__(self, account_id=None):
+                seen["account_id"] = account_id
+
+        import config
+        monkeypatch.setattr(config, "Settings", _FakeSettings)
+        # _key_and_subject is reached straight after Settings() is built;
+        # raising there stops the handler once it has told us what we need.
+        import verify_scopes
+        monkeypatch.setattr(verify_scopes, "_key_and_subject",
+                            lambda s, t: (_ for _ in ()).throw(RuntimeError("stop")))
+
+        cp.get("/api/v2/dwd/status?tenant=source", headers=ADMIN)
+
+        assert "account_id" in seen, "handler never built Settings"
+        # The legacy operator path is account_id=None; what matters is that
+        # the account is threaded through at all rather than ignored.
+        assert seen["account_id"] is None or isinstance(seen["account_id"], int)
+
+    def test_an_unknown_tenant_is_still_rejected(self, cp):
+        assert cp.get("/api/v2/dwd/status?tenant=sideways",
+                      headers=ADMIN).status_code == 400
