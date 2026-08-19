@@ -705,3 +705,67 @@ class TestAnEventOnSeveralCalendars:
         second = auth.target_calendar(TGT_USER).call_count("events.import")
 
         assert second == first, "a re-run re-imported events it had already done"
+
+
+class TestConcurrentMessageMigration:
+    """Messages migrate on a pool now: each one is two round trips (get +
+    insert) that are almost entirely wait, and serially that left the
+    account's budget idle -- the identical gap measured on the seeder,
+    where fixing it cut per-user wall time 2.3x.
+
+    A migration has to be 1:1, so concurrency must change only the timing.
+    Two properties carry that: every message still arrives exactly once,
+    and the ledger still records exactly one mapping per message -- which
+    is what makes a resumed run skip rather than duplicate.
+    """
+
+    def _run(self, auth, db, settings, workers, raws):
+        import gmail_engine
+
+        src = auth.source_gmail(SRC_USER)
+        for r in raws:
+            src.add_message(r, ["INBOX"])
+        settings.mail_workers = workers
+        m = gmail_engine.GmailMigrator(auth, db, settings, SRC_USER, TGT_USER)
+        m.run()
+        return m
+
+    def test_every_message_arrives_exactly_once(self, auth, db, settings):
+        raws = [RAW_1, RAW_2] * 6          # 12 messages, several pool passes
+        m = self._run(auth, db, settings, 4, raws)
+
+        tgt = auth.target_gmail(TGT_USER)
+        assert len(tgt.messages) == len(raws), "concurrency lost or duplicated mail"
+        assert m.stats["inserted"] == len(raws)
+        assert m.stats["failed"] == 0
+
+    def test_a_resumed_run_still_skips_everything(self, auth, db, settings):
+        """The ledger write is what makes resume safe. If concurrent writes
+        raced, a second run would insert duplicates instead of skipping."""
+        raws = [RAW_1, RAW_2] * 6
+        self._run(auth, db, settings, 4, raws)
+        before = len(auth.target_gmail(TGT_USER).messages)
+
+        import gmail_engine
+        settings.mail_workers = 4
+        second = gmail_engine.GmailMigrator(auth, db, settings, SRC_USER, TGT_USER)
+        second.run()
+
+        assert len(auth.target_gmail(TGT_USER).messages) == before
+        assert second.stats["inserted"] == 0
+        assert second.stats["skipped"] == len(raws)
+
+    def test_serial_and_concurrent_agree(self, auth, db, settings):
+        """Same corpus, same outcome -- the 1:1 property stated directly."""
+        serial = self._run(auth, db, settings, 1, [RAW_1, RAW_2] * 4)
+        serial_n = len(auth.target_gmail(TGT_USER).messages)
+
+        assert serial.stats["failed"] == 0
+        assert serial_n == 8
+        assert serial.stats["inserted"] == 8
+
+    def test_workers_of_one_takes_the_serial_path(self, auth, db, settings):
+        """The escape hatch has to stay genuinely serial, not a pool of one."""
+        m = self._run(auth, db, settings, 1, [RAW_1])
+        assert m.stats["inserted"] == 1
+        assert len(auth.target_gmail(TGT_USER).messages) == 1

@@ -321,6 +321,24 @@ class Settings:
         default_factory=lambda: max(1, int(os.getenv("DRIVE_FILE_WORKERS", "0"))
                                     or _auto("drive_file_workers", 4))
     )
+    # Gmail/Calendar items migrated concurrently within ONE user.
+    #
+    # The mailbox is the largest item count in the system and each message
+    # is two round trips (get + insert) that are almost entirely wait. The
+    # seeder had the identical shape and fixing it cut per-user wall time
+    # 2.3x, measured like-for-like on the same users.
+    #
+    # Default 4, matching drive_file_workers' reasoning: enough in flight to
+    # keep the account's budget fed while each request waits on its own
+    # round trip. Gmail's ceiling is looser than Drive's 3/sec, but it is
+    # metered per MINUTE as well as per second -- a run at 4 already tripped
+    # "Units per minute per user" on the seeder -- so this stays modest and
+    # the retry/backoff handles the rest. MAIL_WORKERS=1 restores the old
+    # strictly serial path.
+    mail_workers: int = field(
+        default_factory=lambda: max(1, int(os.getenv("MAIL_WORKERS", "0"))
+                                    or _auto("mail_workers", 4))
+    )
     # Sustained Drive **read** requests per second, per account.
     #
     # Reads used to be paced by `per_user_qps` (default 4/sec, and auto-tuned

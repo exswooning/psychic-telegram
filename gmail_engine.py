@@ -20,6 +20,8 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import concurrent.futures as futures
+import threading
 import re
 import uuid
 
@@ -55,14 +57,47 @@ class GmailMigrator:
         self.settings = settings
         self.source_user = source_user
         self.target_user = target_user
-        self.src = auth.source_gmail(source_user)
-        self.tgt = auth.target_gmail(target_user)
+        # NOT captured -- see the `src`/`tgt` properties below. The
+        # overrides exist so a test can still inject a double, exactly as
+        # drive_engine.py does for the same reason.
+        self._src_override = None
+        self._tgt_override = None
+        self._stats_lock = threading.Lock()
         self.limiter = RateLimiter(settings.per_user_qps)
         self.stats = {
             "inserted": 0, "failed": 0, "skipped": 0,
             "drafts_inserted": 0, "drafts_failed": 0, "drafts_skipped": 0,
             "filters_inserted": 0, "filters_failed": 0, "filters_skipped": 0,
         }
+
+    # -- API clients ------------------------------------------------------
+    #
+    # Resolved per access, never held on the instance, for the same reason
+    # drive_engine.py's own `src` property documents: `httplib2.Http` is not
+    # thread-safe, AuthManager._service caches one per thread, and capturing
+    # the result in __init__ pins every worker to the constructing thread's
+    # socket. That corrupts glibc's heap -- SIGABRT, "free(): invalid next
+    # size (normal)", no Python traceback. It cost nothing while this ran
+    # serially; `mail_workers` above 1 makes it fatal.
+    @property
+    def src(self):
+        return self._src_override or self.auth.source_gmail(self.source_user)
+
+    @src.setter
+    def src(self, value):
+        self._src_override = value
+
+    @property
+    def tgt(self):
+        return self._tgt_override or self.auth.target_gmail(self.target_user)
+
+    @tgt.setter
+    def tgt(self, value):
+        self._tgt_override = value
+
+    def _bump(self, key: str, n: int = 1) -> None:
+        with self._stats_lock:
+            self.stats[key] += n
 
     def _retry(self, fn, before_retry=None, label=None):
         return retry_on_google_error(
@@ -254,6 +289,85 @@ class GmailMigrator:
             if not token:
                 return
 
+    def _migrate_one_message(self, ref: dict) -> None:
+        """One message, start to finish. Extracted so a pool can run
+        several at once -- every branch that used to `continue` the
+        loop now simply returns."""
+        mid = ref["id"]
+        if self.db.get_target_id(self.source_user, mid, "message"):
+            self._bump("skipped")
+            return
+        try:
+            full = self._retry(lambda m=mid: self.src.users().messages().get(
+                userId="me", id=m, format="raw",
+            ).execute(), label="gmail.messages.get")
+        except (PermanentAPIError, RuntimeError) as exc:
+            self.db.log_audit(self.source_user, mid, "message", "FAILED", str(exc))
+            self._bump("failed")
+            return
+        label_ids = full.get("labelIds") or []
+        if "CHAT" in label_ids:
+            self.db.log_audit(self.source_user, mid, "message", "SKIPPED_CHAT")
+            self._bump("skipped")
+            return
+        if "DRAFT" in label_ids:
+            # messages.list returns draft messages too. Inserting one here
+            # creates a draft, and _migrate_drafts() would then create a
+            # second copy of the same thing -- every draft duplicated.
+            # The dedicated draft pass owns these.
+            self.db.log_audit(self.source_user, mid, "message",
+                              "SKIPPED_IS_DRAFT",
+                              "handled by the drafts pass, not as a message")
+            self._bump("skipped")
+            return
+        raw = full.get("raw", "")
+        if not isinstance(raw, str):
+            raw = raw.decode()
+        # `raw` is already base64url, and `body["raw"]` wants base64url --
+        # decoding it only to re-encode the identical bytes doubled peak
+        # memory per message and burned CPU on every one. The decode is now
+        # deferred to the large-message branch, which is the only place the
+        # actual bytes are needed. Size is derived from the encoded length
+        # instead: base64 is 4 chars per 3 bytes, and `raw` is unpadded
+        # urlsafe, so this is exact to within two bytes -- far tighter than
+        # a threshold whose job is only to choose an upload strategy.
+        approx_bytes = (len(raw) * 3) // 4
+        mapped_labels = self._map_label_ids(label_ids)
+
+        if self.settings.dry_run:
+            log.info("[DRY RUN] would insert message %s", mid)
+            self._bump("inserted")
+            return
+        body: dict = {"labelIds": mapped_labels}
+        media = None
+        path = None
+        if approx_bytes > LARGE_MESSAGE_THRESHOLD:
+            path = os.path.join(self.settings.scratch_dir, uuid.uuid4().hex)
+            os.makedirs(self.settings.scratch_dir, exist_ok=True)
+            with open(path, "wb") as fh:
+                fh.write(base64.urlsafe_b64decode(raw))
+            media = MediaFileUpload(path, mimetype="message/rfc822", resumable=True)
+        else:
+            body["raw"] = raw
+
+        try:
+            result = self._insert_once(body, media, raw)
+        except (PermanentAPIError, RuntimeError) as exc:
+            self.db.log_audit(self.source_user, mid, "message", "FAILED", str(exc))
+            self._bump("failed")
+            return
+        finally:
+            if path:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
+        self.db.record_mapping(self.source_user, mid, result["id"], "message")
+        self.db.log_audit(self.source_user, mid, "message", "SUCCESS",
+                          bytes_moved=approx_bytes)
+        self._bump("inserted")
+
     def run(self, delta: bool = False, since_epoch_days: int = 0) -> dict:
         # A mailbox is the largest item count in the system, and every message
         # costs a get_target_id before anything else happens.
@@ -261,85 +375,32 @@ class GmailMigrator:
         self.sync_labels()
         query = f"newer_than:{since_epoch_days}d" if delta and since_epoch_days else ""
 
-        for ref in self._iter_messages(query):
-            mid = ref["id"]
-            if self.db.get_target_id(self.source_user, mid, "message"):
-                self.stats["skipped"] += 1
-                continue
-
-            try:
-                full = self._retry(lambda m=mid: self.src.users().messages().get(
-                    userId="me", id=m, format="raw",
-                ).execute(), label="gmail.messages.get")
-            except (PermanentAPIError, RuntimeError) as exc:
-                self.db.log_audit(self.source_user, mid, "message", "FAILED", str(exc))
-                self.stats["failed"] += 1
-                continue
-
-            label_ids = full.get("labelIds") or []
-            if "CHAT" in label_ids:
-                self.db.log_audit(self.source_user, mid, "message", "SKIPPED_CHAT")
-                self.stats["skipped"] += 1
-                continue
-            if "DRAFT" in label_ids:
-                # messages.list returns draft messages too. Inserting one here
-                # creates a draft, and _migrate_drafts() would then create a
-                # second copy of the same thing -- every draft duplicated.
-                # The dedicated draft pass owns these.
-                self.db.log_audit(self.source_user, mid, "message",
-                                  "SKIPPED_IS_DRAFT",
-                                  "handled by the drafts pass, not as a message")
-                self.stats["skipped"] += 1
-                continue
-
-            raw = full.get("raw", "")
-            if not isinstance(raw, str):
-                raw = raw.decode()
-            # `raw` is already base64url, and `body["raw"]` wants base64url --
-            # decoding it only to re-encode the identical bytes doubled peak
-            # memory per message and burned CPU on every one. The decode is now
-            # deferred to the large-message branch, which is the only place the
-            # actual bytes are needed. Size is derived from the encoded length
-            # instead: base64 is 4 chars per 3 bytes, and `raw` is unpadded
-            # urlsafe, so this is exact to within two bytes -- far tighter than
-            # a threshold whose job is only to choose an upload strategy.
-            approx_bytes = (len(raw) * 3) // 4
-            mapped_labels = self._map_label_ids(label_ids)
-
-            if self.settings.dry_run:
-                log.info("[DRY RUN] would insert message %s", mid)
-                self.stats["inserted"] += 1
-                continue
-
-            body: dict = {"labelIds": mapped_labels}
-            media = None
-            path = None
-            if approx_bytes > LARGE_MESSAGE_THRESHOLD:
-                path = os.path.join(self.settings.scratch_dir, uuid.uuid4().hex)
-                os.makedirs(self.settings.scratch_dir, exist_ok=True)
-                with open(path, "wb") as fh:
-                    fh.write(base64.urlsafe_b64decode(raw))
-                media = MediaFileUpload(path, mimetype="message/rfc822", resumable=True)
-            else:
-                body["raw"] = raw
-
-            try:
-                result = self._insert_once(body, media, raw)
-            except (PermanentAPIError, RuntimeError) as exc:
-                self.db.log_audit(self.source_user, mid, "message", "FAILED", str(exc))
-                self.stats["failed"] += 1
-                continue
-            finally:
-                if path:
-                    try:
-                        os.remove(path)
-                    except OSError:
-                        pass
-
-            self.db.record_mapping(self.source_user, mid, result["id"], "message")
-            self.db.log_audit(self.source_user, mid, "message", "SUCCESS",
-                              bytes_moved=approx_bytes)
-            self.stats["inserted"] += 1
+        # Messages are the largest item count in the system and each one is
+        # two round trips (get + insert) that spend nearly all their time
+        # waiting. Serially that left the account's budget mostly idle -- the
+        # same gap measured on the seeder, where fixing it cut per-user wall
+        # time by 2.3x. Pagination stays serial: it is inherently sequential
+        # and cheap next to the per-message work.
+        workers = max(1, int(getattr(self.settings, "mail_workers", 1) or 1))
+        if workers == 1:
+            for ref in self._iter_messages(query):
+                self._migrate_one_message(ref)
+        else:
+            with futures.ThreadPoolExecutor(max_workers=workers,
+                                            thread_name_prefix="gmail") as pool:
+                pending: set = set()
+                for ref in self._iter_messages(query):
+                    # Bounded: a mailbox can be hundreds of thousands of
+                    # messages, and submitting them all up front would hold
+                    # every ref (and its futures) in memory at once.
+                    if len(pending) >= workers * 4:
+                        done, pending = futures.wait(
+                            pending, return_when=futures.FIRST_COMPLETED)
+                        for f in done:
+                            f.result()
+                    pending.add(pool.submit(self._migrate_one_message, ref))
+                for f in futures.as_completed(pending):
+                    f.result()
 
         self._migrate_drafts()
         # Filters and signatures both need gmail.settings.basic on both

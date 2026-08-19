@@ -554,6 +554,9 @@ def recommend(r: SystemResources | None = None) -> dict:
         # exists to prevent. server_side streams no bytes through the host
         # and does not care, but the budget has to hold for the worse mode.
         "drive_file_workers": 4 if not r.under_memory_pressure else 2,
+        # Same shape as drive_file_workers: concurrency inside one user,
+        # halved when the box is already trading memory for disk.
+        "mail_workers": 4 if not r.under_memory_pressure else 2,
         "reason": "; ".join(why),
         # The seed pool is sized on different inputs (MB_PER_SEED_WORKER,
         # SEED_HARD_CAP), so it needs its own sentence. Reusing `reason`
