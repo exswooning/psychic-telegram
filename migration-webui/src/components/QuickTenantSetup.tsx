@@ -447,10 +447,10 @@ const QuickTenantSetup: React.FC<{
   const [invBusy, setInvBusy] = useState(false)
   const [invError, setInvError] = useState('')
 
-  const loadInventory = useCallback(() => {
+  const loadInventory = useCallback((deep = false) => {
     setInvBusy(true)
     setInvError('')
-    fetchTenantInventory(side)
+    fetchTenantInventory(side, 250, deep)
       .then(setInv)
       .catch((e) => setInvError(e instanceof Error ? e.message : String(e)))
       .finally(() => setInvBusy(false))
@@ -463,7 +463,7 @@ const QuickTenantSetup: React.FC<{
     const key = `${side}:${result?.clientId || ''}`
     if (invLoadedFor.current === key) return
     invLoadedFor.current = key
-    loadInventory()
+    loadInventory(false)
   }, [setUpOk, side, result?.clientId, loadInventory])
 
   useEffect(() => {
@@ -792,7 +792,9 @@ const QuickTenantSetup: React.FC<{
 
           {setUpOk && (
             <TenantInventoryPanel inv={inv} busy={invBusy} error={invError}
-                                  domain={domain} onRefresh={loadInventory} />
+                                  domain={domain}
+                                  onRefresh={() => loadInventory(false)}
+                                  onDeepScan={() => loadInventory(true)} />
           )}
         </Box>
       )}

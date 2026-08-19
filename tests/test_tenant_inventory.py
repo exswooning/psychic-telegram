@@ -30,6 +30,14 @@ import pytest  # noqa: E402
 import tenant_inventory  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _no_live_licence_call(monkeypatch):
+    """The licence read is a real Google call on its own
+    credential; these tests are about the counting, not it."""
+    monkeypatch.setattr(tenant_inventory, "licenses",
+                        lambda s, side: ({}, ""))
+
+
 class FakeExec:
     def __init__(self, result=None, exc=None):
         self._result, self._exc = result, exc
@@ -123,7 +131,7 @@ class TestHeadcountAndData:
                     "b@x.com": {"usageInDrive": "250"}}))
         snap = tenant_inventory.snapshot(settings, "source")
         assert snap["accounts"] == 2
-        assert snap["totals"] == {"messages": 30, "threads": 13,
+        assert snap["totals"] == {"emails": 30, "threads": 13,
                                   "driveBytes": 350, "covered": 2}
         assert [u["email"] for u in snap["users"]] == ["a@x.com", "b@x.com"]
 
@@ -170,7 +178,7 @@ class TestPartialsAreHonest:
         assert snap["accounts"] == 2
         assert snap["error"] == ""
         dead = [u for u in snap["users"] if u["email"] == "dead@x.com"][0]
-        assert dead["messages"] is None and dead["driveBytes"] is None
+        assert dead["emails"] is None and dead["driveBytes"] is None
         assert "400" in dead["error"] and "401" in dead["error"]
 
     def test_totals_name_the_accounts_they_actually_cover(self, wired):
@@ -184,7 +192,7 @@ class TestPartialsAreHonest:
             quotas={"ok@x.com": {"usageInDrive": "70"},
                     "dead@x.com": Exception("HttpError 401")}))
         snap = tenant_inventory.snapshot(settings, "source")
-        assert snap["totals"]["messages"] == 7
+        assert snap["totals"]["emails"] == 7
         assert snap["totals"]["covered"] == 1
         assert snap["totals"]["covered"] < snap["accounts"]
 
@@ -197,7 +205,7 @@ class TestPartialsAreHonest:
             profiles={"a@x.com": {"messagesTotal": 11, "threadsTotal": 2}},
             quotas={"a@x.com": Exception("HttpError 403")}))
         snap = tenant_inventory.snapshot(settings, "source")
-        assert snap["totals"]["messages"] == 11
+        assert snap["totals"]["emails"] == 11
         assert snap["totals"]["covered"] == 1
         assert snap["users"][0]["driveBytes"] is None
         assert "403" in snap["users"][0]["error"]
@@ -251,3 +259,216 @@ class TestLimit:
             quotas={"a@x.com": {"usageInDrive": "1"}}))
         snap = tenant_inventory.snapshot(settings, "source", limit=10)
         assert snap["truncated"] is False
+
+
+class TestLicences:
+    """The one metric behind a scope most tenants have never granted.
+
+    It must never be folded into the migration's own scope list: a scope the
+    Admin Console has not authorised fails the ENTIRE token request, so
+    adding it there would break every migration on every tenant that had not
+    re-pasted its scope line. It gets its own single-scope credential and
+    degrades.
+    """
+
+    def test_licences_are_attached_per_account_and_counted(self, wired, monkeypatch):
+        settings, install = wired
+        install(FakeAuth(
+            emails=["a@x.com", "b@x.com"],
+            profiles={e: {"messagesTotal": 1, "threadsTotal": 1}
+                      for e in ("a@x.com", "b@x.com")},
+            quotas={e: {"usageInDrive": "1"} for e in ("a@x.com", "b@x.com")}))
+        monkeypatch.setattr(tenant_inventory, "licenses", lambda s, side: (
+            {"a@x.com": "Business Standard", "b@x.com": "Business Starter"}, ""))
+        snap = tenant_inventory.snapshot(settings, "source")
+        by = {u["email"]: u["license"] for u in snap["users"]}
+        assert by == {"a@x.com": "Business Standard",
+                      "b@x.com": "Business Starter"}
+        assert snap["licenseCounts"] == {"Business Standard": 1,
+                                         "Business Starter": 1}
+
+    def test_an_ungranted_scope_reports_itself_and_does_not_break_the_panel(
+            self, wired, monkeypatch):
+        """"We could not read licences" must not render as "this tenant has
+        none" -- those are opposite facts."""
+        settings, install = wired
+        install(FakeAuth(
+            emails=["a@x.com"],
+            profiles={"a@x.com": {"messagesTotal": 5, "threadsTotal": 1}},
+            quotas={"a@x.com": {"usageInDrive": "9"}}))
+        monkeypatch.setattr(tenant_inventory, "licenses", lambda s, side: (
+            {}, "licence data needs the .../apps.licensing scope"))
+        snap = tenant_inventory.snapshot(settings, "source")
+        assert "apps.licensing" in snap["licenseError"]
+        assert snap["licenseCounts"] == {}
+        assert snap["users"][0]["license"] == ""
+        # The rest of the panel is unaffected.
+        assert snap["totals"]["emails"] == 5
+        assert snap["error"] == ""
+
+    def test_an_unknown_sku_id_falls_back_to_the_raw_id(self):
+        """A new SKU is far likelier than a bug, and the raw id is still
+        actionable -- 'unknown' is not."""
+        assert tenant_inventory.SKU_NAMES.get("1010020027") == "Business Starter"
+        assert tenant_inventory.SKU_NAMES.get("9999999999") is None
+
+
+class TestDeepScan:
+    """Share access and the rest of what inventory.py measures.
+
+    Off by default and explicitly triggered: it walks every file every user
+    owns to read ACLs, which is minutes per tenant rather than seconds.
+    """
+
+    def _wire_deep(self, monkeypatch, per_user):
+        monkeypatch.setattr(tenant_inventory, "deep_probe",
+                            lambda auth, s, side, email: per_user[email])
+
+    def test_the_default_fetch_does_no_deep_probing(self, wired, monkeypatch):
+        """The panel's own load must stay in seconds."""
+        settings, install = wired
+        install(FakeAuth(emails=["a@x.com"],
+                         profiles={"a@x.com": {"messagesTotal": 1, "threadsTotal": 1}},
+                         quotas={"a@x.com": {"usageInDrive": "1"}}))
+
+        def boom(*a, **k):
+            raise AssertionError("deep probe ran on the default fetch")
+
+        monkeypatch.setattr(tenant_inventory, "deep_probe", boom)
+        snap = tenant_inventory.snapshot(settings, "source")
+        assert snap["deep"] is False
+
+    def test_a_deep_scan_totals_the_sharing_facts(self, wired, monkeypatch):
+        """The facts that change what a migration MEANS: what is shared
+        outside the company, and what is link-shared to anyone."""
+        settings, install = wired
+        emails = ["a@x.com", "b@x.com"]
+        install(FakeAuth(
+            emails=emails,
+            profiles={e: {"messagesTotal": 1, "threadsTotal": 1} for e in emails},
+            quotas={e: {"usageInDrive": "1"} for e in emails}))
+        self._wire_deep(monkeypatch, {
+            "a@x.com": {"driveKinds": {"document": 3, "folder": 1}, "shared": 4,
+                        "external": 2, "anyone": 1, "calendarEvents": 10,
+                        "calendars": 1, "chatSpaces": None,
+                        "chatMessages": None, "error": ""},
+            "b@x.com": {"driveKinds": {"document": 2}, "shared": 1,
+                        "external": 0, "anyone": 0, "calendarEvents": 5,
+                        "calendars": 1, "chatSpaces": None,
+                        "chatMessages": None, "error": ""},
+        })
+        snap = tenant_inventory.snapshot(settings, "source", deep=True)
+        assert snap["deep"] is True
+        assert snap["totals"]["shared"] == 5
+        assert snap["totals"]["external"] == 2
+        assert snap["totals"]["anyone"] == 1
+        assert snap["totals"]["calendarEvents"] == 15
+        assert snap["totals"]["driveKinds"]["document"] == 5
+
+    def test_one_users_deep_failure_does_not_lose_the_others(self, wired, monkeypatch):
+        settings, install = wired
+        emails = ["ok@x.com", "bad@x.com"]
+        install(FakeAuth(
+            emails=emails,
+            profiles={e: {"messagesTotal": 1, "threadsTotal": 1} for e in emails},
+            quotas={e: {"usageInDrive": "1"} for e in emails}))
+
+        def probe(auth, s, side, email):
+            if email == "bad@x.com":
+                raise RuntimeError("drive listing blew up")
+            return {"driveKinds": {}, "shared": 3, "external": 1, "anyone": 0,
+                    "calendarEvents": 2, "calendars": 1, "chatSpaces": None,
+                    "chatMessages": None, "error": ""}
+
+        monkeypatch.setattr(tenant_inventory, "deep_probe", probe)
+        snap = tenant_inventory.snapshot(settings, "source", deep=True)
+        assert snap["totals"]["shared"] == 3
+        bad = [u for u in snap["users"] if u["email"] == "bad@x.com"][0]
+        assert "deep" in bad["error"]
+
+
+class TestTheLicenceScopeIsGrantedButNeverRequired:
+    """The asymmetry that keeps this feature from breaking migrations.
+
+    A console grant is monotonic -- authorising a scope nobody requests costs
+    nothing. A scope in the code's own request list that the console has not
+    authorised fails the entire token exchange. So apps.licensing belongs on
+    the paste line and must never reach required_scopes().
+    """
+
+    def test_it_is_on_the_grant_line(self):
+        import webui
+        payload = webui.dwd_payload()
+        for key in ("migrate_source_full", "seed"):
+            entry = payload.get(key)
+            if not entry:
+                continue
+            scopes = entry.get("scope_list") if isinstance(entry, dict) else entry
+            assert tenant_inventory.LICENSING_SCOPE in (scopes or []), key
+
+    def test_it_is_NOT_in_required_scopes(self):
+        """If this ever flips, every tenant that has not re-pasted its scope
+        line stops migrating -- and scope_guard would correctly refuse to
+        start them, which makes the breakage total."""
+        import verify_scopes
+        from config import Settings
+        st = Settings()
+        for side in ("source", "target"):
+            assert tenant_inventory.LICENSING_SCOPE not in \
+                verify_scopes.required_scopes(st, side)
+
+
+class TestTheDeepScanIsAnHonestSample:
+    """Measured on a real account in this tenant: 180 seconds and 29,056
+    files for ONE mailbox's Drive. Across 201 accounts that is ~75 minutes
+    even at eight workers -- past any HTTP request. So the deep tier samples,
+    and the numbers it produces are the sample's, not the tenant's.
+    """
+
+    def _tenant(self, install, n):
+        emails = [f"u{i}@x.com" for i in range(n)]
+        install(FakeAuth(
+            emails=emails,
+            profiles={e: {"messagesTotal": 1, "threadsTotal": 1} for e in emails},
+            quotas={e: {"usageInDrive": "1"} for e in emails}))
+        return emails
+
+    def test_only_the_sample_is_walked(self, wired, monkeypatch):
+        settings, install = wired
+        self._tenant(install, 20)
+        probed: list[str] = []
+
+        def probe(auth, s, side, email):
+            probed.append(email)
+            return {"driveKinds": {}, "shared": 1, "external": 0, "anyone": 0,
+                    "calendarEvents": 1, "calendars": 1, "chatSpaces": None,
+                    "chatMessages": None, "error": ""}
+
+        monkeypatch.setattr(tenant_inventory, "deep_probe", probe)
+        snap = tenant_inventory.snapshot(settings, "source", deep=True,
+                                         deep_sample=3)
+        assert len(probed) == 3
+        assert snap["deepSampled"] == 3
+        assert snap["accounts"] == 20
+
+    def test_sharing_totals_are_the_samples_not_the_tenants(self, wired, monkeypatch):
+        """The trap: summing 3 of 20 accounts and rendering it beside a
+        headcount of 20 invites reading it as the whole tenant."""
+        settings, install = wired
+        self._tenant(install, 20)
+        monkeypatch.setattr(tenant_inventory, "deep_probe",
+                            lambda a, s, side, e: {
+                                "driveKinds": {}, "shared": 2, "external": 1,
+                                "anyone": 0, "calendarEvents": 4, "calendars": 1,
+                                "chatSpaces": None, "chatMessages": None,
+                                "error": ""})
+        snap = tenant_inventory.snapshot(settings, "source", deep=True,
+                                         deep_sample=3)
+        assert snap["totals"]["shared"] == 6        # 3 sampled x 2, not 20 x 2
+        assert snap["deepSampled"] == 3
+
+    def test_a_quick_scan_reports_no_sample_at_all(self, wired, monkeypatch):
+        settings, install = wired
+        self._tenant(install, 5)
+        snap = tenant_inventory.snapshot(settings, "source")
+        assert snap["deepSampled"] == 0

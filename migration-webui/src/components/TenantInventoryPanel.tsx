@@ -1,6 +1,6 @@
 import React from 'react'
 import {
-  Alert, Box, CircularProgress, IconButton, Stack, Typography,
+  Alert, Box, Button, Chip, CircularProgress, IconButton, Stack, Typography,
 } from '@mui/material'
 import { Refresh as RefreshIcon } from '@mui/icons-material'
 import type { TenantInventory } from '@/api/controlPlane'
@@ -59,10 +59,13 @@ export interface TenantInventoryPanelProps {
   error: string
   domain: string
   onRefresh: () => void
+  /** Walks every file to read ACLs -- minutes, not seconds -- so it is a
+   *  deliberate action rather than part of the panel's own load. */
+  onDeepScan?: () => void
 }
 
 export const TenantInventoryPanel: React.FC<TenantInventoryPanelProps> = ({
-  inv, busy, error, domain, onRefresh,
+  inv, busy, error, domain, onRefresh, onDeepScan,
 }) => (
   <Box sx={{ mt: 2 }} data-testid="tenant-inventory">
     <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
@@ -70,7 +73,18 @@ export const TenantInventoryPanel: React.FC<TenantInventoryPanelProps> = ({
         What&apos;s in {inv?.domain || domain}
       </Typography>
       {busy && <CircularProgress size={14} />}
+      {busy && (
+        <Typography variant="caption" color="text.secondary">
+          reading the tenant…
+        </Typography>
+      )}
       <Box sx={{ flex: 1 }} />
+      {onDeepScan && !inv?.deep && (
+        <Button size="small" onClick={onDeepScan} disabled={busy}
+                data-testid="deep-scan">
+          Scan sharing
+        </Button>
+      )}
       <IconButton size="small" onClick={onRefresh} disabled={busy}
                   aria-label="refresh inventory">
         <RefreshIcon fontSize="small" />
@@ -82,13 +96,80 @@ export const TenantInventoryPanel: React.FC<TenantInventoryPanelProps> = ({
 
     {inv && !inv.error && (
       <>
+        {/* "messages" was ambiguous next to Chat, which also has messages.
+            These are mailbox items, so they are labelled email. */}
         <Stack direction="row" spacing={3} sx={{ mb: 1, flexWrap: 'wrap' }}>
           <Stat id="accounts" label="accounts"
                 value={inv.accounts.toLocaleString()} />
-          <Stat id="messages" label="messages"
-                value={inv.totals.messages.toLocaleString()} />
+          <Stat id="emails" label="email" value={inv.totals.emails.toLocaleString()} />
           <Stat id="drive" label="Drive" value={fmtBytes(inv.totals.driveBytes)} />
+          {inv.deep && (
+            <>
+              <Stat id="shared" label="shared files"
+                    value={(inv.totals.shared ?? 0).toLocaleString()} />
+              <Stat id="external" label="shared externally"
+                    value={(inv.totals.external ?? 0).toLocaleString()} />
+              <Stat id="anyone" label="link-shared to anyone"
+                    value={(inv.totals.anyone ?? 0).toLocaleString()} />
+              <Stat id="events" label="calendar events"
+                    value={(inv.totals.calendarEvents ?? 0).toLocaleString()} />
+            </>
+          )}
         </Stack>
+
+        {inv.deep && inv.deepSampled < inv.accounts && (
+          <Typography variant="caption" color="warning.main"
+                      data-testid="sample-note"
+                      sx={{ display: 'block', mb: 1 }}>
+            Sharing figures are from {inv.deepSampled.toLocaleString()} of{' '}
+            {inv.accounts.toLocaleString()} accounts — walking one account&apos;s
+            Drive took ~3 minutes on this tenant, so the panel samples rather
+            than scanning all of them. Run inventory.py for a full audit.
+          </Typography>
+        )}
+
+        {/* Plans. Read with their own single-scope credential, so a tenant
+            that has never granted it still gets the rest of the panel --
+            and "could not read" is said out loud rather than rendering as
+            an empty set, which would read as "this tenant has no licences". */}
+        <Box sx={{ mb: 1 }} data-testid="licence-row">
+          <Typography variant="caption" color="text.secondary"
+                      sx={{ display: 'block', mb: 0.5 }}>
+            licences
+          </Typography>
+          {Object.keys(inv.licenseCounts || {}).length > 0 ? (
+            <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', gap: 0.5 }}>
+              {Object.entries(inv.licenseCounts).map(([sku, n]) => (
+                <Chip key={sku} size="small" variant="outlined"
+                      label={`${sku} · ${n.toLocaleString()}`} />
+              ))}
+            </Stack>
+          ) : (
+            <Typography variant="caption" color="text.secondary"
+                        data-testid="licence-unavailable">
+              {inv.licenseError
+                ? `not available — ${inv.licenseError}`
+                : 'no licence assignments returned for this tenant'}
+            </Typography>
+          )}
+        </Box>
+
+        {/* Drive composition, only meaningful once a deep scan has walked
+            the files. */}
+        {inv.deep && Object.keys(inv.totals.driveKinds || {}).length > 0 && (
+          <Box sx={{ mb: 1 }} data-testid="drive-kinds">
+            <Typography variant="caption" color="text.secondary"
+                        sx={{ display: 'block', mb: 0.5 }}>
+              Drive contents
+            </Typography>
+            <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', gap: 0.5 }}>
+              {Object.entries(inv.totals.driveKinds || {}).map(([k, n]) => (
+                <Chip key={k} size="small" variant="outlined"
+                      label={`${k} · ${n.toLocaleString()}`} />
+              ))}
+            </Stack>
+          </Box>
+        )}
 
         {(inv.totals.covered < inv.accounts || inv.truncated) && (
           <Typography variant="caption" color="text.secondary"
@@ -112,8 +193,17 @@ export const TenantInventoryPanel: React.FC<TenantInventoryPanelProps> = ({
                                          bgcolor: 'background.paper' }}>
               <Box component="tr">
                 <Box component="th" sx={thSx}>account</Box>
-                <Box component="th" sx={{ ...thSx, textAlign: 'right' }}>messages</Box>
+                <Box component="th" sx={thSx}>licence</Box>
+                <Box component="th" sx={{ ...thSx, textAlign: 'right' }}>email</Box>
                 <Box component="th" sx={{ ...thSx, textAlign: 'right' }}>Drive</Box>
+                {inv.deep && (
+                  <>
+                    <Box component="th" sx={{ ...thSx, textAlign: 'right' }}>shared</Box>
+                    <Box component="th" sx={{ ...thSx, textAlign: 'right' }}>external</Box>
+                    <Box component="th" sx={{ ...thSx, textAlign: 'right' }}>anyone</Box>
+                    <Box component="th" sx={{ ...thSx, textAlign: 'right' }}>events</Box>
+                  </>
+                )}
               </Box>
             </Box>
             <Box component="tbody">
@@ -128,12 +218,23 @@ export const TenantInventoryPanel: React.FC<TenantInventoryPanelProps> = ({
                       </Typography>
                     )}
                   </Box>
+                  <Box component="td" sx={tdSx}>
+                    {u.license || <Box component="span" sx={{ color: 'text.disabled' }}>—</Box>}
+                  </Box>
                   <Box component="td" sx={numSx}>
-                    {u.messages === null ? '—' : u.messages.toLocaleString()}
+                    {u.emails === null ? '—' : u.emails.toLocaleString()}
                   </Box>
                   <Box component="td" sx={numSx}>
                     {u.driveBytes === null ? '—' : fmtBytes(u.driveBytes)}
                   </Box>
+                  {inv.deep && (
+                    <>
+                      <Box component="td" sx={numSx}>{u.shared ?? '—'}</Box>
+                      <Box component="td" sx={numSx}>{u.external ?? '—'}</Box>
+                      <Box component="td" sx={numSx}>{u.anyone ?? '—'}</Box>
+                      <Box component="td" sx={numSx}>{u.calendarEvents ?? '—'}</Box>
+                    </>
+                  )}
                 </Box>
               ))}
             </Box>

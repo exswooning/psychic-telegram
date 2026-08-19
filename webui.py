@@ -1956,9 +1956,23 @@ def _widen_to_required(out: dict, st) -> dict:
     """
     import verify_scopes
 
+    # Scopes worth GRANTING but deliberately never REQUIRED.
+    #
+    # The asymmetry is the point. A console grant is monotonic -- authorising
+    # a scope nobody requests costs nothing -- but a scope in the code's own
+    # request list that the console has not authorised fails the ENTIRE token
+    # exchange, so every migration on every tenant that had not re-pasted
+    # would break. These therefore ride along on the paste line, and the
+    # features behind them degrade to "not available" until it is pasted.
+    optional = {
+        # Per-account plan (Business Starter/Standard/Plus...) in the tenant
+        # inventory panel. See tenant_inventory.LICENSING_SCOPE.
+        "https://www.googleapis.com/auth/apps.licensing",
+    }
+
     def _widen(entry: dict, side: str) -> None:
         try:
-            need = set(verify_scopes.required_scopes(st, side))
+            need = set(verify_scopes.required_scopes(st, side)) | optional
         except Exception:      # noqa: BLE001 - never break /api/dwd
             return
         have = set(entry.get("scope_list") or [])

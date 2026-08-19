@@ -1912,7 +1912,7 @@ async def claims_list(op: Operator = Depends(operator)):
 
 
 @app.get("/api/v2/setup/tenant-inventory")
-async def get_tenant_inventory(side: str, limit: int = 250,
+async def get_tenant_inventory(side: str, limit: int = 250, deep: bool = False,
                                op: Operator = Depends(operator)):
     """How many accounts this tenant has, and the data each one holds.
 
@@ -1937,7 +1937,7 @@ async def get_tenant_inventory(side: str, limit: int = 250,
         # env.sh tenant and would report a different customer's headcount
         # back to this caller. Enforced by tests/test_account_scoping.py.
         return tenant_inventory.snapshot(
-            Settings(account_id=op.account_id), side, limit=limit)
+            Settings(account_id=op.account_id), side, limit=limit, deep=deep)
 
     return await _off_loop(_read)
 

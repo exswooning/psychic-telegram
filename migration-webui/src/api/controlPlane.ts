@@ -486,10 +486,20 @@ export const fetchTenantConfigStatus = (side: 'source' | 'target') =>
 // must never go on a poll loop (same rule as every other live-API read).
 export interface TenantInventoryUser {
   email: string
-  messages: number | null
+  emails: number | null
   threads: number | null
   driveBytes: number | null
+  license: string
   error: string
+  // Deep-scan only -- absent until a deep scan has run.
+  driveKinds?: Record<string, number>
+  shared?: number
+  external?: number
+  anyone?: number
+  calendarEvents?: number | null
+  calendars?: number | null
+  chatSpaces?: number | null
+  chatMessages?: number | null
 }
 
 export interface TenantInventory {
@@ -501,14 +511,30 @@ export interface TenantInventory {
   // It can be lower than `accounts` -- a suspended or never-provisioned
   // mailbox answers 400/401 -- and the UI must show the denominator rather
   // than presenting a partial sum as the whole tenant.
-  totals: { messages: number; threads: number; driveBytes: number; covered: number }
+  totals: {
+    emails: number; threads: number; driveBytes: number; covered: number
+    // Deep-scan only.
+    shared?: number; external?: number; anyone?: number
+    calendarEvents?: number; driveKinds?: Record<string, number>
+  }
   truncated: boolean
   error: string
+  deep: boolean
+  /** How many accounts the deep scan actually walked. Always fewer than
+   *  `accounts` -- one account's Drive took 180s to walk on a real tenant,
+   *  so the sharing numbers are this sample's, never the tenant's. */
+  deepSampled: number
+  // Licences come from a scope most tenants have never granted, so "could
+  // not read" and "this tenant has none" must stay distinguishable.
+  licenseCounts: Record<string, number>
+  licenseError: string
 }
 
-export const fetchTenantInventory = (side: 'source' | 'target', limit = 250) =>
+export const fetchTenantInventory = (
+  side: 'source' | 'target', limit = 250, deep = false,
+) =>
   cpFetch<TenantInventory>(
-    `/api/v2/setup/tenant-inventory?side=${side}&limit=${limit}`)
+    `/api/v2/setup/tenant-inventory?side=${side}&limit=${limit}&deep=${deep}`)
 
 export const uploadCredentials = (
   reason: string, side: 'source' | 'target', domain: string,
