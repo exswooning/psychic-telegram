@@ -940,12 +940,21 @@ async def benchmark_start(body: StartBenchmark, op: Operator = Depends(operator)
     """
     from config import Settings
 
-    target = (Settings().target_domain or "").strip().lower()
+    # Scoped to the caller: this is the typed-confirmation gate for an
+    # action that can wipe a target tenant, and comparing against the
+    # LEGACY env.sh domain meant a SaaS account was being asked to confirm
+    # somebody else's tenant name. Same bare-Settings() bug as
+    # /api/v2/dwd/status. reset_target.py re-checks independently, so this
+    # was defence-in-depth rather than the only guard -- but a confirmation
+    # prompt that names the wrong tenant is worse than no prompt, because
+    # it reads as verification.
+    st = Settings(account_id=op.account_id)
+    target = (st.target_domain or "").strip().lower()
     typed = (body.confirm_domain or "").strip().lower()
     if not target:
         raise HTTPException(400, "TARGET_DOMAIN is not configured")
     if typed != target:
-        source = (Settings().source_domain or "").strip().lower()
+        source = (st.source_domain or "").strip().lower()
         extra = (" -- that is the SOURCE domain" if typed and typed == source else "")
         raise HTTPException(400, f"{typed!r} does not match the target domain "
                                  f"{target!r}{extra}")
@@ -1486,7 +1495,11 @@ async def apis_enable(body: WriteAction, op: Operator = Depends(operator)):
         import ensure_apis
         from config import Settings
 
-        s = Settings()
+        # The caller's own projects. Bare Settings() enabled APIs on the
+        # LEGACY tenant's project and reported success, leaving the
+        # account's actual project untouched and still broken -- a write
+        # aimed at the wrong tenant, reported as done.
+        s = Settings(account_id=op.account_id)
         done, failed = [], []
         for tenant in ("source", "target"):
             res = ensure_apis.ensure(s, tenant, do_enable=True)
