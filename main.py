@@ -47,6 +47,7 @@ from auth import AuthManager, list_domain_users
 from calendar_engine import CalendarMigrator
 from chat_engine import ChatMigrator
 from contacts_engine import ContactsMigrator
+import user_claims
 from config import Settings
 from db import MigrationDB
 from discovery import print_report, scan_user
@@ -199,6 +200,44 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
     return result
 
 
+def _coordination_enabled() -> bool:
+    """Is this run sharing a user list with other machines?
+
+    Off unless a coordinator is configured, so every existing single-box
+    install behaves exactly as before -- no claims table, no extra calls, no
+    new way to fail. Turning it on is one environment variable.
+    """
+    return bool(user_claims.coordinator_url())
+
+
+def _renew_until(stop: threading.Event, account_id, source_user: str) -> None:
+    """Hold this node's lease for as long as the user is in flight.
+
+    A user can take an hour; the lease is five minutes. Without this the
+    claim would lapse mid-migration and the user would read as abandoned
+    while it was actively being worked on.
+
+    A renewal that returns False means the claim is no longer ours -- an
+    operator forced it to another node -- and there is nothing useful this
+    thread can do about it, so it stops renewing and lets the log say so.
+    The migration itself is deliberately NOT interrupted: killing it in the
+    middle would leave a half-migrated user, which is worse than finishing
+    work whose ownership record has moved.
+    """
+    while not stop.wait(user_claims.RENEW_EVERY):
+        try:
+            if not user_claims.renew(account_id, source_user):
+                log.warning("lease for %s is no longer held by this node; "
+                            "another node may have been forced onto it",
+                            source_user)
+                return
+        except Exception as exc:      # noqa: BLE001 - never kill the migration
+            # A coordinator blip must not end a run that is otherwise fine.
+            # The lease may lapse, which surfaces as a stale claim an
+            # operator can see, rather than as a failed migration.
+            log.warning("could not renew lease for %s: %s", source_user, exc)
+
+
 def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
               services: set[str], delta: bool, delta_days: int,
               only: list[str] | None = None) -> list[dict]:
@@ -253,17 +292,56 @@ def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
              len(pairs), settings.user_workers, ",".join(sorted(services)), delta)
 
     results: list[dict] = []
+    coordinated = _coordination_enabled()
+    account_id = getattr(settings, "account_id", None)
+    svc_label = ",".join(sorted(services))
+
+    def _one(src: str, tgt: str) -> dict | None:
+        """Migrate one user, holding its claim for the whole time.
+
+        Returns None when another node owns the user -- as_completed then
+        simply has nothing to add, which is the correct outcome: this node
+        did not do that work and must not report on it.
+        """
+        if not coordinated:
+            return migrate_user(auth, db, settings, src, tgt,
+                                services, delta, delta_days)
+
+        claimed, why = user_claims.acquire(account_id, src, services=svc_label)
+        if not claimed:
+            log.info("skipping %s: %s", src, why)
+            return None
+
+        stop = threading.Event()
+        renewer = threading.Thread(
+            target=_renew_until, args=(stop, account_id, src),
+            name=f"lease-{src[:12]}", daemon=True)
+        renewer.start()
+        try:
+            out = migrate_user(auth, db, settings, src, tgt,
+                               services, delta, delta_days)
+            user_claims.finish(account_id, src, status="DONE")
+            return out
+        except BaseException as exc:
+            # Record the failure against the claim before re-raising, so the
+            # user shows as FAILED rather than sitting CLAIMED until the
+            # lease lapses and looking like a live node still working on it.
+            user_claims.finish(account_id, src, status="FAILED",
+                               detail=str(exc)[:400])
+            raise
+        finally:
+            stop.set()
+            renewer.join(timeout=2)
+
     with futures.ThreadPoolExecutor(
         max_workers=settings.user_workers, thread_name_prefix="user"
     ) as pool:
-        pending = {
-            pool.submit(migrate_user, auth, db, settings, s, t,
-                        services, delta, delta_days): s
-            for s, t in pairs
-        }
+        pending = {pool.submit(_one, s, t): s for s, t in pairs}
         for fut in futures.as_completed(pending):
             try:
-                results.append(fut.result())
+                out = fut.result()
+                if out is not None:
+                    results.append(out)
             except Exception as exc:  # noqa: BLE001
                 log.exception("worker for %s crashed: %s", pending[fut], exc)
     return results

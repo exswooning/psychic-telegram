@@ -229,7 +229,13 @@ class TestLedgerSafety:
         path = tempfile.mktemp(suffix=".db")
         os.environ["MIGRATION_DB"] = path
         MigrationDB(path)
-        expected = ["001_control_plane.sql", "002_accounts.sql", "003_active_jobs.sql"]
+        # Derived from the directory, not hardcoded: a literal list here
+        # fails on every new migration for no reason other than being a
+        # literal, which teaches the next person to edit the assertion
+        # rather than read it. What this test is actually about is that
+        # applying twice is safe.
+        expected = sorted(f for f in os.listdir(cpdb.MIGRATIONS_DIR)
+                          if f.endswith(".sql"))
         assert cpdb.apply_migrations() == expected
         assert cpdb.apply_migrations() == expected   # no error
         os.unlink(path)

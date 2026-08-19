@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hmac
 from contextlib import asynccontextmanager
 import json
 import os
@@ -76,6 +77,7 @@ import accounts_auth
 import job_admission
 import ai_diagnostics
 import control_plane_db as cpdb
+import user_claims as user_claims_mod
 
 SESSION_COOKIE = "bp_session"
 
@@ -1826,6 +1828,87 @@ async def upload_credentials(body: UploadCredentials, op: Operator = Depends(ope
         return True, key["client_id"]
     return await _gated(op, "setup.upload_credentials", body,
                         f"{body.side}:{body.domain}", _save)
+
+
+# ======================================================================
+# Multi-node claims -- see user_claims.py and migrations/004_user_claims.sql
+# ======================================================================
+# Worker nodes authenticate with a shared token rather than a session
+# cookie: they are unattended machines on the operator's own tailnet, not
+# people signing in. The token is the second lock behind the network
+# boundary -- Tailscale already limits who can reach this port, and a
+# misconfigured node pointed at the wrong coordinator should be refused
+# rather than silently claiming another tenant's users.
+def node_auth(x_node_token: str = Header(default="")) -> None:
+    expected = os.getenv("BITPORT_NODE_TOKEN", "").strip()
+    if not expected:
+        raise HTTPException(
+            503, "this control plane is not accepting worker nodes: set "
+                 "BITPORT_NODE_TOKEN to enable multi-node migration")
+    if not hmac.compare_digest(x_node_token.strip(), expected):
+        raise HTTPException(401, "bad or missing X-Node-Token")
+
+
+class ClaimBody(BaseModel):
+    accountId: int | None = None
+    sourceUser: str
+    nodeId: str
+    services: str = ""
+    leaseSeconds: int = user_claims_mod.LEASE_SECONDS
+    force: bool = False
+    status: str = "DONE"
+    detail: str = ""
+
+
+@app.post("/api/v2/claims/acquire")
+async def claims_acquire(body: ClaimBody, _: None = Depends(node_auth)):
+    def _do() -> dict:
+        claimed, reason = user_claims_mod._local_acquire(
+            body.accountId, body.sourceUser, node=body.nodeId,
+            services=body.services, lease_seconds=body.leaseSeconds,
+            force=body.force)
+        return {"claimed": claimed, "reason": reason}
+    return await _off_loop(_do)
+
+
+@app.post("/api/v2/claims/renew")
+async def claims_renew(body: ClaimBody, _: None = Depends(node_auth)):
+    def _do() -> dict:
+        return {"renewed": user_claims_mod._local_renew(
+            body.accountId, body.sourceUser, node=body.nodeId,
+            lease_seconds=body.leaseSeconds)}
+    return await _off_loop(_do)
+
+
+@app.post("/api/v2/claims/finish")
+async def claims_finish(body: ClaimBody, _: None = Depends(node_auth)):
+    def _do() -> dict:
+        user_claims_mod._local_finish(
+            body.accountId, body.sourceUser, node=body.nodeId,
+            status=body.status, detail=body.detail)
+        return {"ok": True}
+    return await _off_loop(_do)
+
+
+@app.post("/api/v2/claims/release")
+async def claims_release(body: ClaimBody, _: None = Depends(node_auth)):
+    def _do() -> dict:
+        user_claims_mod._local_release(
+            body.accountId, body.sourceUser, node=body.nodeId)
+        return {"ok": True}
+    return await _off_loop(_do)
+
+
+@app.get("/api/v2/claims")
+async def claims_list(op: Operator = Depends(operator)):
+    """Who is migrating what, for this account. Operator-facing, so it goes
+    through the session dependency rather than the node token."""
+    require_login(op)
+
+    def _read() -> dict:
+        return {"claims": user_claims_mod.claims(op.account_id),
+                "summary": user_claims_mod.summary(op.account_id)}
+    return await _off_loop(_read)
 
 
 @app.get("/api/v2/setup/tenant-inventory")
