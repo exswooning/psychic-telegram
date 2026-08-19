@@ -1828,6 +1828,37 @@ async def upload_credentials(body: UploadCredentials, op: Operator = Depends(ope
                         f"{body.side}:{body.domain}", _save)
 
 
+@app.get("/api/v2/setup/tenant-inventory")
+async def get_tenant_inventory(side: str, limit: int = 250,
+                               op: Operator = Depends(operator)):
+    """How many accounts this tenant has, and the data each one holds.
+
+    Explicit-trigger only, never on a poll path: this makes two live Google
+    calls per account, and webui_spa.py's "no live API call on a poll loop"
+    rule exists for exactly this shape of endpoint. The setup panel fetches
+    it once, after setup succeeds.
+
+    `limit` bounds the per-account probing, not the account count -- the
+    headcount is always the true one, and `truncated` says when the rows
+    below it are a subset.
+    """
+    if side not in ("source", "target"):
+        raise HTTPException(400, "side must be source or target")
+    require_login(op)
+
+    def _read() -> dict:
+        import tenant_inventory
+        from config import Settings
+
+        # Settings(account_id=...), never bare: bare reads the legacy
+        # env.sh tenant and would report a different customer's headcount
+        # back to this caller. Enforced by tests/test_account_scoping.py.
+        return tenant_inventory.snapshot(
+            Settings(account_id=op.account_id), side, limit=limit)
+
+    return await _off_loop(_read)
+
+
 @app.get("/api/v2/setup/tenant-config")
 async def get_tenant_config_status(side: str, op: Operator = Depends(operator)):
     if side not in ("source", "target"):

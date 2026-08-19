@@ -481,6 +481,35 @@ export interface TenantConfigStatus {
 export const fetchTenantConfigStatus = (side: 'source' | 'target') =>
   cpFetch<TenantConfigStatus>(`/api/v2/setup/tenant-config?side=${side}`)
 
+// -- Tenant inventory --------------------------------------------------------
+// Two live Google calls per account, so this is explicit-trigger only and
+// must never go on a poll loop (same rule as every other live-API read).
+export interface TenantInventoryUser {
+  email: string
+  messages: number | null
+  threads: number | null
+  driveBytes: number | null
+  error: string
+}
+
+export interface TenantInventory {
+  side: 'source' | 'target'
+  domain: string
+  accounts: number
+  users: TenantInventoryUser[]
+  // `covered` is the number of accounts the totals are actually built from.
+  // It can be lower than `accounts` -- a suspended or never-provisioned
+  // mailbox answers 400/401 -- and the UI must show the denominator rather
+  // than presenting a partial sum as the whole tenant.
+  totals: { messages: number; threads: number; driveBytes: number; covered: number }
+  truncated: boolean
+  error: string
+}
+
+export const fetchTenantInventory = (side: 'source' | 'target', limit = 250) =>
+  cpFetch<TenantInventory>(
+    `/api/v2/setup/tenant-inventory?side=${side}&limit=${limit}`)
+
 export const uploadCredentials = (
   reason: string, side: 'source' | 'target', domain: string,
   serviceAccountKey: Record<string, unknown>,

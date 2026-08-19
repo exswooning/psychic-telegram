@@ -13,10 +13,12 @@ import {
   FullSetupStatus, startFullSetup, fetchFullSetupStatus,
   startProvision, fetchProvisionStatus, ProvisionStatus,
   fetchTenantConfigStatus, uploadCredentials, TenantConfigStatus,
+  fetchTenantInventory, TenantInventory,
 } from '@/api/controlPlane'
 import { runSeed } from '@/api/client'
 import ReasonCodeDialog from './ReasonCodeDialog'
 import JobProgress from './JobProgress'
+import TenantInventoryPanel from './TenantInventoryPanel'
 
 const REPO_CLONE_CMD =
   'git clone https://github.com/exswooning/psychic-telegram -b workspace-migrator && cd psychic-telegram'
@@ -435,6 +437,35 @@ const QuickTenantSetup: React.FC<{
   const result = status?.result
   const setUpOk = !!result?.ok && !status?.running
 
+  // -- Tenant inventory ------------------------------------------------------
+  // What is actually in the tenant this setup just pointed at: how many
+  // accounts, and how much data each holds. Fetched once when setup
+  // succeeds, never on a poll -- it costs two live Google calls per account
+  // (~34s on a real 201-account tenant), so it is explicitly triggered and
+  // refreshable rather than continuously refreshed.
+  const [inv, setInv] = useState<TenantInventory | null>(null)
+  const [invBusy, setInvBusy] = useState(false)
+  const [invError, setInvError] = useState('')
+
+  const loadInventory = useCallback(() => {
+    setInvBusy(true)
+    setInvError('')
+    fetchTenantInventory(side)
+      .then(setInv)
+      .catch((e) => setInvError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setInvBusy(false))
+  }, [side])
+
+  const invLoadedFor = useRef('')
+  useEffect(() => {
+    if (!setUpOk) return
+    // Once per successful setup, not once per render.
+    const key = `${side}:${result?.clientId || ''}`
+    if (invLoadedFor.current === key) return
+    invLoadedFor.current = key
+    loadInventory()
+  }, [setUpOk, side, result?.clientId, loadInventory])
+
   useEffect(() => {
     if (side !== 'target' || !showProvisionUsers) return
     fetchProvisionStatus('target').then(setProvisionStatus).catch(() => {})
@@ -757,6 +788,11 @@ const QuickTenantSetup: React.FC<{
               own machine) — after that, signing in only needs to grant
               delegation, not create the project.
             </Alert>
+          )}
+
+          {setUpOk && (
+            <TenantInventoryPanel inv={inv} busy={invBusy} error={invError}
+                                  domain={domain} onRefresh={loadInventory} />
           )}
         </Box>
       )}
