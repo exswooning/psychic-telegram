@@ -89,6 +89,34 @@ class Phase:
         return {"name": self.name, "status": self.status, "detail": self.detail}
 
 
+
+# The missing-browser message, as a function rather than a literal buried in
+# a branch -- its exact wording is the whole point, so it needs to be
+# assertable without driving a full setup run.
+_NO_BROWSER_MARKER = "no browser available"
+
+
+def is_no_browser(detail: str) -> bool:
+    """Did this failure come from the host having no browser at all?"""
+    return _NO_BROWSER_MARKER in (detail or "")
+
+
+def no_browser_detail(crash_detail: str) -> str:
+    """What to tell an operator whose host has no browser installed.
+
+    Deliberately mentions neither 2FA nor a captcha. Both were in the
+    message this replaces, and both are wrong here: the sign-in never
+    happened, because nothing was ever launched to sign in with. Observed
+    live -- a wizard run reported "likely needs a human for 2FA/captcha"
+    for two tenants whose delegation was, at that moment, complete and
+    working.
+    """
+    return (f"{crash_detail} Delegation was NOT changed. This is a host "
+            "setup problem, not a sign-in problem: no browser could be "
+            "started at all. Use the Manual tab to paste the scope line "
+            "yourself, or install a browser on the host and retry.")
+
+
 def run_full_setup(
     side: str, domain: str, admin_email: str, admin_password: str,
     org_id: str = "", keys_dir: str = "keys", dry_run: bool = False,
@@ -300,63 +328,99 @@ def run_full_setup(
         _vs = Settings()
     scopes = ",".join(verify_scopes.required_scopes(_vs, side))
 
-    prev_email = os.environ.get("DWD_EMAIL")
-    prev_pw = os.environ.get("DWD_PASSWORD")
-    os.environ["DWD_EMAIL"] = admin_email
-    os.environ["DWD_PASSWORD"] = admin_password
-    _progress(80, f"granting domain-wide delegation as {admin_email}")
-    # Confirmed live: an uncaught Playwright TimeoutError deep inside
-    # dwd_helper.run() (a re-click that raced a dialog closing under it)
-    # propagated all the way out here and crashed the whole subprocess --
-    # the caller's own status file was left reading {"running": true}
-    # forever, since the process that would have written "failed" was
-    # already dead. dwd_helper.py's own selectors are already
-    # best-effort against a console that "changes without notice" (see
-    # its module docstring); this makes THIS call site match that same
-    # assumption instead of trusting every one of ~450 lines of browser
-    # choreography to never raise.
-    # tenant=side deliberately NOT passed: dwd_helper.run() would then do
-    # its OWN functional verification internally, with no retry, and
-    # return a non-zero rc on ANY scope not yet live -- confirmed live,
-    # this short-circuited before phase 3 below (the same check, but
-    # retried) ever got to run, defeating that retry entirely. Phase 3 is
-    # the one and only verification gate now; this call only ever needs
-    # to know whether Authorize was accepted.
-    crash_detail = None
+    # Is this already done?
+    #
+    # Driving the Admin Console is the slowest, most fragile thing this tool
+    # does -- a real browser, a real sign-in, and selectors against a console
+    # that changes without notice. Doing it to re-grant scopes that are
+    # already live is pure risk for no gain, and it is the *common* case:
+    # re-running setup on a working tenant, or setting up a tenant that was
+    # seeded earlier.
+    #
+    # Confirmed live: the wizard reported "FAIL domain-wide delegation" for
+    # BOTH tenants of a pair that, in the same minute, minted every one of
+    # their required scopes in a single token request (15/15 and 11/11) and
+    # completed a 1:1 Gmail migration through them. Nothing was wrong with
+    # the delegation; the browser simply could not start. One token mint
+    # answers that before any of the fragile machinery runs.
+    already_granted = False
     try:
-        rc = dwd_helper.run(client_id, scopes, timeout, headful=True)
-    except Exception as exc:      # noqa: BLE001
-        rc, crash_detail = None, str(exc)[:200]
-    finally:
-        # Never leave the password sitting in this process's environment
-        # longer than the one call that needs it.
-        for var, val in (("DWD_EMAIL", prev_email), ("DWD_PASSWORD", prev_pw)):
-            if val is None:
-                os.environ.pop(var, None)
-            else:
-                os.environ[var] = val
-    admin_password = None  # noqa: F841 - drop the only local reference
+        import scope_guard
+        if scope_guard.is_complete(_vs, side, scopes.split(",")):
+            already_granted = True
+            p.status = "ok"
+            p.detail = ("already granted -- every required scope minted in "
+                        "one token request, so the console was not touched")
+            _progress(90, "delegation already complete -- verifying")
+    except Exception as exc:      # noqa: BLE001 - advisory only
+        # A failed pre-check must never be the reason setup does not run;
+        # fall through and do it the long way.
+        log(f"  pre-check could not run ({str(exc)[:90]}); granting anyway")
 
-    if crash_detail is not None:
-        p.status, p.detail = "failed", (
-            f"dwd_helper crashed unexpectedly ({crash_detail}) -- likely "
-            "the Admin Console DOM shifted underneath it mid-click. Re-run "
-            f"dwd_helper.py --tenant {side} --client-id {client_id} by hand "
-            "to see the browser and finish it, or fix the selector it "
-            "choked on.")
-        return {"side": side, "ok": False, "phases": [x.as_dict() for x in phases],
-                "clientId": client_id}
+    if not already_granted:
+        prev_email = os.environ.get("DWD_EMAIL")
+        prev_pw = os.environ.get("DWD_PASSWORD")
+        os.environ["DWD_EMAIL"] = admin_email
+        os.environ["DWD_PASSWORD"] = admin_password
+        _progress(80, f"granting domain-wide delegation as {admin_email}")
+        # Confirmed live: an uncaught Playwright TimeoutError deep inside
+        # dwd_helper.run() (a re-click that raced a dialog closing under it)
+        # propagated all the way out here and crashed the whole subprocess --
+        # the caller's own status file was left reading {"running": true}
+        # forever, since the process that would have written "failed" was
+        # already dead. dwd_helper.py's own selectors are already
+        # best-effort against a console that "changes without notice" (see
+        # its module docstring); this makes THIS call site match that same
+        # assumption instead of trusting every one of ~450 lines of browser
+        # choreography to never raise.
+        # tenant=side deliberately NOT passed: dwd_helper.run() would then do
+        # its OWN functional verification internally, with no retry, and
+        # return a non-zero rc on ANY scope not yet live -- confirmed live,
+        # this short-circuited before phase 3 below (the same check, but
+        # retried) ever got to run, defeating that retry entirely. Phase 3 is
+        # the one and only verification gate now; this call only ever needs
+        # to know whether Authorize was accepted.
+        crash_detail = None
+        try:
+            rc = dwd_helper.run(client_id, scopes, timeout, headful=True)
+        except Exception as exc:      # noqa: BLE001
+            rc, crash_detail = None, str(exc)[:200]
+        finally:
+            # Never leave the password sitting in this process's environment
+            # longer than the one call that needs it.
+            for var, val in (("DWD_EMAIL", prev_email), ("DWD_PASSWORD", prev_pw)):
+                if val is None:
+                    os.environ.pop(var, None)
+                else:
+                    os.environ[var] = val
+        admin_password = None  # noqa: F841 - drop the only local reference
 
-    if rc != 0:
-        p.status = "failed"
-        p.detail = ("dwd_helper exited nonzero -- likely needs a human for "
-                    "2FA/captcha, or the sign-in form changed. Re-run "
-                    f"dwd_helper.py --tenant {side} --client-id {client_id} "
-                    "by hand to see the browser.")
-        return {"side": side, "ok": False, "phases": [x.as_dict() for x in phases],
-                "clientId": client_id}
-    p.status = "ok"
-    _progress(90, "delegation granted -- verifying")
+        if crash_detail is not None and is_no_browser(crash_detail):
+            p.status, p.detail = "failed", no_browser_detail(crash_detail)
+            return {"side": side, "ok": False,
+                    "phases": [x.as_dict() for x in phases],
+                    "clientId": client_id}
+
+        if crash_detail is not None:
+            p.status, p.detail = "failed", (
+                f"dwd_helper crashed unexpectedly ({crash_detail}) -- likely "
+                "the Admin Console DOM shifted underneath it mid-click. Re-run "
+                f"dwd_helper.py --tenant {side} --client-id {client_id} by hand "
+                "to see the browser and finish it, or fix the selector it "
+                "choked on.")
+            return {"side": side, "ok": False, "phases": [x.as_dict() for x in phases],
+                    "clientId": client_id}
+
+        if rc != 0:
+            p.status = "failed"
+            p.detail = ("dwd_helper exited nonzero -- likely needs a human for "
+                        "2FA/captcha, or the sign-in form changed. Re-run "
+                        f"dwd_helper.py --tenant {side} --client-id {client_id} "
+                        "by hand to see the browser.")
+            return {"side": side, "ok": False, "phases": [x.as_dict() for x in phases],
+                    "clientId": client_id}
+        p.status = "ok"
+        _progress(90, "delegation granted -- verifying")
 
     # -- 3. Verify, functionally -------------------------------------------
     p = Phase(f"verify delegation ({side})")

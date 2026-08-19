@@ -30,8 +30,10 @@ Usage
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -94,6 +96,95 @@ def _dialog_open(dialog) -> bool:
         return False
 
 
+_XVFB = None
+
+
+def _ensure_display() -> str:
+    """Guarantee a usable X display, starting one if the host has none.
+
+    Why this is not optional
+    ------------------------
+    The sign-in has to be headful: Google rejects headless Chrome outright,
+    so `headless=False` is load-bearing (see run()'s docstring). A headed
+    browser needs an X server, and a VPS has none by default -- Playwright
+    fails with "Looks like you launched a headed browser without having a
+    XServer running."
+
+    That failure reached the operator as "likely needs a human for
+    2FA/captcha", which is wrong in the most expensive direction: it sends
+    them to watch a sign-in that never started, on a tenant whose
+    delegation was already complete. Confirmed live on this project's own
+    VPS -- Xvfb was installed, DISPLAY was simply never set for the service.
+
+    So: if there is no DISPLAY and Xvfb is available, start one. This is the
+    documented deployment for this tool ("runs on the Xvfb+Chrome virtual
+    display already set up") -- it just never actually set it up itself.
+    Returns the DISPLAY value in use, or "" if none could be arranged.
+    """
+    global _XVFB
+
+    if os.environ.get("DISPLAY"):
+        return os.environ["DISPLAY"]
+    if not sys.platform.startswith("linux"):
+        # macOS and Windows have a real window server; there is nothing to
+        # start and nothing to diagnose.
+        return ""
+    import shutil
+    if not shutil.which("Xvfb"):
+        return ""
+
+    # :99 by convention, but step past anything already listening so two
+    # concurrent jobs cannot land on the same display and fight over it.
+    for num in range(99, 110):
+        if os.path.exists(f"/tmp/.X11-unix/X{num}"):
+            continue
+        try:
+            proc = subprocess.Popen(
+                ["Xvfb", f":{num}", "-screen", "0", "1280x1024x24", "-nolisten",
+                 "tcp"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True)
+        except Exception:      # noqa: BLE001 - fall through to the message
+            return ""
+        # Xvfb takes a moment to create its socket; a browser that launches
+        # into a half-started server fails the same way as no server at all.
+        for _ in range(50):
+            if os.path.exists(f"/tmp/.X11-unix/X{num}"):
+                break
+            time.sleep(0.1)
+        else:
+            proc.terminate()
+            continue
+        if proc.poll() is not None:
+            continue
+        _XVFB = proc
+        os.environ["DISPLAY"] = f":{num}"
+        atexit.register(_stop_display)
+        log(f"started a virtual display on :{num} (Xvfb)")
+        return os.environ["DISPLAY"]
+    return ""
+
+
+def _stop_display() -> None:
+    global _XVFB
+    if _XVFB is not None and _XVFB.poll() is None:
+        try:
+            _XVFB.terminate()
+        except Exception:      # noqa: BLE001 - best effort at exit
+            pass
+    _XVFB = None
+
+
+class NoBrowserAvailable(RuntimeError):
+    """No browser on this host at all -- a setup problem, not a sign-in one.
+
+    Distinguished from every other failure here because the fix is a
+    one-line install on the host, and because the generic "needs a human
+    for 2FA" message it used to be reported as sends the operator to watch
+    a browser that cannot start.
+    """
+
+
 def _installed_browser_launch(p, headful: bool):
     """Launch a REAL installed browser, not Playwright's bundled Chromium.
 
@@ -112,6 +203,14 @@ def _installed_browser_launch(p, headful: bool):
     regression for a browser session that only ever visits accounts.google.com.
     """
     import shutil
+
+    if headful and not _ensure_display():
+        raise NoBrowserAvailable(
+            "this host has no X display and no Xvfb to start one, so a "
+            "headed browser cannot run. The sign-in must be headed (Google "
+            "rejects headless Chrome), so either install Xvfb "
+            "(apt-get install -y xvfb) or use the Manual tab and paste the "
+            "scope line into the Admin Console yourself.")
 
     root_args = ["--no-sandbox"] if hasattr(os, "geteuid") and os.geteuid() == 0 else []
     launch = None
@@ -133,6 +232,27 @@ def _installed_browser_launch(p, headful: bool):
         launch = candidates[0]
         log(f"using installed browser: {launch[0]}")
         return launch[1]
+    # Nothing installed. The bundled Chromium is a poor last resort (Google
+    # often rejects it as "not secure"), but it is only a resort at all if
+    # it actually exists on disk -- `pip install playwright` ships the
+    # client library, NOT the browser binaries, which need a separate
+    # `playwright install`. On a VPS where that step was missed, the launch
+    # below fails with a Playwright error about a missing executable, and
+    # every caller up the stack reported that as "likely needs a human for
+    # 2FA/captcha". Confirmed live: a wizard run reported exactly that for
+    # both tenants of a pair whose delegation was, at that moment, complete
+    # and working -- sending the operator to debug a sign-in that never
+    # happened. Check first and name the real fix.
+    try:
+        exe = p.chromium.executable_path
+    except Exception:      # noqa: BLE001 - older Playwright, let launch decide
+        exe = ""
+    if exe and not os.path.exists(exe):
+        raise NoBrowserAvailable(
+            "no browser available on this host: Chrome/Edge/Brave are not "
+            f"installed and Playwright's bundled Chromium is missing ({exe}). "
+            "Install one with:  python -m playwright install chromium  "
+            "(and `playwright install-deps chromium` on a bare Linux host).")
     log("no real Chrome/Edge/Brave found; falling back to bundled Chromium "
         "(Google may reject the sign-in as 'not secure')")
     return p.chromium.launch(headless=not headful, args=root_args)

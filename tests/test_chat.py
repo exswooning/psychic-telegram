@@ -166,6 +166,11 @@ def test_selecting_chat_opts_the_run_in(monkeypatch):
 
     settings = Settings()
     settings.migrate_chat = False
+    # This stubs run_batch to inspect the flags cmd_migrate sets; it is not
+    # a migration and has no tenant. The delegation gate that now runs first
+    # would correctly refuse it (no SOURCE_ADMIN), so opt out explicitly --
+    # the same bypass an offline rehearsal against a fixture ledger uses.
+    monkeypatch.setenv("MIGRATE_SKIP_SCOPE_CHECK", "1")
     args = types.SimpleNamespace(services="drive,chat", user=None)
     ran = {}
 

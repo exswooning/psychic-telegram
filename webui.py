@@ -1916,6 +1916,84 @@ def dwd_payload() -> dict:
         }
     except Exception:  # noqa: BLE001 - the seeder is optional; never break /api/dwd
         out["seed"] = {}
+    return _widen_to_required(out, st)
+
+
+def _widen_to_required(out: dict, st) -> dict:
+    """Make every paste line a superset of `required_scopes()` for its side.
+
+    Why this exists
+    ---------------
+    This payload grew five independent scope lists -- one per tenant, a
+    "full" line per side, a provisioning line, and the seeder's -- each
+    assembled by its own union. They drifted, and the drift was invisible
+    because every one of them looks complete on its own. Measured before
+    this function existed:
+
+        seed                 12 scopes, missing 4 that source requires
+                             (drive.readonly, gmail.readonly,
+                              calendar.readonly, admin.directory.group.readonly)
+        migrate_source_full  15 scopes, missing 6 that source requires
+        target_provision      7 scopes, missing 8
+
+    A tenant set up by seeding therefore came out migrate-*incapable* by
+    construction: the seed line grants what the seeder writes with, and the
+    four read-only scopes it omits are exactly the ones only a migration
+    reads with. That is not hypothetical -- a live source tenant granted
+    from the seed line failed its migration on the missing `drive.readonly`
+    with a bare `unauthorized_client` naming neither tenant nor scope.
+
+    Widening rather than replacing is deliberate: each line's own union
+    still contributes (it covers toggles `required_scopes` does not model),
+    and a console grant is monotonic -- authorising a scope nobody requests
+    costs nothing, while omitting one fails the entire token exchange. The
+    Admin Console also replaces the whole line on every edit and re-triggers
+    propagation for the whole grant, so one line that covers seeding *and*
+    migration is strictly better than two that each need re-pasting.
+
+    Enforced by tests/test_scope_guard.py, not by convention -- convention
+    is what produced the drift.
+    """
+    import verify_scopes
+
+    def _widen(entry: dict, side: str) -> None:
+        try:
+            need = set(verify_scopes.required_scopes(st, side))
+        except Exception:      # noqa: BLE001 - never break /api/dwd
+            return
+        have = set(entry.get("scope_list") or [])
+        if not have:
+            have = {x.strip() for x in (entry.get("scopes") or "").split(",")
+                    if x.strip()}
+        merged = sorted(have | need)
+        entry["scopes"] = ",".join(merged)
+        entry["scope_list"] = merged
+        if "combined_list" in entry or "combined" in entry:
+            combined = sorted(set(entry.get("combined_list") or []) | set(merged))
+            entry["combined"] = ",".join(combined)
+            entry["combined_list"] = combined
+
+    for t in out.get("tenants", []):
+        _widen(t, t.get("side") or t.get("tenant") or "source")
+    for key, side in (("migrate_source_full", "source"),
+                      ("migrate_target_full", "target"),
+                      ("target_provision", "target"),
+                      # The seeder writes into the source tenant, and shares
+                      # that tenant's console entry unless a dedicated
+                      # SEED_SA_KEY exists -- so it is the source side that
+                      # has to end up complete.
+                      ("seed", "source")):
+        entry = out.get(key)
+        if isinstance(entry, dict) and entry:
+            _widen(entry, side)
+        elif isinstance(entry, list) and entry:
+            wrapper = {"scope_list": entry}
+            _widen(wrapper, side)
+            out[key] = wrapper["scope_list"]
+        elif isinstance(entry, str) and entry:
+            wrapper = {"scopes": entry}
+            _widen(wrapper, side)
+            out[key] = wrapper["scopes"]
     return out
 
 

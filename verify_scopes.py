@@ -52,15 +52,25 @@ def _key_and_subject(settings: Settings, tenant: str) -> tuple[str, str]:
     return settings.target_sa_key, settings.target_admin
 
 
-def probe_scope(key_path: str, subject: str, scope: str,
+def probe_scope(key_path: str, subject: str, scope: str | list[str],
                 timeout: int = 30) -> tuple[bool, str]:
-    """Mint a token for exactly this one scope. (ok, detail)."""
+    """Mint a token for exactly this one scope. (ok, detail).
+
+    A list may be passed instead, which mints one token for the whole set.
+    That is deliberately the *opposite* of what this module is for -- a
+    combined request cannot say which scope failed -- but it is the cheap
+    screening question: one call answers "is anything missing at all?", and
+    only a failure needs the per-scope walk to find out what. See
+    scope_guard.py, which pays one token mint on the happy path instead of
+    one per scope before every migration.
+    """
     from google.auth.transport.requests import Request
     from google.oauth2 import service_account
 
+    wanted = [scope] if isinstance(scope, str) else list(scope)
     try:
         creds = service_account.Credentials.from_service_account_file(
-            key_path, scopes=[scope]).with_subject(subject)
+            key_path, scopes=wanted).with_subject(subject)
         creds.refresh(Request())
         return True, ""
     except Exception as exc:      # noqa: BLE001 - the failure IS the result

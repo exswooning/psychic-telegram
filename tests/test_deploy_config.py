@@ -896,14 +896,34 @@ class TestSeedScopesDiffer:
         assert set(payload["seed"]["scope_list"]) <= combined
         assert set(source_scopes(Settings())) <= combined
 
-    def test_combined_is_strictly_wider_than_either_alone(self):
+    def test_the_seed_line_alone_now_also_covers_migrating(self):
+        """This assertion inverted deliberately.
+
+        It used to require `combined` to be *strictly* wider than the seed
+        line -- the seed line granted write scopes, the combined line added
+        migration's read-only ones, and you had to paste the combined one.
+        Live, that is exactly how a tenant ended up migrate-incapable: it was
+        set up by seeding, got the seed line, and failed its first migration
+        eight minutes in on a missing `drive.readonly` with a bare
+        `unauthorized_client` naming neither tenant nor scope.
+
+        Every paste line is now widened to `required_scopes()` for its side
+        (see webui._widen_to_required), so the seed line is no longer the
+        narrow one -- pasting it leaves a tenant able to both seed and
+        migrate. `combined` is consequently equal to it rather than wider,
+        and that equality is the fix, not a regression.
+        """
         from config import Settings, source_scopes
 
         payload = webui.dwd_payload()
         combined = set(payload["seed"]["combined_list"])
+        seed = set(payload["seed"]["scope_list"])
 
-        assert combined > set(payload["seed"]["scope_list"])
-        assert combined > set(source_scopes(Settings()))
+        assert seed == combined, "the seed line should now need no widening"
+        assert set(source_scopes(Settings())) <= seed
+        # The specific scopes whose absence caused the live failure.
+        assert "https://www.googleapis.com/auth/drive.readonly" in seed
+        assert "https://www.googleapis.com/auth/gmail.readonly" in seed
 
     def test_read_only_scopes_survive_the_union(self):
         """drive (write) does not authorise a request for drive.readonly --

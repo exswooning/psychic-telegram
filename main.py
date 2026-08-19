@@ -334,9 +334,51 @@ def _memory_watchdog(stop_event: threading.Event, shutdown=SHUTDOWN,
                 consecutive = 0
 
 
+def _gate_on_delegation(settings: Settings) -> None:
+    """Stop before the batch if a tenant cannot mint the token it will need.
+
+    Every per-user failure this prevents used to arrive eight minutes into a
+    run as a raw `unauthorized_client` naming neither the tenant nor the
+    scope, and left a FAILED ledger row against a user nothing was wrong
+    with. One combined token mint per tenant answers it up front; only a
+    failure pays for the per-scope walk that produces the diagnosis.
+
+    Skippable via MIGRATE_SKIP_SCOPE_CHECK=1 -- an offline rehearsal against
+    a fixture ledger has no tenant to probe, and this must never be the
+    reason such a run cannot start.
+    """
+    if os.getenv("MIGRATE_SKIP_SCOPE_CHECK", "").strip() in ("1", "true", "yes"):
+        log.info("scope preflight skipped (MIGRATE_SKIP_SCOPE_CHECK)")
+        return
+    try:
+        import scope_guard
+    except Exception as exc:      # noqa: BLE001 - never block on the guard
+        log.warning("scope preflight unavailable: %s", exc)
+        return
+    try:
+        repaired = scope_guard.ensure(settings)
+    except scope_guard.ScopeGapError as gap:
+        # Deliberately not a traceback: this is an operator-facing
+        # instruction, and the stack tells them nothing they can act on.
+        sys.exit("\nDelegation is incomplete — nothing has been migrated.\n"
+                 f"{scope_guard.describe(gap.gaps)}\n\n"
+                 "Re-run this command once the grant is in place. "
+                 "Set MIGRATE_SKIP_SCOPE_CHECK=1 to bypass this check.")
+    except Exception as exc:      # noqa: BLE001 - advisory, never blocking
+        # A probe that itself fails (network, clock skew) must not stop a
+        # migration that would otherwise work. The run will surface any real
+        # scope problem the old way.
+        log.warning("scope preflight could not complete: %s", exc)
+        return
+    for gap in repaired:
+        log.warning("scope preflight repaired %s: granted %s",
+                    gap.tenant, ", ".join(gap.missing))
+
+
 def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
                            only=None) -> list[dict]:
     """run_batch under the memory watchdog; exits PAUSED if it fires."""
+    _gate_on_delegation(settings)
     MEMORY_PAUSE.clear()
     stop = threading.Event()
     watchdog = threading.Thread(target=_memory_watchdog, args=(stop,),
