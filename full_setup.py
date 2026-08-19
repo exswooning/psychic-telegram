@@ -282,7 +282,23 @@ def run_full_setup(
 
     os.environ[f"{side.upper()}_ADMIN"] = admin_email
     os.environ[f"{side.upper()}_DOMAIN"] = domain
-    scopes = ",".join(verify_scopes.required_scopes(Settings(), side))
+    # Settings(account_id=...), not bare Settings(). A SaaS account's key
+    # lives at keys/<id>/<side>-sa.json; bare Settings() resolves the
+    # LEGACY env.sh key instead, whose client ID was never granted on this
+    # tenant -- so verification below could not pass no matter how long it
+    # waited. Confirmed live: this loop sat at "0/11 scopes live" for its
+    # whole retry budget while an account-scoped check of the very same
+    # tenant returned 11/11. The account's tenant_configs row is written in
+    # phase 1 above, before this runs, so it is available here.
+    try:
+        _vs = Settings(account_id=account_id)
+    except Exception:      # noqa: BLE001
+        # A tenant_configs row that cannot be read must not abort a setup
+        # that has already provisioned a project and granted delegation --
+        # fall back to the legacy resolution and let verification report
+        # whatever it finds, rather than crashing at the last phase.
+        _vs = Settings()
+    scopes = ",".join(verify_scopes.required_scopes(_vs, side))
 
     prev_email = os.environ.get("DWD_EMAIL")
     prev_pw = os.environ.get("DWD_PASSWORD")
@@ -365,7 +381,7 @@ def run_full_setup(
     backoffs = (15, 20, 30, 45, 60, 90, 120, 150, 180, 210)  # ~15.3 min total
     rows = missing = []
     for attempt in range(len(backoffs) + 1):
-        rows = verify_scopes.verify(Settings(), side, scopes.split(","))
+        rows = verify_scopes.verify(_vs, side, scopes.split(","))
         missing = [r["scope"] for r in rows if not r["ok"]]
         if not missing or attempt == len(backoffs):
             break
