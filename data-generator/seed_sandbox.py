@@ -71,6 +71,7 @@ import json
 import os
 import random
 import sys
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -93,6 +94,48 @@ from corpus import ORG, SCALES, CorpusBuilder  # noqa: E402
 # internal handling. "Filed" carries no relation to that word at all.
 SEED_LABELS = ["Clients", "Clients/Acme", "Clients/Acme/2024",
                "Projects", "Projects/Apollo", "Filed", "Receipts"]
+
+# In-flight API calls per user for Gmail and Calendar.
+#
+# Deliberately higher than Drive's: Drive caps writes at 3/sec/account (a
+# real, non-raiseable wall -- see config.drive_write_qps), but Gmail allows
+# ~250 quota units/user/sec, and messages.insert costs 25, so ~10/sec.
+# Calendar is similarly looser. Measured serially at ~1.18s per round trip,
+# Gmail + Calendar were 44.5% of a user's work and ~39 minutes of pure
+# waiting -- a floor no amount of cross-user concurrency could lower,
+# because one user is one thread. 8 in flight keeps both services inside
+# their quota while removing that stall.
+# DEFAULT 1 -- the pool is wired and tested, but cannot be switched on
+# until the seeder resolves API clients per thread.
+#
+# `httplib2.Http` is not thread-safe. seed_sandbox builds one client set
+# per USER and hands it to every helper, so raising this shares one
+# socket across threads and corrupts glibc's heap: SIGABRT, "free():
+# invalid next size (normal)", no Python traceback, zero users seeded.
+# Reproduced live at 8 -- 29 users started, 0 finished, dead in 9s. It is
+# the same failure drive_engine.py already documents at its own `src`
+# property, which fixes it by resolving the client per access from
+# AuthManager's per-thread cache instead of capturing it on the instance.
+# The seeder needs that same treatment before this goes above 1.
+MAIL_CAL_WORKERS = max(1, int(os.getenv("SEED_MAIL_WORKERS", "1")))
+
+
+def _run_parallel(plans: list, fn, workers: int) -> None:
+    """Apply `fn` to pre-planned items on a bounded pool.
+
+    Every caller plans serially first and only performs I/O in `fn`. That
+    split is what makes this safe: each seeder holds one `random.Random`
+    consumed in a fixed order, so drawing from it inside worker threads
+    would both race and change which content lands where.
+    """
+    if workers <= 1 or len(plans) <= 1:
+        for pl in plans:
+            fn(pl)
+        return
+    with futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        for fut in futures.as_completed([pool.submit(fn, pl) for pl in plans]):
+            fut.result()
+
 
 SEED_SCOPES = [
     "https://www.googleapis.com/auth/drive",
@@ -430,6 +473,7 @@ def seed_gmail(gmail, settings: Settings, user: str, peers: list[str],
 
     user_labels = [v for k, v in label_ids.items() if "/" in k]
 
+    plans = []
     for i in range(count):
         sender = rng.choice(peers + [external])
         subj = rng.choice(SUBJECTS).format(
@@ -457,16 +501,26 @@ def seed_gmail(gmail, settings: Settings, user: str, peers: list[str],
         raw = _rfc822(subj, sender, user, rng.randint(1, 2000),
                       cc=rng.choice(peers) if rng.random() < 0.3 else "",
                       attachment_kb=att)
+        plans.append((raw, labels, att))
+
+    mlock = threading.Lock()
+
+    def _insert_one(pl) -> None:
+        raw, labels, att = pl
         try:
             insert(raw, labels)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ! message: {exc}")
+            return
+        with mlock:
             m["messages"] += 1
             m["unread"] += "UNREAD" in labels
             m["starred"] += "STARRED" in labels
             m["in_spam"] += "SPAM" in labels
             m["in_trash"] += "TRASH" in labels
             m["with_attachment"] += bool(att)
-        except Exception as exc:  # noqa: BLE001
-            print(f"  ! message: {exc}")
+
+    _run_parallel(plans, _insert_one, MAIL_CAL_WORKERS)
 
     # A deterministic three-message thread, so threading can be checked by hand.
     root_id = f"thread-root-{user.split('@')[0]}"
@@ -801,6 +855,7 @@ def seed_calendar(cal, settings: Settings, user: str, peers: list[str],
     titles = ["Weekly sync", "Design review", "Budget check-in", "1:1",
               "Sprint planning", "Customer call", "Retro", "All-hands prep"]
 
+    plans = []
     for i in range(count):
         days = rng.randint(1, 700)
         start, end = window(days, rng.randint(8, 17))
@@ -825,12 +880,22 @@ def seed_calendar(cal, settings: Settings, user: str, peers: list[str],
         if rng.random() < 0.12:
             body["recurrence"] = ["RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=12"]
             m["recurring"] += 1
+        plans.append((i, body, has_ext))
+
+    mlock = threading.Lock()
+
+    def _import_one(pl) -> None:
+        idx, body, ext_flag = pl
         try:
             imp(body)
-            m["events"] += 1
-            m["with_external"] += has_ext
         except Exception as exc:  # noqa: BLE001
-            print(f"  ! event {i}: {exc}")
+            print(f"  ! event {idx}: {exc}")
+            return
+        with mlock:
+            m["events"] += 1
+            m["with_external"] += ext_flag
+
+    _run_parallel(plans, _import_one, MAIL_CAL_WORKERS)
 
     # One recurring series with a stable UID, for the hand-edited exception.
     start, end = window(30, 10)
@@ -1769,7 +1834,8 @@ def main(argv: list[str] | None = None) -> int:
             import resources
             rec = resources.recommend()
             args.workers = rec["seed_workers"]
-            print(f"Workers: {args.workers} ({rec['reason']})")
+            print(f"Workers: {args.workers} "
+                  f"({rec.get('seed_reason') or rec['reason']})")
         except Exception:  # noqa: BLE001
             args.workers = 3
 

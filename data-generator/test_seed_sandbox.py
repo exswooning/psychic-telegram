@@ -16,6 +16,7 @@ union exactly once, not once per recipient.
 from __future__ import annotations
 
 import base64
+import re
 
 import pytest
 
@@ -344,6 +345,60 @@ def test_mailbox_has_cross_user_mail_in_every_state(seed, settings):
             if line.startswith("From: "):
                 senders.add(line[6:].strip())
     assert len(senders & set(peers)) >= 3, "mail should come from several colleagues"
+
+
+class TestConcurrentMailAndCalendar:
+    """Gmail and Calendar were 44.5% of a user's API calls and entirely
+    serial -- ~39 minutes per user of pure round-trip waiting that no
+    amount of cross-user concurrency could remove, because one user is one
+    thread. They now plan serially and insert on a bounded pool, so the
+    property to protect is the same one as for Drive: the mailbox a seeded
+    run produces must not depend on how many threads carried it."""
+
+    def _mail(self, seed, settings, workers, monkeypatch):
+        monkeypatch.setattr(seed, "MAIL_CAL_WORKERS", workers)
+        gmail = FakeGmail("alice@tenanta.com", "source")
+        m = seed.seed_gmail(gmail, settings, "alice@tenanta.com",
+                            ["bob@tenanta.com", "carol@tenanta.com"],
+                            "ext@example.com", count=40)
+        # Subjects, not the raw MIME. _rfc822 stamps a live `Date:` header
+        # and a hash()-derived Message-ID, so two IDENTICAL serial runs
+        # already differ byte-for-byte -- verified directly. Comparing raw
+        # bytes would fail for a reason that has nothing to do with
+        # concurrency; the subject line is the deterministic part that
+        # actually encodes which content went where.
+        subjects = sorted(
+            re.search(r"Subject: (.*)",
+                      base64.urlsafe_b64decode(msg["raw"]).decode("utf-8", "replace")).group(1)
+            for msg in gmail.messages.values())
+        return m, subjects
+
+    def test_the_mailbox_is_identical_serial_or_concurrent(
+            self, seed, settings, monkeypatch):
+        s_m, s_subj = self._mail(seed, settings, 1, monkeypatch)
+        p_m, p_subj = self._mail(seed, settings, 8, monkeypatch)
+
+        assert s_subj == p_subj, "concurrency changed which messages exist"
+        for k in ("messages", "unread", "starred", "in_spam",
+                  "in_trash", "with_attachment"):
+            assert s_m[k] == p_m[k], f"{k} differs under concurrency"
+
+    def test_calendar_is_identical_serial_or_concurrent(
+            self, seed, settings, monkeypatch):
+        def run(workers):
+            monkeypatch.setattr(seed, "MAIL_CAL_WORKERS", workers)
+            cal = FakeCalendar("alice@tenanta.com", "source")
+            m = seed.seed_calendar(cal, settings, "alice@tenanta.com",
+                                   ["bob@tenanta.com", "carol@tenanta.com"],
+                                   "ext@example.com", count=30)
+            # `store`, not `events` -- see FakeCalendar's own note.
+            return m, sorted(e.get("iCalUID", "") for e in cal.store.values())
+
+        s_m, s_uids = run(1)
+        p_m, p_uids = run(8)
+        assert s_uids == p_uids
+        assert s_m["events"] == p_m["events"]
+        assert s_m["with_external"] == p_m["with_external"]
 
 
 class TestConcurrentLeafCreation:

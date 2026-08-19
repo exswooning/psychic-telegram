@@ -471,6 +471,23 @@ class CorpusBuilder:
             else:
                 self.share_anyone(fid)
 
+    def _leaf_workers(self) -> int:
+        """How many leaves to create at once. 1 unless explicitly opted in.
+
+        `httplib2.Http` is not thread-safe, and CorpusBuilder captures one
+        `self.drive` for the whole user, so every worker here would drive
+        the same socket. That corrupts glibc's heap -- SIGABRT, "free():
+        invalid next size (normal)", no Python traceback. Reproduced live:
+        29 users started, 0 finished, dead in 9 seconds. drive_engine.py
+        documents the identical failure at its `src` property and fixes it
+        by resolving the client per access from AuthManager's per-thread
+        cache rather than holding it on the instance; the seeder needs the
+        same before this can default above 1.
+
+        SEED_LEAF_WORKERS exists so that fix can be verified in place.
+        """
+        return max(1, int(os.getenv("SEED_LEAF_WORKERS", "1")))
+
     def _run_leaves(self, plans: list[dict]) -> None:
         """Create planned leaves concurrently, bounded by drive_file_workers.
 
@@ -488,7 +505,8 @@ class CorpusBuilder:
         migration engine -- see its comment in config.py, which describes
         this identical finding on the migrate side.
         """
-        n = max(1, int(getattr(self.settings, "drive_file_workers", 4) or 1))
+        # See _leaf_workers: 1 until the seeder holds per-thread clients.
+        n = self._leaf_workers()
         if n == 1 or len(plans) <= 1:
             for p in plans:
                 self._exec_leaf(p)
@@ -509,7 +527,7 @@ class CorpusBuilder:
         pools against RAM. A window of 4x the worker count is enough to
         keep every thread fed.
         """
-        n = max(1, int(getattr(self.settings, "drive_file_workers", 4) or 1))
+        n = self._leaf_workers()
         window, batch = max(4, n * 4), []
         for i in range(count):
             batch.append(self._plan_leaf(parent, dept, sub, i))

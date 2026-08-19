@@ -548,6 +548,19 @@ def recommend(r: SystemResources | None = None) -> dict:
         # and does not care, but the budget has to hold for the worse mode.
         "drive_file_workers": 4 if not r.under_memory_pressure else 2,
         "reason": "; ".join(why),
+        # The seed pool is sized on different inputs (MB_PER_SEED_WORKER,
+        # SEED_HARD_CAP), so it needs its own sentence. Reusing `reason`
+        # printed the self-contradicting "Workers: 32 (memory-bound: ... = 9)"
+        # -- the count from one model, the explanation from the other.
+        "seed_reason": (
+            why[0] if r.under_memory_pressure else
+            (f"memory-bound: {r.ram_usable_gb:.1f} GB usable / "
+             f"{MB_PER_SEED_WORKER} MB per seed worker = "
+             f"{int((r.ram_usable_gb * 1024) // MB_PER_SEED_WORKER)}"
+             if int((r.ram_usable_gb * 1024) // MB_PER_SEED_WORKER) < SEED_HARD_CAP
+             else f"capped at {SEED_HARD_CAP}; each seeded user is a separate "
+                  f"account with its own write ceiling, so the per-project "
+                  f"quota binds before the per-user one")),
         "resources": r,
     }
 
