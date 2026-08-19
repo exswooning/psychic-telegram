@@ -768,3 +768,81 @@ class TestTheVirtualDisplayStartsItself:
 
         monkeypatch.setattr(dwd_helper.subprocess, "Popen", boom)
         assert dwd_helper._ensure_display() == ""
+
+
+class TestSetupGrantsTheOptionalScopes:
+    """The setup runner writes a wider line than it enforces.
+
+    A tenant set up by this runner should come out able to read licences
+    without a second hand-pasted grant. But an optional scope must never be
+    able to fail a setup -- it costs one panel feature; failing setup costs
+    the whole tenant, and the advertised remedy (re-run setup) mints another
+    throwaway GCP project.
+    """
+
+    def test_the_grant_line_is_wider_than_the_required_line(self):
+        import verify_scopes
+        from config import Settings
+
+        st = Settings()
+        for side in ("source", "target"):
+            grant = set(verify_scopes.grant_scopes(st, side))
+            need = set(verify_scopes.required_scopes(st, side))
+            assert need < grant, f"{side}: grant line should be strictly wider"
+            assert grant - need == verify_scopes.OPTIONAL_SCOPES
+
+    def test_setup_grants_the_wide_line_not_the_required_one(self):
+        """If this regresses, new tenants come out without apps.licensing and
+        the licence panel is empty for every one of them."""
+        import inspect
+
+        import full_setup
+
+        src = inspect.getsource(full_setup.run_full_setup)
+        assert "verify_scopes.grant_scopes(" in src
+        # The grant must not be built from required_scopes alone.
+        assert 'scopes = ",".join(verify_scopes.required_scopes(' not in src
+
+    def test_an_optional_scope_is_graded_leniently(self):
+        """Only the required set decides whether the phase passes, and
+        whether to keep waiting through the ~15 minute propagation budget."""
+        import inspect
+
+        import full_setup
+
+        src = inspect.getsource(full_setup.run_full_setup)
+        i = src.index("missing_optional")
+        window = src[i:i + 900]
+        assert "if sc in required" in window
+        assert "if sc in optional" in window
+
+    def test_a_missing_optional_scope_is_named_in_the_success_detail(self):
+        """Named, not silent -- this is the message that sends someone to the
+        right console entry instead of wondering why a panel is empty."""
+        import full_setup
+
+        detail = full_setup.optional_missing_detail(
+            ["https://www.googleapis.com/auth/apps.licensing"])
+        assert "apps.licensing" in detail
+        assert "re-paste the scope line" in detail
+        assert "nothing else is affected" in detail
+
+    def test_a_failed_grant_does_not_fail_a_tenant_whose_required_scopes_are_live(self):
+        """The regression this guards.
+
+        Adding optional scopes to the console line means an already-complete
+        tenant now gets sent through the browser again just to add them. If
+        that browser cannot run -- no display, 2FA, a captcha, all seen live
+        on this project -- failing the whole setup would turn a previously
+        green tenant red over a panel feature.
+        """
+        import inspect
+
+        import full_setup
+
+        src = inspect.getsource(full_setup.run_full_setup)
+        i = src.index("grant_failed")
+        window = src[i:i + 900]
+        assert "is_complete" in window
+        assert "sorted(required)" in window
+        assert "already_granted = True" in window

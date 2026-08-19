@@ -96,6 +96,20 @@ class Phase:
 _NO_BROWSER_MARKER = "no browser available"
 
 
+def optional_missing_detail(scopes: list[str]) -> str:
+    """What to append when an optional scope did not land.
+
+    Named, not silent: this is the message that sends someone to the right
+    console entry instead of wondering why a panel is empty. A function
+    rather than a literal buried in a branch because its exact wording is
+    the point, and that has to be assertable without driving a setup run.
+    """
+    short = ", ".join(sc.rsplit("/", 1)[-1] for sc in scopes)
+    return (f" (optional scopes not granted: {short} — re-paste the scope line "
+            f"in the delegation panel to enable the features that use them; "
+            f"nothing else is affected)")
+
+
 def is_no_browser(detail: str) -> bool:
     """Did this failure come from the host having no browser at all?"""
     return _NO_BROWSER_MARKER in (detail or "")
@@ -326,7 +340,14 @@ def run_full_setup(
         # fall back to the legacy resolution and let verification report
         # whatever it finds, rather than crashing at the last phase.
         _vs = Settings()
-    scopes = ",".join(verify_scopes.required_scopes(_vs, side))
+    # grant_scopes(), not required_scopes(): the console line carries the
+    # optional extras too (apps.licensing, for per-account plans), so a
+    # tenant set up by this runner has them from the start instead of
+    # needing a second hand-pasted grant later. They are graded leniently
+    # below -- optional means optional, including when the grant fails.
+    scopes = ",".join(verify_scopes.grant_scopes(_vs, side))
+    required = set(verify_scopes.required_scopes(_vs, side))
+    optional = set(scopes.split(",")) - required
 
     # Is this already done?
     #
@@ -395,6 +416,30 @@ def run_full_setup(
                     os.environ[var] = val
         admin_password = None  # noqa: F841 - drop the only local reference
 
+        # A failed grant attempt is not automatically a failed setup.
+        #
+        # The console line now carries optional scopes too, so a tenant whose
+        # required delegation is already complete still comes through here --
+        # it is being asked to add apps.licensing, nothing more. If the
+        # browser cannot run (no display, 2FA, a captcha), failing the whole
+        # setup would turn a previously-green tenant red over a panel
+        # feature. Check what is actually live before deciding.
+        grant_failed = (crash_detail is not None) or (rc != 0)
+        if grant_failed:
+            try:
+                import scope_guard
+                if scope_guard.is_complete(_vs, side, sorted(required)):
+                    log("  grant attempt failed, but every REQUIRED scope is "
+                        "already live -- continuing; only the optional extras "
+                        "were missed")
+                    p.status = "ok"
+                    p.detail = ("required delegation already complete; the "
+                                "optional extras could not be added this run")
+                    already_granted = True
+                    crash_detail, rc = None, 0
+            except Exception:      # noqa: BLE001 - fall through to the normal path
+                pass
+
         if crash_detail is not None and is_no_browser(crash_detail):
             p.status, p.detail = "failed", no_browser_detail(crash_detail)
             return {"side": side, "ok": False,
@@ -444,9 +489,15 @@ def run_full_setup(
     # slowest confirmed-live case rather than matching it exactly.
     backoffs = (15, 20, 30, 45, 60, 90, 120, 150, 180, 210)  # ~15.3 min total
     rows = missing = []
+    missing_optional: list[str] = []
     for attempt in range(len(backoffs) + 1):
         rows = verify_scopes.verify(_vs, side, scopes.split(","))
-        missing = [r["scope"] for r in rows if not r["ok"]]
+        not_live = [r["scope"] for r in rows if not r["ok"]]
+        # Only the required set decides whether to keep waiting, and whether
+        # this phase passes. An optional scope that never lands costs one
+        # panel feature; failing setup over it would cost the whole tenant.
+        missing = [sc for sc in not_live if sc in required]
+        missing_optional = [sc for sc in not_live if sc in optional]
         if not missing or attempt == len(backoffs):
             break
         _progress(90, f"delegation granted -- waiting for it to propagate "
@@ -468,7 +519,11 @@ def run_full_setup(
             f"--tenant {side}` -- no need to redo delegation itself.")
         return {"side": side, "ok": False, "phases": [x.as_dict() for x in phases],
                 "clientId": client_id, "missingScopes": missing}
-    p.status, p.detail = "ok", f"{len(rows)}/{len(rows)} scopes confirmed live"
+    live = len(rows) - len(missing_optional)
+    p.status = "ok"
+    p.detail = f"{live}/{len(rows)} scopes confirmed live"
+    if missing_optional:
+        p.detail += optional_missing_detail(missing_optional)
     _progress(97, "saving tenant configuration")
 
     # -- 3b. Point the REST of the tool at what was just built ---------------

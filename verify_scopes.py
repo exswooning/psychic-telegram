@@ -103,6 +103,43 @@ def verify(settings: Settings, tenant: str,
     return out
 
 
+# Scopes worth GRANTING but deliberately never REQUIRED.
+#
+# The asymmetry is the whole point, and getting it backwards is expensive:
+#
+#   granting a scope nobody requests   costs nothing (a console grant is
+#                                      monotonic)
+#   requesting a scope nobody granted  fails the ENTIRE token exchange, for
+#                                      every feature, on that tenant
+#
+# So anything here rides along on the Admin Console paste line and on what
+# full_setup grants, while the feature behind it builds its own single-scope
+# credential and degrades to a named reason when the grant is absent. Adding
+# one of these to required_scopes() instead would break every migration on
+# every tenant that had not re-pasted -- and scope_guard would then correctly
+# refuse to start them, making the breakage total rather than partial.
+OPTIONAL_SCOPES = {
+    # Per-account plan (Business Starter/Standard/Plus, Enterprise,
+    # Frontline) in the tenant inventory panel. See
+    # tenant_inventory.LICENSING_SCOPE.
+    "https://www.googleapis.com/auth/apps.licensing",
+}
+
+
+def grant_scopes(settings: Settings, tenant: str) -> list[str]:
+    """Everything to put on the Admin Console line for this tenant.
+
+    Wider than required_scopes() by exactly OPTIONAL_SCOPES. Use this
+    wherever a grant is being *written*; use required_scopes() wherever the
+    question is "may this run start".
+
+    Deliberately a two-argument passthrough: it delegates to
+    required_scopes() with the same signature every other caller uses, so a
+    test that substitutes required_scopes still works through this.
+    """
+    return sorted(set(required_scopes(settings, tenant)) | OPTIONAL_SCOPES)
+
+
 def required_scopes(settings: Settings, tenant: str,
                     include_seed: bool = True) -> list[str]:
     """Everything the code will request against this tenant.

@@ -1964,11 +1964,7 @@ def _widen_to_required(out: dict, st) -> dict:
     # exchange, so every migration on every tenant that had not re-pasted
     # would break. These therefore ride along on the paste line, and the
     # features behind them degrade to "not available" until it is pasted.
-    optional = {
-        # Per-account plan (Business Starter/Standard/Plus...) in the tenant
-        # inventory panel. See tenant_inventory.LICENSING_SCOPE.
-        "https://www.googleapis.com/auth/apps.licensing",
-    }
+    optional = verify_scopes.OPTIONAL_SCOPES
 
     def _widen(entry: dict, side: str) -> None:
         try:
