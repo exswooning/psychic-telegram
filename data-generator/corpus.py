@@ -179,6 +179,7 @@ class CorpusBuilder:
         # below is a read-modify-write. Guarded rather than trusted to the
         # GIL: `d[k] += 1` is three bytecodes, not one.
         self._mlock = threading.Lock()
+        self._leaf_pool: futures.ThreadPoolExecutor | None = None
         self.m = {
             "folders": 0, "docs": 0, "sheets": 0, "slides": 0, "binaries": 0,
             "shortcuts": 0, "grants": {"user": 0, "domain": 0, "anyone": 0,
@@ -336,17 +337,23 @@ class CorpusBuilder:
     # ==================================================================
     def build(self, dept: str, project: str, edge_cases: bool) -> dict:
         cfg = self.cfg
-        root = self.folder("MIGRATION-TEST", days_ago=500)
-        self.m["items"]["root"] = root
+        try:
+            root = self.folder("MIGRATION-TEST", days_ago=500)
+            self.m["items"]["root"] = root
 
-        self._build_department(root, dept)
-        self._build_project(root, project)
-        self._build_archive(root, dept)
-        self._build_personal(root)
-        if edge_cases:
-            self._build_edge_cases(root)
-        else:
-            self._build_light_edge_cases(root)
+            self._build_department(root, dept)
+            self._build_project(root, project)
+            self._build_archive(root, dept)
+            self._build_personal(root)
+            if edge_cases:
+                self._build_edge_cases(root)
+            else:
+                self._build_light_edge_cases(root)
+        finally:
+            # Always: this builder is one of many running concurrently, and
+            # leaking a pool per user would pin its threads (and their API
+            # clients) for the rest of the run.
+            self.close()
 
         self.m["total_files"] = (self.m["docs"] + self.m["sheets"]
                                  + self.m["slides"] + self.m["binaries"]
@@ -472,21 +479,39 @@ class CorpusBuilder:
                 self.share_anyone(fid)
 
     def _leaf_workers(self) -> int:
-        """How many leaves to create at once. 1 unless explicitly opted in.
+        """How many leaf files to create at once, within one user.
 
-        `httplib2.Http` is not thread-safe, and CorpusBuilder captures one
-        `self.drive` for the whole user, so every worker here would drive
-        the same socket. That corrupts glibc's heap -- SIGABRT, "free():
-        invalid next size (normal)", no Python traceback. Reproduced live:
-        29 users started, 0 finished, dead in 9 seconds. drive_engine.py
-        documents the identical failure at its `src` property and fixes it
-        by resolving the client per access from AuthManager's per-thread
-        cache rather than holding it on the instance; the seeder needs the
-        same before this can default above 1.
+        Safe only because `self.drive` is now a _PerThreadService (see
+        seed_sandbox): each worker resolves its own client rather than
+        sharing one httplib2.Http, which previously corrupted glibc's heap.
 
-        SEED_LEAF_WORKERS exists so that fix can be verified in place.
+        4 is where the arithmetic lands: Drive allows 3 sustained
+        writes/sec/account and a round trip measured ~1.18s, so ~4 requests
+        in flight keeps that ceiling fed without queueing behind it. Past
+        that the limiter binds and the extra threads only cost memory --
+        each one builds its own Drive client, ~7 MB.
         """
-        return max(1, int(os.getenv("SEED_LEAF_WORKERS", "1")))
+        return max(1, int(os.getenv("SEED_LEAF_WORKERS", "4")))
+
+    def _pool(self):
+        """One pool for this builder's whole lifetime.
+
+        Created per folder, every folder would spin up fresh threads, and
+        each new thread pays for a fresh API client (a discovery parse and
+        a TLS handshake -- see _PerThreadService). Reusing one pool bounds
+        the client count to `_leaf_workers()` per user and lets httplib2
+        keep its connections warm across the whole build.
+        """
+        if self._leaf_pool is None:
+            self._leaf_pool = futures.ThreadPoolExecutor(
+                max_workers=self._leaf_workers(),
+                thread_name_prefix="leaf")
+        return self._leaf_pool
+
+    def close(self) -> None:
+        if self._leaf_pool is not None:
+            self._leaf_pool.shutdown(wait=True)
+            self._leaf_pool = None
 
     def _run_leaves(self, plans: list[dict]) -> None:
         """Create planned leaves concurrently, bounded by drive_file_workers.
@@ -511,12 +536,12 @@ class CorpusBuilder:
             for p in plans:
                 self._exec_leaf(p)
             return
-        with futures.ThreadPoolExecutor(max_workers=n) as pool:
-            for fut in futures.as_completed(
-                    [pool.submit(self._exec_leaf, p) for p in plans]):
-                # Surface a genuine bug; a per-item API failure has already
-                # been recorded into self.m by the primitive that raised.
-                fut.result()
+        pool = self._pool()
+        for fut in futures.as_completed(
+                [pool.submit(self._exec_leaf, p) for p in plans]):
+            # Surface a genuine bug; a per-item API failure has already
+            # been recorded into self.m by the primitive that raised.
+            fut.result()
 
     def _leaf_files(self, parent: str, dept: str, sub: str, count: int) -> None:
         """Plan `count` leaves serially, then create them concurrently.

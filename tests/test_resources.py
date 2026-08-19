@@ -105,7 +105,7 @@ class TestSizing:
         a 201-user run at ~32 hours."""
         rec = resources.recommend(make(ram_usable=3.0, cores=2, swap_used=0.0))
         assert rec["user_workers"] == 9           # 3.0 GB * 1024 // 320 MB
-        assert rec["seed_workers"] == 32          # capped by SEED_HARD_CAP
+        assert rec["seed_workers"] == 24          # 3.0 GB * 1024 // 128 MB
         assert rec["seed_workers"] > rec["user_workers"]
 
     def test_the_seed_pool_is_still_ram_bound_on_a_small_box(self):
@@ -113,7 +113,7 @@ class TestSizing:
         machine must still come out below it rather than being handed 32
         workers it cannot hold."""
         rec = resources.recommend(make(ram_usable=1.0, cores=2, swap_used=0.0))
-        assert rec["seed_workers"] == 16          # 1.0 GB * 1024 // 64 MB
+        assert rec["seed_workers"] == 8           # 1.0 GB * 1024 // 128 MB
 
     def test_memory_pressure_still_collapses_the_seed_pool(self):
         """The one thing the larger ceiling must not do is override the

@@ -48,7 +48,14 @@ MB_PER_WORKER = 320
 # ~17 MB per worker, so charging each one 320 MB under-sized the pool by
 # roughly 19x and left the run memory-bound at 9 workers on a box with
 # 2.9 GB free. 64 MB keeps a ~3.7x margin over what was actually observed.
-MB_PER_SEED_WORKER = 64
+# Raised from 64 once the seeder went concurrent *within* a user. A user
+# is no longer one thread with one client: it runs 4 leaf + 4 mail workers
+# (SEED_LEAF_WORKERS / SEED_MAIL_WORKERS), and each resolves its own API
+# client because httplib2.Http is not thread-safe. Measured on the VPS: a
+# full drive+gmail+calendar client set is 22 MB, so a user costs roughly
+# 22 + 7*(4+4) = 78 MB. 128 keeps a real margin over that while still
+# leaving room for ~23 concurrent users on a 3 GB box.
+MB_PER_SEED_WORKER = 128
 
 # Above this fraction of swap in use, the machine is already trading disk for
 # memory and more concurrency makes it strictly worse.

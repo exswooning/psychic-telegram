@@ -105,19 +105,18 @@ SEED_LABELS = ["Clients", "Clients/Acme", "Clients/Acme/2024",
 # waiting -- a floor no amount of cross-user concurrency could lower,
 # because one user is one thread. 8 in flight keeps both services inside
 # their quota while removing that stall.
-# DEFAULT 1 -- the pool is wired and tested, but cannot be switched on
-# until the seeder resolves API clients per thread.
+# Gmail/Calendar calls in flight per user.
 #
-# `httplib2.Http` is not thread-safe. seed_sandbox builds one client set
-# per USER and hands it to every helper, so raising this shares one
-# socket across threads and corrupts glibc's heap: SIGABRT, "free():
-# invalid next size (normal)", no Python traceback, zero users seeded.
-# Reproduced live at 8 -- 29 users started, 0 finished, dead in 9s. It is
-# the same failure drive_engine.py already documents at its own `src`
-# property, which fixes it by resolving the client per access from
-# AuthManager's per-thread cache instead of capturing it on the instance.
-# The seeder needs that same treatment before this goes above 1.
-MAIL_CAL_WORKERS = max(1, int(os.getenv("SEED_MAIL_WORKERS", "1")))
+# Safe only because build_services now hands out _PerThreadService: each
+# worker resolves its own client, so no httplib2.Http is shared. Setting
+# this above 1 without that returned SIGABRT and glibc heap corruption --
+# see _PerThreadService for the full account.
+#
+# 4, not 8: each extra thread builds its own Gmail client, measured at
+# ~7 MB, and that memory is what bounds how many USERS can run at once.
+# 4 leaf + 4 mail threads costs ~78 MB per user, which is what
+# resources.MB_PER_SEED_WORKER now budgets against.
+MAIL_CAL_WORKERS = max(1, int(os.getenv("SEED_MAIL_WORKERS", "4")))
 
 
 def _run_parallel(plans: list, fn, workers: int) -> None:
@@ -1173,6 +1172,39 @@ def _resolve_key_path(settings: Settings) -> str:
     return key
 
 
+class _PerThreadService:
+    """A googleapiclient service that resolves per calling thread.
+
+    `httplib2.Http` is not thread-safe: sharing one across threads drives a
+    single socket from several of them and corrupts glibc's heap -- SIGABRT,
+    "free(): invalid next size (normal)", no Python traceback. Reproduced
+    live here (29 users started, 0 finished, dead in 9s), and documented
+    independently at drive_engine.py's `src` property, which solves it the
+    same way: never capture a client, resolve one per access from a
+    per-thread cache.
+
+    A proxy rather than an API change so every existing call site --
+    `drive.files()`, `gmail.users()`, and the corpus builder's `self.drive`
+    -- keeps working untouched while becoming thread-safe.
+    """
+
+    __slots__ = ("_factory", "_local")
+
+    def __init__(self, factory):
+        self._factory = factory
+        self._local = threading.local()
+
+    def __getattr__(self, name):
+        svc = getattr(self._local, "svc", None)
+        if svc is None:
+            # One build per thread, not per call: build() parses a discovery
+            # document and opens a TLS connection, and reusing the client
+            # within a thread is what keeps httplib2's connection pooling.
+            svc = self._factory()
+            self._local.svc = svc
+        return getattr(svc, name)
+
+
 def build_services(settings: Settings, user: str):
     """Delegated clients with WRITE scopes against the sandbox source tenant."""
     import google_auth_httplib2
@@ -1191,7 +1223,11 @@ def build_services(settings: Settings, user: str):
         )
         return build(api, version, http=http, cache_discovery=False)
 
-    return svc("drive", "v3"), svc("gmail", "v1"), svc("calendar", "v3")
+    # Wrapped, not returned directly: these are handed to helpers that now
+    # run their API calls on a pool. See _PerThreadService.
+    return (_PerThreadService(lambda: svc("drive", "v3")),
+            _PerThreadService(lambda: svc("gmail", "v1")),
+            _PerThreadService(lambda: svc("calendar", "v3")))
 
 
 def build_chat(settings: Settings, user: str):
