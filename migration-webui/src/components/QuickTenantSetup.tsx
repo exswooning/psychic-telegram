@@ -478,15 +478,23 @@ const QuickTenantSetup: React.FC<{
   // so it cannot live inside the request that asks for it -- that 502'd.
   const scanPoll = useRef<number | null>(null)
 
+  const [scanProgress, setScanProgress] = useState<{ done: number; total: number } | null>(null)
+
   const pollScan = useCallback(() => {
     fetchTenantScan(side)
       .then((st) => {
-        if (st.present && !st.running) {
-          if (scanPoll.current) { window.clearInterval(scanPoll.current); scanPoll.current = null }
-          setInvBusy(false)
-          if (st.error) setInvError(st.error)
-          else setInv(st as TenantInventory)
+        if (st.running) {
+          // Show movement. A scan whose only signal is a spinner is
+          // indistinguishable from one that has died -- and they have died.
+          setScanProgress({ done: st.done ?? 0, total: st.scanTotal ?? 0 })
+          return
         }
+        if (!st.present) return
+        if (scanPoll.current) { window.clearInterval(scanPoll.current); scanPoll.current = null }
+        setInvBusy(false)
+        setScanProgress(null)
+        if (st.error) setInvError(st.error)
+        else setInv(st as TenantInventory)
       })
       .catch(() => { /* a poll blip must not end the watch */ })
   }, [side])
@@ -867,7 +875,7 @@ const QuickTenantSetup: React.FC<{
 
           {setUpOk && (
             <TenantInventoryPanel inv={inv} busy={invBusy} error={invError}
-                                  domain={domain}
+                                  domain={domain} scanProgress={scanProgress}
                                   onRefresh={() => loadInventory(false)}
                                   onDeepScan={runDeepScan} />
           )}

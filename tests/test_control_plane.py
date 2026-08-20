@@ -1595,3 +1595,151 @@ class TestProvisionDenominatorIsThisAccounts:
         import control_plane_db as c
 
         assert isinstance(c.identity_count(999999), int)
+
+
+class TestAScanThatDiedIsNotStillRunning:
+    """A deep scan runs in a thread inside this process, so a restart takes
+    it with no chance to record that.
+
+    Confirmed live: a scan started at 06:30:52, a deploy restarted the server
+    at 06:31:01, and its status file still said running a quarter of an hour
+    later. The panel faithfully rendered "reading the tenant..." forever, and
+    no amount of waiting or refreshing could recover it -- the file had to be
+    deleted by hand. Believing the file over the clock is what made it
+    unrecoverable.
+    """
+
+    def _state(self, cp, payload):
+        """The staleness rule itself. Driving it through HTTP would test the
+        login gate instead -- the test client has no session."""
+        import api_server
+
+        return api_server._mark_stale_scan(dict(payload))
+
+    def test_a_stale_heartbeat_reads_as_interrupted(self, cp):
+        import time as t
+
+        r = self._state(cp, {"running": True, "startedAt": t.time() - 99999,
+                             "heartbeat": t.time() - 99999})
+        assert r["running"] is False
+        assert r["interrupted"] is True
+        assert "restarted" in r["error"]
+
+    def test_a_fresh_heartbeat_is_left_alone(self, cp):
+        """Calling a slow scan dead is as wrong as believing a dead one --
+        one account's Drive walk can take ~3 minutes."""
+        import time as t
+
+        r = self._state(cp, {"running": True, "startedAt": t.time() - 600,
+                             "heartbeat": t.time() - 5, "done": 12,
+                             "scanTotal": 201})
+        assert r["running"] is True
+        assert r.get("interrupted") is not True
+        assert r["done"] == 12 and r["scanTotal"] == 201
+
+    def test_an_old_file_without_a_heartbeat_still_gets_judged(self, cp):
+        """Files written before heartbeats existed must not be immortal."""
+        import time as t
+
+        r = self._state(cp, {"running": True, "startedAt": t.time() - 99999})
+        assert r["running"] is False
+        assert r["interrupted"] is True
+
+    def test_a_finished_scan_is_untouched(self, cp):
+        r = self._state(cp, {"running": False, "accounts": 5, "deep": True})
+        assert r["running"] is False
+        assert r.get("interrupted") is not True
+        assert r["accounts"] == 5
+
+
+class TestScanReportsProgress:
+    """One account's Drive walk takes ~3 minutes, so a 200-account scan that
+    says nothing until it finishes looks identical to one that died."""
+
+    def test_snapshot_reports_each_account_as_it_lands(self, monkeypatch):
+        import tenant_inventory as ti
+
+        emails = [f"u{i}@x.com" for i in range(4)]
+
+        class FakeAuth:
+            def directory(self, side, writable=False):
+                class D:
+                    def users(self_inner):
+                        return self_inner
+                    def list(self_inner, **kw):
+                        class E:
+                            def execute(self_e):
+                                return {"users": [{"primaryEmail": e}
+                                                  for e in emails]}
+                        return E()
+                return D()
+
+        monkeypatch.setattr(ti, "AuthManager", lambda s: FakeAuth())
+        monkeypatch.setattr(ti, "licenses", lambda s, side: ({}, ""))
+        monkeypatch.setattr(ti, "probe_account",
+                            lambda a, side, e: {"email": e, "emails": 1,
+                                                "threads": 1, "driveBytes": 1,
+                                                "error": ""})
+        monkeypatch.setattr(ti, "deep_probe",
+                            lambda a, s, side, e: {"driveKinds": {}, "shared": 0,
+                                                   "external": 0, "anyone": 0,
+                                                   "calendarEvents": 0,
+                                                   "calendars": 0,
+                                                   "chatSpaces": 0,
+                                                   "chatMessages": 0,
+                                                   "error": ""})
+
+        class S:
+            source_domain = "x.com"
+            target_domain = ""
+            migrate_chat = False
+
+        seen: list[tuple] = []
+        ti.snapshot(S(), "source", deep=True, deep_sample=4,
+                    on_progress=lambda d, t: seen.append((d, t)))
+        assert [d for d, _ in seen] == [1, 2, 3, 4]
+        assert all(t == 4 for _, t in seen)
+
+    def test_a_progress_callback_that_raises_does_not_kill_the_scan(
+            self, monkeypatch):
+        """Reporting is not worth losing an hour of walking."""
+        import tenant_inventory as ti
+
+        class FakeAuth:
+            def directory(self, side, writable=False):
+                class D:
+                    def users(self_inner):
+                        return self_inner
+                    def list(self_inner, **kw):
+                        class E:
+                            def execute(self_e):
+                                return {"users": [{"primaryEmail": "a@x.com"}]}
+                        return E()
+                return D()
+
+        monkeypatch.setattr(ti, "AuthManager", lambda s: FakeAuth())
+        monkeypatch.setattr(ti, "licenses", lambda s, side: ({}, ""))
+        monkeypatch.setattr(ti, "probe_account",
+                            lambda a, side, e: {"email": e, "emails": 1,
+                                                "threads": 1, "driveBytes": 1,
+                                                "error": ""})
+        monkeypatch.setattr(ti, "deep_probe",
+                            lambda a, s, side, e: {"driveKinds": {}, "shared": 7,
+                                                   "external": 0, "anyone": 0,
+                                                   "calendarEvents": 0,
+                                                   "calendars": 0,
+                                                   "chatSpaces": 0,
+                                                   "chatMessages": 0,
+                                                   "error": ""})
+
+        class S:
+            source_domain = "x.com"
+            target_domain = ""
+            migrate_chat = False
+
+        def boom(done, total):
+            raise RuntimeError("status file is on a full disk")
+
+        snap = ti.snapshot(S(), "source", deep=True, deep_sample=1,
+                           on_progress=boom)
+        assert snap["totals"]["shared"] == 7

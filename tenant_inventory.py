@@ -265,7 +265,8 @@ DEEP_SAMPLE = 5
 
 def snapshot(settings: Settings, side: str, limit: int | None = None,
              workers: int = DEFAULT_WORKERS, deep: bool = False,
-             deep_sample: int = DEEP_SAMPLE) -> dict:
+             deep_sample: int = DEEP_SAMPLE,
+             on_progress=None) -> dict:
     """Accounts in the tenant and the data each holds.
 
     Never raises for an ordinary misconfiguration: a tenant that cannot be
@@ -329,6 +330,7 @@ def snapshot(settings: Settings, side: str, limit: int | None = None,
                 thread_name_prefix="deep") as pool:
             fut = {pool.submit(deep_probe, auth, settings, side, r["email"]): r
                    for r in sample}
+            done = 0
             for f in futures.as_completed(fut):
                 row = fut[f]
                 try:
@@ -336,6 +338,18 @@ def snapshot(settings: Settings, side: str, limit: int | None = None,
                 except Exception as exc:      # noqa: BLE001
                     row["error"] = (row["error"] + "; " if row["error"] else "") \
                         + f"deep: {str(exc)[:100]}"
+                done += 1
+                # Reported per account, because the unit of work here is
+                # ~3 minutes long: a scan of 200 accounts that says nothing
+                # until it finishes is indistinguishable from one that died,
+                # and this one HAS died silently -- a deploy restarted the
+                # server nine seconds into a run and its status file claimed
+                # "running" for the next quarter of an hour.
+                if on_progress:
+                    try:
+                        on_progress(done, len(sample))
+                    except Exception:      # noqa: BLE001 - never kill the scan
+                        pass
         out["deep"] = True
         # Summed over the SAMPLE, never the tenant -- these are not tenant
         # totals and must not be presented as if they were. The UI reads

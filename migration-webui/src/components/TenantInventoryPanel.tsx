@@ -1,6 +1,7 @@
 import React from 'react'
 import {
-  Alert, Box, Button, Chip, CircularProgress, IconButton, Stack, Typography,
+  Alert, Box, Button, Chip, CircularProgress, IconButton, LinearProgress,
+  Stack, Typography,
 } from '@mui/material'
 import { Refresh as RefreshIcon } from '@mui/icons-material'
 import type { TenantInventory } from '@/api/controlPlane'
@@ -58,6 +59,10 @@ export interface TenantInventoryPanelProps {
   busy: boolean
   error: string
   domain: string
+  /** Accounts walked so far during a running deep scan. A scan whose only
+   *  signal is a spinner is indistinguishable from one that has died --
+   *  and they do die: a deploy restarts the server under them. */
+  scanProgress?: { done: number; total: number } | null
   onRefresh: () => void
   /** Walks every file to read ACLs -- minutes, not seconds -- so it is a
    *  deliberate action rather than part of the panel's own load. */
@@ -65,7 +70,7 @@ export interface TenantInventoryPanelProps {
 }
 
 export const TenantInventoryPanel: React.FC<TenantInventoryPanelProps> = ({
-  inv, busy, error, domain, onRefresh, onDeepScan,
+  inv, busy, error, domain, scanProgress, onRefresh, onDeepScan,
 }) => (
   <Box sx={{ mt: 2 }} data-testid="tenant-inventory">
     <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
@@ -74,8 +79,12 @@ export const TenantInventoryPanel: React.FC<TenantInventoryPanelProps> = ({
       </Typography>
       {busy && <CircularProgress size={14} />}
       {busy && (
-        <Typography variant="caption" color="text.secondary">
-          reading the tenant…
+        <Typography variant="caption" color="text.secondary"
+                    data-testid="scan-progress">
+          {scanProgress && scanProgress.total
+            ? `scanning ${scanProgress.done.toLocaleString()} of `
+              + `${scanProgress.total.toLocaleString()} accounts…`
+            : 'reading the tenant…'}
         </Typography>
       )}
       <Box sx={{ flex: 1 }} />
@@ -90,6 +99,12 @@ export const TenantInventoryPanel: React.FC<TenantInventoryPanelProps> = ({
         <RefreshIcon fontSize="small" />
       </IconButton>
     </Stack>
+
+    {busy && scanProgress && scanProgress.total > 0 && (
+      <LinearProgress variant="determinate" sx={{ mb: 1, borderRadius: 1 }}
+        value={Math.min(100, Math.round(
+          100 * scanProgress.done / scanProgress.total))} />
+    )}
 
     {error && <Alert severity="warning" sx={{ mb: 1 }}>{error}</Alert>}
     {inv?.error && <Alert severity="warning" sx={{ mb: 1 }}>{inv.error}</Alert>}

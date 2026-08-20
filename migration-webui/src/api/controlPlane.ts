@@ -579,6 +579,14 @@ export interface TenantScanState extends Partial<TenantInventory> {
   present: boolean
   elapsed?: number
   error?: string
+  /** Accounts walked so far, and how many this scan will walk. Reported per
+   *  account because one account's Drive can take ~3 minutes. */
+  done?: number
+  scanTotal?: number
+  /** The scan stopped without finishing -- almost always a server restart
+   *  under it. Distinguished from "still running" so the panel can offer to
+   *  start it again instead of polling something that will never answer. */
+  interrupted?: boolean
 }
 
 export const startTenantScan = (side: 'source' | 'target', accounts = 0) =>

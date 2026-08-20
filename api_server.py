@@ -2020,6 +2020,36 @@ def _inventory_scan_path(side: str, account_id: int | None) -> str:
 _SCANS: dict[tuple, threading.Thread] = {}
 _SCANS_LOCK = threading.Lock()
 
+# How long without a heartbeat before a "running" scan is treated as dead.
+# One account's Drive walk can take ~3 minutes on a real tenant and the
+# heartbeat only ticks as accounts complete, so this has to clear that by a
+# margin -- calling a slow scan dead is as wrong as believing a dead one.
+SCAN_STALE_AFTER_S = 900
+
+
+def _mark_stale_scan(data: dict) -> dict:
+    """A scan claiming to run whose heartbeat has stopped is not running.
+
+    The thread lives in the API process, so a restart -- every deploy --
+    takes it with no chance to record that. Confirmed live: a scan started
+    at 06:30:52, a deploy restarted the server at 06:31:01, and the file
+    still said running a quarter of an hour later. The panel faithfully
+    rendered "reading the tenant..." forever and could not recover without
+    the file being deleted by hand. Believing the file over the clock is
+    what made it unrecoverable.
+    """
+    if not data.get("running"):
+        return data
+    beat = data.get("heartbeat") or data.get("startedAt") or 0
+    if time.time() - beat > SCAN_STALE_AFTER_S:
+        data["running"] = False
+        data["interrupted"] = True
+        data["error"] = (
+            "the scan stopped without finishing — most likely the server "
+            "restarted under it (a deploy does that). Nothing was changed; "
+            "start it again.")
+    return data
+
 
 @app.post("/api/v2/setup/tenant-inventory/scan")
 async def start_tenant_inventory_scan(side: str, limit: int = 250,
@@ -2058,11 +2088,29 @@ async def start_tenant_inventory_scan(side: str, limit: int = 250,
             from config import Settings
 
             started = time.time()
-            try:
-                with open(out, "w", encoding="utf-8") as fh:
-                    json.dump({"running": True, "startedAt": started}, fh)
-            except OSError:
-                pass
+
+            def _write(payload: dict) -> None:
+                try:
+                    tmp = out + ".tmp"
+                    with open(tmp, "w", encoding="utf-8") as fh:
+                        json.dump(payload, fh)
+                    os.replace(tmp, out)
+                except OSError:
+                    pass
+
+            # heartbeat, not just `running`. A thread in this process dies
+            # with the process, and a deploy restarts it -- observed: a scan
+            # was killed nine seconds in and its file claimed "running" for
+            # the next fifteen minutes, so the panel polled a corpse. The
+            # reader treats a stale heartbeat as interrupted.
+            _write({"running": True, "startedAt": started,
+                    "heartbeat": time.time(), "done": 0, "scanTotal": 0})
+
+            def _progress(done: int, total: int) -> None:
+                _write({"running": True, "startedAt": started,
+                        "heartbeat": time.time(), "done": done,
+                        "scanTotal": total})
+
             try:
                 # accounts=0 -> every account. The sample cap exists for the
                 # synchronous path's benefit, and this path has no such
@@ -2070,19 +2118,14 @@ async def start_tenant_inventory_scan(side: str, limit: int = 250,
                 snap = tenant_inventory.snapshot(
                     Settings(account_id=op.account_id), side, limit=limit,
                     deep=True,
-                    deep_sample=accounts or 10 ** 9)
+                    deep_sample=accounts or 10 ** 9,
+                    on_progress=_progress)
                 snap["running"] = False
                 snap["elapsed"] = round(time.time() - started, 1)
             except Exception as exc:      # noqa: BLE001 - report, never 500
                 snap = {"running": False, "error": str(exc)[:300],
                         "elapsed": round(time.time() - started, 1)}
-            try:
-                tmp = out + ".tmp"
-                with open(tmp, "w", encoding="utf-8") as fh:
-                    json.dump(snap, fh)
-                os.replace(tmp, out)
-            except OSError:
-                pass
+            _write(snap)
 
         t = threading.Thread(target=_run, name=f"inv-scan-{side}", daemon=True)
         _SCANS[key] = t
@@ -2109,7 +2152,8 @@ async def get_tenant_inventory_scan(side: str,
             return {"running": False, "present": False,
                     "error": f"could not read scan result: {str(exc)[:120]}"}
         data["present"] = True
-        return data
+
+        return _mark_stale_scan(data)
 
     return await _off_loop(_read)
 
