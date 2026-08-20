@@ -1272,3 +1272,111 @@ class TestAWhollyFailedServiceIsNotMarkedDone:
         import main
 
         assert main._services_that_succeeded({"chat": "ok"}) == ["chat"]
+
+
+class TestStaleServiceMarkersAreReopened:
+    """A service marked done is skipped forever, so a bug that failed one
+    outright made itself permanent. That is fixed going forward, but ledgers
+    written BEFORE the fix still carry the bad markers and those users stay
+    stranded -- which is exactly the state a live tenant was left in after
+    contacts failed 50 for 50 and marked itself complete.
+    """
+
+    class FakeDB:
+        def __init__(self, rows, mappings, failures, done):
+            self._rows, self._map, self._fail = rows, mappings, failures
+            self._done = done
+            self.updates = []
+            outer = self
+
+            class Conn:
+                def execute(self, sql, args):
+                    user = args[0]
+                    if "id_mapping" in sql:
+                        types = set(args[1:])
+                        n = sum(1 for u, t in outer._map if u == user and t in types)
+                    else:
+                        n = outer._fail.get(user, 0)
+                    return type("R", (), {"fetchone": lambda s, n=n: {"n": n}})()
+            self.conn = Conn()
+
+        def all_identities(self):
+            return self._rows
+
+        def services_done(self, user):
+            return set(self._done.get(user, set()))
+
+        def write(self):
+            outer = self
+
+            class Ctx:
+                def __enter__(self_inner):
+                    class C:
+                        def execute(self_c, sql, args):
+                            outer.updates.append(args)
+                    return C()
+                def __exit__(self_inner, *a):
+                    return False
+            return Ctx()
+
+    def test_a_service_with_no_items_and_a_failure_is_reopened(self):
+        import main
+
+        db = self.FakeDB(
+            rows=[{"entity_type": "user", "source_email": "a@x.com"}],
+            mappings=[("a@x.com", "message")],      # gmail worked
+            failures={"a@x.com": 50},               # contacts did not
+            done={"a@x.com": {"gmail", "contacts"}})
+        reopened = main.reconcile_service_markers(db)
+        assert reopened == [("a@x.com", "contacts")]
+        assert db.updates and db.updates[0][0] == "gmail"
+
+    def test_a_service_that_migrated_something_is_left_alone(self):
+        import main
+
+        db = self.FakeDB(
+            rows=[{"entity_type": "user", "source_email": "a@x.com"}],
+            mappings=[("a@x.com", "contact")],
+            failures={"a@x.com": 3},                # partial failure
+            done={"a@x.com": {"contacts"}})
+        assert main.reconcile_service_markers(db) == []
+
+    def test_an_empty_service_with_no_failures_is_left_alone(self):
+        """The ordinary state of a user with no tasks. Re-opening it would
+        re-check every empty mailbox on every run forever."""
+        import main
+
+        db = self.FakeDB(
+            rows=[{"entity_type": "user", "source_email": "a@x.com"}],
+            mappings=[], failures={}, done={"a@x.com": {"tasks"}})
+        assert main.reconcile_service_markers(db) == []
+
+    def test_a_broken_ledger_row_does_not_stop_the_run(self):
+        import main
+
+        class Boom(self.FakeDB):
+            def services_done(self, user):
+                raise RuntimeError("ledger row is corrupt")
+
+        db = Boom(rows=[{"entity_type": "user", "source_email": "a@x.com"}],
+                  mappings=[], failures={}, done={})
+        assert main.reconcile_service_markers(db) == []
+
+    def test_it_runs_before_users_are_dispatched(self):
+        """After dispatch it would be useless -- the skip has already
+        happened."""
+        import ast
+        import inspect
+        import textwrap
+
+        import main
+
+        fn = ast.parse(textwrap.dedent(
+            inspect.getsource(main._run_with_memory_pause))).body[0]
+        order = []
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                if node.func.id in ("reconcile_service_markers", "run_batch"):
+                    order.append((node.lineno, node.func.id))
+        names = [n for _, n in sorted(order)]
+        assert names[:2] == ["reconcile_service_markers", "run_batch"], names

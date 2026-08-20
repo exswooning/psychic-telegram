@@ -229,7 +229,16 @@ class WriteAction(BaseModel):
 
 
 class StartMigration(WriteAction):
-    services: list[str] = Field(default_factory=lambda: ["drive"])
+    # "all", matching main.py's own default. Defaulting to Drive alone meant
+    # a caller that did not name services silently migrated one of six, and
+    # a tenant's Chat, Contacts and Tasks were simply never copied -- with
+    # nothing in the result saying they had been left behind.
+    #
+    # Safe to widen because the delegation gate runs first and checks the
+    # scopes THIS configuration will request (scope_guard, via
+    # _gate_on_delegation): a tenant missing the Chat scopes is stopped
+    # before anything moves, naming the scope, rather than failing mid-run.
+    services: list[str] = Field(default_factory=lambda: ["all"])
     users: list[str] = Field(default_factory=list)   # empty = whole batch
     dry_run: bool = False
 

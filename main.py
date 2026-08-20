@@ -122,6 +122,75 @@ def _install_signal_handlers() -> None:
 _NO_MAILBOX = ("mail service not enabled", "failedprecondition")
 
 
+# Which ledger item types prove a service actually did something.
+_SERVICE_ITEMS = {
+    "gmail": ("message", "draft"),
+    "drive": ("file", "folder"),
+    "calendar": ("event", "calendar"),
+    "contacts": ("contact", "contact_group"),
+    "tasks": ("task", "task_list"),
+    "chat": ("space", "chat_message"),
+}
+
+
+def reconcile_service_markers(db) -> list[tuple]:
+    """Re-open services that are marked done but migrated nothing and failed.
+
+    A service marked done is skipped forever, so a bug that failed one
+    outright made itself permanent -- the fix could never be applied because
+    the user was never looked at again. That is fixed going forward
+    (_services_that_succeeded), but ledgers written BEFORE the fix still
+    carry the bad markers, and those users are stranded exactly as they were.
+
+    This clears them: a service claiming completion with zero items of its
+    own types and at least one failure recorded did not complete. Both
+    conditions together, deliberately -- zero items alone is the ordinary
+    state of a user with no tasks, and clearing that would re-check every
+    empty mailbox on every run forever.
+
+    Returns what it re-opened, so a run says it rather than silently
+    behaving differently from the last one.
+    """
+    reopened: list[tuple] = []
+    try:
+        rows = [r for r in db.all_identities() if r["entity_type"] == "user"]
+    except Exception:      # noqa: BLE001 - never block a migration
+        return reopened
+
+    for row in rows:
+        user = row["source_email"]
+        try:
+            done = db.services_done(user)
+            if not done:
+                continue
+            keep = set(done)
+            for svc in done:
+                types = _SERVICE_ITEMS.get(svc)
+                if not types:
+                    continue
+                marks = db.conn.execute(
+                    "SELECT COUNT(*) n FROM id_mapping WHERE source_user=? "
+                    f"AND type IN ({','.join('?' * len(types))})",
+                    (user, *types)).fetchone()["n"]
+                if marks:
+                    continue
+                fails = db.conn.execute(
+                    "SELECT COUNT(*) n FROM audit_log WHERE source_user=? "
+                    "AND status='FAILED'", (user,)).fetchone()["n"]
+                if fails:
+                    keep.discard(svc)
+                    reopened.append((user, svc))
+            if keep != set(done):
+                with db.write() as conn:
+                    conn.execute(
+                        "UPDATE identity_map SET services_done=? "
+                        "WHERE source_email=?",
+                        (",".join(sorted(keep)), user))
+        except Exception:      # noqa: BLE001 - one bad row must not stop the run
+            continue
+    return reopened
+
+
 def _services_that_succeeded(services: dict) -> list[str]:
     """Which services may be recorded as done for this user.
 
@@ -521,6 +590,15 @@ def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
                            only=None) -> list[dict]:
     """run_batch under the memory watchdog; exits PAUSED if it fires."""
     _gate_on_delegation(settings)
+    try:
+        reopened = reconcile_service_markers(db)
+        for user, svc in reopened[:20]:
+            log.warning("re-opening %s for %s: marked done but migrated "
+                        "nothing and recorded failures", svc, user)
+        if len(reopened) > 20:
+            log.warning("... and %d more re-opened", len(reopened) - 20)
+    except Exception as exc:      # noqa: BLE001 - advisory, never blocking
+        log.warning("could not reconcile service markers: %s", exc)
     MEMORY_PAUSE.clear()
     stop = threading.Event()
     watchdog = threading.Thread(target=_memory_watchdog, args=(stop,),
@@ -1159,8 +1237,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_discover)
 
     s = sub.add_parser("migrate", help="run the full bulk copy")
-    s.add_argument("--services", default="drive,gmail,calendar",
+    s.add_argument("--services", default="all",
                    help="drive,gmail,calendar,chat,contacts,tasks — or 'all' "
+                        "(the default: everything the tenant has). "
                         "for every per-user service. Shared Drives are not a "
                         "per-user service; run shared_drives.py, or use "
                         "phases.py which sequences both.")
@@ -1168,7 +1247,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_migrate)
 
     s = sub.add_parser("delta", help="incremental catch-up pass")
-    s.add_argument("--services", default="drive,gmail,calendar")
+    s.add_argument("--services", default="all")
     s.add_argument("--days", type=int, default=2,
                    help="look-back window for Gmail/Calendar delta queries")
     s.add_argument("--user", action="append")
