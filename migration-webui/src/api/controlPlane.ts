@@ -515,7 +515,8 @@ export interface TenantInventory {
     emails: number; threads: number; driveBytes: number; covered: number
     // Deep-scan only.
     shared?: number; external?: number; anyone?: number
-    calendarEvents?: number; driveKinds?: Record<string, number>
+    calendarEvents?: number; chatSpaces?: number; chatMessages?: number
+    driveKinds?: Record<string, number>
   }
   truncated: boolean
   error: string

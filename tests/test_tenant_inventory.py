@@ -472,3 +472,60 @@ class TestTheDeepScanIsAnHonestSample:
         self._tenant(install, 5)
         snap = tenant_inventory.snapshot(settings, "source")
         assert snap["deepSampled"] == 0
+
+
+class TestChatIsReportedRegardlessOfMigrationFlags:
+    """A tenant panel describes a TENANT, not a planned migration.
+
+    inventory.py gates its Chat scan on settings.migrate_chat because it is
+    describing a migration about to run. Reusing that gate here meant the
+    Chat columns were always empty -- migrate_chat defaults False -- on
+    tenants that demonstrably have Chat. That is the panel telling the
+    operator something false about their own data.
+    """
+
+    def test_chat_is_probed_even_with_migrate_chat_off(self, monkeypatch):
+        import inventory
+
+        scanned: list[str] = []
+
+        class FakeAuthChat:
+            def source_drive(self, u):
+                raise RuntimeError("not under test")
+            def source_calendar(self, u):
+                raise RuntimeError("not under test")
+            def source_chat(self, u):
+                scanned.append(u)
+                return object()
+
+        monkeypatch.setattr(inventory, "scan_chat",
+                            lambda c: {"spaces": 4, "messages": 40})
+
+        class S:
+            migrate_chat = False       # the default, and the whole point
+
+        out = tenant_inventory.deep_probe(FakeAuthChat(), S(), "source",
+                                          "a@x.com")
+        assert scanned == ["a@x.com"]
+        assert out["chatSpaces"] == 4
+        assert out["chatMessages"] == 40
+
+    def test_a_tenant_without_chat_scopes_records_the_reason(self, monkeypatch):
+        """"Not granted" and "none present" must stay distinguishable."""
+        import inventory
+
+        class FakeAuthChat:
+            def source_drive(self, u):
+                raise RuntimeError("drive off")
+            def source_calendar(self, u):
+                raise RuntimeError("cal off")
+            def source_chat(self, u):
+                raise RuntimeError("unauthorized_client")
+
+        class S:
+            migrate_chat = False
+
+        out = tenant_inventory.deep_probe(FakeAuthChat(), S(), "source",
+                                          "a@x.com")
+        assert out["chatSpaces"] is None
+        assert "chat: unauthorized_client" in out["error"]

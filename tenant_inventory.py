@@ -153,8 +153,14 @@ def deep_probe(auth: AuthManager, settings: Settings, side: str,
     out: dict = {"driveKinds": {}, "shared": 0, "external": 0, "anyone": 0,
                  "calendarEvents": None, "calendars": None,
                  "chatSpaces": None, "chatMessages": None, "error": ""}
-    drive = (auth.source_drive if side == "source" else auth.target_drive)(email)
     try:
+        # Building the client is inside the try, not before it. An
+        # ungranted scope fails at credential/client construction, which is
+        # precisely the case this is meant to record -- outside the try it
+        # took down the whole probe for that user instead, losing the
+        # calendar and chat numbers that would have been readable.
+        drive = (auth.source_drive if side == "source"
+                 else auth.target_drive)(email)
         d = inventory.scan_drive(drive, settings, email)
         out["driveKinds"] = dict(d.get("kinds") or {})
         shared = d.get("shared_files") or []
@@ -167,23 +173,35 @@ def deep_probe(auth: AuthManager, settings: Settings, side: str,
     try:
         cal = (auth.source_calendar if side == "source"
                else auth.target_calendar)(email)
-        c = inventory.scan_calendar(cal)
+        c = inventory.scan_calendar(cal)  # noqa: E501
         out["calendarEvents"] = c.get("events")
         out["calendars"] = c.get("calendars")
     except Exception as exc:      # noqa: BLE001
         out["error"] = (out["error"] + "; " if out["error"] else "") \
             + f"calendar: {str(exc)[:80]}"
 
-    if getattr(settings, "migrate_chat", False):
-        try:
-            chat = (auth.source_chat if side == "source"
-                    else auth.target_chat)(email)
-            ch = inventory.scan_chat(chat)
-            out["chatSpaces"] = ch.get("spaces")
-            out["chatMessages"] = ch.get("messages")
-        except Exception as exc:      # noqa: BLE001
-            out["error"] = (out["error"] + "; " if out["error"] else "") \
-                + f"chat: {str(exc)[:80]}"
+    # Chat is probed unconditionally, NOT gated on settings.migrate_chat.
+    #
+    # inventory.py gates it that way because it is describing a migration
+    # about to run. This is describing a TENANT -- what is in it does not
+    # depend on which services someone has switched on, and a panel that
+    # silently reports no Chat because a migration flag is off is telling
+    # the operator something false about their data. Observed exactly that:
+    # migrate_chat defaults False, so the Chat columns were always empty on a
+    # tenant that has Chat.
+    #
+    # A tenant without the Chat scopes granted answers with an error, which
+    # is recorded per user like any other partial -- "not granted" and "none
+    # present" stay distinguishable.
+    try:
+        chat = (auth.source_chat if side == "source"
+                else auth.target_chat)(email)
+        ch = inventory.scan_chat(chat)
+        out["chatSpaces"] = ch.get("spaces")
+        out["chatMessages"] = ch.get("messages")
+    except Exception as exc:      # noqa: BLE001
+        out["error"] = (out["error"] + "; " if out["error"] else "") \
+            + f"chat: {str(exc)[:80]}"
     return out
 
 
@@ -324,8 +342,8 @@ def snapshot(settings: Settings, side: str, limit: int | None = None,
         # deepSampled to say what the denominator is.
         for key in ("shared", "external", "anyone"):
             out["totals"][key] = sum(r.get(key) or 0 for r in sample)
-        out["totals"]["calendarEvents"] = sum(
-            r.get("calendarEvents") or 0 for r in sample)
+        for key in ("calendarEvents", "chatSpaces", "chatMessages"):
+            out["totals"][key] = sum(r.get(key) or 0 for r in sample)
         kinds: dict[str, int] = {}
         for r in sample:
             for k, v in (r.get("driveKinds") or {}).items():

@@ -113,6 +113,10 @@ export const TenantInventoryPanel: React.FC<TenantInventoryPanelProps> = ({
                     value={(inv.totals.anyone ?? 0).toLocaleString()} />
               <Stat id="events" label="calendar events"
                     value={(inv.totals.calendarEvents ?? 0).toLocaleString()} />
+              <Stat id="chat" label="Chat messages"
+                    value={(inv.totals.chatMessages ?? 0).toLocaleString()} />
+              <Stat id="spaces" label="Chat spaces"
+                    value={(inv.totals.chatSpaces ?? 0).toLocaleString()} />
             </>
           )}
         </Stack>
@@ -202,6 +206,7 @@ export const TenantInventoryPanel: React.FC<TenantInventoryPanelProps> = ({
                     <Box component="th" sx={{ ...thSx, textAlign: 'right' }}>external</Box>
                     <Box component="th" sx={{ ...thSx, textAlign: 'right' }}>anyone</Box>
                     <Box component="th" sx={{ ...thSx, textAlign: 'right' }}>events</Box>
+                    <Box component="th" sx={{ ...thSx, textAlign: 'right' }}>Chat</Box>
                   </>
                 )}
               </Box>
@@ -233,6 +238,7 @@ export const TenantInventoryPanel: React.FC<TenantInventoryPanelProps> = ({
                       <Box component="td" sx={numSx}>{u.external ?? '—'}</Box>
                       <Box component="td" sx={numSx}>{u.anyone ?? '—'}</Box>
                       <Box component="td" sx={numSx}>{u.calendarEvents ?? '—'}</Box>
+                      <Box component="td" sx={numSx}>{u.chatMessages ?? '—'}</Box>
                     </>
                   )}
                 </Box>
