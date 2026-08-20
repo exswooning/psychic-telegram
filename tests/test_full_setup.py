@@ -865,3 +865,107 @@ class TestProgressFile:
 
         assert captured == [18 + int(57 * i / 5) for i in range(1, 6)]
         assert all(18 <= p <= 75 for p in captured)
+
+
+class TestReprovisionAndScopeChoice:
+    """Re-provisioning abandons a tenant's service account and client ID, so
+    the delegation in place stops applying until the run re-grants it. And a
+    scope chooser that could drop a required scope would not narrow a
+    migration -- it would break one."""
+
+    def _common(self, monkeypatch):
+        monkeypatch.setattr(fs.dwd_helper, "run", lambda *a, **k: 0)
+        monkeypatch.setattr(fs.gcloud_browser_auth, "configure_chat_app",
+                            lambda *a, **k: (True, "mocked"))
+        monkeypatch.setattr(fs.accounts_auth, "update_tenant_config",
+                            lambda *a, **k: None)
+        monkeypatch.setattr(fs.verify_scopes, "required_scopes",
+                            lambda settings, tenant: ["req-a", "req-b"])
+        monkeypatch.setattr(fs.verify_scopes, "grant_scopes",
+                            lambda settings, tenant: ["req-a", "req-b", "opt-c"])
+        monkeypatch.setattr(fs.verify_scopes, "verify",
+                            lambda settings, tenant, scopes: [
+                                {"scope": s, "ok": True} for s in scopes])
+
+    def test_an_uploaded_key_is_ignored_when_reprovisioning(
+            self, monkeypatch, tmp_path):
+        """The reason this exists: an uploaded key can point at a project the
+        admin holds no IAM role on, and there is no way to grant access to it
+        from here. The only project the admin controls is one it creates."""
+        key = tmp_path / "source-sa.json"
+        key.write_text('{"client_id": "old-client"}')
+        self._common(monkeypatch)
+        monkeypatch.setattr(fs.accounts_auth, "get_tenant_config",
+                            lambda account_id, side: {"sa_key_path": str(key)})
+        monkeypatch.setattr(fs.provision_gcp, "gcloud_ready", lambda: (True, "me"))
+        monkeypatch.setattr(fs.provision_gcp, "detect_org", lambda env=None: "")
+        monkeypatch.setattr(fs.provision_gcp, "provision_side",
+                            _fake_provision_side(client_id="new-client"))
+        monkeypatch.setattr(fs.provision_gcp, "client_id_of", lambda p: "new-client")
+
+        res = fs.run_full_setup("source", "c.example.com", "a@c.example.com",
+                                "pw", account_id=7, keys_dir=str(tmp_path),
+                                reprovision=True)
+        assert res["clientId"] == "new-client"
+        assert res["phases"][0]["status"] != "skipped"
+
+    def test_without_reprovision_the_uploaded_key_is_still_used(
+            self, monkeypatch, tmp_path):
+        """The default must not change: re-provisioning is opt-in."""
+        key = tmp_path / "source-sa.json"
+        key.write_text('{"client_id": "old-client"}')
+        self._common(monkeypatch)
+        monkeypatch.setattr(fs.accounts_auth, "get_tenant_config",
+                            lambda account_id, side: {"sa_key_path": str(key)})
+        res = fs.run_full_setup("source", "c.example.com", "a@c.example.com",
+                                "pw", account_id=7, keys_dir=str(tmp_path))
+        assert res["clientId"] == "old-client"
+        assert res["phases"][0]["status"] == "skipped"
+
+    def test_a_chosen_scope_list_is_what_gets_granted(
+            self, monkeypatch, tmp_path):
+        key = tmp_path / "source-sa.json"
+        key.write_text('{"client_id": "c"}')
+        self._common(monkeypatch)
+        monkeypatch.setattr(fs.accounts_auth, "get_tenant_config",
+                            lambda account_id, side: {"sa_key_path": str(key)})
+        seen = {}
+        monkeypatch.setattr(fs.dwd_helper, "run",
+                            lambda cid, scopes, t, headful=True:
+                            seen.update(scopes=scopes) or 0)
+        # Force the browser path so the grant is observable. scope_guard is
+        # imported lazily inside run_full_setup, so patch the module itself.
+        import scope_guard
+        monkeypatch.setattr(scope_guard, "is_complete", lambda *a, **k: False)
+
+        fs.run_full_setup("source", "c.example.com", "a@c.example.com", "pw",
+                          account_id=7, keys_dir=str(tmp_path),
+                          scopes_override=["req-a", "opt-c"])
+        granted = set(seen.get("scopes", "").split(","))
+        assert "opt-c" in granted
+
+    def test_a_required_scope_cannot_be_dropped_by_the_chooser(
+            self, monkeypatch, tmp_path):
+        """The one that matters. A delegated token request fails WHOLE if any
+        requested scope is ungranted, so honouring a selection that omits a
+        required scope would produce a tenant that cannot migrate at all --
+        diagnosed much later as a delegation gap."""
+        key = tmp_path / "source-sa.json"
+        key.write_text('{"client_id": "c"}')
+        self._common(monkeypatch)
+        monkeypatch.setattr(fs.accounts_auth, "get_tenant_config",
+                            lambda account_id, side: {"sa_key_path": str(key)})
+        seen = {}
+        monkeypatch.setattr(fs.dwd_helper, "run",
+                            lambda cid, scopes, t, headful=True:
+                            seen.update(scopes=scopes) or 0)
+        import scope_guard
+        monkeypatch.setattr(scope_guard, "is_complete", lambda *a, **k: False)
+
+        # Deliberately omits both required scopes.
+        fs.run_full_setup("source", "c.example.com", "a@c.example.com", "pw",
+                          account_id=7, keys_dir=str(tmp_path),
+                          scopes_override=["opt-c"])
+        granted = set(seen.get("scopes", "").split(","))
+        assert "req-a" in granted
+        assert "req-b" in granted

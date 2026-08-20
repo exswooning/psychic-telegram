@@ -1537,6 +1537,18 @@ class StartFullSetup(WriteAction):
     seed_scale: str = "small"
     create_users: bool = False
     provision_users: bool = False
+    # Create a NEW Cloud project even though a key is already on file. Mints
+    # a new service account and client ID, so the delegation granted against
+    # the OLD client ID stops applying -- this run re-grants it, but a tenant
+    # mid-migration must not be re-provisioned. Gated by confirm_domain
+    # below, on top of the Reason Code every write already carries.
+    reprovision: bool = False
+    confirm_domain: str = ""
+    # Operator-chosen scope line. Required scopes are unioned back in
+    # regardless (see full_setup.run_full_setup): a token request fails
+    # WHOLE if any requested scope is ungranted, so deselecting a required
+    # one would not narrow the migration, it would break it.
+    scopes: list[str] = Field(default_factory=list)
 
 
 def _full_setup_state_path(side: str, account_id: int | None) -> str:
@@ -1561,6 +1573,19 @@ async def full_setup_start(body: StartFullSetup, op: Operator = Depends(operator
     never through a shell string, and is not present anywhere in this
     handler's own logging.
     """
+    # Re-provisioning is the one destructive shape this endpoint has: it
+    # abandons the current service account and client ID, so the delegation
+    # in place stops applying until this run re-grants it. Typed
+    # confirmation of the domain, on top of the Reason Code every write
+    # carries -- the same gate reset-target uses, and for the same reason:
+    # getting the wrong tenant here costs a working setup.
+    if body.reprovision and body.confirm_domain.strip().lower() != body.domain.strip().lower():
+        raise HTTPException(
+            400, f"re-provisioning {body.domain} replaces its Cloud project, "
+                 f"service account and client ID, and the delegation in place "
+                 f"stops applying until this run re-grants it. Type the domain "
+                 f"to confirm.")
+
     def _launch() -> tuple[bool, str]:
         # Inlined rather than routed through _run_admitted: this launch's
         # Popen call is already bespoke (file-redirected output,
@@ -1580,6 +1605,10 @@ async def full_setup_start(body: StartFullSetup, op: Operator = Depends(operator
             argv += ["--org-id", body.org_id]
         if body.dry_run:
             argv.append("--dry-run")
+        if body.reprovision:
+            argv.append("--reprovision")
+        if body.scopes:
+            argv += ["--scopes", ",".join(body.scopes)]
         if body.seed and body.side == "source":
             argv += ["--seed", "--scale", body.seed_scale]
             if body.create_users:
@@ -2014,6 +2043,39 @@ async def get_tenant_inventory_scan(side: str,
                     "error": f"could not read scan result: {str(exc)[:120]}"}
         data["present"] = True
         return data
+
+    return await _off_loop(_read)
+
+
+@app.get("/api/v2/setup/scope-options")
+async def get_scope_options(side: str, op: Operator = Depends(operator)):
+    """What a scope chooser should offer, and which entries it may not drop.
+
+    `required` is returned separately so the UI can render those as fixed
+    rather than as unchecked boxes someone can turn off. Deselecting one
+    does not produce a narrower migration -- a delegated token request fails
+    WHOLE if any requested scope is ungranted, so it produces a tenant that
+    cannot migrate at all. The server unions them back regardless; the UI
+    showing them as locked is what stops the operator being surprised by
+    that.
+    """
+    if side not in ("source", "target"):
+        raise HTTPException(400, "side must be source or target")
+    require_login(op)
+
+    def _read() -> dict:
+        import verify_scopes
+        from config import Settings
+
+        s = Settings(account_id=op.account_id)
+        required = sorted(verify_scopes.required_scopes(s, side))
+        everything = sorted(verify_scopes.grant_scopes(s, side))
+        return {
+            "side": side,
+            "required": required,
+            "optional": sorted(set(everything) - set(required)),
+            "default": everything,
+        }
 
     return await _off_loop(_read)
 

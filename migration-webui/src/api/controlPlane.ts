@@ -421,6 +421,14 @@ export const startFullSetup = (
   adminEmail: string, adminPassword: string, opts: {
     orgId?: string; dryRun?: boolean; seed?: boolean; seedScale?: string
     createUsers?: boolean; provisionUsers?: boolean
+    /** Build a NEW Cloud project even though a key is on file. Mints a new
+     *  service account and client ID, so the delegation in place stops
+     *  applying until this run re-grants it. Requires confirmDomain. */
+    reprovision?: boolean; confirmDomain?: string
+    /** Operator-chosen scope line. Required scopes are unioned back in by
+     *  the server regardless -- omitting one does not narrow the migration,
+     *  it breaks it. */
+    scopes?: string[]
   } = {},
 ) =>
   cpFetch<ActionResult>('/api/v2/full-setup/start', {
@@ -432,8 +440,24 @@ export const startFullSetup = (
       seed: opts.seed ?? false, seed_scale: opts.seedScale ?? 'small',
       create_users: opts.createUsers ?? false,
       provision_users: opts.provisionUsers ?? false,
+      reprovision: opts.reprovision ?? false,
+      confirm_domain: opts.confirmDomain ?? '',
+      scopes: opts.scopes ?? [],
     }),
   })
+
+export interface ScopeOptions {
+  side: 'source' | 'target'
+  /** Cannot be deselected: a delegated token request fails WHOLE if any
+   *  requested scope is ungranted, so dropping one of these does not make a
+   *  narrower migration, it makes a tenant that cannot migrate. */
+  required: string[]
+  optional: string[]
+  default: string[]
+}
+
+export const fetchScopeOptions = (side: 'source' | 'target') =>
+  cpFetch<ScopeOptions>(`/api/v2/setup/scope-options?side=${side}`)
 
 export const fetchFullSetupStatus = (side: 'source' | 'target') =>
   cpFetch<FullSetupStatus>(`/api/v2/full-setup/status?side=${side}`)

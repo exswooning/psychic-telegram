@@ -178,6 +178,7 @@ def run_full_setup(
     seed: bool = False, seed_scale: str = "small", create_users: bool = False,
     provision_users: bool = False, timeout: int = 900,
     account_id: int | None = None, progress_file: str | None = None,
+    reprovision: bool = False, scopes_override: list[str] | None = None,
 ) -> dict:
     """side is 'source' or 'target'. Returns {phases: [...], ok: bool, ...}.
 
@@ -233,6 +234,27 @@ def run_full_setup(
                 if account_id is not None else None)
     uploaded_key = existing["sa_key_path"] if existing else None
     key_path = uploaded_key or os.path.join(keys_dir, f"{side}-sa.json")
+
+    # Re-provision: build a brand-new project even though a key is on file.
+    #
+    # The reason this exists is specific, not general "force" convenience. An
+    # UPLOADED key points at a project the Workspace admin may hold no IAM
+    # role on -- an upload carries no relationship to who owns the project
+    # behind it. Confirmed live: a key for wsmig-src-96030 whose admin was
+    # owner of a different project entirely, which left every console-driven
+    # step (Chat app configuration) unable to load its own page. There is no
+    # way to grant access to that project from here; the only route the
+    # admin controls is a project it creates itself.
+    #
+    # Destructive on purpose and gated at the API: it mints a new project,
+    # service account and client ID, so the delegation granted against the
+    # OLD client ID stops applying and has to be re-granted (which this run
+    # then does). A tenant mid-migration should not be re-provisioned.
+    if reprovision and uploaded_key:
+        log(f"  re-provisioning {side}: ignoring the uploaded key at "
+            f"{uploaded_key} and creating a new project")
+        uploaded_key = None
+        key_path = os.path.join(keys_dir, f"{side}-sa.json")
 
     p = Phase(f"provision Cloud project ({side})")
     phases.append(p)
@@ -400,9 +422,27 @@ def run_full_setup(
     # tenant set up by this runner has them from the start instead of
     # needing a second hand-pasted grant later. They are graded leniently
     # below -- optional means optional, including when the grant fails.
-    scopes = ",".join(verify_scopes.grant_scopes(_vs, side))
     required = set(verify_scopes.required_scopes(_vs, side))
-    optional = set(scopes.split(",")) - required
+    if scopes_override:
+        # An operator-chosen list, unioned with what the code will actually
+        # request. Union rather than replace, deliberately: a token request
+        # fails WHOLE if any requested scope is ungranted, so a chooser that
+        # let someone deselect a required scope would not produce a
+        # narrower migration -- it would produce a tenant that cannot
+        # migrate at all, diagnosed later by scope_guard as a delegation
+        # gap. What the chooser genuinely controls is the OPTIONAL extras
+        # and anything beyond them.
+        chosen = {s.strip() for s in scopes_override if s.strip()}
+        granted = sorted(chosen | required)
+        dropped = sorted(required - chosen)
+        if dropped:
+            log(f"  scope selection omitted {len(dropped)} required "
+                f"scope(s); granting them anyway -- a token request fails "
+                f"whole without them")
+    else:
+        granted = verify_scopes.grant_scopes(_vs, side)
+    scopes = ",".join(granted)
+    optional = set(granted) - required
 
     # Is this already done?
     #
@@ -692,6 +732,18 @@ def main(argv: list[str] | None = None) -> int:
                     help="live {pct, label} JSON written as this run "
                          "progresses, for a caller polling from outside")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--reprovision", action="store_true",
+                    help="create a NEW Cloud project even if a key is already "
+                         "on file. Mints a new service account and client ID, "
+                         "so the existing delegation stops applying and is "
+                         "re-granted by this run. Use when the uploaded key's "
+                         "project is one this admin cannot administer.")
+    ap.add_argument("--scopes", default="",
+                    help="comma-separated scope line to grant instead of the "
+                         "default. Required scopes are added back regardless: "
+                         "a token request fails whole if any requested scope "
+                         "is ungranted, so omitting one does not narrow the "
+                         "migration, it breaks it.")
     args = ap.parse_args(argv)
 
     password = os.environ.get("DWD_PASSWORD") or getpass.getpass(
@@ -701,7 +753,9 @@ def main(argv: list[str] | None = None) -> int:
         args.side, args.domain, args.admin, password, args.org_id,
         args.keys_dir, args.dry_run, args.seed, args.scale, args.create_users,
         args.provision_users, account_id=args.account_id,
-        progress_file=args.progress_file)
+        progress_file=args.progress_file, reprovision=args.reprovision,
+        scopes_override=[s for s in args.scopes.split(",") if s.strip()]
+        or None)
     password = None  # noqa: F841
 
     if args.json:

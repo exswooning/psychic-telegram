@@ -20,6 +20,7 @@ import { runSeed } from '@/api/client'
 import ReasonCodeDialog from './ReasonCodeDialog'
 import JobProgress from './JobProgress'
 import TenantInventoryPanel from './TenantInventoryPanel'
+import ReprovisionPanel from './ReprovisionPanel'
 
 const REPO_CLONE_CMD =
   'git clone https://github.com/exswooning/psychic-telegram -b workspace-migrator && cd psychic-telegram'
@@ -404,6 +405,11 @@ const QuickTenantSetup: React.FC<{
     }
   }, [status?.running, poll])
 
+  // Set by the re-provision panel just before it asks for a Reason Code, so
+  // the launch below carries the destructive flags. Cleared after every
+  // launch so an ordinary setup can never inherit them.
+  const reprovisionRef = useRef<{ scopes: string[] } | null>(null)
+
   const launch = async (reason: string) => {
     setBusy(true); setError(null); setJustLaunched(true)
     try {
@@ -416,6 +422,15 @@ const QuickTenantSetup: React.FC<{
         seed: showSeedOptions ? seed : false, seedScale,
         createUsers: showSeedOptions ? createUsers : false,
         provisionUsers: showProvisionUsers ? provisionUsers : false,
+        ...(reprovisionRef.current
+          ? {
+              reprovision: true,
+              // The server re-checks this; sending it is not the gate, the
+              // panel already made the operator type it.
+              confirmDomain: domain.trim(),
+              scopes: reprovisionRef.current.scopes,
+            }
+          : {}),
       })
       if (!r.ok) throw new Error(r.detail || 'could not start')
       setAsk(false)
@@ -431,6 +446,8 @@ const QuickTenantSetup: React.FC<{
       setPassword('')
       setBusy(false)
       setJustLaunched(false)
+      // Never let an ordinary setup inherit the destructive flags.
+      reprovisionRef.current = null
     }
   }
 
@@ -855,6 +872,20 @@ const QuickTenantSetup: React.FC<{
                                   onDeepScan={runDeepScan} />
           )}
         </Box>
+      )}
+
+      {/* Re-provisioning needs a password, so it reuses the same sign-in
+          dialog and Reason Code the ordinary launch does -- one credential
+          path, not a second one that could drift from it. */}
+      {setUpOk && (
+        <ReprovisionPanel
+          side={side} domain={domain} busy={busy || !!status?.running}
+          onReprovision={(scopes) => {
+            reprovisionRef.current = { scopes }
+            if (password) setAsk(true)
+            else setAuthDialogOpen(true)
+          }}
+        />
       )}
 
       {setUpOk && showSeedOptions && side === 'source' && (
