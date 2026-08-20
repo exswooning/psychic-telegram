@@ -96,6 +96,23 @@ class Phase:
 _NO_BROWSER_MARKER = "no browser available"
 
 
+def log(msg: str) -> None:
+    """Diagnostic line, on stderr.
+
+    stdout carries the --json result and nothing else, so anything written
+    for a human goes here -- where the api_server launch path already
+    redirects it to full-setup-<side>.err, and where a CLI run shows it
+    inline.
+
+    This exists because four call sites were already calling log() and
+    nothing defined it. Three were new; the fourth had been sitting in the
+    pre-check's `except` branch since yesterday, which is why it never
+    fired -- a NameError waiting for the one path that would have most
+    needed to explain itself.
+    """
+    print(msg, file=sys.stderr, flush=True)
+
+
 def optional_missing_detail(scopes: list[str]) -> str:
     """What to append when an optional scope did not land.
 
@@ -426,19 +443,27 @@ def run_full_setup(
         # feature. Check what is actually live before deciding.
         grant_failed = (crash_detail is not None) or (rc != 0)
         if grant_failed:
+            # Say what this decided and why. A silent `except: pass` here
+            # turns a transient probe failure into a failed setup that
+            # blames the browser, which is exactly the kind of misdirection
+            # this whole area has already cost a day to.
             try:
                 import scope_guard
-                if scope_guard.is_complete(_vs, side, sorted(required)):
-                    log("  grant attempt failed, but every REQUIRED scope is "
-                        "already live -- continuing; only the optional extras "
-                        "were missed")
-                    p.status = "ok"
-                    p.detail = ("required delegation already complete; the "
-                                "optional extras could not be added this run")
-                    already_granted = True
-                    crash_detail, rc = None, 0
-            except Exception:      # noqa: BLE001 - fall through to the normal path
-                pass
+                complete = scope_guard.is_complete(_vs, side, sorted(required))
+                log(f"  grant attempt failed; required scopes complete="
+                    f"{complete} ({len(required)} checked)")
+            except Exception as exc:      # noqa: BLE001
+                complete = False
+                log(f"  grant attempt failed and the required-scope check "
+                    f"could not run ({type(exc).__name__}: {str(exc)[:90]})")
+            if complete:
+                log("  every REQUIRED scope is already live -- continuing; "
+                    "only the optional extras were missed")
+                p.status = "ok"
+                p.detail = ("required delegation already complete; the "
+                            "optional extras could not be added this run")
+                already_granted = True
+                crash_detail, rc = None, 0
 
         if crash_detail is not None and is_no_browser(crash_detail):
             p.status, p.detail = "failed", no_browser_detail(crash_detail)

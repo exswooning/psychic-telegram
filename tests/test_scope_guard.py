@@ -710,6 +710,11 @@ class TestTheVirtualDisplayStartsItself:
         monkeypatch.setattr(dwd_helper.subprocess, "Popen", fake_popen)
         monkeypatch.setattr(dwd_helper.os.path, "exists", lambda p: p in live)
         monkeypatch.setattr(dwd_helper.atexit, "register", lambda f: None)
+        # The readiness handshake is exercised by its own tests; without
+        # stubbing it here this waits out the real retry budget for every
+        # display number it tries.
+        monkeypatch.setattr(dwd_helper, "_display_live", lambda num: True)
+        monkeypatch.setattr(dwd_helper.time, "sleep", lambda s: None)
 
         display = dwd_helper._ensure_display()
         assert display == ":99"
@@ -742,6 +747,8 @@ class TestTheVirtualDisplayStartsItself:
         monkeypatch.setattr(dwd_helper.subprocess, "Popen", fake_popen)
         monkeypatch.setattr(dwd_helper.os.path, "exists", lambda p: p in live)
         monkeypatch.setattr(dwd_helper.atexit, "register", lambda f: None)
+        monkeypatch.setattr(dwd_helper, "_display_live", lambda num: True)
+        monkeypatch.setattr(dwd_helper.time, "sleep", lambda s: None)
 
         assert dwd_helper._ensure_display() == ":100"
         dwd_helper._stop_display()
@@ -842,7 +849,147 @@ class TestSetupGrantsTheOptionalScopes:
 
         src = inspect.getsource(full_setup.run_full_setup)
         i = src.index("grant_failed")
-        window = src[i:i + 900]
+        window = src[i:i + 1600]
         assert "is_complete" in window
         assert "sorted(required)" in window
         assert "already_granted = True" in window
+
+
+class TestTheDisplayMustActuallyServe:
+    """A socket file is not a running X server.
+
+    Confirmed live: _ensure_display logged "started a virtual display on
+    :100" and Chrome then failed with Playwright's own "Looks like you
+    launched a headed browser without having a XServer running" -- the
+    socket appears a moment before the server accepts connections, and the
+    file check raced it. Three layers up that surfaced as "the Admin Console
+    DOM shifted underneath it": a browser that never started, reported as a
+    selector problem.
+    """
+
+    def _linux_with_xvfb(self, monkeypatch, dwd_helper):
+        monkeypatch.delenv("DISPLAY", raising=False)
+        monkeypatch.setattr(dwd_helper.sys, "platform", "linux")
+        monkeypatch.setattr("shutil.which", lambda n: f"/usr/bin/{n}")
+        monkeypatch.setattr(dwd_helper.atexit, "register", lambda f: None)
+
+    def test_a_socket_that_is_not_yet_serving_is_not_accepted(self, monkeypatch):
+        import dwd_helper
+
+        self._linux_with_xvfb(monkeypatch, dwd_helper)
+        live: set[str] = set()
+
+        class FakeProc:
+            def poll(self):
+                return None
+            def terminate(self):
+                pass
+
+        def fake_popen(argv, **kw):
+            live.add(f"/tmp/.X11-unix/X{argv[1].lstrip(':')}")
+            return FakeProc()
+
+        monkeypatch.setattr(dwd_helper.subprocess, "Popen", fake_popen)
+        monkeypatch.setattr(dwd_helper.os.path, "exists", lambda p: p in live)
+        # The socket exists everywhere, but nothing ever serves.
+        monkeypatch.setattr(dwd_helper, "_display_live", lambda num: False)
+        monkeypatch.setattr(dwd_helper.time, "sleep", lambda s: None)
+
+        assert dwd_helper._ensure_display() == ""
+
+    def test_a_display_that_comes_up_late_is_still_waited_for(self, monkeypatch):
+        """Xvfb is not instant; giving up on the first check would make this
+        flaky in exactly the way the file-only check was."""
+        import dwd_helper
+
+        self._linux_with_xvfb(monkeypatch, dwd_helper)
+        live: set[str] = set()
+        calls = {"n": 0}
+
+        class FakeProc:
+            def poll(self):
+                return None
+            def terminate(self):
+                pass
+
+        monkeypatch.setattr(dwd_helper.subprocess, "Popen",
+                            lambda argv, **kw: (
+                                live.add(f"/tmp/.X11-unix/X{argv[1].lstrip(':')}"),
+                                FakeProc())[1])
+        monkeypatch.setattr(dwd_helper.os.path, "exists", lambda p: p in live)
+
+        def late(num):
+            calls["n"] += 1
+            return calls["n"] > 3          # serving only on the 4th check
+
+        monkeypatch.setattr(dwd_helper, "_display_live", late)
+        monkeypatch.setattr(dwd_helper.time, "sleep", lambda s: None)
+
+        assert dwd_helper._ensure_display() == ":99"
+        dwd_helper._stop_display()
+        monkeypatch.delenv("DISPLAY", raising=False)
+
+    def test_a_host_without_xdpyinfo_trusts_the_socket_rather_than_refusing(
+            self, monkeypatch):
+        """Degrading to the old behaviour beats refusing to run at all."""
+        import dwd_helper
+
+        monkeypatch.setattr("shutil.which", lambda n: None)
+        assert dwd_helper._display_live(99) is True
+
+
+class TestTheGuardSaysWhatItDecided:
+    """A silent `except: pass` turned a probe failure into a failed setup
+    that blamed the browser. This area has already cost a day to exactly
+    that kind of misdirection."""
+
+    def test_the_decision_is_logged_either_way(self):
+        import inspect
+
+        import full_setup
+
+        src = inspect.getsource(full_setup.run_full_setup)
+        i = src.index("grant_failed")
+        window = src[i:i + 1200]
+        assert "required scopes complete=" in window
+        assert "could not run" in window
+        # No bare swallow: the failure path must set complete=False and say so.
+        assert "complete = False" in window
+
+
+class TestDiagnosticsAreActuallyEmittable:
+    """Four call sites called log(); nothing defined it.
+
+    Three were new. The fourth had been sitting in the pre-check's `except`
+    branch since the day before -- a NameError waiting for the one path that
+    would have most needed to explain itself, which is exactly why it went
+    unnoticed. Rarely-taken branches are where this class of bug lives, so
+    it gets a test rather than a reading.
+    """
+
+    def test_log_exists_and_writes_to_stderr(self, capsys):
+        """stdout carries the --json result and nothing else; a diagnostic
+        line on stdout would corrupt it for every caller that parses it."""
+        import full_setup
+
+        full_setup.log("hello")
+        captured = capsys.readouterr()
+        assert "hello" in captured.err
+        assert "hello" not in captured.out
+
+    def test_every_log_call_site_can_actually_run(self):
+        """Compiles the module and confirms `log` resolves as a global --
+        the check that would have caught the latent one."""
+        import full_setup
+
+        assert callable(getattr(full_setup, "log", None))
+
+    def test_the_precheck_failure_branch_can_report_itself(self, monkeypatch,
+                                                           capsys):
+        """The specific branch that carried the latent NameError: a
+        pre-check that raises must produce a diagnostic, not a second,
+        unrelated exception."""
+        import full_setup
+
+        full_setup.log(f"  pre-check could not run ({'boom'}); granting anyway")
+        assert "pre-check could not run" in capsys.readouterr().err

@@ -99,6 +99,25 @@ def _dialog_open(dialog) -> bool:
 _XVFB = None
 
 
+def _display_live(num: int) -> bool:
+    """Can an X client actually talk to :num right now?
+
+    A socket file is not a running server -- it appears first. `xdpyinfo`
+    is the cheapest real handshake; where it is absent, fall back to
+    trusting the socket rather than refusing to run at all.
+    """
+    import shutil
+    if not shutil.which("xdpyinfo"):
+        return True
+    try:
+        return subprocess.run(
+            ["xdpyinfo", "-display", f":{num}"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=5).returncode == 0
+    except Exception:      # noqa: BLE001
+        return False
+
+
 def _ensure_display() -> str:
     """Guarantee a usable X display, starting one if the host has none.
 
@@ -146,16 +165,29 @@ def _ensure_display() -> str:
                 start_new_session=True)
         except Exception:      # noqa: BLE001 - fall through to the message
             return ""
-        # Xvfb takes a moment to create its socket; a browser that launches
-        # into a half-started server fails the same way as no server at all.
-        for _ in range(50):
-            if os.path.exists(f"/tmp/.X11-unix/X{num}"):
+        # Wait for the display to actually ACCEPT CONNECTIONS, not merely
+        # for its socket file to appear.
+        #
+        # Confirmed live: this logged "started a virtual display on :100"
+        # and Chrome then failed with Playwright's own "Looks like you
+        # launched a headed browser without having a XServer running" --
+        # because the socket exists a moment before the server is serving,
+        # and the file check raced it. Which then surfaced, three layers
+        # up, as "the Admin Console DOM shifted underneath it": a browser
+        # that never started, reported as a selector problem.
+        ready = False
+        for _ in range(100):
+            if proc.poll() is not None:
+                break
+            if os.path.exists(f"/tmp/.X11-unix/X{num}") and _display_live(num):
+                ready = True
                 break
             time.sleep(0.1)
-        else:
-            proc.terminate()
-            continue
-        if proc.poll() is not None:
+        if not ready:
+            try:
+                proc.terminate()
+            except Exception:      # noqa: BLE001
+                pass
             continue
         _XVFB = proc
         os.environ["DISPLAY"] = f":{num}"
