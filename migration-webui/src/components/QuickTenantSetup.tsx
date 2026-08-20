@@ -564,9 +564,46 @@ const QuickTenantSetup: React.FC<{
       .catch(() => { /* the quick figures already loaded; leave it at that */ })
   }, [setUpOk, side, result?.clientId, loadInventory, pollScan, runDeepScan])
 
+  // Poll while it runs, not once when it starts.
+  //
+  // This fetched exactly once immediately after launch -- when `ps` still
+  // saw the process and the log was empty -- and never again. Provisioning
+  // one account takes about two seconds, so the button sat on "Running..."
+  // with no rows under it indefinitely, for a job that had already
+  // finished and written its result. "provisioning started" was the last
+  // true thing the panel ever said.
   useEffect(() => {
     if (side !== 'target' || !showProvisionUsers) return
-    fetchProvisionStatus('target').then(setProvisionStatus).catch(() => {})
+    let timer: number | null = null
+    let stopped = false
+
+    const tick = () => {
+      fetchProvisionStatus('target')
+        .then((st) => {
+          if (stopped) return
+          setProvisionStatus(st)
+          // One more read after it stops: the process disappears from `ps`
+          // slightly before the last lines are flushed to the log, so the
+          // poll that first sees running=false can still be a line short.
+          if (!st.running && timer) {
+            window.clearInterval(timer)
+            timer = null
+            window.setTimeout(() => {
+              if (!stopped) {
+                fetchProvisionStatus('target').then(setProvisionStatus).catch(() => {})
+              }
+            }, 1500)
+          }
+        })
+        .catch(() => { /* a blip must not end the watch */ })
+    }
+
+    tick()
+    timer = window.setInterval(tick, 2000)
+    return () => {
+      stopped = true
+      if (timer) window.clearInterval(timer)
+    }
   }, [side, showProvisionUsers, postDone])
 
   const runPostAction = async (reason: string) => {

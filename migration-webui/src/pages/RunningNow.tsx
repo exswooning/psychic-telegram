@@ -9,6 +9,7 @@ import {
 import {
   fetchTenantConfigStatus, fetchFullSetupStatus, fetchFleet, FleetNode,
   fetchActiveJobs, fetchMe, stopJob as stopFleetJob,
+  fetchProvisionStatus, ProvisionStatus,
 } from '@/api/controlPlane'
 import { fetchJob, stopJob as stopSeedJob } from '@/api/client'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
@@ -69,6 +70,10 @@ function useRunningNow() {
         fetchActiveJobs().catch(() => []),
         fetchMe().catch(() => null),
       ])
+      const provisions: Array<['source' | 'target', ProvisionStatus | null]> =
+        await Promise.all((['source', 'target'] as const).map(async (t) =>
+          [t, await fetchProvisionStatus(t).catch(() => null)] as
+            ['source' | 'target', ProvisionStatus | null]))
       const myAccountId = me?.id ?? null
       const found: RunningJob[] = []
       if (srcSetup?.running) {
@@ -147,6 +152,32 @@ function useRunningNow() {
           // and stopping someone else's run isn't this page's call to make.
         })
       }
+      // Provisioning, which registers nowhere else.
+      //
+      // It deliberately does not go through job_admission -- that gate holds
+      // ONE heavy job across the whole box, and creating a handful of
+      // accounts must not block a migration from starting. But "not a heavy
+      // job" was silently taken to mean "not worth showing", so a run that
+      // was genuinely in flight appeared on no page at all. This page's job
+      // is to answer "what is happening right now", and the honest answer
+      // includes this.
+      for (const [tenant, st] of provisions) {
+        if (!st?.running) continue
+        found.push({
+          key: `provision-${tenant}`,
+          label: `provision users — ${tenant}`,
+          detail: `${st.created} of ${st.total} created`
+            + (st.existing ? `, ${st.existing} already existed` : '')
+            + (st.failed ? `, ${st.failed} failed` : ''),
+          pct: st.total ? Math.round(100 * (st.created + (st.existing ?? 0)) / st.total) : null,
+          stop: async (reason) => {
+            if (!st.pid) throw new Error('no pid recorded for this run yet -- try again shortly')
+            const r = await stopFleetJob(st.pid, reason)
+            if (!r.ok) throw new Error(r.detail || 'could not stop')
+          },
+        })
+      }
+
       setJobs(found)
     } finally {
       setLoading(false)
