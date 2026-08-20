@@ -25,13 +25,26 @@ call this and are unaffected.
 
 from __future__ import annotations
 
+import os
+
 import control_plane_db as cpdb
 
-# Matches resources.py's own sizing model, which assumes it owns the whole
-# machine -- one heavy job at a time keeps that assumption true. Raising
-# this later (once the VPS itself grows, or per-client quotas get more
-# granular) is a one-line change here, not a redesign.
-MAX_CONCURRENT_TENANT_JOBS = 1
+# How many heavy jobs may run at once, across every account.
+#
+# This was 1 because resources.py sized a job's worker pool to the WHOLE
+# machine: two tenants each claiming a full pool against the same 2.8 GB is
+# not two migrations, it is the swap stall that module exists to prevent,
+# twice. resources.recommend() now takes concurrent_jobs and divides the
+# memory budget, which is what makes a number above 1 safe rather than
+# optimistic -- so the two must move together. Raising this without that
+# division re-creates the original failure exactly.
+#
+# Default 2: enough for a second tenant to run while one is in flight, on a
+# box whose 8-worker pool becomes 4+4 rather than 8+8. Override with
+# BITPORT_MAX_CONCURRENT_JOBS on a machine with room for more; every worker
+# still costs MB_PER_WORKER of real memory.
+MAX_CONCURRENT_TENANT_JOBS = max(
+    1, int(os.getenv("BITPORT_MAX_CONCURRENT_JOBS", "2")))
 
 
 def try_admit(account_id: int | None, job_name: str, pid: int | None = None) -> tuple[bool, str]:

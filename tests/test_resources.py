@@ -146,3 +146,57 @@ class TestSettingsIntegration:
         from config import Settings
 
         assert Settings().user_workers >= 1
+
+
+class TestConcurrentJobsShareTheMachine:
+    """job_admission capped concurrency at one because every number here is
+    derived from usable RAM on the assumption that this job owns the box.
+    Two tenants each claiming a full pool against the same 2.8 GB is not two
+    migrations -- it is the swap stall this module exists to prevent, twice.
+    Dividing the budget is what makes raising that cap safe."""
+
+    def vps(self):
+        # The real VPS profile: 2 cores, 2.8 GB usable, no swap.
+        return make(ram_usable=2.8, ram_total=3.7, swap_used=0.0,
+                    swap_total=0.0, cores=2)
+
+    def test_one_job_gets_the_whole_budget(self):
+        assert resources.recommend(self.vps(), concurrent_jobs=1)["user_workers"] == 8
+
+    def test_two_jobs_get_half_each(self):
+        assert resources.recommend(self.vps(), concurrent_jobs=2)["user_workers"] == 4
+
+    def test_the_split_never_reaches_zero_workers(self):
+        """A box that can only support one worker still has to give each job
+        one -- a pool of zero is not a smaller migration, it is a stalled
+        one."""
+        rec = resources.recommend(make(ram_usable=0.6, swap_used=0.0),
+                                  concurrent_jobs=8)
+        assert rec["user_workers"] >= resources.MIN_WORKERS
+
+    def test_the_seed_pool_is_divided_too(self):
+        """It shares the same physical memory; sizing it against the whole
+        machine while user_workers halves would leak the budget back."""
+        one = resources.recommend(self.vps(), concurrent_jobs=1)["seed_workers"]
+        two = resources.recommend(self.vps(), concurrent_jobs=2)["seed_workers"]
+        assert two < one
+
+    def test_the_reason_states_the_budget_it_actually_used(self):
+        """It read "2.8 GB usable / 320 MB per worker = 4", which does not
+        divide -- a number beside arithmetic that contradicts it teaches the
+        reader to distrust both."""
+        rec = resources.recommend(self.vps(), concurrent_jobs=2)
+        assert "2 concurrent jobs" in rec["reason"]
+        assert "1.4 GB budget" in rec["reason"]
+
+    def test_a_single_job_reason_does_not_mention_sharing(self):
+        """The common case must not grow noise about a split that is not
+        happening."""
+        assert "concurrent" not in resources.recommend(
+            self.vps(), concurrent_jobs=1)["reason"]
+
+    def test_the_default_is_unchanged(self):
+        """Every existing caller passes nothing and must behave exactly as
+        before."""
+        r = self.vps()
+        assert resources.recommend(r) == resources.recommend(r, concurrent_jobs=1)

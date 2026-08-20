@@ -219,11 +219,48 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 
+def _concurrent_jobs() -> int:
+    """How many heavy jobs are already running, including this one.
+
+    Sizing a pool against the whole machine is only correct when this job
+    owns it. With concurrent tenant migrations allowed (see
+    job_admission.MAX_CONCURRENT_TENANT_JOBS) that assumption is false, and
+    two full-size pools on one box is the swap stall resources.py exists to
+    prevent. Counting the admission table is how a starting job learns what
+    it is sharing with.
+
+    +1 for this process: at the moment Settings is constructed the job has
+    usually not been admitted yet, so the table under-reports by exactly
+    one. Erring toward more concurrency would mean sizing as though alone.
+
+    Read with a bare sqlite3 connection rather than through
+    control_plane_db, and that is not a shortcut: cpdb resolves its path via
+    Settings(), so asking it from inside Settings own field defaults
+    recurses until the stack ends. Found immediately -- the import hung.
+    """
+    import os
+    import sqlite3
+
+    path = os.getenv("MIGRATION_DB") or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "migration.db")
+    if not os.path.isfile(path):
+        return 1
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2.0)
+        try:
+            n = conn.execute("SELECT COUNT(*) FROM active_jobs").fetchone()[0]
+        finally:
+            conn.close()
+        return max(1, int(n) + 1)
+    except Exception:      # noqa: BLE001 - never break startup over this
+        return 1
+
+
 def _auto(key: str, fallback):
     """Machine-sized default from resources.py, with a safe fallback."""
     try:
         import resources
-        return resources.recommend()[key]
+        return resources.recommend(concurrent_jobs=_concurrent_jobs())[key]
     except Exception:  # noqa: BLE001 - probing must never break startup
         return fallback
 

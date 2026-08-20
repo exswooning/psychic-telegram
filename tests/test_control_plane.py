@@ -1183,15 +1183,24 @@ class TestCrossAccountJobAdmission:
     def test_a_slot_already_taken_by_another_account_blocks_migrate_start(self, cp):
         import job_admission
 
-        job_admission.try_admit(999, "seed")
-        r = cp.post("/api/v2/migrate/start",
-                    json={"reason": "should be blocked", "services": ["drive"]},
-                    headers=ADMIN)
-        assert r.status_code == 200
-        body = r.json()
-        assert body["ok"] is False
-        assert "capacity is full" in body["detail"]
-        job_admission.release(999, "seed")
+        # Fill every slot, not just one: the cap moved above 1 once
+        # resources.recommend() learned to divide the memory budget between
+        # concurrent jobs, and a test that occupies exactly one slot stops
+        # testing a refusal the moment two are allowed.
+        taken = list(range(999, 999 + job_admission.MAX_CONCURRENT_TENANT_JOBS))
+        for acct in taken:
+            assert job_admission.try_admit(acct, "seed")[0]
+        try:
+            r = cp.post("/api/v2/migrate/start",
+                        json={"reason": "should be blocked", "services": ["drive"]},
+                        headers=ADMIN)
+            assert r.status_code == 200
+            body = r.json()
+            assert body["ok"] is False
+            assert "capacity is full" in body["detail"]
+        finally:
+            for acct in taken:
+                job_admission.release(acct, "seed")
 
     def test_the_slot_is_freed_once_the_process_exits(self, monkeypatch, cp):
         """_run_admitted's wait-thread must actually call release() -- not

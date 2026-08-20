@@ -479,7 +479,8 @@ def cached_probe(ttl: float = 3.0) -> SystemResources:
     return _probe_cache
 
 
-def recommend(r: SystemResources | None = None) -> dict:
+def recommend(r: SystemResources | None = None,
+              concurrent_jobs: int = 1) -> dict:
     """
     Worker counts this machine can actually sustain.
 
@@ -501,7 +502,22 @@ def recommend(r: SystemResources | None = None) -> dict:
     """
     r = r or probe()
 
-    by_ram = int((r.ram_usable_gb * 1024) // MB_PER_WORKER)
+    # Share the machine when more than one migration is running.
+    #
+    # Every number below is derived from usable RAM on the assumption that
+    # this job owns the box -- which is exactly why job_admission capped
+    # concurrency at one. Two tenants each sizing a full pool against the
+    # same 2.8 GB is not two migrations, it is the swap stall this module
+    # exists to prevent, twice. Dividing the budget is what makes raising
+    # that cap safe rather than optimistic.
+    #
+    # Ceil, not floor, on the divisor: three jobs on a nine-worker box get
+    # three each, and a box that can only support one worker still gets one
+    # per job rather than zero.
+    jobs = max(1, int(concurrent_jobs))
+    budget_mb = (r.ram_usable_gb * 1024) / jobs
+
+    by_ram = int(budget_mb // MB_PER_WORKER)
     workers = max(MIN_WORKERS, min(by_ram, HARD_CAP))
 
     why = []
@@ -516,7 +532,10 @@ def recommend(r: SystemResources | None = None) -> dict:
             f"as socket timeouts"
         )
     elif by_ram < HARD_CAP:
-        why.append(f"memory-bound: {r.ram_usable_gb:.1f} GB usable / "
+        why.append(f"memory-bound: {budget_mb / 1024:.1f} GB budget"
+                   + (f" ({r.ram_usable_gb:.1f} GB usable / {jobs} concurrent "
+                      f"jobs)" if jobs > 1 else " usable")
+                   + " / "
                    f"{MB_PER_WORKER} MB per worker = {by_ram}")
     else:
         why.append(f"capped at {HARD_CAP}; past this Google's per-user quotas bind first")
@@ -530,7 +549,7 @@ def recommend(r: SystemResources | None = None) -> dict:
         "seed_workers": (
             MIN_WORKERS if r.under_memory_pressure
             else max(MIN_WORKERS, min(
-                int((r.ram_usable_gb * 1024) // MB_PER_SEED_WORKER),
+                int(budget_mb // MB_PER_SEED_WORKER),
                 SEED_HARD_CAP))
         ),
         # Requests/sec per user. Was 8.0/4.0 -- Google's own Drive migration
@@ -564,7 +583,10 @@ def recommend(r: SystemResources | None = None) -> dict:
         # -- the count from one model, the explanation from the other.
         "seed_reason": (
             why[0] if r.under_memory_pressure else
-            (f"memory-bound: {r.ram_usable_gb:.1f} GB usable / "
+            (f"memory-bound: {budget_mb / 1024:.1f} GB budget"
+             + (f" ({r.ram_usable_gb:.1f} GB usable / {jobs} concurrent jobs)"
+                if jobs > 1 else " usable")
+             + " / "
              f"{MB_PER_SEED_WORKER} MB per seed worker = "
              f"{int((r.ram_usable_gb * 1024) // MB_PER_SEED_WORKER)}"
              if int((r.ram_usable_gb * 1024) // MB_PER_SEED_WORKER) < SEED_HARD_CAP
