@@ -1911,6 +1911,113 @@ async def claims_list(op: Operator = Depends(operator)):
     return await _off_loop(_read)
 
 
+def _inventory_scan_path(side: str, account_id: int | None) -> str:
+    d = os.path.join(HERE, "logs") if account_id is None \
+        else os.path.join(HERE, "logs", str(account_id))
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, f"inventory-scan-{side}.json")
+
+
+# One deep scan at a time per (account, side). Each one walks every file
+# every sampled user owns; two of them racing would double the API load for
+# no extra information.
+_SCANS: dict[tuple, threading.Thread] = {}
+_SCANS_LOCK = threading.Lock()
+
+
+@app.post("/api/v2/setup/tenant-inventory/scan")
+async def start_tenant_inventory_scan(side: str, limit: int = 250,
+                                      accounts: int = 0,
+                                      op: Operator = Depends(operator)):
+    """Start a deep scan in the background, and return immediately.
+
+    Why this is not just the GET with deep=true
+    -------------------------------------------
+    That is what it was, and it 502'd. Walking one real account's Drive to
+    read ACLs took 180 seconds; the proxy logged `EOF` after 91s and the
+    browser got a 502 with nothing to show for the three minutes of API
+    calls already spent. No timeout tuning fixes that -- a scan whose honest
+    duration is minutes to hours cannot live inside a request, and making
+    the request survive longer only moves the failure to the next hop.
+
+    So it writes its result to disk (the same shape full-setup already uses)
+    and the panel polls. That also removes the reason the synchronous
+    version had to sample only five accounts: a background job can walk the
+    whole tenant, and `accounts=0` means exactly that.
+    """
+    if side not in ("source", "target"):
+        raise HTTPException(400, "side must be source or target")
+    require_login(op)
+
+    key = (op.account_id, side)
+    out = _inventory_scan_path(side, op.account_id)
+
+    with _SCANS_LOCK:
+        running = _SCANS.get(key)
+        if running is not None and running.is_alive():
+            return {"started": False, "detail": "a scan is already running"}
+
+        def _run() -> None:
+            import tenant_inventory
+            from config import Settings
+
+            started = time.time()
+            try:
+                with open(out, "w", encoding="utf-8") as fh:
+                    json.dump({"running": True, "startedAt": started}, fh)
+            except OSError:
+                pass
+            try:
+                # accounts=0 -> every account. The sample cap exists for the
+                # synchronous path's benefit, and this path has no such
+                # constraint.
+                snap = tenant_inventory.snapshot(
+                    Settings(account_id=op.account_id), side, limit=limit,
+                    deep=True,
+                    deep_sample=accounts or 10 ** 9)
+                snap["running"] = False
+                snap["elapsed"] = round(time.time() - started, 1)
+            except Exception as exc:      # noqa: BLE001 - report, never 500
+                snap = {"running": False, "error": str(exc)[:300],
+                        "elapsed": round(time.time() - started, 1)}
+            try:
+                tmp = out + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    json.dump(snap, fh)
+                os.replace(tmp, out)
+            except OSError:
+                pass
+
+        t = threading.Thread(target=_run, name=f"inv-scan-{side}", daemon=True)
+        _SCANS[key] = t
+        t.start()
+    return {"started": True, "detail": "scan running"}
+
+
+@app.get("/api/v2/setup/tenant-inventory/scan")
+async def get_tenant_inventory_scan(side: str,
+                                    op: Operator = Depends(operator)):
+    """The last deep scan's result, or its in-flight state."""
+    if side not in ("source", "target"):
+        raise HTTPException(400, "side must be source or target")
+    require_login(op)
+
+    def _read() -> dict:
+        path = _inventory_scan_path(side, op.account_id)
+        if not os.path.isfile(path):
+            return {"running": False, "present": False}
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception as exc:      # noqa: BLE001
+            return {"running": False, "present": False,
+                    "error": f"could not read scan result: {str(exc)[:120]}"}
+        data["present"] = True
+        return data
+
+    return await _off_loop(_read)
+
+
 @app.get("/api/v2/setup/tenant-inventory")
 async def get_tenant_inventory(side: str, limit: int = 250, deep: bool = False,
                                op: Operator = Depends(operator)):

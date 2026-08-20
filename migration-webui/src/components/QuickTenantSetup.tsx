@@ -14,6 +14,7 @@ import {
   startProvision, fetchProvisionStatus, ProvisionStatus,
   fetchTenantConfigStatus, uploadCredentials, TenantConfigStatus,
   fetchTenantInventory, TenantInventory,
+  startTenantScan, fetchTenantScan,
 } from '@/api/controlPlane'
 import { runSeed } from '@/api/client'
 import ReasonCodeDialog from './ReasonCodeDialog'
@@ -456,6 +457,41 @@ const QuickTenantSetup: React.FC<{
       .finally(() => setInvBusy(false))
   }, [side])
 
+  // Deep scan: start it, then poll. It walks every file every account owns,
+  // so it cannot live inside the request that asks for it -- that 502'd.
+  const scanPoll = useRef<number | null>(null)
+
+  const pollScan = useCallback(() => {
+    fetchTenantScan(side)
+      .then((st) => {
+        if (st.present && !st.running) {
+          if (scanPoll.current) { window.clearInterval(scanPoll.current); scanPoll.current = null }
+          setInvBusy(false)
+          if (st.error) setInvError(st.error)
+          else setInv(st as TenantInventory)
+        }
+      })
+      .catch(() => { /* a poll blip must not end the watch */ })
+  }, [side])
+
+  const runDeepScan = useCallback(() => {
+    setInvBusy(true)
+    setInvError('')
+    startTenantScan(side, 0)
+      .then(() => {
+        if (scanPoll.current) window.clearInterval(scanPoll.current)
+        scanPoll.current = window.setInterval(pollScan, 5000)
+      })
+      .catch((e) => {
+        setInvBusy(false)
+        setInvError(e instanceof Error ? e.message : String(e))
+      })
+  }, [side, pollScan])
+
+  useEffect(() => () => {
+    if (scanPoll.current) window.clearInterval(scanPoll.current)
+  }, [])
+
   const invLoadedFor = useRef('')
   useEffect(() => {
     if (!setUpOk) return
@@ -794,7 +830,7 @@ const QuickTenantSetup: React.FC<{
             <TenantInventoryPanel inv={inv} busy={invBusy} error={invError}
                                   domain={domain}
                                   onRefresh={() => loadInventory(false)}
-                                  onDeepScan={() => loadInventory(true)} />
+                                  onDeepScan={runDeepScan} />
           )}
         </Box>
       )}

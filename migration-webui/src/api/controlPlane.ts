@@ -531,6 +531,26 @@ export interface TenantInventory {
   licenseError: string
 }
 
+/** A deep scan runs for minutes to hours -- walking every file every account
+ *  owns -- so it is a background job, not a request. Doing it synchronously
+ *  502'd: the proxy gave up after 91s with nothing to show for the API calls
+ *  already spent. */
+export interface TenantScanState extends Partial<TenantInventory> {
+  running: boolean
+  present: boolean
+  elapsed?: number
+  error?: string
+}
+
+export const startTenantScan = (side: 'source' | 'target', accounts = 0) =>
+  cpFetch<{ started: boolean; detail: string }>(
+    `/api/v2/setup/tenant-inventory/scan?side=${side}&accounts=${accounts}`,
+    { method: 'POST' })
+
+export const fetchTenantScan = (side: 'source' | 'target') =>
+  cpFetch<TenantScanState>(
+    `/api/v2/setup/tenant-inventory/scan?side=${side}`)
+
 export const fetchTenantInventory = (
   side: 'source' | 'target', limit = 250, deep = false,
 ) =>

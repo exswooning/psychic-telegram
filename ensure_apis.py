@@ -70,6 +70,13 @@ REQUIRED_APIS = {
     "chat.googleapis.com": "Chat",
     "iamcredentials.googleapis.com": "IAM credentials (keyless auth)",
     "cloudidentity.googleapis.com": "Cloud Identity (groups)",
+    # Per-account plan (Business Starter/Standard/Plus, Enterprise,
+    # Frontline) for the tenant inventory panel. Enabling the service is
+    # necessary but not sufficient -- the apps.licensing SCOPE also has to
+    # be delegated, which is why it rides verify_scopes.OPTIONAL_SCOPES on
+    # the console paste line. Enabled here so that the only remaining step
+    # is the one no API can perform.
+    "licensing.googleapis.com": "Enterprise Licence Manager (plans)",
 }
 
 CLOUD_PLATFORM = "https://www.googleapis.com/auth/cloud-platform"

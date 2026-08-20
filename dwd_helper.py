@@ -245,6 +245,22 @@ def _installed_browser_launch(p, headful: bool):
             "scope line into the Admin Console yourself.")
 
     root_args = ["--no-sandbox"] if hasattr(os, "geteuid") and os.geteuid() == 0 else []
+
+    # Hand the browser our environment explicitly.
+    #
+    # _ensure_display() sets os.environ["DISPLAY"] in THIS process, but the
+    # browser is spawned by Playwright's driver, which inherited its own
+    # environment when sync_playwright() started -- before the display
+    # existed. Chrome therefore came up with no DISPLAY at all and died with
+    # "Missing X server or $DISPLAY", while this process was quite sure it
+    # had just started one.
+    #
+    # This is also why a hand-written check of the same functions passed:
+    # calling _ensure_display() before entering sync_playwright() gets the
+    # variable into the driver by inheritance, which the real call path --
+    # launch happens inside the context -- never does. Passing env= removes
+    # the ordering dependency entirely.
+    env = dict(os.environ)
     launch = None
     candidates = []
     chrome = (shutil.which("google-chrome")
@@ -253,13 +269,13 @@ def _installed_browser_launch(p, headful: bool):
     brave = "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"
     if os.path.exists(chrome):
         candidates.append(("chrome", p.chromium.launch(
-            channel="chrome", headless=not headful, args=root_args)))
+            channel="chrome", headless=not headful, args=root_args, env=env)))
     if os.path.exists(edge):
         candidates.append(("edge", p.chromium.launch(
-            channel="msedge", headless=not headful, args=root_args)))
+            channel="msedge", headless=not headful, args=root_args, env=env)))
     if os.path.exists(brave):
         candidates.append(("brave", p.chromium.launch(
-            executable_path=brave, headless=not headful, args=root_args)))
+            executable_path=brave, headless=not headful, args=root_args, env=env)))
     if candidates:
         launch = candidates[0]
         log(f"using installed browser: {launch[0]}")
@@ -287,7 +303,7 @@ def _installed_browser_launch(p, headful: bool):
             "(and `playwright install-deps chromium` on a bare Linux host).")
     log("no real Chrome/Edge/Brave found; falling back to bundled Chromium "
         "(Google may reject the sign-in as 'not secure')")
-    return p.chromium.launch(headless=not headful, args=root_args)
+    return p.chromium.launch(headless=not headful, args=root_args, env=env)
 
 
 def _open_dwd_console(p, headful: bool, timeout: int):
