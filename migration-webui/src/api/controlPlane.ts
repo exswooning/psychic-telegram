@@ -264,6 +264,26 @@ export interface ProvisionStatus {
   total: number; tail: string[]
 }
 
+// -- Identity map ------------------------------------------------------------
+// Which source user becomes which target user. Provisioning and migration
+// both read it, and on a fresh target neither can populate it: auto-mapping
+// pairs only accounts that already exist on both sides, and provisioning
+// only creates accounts already mapped. includeMissing breaks that cycle.
+export interface IdentityMapStatus {
+  running: boolean
+  mapped: number
+  tail: string[]
+}
+
+export const buildIdentityMap = (reason: string, includeMissing = true) =>
+  cpFetch<ActionResult>('/api/v2/identities/auto-map', {
+    method: 'POST',
+    body: JSON.stringify({ reason, include_missing: includeMissing }),
+  })
+
+export const fetchIdentityMapStatus = () =>
+  cpFetch<IdentityMapStatus>('/api/v2/identities/status')
+
 export const startProvision = (reason: string, tenant: 'source' | 'target' = 'target', dryRun = false) =>
   cpFetch<ActionResult>('/api/v2/provision/start', {
     method: 'POST',

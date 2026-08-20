@@ -401,3 +401,54 @@ class TestLeaseRenewal:
         stop.set()
         t.join(timeout=2)
         assert not t.is_alive()
+
+
+class TestAutoMapCanBootstrapAFreshTarget:
+    """auto-map and provision-users could not start each other.
+
+    auto-map pairs only accounts that already exist on BOTH tenants;
+    provision-users only creates accounts already in identity_map. On a
+    fresh target that is a closed loop: a tenant holding one account mapped
+    1 of the source's 201 users, then correctly reported nothing to create.
+    Live, that read as a button doing nothing, repeatedly.
+    """
+
+    def _run(self, monkeypatch, include_missing):
+        import main
+
+        src = ["a@src.com", "b@src.com", "c@src.com"]
+        tgt = ["a@tgt.com"]                     # only one exists yet
+        monkeypatch.setattr(main, "list_domain_users",
+                            lambda auth, side, dom: src if side == "source" else tgt)
+        seeded: list = []
+        import db as db_mod
+        monkeypatch.setattr(db_mod, "bulk_seed_identities",
+                            lambda d, pairs: seeded.extend(pairs))
+
+        class S:
+            source_domain = "src.com"
+            target_domain = "tgt.com"
+            db_path = ":memory:"
+
+        args = type("A", (), {"identities": None, "auto_map": True,
+                              "include_missing": include_missing})()
+        main.cmd_init_db(args, S(), None, None)
+        return seeded
+
+    def test_without_the_flag_only_existing_accounts_are_mapped(self, monkeypatch):
+        """The old behaviour, kept as the default: a lift-and-shift merge
+        where nobody is being renamed should not invent target accounts."""
+        assert self._run(monkeypatch, False) == [("a@src.com", "a@tgt.com")]
+
+    def test_with_the_flag_every_source_user_is_mapped(self, monkeypatch):
+        """So provision-users has something to create."""
+        seeded = self._run(monkeypatch, True)
+        assert sorted(seeded) == [("a@src.com", "a@tgt.com"),
+                                  ("b@src.com", "b@tgt.com"),
+                                  ("c@src.com", "c@tgt.com")]
+
+    def test_the_mapping_keeps_the_localpart(self, monkeypatch):
+        """b@src.com must become b@tgt.com, not a generated name -- the
+        address is what an operator will recognise in the target."""
+        seeded = dict(self._run(monkeypatch, True))
+        assert seeded["b@src.com"] == "b@tgt.com"

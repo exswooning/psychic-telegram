@@ -248,6 +248,19 @@ class RevertPublic(WriteAction):
     confirm: str = Field(description="must be the literal string REVERT")
 
 
+class BuildIdentityMap(WriteAction):
+    """Derive identity_map from the two tenants' directories.
+
+    include_missing is the flag that makes provisioning possible at all on a
+    fresh target: without it, auto-mapping only pairs accounts that ALREADY
+    exist on both sides, and provision-users only creates accounts already in
+    identity_map -- so neither command can start the other. A target holding
+    one account maps one of the source's 201 users and then correctly
+    reports nothing to create.
+    """
+    include_missing: bool = True
+
+
 class StartProvision(WriteAction):
     """Create missing accounts for identity_map entries on one tenant.
 
@@ -1036,6 +1049,64 @@ async def provision_status(tenant: str = "target", op: Operator = Depends(operat
     return await _off_loop(_read)
 
 
+@app.post("/api/v2/identities/auto-map")
+async def identities_auto_map(body: BuildIdentityMap,
+                              op: Operator = Depends(operator)):
+    """Build identity_map by matching localparts across the two tenants.
+
+    A UI front end for `main.py init-db --auto-map`, not a second
+    implementation -- same reasoning as provision.start above. It runs
+    detached and writes to a log the status endpoint reads, because
+    listing both directories on a 200-account tenant takes longer than a
+    request should hold.
+    """
+    require_login(op)
+
+    def _launch() -> tuple[bool, str]:
+        log = _identity_map_log_path(op.account_id)
+        argv = ([PY, "main.py"] + _account_argv(op.account_id)
+                + ["init-db", "--auto-map"])
+        if body.include_missing:
+            argv.append("--include-missing")
+        with open(log, "wb") as fh:
+            proc = subprocess.Popen(argv, cwd=HERE, stdout=fh,
+                                    stderr=subprocess.STDOUT,
+                                    stdin=subprocess.DEVNULL,
+                                    start_new_session=True)
+        return True, f"building the identity map, pid {proc.pid}"
+
+    return await _gated(op, "identities.auto_map", body, "identity_map", _launch)
+
+
+@app.get("/api/v2/identities/status")
+async def identities_status(op: Operator = Depends(operator)):
+    """How many users are mapped, and how the last build went."""
+    require_login(op)
+
+    def _read() -> dict:
+        log = _identity_map_log_path(op.account_id)
+        running = False
+        needle = (f"--account-id {op.account_id}"
+                  if op.account_id is not None else None)
+        ps = subprocess.run(["ps", "-eo", "args="], capture_output=True,
+                            text=True).stdout
+        for line in ps.splitlines():
+            if ("init-db" in line and "--auto-map" in line
+                    and "grep" not in line
+                    and (needle is None or needle in line)):
+                running = True
+                break
+        tail: list[str] = []
+        if os.path.isfile(log):
+            with open(log, encoding="utf-8", errors="replace") as fh:
+                tail = [ln.rstrip() for ln in fh.readlines()[-25:]]
+        return {"running": running,
+                "mapped": cpdb.identity_count(op.account_id),
+                "tail": tail}
+
+    return await _off_loop(_read)
+
+
 @app.post("/api/v2/benchmark/start")
 async def benchmark_start(body: StartBenchmark, op: Operator = Depends(operator)):
     """
@@ -1656,6 +1727,13 @@ class StartFullSetup(WriteAction):
     # WHOLE if any requested scope is ungranted, so deselecting a required
     # one would not narrow the migration, it would break it.
     scopes: list[str] = Field(default_factory=list)
+
+
+def _identity_map_log_path(account_id: int | None) -> str:
+    d = os.path.join(HERE, "logs") if account_id is None \
+        else os.path.join(HERE, "logs", str(account_id))
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, "identity-map.log")
 
 
 def _full_setup_state_path(side: str, account_id: int | None) -> str:

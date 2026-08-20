@@ -523,15 +523,36 @@ def cmd_init_db(args, settings: Settings, db: MigrationDB, auth: AuthManager):
         src_users = list_domain_users(auth, "source", settings.source_domain)
         tgt_users = set(list_domain_users(auth, "target", settings.target_domain))
         pairs = []
+        missing = []
         for s in src_users:
             candidate = s.split("@")[0] + "@" + settings.target_domain
             if candidate in tgt_users:
                 pairs.append((s, candidate))
+            elif getattr(args, "include_missing", False):
+                # Map it anyway, so provision-users has something to create.
+                #
+                # Without this the two commands cannot start each other:
+                # auto-map only pairs accounts that already exist on the
+                # target, and provision-users only creates accounts already
+                # in identity_map. A fresh target therefore maps 1 user of
+                # 201 and then reports "nothing to create" -- correctly, and
+                # uselessly. Seen exactly that: a target holding only
+                # info@, mapped to source's info@, with 200 source accounts
+                # invisible to both commands.
+                pairs.append((s, candidate))
+                missing.append(candidate)
             else:
                 log.warning("no target account for %s (expected %s)", s, candidate)
         from db import bulk_seed_identities
         bulk_seed_identities(db, pairs)
         print(f"Auto-mapped {len(pairs)} of {len(src_users)} source users.")
+        if missing:
+            print(f"  {len(missing)} of them have no target account yet. "
+                  f"They are mapped so `provision-users` can create them; "
+                  f"until it does, migrating those users will fail.")
+            print(f"  Creating them consumes a licence each -- run "
+                  f"`provision-users --tenant target --dry-run` first to see "
+                  f"the exact list.")
     print(f"Schema initialised at {settings.db_path}")
 
 
@@ -1044,6 +1065,14 @@ def build_parser() -> argparse.ArgumentParser:
                         "SOURCE_DOMAIN/TARGET_DOMAIN")
     s.add_argument("--auto-map", action="store_true",
                    help="derive mappings by matching localparts across tenants")
+    s.add_argument("--include-missing", action="store_true",
+                   help="with --auto-map, also map source users that have NO "
+                        "target account yet, so provision-users can create "
+                        "them. Without this a fresh target maps almost "
+                        "nothing: auto-map only pairs accounts that already "
+                        "exist, and provision-users only creates accounts "
+                        "already mapped, so neither can start the other. "
+                        "Every account created consumes a licence.")
     s.set_defaults(func=cmd_init_db)
 
     s = sub.add_parser("preflight", help="verify DWD for every mapped user")

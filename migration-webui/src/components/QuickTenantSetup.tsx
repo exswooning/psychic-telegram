@@ -15,6 +15,7 @@ import {
   fetchTenantConfigStatus, uploadCredentials, TenantConfigStatus,
   fetchTenantInventory, TenantInventory,
   startTenantScan, fetchTenantScan,
+  buildIdentityMap, fetchIdentityMapStatus, IdentityMapStatus,
 } from '@/api/controlPlane'
 import { runSeed } from '@/api/client'
 import ReasonCodeDialog from './ReasonCodeDialog'
@@ -375,7 +376,8 @@ const QuickTenantSetup: React.FC<{
   // full_setup.py. Re-running full_setup.py to seed would force a second,
   // unnecessary browser-based DWD sign-in for something that needs neither
   // a browser nor a password.
-  const [postAction, setPostAction] = useState<'seed' | 'provision' | 'maxUsers' | null>(null)
+  const [postAction, setPostAction] = useState<
+    'seed' | 'provision' | 'maxUsers' | 'mapUsers' | null>(null)
   const [postBusy, setPostBusy] = useState(false)
   const [postError, setPostError] = useState<string | null>(null)
   const [postDone, setPostDone] = useState<string | null>(null)
@@ -564,6 +566,29 @@ const QuickTenantSetup: React.FC<{
       .catch(() => { /* the quick figures already loaded; leave it at that */ })
   }, [setUpOk, side, result?.clientId, loadInventory, pollScan, runDeepScan])
 
+  const [identityStatus, setIdentityStatus] = useState<IdentityMapStatus | null>(null)
+
+  // Same polling shape as provisioning below, for the same reason: listing
+  // both directories on a 200-account tenant takes long enough that a
+  // one-shot read reports "running" and then never corrects itself.
+  useEffect(() => {
+    if (side !== 'target' || !showProvisionUsers) return
+    let timer: number | null = null
+    let stopped = false
+    const tick = () => {
+      fetchIdentityMapStatus()
+        .then((st) => {
+          if (stopped) return
+          setIdentityStatus(st)
+          if (!st.running && timer) { window.clearInterval(timer); timer = null }
+        })
+        .catch(() => { /* a blip must not end the watch */ })
+    }
+    tick()
+    timer = window.setInterval(tick, 3000)
+    return () => { stopped = true; if (timer) window.clearInterval(timer) }
+  }, [side, showProvisionUsers, postDone])
+
   // Poll while it runs, not once when it starts.
   //
   // This fetched exactly once immediately after launch -- when `ps` still
@@ -624,6 +649,10 @@ const QuickTenantSetup: React.FC<{
         if (!r.ok) throw new Error(r.error || 'could not add users')
         setJobActive(true)
         setPostDone('adding users until full — live output below')
+      } else if (postAction === 'mapUsers') {
+        await buildIdentityMap(reason, true)
+        setPostDone('mapping users from the source directory')
+        fetchIdentityMapStatus().then(setIdentityStatus).catch(() => {})
       } else if (postAction === 'provision') {
         await startProvision(reason, 'target', false)
         setPostDone('provisioning started')
@@ -992,6 +1021,30 @@ const QuickTenantSetup: React.FC<{
           <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>
             Setup done — provision accounts
           </Typography>
+
+          {/* Step one, and the one that was missing entirely.
+              Auto-mapping pairs only accounts that already exist on BOTH
+              tenants, and provisioning only creates accounts already mapped
+              -- so on a fresh target neither could start the other. A target
+              holding one account mapped one of the source's 201 users and
+              then correctly reported nothing to create, which read as the
+              button doing nothing. */}
+          <Stack direction="row" spacing={2} sx={{ mb: 1.5, flexWrap: 'wrap',
+                                                   gap: 1, alignItems: 'center' }}>
+            <Button variant="outlined" startIcon={<AddUsersIcon />}
+                    disabled={postBusy || identityStatus?.running}
+                    data-testid="build-identity-map"
+                    onClick={() => setPostAction('mapUsers')}>
+              {identityStatus?.running ? 'Mapping…' : 'Map users from source'}
+            </Button>
+            <Typography variant="caption" color="text.secondary"
+                        data-testid="identity-count">
+              {identityStatus
+                ? `${identityStatus.mapped.toLocaleString()} user(s) mapped`
+                : 'checking…'}
+            </Typography>
+          </Stack>
+
           <Stack direction="row" spacing={2} sx={{ flexWrap: 'wrap', gap: 1, alignItems: 'center' }}>
             <Button variant="contained" startIcon={<SeedIcon />}
                     disabled={postBusy || provisionStatus?.running}
