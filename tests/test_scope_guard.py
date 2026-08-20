@@ -993,3 +993,77 @@ class TestDiagnosticsAreActuallyEmittable:
 
         full_setup.log(f"  pre-check could not run ({'boom'}); granting anyway")
         assert "pre-check could not run" in capsys.readouterr().err
+
+
+class TestConsoleFailuresNameAccessNotSelectors:
+    """Setup both provisions projects AND accepts uploaded keys.
+
+    An uploaded key can point at a project the Workspace admin has no IAM
+    role on -- Workspace admin and GCP IAM are separate systems, and an
+    upload carries no relationship to who owns the project behind it. Every
+    console-driven step then runs as an account that cannot open the page.
+
+    Confirmed live: an uploaded key for wsmig-src-96030, whose admin is
+    owner of a DIFFERENT project it created itself, reported "could not find
+    the app name field -- console may have changed".
+    """
+
+    def test_the_hint_names_the_project_the_admin_and_the_fix(self):
+        import full_setup
+
+        hint = full_setup._chat_access_hint(
+            "wsmig-src-96030", "info@source.example.com",
+            "could not find the app name field")
+        assert "wsmig-src-96030" in hint
+        assert "info@source.example.com" in hint
+        assert "add-iam-policy-binding" in hint
+        assert "UPLOADED key" in hint
+
+    def test_it_says_provisioned_projects_do_not_need_this(self):
+        """Otherwise the reader cannot tell whether this is a permanent
+        limitation or a property of how this one tenant was set up."""
+        import full_setup
+
+        hint = full_setup._chat_access_hint("p", "a@b.com", "x")
+        assert "provisions itself get that grant automatically" in hint
+
+    def test_only_the_missing_form_failure_is_reinterpreted(self):
+        """A genuine selector change must keep its own message -- rewriting
+        every Chat failure as a permissions problem would be the same error
+        in the other direction."""
+        import inspect
+
+        import full_setup
+
+        src = inspect.getsource(full_setup.run_full_setup)
+        assert 'if not chat_ok and "name field" in chat_detail:' in src
+
+
+class TestDeployInstallsItsOwnUnitFiles:
+    """systemd/*.service was documented as a one-time manual copy, so every
+    later edit stayed on the dev machine. Found live: xvfb.service existed in
+    the repo and had never been installed at all -- the virtual display the
+    whole browser-automation path depends on was an unmanaged process that
+    would not have survived a reboot."""
+
+    def _script(self):
+        import os
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(here, "sync_vps.sh"), encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_units_are_copied_and_reloaded_before_the_restart(self):
+        src = self._script()
+        assert "/etc/systemd/system/" in src
+        assert "systemctl daemon-reload" in src
+        assert src.index("daemon-reload") < src.index("systemctl restart")
+
+    def test_the_xvfb_unit_exists_to_be_installed(self):
+        import os
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        unit = os.path.join(here, "systemd", "xvfb.service")
+        assert os.path.isfile(unit)
+        body = open(unit, encoding="utf-8").read()
+        assert "Xvfb :99" in body
+        # Restart=always is what makes it survive the browser crashing it.
+        assert "Restart=always" in body

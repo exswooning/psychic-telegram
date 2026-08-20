@@ -127,6 +127,30 @@ def optional_missing_detail(scopes: list[str]) -> str:
             f"nothing else is affected)")
 
 
+def _chat_access_hint(project: str, admin_email: str, detail: str) -> str:
+    """Why the Chat form did not render, when the likely reason is access.
+
+    Setup provisions projects AND accepts uploaded keys. A key uploaded by
+    hand can point at a project the Workspace admin has no IAM role on --
+    Workspace admin and GCP IAM are separate systems, and an upload carries
+    no relationship to who owns the project behind it. Every console-driven
+    step then runs as an account that cannot open the page.
+
+    Confirmed live: an uploaded key for wsmig-src-96030, whose admin owns a
+    different project entirely, reported "could not find the app name field
+    -- console may have changed". Naming the likelier cause costs one line
+    and saves an afternoon spent editing selectors that were fine.
+    """
+    return (f"{detail} — this usually means {admin_email or 'the admin'} has "
+            f"no IAM role on {project}, so the page never rendered. Common "
+            f"with an UPLOADED key: the project behind it was created by a "
+            f"different account. Check with `gcloud projects describe "
+            f"{project}`, then grant access with `gcloud projects "
+            f"add-iam-policy-binding {project} --member=user:{admin_email} "
+            f"--role=roles/editor` from an account that owns it. Projects "
+            f"this tool provisions itself get that grant automatically.")
+
+
 def is_no_browser(detail: str) -> bool:
     """Did this failure come from the host having no browser at all?"""
     return _NO_BROWSER_MARKER in (detail or "")
@@ -307,6 +331,15 @@ def run_full_setup(
                 admin_email, admin_password, project, timeout=90)
             chat_phase.status = "ok" if chat_ok else "skipped"
             chat_phase.detail = chat_detail
+            # A console step that fails because the account cannot SEE the
+            # project must say so. Confirmed live: an uploaded key pointed at
+            # wsmig-src-96030, a project this admin has no role on (it owns a
+            # different one it created itself), and the failure surfaced as
+            # "could not find the app name field -- console may have changed"
+            # -- a selector report for a page that never rendered.
+            if not chat_ok and "name field" in chat_detail:
+                chat_phase.detail = _chat_access_hint(project, admin_email,
+                                                      chat_detail)
         except Exception as exc:      # noqa: BLE001 - never fail setup over this
             chat_phase.status, chat_phase.detail = "skipped", str(exc)[:150]
 

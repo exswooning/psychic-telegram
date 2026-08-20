@@ -78,9 +78,24 @@ def login(email: str, password: str, timeout: int = 180) -> tuple[bool, str, str
     cloudsdk_config = tempfile.mkdtemp(prefix="cloudsdk-")
     env = dict(os.environ, CLOUDSDK_CONFIG=cloudsdk_config)
 
+    # --no-launch-browser and a real stdin pipe.
+    #
+    # On a headless host gcloud cannot receive the OAuth redirect, so it
+    # falls back to printing a URL and BLOCKING on a code read from stdin --
+    # which it did even without the flag, since there was no browser it
+    # could launch itself. Asking for that flow explicitly makes the
+    # behaviour deterministic rather than dependent on what gcloud infers
+    # about the environment.
+    #
+    # stdin=PIPE is the half that was missing: with stdin inherited from a
+    # detached service there is nothing to read, so gcloud got EOF and
+    # reported `gcloud crashed (EOFError): EOF when reading a line` --
+    # which reads like a gcloud bug and is really "nobody pasted the code".
+    # _drive_browser now writes it here.
     proc = subprocess.Popen(
-        ["gcloud", "auth", "login", "--quiet"],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env,
+        ["gcloud", "auth", "login", "--quiet", "--no-launch-browser"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, text=True, env=env,
     )
 
     url = None
@@ -149,6 +164,44 @@ _EMAIL_SEL = '#identifierId, input[name="identifier"], input[type="email"]'
 _PW_SEL = 'input[type="password"][name="Passwd"], input[type="password"]'
 _CONSENT_LABELS = ("Allow", "Continue", "I agree", "Got it")
 
+# Where Google shows the verification code at the end of the out-of-band
+# sign-in flow. It has moved between a readonly <input>, a <textarea>, and a
+# plain element, so all three are tried before falling back to scraping the
+# page text.
+_CODE_SEL = ('input#code', 'input[readonly][value^="4/"]', 'textarea',
+             'input[type="text"][readonly]')
+_CODE_RE = re.compile(r"\b4/[0-9A-Za-z_\-]{20,}")
+
+
+def _extract_auth_code(pg) -> str:
+    """The code gcloud is waiting for on stdin, from the consent result page.
+
+    On a headless host `gcloud auth login` cannot receive a redirect, so it
+    prints a URL and blocks reading a code from stdin. Driving the browser
+    through consent is only half the flow -- without this the sign-in
+    completes in the browser and gcloud sits there until it gets EOF and
+    reports `gcloud crashed (EOFError): EOF when reading a line`, which
+    reads like a gcloud bug rather than a missing paste.
+    """
+    for sel in _CODE_SEL:
+        try:
+            loc = pg.locator(sel)
+            for i in range(min(loc.count(), 3)):
+                val = (loc.nth(i).input_value() if "input" in sel or "textarea" in sel
+                       else loc.nth(i).inner_text())
+                m = _CODE_RE.search(val or "")
+                if m:
+                    return m.group(0)
+        except Exception:      # noqa: BLE001 - try the next shape
+            continue
+    try:
+        m = _CODE_RE.search(pg.inner_text("body"))
+        if m:
+            return m.group(0)
+    except Exception:      # noqa: BLE001
+        pass
+    return ""
+
 
 def _fill_visible(pg, selector: str, value: str) -> bool:
     loc = pg.locator(selector)
@@ -183,7 +236,7 @@ def _drive_browser(proc, url: str, email: str, password: str, timeout: int) -> N
         page = browser.new_page()
         page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
-        typed_email = typed_pw = False
+        typed_email = typed_pw = sent_code = False
         deadline = time.time() + timeout
         while time.time() < deadline and proc.poll() is None:
             for pg in list(browser.contexts[0].pages):
@@ -205,6 +258,21 @@ def _drive_browser(proc, url: str, email: str, password: str, timeout: int) -> N
                                 btn.first.click()
                                 pg.wait_for_timeout(1500)
                                 break
+                        # Consent done: gcloud is blocked reading a code from
+                        # stdin. Hand it over -- clicking Allow is only half
+                        # the flow, and without this it waits until EOF and
+                        # reports "gcloud crashed (EOFError)", which looks
+                        # like a gcloud bug rather than a missing paste.
+                        if not sent_code:
+                            code = _extract_auth_code(pg)
+                            if code:
+                                try:
+                                    proc.stdin.write(code + "\n")
+                                    proc.stdin.flush()
+                                    log("  handed the verification code to gcloud")
+                                    sent_code = True
+                                except Exception:      # noqa: BLE001
+                                    pass
                 except Exception:      # noqa: BLE001 - keep polling
                     continue
             time.sleep(1)

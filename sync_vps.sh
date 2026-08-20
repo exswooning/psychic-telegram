@@ -89,6 +89,25 @@ echo "  stamped DEPLOYED_COMMIT=$COMMIT"
 # beats the nohup+pid-file+kill-by-port dance this replaces, which stays
 # below only as a fallback for a box that hasn't had systemd/*.service
 # copied onto it yet.
+# Install unit files before restarting anything.
+#
+# systemd/*.service was documented as a one-time manual copy, so every later
+# edit to a unit stayed on the dev machine while the VPS kept running the
+# version installed months earlier. Found live: xvfb.service existed in the
+# repo and had never been installed at all, so the virtual display the whole
+# browser-automation path depends on was an unmanaged process that would not
+# have survived a reboot.
+#
+# --no-reload on the copy, then one daemon-reload: cheap, idempotent, and it
+# makes the units in git the units that actually run.
+if [[ -d "$(cd "$(dirname "$0")" && pwd)/systemd" ]]; then
+  rsync -az -e "${SSH[*]}" \
+    "$(cd "$(dirname "$0")" && pwd)/systemd/"*.service \
+    "$TARGET:/etc/systemd/system/" 2>/dev/null \
+    && "${SSH[@]}" "$TARGET" "systemctl daemon-reload" >/dev/null 2>&1 \
+    && echo "  systemd units installed"
+fi
+
 if "${SSH[@]}" "$TARGET" "systemctl list-unit-files bitport-webui.service >/dev/null 2>&1"; then
   "${SSH[@]}" "$TARGET" "systemctl restart bitport-webui bitport-api; sleep 2; \
     if systemctl is-active --quiet bitport-webui && systemctl is-active --quiet bitport-api; then \
