@@ -29,6 +29,32 @@ rsync -az -e "${SSH[*]}" \
   "$(cd "$(dirname "$0")" && pwd)/" "$TARGET:$DEST/" || exit 1
 echo "  synced to $TARGET:$DEST"
 
+# Second pass, scoped to the built frontend, WITH --delete.
+#
+# Vite fingerprints every bundle (index-<hash>.js), so each deploy writes a
+# new filename and the main rsync -- which has no --delete, deliberately,
+# because the remote owns its keys, ledger and logs -- leaves every previous
+# one behind forever. Measured on this VPS after ~70 deploys: 70 bundles,
+# 50 MB of dist/assets on a box with 3.7 GB of RAM and a small disk, none of
+# it reachable.
+#
+# --delete is safe HERE and nowhere else in this script: `npm run build`
+# regenerates dist/ wholesale, so the local copy is the complete and
+# authoritative set. Scoping it to one directory is what makes that true --
+# a blanket --delete would take the remote's own state with it.
+#
+# Skipped entirely when there is no local build, so a deploy from a checkout
+# that has not run `npm run build` cannot wipe the frontend the remote is
+# currently serving.
+LOCAL_DIST="$(cd "$(dirname "$0")" && pwd)/migration-webui/dist"
+if [[ -f "$LOCAL_DIST/index.html" ]]; then
+  rsync -az --delete -e "${SSH[*]}" \
+    "$LOCAL_DIST/" "$TARGET:$DEST/migration-webui/dist/" || exit 1
+  echo "  frontend dist synced (stale bundles pruned)"
+else
+  echo "  no local frontend build -- left the remote's dist/ untouched"
+fi
+
 # The remote is an rsync of the tree, not a git checkout, so anything there
 # that asks git what it is running gets no answer -- benchmark_run.py
 # recorded every VPS run as commit "unknown", which makes those runs
