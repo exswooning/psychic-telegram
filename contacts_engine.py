@@ -52,6 +52,33 @@ WRITE_FIELDS = [
 ]
 
 
+def _strip_source_metadata(value):
+    """Remove per-field `metadata` before writing a contact.
+
+    people.connections.list returns every field annotated with where it came
+    from -- `metadata.source.id`, pointing at a record in the SOURCE tenant.
+    Sending that back to createContact fails the whole call with:
+
+        HTTP 400 (INVALID_ARGUMENT): Fields with source ids are not allowed.
+
+    Confirmed live: every contact of every user failed this way, 50 for 50
+    on a two-user canary, while Drive, Calendar and Tasks in the same run
+    succeeded. The ids describe provenance in a tenant the target knows
+    nothing about, so there is nothing to preserve by keeping them -- the
+    target assigns its own.
+
+    Recursive because these fields are lists of dicts (several phone
+    numbers, each with its own metadata), and dict-or-list because
+    WRITE_FIELDS holds both shapes.
+    """
+    if isinstance(value, list):
+        return [_strip_source_metadata(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _strip_source_metadata(v) for k, v in value.items()
+                if k != "metadata"}
+    return value
+
+
 class ContactsMigrator:
     def __init__(self, auth, db, settings, source_user: str, target_user: str):
         self.auth = auth
@@ -156,7 +183,8 @@ class ContactsMigrator:
             self.stats["contacts"] += 1
             return
 
-        body = {f: person[f] for f in WRITE_FIELDS if person.get(f)}
+        body = {f: _strip_source_metadata(person[f])
+                for f in WRITE_FIELDS if person.get(f)}
         if not body:
             # A contact with no name, address or number is not a contact; it
             # is usually a stub left by an app. Recorded so the count still

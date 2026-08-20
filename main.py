@@ -122,6 +122,38 @@ def _install_signal_handlers() -> None:
 _NO_MAILBOX = ("mail service not enabled", "failedprecondition")
 
 
+def _services_that_succeeded(services: dict) -> list[str]:
+    """Which services may be recorded as done for this user.
+
+    A service is skipped on the next run once it is marked done, so marking
+    one that failed outright makes the failure permanent: the fix can never
+    be applied, because the user is never looked at again.
+
+    Confirmed live and immediately: every contact of a canary user failed
+    with "Fields with source ids are not allowed", contacts was marked done
+    anyway, and re-running after fixing the bug reported "no users to
+    process". The data was recoverable; the ledger said otherwise.
+
+    A service that migrated SOMETHING and failed some items still counts as
+    done -- the per-item ledger already skips what landed and retries what
+    did not, so those users are not stranded. It is the all-or-nothing
+    failure that has to stay un-marked.
+    """
+    done = []
+    for name, stats in (services or {}).items():
+        if not isinstance(stats, dict):
+            done.append(name)
+            continue
+        failed = sum(v for k, v in stats.items()
+                     if k.endswith("failed") and isinstance(v, int))
+        moved = sum(v for k, v in stats.items()
+                    if isinstance(v, int) and not k.endswith("failed"))
+        if failed and not moved:
+            continue
+        done.append(name)
+    return done
+
+
 def explain_user_failure(exc: Exception, source_user: str,
                          target_user: str) -> str:
     """Turn an engine exception into something an operator can act on.
@@ -213,7 +245,8 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
         if track_status:
             db.set_identity_status(source_user, status)
             if status == "DONE":
-                db.mark_services_done(source_user, result["services"].keys())
+                db.mark_services_done(source_user,
+                                      _services_that_succeeded(result["services"]))
         result["status"] = status
 
     except Exception as exc:  # noqa: BLE001 - worker must not propagate

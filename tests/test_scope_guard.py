@@ -1160,3 +1160,115 @@ class TestUnlicensedAccountsAreNamedAsSuch:
             RuntimeError("HTTP 400 (failedPrecondition): bad label id"),
             "a@s", "a@t")
         assert "licence" not in out.lower()
+
+
+class TestContactsStripSourceProvenance:
+    """people.connections.list annotates every field with where it came from
+    -- metadata.source.id, pointing at a record in the SOURCE tenant.
+    Sending that back to createContact fails the whole call:
+
+        HTTP 400 (INVALID_ARGUMENT): Fields with source ids are not allowed.
+
+    Confirmed live: 50 of 50 contacts failed this way on a two-user canary,
+    while Drive, Calendar and Tasks in the same run succeeded.
+    """
+
+    def test_field_metadata_is_removed(self):
+        import contacts_engine as ce
+
+        out = ce._strip_source_metadata(
+            {"value": "a@b.com", "metadata": {"source": {"id": "x"}}})
+        assert out == {"value": "a@b.com"}
+
+    def test_it_recurses_into_lists_of_fields(self):
+        """These arrive as lists -- several phone numbers, each carrying its
+        own metadata -- so stripping only the outer dict leaves the ids in
+        place and the call still fails."""
+        import contacts_engine as ce
+
+        out = ce._strip_source_metadata([
+            {"value": "+1", "metadata": {"source": {"id": "x"}}, "type": "home"},
+            {"value": "+2", "metadata": {"source": {"id": "y"}}},
+        ])
+        assert out == [{"value": "+1", "type": "home"}, {"value": "+2"}]
+
+    def test_nested_metadata_is_removed_too(self):
+        import contacts_engine as ce
+
+        out = ce._strip_source_metadata(
+            {"name": {"givenName": "A", "metadata": {"source": {"id": "z"}}}})
+        assert out == {"name": {"givenName": "A"}}
+
+    def test_everything_else_survives_untouched(self):
+        """Stripping more than provenance would silently drop real contact
+        data -- the failure mode would be a migration that succeeds with
+        emptier contacts, which is worse than one that errors."""
+        import contacts_engine as ce
+
+        person = {"givenName": "Ada", "familyName": "Lovelace",
+                  "value": "ada@example.com", "type": "work"}
+        assert ce._strip_source_metadata(person) == person
+
+    def test_scalars_pass_through(self):
+        import contacts_engine as ce
+
+        assert ce._strip_source_metadata("plain") == "plain"
+        assert ce._strip_source_metadata(7) == 7
+
+    def test_the_migrator_still_has_its_method(self):
+        """The first attempt at this fix put the helper at column 0 inside
+        the class body, which ended the class and turned _migrate_contact
+        into a nested function -- the file still parsed and the method was
+        simply gone."""
+        import contacts_engine as ce
+
+        assert hasattr(ce.ContactsMigrator, "_migrate_contact")
+
+
+class TestAWhollyFailedServiceIsNotMarkedDone:
+    """A service marked done is skipped on every later run, so marking one
+    that failed outright makes the failure permanent -- the fix can never be
+    applied because the user is never looked at again.
+
+    Confirmed live and immediately: every contact of a canary user failed
+    with "Fields with source ids are not allowed", contacts was marked done
+    anyway, and re-running after fixing the bug reported "no users to
+    process". The data was recoverable; the ledger said otherwise.
+    """
+
+    def test_a_service_where_everything_failed_is_not_recorded(self):
+        import main
+
+        assert main._services_that_succeeded(
+            {"contacts": {"contacts": 0, "failed": 50, "skipped": 0}}) == []
+
+    def test_a_partial_failure_still_counts_as_done(self):
+        """The per-item ledger already skips what landed and retries what did
+        not, so those users are not stranded -- only the all-or-nothing case
+        needs protecting, and treating every failure as un-done would
+        re-walk whole mailboxes for one bad message."""
+        import main
+
+        assert main._services_that_succeeded(
+            {"gmail": {"inserted": 4333, "failed": 2}}) == ["gmail"]
+
+    def test_a_clean_run_is_recorded(self):
+        import main
+
+        assert main._services_that_succeeded(
+            {"drive": {"files": 82, "folders": 48, "failed": 0}}) == ["drive"]
+
+    def test_nothing_to_migrate_still_counts_as_done(self):
+        """A user with no tasks has finished tasks. Leaving it un-marked
+        would re-check it on every run forever."""
+        import main
+
+        assert main._services_that_succeeded(
+            {"tasks": {"tasks": 0, "failed": 0}}) == ["tasks"]
+
+    def test_an_unexpected_stats_shape_is_recorded_rather_than_dropped(self):
+        """An engine returning something this does not understand must not
+        silently cause its users to be re-migrated forever."""
+        import main
+
+        assert main._services_that_succeeded({"chat": "ok"}) == ["chat"]
