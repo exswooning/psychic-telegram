@@ -194,8 +194,21 @@ def deep_probe(auth: AuthManager, settings: Settings, side: str,
     # is recorded per user like any other partial -- "not granted" and "none
     # present" stay distinguishable.
     try:
-        chat = (auth.source_chat if side == "source"
-                else auth.target_chat)(email)
+        # A client built from settings with migrate_chat off does not REQUEST
+        # the chat scopes, so every call 403s with "insufficient
+        # authentication scopes" no matter what the console has granted.
+        # Probing unconditionally (above) was only half the fix: the client
+        # has to ask for them too. Confirmed live -- this reported 0 spaces
+        # on a tenant that has one, because the 403 landed in the error field
+        # while the count defaulted to 0.
+        import dataclasses
+        try:
+            chat_settings = dataclasses.replace(settings, migrate_chat=True)
+        except Exception:      # noqa: BLE001 - not a dataclass in some builds
+            chat_settings = settings
+        chat_auth = type(auth)(chat_settings) if chat_settings is not settings else auth
+        chat = (chat_auth.source_chat if side == "source"
+                else chat_auth.target_chat)(email)
         ch = inventory.scan_chat(chat)
         out["chatSpaces"] = ch.get("spaces")
         out["chatMessages"] = ch.get("messages")
@@ -356,8 +369,13 @@ def snapshot(settings: Settings, side: str, limit: int | None = None,
         # deepSampled to say what the denominator is.
         for key in ("shared", "external", "anyone"):
             out["totals"][key] = sum(r.get(key) or 0 for r in sample)
+        # None means "not measured" and must not sum as 0 -- the same
+        # distinction the per-account em dash makes. A tenant whose Chat
+        # could not be read reported a confident 0 for a tenant that has
+        # Chat, which is the one wrong answer nobody double-checks.
         for key in ("calendarEvents", "chatSpaces", "chatMessages"):
-            out["totals"][key] = sum(r.get(key) or 0 for r in sample)
+            vals = [r.get(key) for r in sample if r.get(key) is not None]
+            out["totals"][key] = sum(vals) if vals else None
         kinds: dict[str, int] = {}
         for r in sample:
             for k, v in (r.get("driveKinds") or {}).items():

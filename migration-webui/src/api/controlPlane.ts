@@ -616,7 +616,10 @@ export interface TenantInventory {
     emails: number; threads: number; driveBytes: number; covered: number
     // Deep-scan only.
     shared?: number; external?: number; anyone?: number
-    calendarEvents?: number; chatSpaces?: number; chatMessages?: number
+    /** null when the scan could not read it -- distinct from a
+     *  measured zero, and rendered as a dash rather than 0. */
+    calendarEvents?: number | null
+    chatSpaces?: number | null; chatMessages?: number | null
     driveKinds?: Record<string, number>
   }
   truncated: boolean

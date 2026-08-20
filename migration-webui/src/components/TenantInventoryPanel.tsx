@@ -148,11 +148,19 @@ export const TenantInventoryPanel: React.FC<TenantInventoryPanelProps> = ({
                     value={(inv.totals.external ?? 0).toLocaleString()} />
               <Stat id="anyone" label="link-shared to anyone" pending={!inv.deep}
                     value={(inv.totals.anyone ?? 0).toLocaleString()} />
-              <Stat id="events" label="calendar events" pending={!inv.deep}
+              <Stat id="events" label="calendar events"
+                    pending={!inv.deep || inv.totals.calendarEvents == null}
                     value={(inv.totals.calendarEvents ?? 0).toLocaleString()} />
-              <Stat id="chat" label="Chat messages" pending={!inv.deep}
+              {/* null here means the scan could not read Chat at all --
+                  a different fact from "this tenant has none", and the one
+                  that gets believed if it renders as 0. It did: a tenant
+                  with a live Chat space reported 0 because the probe 403'd
+                  and the count defaulted. */}
+              <Stat id="chat" label="Chat messages"
+                    pending={!inv.deep || inv.totals.chatMessages == null}
                     value={(inv.totals.chatMessages ?? 0).toLocaleString()} />
-              <Stat id="spaces" label="Chat spaces" pending={!inv.deep}
+              <Stat id="spaces" label="Chat spaces"
+                    pending={!inv.deep || inv.totals.chatSpaces == null}
                     value={(inv.totals.chatSpaces ?? 0).toLocaleString()} />
             </>
           )}

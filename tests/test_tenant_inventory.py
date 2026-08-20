@@ -529,3 +529,82 @@ class TestChatIsReportedRegardlessOfMigrationFlags:
                                           "a@x.com")
         assert out["chatSpaces"] is None
         assert "chat: unauthorized_client" in out["error"]
+
+
+class TestChatNeedsItsScopesRequestedNotJustGranted:
+    """Probing Chat unconditionally was only half the fix.
+
+    A client built from settings with migrate_chat off does not REQUEST the
+    chat scopes, so every call 403s with "insufficient authentication
+    scopes" no matter what the Admin Console has granted. Confirmed live:
+    the panel reported 0 spaces on a tenant that has one, because the 403
+    landed in the error field while the count defaulted to 0 -- the one
+    wrong answer nobody double-checks.
+    """
+
+    def test_the_chat_client_is_built_with_chat_enabled(self, monkeypatch):
+        import dataclasses
+
+        import inventory
+
+        seen = {}
+
+        @dataclasses.dataclass
+        class S:
+            migrate_chat: bool = False
+            source_domain: str = "x.com"
+
+        class FakeAuth:
+            def __init__(self, settings=None):
+                self.settings = settings
+            def source_drive(self, u):
+                raise RuntimeError("not under test")
+            def source_calendar(self, u):
+                raise RuntimeError("not under test")
+            def source_chat(self, u):
+                seen["migrate_chat"] = self.settings.migrate_chat
+                return object()
+
+        monkeypatch.setattr(inventory, "scan_chat",
+                            lambda c: {"spaces": 1, "messages": 4})
+        out = tenant_inventory.deep_probe(FakeAuth(S()), S(), "source", "a@x.com")
+        assert seen["migrate_chat"] is True, (
+            "the chat client must request the chat scopes, or every call 403s")
+        assert out["chatSpaces"] == 1
+
+
+class TestUnknownIsNotZero:
+    """A total summed from nothing is not 0.
+
+    The per-account view already renders an unread account as an em dash;
+    the TOTALS quietly defaulted the same missing values to 0 and summed
+    them, so a tenant whose Chat could not be read reported a confident zero.
+    """
+
+    def _rows(self, monkeypatch, wired, chat_value):
+        settings, install = wired
+        emails = ["a@x.com", "b@x.com"]
+        install(FakeAuth(
+            emails=emails,
+            profiles={e: {"messagesTotal": 1, "threadsTotal": 1} for e in emails},
+            quotas={e: {"usageInDrive": "1"} for e in emails}))
+        monkeypatch.setattr(tenant_inventory, "deep_probe",
+                            lambda a, s, side, e: {
+                                "driveKinds": {}, "shared": 1, "external": 0,
+                                "anyone": 0, "calendarEvents": 3,
+                                "calendars": 1, "chatSpaces": chat_value,
+                                "chatMessages": chat_value, "error": ""})
+        return tenant_inventory.snapshot(settings, "source", deep=True,
+                                         deep_sample=2)
+
+    def test_an_unreadable_metric_totals_to_none_not_zero(self, wired, monkeypatch):
+        snap = self._rows(monkeypatch, wired, None)
+        assert snap["totals"]["chatSpaces"] is None
+        assert snap["totals"]["chatMessages"] is None
+        # Something that WAS measured still totals normally.
+        assert snap["totals"]["calendarEvents"] == 6
+
+    def test_a_genuine_zero_still_totals_to_zero(self, wired, monkeypatch):
+        """A tenant that really has no Chat must not read as unknown."""
+        snap = self._rows(monkeypatch, wired, 0)
+        assert snap["totals"]["chatSpaces"] == 0
