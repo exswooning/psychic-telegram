@@ -2197,6 +2197,84 @@ async def list_migrations(op: Operator = Depends(operator)):
     return await _off_loop(_read)
 
 
+@app.get("/api/v2/migrations/{account_id}")
+async def migration_detail(account_id: int, op: Operator = Depends(operator)):
+    """One tenant pair in full: what moved, what failed, and why.
+
+    Failures are grouped by REASON rather than listed per item. A migration
+    that fails 50 contacts fails them for one cause, and a scrolling list of
+    fifty identical HTTP 400s hides that -- the count and one example are
+    what an operator acts on. The affected users are named for each cause,
+    because "which mailboxes are affected" is the next question every time.
+    """
+    require_login(op)
+    if not op.is_superadmin and account_id != op.account_id:
+        raise HTTPException(403, "that migration belongs to another account")
+
+    def _read() -> dict:
+        src = accounts_auth.get_tenant_config(account_id, "source") or {}
+        tgt = accounts_auth.get_tenant_config(account_id, "target") or {}
+        out = {
+            "accountId": account_id,
+            "sourceDomain": src.get("domain") or "",
+            "targetDomain": tgt.get("domain") or "",
+            "progress": _migration_progress(account_id),
+            "items": [], "failures": [], "failedUsers": [],
+            "running": bool([j for j in job_admission.list_active()
+                             if j.get("account_id") == account_id]),
+            "error": "",
+        }
+        try:
+            from config import Settings
+            path = Settings(account_id=account_id).db_path
+        except Exception as exc:      # noqa: BLE001
+            out["error"] = str(exc)[:200]
+            return out
+        if not os.path.isfile(path):
+            out["error"] = "this account has no migration ledger yet"
+            return out
+
+        try:
+            with cpdb.ro(path) as conn:
+                out["items"] = [
+                    {"type": r["type"], "count": r["n"]}
+                    for r in conn.execute(
+                        "SELECT type, COUNT(*) n FROM id_mapping "
+                        "GROUP BY type ORDER BY n DESC")]
+
+                # Grouped by the first line of the message: the useful part
+                # is before the URL and the request id, which differ per
+                # item and would split one cause into fifty groups.
+                out["failures"] = [
+                    {"reason": (r["reason"] or "").strip()[:300],
+                     "itemType": r["item_type"], "count": r["n"],
+                     "users": [u for u in (r["users"] or "").split(",")[:5] if u]}
+                    for r in conn.execute(
+                        "SELECT item_type, COUNT(*) n, "
+                        "       substr(error_message, 1, 120) reason, "
+                        "       group_concat(DISTINCT source_user) users "
+                        "FROM audit_log WHERE status='FAILED' "
+                        "GROUP BY item_type, reason ORDER BY n DESC LIMIT 25")]
+
+                # `notes` is where set_identity_status records why -- which
+                # is now the enriched licence explanation rather than a raw
+                # HTTP 400 (see main.explain_user_failure).
+                out["failedUsers"] = [
+                    {"sourceUser": r["source_email"],
+                     "targetUser": r["target_email"],
+                     "detail": (r["notes"] or "")[:400]}
+                    for r in conn.execute(
+                        "SELECT source_email, target_email, notes "
+                        "FROM identity_map "
+                        "WHERE entity_type='user' AND status='FAILED' "
+                        "ORDER BY source_email")]
+        except Exception as exc:      # noqa: BLE001 - report, never 500
+            out["error"] = f"could not read the ledger: {str(exc)[:160]}"
+        return out
+
+    return await _off_loop(_read)
+
+
 @app.get("/api/v2/nodes/join")
 async def node_join_details(reveal: bool = False,
                             op: Operator = Depends(operator)):

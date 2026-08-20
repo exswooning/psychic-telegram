@@ -499,6 +499,30 @@ export interface MigrationRow {
   progress: MigrationProgress
 }
 
+export interface MigrationFailure {
+  reason: string
+  itemType: string
+  count: number
+  /** Up to five affected mailboxes -- "which users" is the next question
+   *  every time, and a per-item list would bury it. */
+  users: string[]
+}
+
+export interface MigrationDetail {
+  accountId: number
+  sourceDomain: string
+  targetDomain: string
+  running: boolean
+  progress: MigrationProgress
+  items: Array<{ type: string; count: number }>
+  failures: MigrationFailure[]
+  failedUsers: Array<{ sourceUser: string; targetUser: string; detail: string }>
+  error: string
+}
+
+export const fetchMigrationDetail = (accountId: number) =>
+  cpFetch<MigrationDetail>(`/api/v2/migrations/${accountId}`)
+
 export const fetchMigrations = () =>
   cpFetch<{ migrations: MigrationRow[]; maxConcurrent: number; activeTotal: number }>(
     '/api/v2/migrations')

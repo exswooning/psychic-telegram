@@ -125,7 +125,7 @@ export const Migrations: React.FC = () => {
                    data-testid={`migration-${row.accountId}`}
                    sx={{ p: 2, cursor: 'pointer',
                          '&:hover': { borderColor: 'primary.main' } }}
-                   onClick={() => navigate('/running-now')}>
+                   onClick={() => navigate(`/migrations/${row.accountId}`)}>
               <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
                 <Typography sx={{ fontWeight: 700, fontSize: 15 }}>
                   {row.sourceDomain || '—'}
