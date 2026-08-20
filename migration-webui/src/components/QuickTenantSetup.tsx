@@ -567,6 +567,11 @@ const QuickTenantSetup: React.FC<{
   }, [setUpOk, side, result?.clientId, loadInventory, pollScan, runDeepScan])
 
   const [identityStatus, setIdentityStatus] = useState<IdentityMapStatus | null>(null)
+  // Transitions, not levels: a flag alone re-fires on every remount.
+  const identityRunningRef = useRef(false)
+  const provisionRunningRef = useRef(false)
+  const chainProvisionRef = useRef(false)
+  const chainReasonRef = useRef('')
 
   // Same polling shape as provisioning below, for the same reason: listing
   // both directories on a 200-account tenant takes long enough that a
@@ -579,8 +584,21 @@ const QuickTenantSetup: React.FC<{
       fetchIdentityMapStatus()
         .then((st) => {
           if (stopped) return
+          const wasRunning = identityRunningRef.current
+          identityRunningRef.current = st.running
           setIdentityStatus(st)
           if (!st.running && timer) { window.clearInterval(timer); timer = null }
+          // Mapping only writes identity_map; the accounts still have to be
+          // created, and doing that as a separate click meant a target that
+          // said "201 mapped" next to "0 created" and looked stuck. Chained
+          // on the transition, not on the flag, so re-mounting the panel
+          // after a finished map cannot re-trigger it.
+          if (wasRunning && !st.running && chainProvisionRef.current) {
+            chainProvisionRef.current = false
+            startProvision(chainReasonRef.current, 'target', false)
+              .then(() => setPostDone('creating the accounts that do not exist yet'))
+              .catch((e) => setPostError(e instanceof Error ? e.message : String(e)))
+          }
         })
         .catch(() => { /* a blip must not end the watch */ })
     }
@@ -618,7 +636,15 @@ const QuickTenantSetup: React.FC<{
                 fetchProvisionStatus('target').then(setProvisionStatus).catch(() => {})
               }
             }, 1500)
+            // Provisioning is the one action here that CHANGES the tenant,
+            // so the panel above it is stale the moment it finishes. It read
+            // "1 account" beside "200 created", which is the panel
+            // contradicting itself on the same screen.
+            if (provisionRunningRef.current) {
+              loadInventory(false, true)
+            }
           }
+          provisionRunningRef.current = st.running
         })
         .catch(() => { /* a blip must not end the watch */ })
     }
@@ -629,7 +655,7 @@ const QuickTenantSetup: React.FC<{
       stopped = true
       if (timer) window.clearInterval(timer)
     }
-  }, [side, showProvisionUsers, postDone])
+  }, [side, showProvisionUsers, postDone, loadInventory])
 
   const runPostAction = async (reason: string) => {
     setPostBusy(true); setPostError(null)
@@ -650,8 +676,15 @@ const QuickTenantSetup: React.FC<{
         setJobActive(true)
         setPostDone('adding users until full — live output below')
       } else if (postAction === 'mapUsers') {
+        // The Reason Code is carried into the provisioning call the chain
+        // fires next, so the account creation is audited under the same
+        // reason the operator actually gave -- not a synthesised one.
+        chainReasonRef.current = reason
+        chainProvisionRef.current = true
+        identityRunningRef.current = true
         await buildIdentityMap(reason, true)
-        setPostDone('mapping users from the source directory')
+        setPostDone('mapping users from the source directory, then creating '
+                    + 'the ones that do not exist yet')
         fetchIdentityMapStatus().then(setIdentityStatus).catch(() => {})
       } else if (postAction === 'provision') {
         await startProvision(reason, 'target', false)
@@ -1035,7 +1068,7 @@ const QuickTenantSetup: React.FC<{
                     disabled={postBusy || identityStatus?.running}
                     data-testid="build-identity-map"
                     onClick={() => setPostAction('mapUsers')}>
-              {identityStatus?.running ? 'Mapping…' : 'Map users from source'}
+              {identityStatus?.running ? 'Mapping…' : 'Map & create users from source'}
             </Button>
             <Typography variant="caption" color="text.secondary"
                         data-testid="identity-count">
