@@ -461,6 +461,48 @@ export const startFullSetup = (
     }),
   })
 
+// -- Multi-node claims -------------------------------------------------------
+// A migration spread across machines needs one atomic answer to "is this
+// user mine?" -- see user_claims.py. These read that; nothing here hands out
+// work, because nodes claim it themselves.
+export interface UserClaim {
+  account_id: number | null
+  source_user: string
+  node_id: string
+  status: 'CLAIMED' | 'DONE' | 'FAILED'
+  services: string
+  claimed_at: string
+  renewed_at: string
+  lease_expires: string
+  forced_from: string
+  detail: string
+  /** Lease still valid. */
+  live: boolean
+  /** Claimed, but the lease lapsed -- the node died. NOT free for another
+   *  node to take: resume reads the dead node's own local ledger. */
+  stale: boolean
+}
+
+export interface ClaimSummary {
+  nodes: Array<{ node: string; claimed: number; done: number; failed: number; stale: number }>
+  total: number; done: number; failed: number; stale: number
+}
+
+export const fetchClaims = () =>
+  cpFetch<{ claims: UserClaim[]; summary: ClaimSummary }>('/api/v2/claims')
+
+export interface NodeJoinDetails {
+  enabled: boolean
+  /** Masked unless explicitly revealed. */
+  token: string
+  revealed: boolean
+  coordinatorUrl: string
+  leaseSeconds: number
+}
+
+export const fetchNodeJoin = (reveal = false) =>
+  cpFetch<NodeJoinDetails>(`/api/v2/nodes/join?reveal=${reveal}`)
+
 export interface ScopeOptions {
   side: 'source' | 'target'
   /** Cannot be deselected: a delegated token request fails WHOLE if any

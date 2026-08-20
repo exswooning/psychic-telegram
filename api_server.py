@@ -2035,6 +2035,45 @@ async def claims_release(body: ClaimBody, _: None = Depends(node_auth)):
     return await _off_loop(_do)
 
 
+@app.get("/api/v2/nodes/join")
+async def node_join_details(reveal: bool = False,
+                            op: Operator = Depends(operator)):
+    """What a worker node needs to reach this coordinator.
+
+    Superadmin-only, and that is not caution for its own sake: the node
+    token is currently ONE shared secret for the whole control plane, and
+    the claim body carries its own accountId -- so anything holding the
+    token can claim users for any account, not just the one that read it
+    here. Handing it to every signed-in client would turn a per-account
+    credential boundary into none at all. Making the token per-account is
+    the real fix and is not done yet; until it is, this stays behind the
+    role that already spans accounts.
+
+    The token is masked unless `reveal` is asked for explicitly, so the
+    common case (checking whether nodes are configured at all) does not put
+    a live credential on screen or in a screenshot.
+    """
+    require_login(op)
+    require_superadmin(op)
+
+    def _read() -> dict:
+        token = os.getenv("BITPORT_NODE_TOKEN", "").strip()
+        shown = token if reveal else (
+            f"{token[:4]}{'•' * 12}{token[-4:]}" if len(token) > 8 else "")
+        return {
+            "enabled": bool(token),
+            "token": shown,
+            "revealed": bool(reveal and token),
+            # What a node should POST to. The public origin works today and
+            # is token-authenticated; a tailnet address is tighter and is
+            # what BITPORT_COORDINATOR would be set to instead.
+            "coordinatorUrl": os.getenv("BITPORT_PUBLIC_ORIGIN", "").strip(),
+            "leaseSeconds": user_claims_mod.LEASE_SECONDS,
+        }
+
+    return await _off_loop(_read)
+
+
 @app.get("/api/v2/claims")
 async def claims_list(op: Operator = Depends(operator)):
     """Who is migrating what, for this account. Operator-facing, so it goes

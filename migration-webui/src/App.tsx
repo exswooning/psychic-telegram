@@ -7,6 +7,7 @@ import Pricing from '@/pages/Pricing'
 import Wizard from '@/pages/Wizard'
 import Jobs from '@/pages/Jobs'
 import RunningNow from '@/pages/RunningNow'
+import Nodes from '@/pages/Nodes'
 import MissionControl from '@/pages/MissionControl'
 import Users from '@/pages/Users'
 import UserDetail from '@/pages/UserDetail'
@@ -80,6 +81,7 @@ const App: React.FC = () => {
             <Route path="/mission-control" element={<MissionControl />} />
             <Route path="/jobs" element={<Jobs />} />
             <Route path="/running-now" element={<RunningNow />} />
+            <Route path="/nodes" element={<Nodes />} />
             <Route path="/wizard" element={<Wizard />} />
             {/* Setup Wizard and Seed Wizard merged into one doorway --
                old bookmarks/links still land on the Seed path directly. */}

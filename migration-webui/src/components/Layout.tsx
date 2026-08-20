@@ -46,6 +46,7 @@ import {
   Rule as ScopeIconNav,
   Terminal as LogsIconNav,
   DeleteForever as TeardownIconNav,
+  Hub as NodesIconNav,
 } from '@mui/icons-material'
 import { useMigrationStore } from '@/store'
 import { fetchConfig, fetchJob, ConfigPayload, HostInfo, JobStatus, stopJob } from '@/api/client'
@@ -87,6 +88,11 @@ const OPERATOR_NAV_ITEMS = [
   { path: '/scope', label: 'Scope', icon: <ScopeIconNav /> },
   { path: '/logs', label: 'Logs', icon: <LogsIconNav /> },
   { path: '/gcp-teardown', label: 'GCP Teardown', icon: <TeardownIconNav /> },
+  // Superadmin, matching the join endpoint it reads: the node token is one
+  // shared secret for the whole control plane today, so anything holding it
+  // can claim users for any account. Until that token is per-account, the
+  // page that shows it belongs behind the role that already spans accounts.
+  { path: '/nodes', label: 'Nodes', icon: <NodesIconNav /> },
 ]
 
 const formatEta = (seconds: number): string => {
