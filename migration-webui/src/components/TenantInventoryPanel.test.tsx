@@ -188,3 +188,55 @@ describe('TenantInventoryPanel — deep scan honesty', () => {
     expect(screen.queryByTestId('sample-note')).toBeNull()
   })
 })
+
+describe('deep data must not be overwritten by a shallower read', () => {
+  /**
+   * The quick read and the stored deep scan are fetched together and race.
+   * The stored scan answers in milliseconds; the quick read walks every
+   * account and takes ~30 seconds on a 201-account tenant -- so it lands
+   * LAST and overwrote a complete scan. Sharing, Chat and calendar columns
+   * were present one moment and gone the next.
+   *
+   * The rule lives in the parent's applyInv, so this pins the property the
+   * panel depends on: a rendered deep snapshot has columns a quick one does
+   * not, and losing them is a visible regression, not a cosmetic one.
+   */
+  const deep = () => inv({
+    deep: true, deepSampled: 3,
+    totals: { emails: 30, threads: 12, driveBytes: 3072, covered: 2,
+              shared: 9, external: 4, anyone: 2, calendarEvents: 51,
+              chatMessages: 7, chatSpaces: 2, driveKinds: { document: 12 } },
+  })
+
+  it('a deep snapshot renders the columns a quick one cannot', () => {
+    const { rerender } = render(
+      <TenantInventoryPanel inv={inv()} busy={false} error=""
+                            domain="src.example.com" onRefresh={() => {}} />)
+    expect(screen.queryByTestId('stat-shared')).toBeNull()
+
+    rerender(<TenantInventoryPanel inv={deep()} busy={false} error=""
+                                   domain="src.example.com" onRefresh={() => {}} />)
+    expect(screen.getByTestId('stat-shared')).toHaveTextContent('9')
+    expect(screen.getByTestId('stat-chat')).toHaveTextContent('7')
+    expect(screen.getByTestId('stat-spaces')).toHaveTextContent('2')
+    expect(screen.getByTestId('stat-events')).toHaveTextContent('51')
+  })
+
+  it('shows scan progress instead of a bare spinner while running', () => {
+    /* A 200-account scan that says nothing for an hour is indistinguishable
+       from one that has died -- and they have died. */
+    render(<TenantInventoryPanel inv={inv()} busy error=""
+                                 domain="src.example.com" onRefresh={() => {}}
+                                 scanProgress={{ done: 47, total: 201 }} />)
+    expect(screen.getByTestId('scan-progress'))
+      .toHaveTextContent('scanning 47 of 201 accounts')
+  })
+
+  it('falls back to a plain message when there is no count yet', () => {
+    render(<TenantInventoryPanel inv={inv()} busy error=""
+                                 domain="src.example.com" onRefresh={() => {}}
+                                 scanProgress={{ done: 0, total: 0 }} />)
+    expect(screen.getByTestId('scan-progress'))
+      .toHaveTextContent('reading the tenant')
+  })
+})

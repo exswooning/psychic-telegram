@@ -465,14 +465,29 @@ const QuickTenantSetup: React.FC<{
   const [invBusy, setInvBusy] = useState(false)
   const [invError, setInvError] = useState('')
 
-  const loadInventory = useCallback((deep = false) => {
+  // Never replace deep data with shallower data.
+  //
+  // The quick read and the stored deep scan are fetched together, and they
+  // race: the stored scan answers in milliseconds, the quick read walks
+  // every account and takes ~30 seconds on a 201-account tenant. So the
+  // quick result landed LAST and overwrote a complete scan -- sharing,
+  // Chat and calendar columns present one moment and gone the next, which
+  // is exactly what it looked like.
+  //
+  // Guarding the setter rather than ordering the calls, because ordering
+  // only fixes the orderings you thought of; a slow network makes a new one.
+  const applyInv = useCallback((next: TenantInventory, force = false) => {
+    setInv((prev) => (!force && prev?.deep && !next.deep ? prev : next))
+  }, [])
+
+  const loadInventory = useCallback((deep = false, force = false) => {
     setInvBusy(true)
     setInvError('')
     fetchTenantInventory(side, 250, deep)
-      .then(setInv)
+      .then((r) => applyInv(r, force))
       .catch((e) => setInvError(e instanceof Error ? e.message : String(e)))
       .finally(() => setInvBusy(false))
-  }, [side])
+  }, [side, applyInv])
 
   // Deep scan: start it, then poll. It walks every file every account owns,
   // so it cannot live inside the request that asks for it -- that 502'd.
@@ -494,10 +509,10 @@ const QuickTenantSetup: React.FC<{
         setInvBusy(false)
         setScanProgress(null)
         if (st.error) setInvError(st.error)
-        else setInv(st as TenantInventory)
+        else applyInv(st as TenantInventory)
       })
       .catch(() => { /* a poll blip must not end the watch */ })
-  }, [side])
+  }, [side, applyInv])
 
   const runDeepScan = useCallback(() => {
     setInvBusy(true)
@@ -541,7 +556,7 @@ const QuickTenantSetup: React.FC<{
           if (scanPoll.current) window.clearInterval(scanPoll.current)
           scanPoll.current = window.setInterval(pollScan, 5000)
         } else if (st.present && !st.error) {
-          setInv(st as TenantInventory)
+          applyInv(st as TenantInventory)
         } else {
           runDeepScan()
         }
@@ -876,7 +891,7 @@ const QuickTenantSetup: React.FC<{
           {setUpOk && (
             <TenantInventoryPanel inv={inv} busy={invBusy} error={invError}
                                   domain={domain} scanProgress={scanProgress}
-                                  onRefresh={() => loadInventory(false)}
+                                  onRefresh={() => loadInventory(false, true)}
                                   onDeepScan={runDeepScan} />
           )}
         </Box>
