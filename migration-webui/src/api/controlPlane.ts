@@ -481,6 +481,28 @@ export const startFullSetup = (
     }),
   })
 
+// -- Migrations --------------------------------------------------------------
+// One row per account: an account owns exactly one source and one target, so
+// a tenant pair IS an account here.
+export interface MigrationProgress {
+  users: number; done: number; running: number; failed: number; pending: number
+  items: number; itemsFailed: number
+}
+
+export interface MigrationRow {
+  accountId: number
+  accountName: string
+  sourceDomain: string
+  targetDomain: string
+  running: boolean
+  jobs: string[]
+  progress: MigrationProgress
+}
+
+export const fetchMigrations = () =>
+  cpFetch<{ migrations: MigrationRow[]; maxConcurrent: number; activeTotal: number }>(
+    '/api/v2/migrations')
+
 // -- Multi-node claims -------------------------------------------------------
 // A migration spread across machines needs one atomic answer to "is this
 // user mine?" -- see user_claims.py. These read that; nothing here hands out

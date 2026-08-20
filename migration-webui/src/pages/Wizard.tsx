@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useSearchParams, useNavigate } from 'react-router-dom'
 import {
   Box, Typography, Card, CardContent, CardActionArea,
   Chip, Button, TextField, Grid, Alert, Divider, RadioGroup, FormControlLabel,
@@ -8,6 +8,7 @@ import {
 import {
   Refresh as RefreshIcon, Grass as SeedIcon, RocketLaunch as MigrateIcon,
   ArrowBack as BackIcon,
+  AddCircleOutline as NewMigrationIcon,
 } from '@mui/icons-material'
 import {
   fetchStatus, checkStep, fetchConfig, saveConfig, setRunMode, fetchActions,
@@ -127,10 +128,23 @@ const Wizard: React.FC = () => {
  * sign-in stalls on 2FA/captcha, same reasoning as SeedWizard's own. */
 const MigrateWizard: React.FC = () => {
   const [route, setRoute] = useState<'automated' | 'manual'>('automated')
+  const navigate = useNavigate()
 
   return (
     <Box>
-      <Typography variant="h4" sx={{ fontWeight: 700, mb: 0.5 }}>Set up for a real migration</Typography>
+      <Stack direction="row" alignItems="center" spacing={2} sx={{ mb: 0.5 }}>
+        <Typography variant="h4" sx={{ fontWeight: 700 }}>Set up for a real migration</Typography>
+        <Box sx={{ flex: 1 }} />
+        {/* Goes to Migrations rather than resetting this form. Wiping the
+            fields would look like starting something while actually
+            destroying the setup already on screen; the list is where an
+            existing pair is picked or a genuinely new one begins. */}
+        <Button variant="contained" startIcon={<NewMigrationIcon />}
+                data-testid="start-new-migration"
+                onClick={() => navigate('/migrations')}>
+          Start a new migration
+        </Button>
+      </Stack>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
         Automated signs in and handles the Cloud project and delegation for
         both tenants; Manual walks through each part by hand -- use it if

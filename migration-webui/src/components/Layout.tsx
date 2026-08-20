@@ -47,6 +47,7 @@ import {
   Terminal as LogsIconNav,
   DeleteForever as TeardownIconNav,
   Hub as NodesIconNav,
+  CompareArrows as MigrationsIconNav,
 } from '@mui/icons-material'
 import { useMigrationStore } from '@/store'
 import { fetchConfig, fetchJob, ConfigPayload, HostInfo, JobStatus, stopJob } from '@/api/client'
@@ -64,6 +65,9 @@ import Logout from '@mui/icons-material/Logout'
 // Layout below, not listed here.
 const NAV_ITEMS = [
   { path: '/wizard', label: 'Setup Wizard', icon: <WizardIconNav /> },
+  // Every account has a tenant pair, so this is not gated -- a client
+  // sees only its own, which the endpoint enforces rather than the nav.
+  { path: '/migrations', label: 'Migrations', icon: <MigrationsIconNav /> },
   { path: '/jobs', label: 'Jobs', icon: <JobsIconNav /> },
   { path: '/running-now', label: 'Running Now', icon: <RunningNowIconNav /> },
   { path: '/mission-control', label: 'Mission Control', icon: <MissionIcon /> },

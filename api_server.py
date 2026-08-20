@@ -2113,6 +2113,90 @@ async def claims_release(body: ClaimBody, _: None = Depends(node_auth)):
     return await _off_loop(_do)
 
 
+def _migration_progress(account_id: int | None) -> dict:
+    """Per-user rollup from ONE account's ledger.
+
+    Counts, never an average. DONE / RUNNING / FAILED / PENDING coexist in
+    every real batch, and collapsing them into a single percentage is the
+    one thing tui.py's own design notes say never to do -- a run that is 60%
+    done and 40% failed is not 60% of a migration.
+    """
+    empty = {"users": 0, "done": 0, "running": 0, "failed": 0, "pending": 0,
+             "items": 0, "itemsFailed": 0}
+    try:
+        from config import Settings
+        path = Settings(account_id=account_id).db_path
+    except Exception:      # noqa: BLE001
+        return empty
+    if not os.path.isfile(path):
+        return empty
+    try:
+        with cpdb.ro(path) as conn:
+            out = dict(empty)
+            for row in conn.execute(
+                    "SELECT status, COUNT(*) n FROM identity_map "
+                    "WHERE entity_type='user' GROUP BY status"):
+                out["users"] += row["n"]
+                key = {"DONE": "done", "RUNNING": "running",
+                       "FAILED": "failed"}.get(row["status"], "pending")
+                out[key] += row["n"]
+            out["items"] = conn.execute(
+                "SELECT COUNT(*) n FROM id_mapping").fetchone()["n"]
+            out["itemsFailed"] = conn.execute(
+                "SELECT COUNT(*) n FROM audit_log WHERE status='FAILED'"
+            ).fetchone()["n"]
+            return out
+    except Exception:      # noqa: BLE001 - a ledger mid-migration, or absent
+        return empty
+
+
+@app.get("/api/v2/migrations")
+async def list_migrations(op: Operator = Depends(operator)):
+    """Every tenant pair this caller may see, with live progress.
+
+    One row per ACCOUNT, because that is what a tenant pair is here: an
+    account owns exactly one source and one target. A superadmin sees all of
+    them, which is the whole point of running several at once; anyone else
+    sees their own and nothing about anybody else's.
+    """
+    require_login(op)
+
+    def _read() -> dict:
+        if op.is_superadmin:
+            accounts = accounts_auth.list_accounts()
+        else:
+            acct = accounts_auth.get_account(op.account_id)
+            accounts = [dict(acct)] if acct else []
+
+        active = {}
+        for row in job_admission.list_active():
+            active.setdefault(row.get("account_id"), []).append(row)
+
+        out = []
+        for acct in accounts:
+            aid = acct["id"]
+            src = accounts_auth.get_tenant_config(aid, "source") or {}
+            tgt = accounts_auth.get_tenant_config(aid, "target") or {}
+            if not src.get("domain") and not tgt.get("domain"):
+                # An account that has never been set up is not a migration.
+                continue
+            jobs = active.get(aid, [])
+            out.append({
+                "accountId": aid,
+                "accountName": acct.get("name") or acct.get("email") or f"#{aid}",
+                "sourceDomain": src.get("domain") or "",
+                "targetDomain": tgt.get("domain") or "",
+                "running": bool(jobs),
+                "jobs": [j.get("job_name") for j in jobs],
+                "progress": _migration_progress(aid),
+            })
+        return {"migrations": out,
+                "maxConcurrent": job_admission.MAX_CONCURRENT_TENANT_JOBS,
+                "activeTotal": len(job_admission.list_active())}
+
+    return await _off_loop(_read)
+
+
 @app.get("/api/v2/nodes/join")
 async def node_join_details(reveal: bool = False,
                             op: Operator = Depends(operator)):
