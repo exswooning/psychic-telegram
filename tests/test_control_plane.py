@@ -1743,3 +1743,60 @@ class TestScanReportsProgress:
         snap = ti.snapshot(S(), "source", deep=True, deep_sample=1,
                            on_progress=boom)
         assert snap["totals"]["shared"] == 7
+
+
+class TestScansAreReconciledAtStartup:
+    """A fresh process cannot have a scan thread in flight -- they run inside
+    it. Marking orphans at startup is exact, where the heartbeat timeout is
+    only eventually right: without this a deploy left the panel waiting the
+    full 15-minute staleness window before it could even offer to start
+    again, on top of the work it had just thrown away."""
+
+    def _run(self, tmp_path, monkeypatch, payload):
+        import api_server
+
+        monkeypatch.setattr(api_server, "HERE", str(tmp_path))
+        d = tmp_path / "logs" / "7"
+        d.mkdir(parents=True)
+        p = d / "inventory-scan-source.json"
+        p.write_text(json.dumps(payload))
+        api_server._reconcile_inventory_scans()
+        return json.loads(p.read_text())
+
+    def test_a_running_scan_is_marked_interrupted(self, tmp_path, monkeypatch):
+        out = self._run(tmp_path, monkeypatch,
+                        {"running": True, "done": 11, "scanTotal": 201})
+        assert out["running"] is False
+        assert out["interrupted"] is True
+        assert "restarted" in out["error"]
+
+    def test_a_finished_scan_is_left_exactly_as_it_was(self, tmp_path, monkeypatch):
+        """The common case at startup, and the one that must not be
+        damaged -- a completed scan is the panel's only deep data."""
+        done = {"running": False, "accounts": 201, "deep": True,
+                "totals": {"shared": 88825}}
+        out = self._run(tmp_path, monkeypatch, done)
+        assert out == done
+
+    def test_an_unreadable_file_does_not_block_startup(self, tmp_path, monkeypatch):
+        import api_server
+
+        monkeypatch.setattr(api_server, "HERE", str(tmp_path))
+        d = tmp_path / "logs" / "7"
+        d.mkdir(parents=True)
+        (d / "inventory-scan-source.json").write_text("{ not json")
+        api_server._reconcile_inventory_scans()      # must not raise
+
+    def test_no_logs_directory_is_fine(self, tmp_path, monkeypatch):
+        import api_server
+
+        monkeypatch.setattr(api_server, "HERE", str(tmp_path / "nothing"))
+        api_server._reconcile_inventory_scans()      # must not raise
+
+    def test_it_runs_on_startup(self):
+        """A reconciler nobody calls is not a reconciler."""
+        import inspect
+
+        import api_server
+
+        assert "_reconcile_inventory_scans" in inspect.getsource(api_server.lifespan)

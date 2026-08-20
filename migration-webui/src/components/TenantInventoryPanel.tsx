@@ -43,16 +43,22 @@ const numSx = { ...tdSx, textAlign: 'right' as const,
 
 /** One headline number. Value first at a readable size, label under it --
  * the number is what is being scanned for, not the word. */
-const Stat: React.FC<{ id: string; label: string; value: string }> =
-  ({ id, label, value }) => (
-    <Box data-testid={`stat-${id}`}>
-      <Typography sx={{ fontWeight: 700, fontSize: 20, lineHeight: 1.2,
-                        fontVariantNumeric: 'tabular-nums' }}>
-        {value}
-      </Typography>
-      <Typography variant="caption" color="text.secondary">{label}</Typography>
-    </Box>
-  )
+const Stat: React.FC<{
+  id: string; label: string; value: string
+  /** Not measured yet. Renders an em dash rather than 0 -- a real measured
+   *  zero and "still counting" are different facts, and 0 is the one that
+   *  gets believed. */
+  pending?: boolean
+}> = ({ id, label, value, pending = false }) => (
+  <Box data-testid={`stat-${id}`}>
+    <Typography sx={{ fontWeight: 700, fontSize: 20, lineHeight: 1.2,
+                      fontVariantNumeric: 'tabular-nums',
+                      color: pending ? 'text.disabled' : 'text.primary' }}>
+      {pending ? '—' : value}
+    </Typography>
+    <Typography variant="caption" color="text.secondary">{label}</Typography>
+  </Box>
+)
 
 export interface TenantInventoryPanelProps {
   inv: TenantInventory | null
@@ -71,7 +77,9 @@ export interface TenantInventoryPanelProps {
 
 export const TenantInventoryPanel: React.FC<TenantInventoryPanelProps> = ({
   inv, busy, error, domain, scanProgress, onRefresh, onDeepScan,
-}) => (
+}) => {
+  const scanning = !!scanProgress
+  return (
   <Box sx={{ mt: 2 }} data-testid="tenant-inventory">
     <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
       <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
@@ -100,10 +108,19 @@ export const TenantInventoryPanel: React.FC<TenantInventoryPanelProps> = ({
       </IconButton>
     </Stack>
 
-    {busy && scanProgress && scanProgress.total > 0 && (
-      <LinearProgress variant="determinate" sx={{ mb: 1, borderRadius: 1 }}
-        value={Math.min(100, Math.round(
-          100 * scanProgress.done / scanProgress.total))} />
+    {scanning && scanProgress.total > 0 && (
+      <Box sx={{ mb: 1.5 }} data-testid="scan-banner">
+        <LinearProgress variant="determinate" sx={{ mb: 0.5, borderRadius: 1 }}
+          value={Math.min(100, Math.round(
+            100 * scanProgress.done / scanProgress.total))} />
+        <Typography variant="caption" color="text.secondary">
+          Reading sharing, Chat and calendar for every account —{' '}
+          {scanProgress.done.toLocaleString()} of{' '}
+          {scanProgress.total.toLocaleString()} done. Each account&apos;s Drive
+          has to be walked, so this takes minutes per account and runs in the
+          background; the figures above are already final.
+        </Typography>
+      </Box>
     )}
 
     {error && <Alert severity="warning" sx={{ mb: 1 }}>{error}</Alert>}
@@ -118,19 +135,24 @@ export const TenantInventoryPanel: React.FC<TenantInventoryPanelProps> = ({
                 value={inv.accounts.toLocaleString()} />
           <Stat id="emails" label="email" value={inv.totals.emails.toLocaleString()} />
           <Stat id="drive" label="Drive" value={fmtBytes(inv.totals.driveBytes)} />
-          {inv.deep && (
+          {/* Shown as pending rather than hidden while a scan runs.
+              Absent columns read as "this tenant has no sharing"; a dash
+              with a scan visibly in flight reads as "not counted yet",
+              which is the true state. The alternative was a panel that
+              looked like it had less information than it did an hour ago. */}
+          {(inv.deep || scanning) && (
             <>
-              <Stat id="shared" label="shared files"
+              <Stat id="shared" label="shared files" pending={!inv.deep}
                     value={(inv.totals.shared ?? 0).toLocaleString()} />
-              <Stat id="external" label="shared externally"
+              <Stat id="external" label="shared externally" pending={!inv.deep}
                     value={(inv.totals.external ?? 0).toLocaleString()} />
-              <Stat id="anyone" label="link-shared to anyone"
+              <Stat id="anyone" label="link-shared to anyone" pending={!inv.deep}
                     value={(inv.totals.anyone ?? 0).toLocaleString()} />
-              <Stat id="events" label="calendar events"
+              <Stat id="events" label="calendar events" pending={!inv.deep}
                     value={(inv.totals.calendarEvents ?? 0).toLocaleString()} />
-              <Stat id="chat" label="Chat messages"
+              <Stat id="chat" label="Chat messages" pending={!inv.deep}
                     value={(inv.totals.chatMessages ?? 0).toLocaleString()} />
-              <Stat id="spaces" label="Chat spaces"
+              <Stat id="spaces" label="Chat spaces" pending={!inv.deep}
                     value={(inv.totals.chatSpaces ?? 0).toLocaleString()} />
             </>
           )}
@@ -264,6 +286,7 @@ export const TenantInventoryPanel: React.FC<TenantInventoryPanelProps> = ({
       </>
     )}
   </Box>
-)
+  )
+}
 
 export default TenantInventoryPanel

@@ -240,3 +240,50 @@ describe('deep data must not be overwritten by a shallower read', () => {
       .toHaveTextContent('reading the tenant')
   })
 })
+
+describe('a scan in flight shows what is still coming', () => {
+  /**
+   * Absent columns read as "this tenant has no sharing". A dash with a scan
+   * visibly in flight reads as "not counted yet", which is the true state.
+   * Without this the panel looked like it had LESS information than it did
+   * an hour earlier -- which is how it was reported.
+   */
+  it('renders the deep columns as pending, not missing', () => {
+    render(<TenantInventoryPanel inv={inv()} busy error=""
+                                 domain="src.example.com" onRefresh={() => {}}
+                                 scanProgress={{ done: 11, total: 201 }} />)
+    expect(screen.getByTestId('stat-shared')).toHaveTextContent('—')
+    expect(screen.getByTestId('stat-chat')).toHaveTextContent('—')
+    expect(screen.getByTestId('stat-spaces')).toBeTruthy()
+  })
+
+  it('never shows 0 for something it has not counted', () => {
+    /* A real measured zero and "still counting" are different facts, and 0
+       is the one that gets believed. */
+    render(<TenantInventoryPanel inv={inv()} busy error=""
+                                 domain="src.example.com" onRefresh={() => {}}
+                                 scanProgress={{ done: 11, total: 201 }} />)
+    expect(screen.getByTestId('stat-shared')).not.toHaveTextContent('0')
+  })
+
+  it('says how far along it is and that the top figures are already final', () => {
+    render(<TenantInventoryPanel inv={inv()} busy error=""
+                                 domain="src.example.com" onRefresh={() => {}}
+                                 scanProgress={{ done: 11, total: 201 }} />)
+    const banner = screen.getByTestId('scan-banner')
+    expect(banner).toHaveTextContent('11 of 201 done')
+    expect(banner).toHaveTextContent('already final')
+  })
+
+  it('shows real values once the scan has finished', () => {
+    render(<TenantInventoryPanel busy={false} error="" domain="src.example.com"
+                                 onRefresh={() => {}}
+      inv={inv({ deep: true, deepSampled: 3,
+                 totals: { emails: 30, threads: 12, driveBytes: 3072, covered: 2,
+                           shared: 9, external: 4, anyone: 0, calendarEvents: 51,
+                           chatMessages: 7, chatSpaces: 2 } })} />)
+    expect(screen.getByTestId('stat-shared')).toHaveTextContent('9')
+    // A genuine measured zero renders as 0, not a dash.
+    expect(screen.getByTestId('stat-anyone')).toHaveTextContent('0')
+  })
+})

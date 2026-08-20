@@ -351,6 +351,45 @@ def _reconcile_active_jobs() -> None:
               f"job={name!r} (no matching process found at startup)", flush=True)
 
 
+def _reconcile_inventory_scans() -> None:
+    """Any scan claiming to run when this process starts is orphaned.
+
+    Deep scans run in threads inside this process, so a fresh process cannot
+    have one in flight -- by definition. Marking them on startup is exact,
+    where the heartbeat timeout is only eventually right: without this a
+    deploy left the panel waiting the full staleness window (15 minutes)
+    before it could even offer to start again, on top of the work it had
+    just thrown away.
+
+    Best-effort. A scan status file is not worth failing startup over.
+    """
+    root = os.path.join(HERE, "logs")
+    if not os.path.isdir(root):
+        return
+    for dirpath, _dirs, files in os.walk(root):
+        for name in files:
+            if not (name.startswith("inventory-scan-") and name.endswith(".json")):
+                continue
+            path = os.path.join(dirpath, name)
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    data = json.load(fh)
+                if not data.get("running"):
+                    continue
+                data.update({
+                    "running": False, "interrupted": True,
+                    "error": ("the scan was interrupted when the server "
+                              "restarted. Nothing was changed; start it "
+                              "again."),
+                })
+                tmp = path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    json.dump(data, fh)
+                os.replace(tmp, path)
+            except Exception:      # noqa: BLE001 - never block startup
+                continue
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     """Apply control-plane migrations, then start the single ledger tailer.
@@ -365,6 +404,7 @@ async def lifespan(_: FastAPI):
     # not before -- it writes into tables that migration just created.
     await _off_loop(accounts_auth.bootstrap_legacy_account)
     await _off_loop(_reconcile_active_jobs)
+    await _off_loop(_reconcile_inventory_scans)
     task = asyncio.create_task(_tailer())
     try:
         yield
