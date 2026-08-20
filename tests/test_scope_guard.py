@@ -1100,3 +1100,63 @@ class TestDeployInstallsItsOwnUnitFiles:
         assert "Xvfb :99" in body
         # Restart=always is what makes it survive the browser crashing it.
         assert "Restart=always" in body
+
+
+class TestUnlicensedAccountsAreNamedAsSuch:
+    """Google reports an unlicensed account as:
+
+        HTTP 400 (failedPrecondition): ... Mail service not enabled
+
+    Nothing in that sentence contains the word licence, so it reads like a
+    service outage or a scope problem, and it is neither. Seen live on both
+    tenants simultaneously -- 201 accounts, 200 licences, one unlicensed
+    account on each side -- producing two failed users and an HTTP 400 that
+    named no cause anyone could act on.
+    """
+
+    def test_the_licence_cause_is_stated(self):
+        import main
+
+        out = main.explain_user_failure(
+            RuntimeError("HTTP 400 (failedPrecondition): Mail service not enabled"),
+            "zane@src.com", "zane@tgt.com")
+        assert "licence" in out.lower()
+        assert "zane@src.com" in out and "zane@tgt.com" in out
+        assert "Billing" in out
+
+    def test_it_says_nothing_was_migrated_for_that_user(self):
+        """Otherwise a partial migration is the reasonable assumption, and
+        re-running looks risky rather than correct."""
+        import main
+
+        out = main.explain_user_failure(
+            RuntimeError("failedPrecondition: Mail service not enabled"),
+            "a@s.com", "a@t.com")
+        assert "Nothing was migrated" in out
+
+    def test_the_original_error_is_kept_not_replaced(self):
+        """The raw text is what matches a support article or a log search."""
+        import main
+
+        raw = "HTTP 400 (failedPrecondition): Mail service not enabled for user"
+        assert raw in main.explain_user_failure(RuntimeError(raw), "a@s", "a@t")
+
+    def test_an_unrecognised_error_is_left_completely_alone(self):
+        """A diagnosis layer that paraphrases what it does not understand is
+        worse than none -- it hides the detail that would have identified
+        the error."""
+        import main
+
+        assert main.explain_user_failure(
+            RuntimeError("Connection reset by peer"), "a@s", "a@t"
+        ) == "Connection reset by peer"
+
+    def test_a_partial_match_does_not_trigger_it(self):
+        """failedPrecondition alone covers plenty of unrelated conditions;
+        both halves have to be present."""
+        import main
+
+        out = main.explain_user_failure(
+            RuntimeError("HTTP 400 (failedPrecondition): bad label id"),
+            "a@s", "a@t")
+        assert "licence" not in out.lower()

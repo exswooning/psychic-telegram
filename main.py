@@ -113,6 +113,36 @@ def _install_signal_handlers() -> None:
 # ======================================================================
 # Per-user worker
 # ======================================================================
+# Google says "failedPrecondition ... Mail service not enabled" for an
+# account that has no Workspace licence. Nothing in that sentence contains
+# the word licence, so it reads like a service outage or a scope problem --
+# and it is neither. Seen live on both tenants at once: 201 accounts, 200
+# licences, one unlicensed account on each side. Two users failed with an
+# HTTP 400 that named no cause anyone could act on.
+_NO_MAILBOX = ("mail service not enabled", "failedprecondition")
+
+
+def explain_user_failure(exc: Exception, source_user: str,
+                         target_user: str) -> str:
+    """Turn an engine exception into something an operator can act on.
+
+    Only rewrites what it recognises. Anything else keeps its original text
+    verbatim -- a diagnosis layer that paraphrases errors it does not
+    understand is worse than none, because it hides the one detail that
+    would have identified them.
+    """
+    raw = str(exc)
+    low = raw.lower()
+    if all(k in low for k in _NO_MAILBOX):
+        return (f"{raw}\n\nThis almost always means the account has no "
+                f"Workspace licence, so Gmail does not exist for it -- the "
+                f"error names no cause, which is why it reads like an "
+                f"outage. Check {source_user} and {target_user} in the Admin "
+                f"Console under Billing > Licences; assign one and re-run "
+                f"this user. Nothing was migrated for them.")
+    return raw
+
+
 def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
                  source_user: str, target_user: str, services: set[str],
                  delta: bool, delta_days: int) -> dict:
@@ -188,11 +218,12 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
 
     except Exception as exc:  # noqa: BLE001 - worker must not propagate
         log.exception("[%s] user migration failed", source_user)
+        detail = explain_user_failure(exc, source_user, target_user)
         if track_status:
-            db.set_identity_status(source_user, "FAILED", str(exc))
-        db.log_audit(source_user, source_user, "user", "FAILED", str(exc))
+            db.set_identity_status(source_user, "FAILED", detail)
+        db.log_audit(source_user, source_user, "user", "FAILED", detail)
         result["status"] = "FAILED"
-        result["error"] = str(exc)
+        result["error"] = detail
 
     result["elapsed_sec"] = round(time.time() - started, 1)
     log.info("[%s] finished in %.1fs: %s", source_user,
