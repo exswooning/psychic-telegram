@@ -126,18 +126,70 @@ OPTIONAL_SCOPES = {
 }
 
 
+def every_toggle_scopes(settings: Settings, tenant: str) -> set[str]:
+    """Every scope the code could ask for under ANY feature toggle.
+
+    required_scopes() answers "what does THIS configuration request", which
+    is the right question before starting a run and the wrong one before
+    writing a grant. Confirmed live and expensively: migrate_chat defaults
+    off, so chat.memberships.readonly was never in the granted line -- and
+    the moment Chat was switched on, the whole token request failed with
+    `unauthorized_client`, taking Drive, Gmail and everything else with it,
+    because a delegated request is all-or-nothing.
+
+    A console grant is monotonic: authorising a scope nobody requests costs
+    nothing. So the line that gets written covers every toggle, and turning
+    a feature on later needs no second visit to the Admin Console -- which
+    matters more than it sounds, since each edit replaces the whole line and
+    re-triggers propagation for the entire grant.
+    """
+    import dataclasses
+
+    from config import TRANSFER_MODES
+
+    import scope as scope_mod
+
+    out: set[str] = set()
+    combos = [
+        {"transfer_mode": m, "migrate_gmail_settings": g, "migrate_chat": c,
+         "chat_space_mode": cm, "migrate_contacts": co, "migrate_tasks": t,
+         "migrate_sso": ss, "migrate_calendar_acls": ca}
+        for m in TRANSFER_MODES
+        for g in (False, True)
+        for c in (False, True)
+        for cm in ("direct", "import")
+        for co in (False, True)
+        for t in (False, True)
+        for ss in (False, True)
+        for ca in (False, True)
+    ]
+    for combo in combos:
+        try:
+            variant = dataclasses.replace(settings, **combo)
+        except Exception:      # noqa: BLE001 - a field this build lacks
+            continue
+        try:
+            out |= set(scope_mod.oauth_scopes(variant)[tenant])
+        except Exception:      # noqa: BLE001 - skip an invalid combination
+            continue
+    return out
+
+
 def grant_scopes(settings: Settings, tenant: str) -> list[str]:
     """Everything to put on the Admin Console line for this tenant.
 
-    Wider than required_scopes() by exactly OPTIONAL_SCOPES. Use this
-    wherever a grant is being *written*; use required_scopes() wherever the
-    question is "may this run start".
-
-    Deliberately a two-argument passthrough: it delegates to
-    required_scopes() with the same signature every other caller uses, so a
-    test that substitutes required_scopes still works through this.
+    Wider than required_scopes() in two directions, both deliberate:
+    OPTIONAL_SCOPES (features that degrade rather than fail), and every
+    scope any feature toggle could ever need. Use this wherever a grant is
+    being *written*; use required_scopes() wherever the question is "may
+    this run start".
     """
-    return sorted(set(required_scopes(settings, tenant)) | OPTIONAL_SCOPES)
+    want = set(required_scopes(settings, tenant)) | OPTIONAL_SCOPES
+    try:
+        want |= every_toggle_scopes(settings, tenant)
+    except Exception:      # noqa: BLE001 - never make a grant impossible
+        pass
+    return sorted(want)
 
 
 def required_scopes(settings: Settings, tenant: str,

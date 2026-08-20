@@ -796,7 +796,40 @@ class TestSetupGrantsTheOptionalScopes:
             grant = set(verify_scopes.grant_scopes(st, side))
             need = set(verify_scopes.required_scopes(st, side))
             assert need < grant, f"{side}: grant line should be strictly wider"
-            assert grant - need == verify_scopes.OPTIONAL_SCOPES
+            # Wider in two directions, and the second one is why this
+            # assertion loosened: it used to demand the difference be
+            # EXACTLY the optional scopes, which pinned the grant to what
+            # today's toggles happen to need. migrate_chat defaults off, so
+            # chat.memberships.readonly was never granted -- and switching
+            # Chat on then failed the whole token request, taking every
+            # other service with it.
+            assert verify_scopes.OPTIONAL_SCOPES <= grant
+            assert verify_scopes.every_toggle_scopes(st, side) <= grant
+
+    def test_the_grant_covers_scopes_no_current_toggle_asks_for(self):
+        """The specific regression. Every one of these is needed only when
+        some feature is switched on, and none of them is in required_scopes
+        with the defaults -- so each was a live tenant one toggle away from
+        an opaque unauthorized_client."""
+        import verify_scopes
+        from config import Settings
+
+        grant = set(verify_scopes.grant_scopes(Settings(), "source"))
+        for scope in ("https://www.googleapis.com/auth/chat.memberships.readonly",
+                      "https://www.googleapis.com/auth/contacts.readonly",
+                      "https://www.googleapis.com/auth/tasks.readonly",
+                      "https://www.googleapis.com/auth/gmail.settings.basic"):
+            assert scope in grant, scope
+
+    def test_required_scopes_stays_narrow(self):
+        """The gate must keep asking "what does THIS run need". Widening it
+        to the toggle union would refuse to start every tenant that has not
+        re-pasted its line -- the exact breakage the split exists to avoid."""
+        import verify_scopes
+        from config import Settings
+
+        need = set(verify_scopes.required_scopes(Settings(), "source"))
+        assert "https://www.googleapis.com/auth/chat.memberships.readonly" not in need
 
     def test_setup_grants_the_wide_line_not_the_required_one(self):
         """If this regresses, new tenants come out without apps.licensing and
