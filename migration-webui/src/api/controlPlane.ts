@@ -244,8 +244,23 @@ export const retryItem = (sourceUser: string, itemId: string, reason: string) =>
     body: JSON.stringify({ reason, source_user: sourceUser, item_id: itemId }),
   })
 
+export interface ProvisionUser {
+  email: string
+  state: 'created' | 'existing' | 'failed'
+  detail: string
+}
+
 export interface ProvisionStatus {
   running: boolean; pid: number | null; created: number; failed: number
+  /** Accounts that were already there. Counted separately from `created`
+   *  because "nothing to do" and "nothing happened" look identical as a
+   *  bare 0. */
+  existing?: number
+  /** The accounts themselves, so the panel can show which addresses are
+   *  being created rather than only a fraction. Passwords are stripped
+   *  server-side -- provision.py prints each new one once, and this
+   *  response goes to a browser. */
+  users?: ProvisionUser[]
   total: number; tail: string[]
 }
 

@@ -115,9 +115,15 @@ def _apply_column_upgrades(conn: sqlite3.Connection) -> None:
 
 
 @contextmanager
-def ro() -> Iterator[sqlite3.Connection]:
-    """A read-only connection. See rule 1 in the module docstring."""
-    conn = sqlite3.connect(f"file:{_db_path()}?mode=ro", uri=True, timeout=15.0)
+def ro(path: str | None = None) -> Iterator[sqlite3.Connection]:
+    """A read-only connection. See rule 1 in the module docstring.
+
+    `path` opens a specific ledger instead of the shared control-plane one --
+    a SaaS account's own migration.db, for reads that must not answer with
+    another tenant's numbers (see identity_count).
+    """
+    conn = sqlite3.connect(f"file:{path or _db_path()}?mode=ro", uri=True,
+                           timeout=15.0)
     conn.row_factory = sqlite3.Row
     try:
         yield conn
@@ -244,12 +250,37 @@ def failure_feed(limit: int = 200, source_user: str | None = None) -> list[dict]
         return [dict(r) for r in conn.execute(q, args)]
 
 
-def identity_count() -> int:
+def identity_count(account_id: int | None = None) -> int:
     """Denominator for provisioning progress -- every distinct target address
     identity_map expects to exist. Same source `provision-users` itself reads
     from, so the UI's progress bar and the CLI's own count can never disagree
-    about what "done" means."""
-    with ro() as conn:
+    about what "done" means.
+
+    account_id, because without it they DID disagree. This read the shared
+    control-plane database for every caller, so a SaaS account's progress bar
+    showed the LEGACY tenant's headcount: confirmed live as "0/11 created" on
+    account 7, whose identity_map holds exactly one user -- which already
+    existed, so the run correctly created nothing and the UI reported it
+    against a denominator belonging to a different tenant entirely.
+
+    Falls back to the shared database when no account is given (the legacy
+    / SSH-tunnel caller, which genuinely lives there) or when that account
+    has no ledger yet -- a progress bar is not worth an exception.
+    """
+    import os
+
+    path = None
+    if account_id is not None:
+        try:
+            from config import Settings
+            path = Settings(account_id=account_id).db_path
+        except Exception:      # noqa: BLE001 - fall back to the shared db
+            path = None
+        if path and not os.path.isfile(path):
+            path = None
+
+    ctx = ro(path) if path else ro()
+    with ctx as conn:
         return conn.execute(
             "SELECT COUNT(*) n FROM identity_map WHERE entity_type='user'"
         ).fetchone()["n"]

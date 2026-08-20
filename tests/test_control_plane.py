@@ -169,23 +169,54 @@ class TestProvisioning:
         assert r["running"] is False
 
     def test_progress_is_parsed_from_the_exact_provision_log_format(self, cp, tmp_path):
-        """Pins the regex against provision.py's actual wording -- a rename
-        of that log line would otherwise silently freeze the progress bar
-        at 0 with no test catching it."""
+        """Pins the parser against provision.report()'s ACTUAL output.
+
+        The version this replaces wrote `provision: created a@t.com` -- a
+        line provision.py has never printed. It passed against its own
+        invention while the endpoint read 0 from every real log, which is
+        how a parser that matched nothing shipped with a green test claiming
+        it "pins the regex against provision.py's actual wording".
+
+        The format below is copied from provision.report(); the assertion at
+        the end of this class checks it still is.
+        """
         import api_server
 
         os.makedirs(os.path.join(api_server.HERE, "logs"), exist_ok=True)
         log = os.path.join(api_server.HERE, "logs", "provision-target.log")
         with open(log, "w", encoding="utf-8") as fh:
-            fh.write("2026-01-01 00:00:00 INFO provision: created a@t.com\n")
-            fh.write("2026-01-01 00:00:01 INFO provision: created b@t.com\n")
-            fh.write("2026-01-01 00:00:02 WARNING provision: could not create c@t.com: 409\n")
+            fh.write("Created 2 account(s):\n")
+            fh.write("    a@t.com\n")
+            fh.write("        password: secret-one\n")
+            fh.write("    b@t.com\n")
+            fh.write("        password: secret-two\n")
+            fh.write("\nFailed (1):\n")
+            fh.write("    c@t.com: 409 already exists\n")
         try:
             r = cp.get("/api/v2/provision/status?tenant=target").json()
             assert r["created"] == 2
             assert r["failed"] == 1
+            assert {u["email"] for u in r["users"]} == {"a@t.com", "b@t.com",
+                                                        "c@t.com"}
+            # The whole response, including `tail`, must not carry them.
+            assert "secret-one" not in json.dumps(r)
         finally:
             os.remove(log)
+
+    def test_the_parser_matches_the_wording_provision_actually_prints(self):
+        """The guard the old test only claimed to be.
+
+        If provision.report() is reworded, this fails here rather than
+        silently freezing the progress bar at zero.
+        """
+        import inspect
+
+        import provision
+
+        src = inspect.getsource(provision.report)
+        assert 'account(s):' in src
+        assert "Already existed, left untouched" in src
+        assert 'Failed (' in src
 
 
 class TestEmergencyBrake:
@@ -1449,3 +1480,118 @@ class TestDwdStatusIsScopedToTheCaller:
     def test_an_unknown_tenant_is_still_rejected(self, cp):
         assert cp.get("/api/v2/dwd/status?tenant=sideways",
                       headers=ADMIN).status_code == 400
+
+
+class TestProvisionProgressIsReadable:
+    """`provision-users` prints SECTIONS, not one line per account:
+
+        Created 2 account(s):
+            alice@target...
+                password: <secret>
+        Already existed, left untouched (1):
+            info@target...
+        Failed (1):
+            carol@target...: quota exceeded
+
+    The regexes this replaced (`provision: created (\\S+)`) matched none of
+    that, so `created` read 0 on runs that had just created accounts --
+    reported next to a denominator read from a different tenant's database.
+    Clicking the button repeatedly and seeing "0/11 created" was both numbers
+    being wrong at once.
+    """
+
+    LOG = [
+        "2026-08-20 06:15 INFO db ready\n",
+        "Tenant : target (target.example.com)\n",
+        "\n",
+        "Created 2 account(s):\n",
+        "    alice@target.example.com\n",
+        "        password: SuperSecret123\n",
+        "    bob@target.example.com\n",
+        "        password: OtherSecret456\n",
+        "\n",
+        "Already existed, left untouched (1):\n",
+        "    info@target.example.com\n",
+        "\n",
+        "Failed (1):\n",
+        "    carol@target.example.com: quota exceeded\n",
+    ]
+
+    def test_every_account_is_found_with_its_state(self):
+        import api_server
+
+        out = api_server._parse_provision_log(self.LOG)
+        assert out["created"] == 2
+        assert out["existing"] == 1
+        assert out["failed"] == 1
+        by = {u["email"]: u["state"] for u in out["users"]}
+        assert by["alice@target.example.com"] == "created"
+        assert by["info@target.example.com"] == "existing"
+        assert by["carol@target.example.com"] == "failed"
+
+    def test_a_failure_keeps_its_reason(self):
+        import api_server
+
+        out = api_server._parse_provision_log(self.LOG)
+        carol = [u for u in out["users"] if u["email"].startswith("carol")][0]
+        assert "quota exceeded" in carol["detail"]
+
+    def test_passwords_never_reach_the_response(self):
+        """provision.py prints each new account's password once, by design.
+        That log is read by an HTTP endpoint, so anything echoing raw lines
+        puts a live credential in a browser response and whatever caches it."""
+        import api_server
+
+        out = api_server._parse_provision_log(self.LOG)
+        blob = json.dumps(out)
+        assert "SuperSecret123" not in blob
+        assert "OtherSecret456" not in blob
+        assert "password" not in blob.lower()
+
+    def test_a_dry_run_still_parses(self):
+        import api_server
+
+        out = api_server._parse_provision_log(
+            ["Would create 1 account(s):\n", "    zoe@target.example.com\n"])
+        assert out["created"] == 1
+
+    def test_an_empty_log_is_all_zeroes_not_an_error(self):
+        import api_server
+
+        out = api_server._parse_provision_log([])
+        assert out == {"users": [], "created": 0, "existing": 0, "failed": 0}
+
+    def test_log_preamble_is_not_mistaken_for_accounts(self):
+        """"Tenant : target (...)" and timestamps must not parse as emails."""
+        import api_server
+
+        out = api_server._parse_provision_log(self.LOG[:3])
+        assert out["users"] == []
+
+
+class TestProvisionDenominatorIsThisAccounts:
+    """identity_count read the SHARED control-plane database for every
+    caller, so a SaaS account's progress bar showed the LEGACY tenant's
+    headcount. Confirmed live: "0/11 created" on account 7, whose
+    identity_map holds exactly one user."""
+
+    def test_identity_count_accepts_an_account(self):
+        import inspect
+
+        import control_plane_db as c
+
+        assert "account_id" in inspect.signature(c.identity_count).parameters
+
+    def test_no_account_still_reads_the_shared_ledger(self, cp):
+        """The legacy / SSH-tunnel caller genuinely lives there. `cp` is
+        here for the database it sets up, not the client."""
+        import control_plane_db as c
+
+        assert isinstance(c.identity_count(), int)
+
+    def test_a_missing_account_ledger_falls_back_rather_than_raising(self, cp):
+        """A progress bar is not worth an exception -- an account with no
+        ledger yet reads the shared one instead of 500ing the panel."""
+        import control_plane_db as c
+
+        assert isinstance(c.identity_count(999999), int)

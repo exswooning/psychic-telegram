@@ -70,7 +70,15 @@ export const ReprovisionPanel: React.FC<ReprovisionPanelProps> = ({
     })
   }
 
-  const confirmed = confirm.trim().toLowerCase() === domain.trim().toLowerCase()
+  // An empty domain must never satisfy this.
+  //
+  // `confirm === domain` is true when BOTH are empty, which enabled the
+  // button with nothing typed the moment the wizard did not know the domain
+  // -- exactly the state a page loaded from a previous session is in. A
+  // typed-confirmation gate that passes on an empty field is not a gate.
+  const known = domain.trim().length > 0
+  const confirmed = known
+    && confirm.trim().toLowerCase() === domain.trim().toLowerCase()
 
   return (
     <Box sx={{ mt: 2, pt: 2, borderTop: '1px solid', borderColor: 'divider' }}
@@ -94,6 +102,14 @@ export const ReprovisionPanel: React.FC<ReprovisionPanelProps> = ({
           </Alert>
 
           {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+
+          {!known && (
+            <Alert severity="info" sx={{ mb: 2 }} data-testid="domain-unknown">
+              Enter the domain in the sign-in form above before re-provisioning
+              — this needs to be confirmed by name, and the page does not know
+              it yet.
+            </Alert>
+          )}
 
           {opts && (
             <>

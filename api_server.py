@@ -887,6 +887,68 @@ async def provision_start(body: StartProvision, op: Operator = Depends(operator)
 _PROVISION_CREATED_RE = re.compile(r"provision:\s+created\s+(\S+)")
 _PROVISION_EXISTS_ERR_RE = re.compile(r"could not create (\S+)")
 
+# provision.report() prints SECTIONS, not one line per account:
+#
+#     Created 3 account(s):
+#         alice@target...
+#             password: <secret>
+#     Already existed, left untouched (1):
+#         info@target...
+#     Failed (1):
+#         bob@target...: <error>
+#
+# The two regexes above match none of that -- which is why `created` read 0
+# on runs that had just created accounts, and why the panel could only ever
+# show a count of zero next to somebody else's denominator.
+_PROVISION_SECTIONS = (
+    (re.compile(r"^\s*(?:Created|Would create)\s+\d+\s+account", re.I), "created"),
+    (re.compile(r"^\s*Already existed", re.I), "existing"),
+    (re.compile(r"^\s*Failed\s*\(", re.I), "failed"),
+)
+_PROVISION_EMAIL_RE = re.compile(r"^\s{2,}([^\s:]+@[^\s:]+)\s*:?\s*(.*)$")
+# Never leaves this process. provision.py prints each new account's password
+# once, by design ("shown once and not stored anywhere") -- but that log is
+# read by an HTTP endpoint, so anything echoing raw lines would put a live
+# credential in a browser response and in whatever caches it.
+_PROVISION_SECRET_RE = re.compile(r"password\s*:", re.I)
+
+
+def _parse_provision_log(lines: list[str]) -> dict:
+    """Per-account state from provision-users' own output.
+
+    Section-aware because the output is section-shaped; emails are indented
+    under whichever header last appeared. Returns the accounts themselves,
+    not just totals, so the UI can show which addresses are being created
+    rather than a bare fraction.
+    """
+    section = ""
+    users: list[dict] = []
+    seen: set[str] = set()
+    for raw in lines:
+        line = raw.rstrip()
+        for pattern, name in _PROVISION_SECTIONS:
+            if pattern.match(line):
+                section = name
+                break
+        else:
+            if not section or _PROVISION_SECRET_RE.search(line):
+                continue
+            m = _PROVISION_EMAIL_RE.match(line)
+            if not m:
+                continue
+            email, detail = m.group(1), m.group(2).strip()
+            if email in seen:
+                continue
+            seen.add(email)
+            users.append({"email": email, "state": section,
+                          "detail": detail[:160]})
+    return {
+        "users": users,
+        "created": sum(1 for u in users if u["state"] == "created"),
+        "existing": sum(1 for u in users if u["state"] == "existing"),
+        "failed": sum(1 for u in users if u["state"] == "failed"),
+    }
+
 
 @app.get("/api/v2/provision/status")
 async def provision_status(tenant: str = "target", op: Operator = Depends(operator)):
@@ -918,14 +980,19 @@ async def provision_status(tenant: str = "target", op: Operator = Depends(operat
                 break
         if not os.path.isfile(log_path):
             return {"running": pid is not None, "pid": pid, "created": 0,
-                    "failed": 0, "total": cpdb.identity_count(), "tail": []}
+                    "failed": 0, "total": cpdb.identity_count(op.account_id), "tail": []}
         with open(log_path, encoding="utf-8", errors="replace") as fh:
             lines = fh.readlines()
-        created = sum(1 for ln in lines if _PROVISION_CREATED_RE.search(ln))
-        failed = sum(1 for ln in lines if _PROVISION_EXISTS_ERR_RE.search(ln))
-        return {"running": pid is not None, "pid": pid, "created": created,
-                "failed": failed, "total": cpdb.identity_count(),
-                "tail": [ln.rstrip() for ln in lines[-30:]]}
+        parsed = _parse_provision_log(lines)
+        return {"running": pid is not None, "pid": pid,
+                "created": parsed["created"], "existing": parsed["existing"],
+                "failed": parsed["failed"], "users": parsed["users"],
+                "total": cpdb.identity_count(op.account_id),
+                # Redacted, not raw: provision.py prints each new account's
+                # password once, and this response goes to a browser.
+                "tail": [("        password: <hidden>"
+                          if _PROVISION_SECRET_RE.search(ln) else ln.rstrip())
+                         for ln in lines[-30:]]}
     return await _off_loop(_read)
 
 

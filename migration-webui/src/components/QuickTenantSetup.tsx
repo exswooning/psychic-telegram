@@ -939,12 +939,56 @@ const QuickTenantSetup: React.FC<{
               {provisionStatus?.running ? 'Running…' : 'Provision users now'}
             </Button>
             {provisionStatus && (provisionStatus.created || provisionStatus.total) && (
-              <Typography variant="caption" color="text.secondary">
+              <Typography variant="caption" color="text.secondary"
+                          data-testid="provision-counts">
                 {provisionStatus.created}/{provisionStatus.total} created
+                {provisionStatus.existing
+                  ? `, ${provisionStatus.existing} already existed` : ''}
                 {provisionStatus.failed ? `, ${provisionStatus.failed} failed` : ''}
               </Typography>
             )}
           </Stack>
+
+          {/* The accounts themselves, not just a fraction.
+              "0/1 created" on a tenant whose only user already exists is
+              indistinguishable from "nothing happened" -- which is exactly
+              how this read when it was clicked repeatedly and appeared to do
+              nothing. Naming the address and its state is what makes
+              "already there" legible as a result. */}
+          {provisionStatus?.users && provisionStatus.users.length > 0 && (
+            <Box sx={{ mt: 1.5 }} data-testid="provision-users">
+              {provisionStatus.running && (
+                <LinearProgress
+                  variant={provisionStatus.total ? 'determinate' : 'indeterminate'}
+                  value={provisionStatus.total
+                    ? Math.min(100, Math.round(
+                        100 * provisionStatus.users.length / provisionStatus.total))
+                    : undefined}
+                  sx={{ mb: 1, borderRadius: 1 }} />
+              )}
+              <Box sx={{ maxHeight: 200, overflowY: 'auto', border: '1px solid',
+                         borderColor: 'divider', borderRadius: 1, p: 1 }}>
+                {provisionStatus.users.map((u) => (
+                  <Stack key={u.email} direction="row" spacing={1}
+                         alignItems="center" sx={{ py: 0.25 }}
+                         data-testid={`prov-${u.email}`}>
+                    <Chip size="small" variant="outlined"
+                          color={u.state === 'created' ? 'success'
+                                 : u.state === 'failed' ? 'error' : 'default'}
+                          label={u.state === 'existing' ? 'already there' : u.state} />
+                    <Typography variant="body2" sx={{ fontSize: 12 }}>
+                      {u.email}
+                    </Typography>
+                    {u.detail && (
+                      <Typography variant="caption" color="error.main">
+                        {u.detail}
+                      </Typography>
+                    )}
+                  </Stack>
+                ))}
+              </Box>
+            </Box>
+          )}
         </Box>
       )}
 
