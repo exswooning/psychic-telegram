@@ -32,7 +32,8 @@ class _Phase:
 
 
 def _fake_provision_side(ok=True, client_id="999", detail=""):
-    def fn(side, project, org, key_dest, dry_run, force, env=None, on_step=None):
+    def fn(side, project, org, key_dest, dry_run, force, env=None,
+           on_step=None, admin_email=""):
         return {"side": side, "project": project, "ok": ok,
                 "steps": [{"name": "x", "status": "ok" if ok else "failed",
                           "detail": detail}],
@@ -139,7 +140,8 @@ class TestSideSelectionIsCorrect:
         a real run here the way it used to."""
         seen = {}
 
-        def fake_provision_side(side, project, org, key_dest, dry_run, force, env=None, on_step=None):
+        def fake_provision_side(side, project, org, key_dest, dry_run, force,
+                                env=None, on_step=None, admin_email=""):
             seen["side"] = side
             seen["project"] = project
             seen["key_dest"] = key_dest
@@ -632,7 +634,8 @@ class TestBrowserAuthFallback:
                             lambda email, password, timeout: (True, "ok", "/tmp/fake-cloudsdk-config"))
         monkeypatch.setattr(fs.gcloud_browser_auth, "cleanup", lambda d: None)
 
-        def fake_provision_side(side, project, org, key_dest, dry_run, force, env=None, on_step=None):
+        def fake_provision_side(side, project, org, key_dest, dry_run, force,
+                                env=None, on_step=None, admin_email=""):
             seen["env"] = env
             return {"side": side, "project": project, "ok": True, "steps": [], "clientId": "42"}
 
@@ -846,7 +849,7 @@ class TestProgressFile:
         captured = []
 
         def fake_provision_side(side, project, org, key_dest, dry_run, force,
-                                env=None, on_step=None):
+                                env=None, on_step=None, admin_email=""):
             for i in range(1, 6):
                 if on_step:
                     on_step(i, 5, f"step {i}")

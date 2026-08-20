@@ -126,9 +126,9 @@ export const TenantInventoryPanel: React.FC<TenantInventoryPanelProps> = ({
                       data-testid="sample-note"
                       sx={{ display: 'block', mb: 1 }}>
             Sharing figures are from {inv.deepSampled.toLocaleString()} of{' '}
-            {inv.accounts.toLocaleString()} accounts — walking one account&apos;s
-            Drive took ~3 minutes on this tenant, so the panel samples rather
-            than scanning all of them. Run inventory.py for a full audit.
+            {inv.accounts.toLocaleString()} accounts. Re-run the scan to cover
+            every account — it walks each one&apos;s Drive to read sharing, so
+            it takes minutes per account and runs in the background.
           </Typography>
         )}
 

@@ -457,6 +457,60 @@ def grant_service_usage(project: str, sa_email: str, steps: list[Step],
     s.status, s.detail = "failed", out.strip()[-200:]
 
 
+def grant_admin_console_access(project: str, admin_email: str,
+                               steps: list, dry_run: bool,
+                               env: dict | None = None) -> None:
+    """Give the Workspace admin a role on the project it is expected to
+    administer.
+
+    Workspace admin and GCP IAM are separate permission systems -- being a
+    super admin of the domain confers nothing on a Cloud project, even one
+    created moments ago on that domain's behalf. Every browser-driven
+    console step afterwards is performed AS that admin, so without this they
+    open the console and get:
+
+        You need additional access to the project: <project>
+        resourcemanager.projects.get (Missing)
+
+    Confirmed live on wsmig-src-96030: the Chat app configuration page never
+    rendered its form, and that surfaced three layers up as "could not find
+    the app name field -- console may have changed". A selector report for a
+    page the account was never allowed to see.
+
+    roles/editor rather than roles/owner: enough to configure the Chat app
+    and read the project, not enough to hand out further IAM or delete the
+    project. These are per-tenant throwaway projects belonging to the
+    operator, so this is not privilege escalation -- it gives the project's
+    actual owner the access the rest of the tool already assumes they have.
+
+    Non-fatal, like the other grants here: a project provisioned without it
+    still migrates fine; only the console-driven extras (Chat) need it.
+    """
+    s = Step(f"grant project access to {admin_email or 'the admin'}")
+    steps.append(s)
+    if dry_run:
+        s.status, s.detail = "skipped", "dry run"
+        return
+    if not admin_email:
+        s.status, s.detail = "skipped", "no admin email known at this point"
+        return
+    out = ""
+    for attempt in range(3):
+        rc, out = run(["gcloud", "projects", "add-iam-policy-binding", project,
+                       f"--member=user:{admin_email}",
+                       "--role=roles/editor",
+                       "--condition=None"], timeout=300, env=env)
+        if rc == 0:
+            s.status = "ok"
+            s.detail = "the admin can now open this project in the console"
+            return
+        time.sleep(5 * (attempt + 1))
+    # Skipped, not failed: everything except the console-driven Chat step
+    # works without it, and failing the whole provision here would cost more
+    # than the gap it leaves.
+    s.status, s.detail = "skipped", out.strip()[-180:]
+
+
 # Confirmed live: a brand-new org's Workspace super admin does not
 # automatically hold the GCP-side "Organization Policy Administrator"
 # role needed to relax iam.managed.disableServiceAccountKeyCreation --
@@ -570,7 +624,8 @@ def client_id_of(key_path: str) -> str:
 
 def provision_side(side: str, project: str, org: str, key_dest: str,
                    dry_run: bool, force: bool, env: dict | None = None,
-                   on_step: Callable[[int, int, str], None] | None = None) -> dict:
+                   on_step: Callable[[int, int, str], None] | None = None,
+                   admin_email: str = "") -> dict:
     """on_step(done, total, step_name), called after every single step --
     not just once per function -- is what lets a caller show real,
     smoothly-advancing progress through the slowest part of setup (a
@@ -579,7 +634,7 @@ def provision_side(side: str, project: str, org: str, key_dest: str,
     steps: list[Step] = []
     sa = f"{side}-sa"
     # project, N APIs, SA, grant, self-grant-orgpolicy, relax, key
-    total = 6 + len(SUPPORT_APIS + APIS)
+    total = 7 + len(SUPPORT_APIS + APIS)
 
     def _tick() -> None:
         if on_step and steps:
@@ -596,6 +651,8 @@ def provision_side(side: str, project: str, org: str, key_dest: str,
     sa_email = ensure_service_account(project, sa, steps, dry_run, env=env)
     _tick()
     grant_service_usage(project, sa_email, steps, dry_run, env=env)
+    _tick()
+    grant_admin_console_access(project, admin_email, steps, dry_run, env=env)
     _tick()
     relax_key_policy(project, steps, dry_run, org=org, env=env)
     _tick()

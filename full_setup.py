@@ -271,7 +271,12 @@ def run_full_setup(
             result = provision_gcp.provision_side(
                 side, project, org, key_path, dry_run, force=False, env=env,
                 on_step=lambda done, total, name: _progress(
-                    18 + int(57 * done / total), name))
+                    18 + int(57 * done / total), name),
+                # The console steps that follow (Chat app configuration) run
+                # as this admin, and a Workspace super admin holds nothing on
+                # a Cloud project by default -- see
+                # provision_gcp.grant_admin_console_access.
+                admin_email=admin_email)
         finally:
             if cloudsdk_config:
                 gcloud_browser_auth.cleanup(cloudsdk_config)

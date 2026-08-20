@@ -455,10 +455,15 @@ class TestOnStepProgress:
             "source", "p1", "", "/tmp/nope-key.json", dry_run=True, force=False,
             on_step=lambda done, total, name: seen.append((done, total, name)))
         assert result["ok"] is True
-        # 1 project + N APIs + service account + grant + self-grant-orgpolicy + relax + key
-        expected_total = 6 + len(pg.SUPPORT_APIS + pg.APIS)
-        assert seen[-1][1] == expected_total
-        assert seen[-1][0] == expected_total
+        # What actually matters is that the bar reaches the end -- done ==
+        # total on the final tick, and total is the real number of steps.
+        # Asserting a hardcoded count instead just breaks on every new step
+        # and teaches the next person to bump the literal rather than read
+        # the test.
+        assert seen[-1][0] == seen[-1][1], "the progress bar never reached 100%"
+        assert seen[-1][1] == len(result["steps"]), (
+            "total does not match the steps actually taken -- the bar would "
+            "either stop short or jump past the end")
         names = [s[2] for s in seen]
         assert "service account source-sa" in names
         assert any(n.startswith("key -> ") for n in names)
@@ -483,7 +488,12 @@ class TestOnStepProgress:
             "source", "p1", "", "/tmp/nope-key3.json", dry_run=False, force=False,
             on_step=lambda done, total, name: seen.append((done, total)))
         assert result["ok"] is False
-        assert seen == [(1, 6 + len(pg.SUPPORT_APIS + pg.APIS))]
+        # Exactly one tick, and it is 1-of-the-full-total rather than 1-of-1:
+        # the bar must show a small amount of progress, not a completed run.
+        assert len(seen) == 1
+        done, total = seen[0]
+        assert done == 1
+        assert total > 1
 
 
 class TestKnownProjectCreateFailures:
@@ -899,3 +909,80 @@ class TestDeleteProject:
         assert seen["argv"] == ["gcloud", "projects", "delete", "wsmig-src-12345"]
         # run() itself injects --quiet for every gcloud call -- not
         # re-asserted here, see TestRun's own coverage of that.
+
+
+class TestTheAdminGetsAccessToItsOwnProject:
+    """Workspace admin and GCP IAM are separate permission systems.
+
+    Being a super admin of the domain confers nothing on a Cloud project,
+    even one created moments earlier on that domain's behalf. Every
+    browser-driven console step afterwards runs AS that admin, so without a
+    project role they open the console to:
+
+        You need additional access to the project: <project>
+        resourcemanager.projects.get (Missing)
+
+    Confirmed live on wsmig-src-96030: the Chat app configuration page never
+    rendered its form, and that surfaced three layers up as "could not find
+    the app name field -- console may have changed" -- a selector report for
+    a page the account was never allowed to see.
+    """
+
+    def _run(self, monkeypatch, rc=0, admin="admin@x.com", dry=False):
+        import provision_gcp as pg
+
+        calls: list[list[str]] = []
+
+        def fake_run(argv, timeout=None, env=None):
+            calls.append(argv)
+            return rc, "" if rc == 0 else "PERMISSION_DENIED"
+
+        monkeypatch.setattr(pg, "run", fake_run)
+        monkeypatch.setattr(pg.time, "sleep", lambda s: None)
+        steps: list = []
+        pg.grant_admin_console_access("proj-1", admin, steps, dry)
+        return steps, calls
+
+    def test_the_admin_is_granted_a_role_on_the_project(self, monkeypatch):
+        steps, calls = self._run(monkeypatch)
+        assert steps[0].status == "ok"
+        argv = calls[0]
+        assert "add-iam-policy-binding" in argv
+        assert "proj-1" in argv
+        assert "--member=user:admin@x.com" in argv
+
+    def test_it_grants_editor_not_owner(self, monkeypatch):
+        """Enough to configure the Chat app and read the project; not enough
+        to hand out further IAM or delete it."""
+        _, calls = self._run(monkeypatch)
+        assert "--role=roles/editor" in calls[0]
+        assert "--role=roles/owner" not in calls[0]
+
+    def test_a_denied_grant_does_not_fail_the_provision(self, monkeypatch):
+        """Everything except the console-driven Chat step works without it;
+        failing the whole provision here would cost more than the gap."""
+        steps, _ = self._run(monkeypatch, rc=1)
+        assert steps[0].status == "skipped"
+        assert steps[0].status != "failed"
+        assert "PERMISSION_DENIED" in steps[0].detail
+
+    def test_no_admin_email_is_skipped_not_attempted(self, monkeypatch):
+        steps, calls = self._run(monkeypatch, admin="")
+        assert steps[0].status == "skipped"
+        assert calls == []
+
+    def test_a_dry_run_changes_no_iam(self, monkeypatch):
+        steps, calls = self._run(monkeypatch, dry=True)
+        assert steps[0].status == "skipped"
+        assert calls == []
+
+    def test_provision_side_passes_the_admin_through(self):
+        """The wiring, not just the function: full_setup knows the admin
+        email and provision_side is where it has to arrive."""
+        import inspect
+
+        import provision_gcp as pg
+
+        assert "admin_email" in inspect.signature(pg.provision_side).parameters
+        src = inspect.getsource(pg.provision_side)
+        assert "grant_admin_console_access(project, admin_email" in src

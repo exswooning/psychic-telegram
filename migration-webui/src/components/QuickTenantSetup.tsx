@@ -499,8 +499,30 @@ const QuickTenantSetup: React.FC<{
     const key = `${side}:${result?.clientId || ''}`
     if (invLoadedFor.current === key) return
     invLoadedFor.current = key
+
+    // Quick figures first -- they land in seconds and are what the panel is
+    // mostly for. Then adopt a completed deep scan if one already exists,
+    // and only start a new one when there is nothing stored.
+    //
+    // Auto-starting is what makes the sharing numbers appear without anyone
+    // asking, which is the point; not re-starting when a result is already
+    // on disk is what keeps that from re-walking every file in the tenant
+    // each time someone opens the wizard.
     loadInventory(false)
-  }, [setUpOk, side, result?.clientId, loadInventory])
+    fetchTenantScan(side)
+      .then((st) => {
+        if (st.running) {
+          setInvBusy(true)
+          if (scanPoll.current) window.clearInterval(scanPoll.current)
+          scanPoll.current = window.setInterval(pollScan, 5000)
+        } else if (st.present && !st.error) {
+          setInv(st as TenantInventory)
+        } else {
+          runDeepScan()
+        }
+      })
+      .catch(() => { /* the quick figures already loaded; leave it at that */ })
+  }, [setUpOk, side, result?.clientId, loadInventory, pollScan, runDeepScan])
 
   useEffect(() => {
     if (side !== 'target' || !showProvisionUsers) return
