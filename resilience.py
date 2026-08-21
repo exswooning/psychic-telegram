@@ -374,6 +374,82 @@ class RateLimiter:
             time.sleep(wait)
 
 
+class AdaptiveRateLimiter(RateLimiter):
+    """A bucket that finds the real ceiling instead of being told it.
+
+    The fixed limiter had to be handed a number, and every number was a
+    guess about someone else's project. Guessing low is invisible -- it
+    just runs slow forever, and nothing in the logs says the quota was
+    never the binding constraint. Guessing high produced the 127k failed
+    ACL run. Neither error announces itself, which is exactly why this
+    should not be a constant.
+
+    So: additive increase, multiplicative decrease -- the same control law
+    TCP uses on a link whose capacity it cannot ask about, for the same
+    reason. Climb by `step` each clean interval, halve the moment Google
+    says the word "quota", and never leave [floor, ceiling].
+
+    Multiplicative decrease is what makes overshoot cheap. Backing off by
+    a step would spend many more rejections walking down from a rate that
+    is already too high, and every one of those is a real failed
+    operation on someone's tenant, not a retry counter.
+
+    The floor matters as much as the ceiling: a burst of 429s from a
+    genuinely unrelated cause must not be able to drive the rate to zero
+    and wedge the migration.
+    """
+
+    def __init__(self, rate_per_sec: float, *, floor: float, ceiling: float,
+                 step: float = 2.0, probe_after: float = 20.0,
+                 burst: int = 1, on_change=None):
+        super().__init__(rate_per_sec, burst=burst)
+        self.floor = max(float(floor), 0.001)
+        self.ceiling = max(float(ceiling), self.floor)
+        self.step = max(float(step), 0.001)
+        self.probe_after = float(probe_after)
+        self._on_change = on_change
+        self.rate = min(max(self.rate, self.floor), self.ceiling)
+        self._last_change = time.monotonic()
+        self._rejections = 0
+        self._backoffs = 0
+
+    def penalise(self) -> float:
+        """Called when the service rejected a call for quota. Halves the rate."""
+        with self._lock:
+            self._rejections += 1
+            before = self.rate
+            self.rate = max(self.floor, self.rate / 2.0)
+            self._last_change = time.monotonic()
+            if self.rate < before:
+                self._backoffs += 1
+            changed = self.rate != before
+        if changed and self._on_change:
+            self._on_change("backoff", before, self.rate)
+        return self.rate
+
+    def acquire(self) -> None:
+        # Probe upward only from inside the wait path, so an idle process
+        # never drifts its rate up on the strength of having done nothing.
+        with self._lock:
+            if (self.rate < self.ceiling
+                    and time.monotonic() - self._last_change >= self.probe_after):
+                before = self.rate
+                self.rate = min(self.ceiling, self.rate + self.step)
+                self._last_change = time.monotonic()
+                grew = (before, self.rate)
+            else:
+                grew = None
+        if grew and self._on_change:
+            self._on_change("probe", *grew)
+        super().acquire()
+
+    def stats(self) -> dict:
+        with self._lock:
+            return {"rate": round(self.rate, 2), "floor": self.floor,
+                    "ceiling": self.ceiling, "rejections": self._rejections,
+                    "backoffs": self._backoffs}
+
+
 # ======================================================================
 # Daily upload quota guard — persisted, so a process restart does not
 # forget how much of the 750 GB/day cap has already been spent.

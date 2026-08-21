@@ -622,6 +622,21 @@ def client_id_of(key_path: str) -> str:
         return ""
 
 
+def project_of(key_path: str) -> str:
+    """Which GCP project minted this service-account key.
+
+    The companion to client_id_of(). An uploaded key says which project it
+    came from but nothing about whether the admin using it can administer
+    that project -- and console-driven setup steps run as the admin, not as
+    the key. full_setup checks the two against each other.
+    """
+    try:
+        with open(key_path, encoding="utf-8") as fh:
+            return json.load(fh).get("project_id", "")
+    except (OSError, ValueError):
+        return ""
+
+
 def provision_side(side: str, project: str, org: str, key_dest: str,
                    dry_run: bool, force: bool, env: dict | None = None,
                    on_step: Callable[[int, int, str], None] | None = None,

@@ -59,8 +59,9 @@ class TestSizing:
     def test_memory_is_the_binding_constraint_when_scarce(self):
         r = make(ram_usable=2.0, cores=32, swap_used=0.0)
         rec = resources.recommend(r)
-        assert rec["user_workers"] == int(2.0 * 1024 // resources.MB_PER_WORKER)
-        assert "memory-bound" in rec["reason"]
+        assert rec["user_workers"] == min(
+            int(2.0 * 1024 // resources.MB_PER_WORKER), resources.HARD_CAP)
+        assert rec["user_workers"] <= resources.HARD_CAP
 
     def test_cpu_never_binds_even_with_a_single_core(self):
         """CPU was dropped from the formula entirely: a core-count
@@ -90,9 +91,15 @@ class TestSizing:
         multiple."""
         r = make(ram_usable=3.0, cores=2, swap_used=0.0)
         rec = resources.recommend(r)
-        assert rec["user_workers"] == 9          # 3.0 GB * 1024 // 320 MB
-        assert "memory-bound" in rec["reason"]
+        # Derived, not pinned: the point is that RAM and HARD_CAP decide
+        # this, never a core count. Writing the answer as a literal made the
+        # test a record of one value of MB_PER_WORKER instead.
+        assert rec["user_workers"] == min(
+            int(3.0 * 1024 // resources.MB_PER_WORKER), resources.HARD_CAP)
         assert "cpu" not in rec["reason"].lower()
+        # 32 cores must not buy a single extra worker over 2.
+        assert rec["user_workers"] == resources.recommend(
+            make(ram_usable=3.0, cores=32, swap_used=0.0))["user_workers"]
 
     def test_the_seed_pool_is_sized_larger_than_the_migrate_pool(self):
         """These deliberately disagree now. They used to be equal on the
@@ -104,8 +111,8 @@ class TestSizing:
         migrator's 320 MB left a 2.9 GB box memory-bound at 9 workers and
         a 201-user run at ~32 hours."""
         rec = resources.recommend(make(ram_usable=3.0, cores=2, swap_used=0.0))
-        assert rec["user_workers"] == 9           # 3.0 GB * 1024 // 320 MB
-        assert rec["seed_workers"] == 24          # 3.0 GB * 1024 // 128 MB
+        assert rec["seed_workers"] == min(
+            int(3.0 * 1024 // resources.MB_PER_SEED_WORKER), resources.SEED_HARD_CAP)
         assert rec["seed_workers"] > rec["user_workers"]
 
     def test_the_seed_pool_is_still_ram_bound_on_a_small_box(self):
@@ -160,11 +167,30 @@ class TestConcurrentJobsShareTheMachine:
         return make(ram_usable=2.8, ram_total=3.7, swap_used=0.0,
                     swap_total=0.0, cores=2)
 
-    def test_one_job_gets_the_whole_budget(self):
-        assert resources.recommend(self.vps(), concurrent_jobs=1)["user_workers"] == 8
+    def test_the_pool_never_outgrows_the_memory_it_was_budgeted(self):
+        """The property that actually matters, asserted directly.
 
-    def test_two_jobs_get_half_each(self):
-        assert resources.recommend(self.vps(), concurrent_jobs=2)["user_workers"] == 4
+        This replaces a pair of tests that asserted 8 and 4 workers -- the
+        arithmetic of MB_PER_WORKER when it was a hardcoded 320. Pinning the
+        output of a formula means any correction to its inputs reads as a
+        break, so the constant could only ever be wrong in the safe
+        direction. What must hold is not a number, it is that every job's
+        pool together fits in RAM.
+        """
+        r = self.vps()
+        for jobs in (1, 2, 4, 8):
+            rec = resources.recommend(r, concurrent_jobs=jobs)
+            footprint = jobs * rec["user_workers"] * resources.MB_PER_WORKER
+            assert footprint <= r.ram_usable_gb * 1024, (
+                f"{jobs} jobs x {rec['user_workers']} workers exceeds usable RAM")
+
+    def test_more_jobs_never_get_a_bigger_pool_each(self):
+        """Sharing can leave the per-job pool alone when a different limit
+        binds, but it must never enlarge it."""
+        r = self.vps()
+        sizes = [resources.recommend(r, concurrent_jobs=j)["user_workers"]
+                 for j in (1, 2, 4, 8)]
+        assert sizes == sorted(sizes, reverse=True)
 
     def test_the_split_never_reaches_zero_workers(self):
         """A box that can only support one worker still has to give each job
@@ -188,6 +214,14 @@ class TestConcurrentJobsShareTheMachine:
         rec = resources.recommend(self.vps(), concurrent_jobs=2)
         assert "2 concurrent jobs" in rec["reason"]
         assert "1.4 GB budget" in rec["reason"]
+
+    def test_the_split_is_stated_even_when_the_cap_is_what_bound(self):
+        """Once per-worker memory dropped to its measured value, HARD_CAP
+        began binding on ordinary boxes -- and the reason stopped mentioning
+        the split at all, which reads as "your second tenant changed
+        nothing" when the budget really was halved."""
+        rec = resources.recommend(self.vps(), concurrent_jobs=2)
+        assert "concurrent jobs" in rec["reason"]
 
     def test_a_single_job_reason_does_not_mention_sharing(self):
         """The common case must not grow noise about a split that is not

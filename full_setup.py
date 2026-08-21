@@ -127,6 +127,64 @@ def optional_missing_detail(scopes: list[str]) -> str:
             f"nothing else is affected)")
 
 
+def _vs_for(account_id: int | None):
+    """Settings for this account, falling back to the legacy tenant."""
+    try:
+        return Settings(account_id=account_id)
+    except Exception:      # noqa: BLE001
+        return Settings()
+
+
+def _admin_can_reach_project(project: str, admin_email: str,
+                             admin_password: str) -> bool:
+    """Can this admin open the project in the Cloud console?
+
+    Asked with gcloud as the admin, because that is the identity every
+    console-driven step actually runs as. Anything else would be testing a
+    different question than the one that matters.
+
+    False on any doubt: an unreachable project and an unanswerable check
+    lead to the same place, and guessing "probably fine" is how the
+    unusable-key case went unnoticed in the first place.
+    """
+    cfg = ""
+    try:
+        ok, _detail, cfg = gcloud_browser_auth.login(
+            admin_email, admin_password, timeout=240)
+        if not ok:
+            return False
+        env = dict(os.environ, CLOUDSDK_CONFIG=cfg)
+        proc = subprocess.run(
+            ["gcloud", "projects", "describe", project, "--format=value(projectId)"],
+            capture_output=True, text=True, timeout=180, env=env)
+        return proc.returncode == 0
+    except Exception:      # noqa: BLE001 - never block setup on the probe
+        return False
+    finally:
+        if cfg:
+            try:
+                gcloud_browser_auth.cleanup(cfg)
+            except Exception:      # noqa: BLE001
+                pass
+
+
+def _delegation_already_live(settings, side: str, client_id: str) -> bool:
+    """Is this key already carrying a working delegation?
+
+    The difference between "repair it" and "leave it alone". A key whose
+    scopes mint today is migrating someone's tenant; replacing it to unlock
+    one service would trade a working migration for a feature.
+    """
+    if not client_id:
+        return False
+    try:
+        import scope_guard
+        return scope_guard.is_complete(
+            settings, side, verify_scopes.required_scopes(settings, side))
+    except Exception:      # noqa: BLE001
+        return False
+
+
 def _chat_access_hint(project: str, admin_email: str, detail: str) -> str:
     """Why the Chat form did not render, when the likely reason is access.
 
@@ -266,6 +324,56 @@ def run_full_setup(
                 "re-upload the key")
             return {"side": side, "ok": False, "phases": [x.as_dict() for x in phases]}
         p.status, p.detail = "skipped", "using an uploaded service-account key"
+
+        # Can this admin actually administer the project behind that key?
+        #
+        # An upload carries no relationship to who owns the project it came
+        # from. Confirmed live: a key for wsmig-src-96030 whose admin holds
+        # no IAM role on it at all -- so every console-driven step ran as an
+        # account that could not open the page, and Chat could never be
+        # configured. It surfaced three layers up as "could not find the app
+        # name field", a selector complaint about a page that never rendered.
+        #
+        # Detected here rather than discovered there, and repaired the only
+        # way that works: provisioning a project this admin owns. That is
+        # done ONLY when the key is not already carrying a working
+        # delegation -- replacing credentials that are migrating a live
+        # tenant, to unlock one service, is not a trade this should make on
+        # anyone's behalf.
+        project_of_key = provision_gcp.project_of(uploaded_key)
+        if project_of_key and not dry_run:
+            access = Phase(f"admin access to {project_of_key}")
+            phases.append(access)
+            reachable = _admin_can_reach_project(
+                project_of_key, admin_email, admin_password)
+            if reachable:
+                access.status, access.detail = "ok", "the admin can administer it"
+            else:
+                working = _delegation_already_live(_vs_for(account_id), side,
+                                                   client_id)
+                if working:
+                    access.status = "skipped"
+                    access.detail = (
+                        f"{admin_email} has no IAM role on {project_of_key}, so "
+                        f"console steps (Chat app configuration) cannot run. "
+                        f"Delegation IS live, so nothing was changed -- "
+                        f"migration works. To unlock Chat, either grant this "
+                        f"admin access to {project_of_key} from an account "
+                        f"that owns it, or re-provision onto a project it "
+                        f"owns (that mints a new client ID and re-grants).")
+                else:
+                    access.status = "ok"
+                    access.detail = (
+                        f"{admin_email} cannot administer {project_of_key} and "
+                        f"no delegation is live on it -- provisioning a "
+                        f"project this admin owns instead")
+                    log(f"  {access.detail}")
+                    uploaded_key = None
+                    key_path = os.path.join(keys_dir, f"{side}-sa.json")
+                    client_id = ""
+                    p.status, p.detail = "skipped", (
+                        "the uploaded key's project is not administrable by "
+                        "this admin -- provisioning a fresh one")
     elif dry_run:
         # A dry run touches no real gcloud state at all -- every
         # provision_gcp step already no-ops under dry_run and reports

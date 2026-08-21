@@ -32,7 +32,7 @@ import metrics
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload  # noqa: F401
 
 from config import EXPORT_MIME_MAP, FOLDER_MIME, SHORTCUT_MIME, Settings
-from resilience import PermanentAPIError, QuotaExhausted, RateLimiter, retry_on_google_error
+from resilience import AdaptiveRateLimiter, PermanentAPIError, QuotaExhausted, RateLimiter, retry_on_google_error
 
 log = logging.getLogger(__name__)
 
@@ -55,8 +55,48 @@ def _project_limiter(qps: float):
     global _PROJECT_LIMITER
     with _PROJECT_LIMITER_LOCK:
         if _PROJECT_LIMITER is None:
-            _PROJECT_LIMITER = RateLimiter(qps)
+            # Adaptive, because `qps` is a guess about someone else's GCP
+            # project and there is no API that will tell us the real number.
+            # It starts at the configured rate and then finds the ceiling by
+            # running into it: climb while clean, halve on a quota rejection.
+            #
+            # The floor is deliberately low enough to keep a badly
+            # over-subscribed project moving and high enough that a single
+            # user's work never starves. The ceiling is Google's documented
+            # per-project Drive allowance (12,000 queries/minute = 200/sec),
+            # so probing can approach what is actually permitted instead of
+            # stopping at whatever was typed into config.
+            _PROJECT_LIMITER = AdaptiveRateLimiter(
+                qps, floor=max(4.0, qps / 8.0), ceiling=200.0,
+                on_change=_log_rate_change)
         return _PROJECT_LIMITER
+
+
+def _log_rate_change(kind: str, before: float, after: float) -> None:
+    """Say it out loud. A limiter that silently retunes itself is a limiter
+    nobody can debug when a run is mysteriously slow."""
+    if kind == "backoff":
+        log.warning("drive project rate: %.1f -> %.1f/s (quota pushback)",
+                    before, after)
+    else:
+        log.info("drive project rate: %.1f -> %.1f/s (probing up)", before, after)
+
+
+_QUOTA_MARKERS = (
+    "quota exceeded", "ratelimitexceeded", "userratelimitexceeded",
+    "rate limit exceeded", "too many requests",
+)
+
+
+def _is_quota_rejection(exc: Exception) -> bool:
+    """Did Google refuse this for pacing, as opposed to for any other reason?
+
+    Matched on the message rather than the HTTP status because 403 carries
+    both "you are going too fast" and "you may not do this at all", and the
+    two demand opposite responses -- slow down versus stop and report.
+    """
+    text = str(exc).lower()
+    return any(m in text for m in _QUOTA_MARKERS)
 
 
 class DriveMigrator:
@@ -195,12 +235,21 @@ class DriveMigrator:
             # Not `_tgt_write_limiter` directly: tests substitute
             # `_write_limiter`, and reading it here keeps that hook working.
             self._write_limiter.acquire()
-        return retry_on_google_error(
-            max_retries=self.settings.max_retries,
-            base_delay=self.settings.base_backoff,
-            max_delay=self.settings.max_backoff,
-            label=label or "drive",
-        )(fn)()
+        try:
+            return retry_on_google_error(
+                max_retries=self.settings.max_retries,
+                base_delay=self.settings.base_backoff,
+                max_delay=self.settings.max_backoff,
+                label=label or "drive",
+            )(fn)()
+        except Exception as exc:
+            # The limiter cannot adapt to pushback it never hears about.
+            # Only quota rejections count: a 404 or a permission error says
+            # nothing about pacing, and treating them as congestion would
+            # throttle a migration for reasons that have no relation to rate.
+            if _is_quota_rejection(exc):
+                self._project_limiter.penalise()
+            raise
 
     def _scratch_path(self) -> str:
         os.makedirs(self.settings.scratch_dir, exist_ok=True)

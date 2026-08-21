@@ -32,11 +32,48 @@ import sys
 import time
 from dataclasses import dataclass, field
 
-# Peak resident memory a single worker needs, in MB. Derived from the migrator
-# streaming a file through memory plus the discovery document and client
-# objects each thread holds. Generous on purpose: under-estimating it is what
-# produces the swap-stall failure this module exists to prevent.
-MB_PER_WORKER = 320
+# Fixed per-worker overhead in MB: the discovery documents, the two API
+# client objects and the TLS session each thread holds. Measured, not
+# guessed -- see mb_per_worker().
+WORKER_BASE_MB = 40
+
+# How many chunk-sized buffers a worker can hold at once. A download drains
+# into one while an upload streams from another, so two, with the third as
+# headroom for the copy that overlaps them.
+CHUNK_BUFFERS_PER_WORKER = 3
+
+
+def mb_per_worker(chunk_bytes: int | None = None) -> int:
+    """Peak resident memory one worker needs, in MB.
+
+    This was the constant 320, derived when a download drained through the
+    google-api-client default chunk size of 100 MB. drive_engine._download_via
+    has since pinned the chunk explicitly, and said in its own comment that
+    doing so "makes per-worker peak memory a known quantity, which is what
+    lets resources.py derive a worker count instead of guessing one" -- but
+    the guess stayed here anyway, so the whole benefit went unclaimed.
+
+    Live check on a 9-worker run: 453 MB peak for the entire process, about
+    50 MB a worker against a 320 MB budget. Sized for a buffer six times
+    larger than any worker can now allocate, the box ran at a fifth of the
+    concurrency its RAM supported -- while CPU sat 82% idle.
+
+    Still deliberately generous. Under-estimating this is the swap stall the
+    module exists to prevent, and that failure (30 minutes of socket
+    timeouts) is far worse than running a few workers short.
+    """
+    if chunk_bytes is None:
+        try:
+            from config import Settings
+            chunk_bytes = Settings().download_chunk_bytes
+        except Exception:      # noqa: BLE001 - sizing must never fail to import
+            chunk_bytes = 8 * 1024 * 1024
+    chunk_mb = max(1, int(chunk_bytes) // (1024 * 1024))
+    return max(64, WORKER_BASE_MB + CHUNK_BUFFERS_PER_WORKER * chunk_mb)
+
+
+# Kept as a module-level name because callers and tests import it directly.
+MB_PER_WORKER = mb_per_worker()
 
 # The seeder's own figure, and deliberately not MB_PER_WORKER.
 #
@@ -538,7 +575,19 @@ def recommend(r: SystemResources | None = None,
                    + " / "
                    f"{MB_PER_WORKER} MB per worker = {by_ram}")
     else:
+        # Say the split happened even when it was not the binding constraint.
+        #
+        # Once MB_PER_WORKER dropped to its real measured value, RAM stopped
+        # binding on any ordinary box and this branch started answering every
+        # question -- including "did my second tenant halve the first one's
+        # pool?" -- with a sentence about Google's quotas that never mentions
+        # sharing at all. The split is still being applied; it just stopped
+        # being what decided the number, and those are different facts.
         why.append(f"capped at {HARD_CAP}; past this Google's per-user quotas bind first")
+        if jobs > 1:
+            why.append(f"{budget_mb / 1024:.1f} GB budget "
+                       f"({r.ram_usable_gb:.1f} GB usable / {jobs} concurrent jobs) "
+                       f"would have allowed {by_ram}")
 
     return {
         "user_workers": workers,

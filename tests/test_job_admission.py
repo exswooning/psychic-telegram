@@ -87,7 +87,14 @@ class TestAdmission:
         shared = resources.recommend(
             r, concurrent_jobs=ja.MAX_CONCURRENT_TENANT_JOBS)["user_workers"]
         if ja.MAX_CONCURRENT_TENANT_JOBS > 1:
-            assert shared < alone
+            # Not `shared < alone`: HARD_CAP can bind in both cases, and
+            # then the per-job pool legitimately does not shrink. What must
+            # never happen is the machine over-committing -- every job's
+            # pool at once has to fit in the RAM the split divided.
+            assert shared <= alone
+            footprint = (shared * ja.MAX_CONCURRENT_TENANT_JOBS
+                         * resources.MB_PER_WORKER)
+            assert footprint <= r.ram_usable_gb * 1024
 
     def test_the_operators_own_jobs_are_not_exempt(self, db):
         """Unlike the subscription gate, this has nothing to do with who
