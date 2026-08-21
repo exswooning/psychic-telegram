@@ -1605,3 +1605,93 @@ class TestBlockedIsNotFailed:
 
         src = inspect.getsource(main.run_batch)
         assert 'r["status"] != "DONE"' in src
+
+
+class TestDriveFallsBackBetweenCopyStrategies:
+    """Two copy paths exist and they fail for different reasons, so one
+    failing says nothing about the other.
+
+    The case that forced this: 27 native files past Google's ~10 MB export
+    ceiling. download_upload cannot move them by any retry -- but
+    server_side never exports at all, so it can. Reporting them as
+    permanently unmigratable was giving up while an untried method sat
+    right there.
+    """
+
+    def _mig(self, mode="download_upload", native=True):
+        import drive_engine
+
+        m = drive_engine.DriveMigrator.__new__(drive_engine.DriveMigrator)
+        m.settings = type("S", (), {"transfer_mode": mode})()
+        m._sync_server_side = lambda *a: None
+        m._sync_native = lambda *a: None
+        m._sync_binary = lambda *a: None
+        return m
+
+    def test_the_configured_mode_is_tried_first(self):
+        m = self._mig("download_upload")
+        assert [n for n, _ in m._file_strategies(True)][0] == "download_upload"
+        m2 = self._mig("server_side")
+        assert [n for n, _ in m2._file_strategies(True)][0] == "server_side"
+
+    def test_the_other_path_is_offered_as_a_fallback(self):
+        m = self._mig("download_upload")
+        assert [n for n, _ in m._file_strategies(True)] == [
+            "download_upload", "server_side"]
+
+    def test_link_flip_is_never_fallen_back_into(self):
+        """Publishing a file the operator did not agree to expose is not a
+        recovery -- it is a different decision made on their behalf."""
+        m = self._mig("download_upload")
+        assert "link_flip" not in [n for n, _ in m._file_strategies(True)]
+
+    def test_native_and_binary_get_their_own_download_path(self):
+        m = self._mig("download_upload")
+        native = dict(m._file_strategies(True))["download_upload"]
+        binary = dict(m._file_strategies(False))["download_upload"]
+        assert native is not binary
+
+    def test_the_failure_count_is_corrected_from_this_files_own_rows(self):
+        """Not from the shared counter, and not from the attempt count.
+
+        Both earlier versions were wrong in ways only tests caught: counting
+        attempts assumed every one bumped `failed` (a SKIP does not, and the
+        counter reached -1), and snapshotting the shared counter was racy
+        because files run concurrently -- a 5-file run reported 2. The audit
+        row is per-file and cannot be confused with another file's.
+
+        The behaviour itself is covered end-to-end in test_drive_engine.py
+        (recovery, exhaustion, quota, staging lifecycle); this pins the
+        mechanism that makes it thread-safe.
+        """
+        import inspect
+
+        import drive_engine
+
+        src = inspect.getsource(drive_engine.DriveMigrator._sync_with_fallback)
+        assert "local_failures" in src
+        assert "self.stats.get" not in src, (
+            "correcting from the shared counter is racy under the file pool")
+
+    def test_the_real_cause_survives_the_strategy_summary(self):
+        """"every copy strategy failed" as the whole message threw away the
+        line that says WHAT went wrong -- a checksum mismatch became
+        indistinguishable from a permissions denial."""
+        import inspect
+
+        import drive_engine
+
+        src = inspect.getsource(drive_engine.DriveMigrator._sync_with_fallback)
+        assert "if last_error:" in src
+        assert "every copy strategy failed" in src
+
+    def test_quota_exhaustion_still_stops_the_run(self):
+        """QuotaExhausted means the daily cap is spent -- trying the other
+        method would just log failures against the same wall."""
+        import inspect
+
+        import drive_engine
+
+        src = inspect.getsource(drive_engine.DriveMigrator._sync_with_fallback)
+        assert "except QuotaExhausted:" in src
+        assert "raise" in src
