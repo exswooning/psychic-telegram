@@ -324,8 +324,13 @@ class DriveMigrator:
                 # operations, and the two were being compared. Immaterial on a
                 # corpus where 2 of 1,342 files exceed the resumable threshold;
                 # badly misleading on one where they do not.
+                # A download drains from the SOURCE, so its chunks belong to
+                # the source project's quota. `tenant` defaults to "target",
+                # which silently charged every byte of every export to the
+                # wrong project's bucket.
                 _, done = self._retry(lambda: downloader.next_chunk(),
-                                      label="drive.get_media.chunk")
+                                      label="drive.get_media.chunk",
+                                      write=False, tenant="source")
         # One sample for the whole download, matching how files.create is
         # measured on the other side.
         metrics.METRICS.record("drive.files.get_media",
@@ -349,7 +354,7 @@ class DriveMigrator:
         else:
             src_root = self._retry(
                 lambda: self.src.files().get(fileId="root", fields="id").execute(),
-                write=False)["id"]
+                write=False, tenant="source")["id"]
             tgt_root = self._retry(
                 lambda: self.tgt.files().get(fileId="root", fields="id").execute(),
                 write=False)["id"]
@@ -517,7 +522,8 @@ class DriveMigrator:
             resp = self._retry(lambda t=token: self.src.files().list(
                 q=q, pageSize=200, pageToken=t, fields=fields,
                 spaces="drive", supportsAllDrives=True, **extra,
-            ).execute(), label="drive.files.list", write=False)
+            ).execute(), label="drive.files.list", write=False,
+                               tenant="source")
             for f in resp.get("files", []):
                 yield f
             token = resp.get("nextPageToken")
@@ -547,7 +553,8 @@ class DriveMigrator:
                        "modifiedTime,size,md5Checksum,shared,owners,"
                        "capabilities(canDownload),shortcutDetails,description)",
                 spaces="drive", supportsAllDrives=True,
-            ).execute(), label="drive.files.list.sharedWithMe", write=False)
+            ).execute(), label="drive.files.list.sharedWithMe", write=False,
+                               tenant="source")
             for f in resp.get("files", []):
                 if self._owned_by_source_org(f):
                     continue
@@ -1313,7 +1320,7 @@ class DriveMigrator:
                 fileId=source_id, pageSize=100,
                 fields="comments(id,content,author,createdTime,resolved,"
                        "replies(id,content,author,createdTime))",
-            ).execute(), write=False)
+            ).execute(), write=False, tenant="source")
         except (PermanentAPIError, RuntimeError) as exc:
             log.debug("[%s] comments unavailable on %s: %s",
                      self.source_user, source_id, exc)
@@ -1398,7 +1405,8 @@ class DriveMigrator:
                 fields="permissions(id,type,role,emailAddress,domain,"
                        "allowFileDiscovery,permissionDetails)",
                 supportsAllDrives=True,
-            ).execute(), label="drive.permissions.list", write=False).get("permissions", [])
+            ).execute(), label="drive.permissions.list", write=False,
+                               tenant="source").get("permissions", [])
         except (PermanentAPIError, RuntimeError) as exc:
             # Record it, do not merely warn. A warning scrolls past and leaves
             # nothing for `report` or resolve_failures to act on, so a file

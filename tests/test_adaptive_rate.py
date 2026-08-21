@@ -228,3 +228,68 @@ class TestEachProjectGetsItsOwnBucket:
         src.penalise()
         assert src.rate == 20.0
         assert tgt.rate == 40.0
+
+
+class TestSourceCallsAreChargedToTheSourceProject:
+    """Splitting the bucket does nothing if the traffic does not follow.
+
+    Shipped live 2026-08-21 and measured inert: 10 calls issued against
+    self.src, exactly 1 declaring tenant="source". The other nine -- among
+    them permissions.list, the hot path -- took the "target" default and
+    were charged to the wrong project's quota, so the source bucket recorded
+    no probes and no pushbacks at all while the target absorbed both
+    projects' traffic and was halved down to 9/sec.
+
+    Checked by walking the AST rather than grepping: `tenant` defaults to
+    "target" and has to be declared by hand at every call site, so forgetting
+    it is easy and produces no error, no warning and no log line -- only a
+    limiter quietly pacing the wrong quota.
+    """
+
+    def _unrouted(self):
+        import ast
+        import pathlib
+
+        src = pathlib.Path(__file__).resolve().parent.parent / "drive_engine.py"
+        tree = ast.parse(src.read_text())
+        bad = []
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "_retry"):
+                continue
+            args = ast.dump(ast.Module(body=[ast.Expr(a) for a in node.args],
+                                       type_ignores=[]))
+            if "attr='src'" not in args:
+                continue
+            tenant = next((k.value.value for k in node.keywords
+                           if k.arg == "tenant"
+                           and isinstance(k.value, ast.Constant)), None)
+            if tenant != "source":
+                bad.append(node.lineno)
+        return bad
+
+    def test_every_call_issued_as_the_source_declares_it(self):
+        unrouted = self._unrouted()
+        assert not unrouted, (
+            "drive_engine.py lines "
+            f"{unrouted} call self.src through _retry without "
+            'tenant="source", so they are metered against the target '
+            "project's quota")
+
+    def test_the_check_can_actually_fail(self):
+        """A guard that cannot fail guards nothing -- and this one reads
+        source code, which is exactly where a silently-passing test hides."""
+        import ast
+        tree = ast.parse(
+            "class C:\n"
+            "    def f(self):\n"
+            "        self._retry(lambda: self.src.files().list().execute())\n")
+        found = [n for n in ast.walk(tree)
+                 if isinstance(n, ast.Call)
+                 and isinstance(n.func, ast.Attribute)
+                 and n.func.attr == "_retry"]
+        assert found, "the AST walk must locate _retry calls at all"
+        args = ast.dump(ast.Module(
+            body=[ast.Expr(a) for a in found[0].args], type_ignores=[]))
+        assert "attr='src'" in args, "and must see self.src inside the lambda"
