@@ -2257,6 +2257,62 @@ _ID_RE = re.compile(r"[A-Za-z0-9_-]{25,}")
 _URL_RE = re.compile(r"https?://\S+")
 
 
+class _SingleFlightCache:
+    """One computation per key, shared by everyone waiting on it.
+
+    The migration detail endpoint aggregates a 2.95M-row audit_log: a
+    GROUP BY plus a 200,000-row scan, together about 20 seconds on the VPS.
+    The dashboard polls it every 5 seconds. Measured live: 18 requests in
+    3 minutes, api_server.py holding 44% CPU on a 2-core box -- more than
+    the migration it was reporting on, and taken from it.
+
+    Two separate faults produced that. The endpoint is `async def` doing
+    blocking sqlite3 work, so each call pins the event loop rather than
+    yielding; and nothing deduplicated concurrent callers, so every poll
+    started the whole aggregate again from scratch.
+
+    A plain TTL cache does not fix it on its own -- with the query slower
+    than the poll interval, each expiry still admits a stampede. The lock is
+    what matters: the first caller computes, everyone else waits for that
+    same result. So N pollers, and a second browser tab, cost exactly one
+    query.
+    """
+
+    def __init__(self, ttl: float):
+        self.ttl = ttl
+        self._entries: dict = {}
+        self._locks: dict = {}
+        self._guard = threading.Lock()
+
+    def get(self, key, produce):
+        now = time.monotonic()
+        with self._guard:
+            hit = self._entries.get(key)
+            if hit and now < hit[0]:
+                return hit[1]
+            lock = self._locks.setdefault(key, threading.Lock())
+        with lock:
+            # Re-check inside the lock: whoever held it may have just
+            # finished, and recomputing here is precisely the stampede.
+            now = time.monotonic()
+            hit = self._entries.get(key)
+            if hit and now < hit[0]:
+                return hit[1]
+            value = produce()
+            self._entries[key] = (time.monotonic() + self.ttl, value)
+            return value
+
+    def invalidate(self, key) -> None:
+        """After an action that changes what the next read should show."""
+        with self._guard:
+            self._entries.pop(key, None)
+
+
+# 6s: longer than a poll interval so consecutive polls share one result,
+# short enough that a migration's progress still reads as live.
+_DETAIL_CACHE = _SingleFlightCache(ttl=6.0)
+
+
 def _normalise_failure(message: str) -> str:
     """The cause, with the per-item noise removed."""
     msg = _URL_RE.sub("<url>", message or "")
@@ -2381,7 +2437,11 @@ async def migration_detail(account_id: int, op: Operator = Depends(operator)):
             out["error"] = f"could not read the ledger: {str(exc)[:160]}"
         return out
 
-    return await _off_loop(_read)
+    # Cached and deduplicated: see _SingleFlightCache. These are the most
+    # expensive reads in the API by a wide margin, and this is the only
+    # endpoint anything polls on a timer.
+    return await _off_loop(
+        lambda: _DETAIL_CACHE.get(("migration_detail", account_id), _read))
 
 
 @app.get("/api/v2/nodes/join")

@@ -78,6 +78,21 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 CREATE INDEX IF NOT EXISTS ix_audit_status ON audit_log(source_user, status);
 CREATE INDEX IF NOT EXISTS ix_audit_item   ON audit_log(item_id);
+-- The reporting shape. ix_audit_status leads on source_user, which serves
+-- "how is this mailbox doing" and does nothing for "how is this migration
+-- doing" -- the question every dashboard poll actually asks. On a live
+-- 2.95M-row ledger the GROUP BY behind that answer took 8.3s and ran every
+-- 5 seconds, holding api_server.py at 44% CPU on a 2-core box: more than
+-- the migration it was reporting on, and taken from it. With this index,
+-- 0.54s.
+--
+-- One index, not two. status leads because the failures panel filters on it
+-- (an index leading on item_type cannot serve WHERE status='FAILED'), and
+-- SQLite reads this one as a COVERING index for the GROUP BY either way --
+-- verified through EXPLAIN QUERY PLAN, not assumed. A second (item_type,
+-- status) index bought nothing and would have been paid for on every write
+-- of a migration that does millions of them.
+CREATE INDEX IF NOT EXISTS ix_audit_status_type ON audit_log(status, item_type);
 
 -- Module 1: pre-scan output, one row per (user, run).
 CREATE TABLE IF NOT EXISTS discovery (
