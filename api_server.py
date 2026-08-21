@@ -2326,13 +2326,32 @@ def _group_failures(rows) -> list[dict]:
     Done here rather than in SQL because the normalisation is a regex
     substitution, and grouping on the raw text -- which is what the SQL did
     -- produced one group per FILE instead of one per cause.
+
+    But "not groupable in SQL" was taken to mean "read every row", and those
+    are different claims. SQL cannot produce the final grouping; it can
+    still collapse identical raw messages first, and a migration's failures
+    repeat enormously -- 271,330 rows over 12,198 distinct (type, message)
+    pairs on the live ledger. The caller now pre-aggregates, so this
+    normalises about 22x fewer strings for exactly the same answer.
+
+    Profiled on the VPS while it was reported as maxing out: with 200,000
+    rows arriving here, _normalise_failure ran two regex substitutions on
+    each -- 400,000 of them per request -- and was the single largest
+    consumer of real CPU in the whole API process.
+
+    `n` is the pre-aggregated row count, defaulting to 1 so the un-aggregated
+    form still works and the tests can pass plain rows.
     """
     groups: dict = {}
     for r in rows:
+        try:
+            n = r["n"]
+        except (KeyError, IndexError, TypeError):
+            n = 1
         key = (r["item_type"], _normalise_failure(r["error_message"]))
         g = groups.setdefault(key, {"reason": key[1], "itemType": key[0],
                                     "count": 0, "users": set()})
-        g["count"] += 1
+        g["count"] += n or 1
         if r["source_user"]:
             g["users"].add(r["source_user"])
     out = sorted(groups.values(), key=lambda g: -g["count"])[:25]
@@ -2398,9 +2417,17 @@ async def migration_detail(account_id: int, op: Operator = Depends(operator)):
                 # "200 · acl" lines that hid the single reason behind them.
                 # Stripping ids and URLs first is what turns 127,852 rows
                 # into the two causes actually behind them.
+                # Collapsed in SQL before it reaches Python. Identical raw
+                # messages are extremely common -- 271,330 failed rows over
+                # 12,198 distinct (type, message) pairs live -- and every
+                # duplicate used to pay for its own pair of regex
+                # substitutions in _group_failures.
                 out["failures"] = _group_failures(conn.execute(
-                    "SELECT item_type, error_message, source_user "
-                    "FROM audit_log WHERE status='FAILED' LIMIT 200000"))
+                    "SELECT item_type, error_message, source_user, "
+                    "       COUNT(*) AS n "
+                    "FROM audit_log WHERE status='FAILED' "
+                    "GROUP BY item_type, error_message, source_user "
+                    "LIMIT 200000"))
 
                 # `notes` is where set_identity_status records why -- which
                 # is now the enriched licence explanation rather than a raw

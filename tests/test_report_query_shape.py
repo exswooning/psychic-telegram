@@ -127,3 +127,69 @@ class TestPollsShareOneComputation:
         cache.invalidate("k")
         cache.get("k", lambda: calls.append(1) or "v")
         assert len(calls) == 2
+
+
+class TestFailureGroupingScalesWithCausesNotRows:
+    """_group_failures ran two regex substitutions per row. At 200,000 rows
+    that is 400,000 of them per request, and profiling the live VPS put it
+    as the largest single consumer of real CPU in the API process.
+
+    "Cannot be grouped in SQL" was read as "must read every row". SQL cannot
+    produce the final grouping -- the normalisation is a regex -- but it can
+    collapse identical raw messages first, and failures repeat enormously:
+    271,330 rows over 12,198 distinct pairs on the live ledger.
+    """
+
+    def _rows(self, tuples):
+        """Rows that index by name, like sqlite3.Row."""
+        return [dict(zip(("item_type", "error_message", "source_user", "n"), t))
+                for t in tuples]
+
+    def test_a_preaggregated_count_is_honoured(self):
+        import api_server
+        out = api_server._group_failures(self._rows([
+            ("acl", "Quota exceeded for file <id>", "a@x.com", 5000),
+        ]))
+        assert out[0]["count"] == 5000
+
+    def test_rows_without_a_count_still_count_as_one(self):
+        """The un-aggregated form has to keep working -- other callers and
+        every existing test pass plain rows."""
+        import api_server
+        out = api_server._group_failures([
+            {"item_type": "acl", "error_message": "boom", "source_user": "a@x"},
+            {"item_type": "acl", "error_message": "boom", "source_user": "b@x"},
+        ])
+        assert out[0]["count"] == 2
+
+    def test_preaggregation_gives_the_same_answer_as_row_by_row(self):
+        """The optimisation is only worth having if it changes nothing."""
+        import api_server
+        raw = []
+        for i in range(300):
+            raw.append({"item_type": "acl",
+                        "error_message": f"Quota exceeded on file abc{i}",
+                        "source_user": f"u{i % 7}@x.com"})
+        by_row = api_server._group_failures(raw)
+
+        collapsed: dict = {}
+        for r in raw:
+            k = (r["item_type"], r["error_message"], r["source_user"])
+            collapsed[k] = collapsed.get(k, 0) + 1
+        pre = api_server._group_failures(
+            self._rows([(k[0], k[1], k[2], n) for k, n in collapsed.items()]))
+
+        assert [g["count"] for g in by_row] == [g["count"] for g in pre]
+        assert [g["reason"] for g in by_row] == [g["reason"] for g in pre]
+        assert [g["userCount"] for g in by_row] == [g["userCount"] for g in pre]
+
+    def test_distinct_users_survive_aggregation(self):
+        """"3 users" and "all 201" are different problems behind the same
+        message, so the user set must not be collapsed away with the rows."""
+        import api_server
+        out = api_server._group_failures(self._rows([
+            ("acl", "same cause", "a@x.com", 900),
+            ("acl", "same cause", "b@x.com", 100),
+        ]))
+        assert out[0]["count"] == 1000
+        assert out[0]["userCount"] == 2
