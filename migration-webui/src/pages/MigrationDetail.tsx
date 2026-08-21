@@ -2,13 +2,16 @@ import React, { useCallback, useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
   Alert, Box, Button, Chip, CircularProgress, IconButton, Paper, Stack,
-  Table, TableBody, TableCell, TableHead, TableRow, Typography,
+  Table, TableBody, TableCell, TableHead, TableRow, TextField, Typography,
 } from '@mui/material'
 import {
   Refresh as RefreshIcon, ArrowBack as BackIcon,
-  ArrowForward as ArrowIcon,
+  ArrowForward as ArrowIcon, Update as DeltaIcon,
 } from '@mui/icons-material'
-import { fetchMigrationDetail, MigrationDetail as Detail } from '@/api/controlPlane'
+import {
+  fetchMigrationDetail, startDelta, MigrationDetail as Detail,
+} from '@/api/controlPlane'
+import ReasonCodeDialog from '@/components/ReasonCodeDialog'
 
 /**
  * One migration in full: what moved, what failed, and why.
@@ -39,6 +42,11 @@ export const MigrationDetail: React.FC = () => {
   const [d, setD] = useState<Detail | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [askDelta, setAskDelta] = useState(false)
+  const [deltaBusy, setDeltaBusy] = useState(false)
+  const [deltaError, setDeltaError] = useState<string | null>(null)
+  const [deltaDays, setDeltaDays] = useState(2)
+  const [started, setStarted] = useState('')
 
   const id = Number(accountId)
 
@@ -69,11 +77,26 @@ export const MigrationDetail: React.FC = () => {
         </Button>
         {loading && <CircularProgress size={16} />}
         <Box sx={{ flex: 1 }} />
+        <TextField size="small" type="number" label="days"
+                   value={deltaDays} sx={{ width: 90 }}
+                   onChange={(e) => setDeltaDays(Math.max(1, Number(e.target.value) || 1))}
+                   inputProps={{ 'data-testid': 'delta-days', min: 1, max: 90 }} />
+        <Button size="small" variant="outlined" startIcon={<DeltaIcon />}
+                data-testid="run-delta"
+                disabled={d?.running || deltaBusy}
+                onClick={() => setAskDelta(true)}>
+          {d?.running ? 'migration running' : 'Run delta'}
+        </Button>
         <IconButton size="small" onClick={refresh} aria-label="refresh">
           <RefreshIcon fontSize="small" />
         </IconButton>
       </Stack>
 
+      {started && (
+        <Alert severity="success" sx={{ mb: 2 }} data-testid="delta-started">
+          {started}
+        </Alert>
+      )}
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
       {d?.error && <Alert severity="warning" sx={{ mb: 2 }}>{d.error}</Alert>}
 
@@ -233,6 +256,37 @@ export const MigrationDetail: React.FC = () => {
           </Paper>
         </>
       )}
+      <ReasonCodeDialog
+        open={askDelta}
+        busy={deltaBusy}
+        error={deltaError}
+        title={`Run a delta pass over ${d?.sourceDomain || 'this tenant'}`}
+        description={
+          <>
+            Re-asks the source what changed in the last {deltaDays} day(s) and
+            copies it, rather than re-copying what is already in the ledger.
+            This is the pass you run repeatedly between a bulk copy and a
+            cutover, and once more after the cutover window closes. It uses
+            the same engine and the same machine-wide capacity slot as a full
+            migration.
+          </>
+        }
+        onCancel={() => { setAskDelta(false); setDeltaError(null) }}
+        onConfirm={async (reason: string) => {
+          setDeltaBusy(true); setDeltaError(null)
+          try {
+            const r = await startDelta(reason, deltaDays)
+            if (!r.ok) throw new Error(r.detail || 'could not start')
+            setAskDelta(false)
+            setStarted(r.detail || 'delta pass started')
+            refresh()
+          } catch (e: any) {
+            setDeltaError(e.message)
+          } finally {
+            setDeltaBusy(false)
+          }
+        }}
+      />
     </Box>
   )
 }

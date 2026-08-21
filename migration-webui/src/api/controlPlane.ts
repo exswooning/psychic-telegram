@@ -523,6 +523,15 @@ export interface MigrationDetail {
   error: string
 }
 
+/** The incremental catch-up pass -- re-asks the source what CHANGED in a
+ *  recent window, rather than copying what is not yet in the ledger. Run
+ *  repeatedly between a bulk copy and a cutover, and once more after. */
+export const startDelta = (reason: string, days = 2, services = ['all']) =>
+  cpFetch<ActionResult>('/api/v2/migrate/delta', {
+    method: 'POST',
+    body: JSON.stringify({ reason, days, services, users: [] }),
+  })
+
 export const fetchMigrationDetail = (accountId: number) =>
   cpFetch<MigrationDetail>(`/api/v2/migrations/${accountId}`)
 

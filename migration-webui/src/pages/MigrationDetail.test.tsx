@@ -1,11 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
 import MigrationDetail from './MigrationDetail'
 
 const fetchMigrationDetail = vi.fn()
+const startDelta = vi.fn()
 vi.mock('@/api/controlPlane', () => ({
   fetchMigrationDetail: (...a: unknown[]) => fetchMigrationDetail(...a),
+  startDelta: (...a: unknown[]) => startDelta(...a),
 }))
 
 /**
@@ -138,5 +140,52 @@ describe('MigrationDetail', () => {
   it('offers a way back to the list', async () => {
     show(detail())
     await waitFor(() => expect(screen.getByTestId('back')).toBeTruthy())
+  })
+})
+
+
+describe('MigrationDetail — delta pass', () => {
+  beforeEach(() => { vi.clearAllMocks() })
+
+  it('offers a delta run when the migration is idle', async () => {
+    show(detail({ running: false }))
+    await waitFor(() => expect(screen.getByTestId('run-delta')).toBeTruthy())
+    expect(screen.getByTestId('run-delta')).not.toBeDisabled()
+  })
+
+  it('refuses to start one while a migration is running', async () => {
+    /* Delta uses the same engine and the same machine-wide capacity slot,
+       so starting it mid-run would be refused by job_admission anyway --
+       better to say so before asking for a Reason Code. */
+    show(detail({ running: true }))
+    await waitFor(() => expect(screen.getByTestId('run-delta')).toBeTruthy())
+    expect(screen.getByTestId('run-delta')).toBeDisabled()
+    expect(screen.getByTestId('run-delta')).toHaveTextContent('migration running')
+  })
+
+  it('asks for a Reason Code before starting', async () => {
+    /* Every write action carries one; a catch-up pass writes into a live
+       target like any other. */
+    show(detail({ running: false }))
+    await waitFor(() => expect(screen.getByTestId('run-delta')).toBeTruthy())
+    fireEvent.click(screen.getByTestId('run-delta'))
+    await waitFor(() => expect(screen.getByText(/Run a delta pass/)).toBeTruthy())
+    expect(startDelta).not.toHaveBeenCalled()
+  })
+
+  it('carries the chosen look-back window', async () => {
+    show(detail({ running: false }))
+    await waitFor(() => expect(screen.getByTestId('delta-days')).toBeTruthy())
+    fireEvent.change(screen.getByTestId('delta-days'), { target: { value: '7' } })
+    expect((screen.getByTestId('delta-days') as HTMLInputElement).value).toBe('7')
+  })
+
+  it('never lets the window fall below one day', async () => {
+    /* A zero-day window asks the source what changed in no time at all --
+       a pass that is guaranteed to copy nothing while consuming a slot. */
+    show(detail({ running: false }))
+    await waitFor(() => expect(screen.getByTestId('delta-days')).toBeTruthy())
+    fireEvent.change(screen.getByTestId('delta-days'), { target: { value: '0' } })
+    expect((screen.getByTestId('delta-days') as HTMLInputElement).value).toBe('1')
   })
 })

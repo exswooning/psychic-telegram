@@ -243,6 +243,20 @@ class StartMigration(WriteAction):
     dry_run: bool = False
 
 
+class StartDelta(WriteAction):
+    """An incremental catch-up pass over the same tenant pair.
+
+    Separate from migrate rather than a flag on it, mirroring the CLI: the
+    two answer different questions. migrate copies everything not yet in the
+    ledger; delta re-asks the source what CHANGED in a recent window, which
+    is what you run repeatedly between a bulk copy and a cutover, and once
+    more after the cutover window closes.
+    """
+    services: list[str] = Field(default_factory=lambda: ["all"])
+    users: list[str] = Field(default_factory=list)   # empty = whole batch
+    days: int = Field(default=2, ge=1, le=90)
+
+
 class JobSignal(WriteAction):
     pass
 
@@ -333,12 +347,19 @@ class Hub:
 HUB = Hub()
 
 
-# job_admission.py job names THIS process admits (migrate_start's
-# _run_admitted, full_setup_start's inlined try_admit) -- the only ones
-# _reconcile_active_jobs below has any business releasing. Not 'delta' or
-# 'discover': nothing here ever admits those under those names today, but
-# they'd still show up in a live `ps` scan under "main.py" regardless.
-_OWNED_JOB_NAMES = {"migrate", "full_setup"}
+# job_admission.py job names THIS process admits (migrate_start's and
+# migrate_delta's _run_admitted, full_setup_start's inlined try_admit) --
+# the only ones _reconcile_active_jobs below has any business releasing.
+#
+# 'delta' joined this set when the delta endpoint was added, and it had to:
+# a name that is admitted but never reconciled leaks its slot permanently
+# the first time the API restarts under a running job, and the cap is
+# machine-wide, so one leaked slot is half the capacity gone with nothing
+# visible to explain it.
+#
+# Still not 'discover': nothing here admits under that name, and releasing
+# a slot this process did not take is how one job frees another's.
+_OWNED_JOB_NAMES = {"migrate", "delta", "full_setup"}
 
 
 def _reconcile_active_jobs() -> None:
@@ -824,6 +845,25 @@ async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
     target = ",".join(body.users) if body.users else "ALL"
     return await _gated(op, "migrate.start", body, target,
                         lambda: _run_admitted(argv, op.account_id, "migrate"))
+
+
+@app.post("/api/v2/migrate/delta")
+async def migrate_delta(body: StartDelta, op: Operator = Depends(operator)):
+    """Run the catch-up pass.
+
+    Goes through job_admission like migrate does -- it is the same engine
+    against the same tenant, so it consumes the same memory and must count
+    against the same cap. Treating it as "lighter" because it usually moves
+    less would let it run alongside a full migration and halve both.
+    """
+    argv = ([PY, "main.py"] + _account_argv(op.account_id)
+            + ["delta", "--services", ",".join(body.services),
+               "--days", str(body.days)])
+    for u in body.users:
+        argv += ["--user", u]
+    target = ",".join(body.users) if body.users else "ALL"
+    return await _gated(op, "migrate.delta", body, target,
+                        lambda: _run_admitted(argv, op.account_id, "delta"))
 
 
 @app.post("/api/v2/jobs/{pid}/stop")
