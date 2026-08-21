@@ -253,7 +253,7 @@ class TestTheProjectQuotaIsLimitedAtProjectScope:
     def test_the_project_limiter_is_shared_across_migrators(self):
         import drive_engine
 
-        drive_engine._PROJECT_LIMITER = None
+        drive_engine._PROJECT_LIMITERS.clear()
         a = drive_engine._project_limiter(40)
         b = drive_engine._project_limiter(40)
         assert a is b, "each worker holding its own defeats the whole point"

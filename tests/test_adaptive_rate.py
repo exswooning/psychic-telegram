@@ -187,8 +187,44 @@ class TestItConvergesFastEnoughToMatter:
         import os
 
         import drive_engine
-        drive_engine._PROJECT_LIMITER = None
+        drive_engine._PROJECT_LIMITERS.clear()
         lim = drive_engine._project_limiter(40.0)
         assert lim.ceiling >= 1000
         assert lim.ceiling > float(os.getenv("DRIVE_PROJECT_QPS", "40")) * 10
-        drive_engine._PROJECT_LIMITER = None
+        drive_engine._PROJECT_LIMITERS.clear()
+
+
+class TestEachProjectGetsItsOwnBucket:
+    """Source and target are two different GCP projects and Google meters
+    each separately. One bucket made a permissions.list against the source
+    compete with a permissions.create against the target for the same
+    tokens -- the mistake _src_write_limiter and _tgt_write_limiter were
+    split apart to fix, one level further out."""
+
+    def setup_method(self):
+        import drive_engine
+        drive_engine._PROJECT_LIMITERS.clear()
+
+    teardown_method = setup_method
+
+    def test_the_two_tenants_do_not_share_a_bucket(self):
+        import drive_engine
+        assert (drive_engine._project_limiter(40, "source")
+                is not drive_engine._project_limiter(40, "target"))
+
+    def test_the_same_tenant_shares_one_bucket_across_workers(self):
+        """The whole reason this is process-global: per-worker buckets are
+        what let a fan-out outrun a per-project quota."""
+        import drive_engine
+        assert (drive_engine._project_limiter(40, "target")
+                is drive_engine._project_limiter(40, "target"))
+
+    def test_pushback_on_one_project_does_not_throttle_the_other(self):
+        """They have independent allowances. Halving both on one project's
+        rejection would spend a quota that was never the problem."""
+        import drive_engine
+        src = drive_engine._project_limiter(40, "source")
+        tgt = drive_engine._project_limiter(40, "target")
+        src.penalise()
+        assert src.rate == 20.0
+        assert tgt.rate == 40.0

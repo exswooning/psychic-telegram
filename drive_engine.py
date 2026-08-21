@@ -39,22 +39,29 @@ log = logging.getLogger(__name__)
 LARGE_UPLOAD_THRESHOLD = 5 * 1024 * 1024  # switch to resumable above this size
 
 
-_PROJECT_LIMITER = None
+_PROJECT_LIMITERS: dict = {}
 _PROJECT_LIMITER_LOCK = threading.Lock()
 
 
-def _project_limiter(qps: float):
-    """One bucket per PROCESS, not per migrator.
+def _project_limiter(qps: float, tenant: str = "target"):
+    """One bucket per PROCESS **per tenant**, not per migrator.
 
     Every worker thread runs its own DriveMigrator with its own per-user
     limiter, which is correct for the per-user quotas and useless for the
     per-project one -- nine correctly-paced workers still present nine times
     the rate to a limit Google enforces on the project. Built once and shared
     so the fan-out cannot outrun the quota.
+
+    Keyed by tenant, because source and target are two different GCP
+    projects and Google meters each separately. One bucket made a
+    permissions.list against the source compete with a permissions.create
+    against the target for the same tokens, so one project's allowance was
+    spent twice over while the other sat partly idle -- exactly the mistake
+    _src_write_limiter and _tgt_write_limiter were split apart to fix, one
+    level further out and against a far larger quota.
     """
-    global _PROJECT_LIMITER
     with _PROJECT_LIMITER_LOCK:
-        if _PROJECT_LIMITER is None:
+        if tenant not in _PROJECT_LIMITERS:
             # Adaptive, because `qps` is a guess about someone else's GCP
             # project and there is no API that will tell us the real number.
             # It starts at the configured rate and then finds the ceiling by
@@ -77,21 +84,23 @@ def _project_limiter(qps: float):
             # Set high enough that AIMD is what binds. Overshoot is bounded
             # by halving on the first rejection; being stuck 5x low is not
             # bounded by anything, and reports nothing.
-            _PROJECT_LIMITER = AdaptiveRateLimiter(
+            _PROJECT_LIMITERS[tenant] = AdaptiveRateLimiter(
                 qps, floor=max(4.0, qps / 8.0),
                 ceiling=float(os.getenv("DRIVE_PROJECT_QPS_CEILING", "1200")),
-                on_change=_log_rate_change)
-        return _PROJECT_LIMITER
+                on_change=lambda k, a, b, t=tenant: _log_rate_change(k, a, b, t))
+        return _PROJECT_LIMITERS[tenant]
 
 
-def _log_rate_change(kind: str, before: float, after: float) -> None:
+def _log_rate_change(kind: str, before: float, after: float,
+                     tenant: str = "target") -> None:
     """Say it out loud. A limiter that silently retunes itself is a limiter
     nobody can debug when a run is mysteriously slow."""
     if kind == "backoff":
-        log.warning("drive project rate: %.1f -> %.1f/s (quota pushback)",
-                    before, after)
+        log.warning("drive %s project rate: %.1f -> %.1f/s (quota pushback)",
+                    tenant, before, after)
     else:
-        log.info("drive project rate: %.1f -> %.1f/s (probing up)", before, after)
+        log.info("drive %s project rate: %.1f -> %.1f/s (probing up)",
+                 tenant, before, after)
 
 
 _QUOTA_MARKERS = (
@@ -133,7 +142,10 @@ class DriveMigrator:
         # times the project rate; that is what produced 127,832 failed ACL
         # operations in a single run, all of them rateLimitExceeded that had
         # exhausted their retries.
-        self._project_limiter = _project_limiter(settings.drive_project_qps)
+        self._project_limiter = _project_limiter(settings.drive_project_qps,
+                                                 "target")
+        self._src_project_limiter = _project_limiter(
+            settings.drive_project_qps, "source")
         # The ceiling that actually bounds a migration -- one bucket PER
         # ACCOUNT, because that is the unit Google enforces it on.
         #
@@ -243,7 +255,9 @@ class DriveMigrator:
         # a 20-grant permissions batch as a single token let the true rate
         # run 20x over whatever this was configured to allow -- a limiter
         # correct by its own arithmetic and wrong against Google's.
-        self._project_limiter.acquire(cost)
+        project = (self._src_project_limiter if tenant == "source"
+                   else self._project_limiter)
+        project.acquire(cost)
         if not write:
             self._read_limiter.acquire()
         elif tenant == "source":
@@ -265,7 +279,7 @@ class DriveMigrator:
             # nothing about pacing, and treating them as congestion would
             # throttle a migration for reasons that have no relation to rate.
             if _is_quota_rejection(exc):
-                self._project_limiter.penalise()
+                project.penalise()
             raise
 
     def _scratch_path(self) -> str:
