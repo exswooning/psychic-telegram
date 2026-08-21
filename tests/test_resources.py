@@ -267,17 +267,43 @@ class TestTheProjectQuotaIsLimitedAtProjectScope:
         # what one user alone sustains.
         assert 10 <= s.drive_project_qps <= 200
 
-    def test_every_call_is_charged_to_it_not_just_reads(self):
-        """The project quota counts writes too -- exempting them would leave
-        the same hole in a smaller form."""
-        import inspect
-
+    def _charges(self, **kw):
+        """Drive one call through _retry and report what the project bucket
+        was charged. Asserted behaviourally rather than by reading the source
+        of _retry: the old version did `src.index("_project_limiter.
+        acquire()")` and broke the moment the call took an argument, which
+        tests the spelling of the line and not what it does."""
         import drive_engine
 
-        src = inspect.getsource(drive_engine.DriveMigrator._retry)
-        i = src.index("_project_limiter.acquire()")
-        j = src.index("if not write:")
-        assert i < j, "the project bucket must be charged before the branch"
+        class _Bucket:
+            def __init__(self): self.charged = []
+            def acquire(self, cost=1.0): self.charged.append(cost)
+            def penalise(self): pass
+
+        m = drive_engine.DriveMigrator.__new__(drive_engine.DriveMigrator)
+        bucket = _Bucket()
+        m._project_limiter = bucket
+        m._read_limiter = _Bucket()
+        m._write_limiter = _Bucket()
+        m._src_write_limiter = _Bucket()
+        m.settings = type("S", (), {"max_retries": 0, "base_backoff": 0,
+                                    "max_backoff": 0})()
+        m._retry(lambda: "ok", **kw)
+        return bucket.charged
+
+    def test_reads_are_charged_to_it(self):
+        assert self._charges(write=False) == [1]
+
+    def test_writes_are_charged_to_it_too(self):
+        """The project quota counts writes -- exempting them would leave the
+        same hole in a smaller form."""
+        assert self._charges(write=True) == [1]
+
+    def test_a_batch_is_charged_for_every_operation_in_it(self):
+        """One round trip, N operations, and the quota counts operations. A
+        20-grant batch charged as one token let the real rate run 20x over
+        the configured ceiling."""
+        assert self._charges(write=True, cost=20) == [20]
 
 
 class TestTheBudgetsTrackTheirOwnInputs:

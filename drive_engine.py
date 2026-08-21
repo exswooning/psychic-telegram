@@ -197,7 +197,7 @@ class DriveMigrator:
 
     # -- plumbing -----------------------------------------------------------
     def _retry(self, fn, label=None, write: bool = True,
-               tenant: str = "target"):
+               tenant: str = "target", cost: int = 1):
         """
         Every Drive call goes through here, and every call is paced.
 
@@ -226,7 +226,12 @@ class DriveMigrator:
         # Charged on every call, read or write: the project-wide quota
         # counts all of them, so exempting writes would leave the same hole
         # in a smaller form.
-        self._project_limiter.acquire()
+        # `cost`, not 1: a BatchHttpRequest is one round trip and N
+        # operations, and the project quota counts the operations. Charging
+        # a 20-grant permissions batch as a single token let the true rate
+        # run 20x over whatever this was configured to allow -- a limiter
+        # correct by its own arithmetic and wrong against Google's.
+        self._project_limiter.acquire(cost)
         if not write:
             self._read_limiter.acquire()
         elif tenant == "source":
@@ -1525,7 +1530,8 @@ class DriveMigrator:
             batch.add(req, request_id=str(idx), callback=_cb)
 
         try:
-            self._retry(lambda: batch.execute(), label="drive.permissions.create.batch")
+            self._retry(lambda: batch.execute(),
+                        label="drive.permissions.create.batch", cost=len(chunk))
         except (PermanentAPIError, RuntimeError) as exc:
             # A whole-batch failure: every grant in the chunk failed. Record
             # them all, like the per-call loop would have.
@@ -1533,6 +1539,16 @@ class DriveMigrator:
                 self.db.log_audit(self.source_user, audit_key, "acl", "FAILED", str(exc))
             self._bump("acl_failed", len(chunk))
             return 0
+
+        # A batch returns HTTP 200 while individual grants inside it fail,
+        # so _retry never raises and the adaptive limiter never learns it
+        # overshot. Live, that read as 23 upward probes against 1 recorded
+        # pushback while 4,657 grants a minute were being rejected for
+        # quota: the controller was climbing blind, because the failure path
+        # that mattered most was the one it could not see.
+        if any(exc is not None and _is_quota_rejection(exc)
+               for exc in outcomes.values()):
+            self._project_limiter.penalise()
 
         applied = 0
         # `requests` holds (audit_key, request) -- unpack it that way round.

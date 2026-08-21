@@ -360,17 +360,38 @@ class RateLimiter:
         self._last = time.monotonic()
         self._lock = threading.Lock()
 
-    def acquire(self) -> None:
+    def acquire(self, cost: float = 1.0) -> None:
+        """Take `cost` tokens, waiting until they are available.
+
+        `cost` exists because a batched API call is one round trip and many
+        operations, and the quota counts the operations. A 20-grant Drive
+        permissions batch charged as a single token let the real rate run 20x
+        over whatever this was configured to allow -- which is why a limiter
+        that was working correctly by its own reckoning still produced
+        hundreds of thousands of quota rejections.
+
+        Deliberately allowed to exceed `capacity`: a batch may legitimately
+        cost more than the bucket's burst, and refusing it (or silently
+        charging less) would put the cap back exactly where it was.
+        """
+        cost = max(float(cost), 0.0)
+        if cost == 0.0:
+            return
         while True:
             with self._lock:
                 now = time.monotonic()
                 elapsed = now - self._last
                 self._last = now
-                self._tokens = min(self.capacity, self._tokens + elapsed * self.rate)
-                if self._tokens >= 1.0:
-                    self._tokens -= 1.0
+                # Ceiling is max(capacity, cost), not capacity: a batch may
+                # cost more than the bucket's burst, and capping accumulation
+                # at `capacity` there means the balance can never reach the
+                # cost and acquire() spins forever. Found by hanging.
+                self._tokens = min(max(self.capacity, cost),
+                                   self._tokens + elapsed * self.rate)
+                if self._tokens >= cost:
+                    self._tokens -= cost
                     return
-                wait = (1.0 - self._tokens) / self.rate
+                wait = (cost - self._tokens) / self.rate
             time.sleep(wait)
 
 
@@ -427,7 +448,7 @@ class AdaptiveRateLimiter(RateLimiter):
             self._on_change("backoff", before, self.rate)
         return self.rate
 
-    def acquire(self) -> None:
+    def acquire(self, cost: float = 1.0) -> None:
         # Probe upward only from inside the wait path, so an idle process
         # never drifts its rate up on the strength of having done nothing.
         with self._lock:
@@ -441,7 +462,7 @@ class AdaptiveRateLimiter(RateLimiter):
                 grew = None
         if grew and self._on_change:
             self._on_change("probe", *grew)
-        super().acquire()
+        super().acquire(cost)
 
     def stats(self) -> dict:
         with self._lock:

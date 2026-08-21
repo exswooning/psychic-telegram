@@ -116,3 +116,38 @@ class TestOnlyQuotaCounts:
     def test_other_failures_do_not_throttle(self, msg):
         import drive_engine
         assert not drive_engine._is_quota_rejection(Exception(msg))
+
+
+class TestBatchesReportTheirOwnFailures:
+    """A BatchHttpRequest returns HTTP 200 while grants inside it fail, so
+    _retry never raises and the controller never learns it overshot. Live:
+    23 upward probes against 1 recorded pushback while 4,657 grants a minute
+    were being rejected for quota."""
+
+    def test_cost_above_the_burst_does_not_hang(self):
+        """The token ceiling was `capacity`, so a cost above it could never
+        be reached and acquire() span forever. Found by hanging."""
+        import threading
+
+        from resilience import RateLimiter
+
+        lim = RateLimiter(1000, burst=1)
+        done = threading.Event()
+        threading.Thread(target=lambda: (lim.acquire(50), done.set()),
+                         daemon=True).start()
+        assert done.wait(timeout=5), "acquire(cost > burst) never returned"
+
+    def test_a_large_cost_takes_proportionally_longer(self):
+        from resilience import RateLimiter
+        lim = RateLimiter(50, burst=1)
+        lim.acquire(1)
+        started = time.monotonic()
+        lim.acquire(25)
+        assert time.monotonic() - started >= 0.4
+
+    def test_zero_cost_is_free(self):
+        from resilience import RateLimiter
+        lim = RateLimiter(0.5)
+        started = time.monotonic()
+        lim.acquire(0)
+        assert time.monotonic() - started < 0.1
