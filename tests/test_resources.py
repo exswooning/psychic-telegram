@@ -136,10 +136,40 @@ class TestSizing:
 
 class TestSettingsIntegration:
     def test_settings_uses_the_recommendation(self, monkeypatch):
+        """Pinned to one recommendation, not two taken moments apart.
+
+        This compared Settings() against a fresh resources.recommend(), so it
+        was really asserting that the machine's free memory had not moved
+        between the two calls. On a developer box under real memory pressure
+        it does move -- MIN_WORKERS on one side of the boundary, the RAM-
+        derived count on the other -- and the test failed with 6 != 1 while
+        the wiring it exists to check was working perfectly.
+
+        What it needs to prove is that Settings reads the recommendation
+        rather than inventing a number, so the recommendation is fixed and
+        the reading is checked.
+        """
         monkeypatch.delenv("USER_WORKERS", raising=False)
+        monkeypatch.setattr(resources, "recommend",
+                            lambda *a, **k: {"user_workers": 7,
+                                             "seed_workers": 9,
+                                             "mail_workers": 3,
+                                             "reason": "pinned for the test"})
         from config import Settings
 
-        assert Settings().user_workers == resources.recommend()["user_workers"]
+        assert Settings().user_workers == 7
+
+    def test_it_tracks_the_recommendation_rather_than_a_constant(self, monkeypatch):
+        """A hardcoded 7 in Settings would pass the test above."""
+        monkeypatch.delenv("USER_WORKERS", raising=False)
+        monkeypatch.setattr(resources, "recommend",
+                            lambda *a, **k: {"user_workers": 3,
+                                             "seed_workers": 9,
+                                             "mail_workers": 3,
+                                             "reason": "pinned for the test"})
+        from config import Settings
+
+        assert Settings().user_workers == 3
 
     def test_an_explicit_override_still_wins(self, monkeypatch):
         """Auto-sizing must never take the decision away from the operator."""
@@ -342,3 +372,41 @@ class TestTheBudgetsTrackTheirOwnInputs:
         swap stall, which surfaced as 30 minutes of socket timeouts."""
         assert resources.mb_per_worker(0) >= 64
         assert resources.mb_per_seed_worker(1) >= 64
+
+
+class TestAutoSizingCannotFailQuietly:
+    """`_auto` catches everything and returns a hardcoded fallback, which is
+    correct for startup and dangerous for diagnosis. A missing `import time`
+    in config.py made every call raise NameError, so every Settings() took
+    the fallback -- 6 workers on a machine sized for 16 -- and produced a
+    plausible number instead of a complaint. It ran that way for hours.
+    """
+
+    def test_the_module_imports_everything_it_uses(self):
+        """The specific break: _concurrent_jobs calls time.monotonic()."""
+        import config
+        assert config._concurrent_jobs() >= 1
+
+    def test_a_fallback_is_warned_about_once(self, monkeypatch, caplog):
+        import logging as _logging
+
+        import config
+        monkeypatch.setattr(config, "_AUTO_FAILED", {})
+        monkeypatch.setattr(resources, "recommend",
+                            lambda *a, **k: (_ for _ in ()).throw(
+                                NameError("name 'time' is not defined")))
+        with caplog.at_level(_logging.WARNING, logger="config"):
+            assert config._auto("user_workers", 6) == 6
+            config._auto("user_workers", 6)
+        warnings = [r for r in caplog.records if "auto-sizing" in r.message]
+        assert len(warnings) == 1, "warned once per key, not per construction"
+        assert "NameError" in warnings[0].getMessage()
+
+    def test_settings_matches_the_recommendation_it_reads(self, monkeypatch):
+        """The end-to-end property: no silent divergence between what the
+        machine is told it can do and what it does."""
+        monkeypatch.delenv("USER_WORKERS", raising=False)
+        import config
+        assert (config.Settings().user_workers
+                == resources.recommend(
+                    concurrent_jobs=config._concurrent_jobs())["user_workers"])

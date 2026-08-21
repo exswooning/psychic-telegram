@@ -321,15 +321,49 @@ class _DriveFiles:
     def list(self, **kw):
         return _Call(self.s, "files.list", self._list, kw)
 
+    def _within_drive(self, f: dict, drive_id: str, _limit: int = 100) -> bool:
+        """Is this file anywhere inside `drive_id`, at any depth?
+
+        Bounded, because a fake built by a test can contain a parent cycle
+        and an unbounded walk here would hang the suite rather than fail it.
+        """
+        seen = set()
+        stack = list(f.get("parents") or [])
+        while stack and len(seen) < _limit:
+            pid = stack.pop()
+            if pid == drive_id:
+                return True
+            if pid in seen:
+                continue
+            seen.add(pid)
+            parent = self.s.store.get(pid)
+            if parent:
+                stack.extend(parent.get("parents") or [])
+        return False
+
     def _list(self, q: str = "", pageSize: int = 100,
               pageToken: Optional[str] = None, corpora: str = "",
               driveId: str = "", **_):
         rows = [f for f in self.s.store.values() if f["id"] != self.s.root_id]
-        # Enumerating a shared drive's contents (used to check a staging drive
-        # is empty before deleting it).
+        # corpora="drive" SCOPES the search to one shared drive. It does not
+        # replace `q`, and treating it as if it did is what this used to do:
+        # it filtered to the drive's direct children and returned early,
+        # dropping the caller's parent filter on the floor.
+        #
+        # Written for one narrow caller (checking a staging drive is empty
+        # before deleting it, which sends no parent clause), it was then also
+        # reached by _list_children walking a shared drive -- which does send
+        # one. Every level of that walk got back the drive's children instead
+        # of the folder's, including the folder itself, so the walk recursed
+        # into the same folder until max_recursion_depth cut it off at 200: a
+        # 4-item store producing 200 list calls, and a test failure that read
+        # as "4 files migrated instead of 2".
+        #
+        # Scoping is also transitive in the real API -- a file nested three
+        # folders deep is still in the drive -- so membership walks up the
+        # parent chain rather than checking for a direct link.
         if corpora == "drive" and driveId:
-            rows = [f for f in rows if driveId in (f.get("parents") or [])]
-            return {"files": [copy.deepcopy(f) for f in rows[:pageSize]]}
+            rows = [f for f in rows if self._within_drive(f, driveId)]
         m = _Q_PARENT.search(q or "")
         if m:
             # _create() resolves the "root" alias to self.s.root_id when

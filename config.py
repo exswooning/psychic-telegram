@@ -11,7 +11,9 @@ domain, a key path, or a scope string.
 
 from __future__ import annotations
 
+import logging
 import os
+import time
 from dataclasses import dataclass, field
 
 # ======================================================================
@@ -269,12 +271,33 @@ def _concurrent_jobs() -> int:
         return 1
 
 
+_AUTO_FAILED: dict = {}
+
+
 def _auto(key: str, fallback):
-    """Machine-sized default from resources.py, with a safe fallback."""
+    """Machine-sized default from resources.py, with a safe fallback.
+
+    The fallback must never be silent. A bare `except Exception -> fallback`
+    is right about not breaking startup and wrong about saying nothing: a
+    missing `import time` in this very module made every call here raise
+    NameError, so every Settings() quietly took the hardcoded fallback --
+    6 workers where the machine supported 16 -- and nothing anywhere said
+    the auto-sizing had stopped working. The values were plausible, which is
+    exactly why it went unnoticed.
+
+    Warned once per key, because this is read on every Settings()
+    construction and a warning per request is its own kind of silence.
+    """
     try:
         import resources
         return resources.recommend(concurrent_jobs=_concurrent_jobs())[key]
-    except Exception:  # noqa: BLE001 - probing must never break startup
+    except Exception as exc:  # noqa: BLE001 - probing must never break startup
+        if key not in _AUTO_FAILED:
+            _AUTO_FAILED[key] = str(exc)
+            logging.getLogger("config").warning(
+                "auto-sizing for %s failed (%s: %s) -- falling back to %r. "
+                "This machine's real capacity is NOT being used.",
+                key, type(exc).__name__, exc, fallback)
         return fallback
 
 
