@@ -725,6 +725,50 @@ def cmd_init_db(args, settings: Settings, db: MigrationDB, auth: AuthManager):
     print(f"Schema initialised at {settings.db_path}")
 
 
+def cmd_verify_ledger(args, settings: Settings, db: MigrationDB,
+                      auth: "AuthManager") -> int:
+    """Does the ledger still describe the tenant?
+
+    id_mapping is authoritative -- anything with a mapping is skipped on a
+    resume -- and nothing ever checked that the target item still exists.
+    See ledger_verify for the incident that made this necessary.
+    """
+    import ledger_verify
+
+    identities = [(r["source_email"], r["target_email"])
+                  for r in db.identity_pairs()]
+    if not identities:
+        log.error("no identity mappings; run init-db --auto-map first")
+        return 2
+
+    directory = auth.directory("target")
+    spot = None
+    if args.spot_check:
+        def spot(target_user: str, target_id: str) -> bool:
+            try:
+                auth.target_drive(target_user).files().get(
+                    fileId=target_id, fields="id",
+                    supportsAllDrives=True).execute()
+                return True
+            except Exception as exc:      # noqa: BLE001
+                return "404" not in str(exc)
+
+    report = ledger_verify.verify(db, directory, identities, spot_check=spot)
+    print(report.as_text())
+    if not report.stale:
+        return 0
+
+    n = ledger_verify.reopen(db, report, dry_run=not args.reopen)
+    if args.reopen:
+        print(f"\nForgot {n:,} stale mapping(s). The next migrate run will "
+              f"copy those items again. Audit history was left intact.")
+    else:
+        print(f"\n{n:,} mapping(s) would be forgotten. Re-run with --reopen "
+              f"to apply, after confirming the target accounts are the ones "
+              f"you intend to migrate into.")
+    return 1
+
+
 def cmd_provision_users(args, settings: Settings, db: MigrationDB,
                         auth: AuthManager):
     """
@@ -1246,6 +1290,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("preflight", help="verify DWD for every mapped user")
     s.set_defaults(func=cmd_preflight)
+
+    s = sub.add_parser("verify-ledger",
+                       help="check that mapped target items still exist "
+                            "(a deleted account leaves the ledger claiming "
+                            "work that is gone)")
+    s.add_argument("--reopen", action="store_true",
+                   help="forget mappings that no longer resolve, so the next "
+                        "migrate run copies them again")
+    s.add_argument("--spot-check", action="store_true",
+                   help="also sample one real file per user (a few extra API "
+                        "calls each; catches contents removed from an account "
+                        "that itself survived)")
+    s.set_defaults(func=cmd_verify_ledger)
 
     s = sub.add_parser("provision-users",
                        help="create missing accounts for identity_map entries "

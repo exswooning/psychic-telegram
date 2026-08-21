@@ -345,6 +345,13 @@ class MigrationDB:
             return set()
         return {s for s in row["services_done"].split(",") if s}
 
+    def identity_pairs(self):
+        """Every mapped (source, target) pair, in a stable order."""
+        return self.conn.execute(
+            """SELECT source_email, target_email FROM identity_map
+                WHERE target_email IS NOT NULL AND target_email != ''
+                ORDER BY source_email""").fetchall()
+
     def set_identity_status(self, source_email: str, status: str,
                             notes: str = "") -> None:
         with self.write() as conn:
@@ -414,6 +421,50 @@ class MigrationDB:
             (source_user, source_id, item_type),
         ).fetchone()
         return row["target_id"] if row else None
+
+    def mapping_bounds(self, source_user: str):
+        """How many mappings this user has, and when the first was written.
+
+        The earliest is what ledger_verify compares against the target
+        account's creationTime: a mapping written before the account existed
+        cannot name anything inside it. Taken from audit_log because
+        id_mapping records no timestamp -- it is a lookup table, and the
+        audit row is the dated record of the same event.
+        """
+        return self.conn.execute(
+            """SELECT COUNT(*) AS n, MIN(a.timestamp) AS earliest
+                 FROM id_mapping m
+                 LEFT JOIN audit_log a
+                   ON a.source_user = m.source_user
+                  AND a.item_id     = m.source_id
+                  AND a.item_type   = m.type
+                WHERE m.source_user = ?""",
+            (source_user,),
+        ).fetchone()
+
+    def sample_mapping(self, source_user: str, item_type: str = "file"):
+        """One target id for this user, for a spot check against the tenant."""
+        row = self.conn.execute(
+            """SELECT target_id FROM id_mapping
+                WHERE source_user=? AND type=? LIMIT 1""",
+            (source_user, item_type),
+        ).fetchone()
+        return row["target_id"] if row else None
+
+    def forget_mappings(self, source_user: str) -> int:
+        """Drop this user's mappings so the next run migrates them again.
+
+        Only id_mapping. The audit rows are deliberately left alone: they
+        record that the work was done and when, which is the evidence of
+        what happened to it, and a migration that erases its own history
+        cannot explain itself afterwards.
+        """
+        with self.write() as conn:
+            n = conn.execute("DELETE FROM id_mapping WHERE source_user=?",
+                             (source_user,)).rowcount
+        self._mapping_cache.pop(source_user, None)
+        self._mapping_cached_users.discard(source_user)
+        return n
 
     def record_mapping(self, source_user: str, source_id: str, target_id: str,
                        item_type: str, parent_target_id: Optional[str] = None,
