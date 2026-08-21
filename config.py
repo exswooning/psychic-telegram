@@ -219,6 +219,9 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 
+_CONCURRENT_JOBS_CACHE: dict = {}
+
+
 def _concurrent_jobs() -> int:
     """How many heavy jobs are already running, including this one.
 
@@ -245,13 +248,23 @@ def _concurrent_jobs() -> int:
         os.path.dirname(os.path.abspath(__file__)), "migration.db")
     if not os.path.isfile(path):
         return 1
+    # Memoised for a few seconds. Settings() is constructed per request and
+    # this opened a fresh SQLite connection every time, which profiled at
+    # 5.5% of the API's real CPU. The job count changes when a migration
+    # starts or stops, so seconds-old is indistinguishable from current.
+    now = time.monotonic()
+    cached = _CONCURRENT_JOBS_CACHE.get("v")
+    if cached is not None and now < cached[0]:
+        return cached[1]
     try:
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2.0)
         try:
             n = conn.execute("SELECT COUNT(*) FROM active_jobs").fetchone()[0]
         finally:
             conn.close()
-        return max(1, int(n) + 1)
+        value = max(1, int(n) + 1)
+        _CONCURRENT_JOBS_CACHE["v"] = (time.monotonic() + 5.0, value)
+        return value
     except Exception:      # noqa: BLE001 - never break startup over this
         return 1
 

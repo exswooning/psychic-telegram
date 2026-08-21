@@ -2308,9 +2308,21 @@ class _SingleFlightCache:
             self._entries.pop(key, None)
 
 
-# 6s: longer than a poll interval so consecutive polls share one result,
-# short enough that a migration's progress still reads as live.
-_DETAIL_CACHE = _SingleFlightCache(ttl=6.0)
+# 15s, not 6. The dashboard polls every 5, so 6 meant roughly every other
+# request still paid for the full aggregate. On a migration measured in
+# hours, counters 15 seconds stale still read as live, and the expensive
+# part of this payload -- failures grouped by cause -- changes far more
+# slowly than that.
+_DETAIL_CACHE = _SingleFlightCache(ttl=15.0)
+
+
+def _row_has(row, name: str) -> bool:
+    """Does this row carry `name`? sqlite3.Row and dict answer differently."""
+    try:
+        keys = row.keys()
+    except AttributeError:
+        return False
+    return name in keys
 
 
 def _normalise_failure(message: str) -> str:
@@ -2343,12 +2355,23 @@ def _group_failures(rows) -> list[dict]:
     form still works and the tests can pass plain rows.
     """
     groups: dict = {}
-    for r in rows:
-        try:
-            n = r["n"]
-        except (KeyError, IndexError, TypeError):
-            n = 1
-        key = (r["item_type"], _normalise_failure(r["error_message"]))
+    seen = list(rows)
+    # Asked once, not once per row. Written first as a try/except inside the
+    # loop, which profiled at 29.9% of the API's real CPU on its own --
+    # exception-handler setup per row is not free, and the answer is a
+    # property of the cursor, identical for every row it returns.
+    has_n = bool(seen) and _row_has(seen[0], "n")
+    # Normalising the same string twice is pure waste: the pre-aggregated
+    # rows still repeat messages across users, and the regex is the reason
+    # this function is on the profile at all.
+    normalised: dict = {}
+    for r in seen:
+        n = (r["n"] if has_n else 1)
+        raw = r["error_message"]
+        cause = normalised.get(raw)
+        if cause is None:
+            cause = normalised[raw] = _normalise_failure(raw)
+        key = (r["item_type"], cause)
         g = groups.setdefault(key, {"reason": key[1], "itemType": key[0],
                                     "count": 0, "users": set()})
         g["count"] += n or 1

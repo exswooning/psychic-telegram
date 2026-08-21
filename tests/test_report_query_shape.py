@@ -193,3 +193,54 @@ class TestFailureGroupingScalesWithCausesNotRows:
         ]))
         assert out[0]["count"] == 1000
         assert out[0]["userCount"] == 2
+
+
+class TestTheGroupingLoopDoesNotPayPerRow:
+    """Written first with a try/except inside the loop to detect the
+    pre-aggregated count column. That profiled at 29.9% of the API's real
+    CPU on its own: exception-handler setup is not free per row, and the
+    answer is a property of the cursor, identical for every row it returns."""
+
+    def test_the_count_column_is_detected_once_not_per_row(self):
+        import api_server
+
+        class CountingRow(dict):
+            probes = 0
+
+            def keys(self):
+                CountingRow.probes += 1
+                return super().keys()
+
+        rows = [CountingRow({"item_type": "acl", "error_message": f"e{i}",
+                             "source_user": "u@x", "n": 2})
+                for i in range(50)]
+        api_server._group_failures(rows)
+        assert CountingRow.probes <= 2, (
+            f"inspected the row shape {CountingRow.probes} times for 50 rows")
+
+    def test_an_identical_message_is_normalised_once(self):
+        """Pre-aggregated rows still repeat messages across users, and the
+        regex is why this function is on the profile at all."""
+        import api_server
+        calls = []
+        real = api_server._normalise_failure
+
+        def counting(msg):
+            calls.append(msg)
+            return real(msg)
+
+        api_server._normalise_failure = counting
+        try:
+            api_server._group_failures([
+                {"item_type": "acl", "error_message": "same", "source_user": f"u{i}"}
+                for i in range(40)])
+        finally:
+            api_server._normalise_failure = real
+        assert len(calls) == 1, f"normalised {len(calls)} times for 1 message"
+
+    def test_rows_that_cannot_report_their_keys_still_work(self):
+        """Plain tuples and objects without keys() must not raise."""
+        import api_server
+        out = api_server._group_failures([
+            {"item_type": "acl", "error_message": "x", "source_user": "a"}])
+        assert out[0]["count"] == 1
