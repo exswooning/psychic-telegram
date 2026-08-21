@@ -410,3 +410,49 @@ class TestAutoSizingCannotFailQuietly:
         assert (config.Settings().user_workers
                 == resources.recommend(
                     concurrent_jobs=config._concurrent_jobs())["user_workers"])
+
+
+class TestSizingDoesNotDependOnSettings:
+    """mb_per_worker() runs at module level to build MB_PER_WORKER, and
+    Settings() calls config._auto(), which imports resources. Constructing
+    Settings from here re-enters this module before recommend() exists:
+    "partially initialized module 'resources' has no attribute 'recommend'".
+    config catches that and hands out fallback sizing, so the circularity
+    presents as quietly wrong worker counts rather than an ImportError."""
+
+    def test_importing_resources_first_still_sizes_correctly(self):
+        import subprocess
+        import sys
+        out = subprocess.run(
+            [sys.executable, "-c",
+             "import resources, config;"
+             "a=resources.recommend(concurrent_jobs=config._concurrent_jobs())"
+             "['user_workers'];"
+             "b=config.Settings().user_workers;"
+             "print('MATCH' if a==b else f'MISMATCH {a} {b}')"],
+            capture_output=True, text=True, timeout=120)
+        assert "MATCH" in out.stdout, out.stdout + out.stderr
+        assert "auto-sizing for" not in out.stderr, (
+            "auto-sizing fell back during import:\n" + out.stderr)
+
+    def test_importing_config_first_still_sizes_correctly(self):
+        import subprocess
+        import sys
+        out = subprocess.run(
+            [sys.executable, "-c",
+             "import config, resources;"
+             "a=resources.recommend(concurrent_jobs=config._concurrent_jobs())"
+             "['user_workers'];"
+             "b=config.Settings().user_workers;"
+             "print('MATCH' if a==b else f'MISMATCH {a} {b}')"],
+            capture_output=True, text=True, timeout=120)
+        assert "MATCH" in out.stdout, out.stdout + out.stderr
+        assert "auto-sizing for" not in out.stderr, (
+            "auto-sizing fell back during import:\n" + out.stderr)
+
+    def test_the_chunk_default_still_matches_settings(self):
+        """Reading the env directly is only safe while it is the same input
+        Settings uses for this field."""
+        from config import Settings
+        assert resources.mb_per_worker() == resources.mb_per_worker(
+            Settings().download_chunk_bytes)

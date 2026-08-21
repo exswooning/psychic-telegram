@@ -63,11 +63,20 @@ def mb_per_worker(chunk_bytes: int | None = None) -> int:
     timeouts) is far worse than running a few workers short.
     """
     if chunk_bytes is None:
-        try:
-            from config import Settings
-            chunk_bytes = Settings().download_chunk_bytes
-        except Exception:      # noqa: BLE001 - sizing must never fail to import
-            chunk_bytes = 8 * 1024 * 1024
+        # Read from the environment, NOT via Settings().
+        #
+        # This runs at module level (MB_PER_WORKER below), and Settings()
+        # calls config._auto(), which imports this module -- so constructing
+        # Settings here re-enters `resources` before recommend() is defined
+        # and raises AttributeError: partially initialized module. config
+        # then swallows that and hands out fallback sizing. The same circular
+        # shape this codebase has already been bitten by twice.
+        #
+        # The env var is the same input Settings reads for this field, so
+        # nothing is lost by reading it directly, and the dependency
+        # disappears entirely.
+        chunk_bytes = int(os.getenv("DOWNLOAD_CHUNK_BYTES", 0) or
+                          8 * 1024 * 1024)
     chunk_mb = max(1, int(chunk_bytes) // (1024 * 1024))
     return max(64, WORKER_BASE_MB + CHUNK_BUFFERS_PER_WORKER * chunk_mb)
 
