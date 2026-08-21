@@ -62,12 +62,24 @@ def _project_limiter(qps: float):
             #
             # The floor is deliberately low enough to keep a badly
             # over-subscribed project moving and high enough that a single
-            # user's work never starves. The ceiling is Google's documented
-            # per-project Drive allowance (12,000 queries/minute = 200/sec),
-            # so probing can approach what is actually permitted instead of
-            # stopping at whatever was typed into config.
+            # user's work never starves.
+            #
+            # The ceiling is a runaway guard, NOT the intended operating
+            # point. It was 200/sec, from the documented 12,000
+            # queries/minute -- and that made it the binding constraint
+            # again, which is the exact failure this class was written to
+            # remove. Live evidence puts the real ceiling well above it:
+            # presenting roughly 1,680 operations/sec still landed about
+            # half of them, so this project sustains several hundred. A
+            # ceiling below what the service allows is just a hardcoded rate
+            # wearing a different name.
+            #
+            # Set high enough that AIMD is what binds. Overshoot is bounded
+            # by halving on the first rejection; being stuck 5x low is not
+            # bounded by anything, and reports nothing.
             _PROJECT_LIMITER = AdaptiveRateLimiter(
-                qps, floor=max(4.0, qps / 8.0), ceiling=200.0,
+                qps, floor=max(4.0, qps / 8.0),
+                ceiling=float(os.getenv("DRIVE_PROJECT_QPS_CEILING", "1200")),
                 on_change=_log_rate_change)
         return _PROJECT_LIMITER
 

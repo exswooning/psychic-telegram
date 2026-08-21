@@ -421,12 +421,26 @@ class AdaptiveRateLimiter(RateLimiter):
     """
 
     def __init__(self, rate_per_sec: float, *, floor: float, ceiling: float,
-                 step: float = 2.0, probe_after: float = 20.0,
+                 step: float | None = None, growth: float = 0.10,
+                 probe_after: float = 20.0,
                  burst: int = 1, on_change=None):
         super().__init__(rate_per_sec, burst=burst)
         self.floor = max(float(floor), 0.001)
         self.ceiling = max(float(ceiling), self.floor)
-        self.step = max(float(step), 0.001)
+        # Proportional, not a fixed increment.
+        #
+        # A flat +2/sec needs 380 probes -- over two hours at a 20s interval
+        # -- to walk from 40 to 800, so a migration measured in hours would
+        # spend most of itself below a rate it could have sustained the whole
+        # time. Slow convergence on a controller is not a safety property; it
+        # is just a slower way to arrive at the same place.
+        #
+        # A fraction of the current rate climbs geometrically where there is
+        # obvious headroom and takes small steps near the top, which is the
+        # shape wanted in both regions. `step`, when given, pins it flat --
+        # the tests use that to assert exact arithmetic.
+        self.step = float(step) if step is not None else None
+        self.growth = max(float(growth), 0.0)
         self.probe_after = float(probe_after)
         self._on_change = on_change
         self.rate = min(max(self.rate, self.floor), self.ceiling)
@@ -455,7 +469,9 @@ class AdaptiveRateLimiter(RateLimiter):
             if (self.rate < self.ceiling
                     and time.monotonic() - self._last_change >= self.probe_after):
                 before = self.rate
-                self.rate = min(self.ceiling, self.rate + self.step)
+                inc = (self.step if self.step is not None
+                       else max(1.0, self.rate * self.growth))
+                self.rate = min(self.ceiling, self.rate + inc)
                 self._last_change = time.monotonic()
                 grew = (before, self.rate)
             else:

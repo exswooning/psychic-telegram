@@ -151,3 +151,44 @@ class TestBatchesReportTheirOwnFailures:
         started = time.monotonic()
         lim.acquire(0)
         assert time.monotonic() - started < 0.1
+
+
+class TestItConvergesFastEnoughToMatter:
+    """A controller that needs longer than the run to find the rate is not
+    adaptive in any useful sense -- the migration ends before it arrives."""
+
+    def test_the_step_grows_with_the_rate(self):
+        """Flat +2/sec needed 380 probes (over two hours at a 20s interval)
+        to walk 40 -> 800, so an hours-long migration spent most of itself
+        below a rate it could have sustained throughout."""
+        slow = AdaptiveRateLimiter(40, floor=1, ceiling=1e6, probe_after=0)
+        fast = AdaptiveRateLimiter(400, floor=1, ceiling=1e6, probe_after=0)
+        slow.acquire(); fast.acquire()
+        assert (fast.rate - 400) > (slow.rate - 40)
+
+    def test_it_reaches_a_realistic_ceiling_in_minutes_not_hours(self):
+        lim = AdaptiveRateLimiter(40, floor=1, ceiling=1200, probe_after=0)
+        probes = 0
+        while lim.rate < 800 and probes < 1000:
+            lim.acquire(); probes += 1
+        assert probes < 60, f"took {probes} probes ({probes * 20 / 60:.0f} min)"
+
+    def test_an_explicit_step_still_pins_it_flat(self):
+        """Tests that assert exact arithmetic depend on this."""
+        lim = AdaptiveRateLimiter(40, floor=1, ceiling=200, step=5,
+                                  probe_after=0)
+        lim.acquire()
+        assert lim.rate == 45.0
+
+    def test_the_ceiling_is_not_the_operating_point(self):
+        """It is a runaway guard. Set at the documented 200/sec it became
+        the binding constraint again -- a hardcoded rate wearing a different
+        name, which is what this class exists to remove."""
+        import os
+
+        import drive_engine
+        drive_engine._PROJECT_LIMITER = None
+        lim = drive_engine._project_limiter(40.0)
+        assert lim.ceiling >= 1000
+        assert lim.ceiling > float(os.getenv("DRIVE_PROJECT_QPS", "40")) * 10
+        drive_engine._PROJECT_LIMITER = None
