@@ -28,9 +28,11 @@ const detail = (over = {}) => ({
   failures: [
     { reason: 'HTTP 400 (INVALID_ARGUMENT): Fields with source ids are not allowed.',
       itemType: 'contact', count: 50,
-      users: ['tom@source.example.com', 'uma@source.example.com'] },
+      users: ['tom@source.example.com', 'uma@source.example.com'],
+      userCount: 2 },
     { reason: 'HTTP 400 (failedPrecondition): Mail service not enabled',
-      itemType: 'user', count: 2, users: ['zane@source.example.com'] },
+      itemType: 'user', count: 2, users: ['zane@source.example.com'],
+      userCount: 1 },
   ],
   failedUsers: [
     { sourceUser: 'zane@source.example.com', targetUser: 'zane@target.example.com',

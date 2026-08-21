@@ -2246,6 +2246,44 @@ async def list_migrations(op: Operator = Depends(operator)):
     return await _off_loop(_read)
 
 
+# Ids and URLs differ per item and are exactly what splits one cause into
+# thousands of groups. 25+ chars catches Drive/Gmail ids without touching
+# ordinary words.
+_ID_RE = re.compile(r"[A-Za-z0-9_-]{25,}")
+_URL_RE = re.compile(r"https?://\S+")
+
+
+def _normalise_failure(message: str) -> str:
+    """The cause, with the per-item noise removed."""
+    msg = _URL_RE.sub("<url>", message or "")
+    msg = _ID_RE.sub("<id>", msg)
+    return " ".join(msg.split())[:200]
+
+
+def _group_failures(rows) -> list[dict]:
+    """Failures by cause, commonest first, with affected users named.
+
+    Done here rather than in SQL because the normalisation is a regex
+    substitution, and grouping on the raw text -- which is what the SQL did
+    -- produced one group per FILE instead of one per cause.
+    """
+    groups: dict = {}
+    for r in rows:
+        key = (r["item_type"], _normalise_failure(r["error_message"]))
+        g = groups.setdefault(key, {"reason": key[1], "itemType": key[0],
+                                    "count": 0, "users": set()})
+        g["count"] += 1
+        if r["source_user"]:
+            g["users"].add(r["source_user"])
+    out = sorted(groups.values(), key=lambda g: -g["count"])[:25]
+    for g in out:
+        # A count of affected mailboxes matters as much as the names: "3
+        # users" and "all 201" are different problems with the same message.
+        g["userCount"] = len(g["users"])
+        g["users"] = sorted(g["users"])[:5]
+    return out
+
+
 @app.get("/api/v2/migrations/{account_id}")
 async def migration_detail(account_id: int, op: Operator = Depends(operator)):
     """One tenant pair in full: what moved, what failed, and why.
@@ -2291,19 +2329,18 @@ async def migration_detail(account_id: int, op: Operator = Depends(operator)):
                         "SELECT type, COUNT(*) n FROM id_mapping "
                         "GROUP BY type ORDER BY n DESC")]
 
-                # Grouped by the first line of the message: the useful part
-                # is before the URL and the request id, which differ per
-                # item and would split one cause into fifty groups.
-                out["failures"] = [
-                    {"reason": (r["reason"] or "").strip()[:300],
-                     "itemType": r["item_type"], "count": r["n"],
-                     "users": [u for u in (r["users"] or "").split(",")[:5] if u]}
-                    for r in conn.execute(
-                        "SELECT item_type, COUNT(*) n, "
-                        "       substr(error_message, 1, 120) reason, "
-                        "       group_concat(DISTINCT source_user) users "
-                        "FROM audit_log WHERE status='FAILED' "
-                        "GROUP BY item_type, reason ORDER BY n DESC LIMIT 25")]
+                # Grouped by NORMALISED cause, in Python rather than SQL.
+                #
+                # Grouping on the raw message's first 120 characters was
+                # useless: that window is mostly URL, and every Drive error
+                # carries its own file id, so ONE cause became thousands of
+                # groups of a few rows each -- a screen full of identical
+                # "200 · acl" lines that hid the single reason behind them.
+                # Stripping ids and URLs first is what turns 127,852 rows
+                # into the two causes actually behind them.
+                out["failures"] = _group_failures(conn.execute(
+                    "SELECT item_type, error_message, source_user "
+                    "FROM audit_log WHERE status='FAILED' LIMIT 200000"))
 
                 # `notes` is where set_identity_status records why -- which
                 # is now the enriched licence explanation rather than a raw

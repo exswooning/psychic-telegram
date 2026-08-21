@@ -506,6 +506,10 @@ export interface MigrationFailure {
   /** Up to five affected mailboxes -- "which users" is the next question
    *  every time, and a per-item list would bury it. */
   users: string[]
+  /** How many mailboxes in total. "3 users" and "all 201" are different
+   *  problems with the same message, and five sample names cannot tell
+   *  them apart. */
+  userCount: number
 }
 
 export interface MigrationDetail {

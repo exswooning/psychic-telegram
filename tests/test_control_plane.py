@@ -1809,3 +1809,76 @@ class TestScansAreReconciledAtStartup:
         import api_server
 
         assert "_reconcile_inventory_scans" in inspect.getsource(api_server.lifespan)
+
+
+class TestFailuresGroupByCauseNotByItem:
+    """Grouping on the raw message's first 120 characters was useless: that
+    window is mostly URL, and every Drive error carries its own file id. One
+    cause became thousands of groups of a few rows each -- a screen full of
+    identical "200 · acl" lines that hid the single reason behind them.
+
+    Seen live: 127,852 ACL failures rendering as page after page of
+    per-file groups, when there were two causes in total.
+    """
+
+    def _rows(self, items):
+        return [{"item_type": t, "error_message": m, "source_user": u}
+                for t, m, u in items]
+
+    def test_one_cause_across_many_files_is_one_group(self):
+        import api_server
+
+        rows = self._rows([
+            ("acl", 'HttpError 403 requesting https://www.googleapis.com/drive/v3/files/1AAAAAAAAAAAAAAAAAAAAAAAAAAAAA/permissions returned "Quota exceeded"', "a@x.com"),
+            ("acl", 'HttpError 403 requesting https://www.googleapis.com/drive/v3/files/1BBBBBBBBBBBBBBBBBBBBBBBBBBBBB/permissions returned "Quota exceeded"', "b@x.com"),
+            ("acl", 'HttpError 403 requesting https://www.googleapis.com/drive/v3/files/1CCCCCCCCCCCCCCCCCCCCCCCCCCCCC/permissions returned "Quota exceeded"', "a@x.com"),
+        ])
+        out = api_server._group_failures(rows)
+        assert len(out) == 1
+        assert out[0]["count"] == 3
+
+    def test_different_causes_stay_apart(self):
+        """Normalising must not flatten genuinely different problems into
+        one -- that would hide the 27 permanent failures behind the 828
+        transient ones."""
+        import api_server
+
+        rows = self._rows([
+            ("file", "exhausted 6 retries on HTTP 500 (internalError)", "a@x.com"),
+            ("file", "HTTP 403 (exportSizeLimitExceeded): file too large", "b@x.com"),
+        ])
+        assert len(api_server._group_failures(rows)) == 2
+
+    def test_the_same_message_on_different_item_types_stays_apart(self):
+        import api_server
+
+        rows = self._rows([("acl", "Quota exceeded", "a@x.com"),
+                           ("file", "Quota exceeded", "a@x.com")])
+        assert len(api_server._group_failures(rows)) == 2
+
+    def test_affected_users_are_counted_as_well_as_named(self):
+        """"3 users" and "all 201" are different problems with the same
+        message, and five sample names cannot tell them apart."""
+        import api_server
+
+        rows = self._rows([("acl", "Quota exceeded", f"u{i}@x.com")
+                           for i in range(12)])
+        out = api_server._group_failures(rows)[0]
+        assert out["userCount"] == 12
+        assert len(out["users"]) == 5
+
+    def test_groups_come_back_commonest_first(self):
+        import api_server
+
+        rows = (self._rows([("file", "rare thing", "a@x.com")])
+                + self._rows([("file", "common thing", f"u{i}@x.com")
+                              for i in range(5)]))
+        out = api_server._group_failures(rows)
+        assert out[0]["reason"] == "common thing"
+
+    def test_an_empty_message_does_not_crash_the_report(self):
+        import api_server
+
+        out = api_server._group_failures(
+            [{"item_type": "acl", "error_message": None, "source_user": None}])
+        assert out[0]["count"] == 1

@@ -229,7 +229,7 @@ export const MigrationDetail: React.FC = () => {
                       <TableCell>count</TableCell>
                       <TableCell>type</TableCell>
                       <TableCell>cause</TableCell>
-                      <TableCell>affected</TableCell>
+                      <TableCell>affected users</TableCell>
                     </TableRow>
                   </TableHead>
                   <TableBody>
@@ -245,7 +245,8 @@ export const MigrationDetail: React.FC = () => {
                         </TableCell>
                         <TableCell sx={{ fontSize: 11 }}>
                           {f.users.join(', ')}
-                          {f.users.length >= 5 && ' …'}
+                          {f.userCount > f.users.length
+                            && ` +${(f.userCount - f.users.length).toLocaleString()} more`}
                         </TableCell>
                       </TableRow>
                     ))}
