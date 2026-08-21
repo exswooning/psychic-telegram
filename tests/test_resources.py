@@ -120,7 +120,9 @@ class TestSizing:
         machine must still come out below it rather than being handed 32
         workers it cannot hold."""
         rec = resources.recommend(make(ram_usable=1.0, cores=2, swap_used=0.0))
-        assert rec["seed_workers"] == 8           # 1.0 GB * 1024 // 128 MB
+        assert rec["seed_workers"] == int(
+            1.0 * 1024 // resources.MB_PER_SEED_WORKER)
+        assert rec["seed_workers"] < resources.SEED_HARD_CAP
 
     def test_memory_pressure_still_collapses_the_seed_pool(self):
         """The one thing the larger ceiling must not do is override the
@@ -276,3 +278,41 @@ class TestTheProjectQuotaIsLimitedAtProjectScope:
         i = src.index("_project_limiter.acquire()")
         j = src.index("if not write:")
         assert i < j, "the project bucket must be charged before the branch"
+
+
+class TestTheBudgetsTrackTheirOwnInputs:
+    """Both per-worker figures were constants standing beside the arithmetic
+    that produced them, and both outlived the inputs they were derived from.
+    A budget that does not move when its inputs move is a budget that is
+    wrong silently."""
+
+    def test_the_migrator_budget_follows_the_download_chunk(self):
+        """MB_PER_WORKER was 320, sized for the 100 MB library-default
+        chunk that _download_via replaced with 8 MB."""
+        assert resources.mb_per_worker(8 * 1024 * 1024) < resources.mb_per_worker(
+            100 * 1024 * 1024)
+
+    def test_the_old_constant_is_reproduced_by_the_old_chunk_size(self):
+        """Evidence the original 320 was right for its era rather than
+        arbitrary -- which is what makes replacing it safe."""
+        assert resources.mb_per_worker(100 * 1024 * 1024) == 340
+
+    def test_the_seed_budget_follows_the_thread_count(self):
+        """SEED_MAIL_WORKERS is an env var and an input to this figure.
+        Frozen at 128, setting it to 8 doubled the threads per user while
+        the sizing kept charging for 4."""
+        assert (resources.mb_per_seed_worker(8)
+                > resources.mb_per_seed_worker(4)
+                > resources.mb_per_seed_worker(1))
+
+    def test_the_seed_budget_still_clears_its_measured_cost(self):
+        """Measured on the VPS: a full client set is 22 MB and each of the
+        4 leaf + 4 mail threads resolves its own at ~7 MB, so ~78 MB. The
+        margin over that is the point."""
+        assert resources.mb_per_seed_worker(4) >= 78
+
+    def test_neither_budget_can_reach_a_value_that_would_overcommit(self):
+        """A floor matters more than a ceiling here: the failure mode is a
+        swap stall, which surfaced as 30 minutes of socket timeouts."""
+        assert resources.mb_per_worker(0) >= 64
+        assert resources.mb_per_seed_worker(1) >= 64

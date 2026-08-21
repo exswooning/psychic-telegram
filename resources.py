@@ -92,7 +92,33 @@ MB_PER_WORKER = mb_per_worker()
 # full drive+gmail+calendar client set is 22 MB, so a user costs roughly
 # 22 + 7*(4+4) = 78 MB. 128 keeps a real margin over that while still
 # leaving room for ~23 concurrent users on a 3 GB box.
-MB_PER_SEED_WORKER = 128
+SEED_CLIENT_SET_MB = 22     # one drive+gmail+calendar client set, measured
+SEED_THREAD_CLIENT_MB = 7   # each extra worker resolves its own, measured
+
+
+def mb_per_seed_worker(mail_workers: int | None = None) -> int:
+    """Peak resident memory one seeded USER needs, in MB.
+
+    The comment above states the arithmetic -- 22 + 7*(4+4) = 78 -- and then
+    the constant beside it was typed as 128 and frozen. So SEED_MAIL_WORKERS
+    is an environment variable that silently invalidates the budget it is an
+    input to: setting it to 8 doubles the per-user thread count while the
+    sizing keeps charging for 4, and the box quietly over-commits. That is
+    the same failure MB_PER_WORKER had, in a smaller form.
+
+    Both pools are sized by this one knob (leaf and mail alike), hence 2x.
+    The 1.3 margin is the headroom the frozen 128 carried over its own 78
+    and is kept deliberately: under-estimating this is the swap stall the
+    module exists to prevent.
+    """
+    if mail_workers is None:
+        mail_workers = max(1, int(os.getenv("SEED_MAIL_WORKERS", "4")))
+    per_user = SEED_CLIENT_SET_MB + SEED_THREAD_CLIENT_MB * 2 * mail_workers
+    return max(64, int(per_user * 1.3))
+
+
+# Kept as a module-level name because callers and tests import it directly.
+MB_PER_SEED_WORKER = mb_per_seed_worker()
 
 # Above this fraction of swap in use, the machine is already trading disk for
 # memory and more concurrency makes it strictly worse.
