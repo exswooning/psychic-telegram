@@ -110,6 +110,12 @@ def test_checksum_mismatch_marks_file_failed(migrator, auth, db, monkeypatch):
 
     monkeypatch.setattr("tests.fakes._DriveFiles._create",
                         lambda self, **kw: corrupting_create(**kw))
+    # The copy path never streams bytes through this host, so it cannot
+    # suffer the corruption this test injects -- it would legitimately
+    # recover the file. Deny it too, so what is under test stays under test.
+    auth.source_drive(SRC_USER).fail_next("files.copy", status=403,
+                                          reason="insufficientPermissions",
+                                          times=99)
     migrator.run()
 
     row = db.get_audit(SRC_USER, fid, "file")
@@ -117,14 +123,42 @@ def test_checksum_mismatch_marks_file_failed(migrator, auth, db, monkeypatch):
     assert "checksum" in (row["error_message"] or "").lower()
 
 
-def test_oversized_native_export_is_skipped_not_failed(migrator, auth, db, settings):
+def test_oversized_native_export_falls_back_to_a_server_side_copy(
+        migrator, auth, db, settings):
+    """The case the whole cascade exists for.
+
+    A native file past the export ceiling cannot be exported by any retry --
+    but files.copy never exports, so it can move the file regardless. Before
+    the fallback these were recorded SKIPPED_EXPORT_TOO_LARGE and left
+    behind: giving up with an untried method sitting right there. 27 real
+    files were lost that way on a live run.
+    """
     settings.export_size_limit = 50
     src = auth.source_drive(SRC_USER)
     fid = src.add_native("Huge Deck", kind="presentation", export_bytes=b"x" * 500)
     migrator.run()
 
-    row = db.get_audit(SRC_USER, fid, "file")
-    assert row["status"] == "SKIPPED_EXPORT_TOO_LARGE"
+    assert db.get_target_id(SRC_USER, fid, "file"), "the copy path should land it"
+    assert db.get_audit(SRC_USER, fid, "file")["status"] == "SUCCESS"
+    assert migrator.stats["failed"] == 0
+
+
+def test_oversized_native_stays_skipped_when_the_copy_also_fails(
+        migrator, auth, db, settings):
+    """The fallback is a second chance, not a guarantee. With both paths
+    spent the file genuinely cannot move, and must say so rather than
+    silently reporting success."""
+    settings.export_size_limit = 50
+    src = auth.source_drive(SRC_USER)
+    fid = src.add_native("Huge Deck", kind="presentation", export_bytes=b"x" * 500)
+    # files.copy is issued AS THE SOURCE USER into the target's staging
+    # drive (see _sync_server_side), so the fault belongs on the source.
+    auth.source_drive(SRC_USER).fail_next("files.copy", status=403,
+                                          reason="insufficientPermissions",
+                                          times=99)
+    migrator.run()
+
+    assert not db.get_target_id(SRC_USER, fid, "file")
     assert auth.target_drive(TGT_USER).count() == 0
 
 
@@ -135,11 +169,26 @@ def test_undownloadable_file_is_skipped(migrator, auth, db):
     assert db.get_audit(SRC_USER, fid, "file")["status"] == "SKIPPED_NO_DOWNLOAD"
 
 
-def test_unexportable_native_types_are_skipped(migrator, auth, db):
+def test_unexportable_native_types_fall_back_to_a_copy(migrator, auth, db):
+    """A type with no export mapping (a Form) cannot be exported by
+    definition -- and a copy does not need one, because it never converts."""
     src = auth.source_drive(SRC_USER)
     fid = src.add_native("Signup Form", kind="form")
     migrator.run()
-    assert db.get_audit(SRC_USER, fid, "file")["status"] == "SKIPPED_UNEXPORTABLE"
+    assert db.get_target_id(SRC_USER, fid, "file")
+
+
+def test_unexportable_native_stays_skipped_when_the_copy_also_fails(
+        migrator, auth, db):
+    src = auth.source_drive(SRC_USER)
+    fid = src.add_native("Signup Form", kind="form")
+    # files.copy is issued AS THE SOURCE USER into the target's staging
+    # drive (see _sync_server_side), so the fault belongs on the source.
+    auth.source_drive(SRC_USER).fail_next("files.copy", status=403,
+                                          reason="insufficientPermissions",
+                                          times=99)
+    migrator.run()
+    assert not db.get_target_id(SRC_USER, fid, "file")
 
 
 def test_shortcut_resolved_after_target_migrates(migrator, auth):
@@ -189,15 +238,21 @@ def test_interrupted_run_resumes_from_id_mapping(migrator, auth, db, settings, q
     for i in range(5):
         src.add_binary(f"f{i}.pdf", data=f"data{i}".encode())
 
-    # Blow up partway through the first run.
-    auth.target_drive(TGT_USER).fail_next("files.create", status=500,
+    # Blow up partway through the first run. Both paths, not just one:
+    # a file that fails download_upload now falls back to files.copy, so
+    # breaking only files.create leaves nothing to resume FROM -- the run
+    # simply succeeds by the other route, which is the point of the cascade.
+    tgt = auth.target_drive(TGT_USER)
+    tgt.fail_next("files.create", status=500, reason="backendError", times=99)
+    auth.source_drive(SRC_USER).fail_next("files.copy", status=500,
                                           reason="backendError", times=99)
     migrator.run()
     assert migrator.stats["failed"] == 5
     assert auth.target_drive(TGT_USER).count() == 0
 
-    # Clear the fault and resume.
+    # Clear the faults and resume.
     auth.target_drive(TGT_USER)._faults.clear()
+    auth.source_drive(SRC_USER)._faults.clear()
     resumed = drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota)
     resumed.run(delta=True)
     assert auth.target_drive(TGT_USER).count() == 5
@@ -857,7 +912,11 @@ def test_server_side_keeps_staging_drive_when_a_file_is_stranded(auth, db, setti
     m = drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota)
     m.run()
 
-    assert m.stats["failed"] == 1
+    # 0, not 1: download_upload recovers the file the stranded copy could
+    # not deliver. That is the cascade working, and it does not change what
+    # this test is about -- the staging drive must still survive, because
+    # the copy sitting inside it is bytes nobody else has.
+    assert m.stats["failed"] == 0
     assert tgt.shared_drives, "staging drive must survive so the copy isn't lost"
 
 
@@ -999,10 +1058,19 @@ def test_transient_rate_limit_is_retried_then_succeeds(migrator, auth, db):
 def test_permanent_403_is_not_retried(migrator, auth, db, settings):
     src = auth.source_drive(SRC_USER)
     fid = src.add_binary("nospace.pdf")
-    auth.target_drive(TGT_USER).fail_next(
-        "files.create", status=403, reason="storageQuotaExceeded", times=99
-    )
+    tgt = auth.target_drive(TGT_USER)
+    tgt.fail_next("files.create", status=403, reason="storageQuotaExceeded",
+                  times=99)
+    # A full Drive denies the copy too -- same storage, same answer. Issued
+    # as the SOURCE user, so the fault goes there.
+    auth.source_drive(SRC_USER).fail_next("files.copy", status=403,
+                                          reason="storageQuotaExceeded",
+                                          times=99)
     migrator.run()
+    # Both paths must be denied for this to stay terminal. A permanent 403
+    # on one route is not a permanent 403 on the other, and the cascade
+    # exists precisely to tell those apart -- "not retried" means the same
+    # method is not retried, never that an untried method is skipped.
     assert db.get_audit(SRC_USER, fid, "file")["status"] == "FAILED"
     # Exactly one attempt: retrying a full Drive burns quota for nothing.
     assert auth.target_drive(TGT_USER).call_count("files.create") == 1
@@ -1053,6 +1121,12 @@ def test_failed_upload_refunds_the_quota(migrator, auth, db, quota):
     before = quota.remaining()
     auth.target_drive(TGT_USER).fail_next("files.create", status=403,
                                           reason="insufficientPermissions")
+    # Both paths denied: with a working fallback the file ARRIVES, and a
+    # file that arrived is supposed to spend the cap. What must never spend
+    # it is an upload that failed.
+    auth.source_drive(SRC_USER).fail_next("files.copy", status=403,
+                                          reason="insufficientPermissions",
+                                          times=99)
     migrator.run()
     assert quota.remaining() == before, "a failed upload must not eat the cap"
 

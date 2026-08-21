@@ -1651,27 +1651,38 @@ class TestDriveFallsBackBetweenCopyStrategies:
         binary = dict(m._file_strategies(False))["download_upload"]
         assert native is not binary
 
-    def test_a_recovered_file_is_not_left_counted_as_a_failure(self):
-        """The first attempt already logged FAILED and bumped the counter.
-        A file that arrived is not a failure, and leaving it counted as one
-        is how a failure list stops being read."""
+    def test_the_failure_count_is_corrected_from_this_files_own_rows(self):
+        """Not from the shared counter, and not from the attempt count.
+
+        Both earlier versions were wrong in ways only tests caught: counting
+        attempts assumed every one bumped `failed` (a SKIP does not, and the
+        counter reached -1), and snapshotting the shared counter was racy
+        because files run concurrently -- a 5-file run reported 2. The audit
+        row is per-file and cannot be confused with another file's.
+
+        The behaviour itself is covered end-to-end in test_drive_engine.py
+        (recovery, exhaustion, quota, staging lifecycle); this pins the
+        mechanism that makes it thread-safe.
+        """
         import inspect
 
         import drive_engine
 
         src = inspect.getsource(drive_engine.DriveMigrator._sync_with_fallback)
-        assert '_bump("failed", -failed_before)' in src
-        assert '"file", "SUCCESS"' in src
+        assert "local_failures" in src
+        assert "self.stats.get" not in src, (
+            "correcting from the shared counter is racy under the file pool")
 
-    def test_exhausting_every_strategy_counts_as_one_failure(self):
-        """One file that could not be copied is one failure, not one per
-        method tried."""
+    def test_the_real_cause_survives_the_strategy_summary(self):
+        """"every copy strategy failed" as the whole message threw away the
+        line that says WHAT went wrong -- a checksum mismatch became
+        indistinguishable from a permissions denial."""
         import inspect
 
         import drive_engine
 
         src = inspect.getsource(drive_engine.DriveMigrator._sync_with_fallback)
-        assert "_bump(\"failed\", -(len(attempts) - 1))" in src
+        assert "if last_error:" in src
         assert "every copy strategy failed" in src
 
     def test_quota_exhaustion_still_stops_the_run(self):

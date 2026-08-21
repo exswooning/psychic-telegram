@@ -757,6 +757,20 @@ class DriveMigrator:
         as one is how a failure list stops being read.
         """
         attempts: list[str] = []
+        # Count THIS file's failures locally, from its own audit rows.
+        #
+        # Two earlier attempts at this were wrong. Correcting by
+        # len(attempts) assumed every attempt bumped `failed`, but an
+        # attempt can record a SKIP instead -- that drove the counter to -1.
+        # Snapshotting the shared counter instead was racy: files run
+        # concurrently in a pool, so the delta picked up other files'
+        # failures and a 5-file run reported 2.
+        #
+        # The audit row is per-file and cannot be confused with another
+        # file's, which makes it the only signal here that is both exact and
+        # thread-safe.
+        local_failures = 0
+        last_error = ""
         for name, fn in self._file_strategies(is_native):
             try:
                 if name == "server_side":
@@ -770,6 +784,16 @@ class DriveMigrator:
                 log.debug("[%s] %s failed for %s: %s",
                           self.source_user, name, item.get("name"), exc)
             attempts.append(name)
+            row = self.db.get_audit(self.source_user, item["id"], "file")
+            if row is not None and row["status"] == "FAILED":
+                local_failures += 1
+                # The FIRST failure, not the last. The configured strategy's
+                # reason is the one that explains the file -- "checksum
+                # mismatch" says what to do; the fallback's subsequent
+                # "insufficientPermissions" only says the second route was
+                # never open either, which the strategy list already covers.
+                if not last_error:
+                    last_error = row["error_message"] or ""
             if not self.db.get_target_id(self.source_user, item["id"], "file") \
                     and not self._worth_another_strategy(item):
                 # A deliberate skip, not a failure. canDownload=false is the
@@ -780,8 +804,8 @@ class DriveMigrator:
                 return
             if self.db.get_target_id(self.source_user, item["id"], "file"):
                 if len(attempts) > 1:
-                    failed_before = len(attempts) - 1
-                    self._bump("failed", -failed_before)
+                    if local_failures:
+                        self._bump("failed", -local_failures)
                     self._bump("recovered_by_fallback")
                     self.db.log_audit(
                         self.source_user, item["id"], "file", "SUCCESS",
@@ -796,11 +820,21 @@ class DriveMigrator:
         # stand; the others were corrected only on the recovery path above,
         # so correct them here too -- one file that could not be copied is
         # one failure, not three.
-        if len(attempts) > 1:
-            self._bump("failed", -(len(attempts) - 1))
-        self.db.log_audit(
-            self.source_user, item["id"], "file", "FAILED",
-            f"every copy strategy failed ({', '.join(attempts)})")
+        # One file that could not be copied is ONE failure, not one per
+        # method tried.
+        if local_failures > 1:
+            self._bump("failed", -(local_failures - 1))
+        elif local_failures == 0:
+            self._bump("failed")
+        # The strategy list is context, not a replacement for the cause.
+        # Overwriting the real message made a checksum mismatch
+        # indistinguishable from a permissions denial -- throwing away the
+        # one line that says what to do about it.
+        detail = f"every copy strategy failed ({', '.join(attempts)})"
+        if last_error:
+            detail = f"{last_error} [{detail}]"
+        self.db.log_audit(self.source_user, item["id"], "file", "FAILED",
+                          detail[:4000])
 
     # -- server-side copy path -------------------------------------------------
     def _sync_server_side(self, item: dict, tgt_parent: str) -> None:
