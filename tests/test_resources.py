@@ -200,3 +200,45 @@ class TestConcurrentJobsShareTheMachine:
         before."""
         r = self.vps()
         assert resources.recommend(r) == resources.recommend(r, concurrent_jobs=1)
+
+
+class TestTheProjectQuotaIsLimitedAtProjectScope:
+    """drive_read_qps is PER USER and each worker holds its own bucket, so
+    nine concurrent users issue nine times that rate against a quota Google
+    meters per PROJECT.
+
+    Live consequence: 127,832 failed ACL operations in a single run, every
+    one of them "Quota exceeded for quota metric 'Queries' and limit
+    'Requests per minute' ... for consumer project_number:..." -- calls that
+    were paced correctly and still blew the limit, because the limiter's
+    scope did not match the quota's scope.
+    """
+
+    def test_the_project_limiter_is_shared_across_migrators(self):
+        import drive_engine
+
+        drive_engine._PROJECT_LIMITER = None
+        a = drive_engine._project_limiter(40)
+        b = drive_engine._project_limiter(40)
+        assert a is b, "each worker holding its own defeats the whole point"
+
+    def test_the_setting_exists_with_a_conservative_default(self):
+        from config import Settings
+
+        s = Settings()
+        assert s.drive_project_qps > 0
+        # Well under any plausible per-project ceiling, and several times
+        # what one user alone sustains.
+        assert 10 <= s.drive_project_qps <= 200
+
+    def test_every_call_is_charged_to_it_not_just_reads(self):
+        """The project quota counts writes too -- exempting them would leave
+        the same hole in a smaller form."""
+        import inspect
+
+        import drive_engine
+
+        src = inspect.getsource(drive_engine.DriveMigrator._retry)
+        i = src.index("_project_limiter.acquire()")
+        j = src.index("if not write:")
+        assert i < j, "the project bucket must be charged before the branch"

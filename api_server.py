@@ -2228,7 +2228,7 @@ async def migration_detail(account_id: int, op: Operator = Depends(operator)):
             "sourceDomain": src.get("domain") or "",
             "targetDomain": tgt.get("domain") or "",
             "progress": _migration_progress(account_id),
-            "items": [], "failures": [], "failedUsers": [],
+            "items": [], "failures": [], "failedUsers": [], "users": [],
             "running": bool([j for j in job_admission.list_active()
                              if j.get("account_id") == account_id]),
             "error": "",
@@ -2268,6 +2268,23 @@ async def migration_detail(account_id: int, op: Operator = Depends(operator)):
                 # `notes` is where set_identity_status records why -- which
                 # is now the enriched licence explanation rather than a raw
                 # HTTP 400 (see main.explain_user_failure).
+                # Every user with its state, so the report answers "which
+                # mailboxes are finished" without a second page. Capped
+                # because a 200-user tenant is a table, not a payload
+                # problem, but a 20,000-user one would be.
+                out["users"] = [
+                    {"sourceUser": r["source_email"],
+                     "targetUser": r["target_email"],
+                     "status": r["status"] or "PENDING",
+                     "services": r["services_done"] or ""}
+                    for r in conn.execute(
+                        "SELECT source_email, target_email, status, "
+                        "services_done FROM identity_map "
+                        "WHERE entity_type='user' "
+                        "ORDER BY CASE status WHEN 'FAILED' THEN 0 "
+                        "  WHEN 'RUNNING' THEN 1 WHEN 'PENDING' THEN 2 "
+                        "  ELSE 3 END, source_email LIMIT 1000")]
+
                 out["failedUsers"] = [
                     {"sourceUser": r["source_email"],
                      "targetUser": r["target_email"],

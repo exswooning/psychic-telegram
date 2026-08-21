@@ -517,6 +517,9 @@ export interface MigrationDetail {
   items: Array<{ type: string; count: number }>
   failures: MigrationFailure[]
   failedUsers: Array<{ sourceUser: string; targetUser: string; detail: string }>
+  /** Every user with its state, ordered failures-first. The report answers
+   *  "which mailboxes are finished" without needing a separate page. */
+  users: Array<{ sourceUser: string; targetUser: string; status: string; services: string }>
   error: string
 }
 

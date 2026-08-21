@@ -34,6 +34,12 @@ const detail = (over = {}) => ({
     { sourceUser: 'zane@source.example.com', targetUser: 'zane@target.example.com',
       detail: 'This almost always means the account has no Workspace licence' },
   ],
+  users: [
+    { sourceUser: 'zane@source.example.com', targetUser: 'zane@target.example.com',
+      status: 'FAILED', services: '' },
+    { sourceUser: 'ada@source.example.com', targetUser: 'ada@target.example.com',
+      status: 'DONE', services: 'drive,gmail' },
+  ],
   error: '',
   ...over,
 })
@@ -93,7 +99,7 @@ describe('MigrationDetail', () => {
   })
 
   it('says plainly when there are no failures', async () => {
-    show(detail({ failures: [], failedUsers: [],
+    show(detail({ failures: [], failedUsers: [], users: [],
                   progress: { users: 5, done: 5, running: 0, failed: 0,
                               pending: 0, items: 100, itemsFailed: 0 } }))
     await waitFor(() => expect(screen.getByTestId('no-failures')).toBeTruthy())
@@ -102,9 +108,31 @@ describe('MigrationDetail', () => {
 
   it('surfaces a ledger that cannot be read instead of an empty report', async () => {
     show(detail({ error: 'this account has no migration ledger yet',
-                  items: [], failures: [], failedUsers: [] }))
+                  items: [], failures: [], failedUsers: [], users: [] }))
     await waitFor(() =>
       expect(screen.getByText(/no migration ledger yet/)).toBeTruthy())
+  })
+
+  it('shows every user with its state, inside the report', async () => {
+    /* Per-user state only means anything against the tenant pair it belongs
+       to, so it belongs here rather than on a page that has to guess which
+       migration you meant. */
+    show(detail())
+    await waitFor(() => expect(screen.getByTestId('users-table')).toBeTruthy())
+    expect(screen.getByTestId('user-ada@source.example.com'))
+      .toHaveTextContent('done')
+    expect(screen.getByTestId('user-ada@source.example.com'))
+      .toHaveTextContent('drive,gmail')
+  })
+
+  it('puts failures at the top of the user table', async () => {
+    /* A 200-row table sorted alphabetically buries the two rows anybody
+       opened this page to find. The server orders it; this pins that the
+       page does not re-sort it away. */
+    show(detail())
+    await waitFor(() => expect(screen.getByTestId('users-table')).toBeTruthy())
+    const rows = screen.getAllByTestId(/^user-/)
+    expect(rows[0]).toHaveTextContent('zane@source.example.com')
   })
 
   it('offers a way back to the list', async () => {

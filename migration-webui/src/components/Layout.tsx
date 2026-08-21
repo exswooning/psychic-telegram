@@ -71,7 +71,9 @@ const NAV_ITEMS = [
   { path: '/jobs', label: 'Jobs', icon: <JobsIconNav /> },
   { path: '/running-now', label: 'Running Now', icon: <RunningNowIconNav /> },
   { path: '/mission-control', label: 'Mission Control', icon: <MissionIcon /> },
-  { path: '/users', label: 'Users', icon: <PeopleIcon /> },
+  // Users lives inside a migration's report now -- per-user state only
+  // means anything against the tenant pair it belongs to, and a
+  // top-level page had to guess which migration you meant.
   { path: '/activity', label: 'Activity', icon: <ActivityIcon /> },
   { path: '/system-health', label: 'System Health', icon: <BarChartIcon /> },
   { path: '/verification', label: 'Verification', icon: <VerifyIcon /> },

@@ -400,6 +400,23 @@ class Settings:
     # Reads are governed by drive_read_qps above: they come out of the far
     # looser 20,000-per-100s pool (~200/sec) and must not be charged against
     # the write ceiling. See drive_engine._retry().
+    # Project-wide Drive ceiling, shared by every worker in this process.
+    #
+    # drive_read_qps below is PER USER, and each worker holds its own bucket
+    # -- so nine concurrent users issue nine times that rate against a quota
+    # Google meters per PROJECT. Live, that produced 127,832 failed ACL
+    # operations in one run: "Quota exceeded for quota metric 'Queries' and
+    # limit 'Requests per minute' ... for consumer project_number:...". The
+    # calls were paced correctly and still blew the limit, because the
+    # limiter's scope did not match the quota's scope.
+    #
+    # 40/sec = 2,400/min sits well under any plausible per-project ceiling
+    # while being several times what one user alone would sustain. Raise it
+    # if your project's quota is known to be higher; this is the number that
+    # bounds a wide fan-out, not drive_read_qps.
+    drive_project_qps: float = field(
+        default_factory=lambda: float(os.getenv("DRIVE_PROJECT_QPS", "40")))
+
     drive_write_qps: float = field(
         default_factory=lambda: float(os.getenv("DRIVE_WRITE_QPS", "0")) or 3.0
     )

@@ -149,6 +149,46 @@ export const MigrationDetail: React.FC = () => {
             </Paper>
           )}
 
+          <Paper variant="outlined" sx={{ p: 2, mb: 3 }} data-testid="users-table">
+            <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>
+              Users ({d.users.length.toLocaleString()})
+            </Typography>
+            {/* Failures first. A 200-row table sorted alphabetically buries
+                the two rows anybody opened this page to find. */}
+            <Box sx={{ maxHeight: 420, overflowY: 'auto' }}>
+              <Table size="small" stickyHeader>
+                <TableHead>
+                  <TableRow>
+                    <TableCell>user</TableCell>
+                    <TableCell>target</TableCell>
+                    <TableCell>state</TableCell>
+                    <TableCell>services done</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {d.users.map((u) => (
+                    <TableRow key={u.sourceUser}
+                              data-testid={`user-${u.sourceUser}`}>
+                      <TableCell sx={{ fontSize: 12 }}>{u.sourceUser}</TableCell>
+                      <TableCell sx={{ fontSize: 12 }}>{u.targetUser}</TableCell>
+                      <TableCell>
+                        <Chip size="small"
+                              variant={u.status === 'DONE' ? 'outlined' : 'filled'}
+                              color={u.status === 'DONE' ? 'success'
+                                     : u.status === 'FAILED' ? 'error'
+                                     : u.status === 'RUNNING' ? 'primary' : 'default'}
+                              label={u.status.toLowerCase()} />
+                      </TableCell>
+                      <TableCell sx={{ fontSize: 11 }}>
+                        {u.services || '—'}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </Box>
+          </Paper>
+
           <Paper variant="outlined" sx={{ p: 2 }}>
             <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>
               Errors, grouped by cause

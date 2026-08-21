@@ -39,6 +39,26 @@ log = logging.getLogger(__name__)
 LARGE_UPLOAD_THRESHOLD = 5 * 1024 * 1024  # switch to resumable above this size
 
 
+_PROJECT_LIMITER = None
+_PROJECT_LIMITER_LOCK = threading.Lock()
+
+
+def _project_limiter(qps: float):
+    """One bucket per PROCESS, not per migrator.
+
+    Every worker thread runs its own DriveMigrator with its own per-user
+    limiter, which is correct for the per-user quotas and useless for the
+    per-project one -- nine correctly-paced workers still present nine times
+    the rate to a limit Google enforces on the project. Built once and shared
+    so the fan-out cannot outrun the quota.
+    """
+    global _PROJECT_LIMITER
+    with _PROJECT_LIMITER_LOCK:
+        if _PROJECT_LIMITER is None:
+            _PROJECT_LIMITER = RateLimiter(qps)
+        return _PROJECT_LIMITER
+
+
 class DriveMigrator:
     def __init__(self, auth, db, settings: Settings, source_user: str,
                  target_user: str, quota):
@@ -55,6 +75,13 @@ class DriveMigrator:
         # what _download_via charges once per call, and tests substitute it.
         self.limiter = RateLimiter(settings.drive_read_qps)
         self._read_limiter = self.limiter
+        # Shared by every migrator in this process, because the quota it
+        # models is metered per PROJECT while _read_limiter is per user.
+        # Nine workers each pacing themselves correctly still issue nine
+        # times the project rate; that is what produced 127,832 failed ACL
+        # operations in a single run, all of them rateLimitExceeded that had
+        # exhausted their retries.
+        self._project_limiter = _project_limiter(settings.drive_project_qps)
         # The ceiling that actually bounds a migration -- one bucket PER
         # ACCOUNT, because that is the unit Google enforces it on.
         #
@@ -156,6 +183,10 @@ class DriveMigrator:
         is the expensive mistake (it invites 429s); the reverse only costs a
         little throughput.
         """
+        # Charged on every call, read or write: the project-wide quota
+        # counts all of them, so exempting writes would leave the same hole
+        # in a smaller form.
+        self._project_limiter.acquire()
         if not write:
             self._read_limiter.acquire()
         elif tenant == "source":
