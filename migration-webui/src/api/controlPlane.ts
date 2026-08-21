@@ -486,6 +486,9 @@ export const startFullSetup = (
 // a tenant pair IS an account here.
 export interface MigrationProgress {
   users: number; done: number; running: number; failed: number; pending: number
+  /** Waiting on something outside the tool -- a Workspace licence -- not
+   *  broken. Apart from `failed` so that count keeps meaning "investigate". */
+  blocked?: number
   items: number; itemsFailed: number
 }
 
@@ -520,7 +523,7 @@ export interface MigrationDetail {
   progress: MigrationProgress
   items: Array<{ type: string; count: number }>
   failures: MigrationFailure[]
-  failedUsers: Array<{ sourceUser: string; targetUser: string; detail: string }>
+  failedUsers: Array<{ sourceUser: string; targetUser: string; status?: string; detail: string }>
   /** Every user with its state, ordered failures-first. The report answers
    *  "which mailboxes are finished" without needing a separate page. */
   users: Array<{ sourceUser: string; targetUser: string; status: string; services: string }>

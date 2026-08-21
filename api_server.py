@@ -2171,7 +2171,10 @@ def _migration_progress(account_id: int | None) -> dict:
     done and 40% failed is not 60% of a migration.
     """
     empty = {"users": 0, "done": 0, "running": 0, "failed": 0, "pending": 0,
-             "items": 0, "itemsFailed": 0}
+             # Waiting on something outside the tool (a Workspace licence),
+             # not broken. Counted apart so a failure list keeps meaning
+             # "investigate this".
+             "blocked": 0, "items": 0, "itemsFailed": 0}
     try:
         from config import Settings
         path = Settings(account_id=account_id).db_path
@@ -2187,7 +2190,8 @@ def _migration_progress(account_id: int | None) -> dict:
                     "WHERE entity_type='user' GROUP BY status"):
                 out["users"] += row["n"]
                 key = {"DONE": "done", "RUNNING": "running",
-                       "FAILED": "failed"}.get(row["status"], "pending")
+                       "FAILED": "failed",
+                       "BLOCKED": "blocked"}.get(row["status"], "pending")
                 out[key] += row["n"]
             out["items"] = conn.execute(
                 "SELECT COUNT(*) n FROM id_mapping").fetchone()["n"]
@@ -2365,12 +2369,14 @@ async def migration_detail(account_id: int, op: Operator = Depends(operator)):
                 out["failedUsers"] = [
                     {"sourceUser": r["source_email"],
                      "targetUser": r["target_email"],
+                     "status": r["status"],
                      "detail": (r["notes"] or "")[:400]}
                     for r in conn.execute(
-                        "SELECT source_email, target_email, notes "
+                        "SELECT source_email, target_email, notes, status "
                         "FROM identity_map "
-                        "WHERE entity_type='user' AND status='FAILED' "
-                        "ORDER BY source_email")]
+                        "WHERE entity_type='user' "
+                        "AND status IN ('FAILED','BLOCKED') "
+                        "ORDER BY status, source_email")]
         except Exception as exc:      # noqa: BLE001 - report, never 500
             out["error"] = f"could not read the ledger: {str(exc)[:160]}"
         return out

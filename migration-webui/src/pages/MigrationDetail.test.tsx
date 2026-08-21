@@ -22,8 +22,8 @@ const detail = (over = {}) => ({
   sourceDomain: 'source.example.com',
   targetDomain: 'target.example.com',
   running: false,
-  progress: { users: 201, done: 199, running: 0, failed: 2, pending: 0,
-              items: 242234, itemsFailed: 30 },
+  progress: { users: 201, done: 199, running: 0, failed: 0, pending: 0,
+              blocked: 2, items: 242234, itemsFailed: 30 },
   items: [{ type: 'message', count: 240731 }, { type: 'file', count: 82 }],
   failures: [
     { reason: 'HTTP 400 (INVALID_ARGUMENT): Fields with source ids are not allowed.',
@@ -36,6 +36,7 @@ const detail = (over = {}) => ({
   ],
   failedUsers: [
     { sourceUser: 'zane@source.example.com', targetUser: 'zane@target.example.com',
+      status: 'BLOCKED',
       detail: 'This almost always means the account has no Workspace licence' },
   ],
   users: [
@@ -93,12 +94,29 @@ describe('MigrationDetail', () => {
     expect(screen.getByTestId('item-file')).toHaveTextContent('82')
   })
 
+  it('counts a licence-blocked user apart from a failure', async () => {
+    /* They need opposite responses: one is waited on, the other
+       investigated. A count that merges them stops meaning "investigate". */
+    show(detail())
+    await waitFor(() => expect(screen.getByTestId('stat-blocked')).toBeTruthy())
+    expect(screen.getByTestId('stat-blocked')).toHaveTextContent('2')
+    expect(screen.getByTestId('stat-failed')).toHaveTextContent('0')
+  })
+
+  it('labels a blocked user as waiting rather than broken', async () => {
+    show(detail())
+    await waitFor(() =>
+      expect(screen.getByTestId('faileduser-zane@source.example.com')).toBeTruthy())
+    expect(screen.getByTestId('faileduser-zane@source.example.com'))
+      .toHaveTextContent('waiting on you')
+  })
+
   it('separates users failed from items failed', async () => {
     /* Two users failed; thirty items did. Collapsing them into one number
        makes a widespread item failure look like a couple of bad mailboxes. */
     show(detail())
     await waitFor(() => expect(screen.getByTestId('stat-failed')).toBeTruthy())
-    expect(screen.getByTestId('stat-failed')).toHaveTextContent('2')
+    expect(screen.getByTestId('stat-failed')).toHaveTextContent('0')
     expect(screen.getByTestId('stat-itemsfailed')).toHaveTextContent('30')
   })
 

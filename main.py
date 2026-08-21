@@ -223,6 +223,18 @@ def _services_that_succeeded(services: dict) -> list[str]:
     return done
 
 
+def is_blocked_externally(exc: Exception) -> bool:
+    """Is this obstacle outside the tool's reach entirely?
+
+    Distinguished from a failure because the two need opposite responses: a
+    failure is investigated, a block is waited on. Conflating them means a
+    list that says "2 failed" every run forever, about something no re-run
+    can change -- and a failure count nobody trusts is a failure count
+    nobody reads.
+    """
+    return all(k in str(exc).lower() for k in _NO_MAILBOX)
+
+
 def explain_user_failure(exc: Exception, source_user: str,
                          target_user: str) -> str:
     """Turn an engine exception into something an operator can act on.
@@ -321,10 +333,25 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
     except Exception as exc:  # noqa: BLE001 - worker must not propagate
         log.exception("[%s] user migration failed", source_user)
         detail = explain_user_failure(exc, source_user, target_user)
+        # BLOCKED, not FAILED, when the obstacle is outside this tool.
+        #
+        # An account with no Workspace licence has no Gmail at all. No
+        # retry, scope, quota or code change reaches it -- confirmed against
+        # the live tenants, where the Licensing API answers HTTP 412 "There
+        # aren't enough available licenses" because both hold 201 accounts
+        # against 200 seats. Reporting that beside genuine errors trains
+        # people to skim a failure list that is supposed to demand
+        # attention.
+        #
+        # Still not DONE, so it retries the moment a seat is freed --
+        # _already_done skips only DONE, and this state is deliberately not
+        # that. It is "waiting on you", not "finished" and not "broken".
+        blocked = is_blocked_externally(exc)
+        status = "BLOCKED" if blocked else "FAILED"
         if track_status:
-            db.set_identity_status(source_user, "FAILED", detail)
-        db.log_audit(source_user, source_user, "user", "FAILED", detail)
-        result["status"] = "FAILED"
+            db.set_identity_status(source_user, status, detail)
+        db.log_audit(source_user, source_user, "user", status, detail)
+        result["status"] = status
         result["error"] = detail
 
     result["elapsed_sec"] = round(time.time() - started, 1)

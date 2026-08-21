@@ -123,6 +123,7 @@ export const MigrationDetail: React.FC = () => {
                 <Stat id="running" label="running" value={p.running} />
                 <Stat id="pending" label="pending" value={p.pending} />
                 <Stat id="failed" label="users failed" value={p.failed} tone="error" />
+                <Stat id="blocked" label="blocked" value={p.blocked ?? 0} />
                 <Stat id="items" label="items migrated" value={p.items} />
                 <Stat id="itemsfailed" label="items failed" value={p.itemsFailed}
                       tone="error" />
@@ -156,12 +157,22 @@ export const MigrationDetail: React.FC = () => {
               <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>
                 Users that did not migrate ({d.failedUsers.length})
               </Typography>
+              {/* "blocked" and "failed" need opposite responses -- one is
+                  waited on, the other investigated. Labelling them the same
+                  trains people to skim a list meant to demand attention. */}
               <Stack spacing={1.5}>
                 {d.failedUsers.map((u) => (
                   <Box key={u.sourceUser} data-testid={`faileduser-${u.sourceUser}`}>
-                    <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                      {u.sourceUser}
-                    </Typography>
+                    <Stack direction="row" spacing={1} alignItems="center">
+                      <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                        {u.sourceUser}
+                      </Typography>
+                      <Chip size="small"
+                            color={u.status === 'BLOCKED' ? 'warning' : 'error'}
+                            variant={u.status === 'BLOCKED' ? 'outlined' : 'filled'}
+                            label={u.status === 'BLOCKED'
+                              ? 'blocked — waiting on you' : 'failed'} />
+                    </Stack>
                     <Typography variant="caption" color="text.secondary"
                                 sx={{ whiteSpace: 'pre-wrap' }}>
                       {u.detail || 'no detail recorded'}

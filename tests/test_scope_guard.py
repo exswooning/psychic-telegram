@@ -1562,3 +1562,46 @@ class TestExportSizeRefusalIsASkipNotAFailure:
         window = src[i:i + 900]
         assert '"file", "FAILED"' in window
         assert '_bump("failed")' in window
+
+
+class TestBlockedIsNotFailed:
+    """An account with no Workspace licence has no Gmail at all. No retry,
+    scope, quota or code change reaches it -- confirmed against the live
+    tenants, where the Licensing API answers HTTP 412 "There aren't enough
+    available licenses" because both hold 201 accounts against 200 seats.
+
+    Reporting that beside genuine errors trains people to skim a failure
+    list that exists to demand attention.
+    """
+
+    def test_the_licence_condition_is_recognised_as_external(self):
+        import main
+
+        assert main.is_blocked_externally(
+            RuntimeError("HTTP 400 (failedPrecondition): Mail service not enabled"))
+
+    def test_an_ordinary_error_is_not(self):
+        import main
+
+        assert not main.is_blocked_externally(RuntimeError("Connection reset"))
+        assert not main.is_blocked_externally(
+            RuntimeError("HTTP 400 (failedPrecondition): bad label id"))
+
+    def test_blocked_users_are_recorded_as_blocked_not_failed(self):
+        import inspect
+
+        import main
+
+        src = inspect.getsource(main.migrate_user)
+        assert 'status = "BLOCKED" if blocked else "FAILED"' in src
+
+    def test_blocked_is_never_treated_as_done(self):
+        """It must retry the moment a seat is freed. _already_done skips only
+        DONE, so anything else stays eligible -- pinning that here because
+        'stop retrying what cannot succeed' is a tempting wrong turn."""
+        import inspect
+
+        import main
+
+        src = inspect.getsource(main.run_batch)
+        assert 'r["status"] != "DONE"' in src
