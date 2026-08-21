@@ -892,6 +892,26 @@ class DriveMigrator:
                 lambda: self.src.files().export_media(fileId=item["id"], mimeType=export_mime)
             )
         except (PermanentAPIError, RuntimeError) as exc:
+            # Google refusing the export for size is the SAME condition the
+            # guard below treats as a skip -- the only difference is who
+            # noticed first. Recording it as FAILED made 27 files look like
+            # errors to investigate when they are a documented Google
+            # ceiling (~10 MB per export) that no retry, scope or quota
+            # changes.
+            #
+            # Still recorded, not swallowed: the file genuinely did not
+            # migrate, and an operator needs the list. It belongs with the
+            # other skips so the failure count means "something went wrong"
+            # rather than "something is impossible".
+            if "exportSizeLimitExceeded" in str(exc):
+                self.db.log_audit(
+                    self.source_user, item["id"], "file",
+                    "SKIPPED_EXPORT_TOO_LARGE",
+                    f"Google refused the export: this native file is past its "
+                    f"export ceiling (~10 MB). Not retryable -- download it by "
+                    f"hand, or keep it in place and link to it. ({exc})"[:400])
+                self._bump("skipped")
+                return
             self.db.log_audit(self.source_user, item["id"], "file", "FAILED", str(exc))
             self._bump("failed")
             return

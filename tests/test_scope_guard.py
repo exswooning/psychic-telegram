@@ -1512,3 +1512,53 @@ class TestAclFailuresResolveAgainstTheTarget:
         src = inspect.getsource(drive_engine)
         assert src.count('"acl", "SUCCESS"') >= 2, (
             "both the batch and single-grant paths must record success")
+
+
+class TestExportSizeRefusalIsASkipNotAFailure:
+    """A native Google file past its ~10 MB export ceiling cannot be
+    exported by any retry, scope or quota. drive_engine already treats that
+    as SKIPPED_EXPORT_TOO_LARGE when it measures the size itself -- but when
+    Google refuses first, the identical condition was recorded FAILED.
+
+    Live: 27 files in the failure list that no amount of investigation could
+    have resolved, diluting a count whose job is to mean "something went
+    wrong" rather than "something is impossible".
+    """
+
+    def test_the_refusal_is_classified_as_a_skip(self):
+        import inspect
+
+        import drive_engine
+
+        src = inspect.getsource(drive_engine)
+        i = src.index("exportSizeLimitExceeded")
+        window = src[i:i + 700]
+        assert "SKIPPED_EXPORT_TOO_LARGE" in window
+        assert '_bump("skipped")' in window
+
+    def test_it_says_the_file_did_not_migrate_and_is_not_retryable(self):
+        """A skip that reads as success would quietly lose the file. The
+        operator needs to know it is theirs to handle."""
+        import inspect
+
+        import drive_engine
+
+        src = inspect.getsource(drive_engine)
+        i = src.index("exportSizeLimitExceeded")
+        window = src[i:i + 700]
+        assert "Not retryable" in window
+        assert "download it by" in window
+
+    def test_other_export_errors_are_still_failures(self):
+        """Only this one condition is reclassified. Treating every export
+        error as a skip would hide real breakage behind a benign label --
+        the same mistake in the opposite direction."""
+        import inspect
+
+        import drive_engine
+
+        src = inspect.getsource(drive_engine)
+        i = src.index("exportSizeLimitExceeded")
+        window = src[i:i + 900]
+        assert '"file", "FAILED"' in window
+        assert '_bump("failed")' in window
