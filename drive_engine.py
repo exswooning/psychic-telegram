@@ -288,7 +288,17 @@ class DriveMigrator:
                 self._close_file_pool()
             self._fixup_shortcuts()
         finally:
-            if self.server_side and not self.settings.dry_run:
+            # `_staging_drive_id`, not `self.server_side`.
+            #
+            # The fallback cascade can create a staging drive in
+            # download_upload mode -- that is the whole point of it, since
+            # files.copy is the only path that moves a file past its export
+            # ceiling. Keying teardown on the configured MODE therefore
+            # leaked a shared drive on exactly the runs that needed the
+            # fallback, and left it holding copies of the operator's files.
+            # Keying it on whether one was actually created cannot drift
+            # from what happened.
+            if self._staging_drive_id and not self.settings.dry_run:
                 self._teardown_staging_drive()
         return dict(self.stats)
 
@@ -682,15 +692,115 @@ class DriveMigrator:
             self._bump("files")
             return
 
-        if self.server_side:
-            # Native vs binary is irrelevant here -- copy handles both
-            # identically, which is exactly why this path keeps native files
-            # native instead of round-tripping them through OOXML.
-            self._sync_server_side(item, tgt_parent)
-        elif is_native:
-            self._sync_native(item, tgt_parent)
-        else:
-            self._sync_binary(item, tgt_parent)
+        self._sync_with_fallback(item, tgt_parent, is_native)
+
+    # -- strategy cascade ------------------------------------------------------
+    def _file_strategies(self, is_native: bool) -> list:
+        """The copy strategies to try, best-first for this configuration.
+
+        There are three transfer MODES but only two distinct copy paths, and
+        conflating them would mean calling a method that does not exist:
+
+          server_side / link_flip   both take _sync_server_side -- files.copy
+                         through a staging shared drive. No bytes cross this
+                         host and native files stay native, so it is the ONLY
+                         path that can move a Google Doc past its ~10 MB
+                         export ceiling, because it never exports. link_flip
+                         is that same path with the file briefly published to
+                         anyone-with-the-link (see the `link_flip` property).
+          download_upload  export/download then upload. Works where the
+                         source user cannot copy but can read, and is the
+                         only path when no staging drive can be created.
+
+        They fail for genuinely different reasons, which is exactly why one
+        failing says nothing about the other: 27 files that could not be
+        exported can still be copied.
+
+        The configured mode goes first. link_flip is never fallen back INTO
+        -- publishing a file the operator did not agree to expose is not a
+        recovery, it is a different decision made on their behalf.
+        """
+        native_or_binary = (self._sync_native if is_native else self._sync_binary)
+        order = [("server_side", self._sync_server_side),
+                 ("download_upload", native_or_binary)]
+        if self.settings.transfer_mode == "download_upload":
+            order.reverse()
+        return order
+
+    # Skips another strategy CAN legitimately overturn: both mean "this
+    # path cannot carry this file", not "this file must not be carried".
+    # Everything else -- canDownload=false above all -- is a decision to
+    # respect, not an error to route around.
+    _RETRYABLE_SKIPS = ("SKIPPED_EXPORT_TOO_LARGE", "SKIPPED_UNEXPORTABLE")
+
+    def _worth_another_strategy(self, item: dict) -> bool:
+        """Did the last attempt fail in a way a different path could fix?"""
+        row = self.db.get_audit(self.source_user, item["id"], "file")
+        if row is None:
+            # Nothing recorded: the strategy raised before it could log.
+            return True
+        status = row["status"]
+        return status == "FAILED" or status in self._RETRYABLE_SKIPS
+
+    def _sync_with_fallback(self, item: dict, tgt_parent: str,
+                            is_native: bool) -> None:
+        """Try each strategy until one lands the file.
+
+        Success is read from the ledger rather than from a return value:
+        every strategy records its own mapping, so "is there a mapping now"
+        is the one signal that cannot disagree with what actually happened.
+
+        Each failed attempt has already logged its own FAILED row and bumped
+        `failed`. On recovery both are undone -- the audit row by an upsert
+        (log_audit keys on user+item+type), the counter by a negative bump --
+        because a file that arrived is not a failure, and leaving it counted
+        as one is how a failure list stops being read.
+        """
+        attempts: list[str] = []
+        for name, fn in self._file_strategies(is_native):
+            try:
+                if name == "server_side":
+                    # Idempotent, and lazy: a download_upload run only pays
+                    # for a staging drive if it actually needs to fall back.
+                    self._ensure_staging_drive()
+                fn(item, tgt_parent)
+            except QuotaExhausted:
+                raise
+            except Exception as exc:      # noqa: BLE001 - try the next one
+                log.debug("[%s] %s failed for %s: %s",
+                          self.source_user, name, item.get("name"), exc)
+            attempts.append(name)
+            if not self.db.get_target_id(self.source_user, item["id"], "file") \
+                    and not self._worth_another_strategy(item):
+                # A deliberate skip, not a failure. canDownload=false is the
+                # source telling us this user may not have the bytes, and
+                # copying it by another route would be overriding that
+                # decision rather than recovering from an error. Only
+                # failures and the export ceiling earn a second attempt.
+                return
+            if self.db.get_target_id(self.source_user, item["id"], "file"):
+                if len(attempts) > 1:
+                    failed_before = len(attempts) - 1
+                    self._bump("failed", -failed_before)
+                    self._bump("recovered_by_fallback")
+                    self.db.log_audit(
+                        self.source_user, item["id"], "file", "SUCCESS",
+                        f"copied by {name} after {', '.join(attempts[:-1])} "
+                        f"failed")
+                    log.info("[%s] %s recovered %s after %s failed",
+                             self.source_user, name, item.get("name"),
+                             ", ".join(attempts[:-1]))
+                return
+
+        # Every strategy is spent. The last one's FAILED row and counter
+        # stand; the others were corrected only on the recovery path above,
+        # so correct them here too -- one file that could not be copied is
+        # one failure, not three.
+        if len(attempts) > 1:
+            self._bump("failed", -(len(attempts) - 1))
+        self.db.log_audit(
+            self.source_user, item["id"], "file", "FAILED",
+            f"every copy strategy failed ({', '.join(attempts)})")
 
     # -- server-side copy path -------------------------------------------------
     def _sync_server_side(self, item: dict, tgt_parent: str) -> None:
