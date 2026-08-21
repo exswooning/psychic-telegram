@@ -1380,3 +1380,135 @@ class TestStaleServiceMarkersAreReopened:
                     order.append((node.lineno, node.func.id))
         names = [n for _, n in sorted(order)]
         assert names[:2] == ["reconcile_service_markers", "run_batch"], names
+
+
+class TestAclFailuresResolveAgainstTheTarget:
+    """A run reported 127,852 failed ACL operations. They were 2,116 files,
+    each with up to 202 grants, and the target held every one of them --
+    202 permissions on the source, 202 on the target.
+
+    The grants had hit rateLimitExceeded, logged a FAILED row, been retried,
+    and succeeded. Nothing overwrote the row because ACL successes were
+    never logged. A number that alarming and that wrong is worse than no
+    number: it sends people to repair what already worked.
+    """
+
+    class FakeDB:
+        def __init__(self, failed, mappings, identities, perms):
+            self._perms = perms
+            self.logged = []
+            outer = self
+
+            class Conn:
+                def execute(self, sql, args=()):
+                    if "audit_log" in sql:
+                        rows = [{"source_user": u, "item_id": k}
+                                for u, k in failed]
+                    elif "identity_map" in sql:
+                        rows = [(s, t) for s, t in identities]
+                    else:
+                        tid = mappings.get(args[0])
+                        rows = [{"target_id": tid}] if tid else []
+                    return type("C", (), {
+                        "fetchall": lambda s, r=rows: r,
+                        "fetchone": lambda s, r=rows: (r[0] if r else None),
+                    })()
+            self.conn = Conn()
+
+        def log_audit(self, user, key, kind, status, msg=""):
+            self.logged.append((key, status))
+
+    def _auth(self, perms):
+        class Files:
+            def get(self, **kw):
+                return type("E", (), {
+                    "execute": lambda s: {"permissions": perms}})()
+
+        class Drive:
+            def files(self):
+                return Files()
+
+        class Auth:
+            def target_drive(self, u):
+                return Drive()
+        return Auth()
+
+    def test_a_grant_present_on_the_target_is_resolved(self):
+        import acl_reconcile
+
+        db = self.FakeDB(
+            failed=[("a@s.com", "FILE1:bob@t.com")],
+            mappings={"FILE1": "TGT1"},
+            identities=[("a@s.com", "a@t.com")],
+            perms=None)
+        stats = acl_reconcile.reconcile(
+            self._auth([{"emailAddress": "bob@t.com", "type": "user"}]), db, None)
+        assert stats["resolved"] == 1
+        assert stats["still_failed"] == 0
+        assert db.logged == [("FILE1:bob@t.com", "SUCCESS")]
+
+    def test_a_grant_genuinely_missing_stays_failed(self):
+        """This resolves REPORTING, never the underlying work -- a grant the
+        target does not have must keep saying so."""
+        import acl_reconcile
+
+        db = self.FakeDB(
+            failed=[("a@s.com", "FILE1:bob@t.com")],
+            mappings={"FILE1": "TGT1"},
+            identities=[("a@s.com", "a@t.com")],
+            perms=None)
+        stats = acl_reconcile.reconcile(
+            self._auth([{"emailAddress": "someone.else@t.com", "type": "user"}]),
+            db, None)
+        assert stats["resolved"] == 0
+        assert stats["still_failed"] == 1
+        assert db.logged == []
+
+    def test_a_file_that_never_copied_is_not_resolved(self):
+        """Its grant failures are real: there is nothing to hold them."""
+        import acl_reconcile
+
+        db = self.FakeDB(
+            failed=[("a@s.com", "MISSING:bob@t.com")],
+            mappings={}, identities=[("a@s.com", "a@t.com")], perms=None)
+        stats = acl_reconcile.reconcile(self._auth([]), db, None)
+        assert stats["resolved"] == 0
+        assert stats["unreadable"] == 1
+
+    def test_a_dry_run_writes_nothing(self):
+        import acl_reconcile
+
+        db = self.FakeDB(
+            failed=[("a@s.com", "FILE1:bob@t.com")],
+            mappings={"FILE1": "TGT1"},
+            identities=[("a@s.com", "a@t.com")], perms=None)
+        stats = acl_reconcile.reconcile(
+            self._auth([{"emailAddress": "bob@t.com", "type": "user"}]),
+            db, None, dry_run=True)
+        assert stats["resolved"] == 1
+        assert db.logged == []
+
+    def test_link_and_domain_grants_are_matched_by_type(self):
+        """anyone/domain grants carry no email address, so matching on one
+        would report every link-share as permanently failed."""
+        import acl_reconcile
+
+        db = self.FakeDB(
+            failed=[("a@s.com", "FILE1:anyone")],
+            mappings={"FILE1": "TGT1"},
+            identities=[("a@s.com", "a@t.com")], perms=None)
+        stats = acl_reconcile.reconcile(
+            self._auth([{"type": "anyone"}]), db, None)
+        assert stats["resolved"] == 1
+
+    def test_the_engine_records_acl_successes_now(self):
+        """The permanent fix. log_audit upserts on (user, item, type), so a
+        recovered grant overwrites its own FAILED row -- without this the
+        ledger keeps every stumble and none of the recoveries."""
+        import inspect
+
+        import drive_engine
+
+        src = inspect.getsource(drive_engine)
+        assert src.count('"acl", "SUCCESS"') >= 2, (
+            "both the batch and single-grant paths must record success")

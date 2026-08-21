@@ -1339,6 +1339,19 @@ class DriveMigrator:
                 self.db.log_audit(self.source_user, audit_key, "acl", "FAILED", str(exc))
                 self._bump("acl_failed")
             else:
+                # Record the success, and this is not bookkeeping for its own
+                # sake. log_audit upserts on (source_user, item_id,
+                # item_type), so a grant that failed under rate limiting and
+                # succeeded on a later attempt REPLACES its own FAILED row.
+                #
+                # Without it the ledger keeps every stumble and none of the
+                # recoveries: one live run reported 127,852 failed ACL
+                # operations across 2,116 files whose sharing was, on
+                # inspection, entirely intact -- 202 grants on the source,
+                # 202 on the target. A number that alarming and that wrong
+                # is worse than no number, because it sends people to repair
+                # something that already worked.
+                self.db.log_audit(self.source_user, audit_key, "acl", "SUCCESS")
                 applied += 1
         return applied
 
@@ -1351,6 +1364,8 @@ class DriveMigrator:
                 fileId=target_id, body=b, sendNotificationEmail=False,
                 supportsAllDrives=True, fields="id",
             ).execute(), label="drive.permissions.create")
+            # Same upsert-clears-the-failure reasoning as the batch path.
+            self.db.log_audit(self.source_user, audit_key, "acl", "SUCCESS")
             return 1
         except (PermanentAPIError, RuntimeError) as exc:
             self.db.log_audit(self.source_user, audit_key, "acl", "FAILED", str(exc))
