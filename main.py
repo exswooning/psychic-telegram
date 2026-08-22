@@ -448,6 +448,8 @@ def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
         log.warning("no users to process — check identity_map")
         return []
 
+    _warn_if_ledger_is_stale(db, auth, pairs)
+
     log.info("dispatching %d users across %d workers (services=%s, delta=%s)",
              len(pairs), settings.user_workers, ",".join(sorted(services)), delta)
 
@@ -723,6 +725,44 @@ def cmd_init_db(args, settings: Settings, db: MigrationDB, auth: AuthManager):
                   f"`provision-users --tenant target --dry-run` first to see "
                   f"the exact list.")
     print(f"Schema initialised at {settings.db_path}")
+
+
+def _warn_if_ledger_is_stale(db, auth, pairs) -> None:
+    """Refuse to start a run that would skip everything and call it success.
+
+    id_mapping is authoritative, so a target account recreated since the
+    ledger was written leaves every mapping naming something that no longer
+    exists -- and the run skips all of it in seconds and reports done. That
+    happened live on 2026-08-21: 200 accounts deleted, 200 recreated on the
+    same addresses, 462,048 mappings left pointing at deleted items.
+
+    One Directory call per user, once per run. Loud rather than automatic:
+    forgetting 462,048 mappings means re-copying them, which is hours of
+    someone's bandwidth and quota, and is not a decision to take silently on
+    their behalf.
+    """
+    import ledger_verify
+
+    try:
+        report = ledger_verify.verify(db, auth.directory("target"), pairs)
+    except Exception as exc:      # noqa: BLE001 - never block a run on the check
+        log.warning("could not verify the ledger against the target (%s); "
+                    "continuing", str(exc)[:160])
+        return
+    if not report.stale:
+        return
+    log.error(
+        "%d of %d user(s) have %s mapping(s) that no longer exist on the "
+        "target -- their accounts were recreated after the ledger was "
+        "written. Those items will be SKIPPED as already-migrated and this "
+        "run will report success without copying them. Run "
+        "`main.py --account-id N verify-ledger --reopen` first.",
+        len(report.stale), report.checked, f"{report.stale_mappings:,}")
+    for verdict in report.stale[:3]:
+        log.error("  %s: %s", verdict.source_user, verdict.reason)
+    raise SystemExit(
+        "refusing to start against a ledger that does not match the target; "
+        "see verify-ledger")
 
 
 def cmd_verify_ledger(args, settings: Settings, db: MigrationDB,

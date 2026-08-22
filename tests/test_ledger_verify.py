@@ -165,3 +165,62 @@ class TestTimestampsFromTwoSources:
         assert ledger_verify._iso("2026-08-21 17:43:46") == "2026-08-21T17:43:46"
         assert (ledger_verify._iso("2026-08-21T17:43:46.000Z")
                 > ledger_verify._iso("2026-08-21T11:17:15Z"))
+
+
+class TestAMigrationRefusesToRunAgainstAStaleLedger:
+    """The silent-success case is the whole point. id_mapping is
+    authoritative, so a run against recreated accounts skips every mapped
+    item and reports done in seconds -- which is what would have happened
+    on 2026-08-22 if nothing checked."""
+
+    def _pairs(self):
+        return [("u@src", "u@tgt")]
+
+    def _auth(self, accounts):
+        class FakeAuth:
+            def directory(self, tenant):
+                return FakeDirectory(accounts)
+        return FakeAuth()
+
+    def test_it_stops_the_run_when_mappings_predate_the_account(self):
+        import pytest
+
+        import main
+        db = FakeDB({"u@src": bounds(35_490, "2026-08-20T08:53:39Z")})
+        with pytest.raises(SystemExit) as e:
+            main._warn_if_ledger_is_stale(
+                db, self._auth({"u@tgt": "2026-08-21T17:43:46.000Z"}),
+                self._pairs())
+        assert "verify-ledger" in str(e.value)
+
+    def test_it_does_not_stop_a_healthy_run(self):
+        import main
+        db = FakeDB({"u@src": bounds(10, "2026-08-21T19:00:00Z")})
+        main._warn_if_ledger_is_stale(
+            db, self._auth({"u@tgt": "2026-01-01T00:00:00.000Z"}),
+            self._pairs())
+
+    def test_a_failing_check_does_not_block_the_run(self):
+        """An unreachable Directory must not be able to stop a migration that
+        would otherwise be fine -- the check is a guard, not a dependency."""
+        import main
+
+        class Broken:
+            def directory(self, tenant):
+                raise RuntimeError("network down")
+
+        db = FakeDB({"u@src": bounds(10, "2026-08-21T19:00:00Z")})
+        main._warn_if_ledger_is_stale(db, Broken(), self._pairs())
+
+    def test_it_does_not_reopen_anything_by_itself(self):
+        """Forgetting 462,048 mappings means re-copying them -- hours of
+        someone's quota, and not a decision to take on their behalf."""
+        import pytest
+
+        import main
+        db = FakeDB({"u@src": bounds(500, "2026-08-20T08:00:00Z")})
+        with pytest.raises(SystemExit):
+            main._warn_if_ledger_is_stale(
+                db, self._auth({"u@tgt": "2026-08-21T17:43:46.000Z"}),
+                self._pairs())
+        assert db.forgotten == []
