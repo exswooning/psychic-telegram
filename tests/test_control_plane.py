@@ -2032,3 +2032,53 @@ class TestFailuresCarryTheirAge:
         assert row["status"] == "PENDING"
         assert row["status_at"] > "2020-01-01T00:00:00Z"
         d.close()
+
+
+class TestRunStartComesFromTheJobNotAGuess:
+    """runStartedAt decides which failures are shown as stale, so inferring
+    it wrong is worse than not having it.
+
+    The first version used MIN(status_at) over RUNNING and PENDING. PENDING
+    includes users the run has never touched, carrying timestamps from days
+    earlier, so the inferred start landed BEFORE the failures it was meant to
+    age out and marked none of them. Live: PENDING oldest 2026-08-20T11:05,
+    the failures 2026-08-21T17:13.
+    """
+
+    def _job(self, account_id, started, name="migrate"):
+        return {"account_id": account_id, "job_name": name, "pid": 1,
+                "started_at": started}
+
+    def test_the_registered_job_start_wins(self):
+        import api_server
+        assert api_server._run_started_at(
+            7, [self._job(7, "2026-08-22T04:30:00Z")],
+            "2026-08-20T11:05:00Z") == "2026-08-22T04:30:00Z"
+
+    def test_another_accounts_job_is_never_borrowed(self):
+        """A run on someone else's tenant says nothing about when this one
+        began, and using it would age out this tenant's real failures."""
+        import api_server
+        assert api_server._run_started_at(
+            7, [self._job(99, "2099-01-01T00:00:00Z")],
+            "2026-08-22T04:30:00Z") == "2026-08-22T04:30:00Z"
+
+    def test_it_falls_back_to_the_oldest_running_user(self):
+        """Covers a run started before job registration existed."""
+        import api_server
+        assert api_server._run_started_at(
+            7, [], "2026-08-22T04:23:28Z") == "2026-08-22T04:23:28Z"
+
+    def test_unknown_stays_empty_rather_than_guessing(self):
+        """The UI must not treat unknown as old -- that would hide a real
+        failure, and the two errors are not symmetric."""
+        import api_server
+        assert api_server._run_started_at(7, [], None) == ""
+
+    def test_a_non_migration_job_is_ignored(self):
+        """A benchmark or a setup run is not the migration whose failures
+        are being aged."""
+        import api_server
+        assert api_server._run_started_at(
+            7, [self._job(7, "2099-01-01T00:00:00Z", name="benchmark")],
+            "2026-08-22T04:30:00Z") == "2026-08-22T04:30:00Z"

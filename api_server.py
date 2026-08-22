@@ -2325,6 +2325,30 @@ def _row_has(row, name: str) -> bool:
     return name in keys
 
 
+def _run_started_at(account_id: int, active_jobs, oldest_running) -> str:
+    """When the current run for this account began.
+
+    This decides which failures are shown as stale, so getting it wrong is
+    worse than not having it. The first version inferred it as
+    MIN(status_at) over RUNNING and PENDING -- and PENDING includes users the
+    run has never touched, carrying timestamps from days earlier, so the
+    inferred start landed BEFORE the failures it was meant to age out and
+    marked none of them. Live: PENDING oldest 2026-08-20T11:05, the failures
+    2026-08-21T17:13.
+
+    active_jobs records the real start, so it wins. Another account's job is
+    never borrowed: a run on someone else's tenant says nothing about when
+    this one began, and using it would age out this tenant's real failures.
+    The RUNNING fallback covers a run started before job registration
+    existed; "" means unknown, and the UI must not treat unknown as old.
+    """
+    for job in active_jobs or []:
+        if (job.get("account_id") == account_id
+                and job.get("job_name") in _OWNED_JOB_NAMES):
+            return job.get("started_at") or ""
+    return oldest_running or ""
+
+
 def _normalise_failure(message: str) -> str:
     """The cause, with the per-item noise removed."""
     msg = _URL_RE.sub("<url>", message or "")
@@ -2720,11 +2744,21 @@ async def migration_detail(account_id: int, op: Operator = Depends(operator)):
                         "ORDER BY status, source_email")]
                 # When did the current run start? Anything older than that
                 # failed in a previous one and is queued to be retried.
+                #
+                # From active_jobs, which records it directly. The first
+                # version inferred it as MIN(status_at) over RUNNING and
+                # PENDING -- and PENDING includes users this run has not
+                # touched, carrying timestamps from two days earlier, so the
+                # inferred "start" landed BEFORE the failures it was meant to
+                # age out and marked none of them. RUNNING alone would work
+                # while a run is live and collapse the moment it finished.
                 row = conn.execute(
                     "SELECT MIN(status_at) t FROM identity_map "
-                    "WHERE status IN ('RUNNING','PENDING') "
-                    "AND status_at IS NOT NULL").fetchone()
-                out["runStartedAt"] = (row["t"] if row and row["t"] else "")
+                    "WHERE status = 'RUNNING' AND status_at IS NOT NULL"
+                ).fetchone()
+                out["runStartedAt"] = _run_started_at(
+                    account_id, job_admission.list_active(),
+                    row["t"] if row else None)
         except Exception as exc:      # noqa: BLE001 - report, never 500
             out["error"] = f"could not read the ledger: {str(exc)[:160]}"
         return out
