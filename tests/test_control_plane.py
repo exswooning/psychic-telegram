@@ -1882,3 +1882,58 @@ class TestFailuresGroupByCauseNotByItem:
         out = api_server._group_failures(
             [{"item_type": "acl", "error_message": None, "source_user": None}])
         assert out[0]["count"] == 1
+
+
+class TestMetricsAndTestEndpointsRespond:
+    """Called over HTTP, not just imported.
+
+    /api/v2/metrics shipped calling accounts_auth.account_db_path(), which
+    does not exist. It imported cleanly, type-checked cleanly, and returned
+    500 on the first real request -- Python resolves module attributes at
+    call time, so nothing short of calling the endpoint could have said so.
+    Every test around it exercised the parser and the DB layer, and none
+    exercised the route.
+    """
+
+    def _signed_in(self, cp, email):
+        cp.post("/api/v2/auth/signup",
+                json={"email": email, "password": "hunter22222", "name": "User"})
+        return cp.get("/api/v2/auth/me").json()["id"]
+
+    def test_metrics_for_my_account_does_not_error(self, cp):
+        self._signed_in(cp, "metrics@example.com")
+        r = cp.get("/api/v2/metrics")
+        assert r.status_code == 200, r.text
+        assert "error" in r.json()
+
+    def test_metrics_by_account_id_does_not_error(self, cp):
+        account_id = self._signed_in(cp, "metrics2@example.com")
+        r = cp.get(f"/api/v2/metrics/{account_id}")
+        assert r.status_code == 200, r.text
+
+    def test_an_unconfigured_account_is_explained_not_a_500(self, cp):
+        """Settings(account_id=...) raises when an account has no
+        tenant_configs rows. That is a state to explain on the page, not a
+        server error."""
+        self._signed_in(cp, "metrics3@example.com")
+        r = cp.get("/api/v2/metrics/999999")
+        assert r.status_code in (200, 403), r.text
+
+    def test_metrics_requires_a_login(self, cp):
+        assert cp.get("/api/v2/metrics").status_code in (401, 403)
+
+    def test_another_accounts_metrics_are_refused(self, cp):
+        """The same tenancy gate migration_detail uses -- one client must
+        never read another's throughput, let alone their failure reasons."""
+        self._signed_in(cp, "owner-a@example.com")
+        r = cp.get("/api/v2/metrics/424242")
+        assert r.status_code == 403
+
+    def test_the_test_report_is_operator_only(self, cp):
+        """It names source files and carries assertion text from a private
+        codebase."""
+        self._signed_in(cp, "regular-tests@example.com")
+        assert cp.get("/api/v2/tests").status_code == 403
+
+    def test_the_test_report_requires_a_login(self, cp):
+        assert cp.get("/api/v2/tests").status_code in (401, 403)

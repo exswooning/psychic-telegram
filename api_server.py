@@ -2481,9 +2481,30 @@ async def migration_metrics(account_id: int, history: int = 60,
         raise HTTPException(403, "that migration belongs to another account")
 
     def _read() -> dict:
-        path = accounts_auth.account_db_path(account_id)
+        # Settings(account_id=...).db_path, matching every other endpoint
+        # that opens a tenant ledger. An invented accounts_auth helper here
+        # imported fine, type-checked fine, and 500'd on the first real
+        # request -- module attributes resolve at call time, so nothing short
+        # of calling it would have said so.
+        from config import Settings
         out = {"accountId": account_id, "latest": None, "history": [],
                "operations": [], "limiters": {}, "error": ""}
+        try:
+            path = Settings(account_id=account_id).db_path
+        except (ValueError, KeyError, OSError) as exc:
+            # Deliberately NOT `except Exception`.
+            #
+            # Settings raises ValueError for an account with no
+            # tenant_configs rows, which is a state to explain on the page
+            # rather than a server error. But a broad except here also
+            # swallows AttributeError and NameError -- and this endpoint
+            # shipped calling an accounts_auth helper that does not exist,
+            # which a broad except would have rendered as a tidy "error"
+            # string forever instead of the 500 that got it fixed within the
+            # hour. The test written to catch that bug passed with it
+            # reintroduced, which is how this was noticed.
+            out["error"] = str(exc)[:200]
+            return out
         if not path or not os.path.isfile(path):
             out["error"] = "this account has no migration ledger yet"
             return out
