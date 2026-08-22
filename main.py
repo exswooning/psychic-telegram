@@ -795,10 +795,31 @@ def cmd_verify_ledger(args, settings: Settings, db: MigrationDB,
 
     report = ledger_verify.verify(db, directory, identities, spot_check=spot)
     print(report.as_text())
-    if not report.stale:
+
+    # Separate from the mapping check, and invisible to it: a user whose
+    # mappings were already forgotten has nothing left for verify() to
+    # compare, so a stale DONE status reads as perfectly healthy while
+    # dropping the user from every dispatch.
+    orphaned = ledger_verify.orphans(db)
+    if orphaned:
+        total = sum(r["migrated"] for r in orphaned)
+        print(f"\n{len(orphaned)} user(s) are marked DONE with no mappings "
+              f"left, but their audit records {total:,} migrated item(s) -- "
+              f"they will be skipped by every run until reopened:")
+        for r in orphaned[:10]:
+            print(f"  {r['source_email']}: {r['migrated']:,} item(s) "
+                  f"in the audit, 0 mappings")
+        if len(orphaned) > 10:
+            print(f"  ... and {len(orphaned) - 10} more")
+
+    if not report.stale and not orphaned:
         return 0
 
     n = ledger_verify.reopen(db, report, dry_run=not args.reopen)
+    ledger_verify.reopen_orphans(db, orphaned, dry_run=not args.reopen)
+    if args.reopen and orphaned:
+        print(f"Re-opened {len(orphaned)} user(s) whose status claimed they "
+              f"were finished.")
     if args.reopen:
         print(f"\nForgot {n:,} stale mapping(s). The next migrate run will "
               f"copy those items again. Audit history was left intact.")

@@ -84,7 +84,7 @@ def verify(db, directory, identities, spot_check=None) -> Report:
         report.checked += 1
         row = db.mapping_bounds(source_user)
         if not row or not row["n"]:
-            continue          # nothing claimed, nothing to be wrong about
+            continue          # nothing claimed here; see orphans() below
         verdict = UserVerdict(source_user, target_user, True,
                               mappings=row["n"],
                               earliest_mapping=_iso(row["earliest"]))
@@ -128,6 +128,33 @@ def verify(db, directory, identities, spot_check=None) -> Report:
                     f"{row['n']:,} mapping(s) are suspect")
                 report.stale.append(verdict)
     return report
+
+
+def orphans(db) -> list:
+    """Users marked DONE whose mappings are gone but whose audit says they
+    migrated something.
+
+    verify() cannot see these. It works from mappings, and once those are
+    forgotten there is nothing left for it to compare against a creation
+    time -- so a user who was reopened at the mapping level but left DONE
+    reads as perfectly healthy while being dropped from every dispatch.
+    That is precisely what happened after the first reopen on account 7:
+    24 users, the largest of them 35,490 items, skipped by a run that
+    reported no problem at all.
+
+    An empty account with no mappings is normal and is not reported. The
+    audit rows are what separate "nothing to migrate" from "migrated, and
+    lost the record of where it went".
+    """
+    return list(db.finished_but_unmapped())
+
+
+def reopen_orphans(db, rows, dry_run: bool = True) -> int:
+    if dry_run:
+        return len(rows)
+    for r in rows:
+        db.reopen_identity(r["source_email"])
+    return len(rows)
 
 
 def reopen(db, report: Report, dry_run: bool = True) -> int:

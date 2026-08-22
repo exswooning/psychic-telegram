@@ -466,6 +466,26 @@ class MigrationDB:
         self._mapping_cached_users.discard(source_user)
         return n
 
+    def finished_but_unmapped(self):
+        """Users whose status says DONE while nothing maps to the target.
+
+        A user can legitimately have no mappings -- an empty account
+        migrates nothing. What cannot be legitimate is a user with no
+        mappings whose audit_log records items successfully migrated: the
+        work happened and the record of where it went is gone.
+        """
+        return self.conn.execute(
+            """SELECT i.source_email, i.target_email,
+                      (SELECT COUNT(*) FROM audit_log a
+                        WHERE a.source_user = i.source_email
+                          AND a.status = 'SUCCESS') AS migrated
+                 FROM identity_map i
+                WHERE i.status = 'DONE'
+                  AND NOT EXISTS (SELECT 1 FROM id_mapping m
+                                   WHERE m.source_user = i.source_email)
+                  AND migrated > 0
+                ORDER BY migrated DESC""").fetchall()
+
     def reopen_identity(self, source_email: str) -> None:
         """Clear a user's finished-state so the next run picks them up again.
 

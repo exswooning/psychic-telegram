@@ -271,3 +271,67 @@ class TestReopeningAUserNotJustTheirMappings:
         assert row["status"] == "PENDING"
         assert not row["services_done"]
         d.close()
+
+
+class TestOrphanedUsers:
+    """verify() works from mappings, so once those are forgotten it has
+    nothing left to compare -- and a user reopened at the mapping level but
+    left DONE reads as healthy while being dropped from every dispatch.
+    Exactly what happened on account 7 after the first reopen: 24 users, the
+    largest 35,490 items, skipped by a run that reported no problem."""
+
+    def _db(self, tmp_path, status, mappings, audit):
+        import db as dbmod
+        d = dbmod.MigrationDB(str(tmp_path / "m.db"))
+        d.conn.execute(
+            "INSERT INTO identity_map(source_email,target_email,status) "
+            "VALUES(?,?,?)", ("u@src", "u@tgt", status))
+        d.conn.commit()
+        for i in range(mappings):
+            d.record_mapping("u@src", f"s{i}", f"t{i}", "file")
+        for i in range(audit):
+            d.log_audit("u@src", f"s{i}", "file", "SUCCESS")
+        return d
+
+    def test_a_done_user_with_no_mappings_but_real_history_is_reported(
+            self, tmp_path):
+        d = self._db(tmp_path, "DONE", 0, 12)
+        rows = ledger_verify.orphans(d)
+        assert len(rows) == 1
+        assert rows[0]["migrated"] == 12
+        d.close()
+
+    def test_an_empty_account_is_not_reported(self, tmp_path):
+        """No mappings and no history is a user with nothing to migrate,
+        which is normal and must not be dragged back into every run."""
+        d = self._db(tmp_path, "DONE", 0, 0)
+        assert ledger_verify.orphans(d) == []
+        d.close()
+
+    def test_a_user_that_still_has_mappings_is_not_reported(self, tmp_path):
+        d = self._db(tmp_path, "DONE", 3, 3)
+        assert ledger_verify.orphans(d) == []
+        d.close()
+
+    def test_a_user_not_marked_done_is_not_reported(self, tmp_path):
+        """PENDING users are already dispatched; reopening them is noise."""
+        d = self._db(tmp_path, "PENDING", 0, 5)
+        assert ledger_verify.orphans(d) == []
+        d.close()
+
+    def test_reopening_them_clears_the_status(self, tmp_path):
+        d = self._db(tmp_path, "DONE", 0, 7)
+        rows = ledger_verify.orphans(d)
+        ledger_verify.reopen_orphans(d, rows, dry_run=False)
+        assert d.conn.execute(
+            "SELECT status FROM identity_map WHERE source_email='u@src'"
+        ).fetchone()["status"] == "PENDING"
+        assert ledger_verify.orphans(d) == []
+        d.close()
+
+    def test_a_dry_run_changes_nothing(self, tmp_path):
+        d = self._db(tmp_path, "DONE", 0, 7)
+        rows = ledger_verify.orphans(d)
+        assert ledger_verify.reopen_orphans(d, rows, dry_run=True) == 1
+        assert len(ledger_verify.orphans(d)) == 1
+        d.close()
