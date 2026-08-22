@@ -633,6 +633,9 @@ def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
     watchdog = threading.Thread(target=_memory_watchdog, args=(stop,),
                                 name="watchdog", daemon=True)
     watchdog.start()
+    flusher = threading.Thread(target=_metrics_flusher, args=(stop, db),
+                               name="metrics", daemon=True)
+    flusher.start()
     try:
         results = run_batch(auth, db, settings, services, delta=delta,
                             delta_days=delta_days, only=only)
@@ -725,6 +728,40 @@ def cmd_init_db(args, settings: Settings, db: MigrationDB, auth: AuthManager):
                   f"`provision-users --tenant target --dry-run` first to see "
                   f"the exact list.")
     print(f"Schema initialised at {settings.db_path}")
+
+
+METRICS_FLUSH_SEC = 15.0
+
+
+def _metrics_flusher(stop_event: threading.Event, db,
+                     interval: float = METRICS_FLUSH_SEC) -> None:
+    """Copy this process's metrics into the ledger, so other processes can
+    read them.
+
+    Metrics live in the migrating process and every reader lives in another
+    one -- webui_spa called METRICS.snapshot() from inside api_server, a
+    process that issues no Drive calls, and rendered the resulting empty
+    reservoir as though it were the run. Nothing was wrong with the metrics;
+    they were simply being asked for in the wrong address space.
+
+    Daemon, and must never raise: a failure to report progress is not a
+    reason to stop making it.
+    """
+    import metrics as metrics_mod
+
+    while not stop_event.wait(interval):
+        try:
+            payload = metrics_mod.METRICS.snapshot()
+            try:
+                import drive_engine
+                payload["limiters"] = drive_engine.limiter_stats()
+            except Exception:      # noqa: BLE001
+                pass
+            payload["workers_configured"] = getattr(
+                db, "_workers_configured", None) or 0
+            db.record_metrics(payload)
+        except Exception as exc:      # noqa: BLE001
+            log.debug("metrics flush skipped: %s", exc)
 
 
 def _warn_if_ledger_is_stale(db, auth, pairs) -> None:

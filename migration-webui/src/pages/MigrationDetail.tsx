@@ -7,6 +7,7 @@ import {
 import {
   Refresh as RefreshIcon, ArrowBack as BackIcon,
   ArrowForward as ArrowIcon, Update as DeltaIcon,
+  Speed as MetricsIcon,
 } from '@mui/icons-material'
 import {
   fetchMigrationDetail, startDelta, MigrationDetail as Detail,
@@ -81,6 +82,11 @@ export const MigrationDetail: React.FC = () => {
                    value={deltaDays} sx={{ width: 90 }}
                    onChange={(e) => setDeltaDays(Math.max(1, Number(e.target.value) || 1))}
                    inputProps={{ 'data-testid': 'delta-days', min: 1, max: 90 }} />
+        <Button size="small" startIcon={<MetricsIcon />}
+                data-testid="open-metrics"
+                onClick={() => navigate(`/migrations/${id}/metrics`)}>
+          Performance
+        </Button>
         <Button size="small" variant="outlined" startIcon={<DeltaIcon />}
                 data-testid="run-delta"
                 disabled={d?.running || deltaBusy}

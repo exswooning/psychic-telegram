@@ -246,6 +246,10 @@ class TestSideTables:
             "discovery",      # a read-only prescan, never consulted for skipping
             "upload_ledger",  # the 750 GB/day cap: real bytes were really sent,
                               # so a re-run must still be charged for them
+            "run_metrics",    # not per-user at all: process-wide latency and
+                              # throughput samples, bounded to the last hour,
+                              # and nothing consults them to decide whether an
+                              # item still needs migrating
         }
         unaccounted = tables - reset - exempt
         assert not unaccounted, (

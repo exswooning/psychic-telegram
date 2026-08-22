@@ -10,6 +10,8 @@ import RunningNow from '@/pages/RunningNow'
 import Nodes from '@/pages/Nodes'
 import Migrations from '@/pages/Migrations'
 import MigrationDetail from '@/pages/MigrationDetail'
+import Metrics from '@/pages/Metrics'
+import TestReport from '@/pages/TestReport'
 import MissionControl from '@/pages/MissionControl'
 import Users from '@/pages/Users'
 import UserDetail from '@/pages/UserDetail'
@@ -86,6 +88,8 @@ const App: React.FC = () => {
             <Route path="/nodes" element={<Nodes />} />
             <Route path="/migrations" element={<Migrations />} />
             <Route path="/migrations/:accountId" element={<MigrationDetail />} />
+            <Route path="/migrations/:accountId/metrics" element={<Metrics />} />
+            <Route path="/tests" element={<TestReport />} />
             <Route path="/wizard" element={<Wizard />} />
             {/* Setup Wizard and Seed Wizard merged into one doorway --
                old bookmarks/links still land on the Seed path directly. */}

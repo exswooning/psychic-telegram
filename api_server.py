@@ -2386,6 +2386,142 @@ def _group_failures(rows) -> list[dict]:
     return out
 
 
+@app.get("/api/v2/tests")
+async def test_report_latest(op: Operator = Depends(operator)):
+    """The last suite run: totals, per-file breakdown, and what failed.
+
+    Operator-only. The report names source files and carries assertion text
+    from a private codebase, which is not something a tenant's own account
+    should be able to read.
+    """
+    require_login(op)
+    if not op.is_superadmin:
+        raise HTTPException(403, "the test report is operator-only")
+
+    def _read() -> dict:
+        import test_report
+        report = test_report.load()
+        if report is None:
+            return {"ok": False, "neverRun": True,
+                    "detail": "the suite has not been run on this host yet"}
+        report["neverRun"] = False
+        report["running"] = bool([j for j in job_admission.list_active()
+                                  if j.get("name") == "tests"])
+        return report
+
+    return await _off_loop(_read)
+
+
+@app.post("/api/v2/tests/run")
+async def test_report_run(body: WriteAction, op: Operator = Depends(operator)):
+    """Kick off a suite run in the background.
+
+    Not awaited: the suite takes about three minutes, which is longer than
+    any sensible request timeout, and a page that hangs for three minutes
+    reads as broken rather than busy. The GET above reports progress.
+    """
+    require_login(op)
+    if not op.is_superadmin:
+        raise HTTPException(403, "the test report is operator-only")
+    if not body.reason.strip():
+        raise HTTPException(400, "a reason is required")
+
+    if [j for j in job_admission.list_active() if j.get("name") == "tests"]:
+        return {"ok": False, "detail": "a test run is already in progress"}
+
+    def _go() -> None:
+        try:
+            import test_report
+            test_report.run()
+        except Exception as exc:      # noqa: BLE001 - never kill the server
+            log.warning("test run failed: %s", exc)
+
+    await _off_loop(cpdb.begin_action, op.name, op.role, "tests.run",
+                    body.reason, "suite", body.model_dump(), None,
+                    op.account_id)
+    threading.Thread(target=_go, name="test-run", daemon=True).start()
+    return {"ok": True, "detail": "test run started; it takes about 3 minutes"}
+
+
+@app.get("/api/v2/metrics/{account_id}")
+async def migration_metrics(account_id: int, history: int = 60,
+                            op: Operator = Depends(operator)):
+    """Per-operation latency, throughput and limiter state for one tenant.
+
+    Read from the ledger, not from this process. Metrics are recorded by the
+    migrating process; api_server issues no Drive calls, so its own
+    METRICS.snapshot() is an empty reservoir -- which webui_spa was
+    nonetheless rendering as the run's performance.
+    """
+    require_login(op)
+    if not op.is_superadmin and account_id != op.account_id:
+        raise HTTPException(403, "that migration belongs to another account")
+
+    def _read() -> dict:
+        path = accounts_auth.account_db_path(account_id)
+        out = {"accountId": account_id, "latest": None, "history": [],
+               "operations": [], "limiters": {}, "error": ""}
+        if not path or not os.path.isfile(path):
+            out["error"] = "this account has no migration ledger yet"
+            return out
+        try:
+            with cpdb.ro(path) as conn:
+                rows = conn.execute(
+                    "SELECT recorded_at, payload FROM run_metrics "
+                    "ORDER BY id DESC LIMIT ?",
+                    (max(1, min(int(history), 240)),)).fetchall()
+        except Exception as exc:      # noqa: BLE001
+            out["error"] = f"no metrics recorded yet ({str(exc)[:120]})"
+            return out
+        samples = []
+        for r in rows:
+            try:
+                payload = json.loads(r["payload"])
+            except ValueError:
+                continue
+            payload["recordedAt"] = r["recorded_at"]
+            samples.append(payload)
+        if not samples:
+            out["error"] = ("no metrics recorded yet -- they are written "
+                            "every 15s while a migration runs")
+            return out
+
+        latest = samples[0]
+        out["latest"] = {
+            "recordedAt": latest.get("recordedAt"),
+            "elapsedSec": latest.get("elapsed_sec", 0),
+            "calls": latest.get("calls", 0),
+            "workers": latest.get("workers", 0),
+            "requestsPerSec": latest.get("requests_per_sec", 0),
+            "requestsPerSecPerWorker": latest.get(
+                "requests_per_sec_per_worker", 0),
+            "p50": latest.get("p50", 0),
+            "p95": latest.get("p95", 0),
+            "p99": latest.get("p99", 0),
+            "retries": latest.get("retries", 0),
+            "failures": latest.get("failures", 0),
+        }
+        # Per-operation, slowest first: which call is costing the run is the
+        # question this page exists to answer, and an alphabetical list of
+        # fourteen labels does not answer it.
+        per_label = latest.get("by_label") or {}
+        out["operations"] = sorted(
+            [{"label": k, **v} for k, v in per_label.items()],
+            key=lambda o: -(o.get("p95") or 0))
+        out["limiters"] = latest.get("limiters") or {}
+        # Oldest first for plotting.
+        out["history"] = [
+            {"recordedAt": s.get("recordedAt"),
+             "requestsPerSec": s.get("requests_per_sec", 0),
+             "p95": s.get("p95", 0),
+             "failures": s.get("failures", 0)}
+            for s in reversed(samples)]
+        return out
+
+    return await _off_loop(
+        lambda: _DETAIL_CACHE.get(("metrics", account_id, history), _read))
+
+
 @app.get("/api/v2/migrations/{account_id}")
 async def migration_detail(account_id: int, op: Operator = Depends(operator)):
     """One tenant pair in full: what moved, what failed, and why.

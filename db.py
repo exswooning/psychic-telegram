@@ -94,6 +94,18 @@ CREATE INDEX IF NOT EXISTS ix_audit_item   ON audit_log(item_id);
 -- of a migration that does millions of them.
 CREATE INDEX IF NOT EXISTS ix_audit_status_type ON audit_log(status, item_type);
 
+-- Metrics live in the migrating PROCESS, and every reader lives in another
+-- one. webui_spa read METRICS.snapshot() from inside api_server -- a process
+-- that issues no Drive calls -- so the dashboard has been reporting an empty
+-- reservoir as though it were the run. Persisted here so the reading and the
+-- work no longer have to share an address space.
+CREATE TABLE IF NOT EXISTS run_metrics (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    recorded_at TEXT NOT NULL,
+    payload    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_run_metrics_at ON run_metrics(recorded_at DESC);
+
 -- Module 1: pre-scan output, one row per (user, run).
 CREATE TABLE IF NOT EXISTS discovery (
     source_user     TEXT NOT NULL,
@@ -465,6 +477,40 @@ class MigrationDB:
         self._mapping_cache.pop(source_user, None)
         self._mapping_cached_users.discard(source_user)
         return n
+
+    def record_metrics(self, payload: dict, keep: int = 240) -> None:
+        """Persist one metrics sample.
+
+        `keep` bounds the table: sampled every 15s, 240 rows is the last
+        hour, which is what a dashboard actually plots. An unbounded table
+        would grow faster than audit_log on a quiet run and be read on every
+        poll.
+        """
+        import json as _json
+        with self.write() as conn:
+            conn.execute(
+                "INSERT INTO run_metrics(recorded_at, payload) VALUES(?,?)",
+                (utc_now(), _json.dumps(payload)))
+            conn.execute(
+                """DELETE FROM run_metrics WHERE id NOT IN
+                       (SELECT id FROM run_metrics
+                         ORDER BY id DESC LIMIT ?)""", (keep,))
+
+    def latest_metrics(self, limit: int = 1) -> list:
+        """Most recent samples, newest first."""
+        import json as _json
+        rows = self.conn.execute(
+            "SELECT recorded_at, payload FROM run_metrics "
+            "ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        out = []
+        for r in rows:
+            try:
+                payload = _json.loads(r["payload"])
+            except ValueError:
+                continue
+            payload["recordedAt"] = r["recorded_at"]
+            out.append(payload)
+        return out
 
     def finished_but_unmapped(self):
         """Users whose status says DONE while nothing maps to the target.

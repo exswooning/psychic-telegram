@@ -91,6 +91,19 @@ def _project_limiter(qps: float, tenant: str = "target"):
         return _PROJECT_LIMITERS[tenant]
 
 
+def limiter_stats() -> dict:
+    """What each project bucket has settled on, for the dashboard.
+
+    The rate a run converges to is the single most useful number about it --
+    it says whether the migration is bounded by Google, by the box, or by a
+    number somebody typed -- and until now it existed only in scrolling log
+    lines nobody reads during a nine-hour run.
+    """
+    with _PROJECT_LIMITER_LOCK:
+        return {tenant: lim.stats()
+                for tenant, lim in _PROJECT_LIMITERS.items()}
+
+
 def _log_rate_change(kind: str, before: float, after: float,
                      tenant: str = "target") -> None:
     """Say it out loud. A limiter that silently retunes itself is a limiter

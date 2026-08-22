@@ -826,3 +826,88 @@ export function connectCP(
   open()
   return () => { closed = true; if (keepalive) clearInterval(keepalive); ws?.close() }
 }
+
+/* ---------------------------------------------------------------------------
+ * Metrics and test report.
+ *
+ * Both read from the server rather than from anything this app measures.
+ * Metrics in particular are recorded by the MIGRATING process and persisted
+ * to the ledger: webui_spa used to call METRICS.snapshot() inside the API
+ * server -- a process that issues no Drive calls -- and rendered the empty
+ * reservoir as though it were the run's performance.
+ * ------------------------------------------------------------------------- */
+
+export interface OperationMetric {
+  label: string
+  calls: number
+  retries: number
+  failures: number
+  p50: number
+  p95: number
+}
+
+export interface LimiterState {
+  rate: number
+  floor: number
+  ceiling: number
+  rejections: number
+  backoffs: number
+}
+
+export interface MetricsSnapshot {
+  accountId: number
+  error: string
+  latest: {
+    recordedAt: string
+    elapsedSec: number
+    calls: number
+    workers: number
+    requestsPerSec: number
+    requestsPerSecPerWorker: number
+    p50: number
+    p95: number
+    p99: number
+    retries: number
+    failures: number
+  } | null
+  operations: OperationMetric[]
+  limiters: Record<string, LimiterState>
+  history: { recordedAt: string; requestsPerSec: number; p95: number; failures: number }[]
+}
+
+export interface TestFileRow {
+  file: string
+  passed: number
+  failed: number
+  skipped: number
+  duration: number
+}
+
+export interface TestReport {
+  neverRun: boolean
+  running?: boolean
+  detail?: string
+  ok: boolean
+  total: number
+  passed: number
+  failed: number
+  skipped: number
+  durationSec: number
+  wallSec?: number
+  ranAt?: string
+  commit?: string
+  files: TestFileRow[]
+  failures: { name: string; file: string; message: string; detail: string }[]
+  slowest: { name: string; duration: number }[]
+}
+
+export const fetchMetrics = (accountId: number, history = 60) =>
+  cpFetch<MetricsSnapshot>(`/api/v2/metrics/${accountId}?history=${history}`)
+
+export const fetchTestReport = () => cpFetch<TestReport>('/api/v2/tests')
+
+export const runTests = (reason: string) =>
+  cpFetch<ActionResult>('/api/v2/tests/run', {
+    method: 'POST',
+    body: JSON.stringify({ reason }),
+  })

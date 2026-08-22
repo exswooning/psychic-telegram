@@ -48,6 +48,8 @@ import {
   DeleteForever as TeardownIconNav,
   Hub as NodesIconNav,
   CompareArrows as MigrationsIconNav,
+  Speed as MetricsIconNav,
+  FactCheck as TestsIconNav,
 } from '@mui/icons-material'
 import { useMigrationStore } from '@/store'
 import { fetchConfig, fetchJob, ConfigPayload, HostInfo, JobStatus, stopJob } from '@/api/client'
@@ -89,6 +91,9 @@ const NAV_ITEMS = [
 // /admin/accounts already uses below.
 const OPERATOR_NAV_ITEMS = [
   { path: '/deploy', label: 'Deploy', icon: <DeployIcon /> },
+  // The suite is the only evidence the tool behaves as described, and it
+  // used to live entirely in whoever's terminal last ran it.
+  { path: '/tests', label: 'Test suite', icon: <TestsIconNav /> },
   { path: '/identities', label: 'Identities', icon: <IdentitiesIconNav /> },
   { path: '/maintenance', label: 'Maintenance', icon: <MaintenanceIconNav /> },
   { path: '/scope', label: 'Scope', icon: <ScopeIconNav /> },
