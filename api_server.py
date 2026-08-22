@@ -2443,6 +2443,29 @@ async def test_report_run(body: WriteAction, op: Operator = Depends(operator)):
     return {"ok": True, "detail": "test run started; it takes about 3 minutes"}
 
 
+@app.get("/api/v2/metrics")
+async def metrics_for_me(history: int = 60, op: Operator = Depends(operator)):
+    """Metrics without having to name an account.
+
+    The page is reached from the sidebar, where there is no migration in
+    context. A tenant has exactly one account; an operator gets whichever
+    migration is actually running, falling back to their own, because the
+    running one is what a sidebar click means when anything is running.
+    """
+    require_login(op)
+    account_id = op.account_id
+    if op.is_superadmin:
+        active = [j for j in job_admission.list_active()
+                  if j.get("name") in _OWNED_JOB_NAMES and j.get("account_id")]
+        if active:
+            account_id = active[0]["account_id"]
+    if not account_id:
+        return {"accountId": 0, "latest": None, "operations": [],
+                "limiters": {}, "history": [],
+                "error": "no account in context and no migration running"}
+    return await migration_metrics(account_id, history=history, op=op)
+
+
 @app.get("/api/v2/metrics/{account_id}")
 async def migration_metrics(account_id: int, history: int = 60,
                             op: Operator = Depends(operator)):
@@ -2509,6 +2532,54 @@ async def migration_metrics(account_id: int, history: int = 60,
             [{"label": k, **v} for k, v in per_label.items()],
             key=lambda o: -(o.get("p95") or 0))
         out["limiters"] = latest.get("limiters") or {}
+
+        # Everything else the tool measures. The API-latency snapshot above
+        # is one family of metric; a page called "Metrics" that showed only
+        # that would be hiding volume, transfer and capacity, which are the
+        # numbers most people actually came to read.
+        try:
+            with cpdb.ro(path) as conn:
+                out["volume"] = [
+                    {"itemType": r["item_type"], "status": r["status"],
+                     "count": r["n"]}
+                    for r in conn.execute(
+                        "SELECT item_type, status, COUNT(*) n FROM audit_log "
+                        "GROUP BY item_type, status ORDER BY n DESC")]
+                out["mappings"] = [
+                    {"type": r["type"], "count": r["n"]}
+                    for r in conn.execute(
+                        "SELECT type, COUNT(*) n FROM id_mapping "
+                        "GROUP BY type ORDER BY n DESC")]
+                row = conn.execute(
+                    "SELECT COALESCE(SUM(bytes_sent),0) b FROM upload_ledger "
+                    "WHERE day_utc = date('now')").fetchone()
+                out["transfer"] = {
+                    "bytesToday": row["b"] if row else 0,
+                    # The daily cap is Google's, per target account, and the
+                    # guard that enforces it is the reason a run can stop
+                    # mid-way for a reason unrelated to anything failing.
+                    "dailyCapBytes": 750 * 1024 ** 3,
+                }
+        except Exception as exc:      # noqa: BLE001 - a partial page beats none
+            out["volumeError"] = str(exc)[:160]
+
+        try:
+            import resources as _res
+            r = _res.probe()
+            rec = _res.recommend(r)
+            out["host"] = {
+                "cores": r.cpu_logical,
+                "ramTotalGb": round(r.ram_total_gb, 1),
+                "ramUsableGb": round(r.ram_usable_gb, 1),
+                "swapFraction": round(r.swap_fraction, 3),
+                "underMemoryPressure": bool(r.under_memory_pressure),
+                "userWorkers": rec["user_workers"],
+                "seedWorkers": rec["seed_workers"],
+                "mbPerWorker": _res.MB_PER_WORKER,
+                "reason": rec["reason"],
+            }
+        except Exception as exc:      # noqa: BLE001
+            out["hostError"] = str(exc)[:160]
         # Oldest first for plotting.
         out["history"] = [
             {"recordedAt": s.get("recordedAt"),

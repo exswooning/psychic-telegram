@@ -5,7 +5,9 @@ import {
   Table, TableBody, TableCell, TableHead, TableRow, Tooltip, Typography,
 } from '@mui/material'
 import { Refresh as RefreshIcon } from '@mui/icons-material'
-import { fetchMetrics, MetricsSnapshot, LimiterState } from '@/api/controlPlane'
+import {
+  fetchMetrics, fetchMyMetrics, MetricsSnapshot, LimiterState,
+} from '@/api/controlPlane'
 
 /**
  * What the migration is actually doing, per operation.
@@ -23,6 +25,20 @@ import { fetchMetrics, MetricsSnapshot, LimiterState } from '@/api/controlPlane'
 
 const ms = (seconds: number) =>
   seconds >= 1 ? `${seconds.toFixed(2)}s` : `${Math.round(seconds * 1000)}ms`
+
+const bytes = (n: number) => {
+  if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1)} GB`
+  if (n >= 1024 ** 2) return `${(n / 1024 ** 2).toFixed(0)} MB`
+  if (n >= 1024) return `${(n / 1024).toFixed(0)} KB`
+  return `${n} B`
+}
+
+/** Statuses that are not failures, so the volume table can colour honestly.
+ *  SKIPPED_* covers a family (unexportable, too large, no permission) that
+ *  are decisions rather than errors, and colouring them red is how a clean
+ *  run teaches people to ignore red. */
+const isFailure = (status: string) =>
+  status === 'FAILED' || status === 'BLOCKED'
 
 const Stat: React.FC<{
   id: string; label: string; value: string; hint?: string; tone?: 'error' | 'warn'
@@ -87,18 +103,20 @@ const Limiter: React.FC<{ tenant: string; s: LimiterState }> = ({ tenant, s }) =
 export const Metrics: React.FC = () => {
   const { accountId } = useParams()
   const id = Number(accountId)
+  const scoped = Number.isFinite(id) && id > 0
   const [m, setM] = useState<MetricsSnapshot | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
   const refresh = useCallback(() => {
-    if (!Number.isFinite(id)) return
     setLoading(true)
-    fetchMetrics(id)
+    // Reached both from a migration (scoped) and from the sidebar, where
+    // there is no account in context and the server picks the running one.
+    ;(scoped ? fetchMetrics(id) : fetchMyMetrics())
       .then((r) => { setM(r); setError('') })
       .catch((e) => setError(e instanceof Error ? e.message : String(e)))
       .finally(() => setLoading(false))
-  }, [id])
+  }, [id, scoped])
 
   useEffect(() => {
     refresh()
@@ -169,7 +187,7 @@ export const Metrics: React.FC = () => {
             </Paper>
           )}
 
-          <Paper variant="outlined" sx={{ p: 2 }} data-testid="operations">
+          <Paper variant="outlined" sx={{ p: 2, mb: 3 }} data-testid="operations">
             <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>
               By operation, slowest first
             </Typography>
@@ -224,6 +242,118 @@ export const Metrics: React.FC = () => {
               </Box>
             )}
           </Paper>
+          {m.volume && m.volume.length > 0 && (
+            <Paper variant="outlined" sx={{ p: 2, mb: 3 }} data-testid="volume">
+              <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>
+                Items by type and outcome
+              </Typography>
+              {/* Counts, never averaged into a percentage. DONE, FAILED,
+                  SKIPPED and BLOCKED coexist in one run and mean different
+                  things; a single "94% complete" hides all four. */}
+              <Box sx={{ overflowX: 'auto' }}>
+                <Table size="small">
+                  <TableHead>
+                    <TableRow>
+                      <TableCell>type</TableCell>
+                      <TableCell>outcome</TableCell>
+                      <TableCell align="right">count</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {m.volume.map((v) => (
+                      <TableRow key={`${v.itemType}-${v.status}`}
+                                data-testid={`vol-${v.itemType}-${v.status}`}>
+                        <TableCell sx={{ fontSize: 12 }}>{v.itemType}</TableCell>
+                        <TableCell sx={{ fontSize: 12 }}>
+                          <Chip size="small" variant="outlined"
+                                color={isFailure(v.status) ? 'error'
+                                  : v.status === 'SUCCESS' ? 'success' : 'default'}
+                                label={v.status.toLowerCase()} />
+                        </TableCell>
+                        <TableCell align="right"
+                                   sx={{ fontVariantNumeric: 'tabular-nums',
+                                         fontWeight: 600,
+                                         color: isFailure(v.status)
+                                           ? 'error.main' : undefined }}>
+                          {v.count.toLocaleString()}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </Box>
+            </Paper>
+          )}
+
+          {m.transfer && (
+            <Paper variant="outlined" sx={{ p: 2, mb: 3 }} data-testid="transfer">
+              <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1.5 }}>
+                Transfer today
+              </Typography>
+              {/* Google's 750 GB/day cap is per target account and is the
+                  reason a run can stop mid-way with nothing having failed. */}
+              <Stack direction="row" spacing={4} sx={{ flexWrap: 'wrap', gap: 2 }}>
+                <Stat id="bytes" label="uploaded today"
+                      value={bytes(m.transfer.bytesToday)} />
+                <Stat id="cap" label="daily cap"
+                      value={bytes(m.transfer.dailyCapBytes)}
+                      hint="Google's per-account limit. A run stops when it is reached, which is a quota event and not a failure." />
+                <Stat id="capleft" label="remaining"
+                      value={bytes(Math.max(0, m.transfer.dailyCapBytes - m.transfer.bytesToday))}
+                      tone={m.transfer.bytesToday / m.transfer.dailyCapBytes > 0.9
+                        ? 'warn' : undefined} />
+              </Stack>
+            </Paper>
+          )}
+
+          {m.host && (
+            <Paper variant="outlined" sx={{ p: 2, mb: 3 }} data-testid="host">
+              <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1.5 }}>
+                Host capacity
+              </Typography>
+              <Stack direction="row" spacing={4} sx={{ flexWrap: 'wrap', gap: 2 }}>
+                <Stat id="cores" label="cores" value={String(m.host.cores)}
+                      hint="Not part of worker sizing: the pools are I/O-bound and a core multiplier bound before RAM ever did." />
+                <Stat id="ram" label="RAM usable"
+                      value={`${m.host.ramUsableGb} / ${m.host.ramTotalGb} GB`} />
+                <Stat id="uworkers" label="migrate workers"
+                      value={String(m.host.userWorkers)} />
+                <Stat id="sworkers" label="seed workers"
+                      value={String(m.host.seedWorkers)} />
+                <Stat id="mbworker" label="MB budgeted/worker"
+                      value={String(m.host.mbPerWorker)}
+                      hint="Derived from the download chunk size, not a constant." />
+                {m.host.underMemoryPressure && (
+                  <Stat id="pressure" label="memory pressure"
+                        value="yes" tone="error" />
+                )}
+              </Stack>
+              <Typography variant="caption" color="text.secondary"
+                          sx={{ mt: 1.5, display: 'block' }}
+                          data-testid="host-reason">
+                {m.host.reason}
+              </Typography>
+            </Paper>
+          )}
+
+          {m.mappings && m.mappings.length > 0 && (
+            <Paper variant="outlined" sx={{ p: 2 }} data-testid="mappings">
+              <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>
+                Live mappings on the target
+              </Typography>
+              {/* Distinct from the volume table above: audit_log records
+                  every attempt ever made, id_mapping records what currently
+                  exists. They disagree exactly when the target has lost
+                  items the ledger still claims -- see verify-ledger. */}
+              <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', gap: 0.5 }}>
+                {m.mappings.map((x) => (
+                  <Chip key={x.type} size="small" variant="outlined"
+                        data-testid={`map-${x.type}`}
+                        label={`${x.type} · ${x.count.toLocaleString()}`} />
+                ))}
+              </Stack>
+            </Paper>
+          )}
         </>
       )}
     </Box>

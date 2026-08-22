@@ -854,9 +854,27 @@ export interface LimiterState {
   backoffs: number
 }
 
+export interface HostMetrics {
+  cores: number
+  ramTotalGb: number
+  ramUsableGb: number
+  swapFraction: number
+  underMemoryPressure: boolean
+  userWorkers: number
+  seedWorkers: number
+  mbPerWorker: number
+  reason: string
+}
+
 export interface MetricsSnapshot {
   accountId: number
   error: string
+  volume?: { itemType: string; status: string; count: number }[]
+  mappings?: { type: string; count: number }[]
+  transfer?: { bytesToday: number; dailyCapBytes: number }
+  host?: HostMetrics
+  volumeError?: string
+  hostError?: string
   latest: {
     recordedAt: string
     elapsedSec: number
@@ -903,6 +921,10 @@ export interface TestReport {
 
 export const fetchMetrics = (accountId: number, history = 60) =>
   cpFetch<MetricsSnapshot>(`/api/v2/metrics/${accountId}?history=${history}`)
+
+/** Metrics without an account in context -- what the sidebar entry uses. */
+export const fetchMyMetrics = (history = 60) =>
+  cpFetch<MetricsSnapshot>(`/api/v2/metrics?history=${history}`)
 
 export const fetchTestReport = () => cpFetch<TestReport>('/api/v2/tests')
 

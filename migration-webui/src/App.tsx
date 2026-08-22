@@ -88,6 +88,7 @@ const App: React.FC = () => {
             <Route path="/nodes" element={<Nodes />} />
             <Route path="/migrations" element={<Migrations />} />
             <Route path="/migrations/:accountId" element={<MigrationDetail />} />
+            <Route path="/metrics" element={<Metrics />} />
             <Route path="/migrations/:accountId/metrics" element={<Metrics />} />
             <Route path="/tests" element={<TestReport />} />
             <Route path="/wizard" element={<Wizard />} />

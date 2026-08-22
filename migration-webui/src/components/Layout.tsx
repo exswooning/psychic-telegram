@@ -70,6 +70,12 @@ const NAV_ITEMS = [
   // Every account has a tenant pair, so this is not gated -- a client
   // sees only its own, which the endpoint enforces rather than the nav.
   { path: '/migrations', label: 'Migrations', icon: <MigrationsIconNav /> },
+  // Not gated, and not nested under a migration: throughput, latency,
+  // volume, transfer against the daily cap and host capacity are what
+  // people check while a run is in flight, and making them find the run
+  // first is a step between them and the answer. The endpoint resolves
+  // the account -- a client's own, an operator's running one.
+  { path: '/metrics', label: 'Metrics', icon: <MetricsIconNav /> },
   { path: '/jobs', label: 'Jobs', icon: <JobsIconNav /> },
   { path: '/running-now', label: 'Running Now', icon: <RunningNowIconNav /> },
   { path: '/mission-control', label: 'Mission Control', icon: <MissionIcon /> },

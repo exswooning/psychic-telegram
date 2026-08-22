@@ -3,11 +3,14 @@ import { render, screen, waitFor } from '@testing-library/react'
 import Metrics from './Metrics'
 
 const fetchMetrics = vi.fn()
+const fetchMyMetrics = vi.fn()
 
 vi.mock('@/api/controlPlane', () => ({
   fetchMetrics: (...a: unknown[]) => fetchMetrics(...a),
+  fetchMyMetrics: (...a: unknown[]) => fetchMyMetrics(...a),
 }))
-vi.mock('react-router-dom', () => ({ useParams: () => ({ accountId: '7' }) }))
+let params: Record<string, string> = { accountId: '7' }
+vi.mock('react-router-dom', () => ({ useParams: () => params }))
 
 /**
  * The page exists because these numbers were previously read from the wrong
@@ -35,7 +38,10 @@ const snap = (over: Record<string, unknown> = {}) => ({
 })
 
 describe('Metrics', () => {
-  beforeEach(() => { fetchMetrics.mockReset() })
+  beforeEach(() => {
+    fetchMetrics.mockReset(); fetchMyMetrics.mockReset()
+    params = { accountId: '7' }
+  })
 
   it('shows the headline throughput and latency', async () => {
     fetchMetrics.mockResolvedValue(snap())
@@ -104,5 +110,108 @@ describe('Metrics', () => {
     render(<Metrics />)
     await waitFor(() =>
       expect(screen.getByText(/control plane unreachable/)).toBeTruthy())
+  })
+})
+
+describe('Metrics from the sidebar (no account in context)', () => {
+  beforeEach(() => { fetchMetrics.mockReset(); fetchMyMetrics.mockReset() })
+
+  it('asks the server to resolve the account', async () => {
+    // The sidebar entry has no migration in context. Making someone find
+    // the run first is a step between them and the answer.
+    params = {}
+    fetchMyMetrics.mockResolvedValue(snap())
+    render(<Metrics />)
+    await waitFor(() => expect(screen.getByTestId('metric-rps')).toBeTruthy())
+    expect(fetchMyMetrics).toHaveBeenCalled()
+    expect(fetchMetrics).not.toHaveBeenCalled()
+  })
+
+  it('uses the scoped endpoint when opened from a migration', async () => {
+    params = { accountId: '7' }
+    fetchMetrics.mockResolvedValue(snap())
+    render(<Metrics />)
+    await waitFor(() => expect(screen.getByTestId('metric-rps')).toBeTruthy())
+    expect(fetchMetrics).toHaveBeenCalledWith(7)
+    expect(fetchMyMetrics).not.toHaveBeenCalled()
+  })
+})
+
+describe('Metrics covers more than API latency', () => {
+  beforeEach(() => {
+    fetchMetrics.mockReset(); fetchMyMetrics.mockReset()
+    params = { accountId: '7' }
+  })
+
+  it('shows item counts per type and outcome without averaging them', async () => {
+    // DONE, FAILED, SKIPPED and BLOCKED coexist and mean different things.
+    // A single "94% complete" hides all four.
+    fetchMetrics.mockResolvedValue(snap({
+      volume: [
+        { itemType: 'file', status: 'SUCCESS', count: 210456 },
+        { itemType: 'acl', status: 'FAILED', count: 271330 },
+        { itemType: 'file', status: 'SKIPPED_EXPORT_TOO_LARGE', count: 12 },
+      ],
+    }))
+    render(<Metrics />)
+    await waitFor(() => expect(screen.getByTestId('volume')).toBeTruthy())
+    expect(screen.getByTestId('vol-file-SUCCESS').textContent).toContain('210,456')
+    expect(screen.getByTestId('vol-acl-FAILED').textContent).toContain('271,330')
+  })
+
+  it('does not colour a SKIPPED outcome as a failure', async () => {
+    // Skips are decisions, not errors. Colouring them red is how a clean
+    // run teaches people to ignore red.
+    fetchMetrics.mockResolvedValue(snap({
+      volume: [{ itemType: 'file', status: 'SKIPPED_UNEXPORTABLE', count: 5 }],
+    }))
+    render(<Metrics />)
+    await waitFor(() => expect(screen.getByTestId('volume')).toBeTruthy())
+    const row = screen.getByTestId('vol-file-SKIPPED_UNEXPORTABLE')
+    expect(row.querySelector('.MuiChip-colorError')).toBeNull()
+  })
+
+  it('shows transfer against the daily cap', async () => {
+    fetchMetrics.mockResolvedValue(snap({
+      transfer: { bytesToday: 100 * 1024 ** 3, dailyCapBytes: 750 * 1024 ** 3 },
+    }))
+    render(<Metrics />)
+    await waitFor(() => expect(screen.getByTestId('transfer')).toBeTruthy())
+    expect(screen.getByTestId('metric-bytes').textContent).toContain('100.0 GB')
+    expect(screen.getByTestId('metric-capleft').textContent).toContain('650.0 GB')
+  })
+
+  it('shows host capacity and the reason the worker count was chosen', async () => {
+    fetchMetrics.mockResolvedValue(snap({
+      host: {
+        cores: 2, ramTotalGb: 3.7, ramUsableGb: 2.6, swapFraction: 0,
+        underMemoryPressure: false, userWorkers: 16, seedWorkers: 26,
+        mbPerWorker: 64, reason: 'capped at 16; past this Google quotas bind',
+      },
+    }))
+    render(<Metrics />)
+    await waitFor(() => expect(screen.getByTestId('host')).toBeTruthy())
+    expect(screen.getByTestId('metric-uworkers').textContent).toContain('16')
+    expect(screen.getByTestId('host-reason').textContent).toContain('capped at 16')
+  })
+
+  it('shows live mappings separately from the audit history', async () => {
+    // audit_log records every attempt ever made; id_mapping records what
+    // currently exists. They disagree exactly when the target has lost
+    // items the ledger still claims.
+    fetchMetrics.mockResolvedValue(snap({
+      mappings: [{ type: 'file', count: 51499 }],
+    }))
+    render(<Metrics />)
+    await waitFor(() => expect(screen.getByTestId('mappings')).toBeTruthy())
+    expect(screen.getByTestId('map-file').textContent).toContain('51,499')
+  })
+
+  it('omits sections the server did not send rather than showing zeros', async () => {
+    fetchMetrics.mockResolvedValue(snap())
+    render(<Metrics />)
+    await waitFor(() => expect(screen.getByTestId('metric-rps')).toBeTruthy())
+    expect(screen.queryByTestId('volume')).toBeNull()
+    expect(screen.queryByTestId('host')).toBeNull()
   })
 })
