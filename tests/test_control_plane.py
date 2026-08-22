@@ -1937,3 +1937,98 @@ class TestMetricsAndTestEndpointsRespond:
 
     def test_the_test_report_requires_a_login(self, cp):
         assert cp.get("/api/v2/tests").status_code in (401, 403)
+
+
+class TestJobRegistrationCoversCliRuns:
+    """main.py never called job_admission.try_admit, so a migration started
+    from a terminal was invisible three ways at once: the dashboard rendered
+    a running tenant as "idle", MAX_CONCURRENT_TENANT_JOBS could be exceeded
+    because CLI runs did not count, and config._concurrent_jobs -- which
+    divides the RAM budget between concurrent jobs -- sized every worker pool
+    as though the run owned the machine alone."""
+
+    def test_a_registered_run_appears_in_active_jobs(self, cp):
+        import job_admission
+
+        import main
+        before = len(job_admission.list_active())
+        with main._registered("migrate", None):
+            during = job_admission.list_active()
+            assert len(during) == before + 1
+            assert any(j["job_name"] == "migrate" for j in during)
+        assert len(job_admission.list_active()) == before
+
+    def test_the_slot_is_released_even_when_the_run_raises(self, cp):
+        """A crashed migration must not hold a capacity slot forever."""
+        import job_admission
+
+        import main
+        before = len(job_admission.list_active())
+        try:
+            with main._registered("migrate", None):
+                raise RuntimeError("boom")
+        except RuntimeError:
+            pass
+        assert len(job_admission.list_active()) == before
+
+    def test_a_full_machine_warns_but_does_not_refuse(self, monkeypatch, cp):
+        """Admission is advisory from the CLI. Someone who has typed the
+        command has decided; refusing there would strand them at a terminal
+        over a cap meant to stop the web UI over-committing a box."""
+        import job_admission
+
+        import main
+        monkeypatch.setattr(job_admission, "try_admit",
+                            lambda *a, **k: (False, "capacity is full"))
+        ran = False
+        with main._registered("migrate", None):
+            ran = True
+        assert ran
+
+    def test_a_broken_admission_table_does_not_stop_the_run(self, monkeypatch,
+                                                            cp):
+        import job_admission
+
+        import main
+        monkeypatch.setattr(job_admission, "try_admit",
+                            lambda *a, **k: (_ for _ in ()).throw(
+                                RuntimeError("no such table")))
+        ran = False
+        with main._registered("migrate", None):
+            ran = True
+        assert ran
+
+
+class TestFailuresCarryTheirAge:
+    """An error recorded 18 hours ago, against target accounts that have
+    since been deleted and recreated, rendered exactly like one from this
+    minute -- 160 users reading as broken while the run retrying them was
+    healthy."""
+
+    def test_setting_a_status_stamps_the_time(self, tmp_path):
+        import db as dbmod
+        d = dbmod.MigrationDB(str(tmp_path / "m.db"))
+        d.conn.execute("INSERT INTO identity_map(source_email,target_email) "
+                       "VALUES('a@x','a@y')")
+        d.conn.commit()
+        d.set_identity_status("a@x", "FAILED", "boom")
+        row = d.conn.execute(
+            "SELECT status, status_at FROM identity_map").fetchone()
+        assert row["status"] == "FAILED"
+        assert row["status_at"], "a failure with no age cannot be aged out"
+        d.close()
+
+    def test_reopening_a_user_restamps_it(self, tmp_path):
+        """Otherwise a reopened user keeps the timestamp of the failure it
+        was reopened from, and reads as stale forever."""
+        import db as dbmod
+        d = dbmod.MigrationDB(str(tmp_path / "m.db"))
+        d.conn.execute("INSERT INTO identity_map(source_email,target_email,"
+                       "status,status_at) VALUES('a@x','a@y','DONE','2020-01-01T00:00:00Z')")
+        d.conn.commit()
+        d.reopen_identity("a@x")
+        row = d.conn.execute(
+            "SELECT status, status_at FROM identity_map").fetchone()
+        assert row["status"] == "PENDING"
+        assert row["status_at"] > "2020-01-01T00:00:00Z"
+        d.close()

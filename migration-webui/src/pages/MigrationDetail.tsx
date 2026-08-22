@@ -68,6 +68,14 @@ export const MigrationDetail: React.FC = () => {
 
   const p = d?.progress
 
+  // A failure predating the current run is a queued retry, not a live
+  // problem. Unknown timestamps (ledgers written before the column existed)
+  // are deliberately NOT treated as stale: guessing "old" would hide a real
+  // failure, and the two errors are not symmetric.
+  const isStale = (u: { statusAt?: string }) =>
+    !!d?.runStartedAt && !!u.statusAt && u.statusAt < d.runStartedAt
+  const staleCount = (d?.failedUsers || []).filter(isStale).length
+
   return (
     <Box sx={{ p: 3 }}>
       <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 2 }}>
@@ -163,6 +171,18 @@ export const MigrationDetail: React.FC = () => {
               <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>
                 Users that did not migrate ({d.failedUsers.length})
               </Typography>
+              {/* A failure recorded before this run started is not a
+                  current failure -- it is a queued retry. Rendering the two
+                  identically showed 160 users as broken, with 18-hour-old
+                  "invalid_grant" text against target accounts that had since
+                  been recreated, while the run retrying them was healthy. */}
+              {staleCount > 0 && (
+                <Alert severity="info" sx={{ mb: 1.5 }} data-testid="stale-note">
+                  {staleCount} of these failed in an earlier run and are
+                  queued to be retried by the one in progress. They are
+                  marked <strong>earlier run</strong> below.
+                </Alert>
+              )}
               {/* "blocked" and "failed" need opposite responses -- one is
                   waited on, the other investigated. Labelling them the same
                   trains people to skim a list meant to demand attention. */}
@@ -175,9 +195,15 @@ export const MigrationDetail: React.FC = () => {
                       </Typography>
                       <Chip size="small"
                             color={u.status === 'BLOCKED' ? 'warning' : 'error'}
-                            variant={u.status === 'BLOCKED' ? 'outlined' : 'filled'}
+                            variant={u.status === 'BLOCKED' || isStale(u)
+                              ? 'outlined' : 'filled'}
                             label={u.status === 'BLOCKED'
                               ? 'blocked — waiting on you' : 'failed'} />
+                      {isStale(u) && (
+                        <Chip size="small" variant="outlined" color="info"
+                              data-testid={`stale-${u.sourceUser}`}
+                              label="earlier run — queued for retry" />
+                      )}
                     </Stack>
                     <Typography variant="caption" color="text.secondary"
                                 sx={{ whiteSpace: 'pre-wrap' }}>

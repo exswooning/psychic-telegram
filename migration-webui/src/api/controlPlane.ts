@@ -523,7 +523,17 @@ export interface MigrationDetail {
   progress: MigrationProgress
   items: Array<{ type: string; count: number }>
   failures: MigrationFailure[]
-  failedUsers: Array<{ sourceUser: string; targetUser: string; status?: string; detail: string }>
+  failedUsers: Array<{
+    sourceUser: string; targetUser: string; status?: string; detail: string
+    /** When the status was last set. Absent on ledgers written before the
+     *  column existed, which is why the UI treats "" as unknown rather than
+     *  as old. */
+    statusAt?: string
+  }>
+  /** Earliest status change among users the current run has touched. A
+   *  failure older than this happened in a previous run and is queued to be
+   *  retried, which is a completely different thing to show someone. */
+  runStartedAt?: string
   /** Every user with its state, ordered failures-first. The report answers
    *  "which mailboxes are finished" without needing a separate page. */
   users: Array<{ sourceUser: string; targetUser: string; status: string; services: string }>

@@ -2700,17 +2700,31 @@ async def migration_detail(account_id: int, op: Operator = Depends(operator)):
                         "  WHEN 'RUNNING' THEN 1 WHEN 'PENDING' THEN 2 "
                         "  ELSE 3 END, source_email LIMIT 1000")]
 
+                # statusAt is what lets the page say how old a failure is.
+                # Without it, an error recorded 18 hours ago against target
+                # accounts that have since been deleted and recreated reads
+                # exactly like one from this minute -- 160 users appearing
+                # broken while the run retrying them was working fine.
                 out["failedUsers"] = [
                     {"sourceUser": r["source_email"],
                      "targetUser": r["target_email"],
                      "status": r["status"],
+                     "statusAt": r["status_at"] or "",
                      "detail": (r["notes"] or "")[:400]}
                     for r in conn.execute(
-                        "SELECT source_email, target_email, notes, status "
+                        "SELECT source_email, target_email, notes, status, "
+                        "       status_at "
                         "FROM identity_map "
                         "WHERE entity_type='user' "
                         "AND status IN ('FAILED','BLOCKED') "
                         "ORDER BY status, source_email")]
+                # When did the current run start? Anything older than that
+                # failed in a previous one and is queued to be retried.
+                row = conn.execute(
+                    "SELECT MIN(status_at) t FROM identity_map "
+                    "WHERE status IN ('RUNNING','PENDING') "
+                    "AND status_at IS NOT NULL").fetchone()
+                out["runStartedAt"] = (row["t"] if row and row["t"] else "")
         except Exception as exc:      # noqa: BLE001 - report, never 500
             out["error"] = f"could not read the ledger: {str(exc)[:160]}"
         return out

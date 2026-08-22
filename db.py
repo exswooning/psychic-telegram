@@ -244,6 +244,13 @@ class MigrationDB:
             # nothing while reporting a gap it could not explain.
             "identity_map": [
                 ("services_done", "TEXT NOT NULL DEFAULT ''"),
+                # When `status` last changed. Without it a failure has no
+                # age, and the report rendered errors from a run 18 hours
+                # earlier -- against target accounts that had since been
+                # deleted and recreated -- exactly as it renders one from
+                # this minute. 160 users read as currently broken while the
+                # migration retrying them was running fine.
+                ("status_at", "TEXT"),
             ],
             "discovery": [
                 ("messages_total", "INTEGER NOT NULL DEFAULT 0"),
@@ -368,8 +375,9 @@ class MigrationDB:
                             notes: str = "") -> None:
         with self.write() as conn:
             conn.execute(
-                "UPDATE identity_map SET status=?, notes=? WHERE source_email=?",
-                (status, notes[:2000], source_email),
+                "UPDATE identity_map SET status=?, notes=?, status_at=? "
+                "WHERE source_email=?",
+                (status, notes[:2000], utc_now(), source_email),
             )
 
     # -- id_mapping ----------------------------------------------------------
@@ -542,9 +550,10 @@ class MigrationDB:
         with self.write() as conn:
             conn.execute(
                 """UPDATE identity_map
-                      SET status = 'PENDING', services_done = ''
+                      SET status = 'PENDING', services_done = '',
+                          status_at = ?
                     WHERE source_email = ?""",
-                (source_email,))
+                (utc_now(), source_email))
 
     def record_mapping(self, source_user: str, source_id: str, target_id: str,
                        item_type: str, parent_target_id: Optional[str] = None,

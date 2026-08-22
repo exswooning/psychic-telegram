@@ -36,6 +36,7 @@ import argparse
 import concurrent.futures as futures
 import json
 import logging
+import contextlib
 import os
 import signal
 import sys
@@ -764,6 +765,45 @@ def _metrics_flusher(stop_event: threading.Event, db,
             log.debug("metrics flush skipped: %s", exc)
 
 
+@contextlib.contextmanager
+def _registered(job_name: str, account_id):
+    """Announce this run in active_jobs for as long as it lasts.
+
+    main.py never did, so a migration started from the CLI was invisible in
+    three separate places at once: the dashboard rendered a running tenant as
+    "idle", job_admission's MAX_CONCURRENT_TENANT_JOBS could be exceeded
+    because CLI runs did not count toward it, and config._concurrent_jobs --
+    which divides the RAM budget between concurrent jobs -- sized every
+    worker pool as though this run owned the machine alone.
+
+    Admission is advisory here rather than enforcing. A CLI operator who has
+    typed the command has decided; refusing at this point would strand
+    someone at a terminal over a cap meant to stop the WEB UI from
+    over-committing a box. It warns and proceeds, and still registers, so the
+    other two problems are fixed either way.
+    """
+    import job_admission
+
+    admitted = False
+    try:
+        admitted, detail = job_admission.try_admit(account_id, job_name,
+                                                   os.getpid())
+        if not admitted:
+            log.warning("running anyway, but the machine is at its job "
+                        "capacity (%s) -- worker pools are sized on the "
+                        "assumption that they share it", detail)
+    except Exception as exc:      # noqa: BLE001 - never block a run on this
+        log.debug("could not register this run: %s", exc)
+    try:
+        yield
+    finally:
+        if admitted:
+            try:
+                job_admission.release(account_id, job_name)
+            except Exception as exc:      # noqa: BLE001
+                log.debug("could not release the job slot: %s", exc)
+
+
 def _warn_if_ledger_is_stale(db, auth, pairs) -> None:
     """Refuse to start a run that would skip everything and call it success.
 
@@ -1076,8 +1116,10 @@ def cmd_migrate(args, settings: Settings, db: MigrationDB, auth: AuthManager):
         settings.migrate_contacts = True
     if "tasks" in services:
         settings.migrate_tasks = True
-    results = _run_with_memory_pause(
-        auth, db, settings, services, delta=False, delta_days=0, only=args.user)
+    with _registered("migrate", settings.account_id):
+        results = _run_with_memory_pause(
+            auth, db, settings, services, delta=False, delta_days=0,
+            only=args.user)
     _print_batch_summary(results)
 
 
