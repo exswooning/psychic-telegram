@@ -51,6 +51,10 @@ class FakeDB:
         self.forgotten.append(user)
         return self.bounds[user]["n"]
 
+    def reopen_identity(self, user):
+        self.reopened = getattr(self, "reopened", [])
+        self.reopened.append(user)
+
 
 def bounds(n, earliest):
     return {"n": n, "earliest": earliest}
@@ -224,3 +228,46 @@ class TestAMigrationRefusesToRunAgainstAStaleLedger:
                 db, self._auth({"u@tgt": "2026-08-21T17:43:46.000Z"}),
                 self._pairs())
         assert db.forgotten == []
+
+
+class TestReopeningAUserNotJustTheirMappings:
+    """Forgetting the mappings was half the job. identity_map.status stayed
+    DONE and main._already_done() drops DONE users before dispatch, so the
+    next run said "dispatching 177 users" instead of 200 and silently
+    skipped 24 -- the largest holding 35,490 items. Two records claimed the
+    work was finished; correcting one of them fixed nothing visible."""
+
+    def _stale(self):
+        db = FakeDB({"u@src": bounds(35_490, "2026-08-20T08:53:39Z")})
+        d = FakeDirectory({"u@tgt": "2026-08-21T17:43:46.000Z"})
+        return db, ledger_verify.verify(db, d, [("u@src", "u@tgt")])
+
+    def test_the_user_is_reopened_as_well(self):
+        db, report = self._stale()
+        ledger_verify.reopen(db, report, dry_run=False)
+        assert db.forgotten == ["u@src"]
+        assert getattr(db, "reopened", []) == ["u@src"]
+
+    def test_a_dry_run_reopens_nothing(self):
+        db, report = self._stale()
+        ledger_verify.reopen(db, report, dry_run=True)
+        assert getattr(db, "reopened", []) == []
+
+    def test_the_status_and_services_are_both_cleared(self, tmp_path):
+        """_already_done() consults services_done per service, so a user
+        reset to PENDING while still claiming every service was finished is
+        the same skip in a narrower place."""
+        import db as dbmod
+        d = dbmod.MigrationDB(str(tmp_path / "m.db"))
+        d.conn.execute(
+            "INSERT INTO identity_map(source_email,target_email,status,"
+            "services_done) VALUES(?,?,?,?)",
+            ("u@src", "u@tgt", "DONE", "drive,gmail"))
+        d.conn.commit()
+        d.reopen_identity("u@src")
+        row = d.conn.execute(
+            "SELECT status, services_done FROM identity_map "
+            "WHERE source_email='u@src'").fetchone()
+        assert row["status"] == "PENDING"
+        assert not row["services_done"]
+        d.close()

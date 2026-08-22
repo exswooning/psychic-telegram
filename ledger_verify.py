@@ -133,9 +133,16 @@ def verify(db, directory, identities, spot_check=None) -> Report:
 def reopen(db, report: Report, dry_run: bool = True) -> int:
     """Forget the stale mappings so the next run migrates them again.
 
-    Only the mappings. The audit rows stay: they are the record that this
-    was attempted and when, and deleting that history would erase the
-    evidence of what happened here.
+    And re-open the USER, which is a separate lie in a separate table.
+    Forgetting the mappings alone was not enough: identity_map.status stayed
+    DONE, and main._already_done() drops DONE users before dispatch, so the
+    very next run reported "dispatching 177 users" instead of 200 and
+    silently skipped 24 -- including the largest, at 35,490 items. Two
+    records claimed the work was finished and only one of them was corrected.
+
+    The audit rows still stay. They are the record that this was attempted
+    and when, and deleting that history would erase the evidence of what
+    happened here.
     """
     total = 0
     for verdict in report.stale:
@@ -143,4 +150,5 @@ def reopen(db, report: Report, dry_run: bool = True) -> int:
             total += verdict.mappings
             continue
         total += db.forget_mappings(verdict.source_user)
+        db.reopen_identity(verdict.source_user)
     return total

@@ -466,6 +466,20 @@ class MigrationDB:
         self._mapping_cached_users.discard(source_user)
         return n
 
+    def reopen_identity(self, source_email: str) -> None:
+        """Clear a user's finished-state so the next run picks them up again.
+
+        `services_done` is cleared alongside `status` because _already_done()
+        consults it per-service: a user reset to PENDING while still claiming
+        every service was completed is the same skip in a narrower place.
+        """
+        with self.write() as conn:
+            conn.execute(
+                """UPDATE identity_map
+                      SET status = 'PENDING', services_done = ''
+                    WHERE source_email = ?""",
+                (source_email,))
+
     def record_mapping(self, source_user: str, source_id: str, target_id: str,
                        item_type: str, parent_target_id: Optional[str] = None,
                        source_name: Optional[str] = None) -> None:
