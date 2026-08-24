@@ -892,7 +892,9 @@ def cmd_repair(args, settings: Settings, db: MigrationDB,
             ("gmail_invalid_label",
              "Gmail messages rejected as \"Invalid label\""),
             ("user_stale",
-             "users that failed to start and have since migrated")):
+             "users that failed to start and have since migrated"),
+            ("false_done",
+             "users marked done that migrated nothing")):
         if survey[key]:
             named += survey[key]
             print(f"  {survey[key]:>9,}  {label}")

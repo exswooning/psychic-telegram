@@ -48,6 +48,14 @@ def survey(db) -> dict:
 
     return {
         "total": n("1=1"),
+        "false_done": db.conn.execute(
+            """SELECT COUNT(*) c FROM identity_map i
+                WHERE i.status = 'DONE'
+                  AND NOT EXISTS (SELECT 1 FROM id_mapping m
+                                   WHERE m.source_user = i.source_email)
+                  AND EXISTS (SELECT 1 FROM audit_log a
+                               WHERE a.source_user = i.source_email
+                                 AND a.status = 'FAILED')""").fetchone()["c"],
         "user_stale": db.conn.execute(
             """SELECT COUNT(*) c FROM audit_log a
                  JOIN identity_map i ON i.source_email = a.source_user
@@ -102,6 +110,53 @@ def stale_grantee_failures(db, directory=None) -> list:
         if seen[grantee]:
             out.append(r)
     return out
+
+
+def false_done_users(db) -> list:
+    """Users marked DONE that migrated nothing and recorded failures.
+
+    "Done" has to mean the work happened. Live, seeduser382 finished with
+    zero id_mapping rows, zero SUCCESS rows and one HTTP 401 -- and the
+    report read "201 done, 0 users failed". A user whose every attempt
+    failed was being counted as a success, in the one number an operator
+    trusts to decide a migration is finished.
+
+    Both conditions are required. A genuinely empty mailbox migrates nothing
+    and that is a correct DONE; what makes this wrong is nothing migrated
+    AND something failed.
+    """
+    return db.conn.execute(
+        """SELECT i.source_email, i.target_email FROM identity_map i
+            WHERE i.status = 'DONE'
+              AND NOT EXISTS (SELECT 1 FROM id_mapping m
+                               WHERE m.source_user = i.source_email)
+              AND EXISTS (SELECT 1 FROM audit_log a
+                           WHERE a.source_user = i.source_email
+                             AND a.status = 'FAILED')""").fetchall()
+
+
+def demote_false_done(db, rows, dry_run: bool = True) -> int:
+    """Put them back to FAILED, carrying the reason that actually stopped them.
+
+    Not reopened to PENDING: that would hide the problem behind a retry that
+    is very likely to fail the same way, and the operator would learn nothing
+    until the next run finished. FAILED with the real error is the honest
+    state, and re-running is still available afterwards.
+    """
+    if dry_run:
+        return len(rows)
+    n = 0
+    for r in rows:
+        why = db.conn.execute(
+            "SELECT error_message FROM audit_log WHERE source_user=? "
+            "AND status='FAILED' ORDER BY timestamp DESC LIMIT 1",
+            (r["source_email"],)).fetchone()
+        db.set_identity_status(
+            r["source_email"], "FAILED",
+            "marked done but migrated nothing and recorded failures: "
+            + ((why["error_message"] if why else "") or "")[:400])
+        n += 1
+    return n
 
 
 def stale_user_failures(db) -> list:
@@ -196,6 +251,16 @@ def run_all(db, auth, settings, apply: bool = False,
         except Exception as exc:      # noqa: BLE001
             out["errors"].append(f"grantee check: {str(exc)[:160]}")
 
+    # Before the stale-user pass, which keys off status == DONE: demoting
+    # first stops a user that migrated nothing from having its own failure
+    # row resolved as "migrated on a later pass".
+    if out["survey"].get("false_done"):
+        try:
+            out["demoted"] = demote_false_done(
+                db, false_done_users(db), dry_run=not apply)
+        except Exception as exc:      # noqa: BLE001
+            out["errors"].append(f"false-done check: {str(exc)[:160]}")
+
     if out["survey"].get("user_stale"):
         try:
             out["users_resolved"] = resolve_users(
@@ -226,6 +291,9 @@ def summarise(result: dict) -> str:
         parts.append(f"{result['resolved']:,} resolved (grantee recreated)")
     if result.get("reconciled"):
         parts.append(f"{result['reconciled']:,} resolved (already on target)")
+    if result.get("demoted"):
+        parts.append(f"{result['demoted']:,} user(s) demoted from done "
+                     f"(migrated nothing)")
     if result.get("users_resolved"):
         parts.append(f"{result['users_resolved']:,} resolved (user migrated "
                      f"on a later pass)")

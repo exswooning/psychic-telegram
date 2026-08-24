@@ -313,6 +313,11 @@ class TestStaleUserFailures:
         d.conn.execute("INSERT INTO identity_map(source_email,target_email,"
                        "status) VALUES('u@src','u@tgt',?)", (status,))
         d.conn.commit()
+        # Mappings matter: a DONE user with a failure and NOTHING migrated is
+        # a false-DONE, which is a different finding and gets demoted rather
+        # than resolved. This fixture is the other case -- the user really did
+        # migrate, on a later pass, and an old failure row survived.
+        d.record_mapping("u@src", "s1", "t1", "file")
         d.log_audit("u@src", "u@src", "user", "FAILED",
                     "('invalid_grant: Invalid email or User ID', ...)")
         return d
@@ -356,4 +361,74 @@ class TestStaleUserFailures:
         d = self._db_with_user(tmp_path, "DONE")
         out = repair.run_all(d, None, None, apply=True)
         assert out["users_resolved"] == 1
+        d.close()
+
+
+class TestUsersMarkedDoneThatMigratedNothing:
+    """"Done" has to mean the work happened.
+
+    Live, seeduser382 finished with zero id_mapping rows, zero SUCCESS rows
+    and one HTTP 401 -- and the report read "201 done, 0 users failed". A
+    user whose every attempt failed was counted as a success, in the one
+    number an operator trusts to decide a migration is finished.
+    """
+
+    def _user(self, tmp_path, status="DONE", mappings=0, failures=1):
+        d = dbmod.MigrationDB(str(tmp_path / "m.db"))
+        d.conn.execute("INSERT INTO identity_map(source_email,target_email,"
+                       "status) VALUES('u@src','u@tgt',?)", (status,))
+        d.conn.commit()
+        for i in range(mappings):
+            d.record_mapping("u@src", f"s{i}", f"t{i}", "file")
+        for i in range(failures):
+            d.log_audit("u@src", f"x{i}", "user", "FAILED", "HTTP 401 authError")
+        return d
+
+    def test_nothing_migrated_plus_a_failure_is_not_done(self, tmp_path):
+        d = self._user(tmp_path)
+        assert len(repair.false_done_users(d)) == 1
+        assert repair.survey(d)["false_done"] == 1
+        d.close()
+
+    def test_an_empty_mailbox_with_no_failures_stays_done(self, tmp_path):
+        """A genuinely empty mailbox migrates nothing and that is a correct
+        DONE. What makes it wrong is nothing migrated AND something failed."""
+        d = self._user(tmp_path, mappings=0, failures=0)
+        assert repair.false_done_users(d) == []
+        d.close()
+
+    def test_a_user_that_migrated_something_stays_done(self, tmp_path):
+        """Partial failure is normal -- most runs have some."""
+        d = self._user(tmp_path, mappings=5, failures=3)
+        assert repair.false_done_users(d) == []
+        d.close()
+
+    def test_demoting_carries_the_real_reason(self, tmp_path):
+        d = self._user(tmp_path)
+        repair.demote_false_done(d, repair.false_done_users(d), dry_run=False)
+        row = d.conn.execute(
+            "SELECT status, notes FROM identity_map").fetchone()
+        assert row["status"] == "FAILED"
+        assert "migrated nothing" in row["notes"]
+        assert "401" in row["notes"], "the cause must survive the demotion"
+        d.close()
+
+    def test_a_dry_run_changes_nothing(self, tmp_path):
+        d = self._user(tmp_path)
+        assert repair.demote_false_done(
+            d, repair.false_done_users(d), dry_run=True) == 1
+        assert d.conn.execute(
+            "SELECT status FROM identity_map").fetchone()["status"] == "DONE"
+        d.close()
+
+    def test_demotion_runs_before_the_stale_user_pass(self, tmp_path):
+        """stale_user_failures keys off status == DONE. Demoting second would
+        let a user that migrated nothing have its own failure row resolved as
+        "migrated on a later pass" -- erasing the evidence."""
+        d = self._user(tmp_path)
+        out = repair.run_all(d, None, None, apply=True)
+        assert out.get("demoted") == 1
+        assert d.conn.execute(
+            "SELECT status FROM audit_log WHERE item_type='user'"
+        ).fetchone()["status"] == "FAILED"
         d.close()
