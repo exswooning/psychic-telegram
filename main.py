@@ -842,6 +842,34 @@ def _warn_if_ledger_is_stale(db, auth, pairs) -> None:
         "see verify-ledger")
 
 
+def _auto_repair(db, auth, settings) -> None:
+    """Resolve what a run can resolve about its own failures, before anyone
+    reads the total.
+
+    A finished migration reported 119,600 failed items. 58,080 of those
+    blamed grantees that had been deleted mid-run and exist again; roughly
+    27,000 more were quota rejections whose grants had actually landed. The
+    number an operator saw was therefore about six times the number that
+    needed them, and a run whose Drive data was intact read as broken.
+
+    Skipped when the operator turned it off, and never allowed to raise:
+    a repair pass that can break the migration it follows is worse than no
+    repair pass.
+    """
+    if not getattr(settings, "auto_repair", True):
+        return
+    try:
+        import repair
+        result = repair.run_all(db, auth, settings, apply=True)
+        line = repair.summarise(result)
+        if result.get("errors"):
+            log.warning("post-run repair: %s", line)
+        else:
+            log.info("post-run repair: %s", line)
+    except Exception as exc:      # noqa: BLE001
+        log.warning("post-run repair skipped: %s", str(exc)[:200])
+
+
 def cmd_repair(args, settings: Settings, db: MigrationDB,
                auth: "AuthManager") -> int:
     """Survey the failure families a run left behind, and fix the fixable.
@@ -1190,6 +1218,7 @@ def cmd_migrate(args, settings: Settings, db: MigrationDB, auth: AuthManager):
             auth, db, settings, services, delta=False, delta_days=0,
             only=args.user)
     _print_batch_summary(results)
+    _auto_repair(db, auth, settings)
 
 
 def cmd_delta(args, settings: Settings, db: MigrationDB, auth: AuthManager):

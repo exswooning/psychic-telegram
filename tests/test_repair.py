@@ -220,3 +220,81 @@ class TestOnlyASuccessfulLookupConfirmsAnAccount:
         assert len(repair.stale_grantee_failures(
             d, FakeDirectory({"x@tgt"}))) == 1
         d.close()
+
+
+class TestRunAllFixesOnlyWhatItCanConfirm:
+    """Runs at the end of every migration, so the count an operator reads is
+    the residue that needs them. Live those differed by about 91,000."""
+
+    class _Auth:
+        def __init__(self, existing=()):
+            self._d = FakeDirectory(set(existing))
+
+        def directory(self, tenant):
+            return self._d
+
+    def _db_with(self, tmp_path, **kinds):
+        d = _db(tmp_path)
+        for i in range(kinds.get("no_account", 0)):
+            d.log_audit("u@src", f"f{i}:dara@tgt", "acl", "FAILED",
+                        "no Google account associated with this email address")
+        for i in range(kinds.get("label", 0)):
+            d.log_audit("u@src", f"m{i}", "message", "FAILED",
+                        'HTTP 400 (invalidArgument): "Invalid label"')
+        return d
+
+    def test_it_resolves_confirmed_stale_grantees(self, tmp_path):
+        d = self._db_with(tmp_path, no_account=3)
+        out = repair.run_all(d, self._Auth({"dara@tgt"}), None, apply=True)
+        assert out["resolved"] == 3
+        assert repair.survey(d)["acl_no_account"] == 0
+        d.close()
+
+    def test_it_leaves_gmail_label_failures_alone(self, tmp_path):
+        """They are repaired at their source and re-inserted by the next
+        pass. Rewriting their audit rows here would report them fixed before
+        the data had moved."""
+        d = self._db_with(tmp_path, label=4)
+        repair.run_all(d, self._Auth(), None, apply=True)
+        assert repair.survey(d)["gmail_invalid_label"] == 4
+        d.close()
+
+    def test_a_dry_run_changes_nothing(self, tmp_path):
+        d = self._db_with(tmp_path, no_account=2)
+        repair.run_all(d, self._Auth({"dara@tgt"}), None, apply=False)
+        assert repair.survey(d)["acl_no_account"] == 2
+        d.close()
+
+    def test_a_broken_directory_does_not_raise(self, tmp_path):
+        """A repair pass that can break the migration it follows is worse
+        than no repair pass."""
+        class Broken:
+            def directory(self, tenant):
+                raise RuntimeError("network down")
+
+        d = self._db_with(tmp_path, no_account=2)
+        out = repair.run_all(d, Broken(), None, apply=True)
+        assert out["errors"]
+        assert repair.survey(d)["acl_no_account"] == 2
+        d.close()
+
+    def test_a_clean_ledger_does_no_work(self, tmp_path):
+        d = _db(tmp_path)
+        out = repair.run_all(d, self._Auth(), None, apply=True)
+        assert out["resolved"] == 0 and not out["errors"]
+        d.close()
+
+
+class TestSummaryLine:
+    def test_it_names_what_happened(self):
+        line = repair.summarise({
+            "survey": {"total": 119600, "gmail_invalid_label": 32967},
+            "resolved": 58080, "reconciled": 24000, "errors": []})
+        assert "119,600" in line and "58,080" in line and "24,000" in line
+
+    def test_a_clean_run_says_so(self):
+        assert "no failed items" in repair.summarise({"survey": {"total": 0}})
+
+    def test_errors_are_surfaced_not_swallowed(self):
+        line = repair.summarise({"survey": {"total": 5}, "errors": ["boom"]})
+        assert "boom" in line

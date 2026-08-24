@@ -2467,6 +2467,97 @@ async def test_report_run(body: WriteAction, op: Operator = Depends(operator)):
     return {"ok": True, "detail": "test run started; it takes about 3 minutes"}
 
 
+@app.get("/api/v2/repair/{account_id}")
+async def repair_survey(account_id: int, op: Operator = Depends(operator)):
+    """What the failure count is actually made of, and what can be fixed."""
+    require_login(op)
+    if not op.is_superadmin and account_id != op.account_id:
+        raise HTTPException(403, "that migration belongs to another account")
+
+    def _read() -> dict:
+        from config import Settings
+        import repair
+        out = {"accountId": account_id, "total": 0, "families": [],
+               "unclassified": 0, "error": ""}
+        try:
+            path = Settings(account_id=account_id).db_path
+        except (ValueError, KeyError, OSError) as exc:
+            out["error"] = str(exc)[:200]
+            return out
+        if not path or not os.path.isfile(path):
+            out["error"] = "this account has no migration ledger yet"
+            return out
+        with cpdb.ro(path) as conn:
+            class _D:
+                pass
+            d = _D()
+            d.conn = conn
+            s = repair.survey(d)
+        out["total"] = s["total"]
+        named = 0
+        for key, label, fix in (
+                ("acl_no_account",
+                 "share grants refused — the person had no account at the time",
+                 "resolvable now"),
+                ("acl_quota", "share grants refused for rate limits",
+                 "checked against the target"),
+                ("gmail_invalid_label",
+                 "messages rejected — label pointed at a deleted mailbox",
+                 "retried on the next migration")):
+            if s[key]:
+                named += s[key]
+                out["families"].append(
+                    {"key": key, "count": s[key], "label": label, "fix": fix})
+        out["unclassified"] = max(0, s["total"] - named)
+        return out
+
+    return await _off_loop(_read)
+
+
+@app.post("/api/v2/repair/{account_id}")
+async def repair_apply(account_id: int, body: WriteAction,
+                       op: Operator = Depends(operator)):
+    """Fix what can be fixed without guessing.
+
+    Backgrounded: the ACL reconcile is one list call per affected file and
+    takes minutes on a large ledger, which is longer than any request should
+    hold open.
+    """
+    require_login(op)
+    if not op.is_superadmin and account_id != op.account_id:
+        raise HTTPException(403, "that migration belongs to another account")
+    if [j for j in job_admission.list_active()
+            if j.get("account_id") == account_id]:
+        return {"ok": False,
+                "detail": "a migration is running on this tenant; repair runs "
+                          "automatically when it finishes"}
+
+    def _go() -> None:
+        try:
+            from config import Settings
+            from auth import AuthManager
+            from db import MigrationDB
+            import repair
+            st = Settings(account_id=account_id)
+            d = MigrationDB(st.db_path)
+            try:
+                repair.run_all(d, AuthManager(st), st, apply=True)
+            finally:
+                d.close()
+        except Exception as exc:      # noqa: BLE001
+            log.warning("repair failed for account %s: %s", account_id, exc)
+
+    await _off_loop(cpdb.begin_action, op.name, op.role, "repair",
+                    body.reason, str(account_id), body.model_dump(), None,
+                    op.account_id)
+    threading.Thread(target=_go, name=f"repair-{account_id}",
+                     daemon=True).start()
+    _DETAIL_CACHE.invalidate(("migration_detail", account_id))
+    return {"ok": True,
+            "detail": "repair started; it checks each grant against the "
+                      "target and takes a few minutes"}
+
+
 @app.get("/api/v2/metrics")
 async def metrics_for_me(history: int = 60, op: Operator = Depends(operator)):
     """Metrics without having to name an account.

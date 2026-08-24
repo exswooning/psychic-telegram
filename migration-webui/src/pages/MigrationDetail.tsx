@@ -7,10 +7,11 @@ import {
 import {
   Refresh as RefreshIcon, ArrowBack as BackIcon,
   ArrowForward as ArrowIcon, Update as DeltaIcon,
-  Speed as MetricsIcon,
+  Speed as MetricsIcon, HealthAndSafety as RepairIcon,
 } from '@mui/icons-material'
 import {
-  fetchMigrationDetail, startDelta, MigrationDetail as Detail,
+  fetchMigrationDetail, startDelta, fetchRepairSurvey, runRepair,
+  MigrationDetail as Detail, RepairSurvey,
 } from '@/api/controlPlane'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
 
@@ -48,6 +49,10 @@ export const MigrationDetail: React.FC = () => {
   const [deltaError, setDeltaError] = useState<string | null>(null)
   const [deltaDays, setDeltaDays] = useState(2)
   const [started, setStarted] = useState('')
+  const [repair, setRepair] = useState<RepairSurvey | null>(null)
+  const [askRepair, setAskRepair] = useState(false)
+  const [repairBusy, setRepairBusy] = useState(false)
+  const [repairError, setRepairError] = useState<string | null>(null)
 
   const id = Number(accountId)
 
@@ -58,6 +63,9 @@ export const MigrationDetail: React.FC = () => {
       .then((r) => { setD(r); setError('') })
       .catch((e) => setError(e instanceof Error ? e.message : String(e)))
       .finally(() => setLoading(false))
+    // Separate from the detail poll: a failure total means very little until
+    // it is broken into causes, and most of this one usually needs nobody.
+    fetchRepairSurvey(id).then(setRepair).catch(() => setRepair(null))
   }, [id])
 
   useEffect(() => {
@@ -141,6 +149,56 @@ export const MigrationDetail: React.FC = () => {
                 <Stat id="items" label="items migrated" value={p.items} />
                 <Stat id="itemsfailed" label="items failed" value={p.itemsFailed}
                       tone="error" />
+              </Stack>
+            </Paper>
+          )}
+
+          {repair && repair.total > 0 && (
+            <Paper variant="outlined" sx={{ p: 2, mb: 3 }}
+                   data-testid="repair-panel">
+              <Stack direction="row" alignItems="center" spacing={1}
+                     sx={{ mb: 1 }}>
+                <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
+                  What the {repair.total.toLocaleString()} failures are
+                </Typography>
+                <Box sx={{ flex: 1 }} />
+                <Button size="small" variant="outlined" startIcon={<RepairIcon />}
+                        data-testid="run-repair" disabled={repairBusy || d.running}
+                        onClick={() => setAskRepair(true)}>
+                  {d.running ? 'runs when the migration finishes' : 'Repair'}
+                </Button>
+              </Stack>
+              {/* A total is not a diagnosis. Live, 119,600 failures were one
+                  live bug and two families describing states that had since
+                  stopped being true -- about six times the number that
+                  actually needed anybody. */}
+              <Stack spacing={1}>
+                {repair.families.map((f) => (
+                  <Stack key={f.key} direction="row" spacing={1}
+                         alignItems="baseline"
+                         data-testid={`repair-${f.key}`}>
+                    <Typography sx={{ fontWeight: 700, minWidth: 84,
+                                      textAlign: 'right',
+                                      fontVariantNumeric: 'tabular-nums' }}>
+                      {f.count.toLocaleString()}
+                    </Typography>
+                    <Typography variant="body2">{f.label}</Typography>
+                    <Chip size="small" variant="outlined" label={f.fix} />
+                  </Stack>
+                ))}
+                {repair.unclassified > 0 && (
+                  <Stack direction="row" spacing={1} alignItems="baseline"
+                         data-testid="repair-unclassified">
+                    <Typography sx={{ fontWeight: 700, minWidth: 84,
+                                      textAlign: 'right',
+                                      fontVariantNumeric: 'tabular-nums' }}>
+                      {repair.unclassified.toLocaleString()}
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      not yet classified — these need a person
+                    </Typography>
+                  </Stack>
+                )}
               </Stack>
             </Paper>
           )}
@@ -300,6 +358,38 @@ export const MigrationDetail: React.FC = () => {
           </Paper>
         </>
       )}
+      <ReasonCodeDialog
+        open={askRepair}
+        busy={repairBusy}
+        error={repairError}
+        title="Repair what can be repaired"
+        description={
+          <>
+            Re-checks each failure against the target and clears the ones that
+            describe a state which is no longer true — a share refused because
+            the person had no account when it was tried, or a grant the target
+            turns out to hold already. Nothing is deleted: the audit row keeps
+            its original error. Failures that are still real stay exactly where
+            they are. This also runs automatically at the end of every
+            migration.
+          </>
+        }
+        onCancel={() => { setAskRepair(false); setRepairError(null) }}
+        onConfirm={async (reason: string) => {
+          setRepairBusy(true); setRepairError(null)
+          try {
+            const r = await runRepair(id, reason)
+            if (!r.ok) throw new Error(r.detail || 'could not start')
+            setAskRepair(false)
+            setStarted(r.detail || 'repair started')
+            refresh()
+          } catch (e: any) {
+            setRepairError(e.message)
+          } finally {
+            setRepairBusy(false)
+          }
+        }}
+      />
       <ReasonCodeDialog
         open={askDelta}
         busy={deltaBusy}

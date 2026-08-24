@@ -943,3 +943,28 @@ export const runTests = (reason: string) =>
     method: 'POST',
     body: JSON.stringify({ reason }),
   })
+
+/* Repair: what the failure count is made of, and fixing the fixable. */
+export interface RepairFamily {
+  key: string
+  count: number
+  label: string
+  fix: string
+}
+
+export interface RepairSurvey {
+  accountId: number
+  total: number
+  families: RepairFamily[]
+  unclassified: number
+  error: string
+}
+
+export const fetchRepairSurvey = (accountId: number) =>
+  cpFetch<RepairSurvey>(`/api/v2/repair/${accountId}`)
+
+export const runRepair = (accountId: number, reason: string) =>
+  cpFetch<ActionResult>(`/api/v2/repair/${accountId}`, {
+    method: 'POST',
+    body: JSON.stringify({ reason }),
+  })

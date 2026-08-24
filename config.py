@@ -556,6 +556,12 @@ class Settings:
     # so every document carries its own share access independent of the tree.
     # The cost is one permissions.create per inherited grantee per file; turn
     # it off to go back to folder-derived sharing on very large tenants.
+    # Resolve a run's own resolvable failures when it finishes, so the count
+    # an operator reads is the residue that needs them. Live, that was the
+    # difference between 119,600 and roughly 28,000.
+    auto_repair: bool = field(
+        default_factory=lambda: _env_bool("AUTO_REPAIR", True)
+    )
     recreate_inherited_acls: bool = field(
         default_factory=lambda: _env_bool("MIGRATE_INHERITED_ACLS", True)
     )

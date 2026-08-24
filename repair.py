@@ -113,3 +113,77 @@ def resolve(db, rows, status: str, note: str, dry_run: bool = True) -> int:
         db.log_audit(r["source_user"], r["item_id"], "acl", status, note)
         n += 1
     return n
+
+
+def run_all(db, auth, settings, apply: bool = False,
+            reconcile_limit: int | None = None) -> dict:
+    """Survey, then fix what can be fixed without guessing.
+
+    Called automatically at the end of a migration, so the failure count an
+    operator sees is the residue that actually needs a human rather than the
+    raw total. On the live 201-user run those differed by 91,000.
+
+    Two repairs run here and a third deliberately does not:
+
+      - Stale grantee failures are resolved, each confirmed against the
+        directory first.
+      - Quota-refused ACL grants are reconciled against the target, which is
+        one list call per affected FILE (not per grant) -- the 27,597 rows
+        on the live ledger cover far fewer files than that.
+      - Gmail label failures are NOT touched. They are repaired at their
+        source in sync_labels(), and the messages are re-inserted by the
+        next migrate or delta pass. Rewriting their audit rows here would
+        report them fixed before the data had actually moved.
+
+    Never raises. A repair pass that can break the migration it follows is
+    worse than no repair pass.
+    """
+    out = {"survey": {}, "resolved": 0, "reconciled": 0, "errors": []}
+    try:
+        out["survey"] = survey(db)
+    except Exception as exc:      # noqa: BLE001
+        out["errors"].append(f"survey: {str(exc)[:160]}")
+        return out
+    if not out["survey"].get("total"):
+        return out
+
+    if out["survey"].get("acl_no_account"):
+        try:
+            stale = stale_grantee_failures(db, auth.directory("target"))
+            out["resolved"] = resolve(
+                db, stale, "SKIPPED_GRANTEE_RECREATED",
+                "grantee had no account when this was attempted; the account "
+                "exists now, so the row describes a state that no longer holds",
+                dry_run=not apply)
+        except Exception as exc:      # noqa: BLE001
+            out["errors"].append(f"grantee check: {str(exc)[:160]}")
+
+    if out["survey"].get("acl_quota"):
+        try:
+            import acl_reconcile
+            stats = acl_reconcile.reconcile(auth, db, settings,
+                                            dry_run=not apply,
+                                            limit=reconcile_limit)
+            out["reconciled"] = stats.get("resolved", 0)
+            out["reconcile_stats"] = stats
+        except Exception as exc:      # noqa: BLE001
+            out["errors"].append(f"acl reconcile: {str(exc)[:160]}")
+    return out
+
+
+def summarise(result: dict) -> str:
+    """One line per thing that happened, for a migration's closing log."""
+    s = result.get("survey") or {}
+    if not s.get("total"):
+        return "no failed items recorded"
+    parts = [f"{s['total']:,} failed item(s)"]
+    if result.get("resolved"):
+        parts.append(f"{result['resolved']:,} resolved (grantee recreated)")
+    if result.get("reconciled"):
+        parts.append(f"{result['reconciled']:,} resolved (already on target)")
+    if s.get("gmail_invalid_label"):
+        parts.append(f"{s['gmail_invalid_label']:,} Gmail label failure(s) "
+                     f"will retry on the next pass")
+    for e in result.get("errors", []):
+        parts.append(f"repair step failed: {e}")
+    return "; ".join(parts)
