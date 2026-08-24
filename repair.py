@@ -48,6 +48,11 @@ def survey(db) -> dict:
 
     return {
         "total": n("1=1"),
+        "user_stale": db.conn.execute(
+            """SELECT COUNT(*) c FROM audit_log a
+                 JOIN identity_map i ON i.source_email = a.source_user
+                WHERE a.status = 'FAILED' AND a.item_type = 'user'
+                  AND i.status = 'DONE'""").fetchone()["c"],
         "acl_no_account": n("item_type='acl' AND error_message LIKE ?",
                             (f"%{NO_ACCOUNT}%",)),
         "acl_quota": n("item_type='acl' AND error_message LIKE ?",
@@ -97,6 +102,39 @@ def stale_grantee_failures(db, directory=None) -> list:
         if seen[grantee]:
             out.append(r)
     return out
+
+
+def stale_user_failures(db) -> list:
+    """User-level failures for users that subsequently migrated.
+
+    A per-user failure is recorded when the whole user could not be started
+    -- almost always because impersonation failed. Live, 175 of those read
+    "invalid_grant: Invalid email or User ID", every one written while that
+    target account was deleted. The user migrated fine on a later pass and
+    is DONE now, but the row stayed and kept the user in the report's
+    did-not-migrate list.
+
+    identity_map.status is the authority on whether a user migrated -- it is
+    what the engine itself writes when the user finishes -- so no network
+    call is needed to answer this.
+    """
+    return db.conn.execute(
+        """SELECT a.source_user, a.item_id FROM audit_log a
+             JOIN identity_map i ON i.source_email = a.source_user
+            WHERE a.status = 'FAILED' AND a.item_type = 'user'
+              AND i.status = 'DONE'""").fetchall()
+
+
+def resolve_users(db, rows, dry_run: bool = True) -> int:
+    """Same preservation rule as resolve(): status changes, error kept."""
+    if dry_run:
+        return len(rows)
+    for r in rows:
+        db.log_audit(r["source_user"], r["item_id"], "user",
+                     "SKIPPED_USER_LATER_MIGRATED",
+                     "this user failed to start on an earlier pass and has "
+                     "since migrated successfully")
+    return len(rows)
 
 
 def resolve(db, rows, status: str, note: str, dry_run: bool = True) -> int:
@@ -158,6 +196,13 @@ def run_all(db, auth, settings, apply: bool = False,
         except Exception as exc:      # noqa: BLE001
             out["errors"].append(f"grantee check: {str(exc)[:160]}")
 
+    if out["survey"].get("user_stale"):
+        try:
+            out["users_resolved"] = resolve_users(
+                db, stale_user_failures(db), dry_run=not apply)
+        except Exception as exc:      # noqa: BLE001
+            out["errors"].append(f"user rollup: {str(exc)[:160]}")
+
     if out["survey"].get("acl_quota"):
         try:
             import acl_reconcile
@@ -181,6 +226,9 @@ def summarise(result: dict) -> str:
         parts.append(f"{result['resolved']:,} resolved (grantee recreated)")
     if result.get("reconciled"):
         parts.append(f"{result['reconciled']:,} resolved (already on target)")
+    if result.get("users_resolved"):
+        parts.append(f"{result['users_resolved']:,} resolved (user migrated "
+                     f"on a later pass)")
     if s.get("gmail_invalid_label"):
         parts.append(f"{s['gmail_invalid_label']:,} Gmail label failure(s) "
                      f"will retry on the next pass")

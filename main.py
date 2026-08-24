@@ -890,7 +890,9 @@ def cmd_repair(args, settings: Settings, db: MigrationDB,
              "ACL grants refused because the grantee had no account"),
             ("acl_quota", "ACL grants refused for quota"),
             ("gmail_invalid_label",
-             "Gmail messages rejected as \"Invalid label\"")):
+             "Gmail messages rejected as \"Invalid label\""),
+            ("user_stale",
+             "users that failed to start and have since migrated")):
         if survey[key]:
             named += survey[key]
             print(f"  {survey[key]:>9,}  {label}")

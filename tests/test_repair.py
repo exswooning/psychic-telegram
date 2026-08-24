@@ -298,3 +298,62 @@ class TestSummaryLine:
     def test_errors_are_surfaced_not_swallowed(self):
         line = repair.summarise({"survey": {"total": 5}, "errors": ["boom"]})
         assert "boom" in line
+
+
+class TestStaleUserFailures:
+    """A per-user failure is recorded when the whole user could not be
+    started -- almost always a failed impersonation. Live, 175 read
+    "invalid_grant: Invalid email or User ID", every one written while that
+    target account was deleted. The users migrated fine on a later pass and
+    are DONE now, but the rows stayed and kept them in the report's
+    did-not-migrate list."""
+
+    def _db_with_user(self, tmp_path, status):
+        d = dbmod.MigrationDB(str(tmp_path / "m.db"))
+        d.conn.execute("INSERT INTO identity_map(source_email,target_email,"
+                       "status) VALUES('u@src','u@tgt',?)", (status,))
+        d.conn.commit()
+        d.log_audit("u@src", "u@src", "user", "FAILED",
+                    "('invalid_grant: Invalid email or User ID', ...)")
+        return d
+
+    def test_a_user_that_later_migrated_is_resolvable(self, tmp_path):
+        d = self._db_with_user(tmp_path, "DONE")
+        assert len(repair.stale_user_failures(d)) == 1
+        assert repair.survey(d)["user_stale"] == 1
+        d.close()
+
+    def test_a_user_that_never_migrated_is_left_alone(self, tmp_path):
+        """That failure is the current, true state of the user."""
+        d = self._db_with_user(tmp_path, "FAILED")
+        assert repair.stale_user_failures(d) == []
+        d.close()
+
+    def test_a_still_running_user_is_left_alone(self, tmp_path):
+        d = self._db_with_user(tmp_path, "RUNNING")
+        assert repair.stale_user_failures(d) == []
+        d.close()
+
+    def test_resolving_clears_it_and_keeps_the_row(self, tmp_path):
+        d = self._db_with_user(tmp_path, "DONE")
+        repair.resolve_users(d, repair.stale_user_failures(d), dry_run=False)
+        row = d.conn.execute(
+            "SELECT status FROM audit_log WHERE item_type='user'").fetchone()
+        assert row["status"] == "SKIPPED_USER_LATER_MIGRATED"
+        assert repair.survey(d)["user_stale"] == 0
+        d.close()
+
+    def test_a_dry_run_changes_nothing(self, tmp_path):
+        d = self._db_with_user(tmp_path, "DONE")
+        assert repair.resolve_users(d, repair.stale_user_failures(d),
+                                    dry_run=True) == 1
+        assert repair.survey(d)["user_stale"] == 1
+        d.close()
+
+    def test_it_needs_no_network(self, tmp_path):
+        """identity_map.status is what the engine itself writes when a user
+        finishes, so it already answers this."""
+        d = self._db_with_user(tmp_path, "DONE")
+        out = repair.run_all(d, None, None, apply=True)
+        assert out["users_resolved"] == 1
+        d.close()
