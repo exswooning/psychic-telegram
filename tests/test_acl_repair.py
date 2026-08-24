@@ -191,3 +191,40 @@ class TestLoopingUntilItSettles:
         out = mod.repair_until_settled(None, d, None)
         assert out["remaining"] == 3
         d.close()
+
+
+class TestFoldersCarryGrantsToo:
+    """The first version joined on type='file' alone, so every folder's
+    failed grants were invisible: they had migrated perfectly, had mappings,
+    and simply never matched the query. On a corpus that shares at FOLDER
+    level that is the worse half to miss -- 321 of 476 unrecovered grants
+    belonged to folders, and the repair loop reported no progress while they
+    sat there unreachable."""
+
+    def _db(self, tmp_path, item_type):
+        d = dbmod.MigrationDB(str(tmp_path / "m.db"))
+        d.conn.execute("INSERT INTO identity_map(source_email,target_email) "
+                       "VALUES('u@src','u@tgt')")
+        d.conn.commit()
+        d.record_mapping("u@src", "src1", "tgt1", item_type)
+        d.log_audit("u@src", "src1:bob@tgt", "acl", "FAILED", "Quota exceeded")
+        return d
+
+    def test_a_folders_failed_grant_is_repairable(self, tmp_path):
+        d = self._db(tmp_path, "folder")
+        assert acl_repair.files_needing_grants(d) == {
+            "u@src": [("src1", "tgt1")]}
+        d.close()
+
+    def test_a_files_failed_grant_is_still_repairable(self, tmp_path):
+        d = self._db(tmp_path, "file")
+        assert acl_repair.files_needing_grants(d) == {
+            "u@src": [("src1", "tgt1")]}
+        d.close()
+
+    def test_an_unrelated_mapping_type_is_not_swept_in(self, tmp_path):
+        """A message or event mapping shares an id space with nothing here;
+        matching one would send a permissions.create at a Gmail id."""
+        d = self._db(tmp_path, "message")
+        assert acl_repair.files_needing_grants(d) == {}
+        d.close()

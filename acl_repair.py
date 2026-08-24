@@ -36,10 +36,18 @@ def files_needing_grants(db, include_quota_only: bool = False) -> dict:
     """{source_user: [(source_file_id, target_file_id), ...]}
 
     Built from FAILED acl rows joined to id_mapping, because a grant can only
-    be re-applied to a file that actually exists on the target. A failed
+    be re-applied to an item that actually exists on the target. A failed
     grant on a file that never copied is not repairable here -- the file has
     to migrate first -- and reporting it as repairable would be a lie the
     next run has to correct.
+
+    Folders as well as files. The first version joined on type='file' alone,
+    which made every folder's failed grants invisible: they had migrated
+    perfectly, had mappings, and simply never matched the query. On this
+    corpus that is the worse half to miss, because the sharing is applied at
+    FOLDER level -- 321 of 476 unrecovered grants belonged to folders, and
+    the repair loop stopped reporting progress while they sat there
+    unreachable.
     """
     where = "a.item_type='acl' AND a.status='FAILED'"
     if include_quota_only:
@@ -53,7 +61,7 @@ def files_needing_grants(db, include_quota_only: bool = False) -> dict:
                 ON m.source_user = a.source_user
                AND m.source_id  = substr(a.item_id, 1,
                                          instr(a.item_id, ':') - 1)
-               AND m.type = 'file'
+               AND m.type IN ('file', 'folder')
              WHERE {where}
                AND instr(a.item_id, ':') > 0""").fetchall()
     out: dict = {}
