@@ -144,3 +144,79 @@ class TestResolvePreservesHistory:
         assert row["status"] == "SKIPPED_GRANTEE_RECREATED"
         assert "why" in (row["error_message"] or "")
         d.close()
+
+
+class TestPatternsMatchWhatGoogleActuallySends:
+    """Drive writes the grantee-missing 400 two ways: plural for several
+    grantees, singular for one. A pattern written from a single observed
+    message caught only the plural, leaving 2,900 rows of a known cause
+    sitting in "unclassified" where they read as an unknown problem."""
+
+    def _with(self, tmp_path, msg):
+        d = _db(tmp_path)
+        d.log_audit("u@src", "f1:a@tgt", "acl", "FAILED", msg)
+        return d
+
+    def test_the_plural_form_is_recognised(self, tmp_path):
+        d = self._with(tmp_path,
+                       'You are trying to invite a@t, b@t. Since there are no '
+                       'Google accounts associated with these email addresses, '
+                       'you must check the "Notify people" box')
+        assert repair.survey(d)["acl_no_account"] == 1
+        d.close()
+
+    def test_the_singular_form_is_recognised(self, tmp_path):
+        d = self._with(tmp_path,
+                       'You are trying to invite a@t. Since there is no '
+                       'Google account associated with this email address, '
+                       'you must check the "Notify people" box')
+        assert repair.survey(d)["acl_no_account"] == 1
+        d.close()
+
+    def test_an_unrelated_400_is_not_swept_in(self, tmp_path):
+        d = self._with(tmp_path, "Bad Request. User message: something else")
+        assert repair.survey(d)["acl_no_account"] == 0
+        d.close()
+
+
+class TestOnlyASuccessfulLookupConfirmsAnAccount:
+    """The first version treated anything that was not a 404 as confirmation,
+    turning a 403 -- an address this admin may not query -- into "the account
+    is back", and would have marked a real failure resolved on a permission
+    error. Live, the directory pass emitted exactly that 403."""
+
+    def _seed(self, tmp_path):
+        d = _db(tmp_path)
+        d.log_audit("u@src", "file1:x@tgt", "acl", "FAILED",
+                    "no Google account associated with this email address")
+        return d
+
+    def test_a_403_does_not_confirm_the_account(self, tmp_path):
+        class Forbidden(FakeDirectory):
+            def get(self, userKey, fields=None):
+                class _R:
+                    def execute(self):
+                        raise RuntimeError("<HttpError 403 ... forbidden>")
+                return _R()
+
+        d = self._seed(tmp_path)
+        assert repair.stale_grantee_failures(d, Forbidden(set())) == []
+        d.close()
+
+    def test_a_network_error_does_not_confirm_the_account(self, tmp_path):
+        class Broken(FakeDirectory):
+            def get(self, userKey, fields=None):
+                class _R:
+                    def execute(self):
+                        raise RuntimeError("connection reset")
+                return _R()
+
+        d = self._seed(tmp_path)
+        assert repair.stale_grantee_failures(d, Broken(set())) == []
+        d.close()
+
+    def test_a_real_lookup_still_confirms(self, tmp_path):
+        d = self._seed(tmp_path)
+        assert len(repair.stale_grantee_failures(
+            d, FakeDirectory({"x@tgt"}))) == 1
+        d.close()

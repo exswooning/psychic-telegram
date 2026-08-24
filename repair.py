@@ -28,9 +28,13 @@ import logging
 
 log = logging.getLogger("repair")
 
-# The grantee-missing 400 is quoted verbatim by Drive; matched on the stable
-# half of the sentence rather than the address list it interpolates.
-NO_ACCOUNT = "no Google accounts associated with these email addresses"
+# The grantee-missing 400 is quoted verbatim by Drive. Matched on the stable
+# fragment only: Drive writes "no Google accountS ... these email addressES"
+# for several grantees and "no Google account ... this email address" for
+# one, and a pattern written from a single observed message caught the
+# plural alone -- leaving 2,900 rows of the same cause in "unclassified",
+# where they read as an unknown problem rather than a known one.
+NO_ACCOUNT = "no Google account"
 QUOTA = "Quota exceeded"
 INVALID_LABEL = "Invalid label"
 
@@ -79,10 +83,17 @@ def stale_grantee_failures(db, directory=None) -> list:
                 directory.users().get(userKey=grantee,
                                       fields="primaryEmail").execute()
                 seen[grantee] = True
-            except Exception as exc:      # noqa: BLE001
-                text = str(exc)
-                seen[grantee] = not ("404" in text or "notFound" in text
-                                     or "Resource Not Found" in text)
+            except Exception:      # noqa: BLE001
+                # ONLY a successful lookup counts as "this account exists".
+                #
+                # The first version treated anything that was not a 404 as
+                # confirmation, which turned a 403 -- an address this admin
+                # may not query -- into "the account is back", and would have
+                # marked a real, current failure resolved on the strength of
+                # a permission error. Live, the directory pass emitted a 403.
+                # Not knowing and knowing-it-exists must not lead to the same
+                # place.
+                seen[grantee] = False
         if seen[grantee]:
             out.append(r)
     return out
