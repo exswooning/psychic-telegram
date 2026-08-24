@@ -124,28 +124,41 @@ class TestLoopingUntilItSettles:
             d.log_audit("u@src", f"f1:g{i}@tgt", "acl", "FAILED", "Quota")
         return d
 
-    def test_it_stops_when_a_pass_applies_nothing(self, tmp_path, monkeypatch):
-        """The next pass would do the same, so continuing only burns quota."""
+    def test_it_stops_when_the_failure_count_stops_dropping(self, tmp_path,
+                                                             monkeypatch):
+        """Applied-count and progress are different numbers, and the
+        difference wasted four passes live: _sync_acls re-applies every grant
+        on a file it visits, so it kept reporting 21 successes per pass for
+        grants that had never failed while the 712 that had stayed put."""
         import acl_repair as mod
         calls = []
+        # Always "applies" 21, never clears a failure -- the live shape.
         monkeypatch.setattr(mod, "repair",
                             lambda *a, **k: calls.append(1) or
-                            {"applied": 0, "errors": []})
-        d = self._db(tmp_path)
+                            {"applied": 21, "errors": []})
+        d = self._db(tmp_path, acl_failures=3)
         out = mod.repair_until_settled(None, d, None)
-        assert out["passes"] == 1 and len(calls) == 1
+        assert out["passes"] == 1, "a pass that clears nothing must be the last"
+        assert len(calls) == 1
         d.close()
 
-    def test_it_keeps_going_while_progress_is_made(self, tmp_path, monkeypatch):
+    def test_it_keeps_going_while_failures_actually_fall(self, tmp_path,
+                                                          monkeypatch):
         import acl_repair as mod
-        seq = iter([{"applied": 5, "errors": []},
-                    {"applied": 2, "errors": []},
-                    {"applied": 0, "errors": []}])
-        monkeypatch.setattr(mod, "repair", lambda *a, **k: next(seq))
-        d = self._db(tmp_path)
+
+        def clear_one(*a, **k):
+            row = d.conn.execute(
+                "SELECT item_id FROM audit_log WHERE item_type='acl' "
+                "AND status='FAILED' LIMIT 1").fetchone()
+            if row:
+                d.log_audit("u@src", row["item_id"], "acl", "SUCCESS")
+            return {"applied": 1, "errors": []}
+
+        monkeypatch.setattr(mod, "repair", clear_one)
+        d = self._db(tmp_path, acl_failures=3)
         out = mod.repair_until_settled(None, d, None)
-        assert out["passes"] == 3
-        assert out["applied"] == 7
+        assert out["remaining"] == 0
+        assert out["passes"] == 4, "three clearing passes, then one that does not"
         d.close()
 
     def test_max_passes_caps_a_grant_that_never_succeeds(self, tmp_path,
@@ -154,11 +167,20 @@ class TestLoopingUntilItSettles:
         address, a deleted grantee -- would otherwise loop until the quota
         ran out."""
         import acl_repair as mod
-        monkeypatch.setattr(mod, "repair",
-                            lambda *a, **k: {"applied": 1, "errors": []})
-        d = self._db(tmp_path)
+        # Genuinely progressing every pass, from a pool too large to finish
+        # within max_passes.
+        def clears_one(*a, **k):
+            row = d.conn.execute(
+                "SELECT item_id FROM audit_log WHERE item_type='acl' "
+                "AND status='FAILED' LIMIT 1").fetchone()
+            d.log_audit("u@src", row["item_id"], "acl", "SUCCESS")
+            return {"applied": 1, "errors": []}
+
+        d = self._db(tmp_path, acl_failures=40)
+        monkeypatch.setattr(mod, "repair", clears_one)
         out = mod.repair_until_settled(None, d, None, max_passes=4)
         assert out["passes"] == 4
+        assert out["remaining"] == 36, "still work left when the cap hit"
         d.close()
 
     def test_it_reports_what_is_left(self, tmp_path, monkeypatch):

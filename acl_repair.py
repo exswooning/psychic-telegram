@@ -151,12 +151,25 @@ def repair_until_settled(auth, db, settings, max_passes: int = 12,
     throttling that ended the previous pass is no longer the binding
     constraint.
 
-    Stops when a pass applies nothing, because the next one would do the
-    same. max_passes is a backstop against a grant that fails forever for a
-    reason unrelated to pacing -- an invalid address, a deleted grantee --
-    which would otherwise loop until the quota ran out.
+    Stops when the FAILURE COUNT stops dropping, not when a pass applies
+    nothing. Those are different, and the difference wasted four passes on
+    the live ledger: _sync_acls re-applies every grant on a file it visits,
+    so it kept reporting 21 successes per pass for grants that had never
+    failed, while the 712 that had stayed exactly where they were. Measuring
+    what was applied measures effort; measuring what is left measures
+    progress.
+
+      pass 1: applied 9871, 712 acl failure(s) left
+      pass 2: applied 21,   712 acl failure(s) left
+      pass 3: applied 21,   712 acl failure(s) left
+
+    max_passes remains a backstop for a corpus large enough that each pass
+    genuinely makes progress but never finishes.
     """
     total = {"passes": 0, "applied": 0, "remaining": None, "errors": []}
+    previous = db.conn.execute(
+        "SELECT COUNT(*) c FROM audit_log "
+        "WHERE item_type='acl' AND status='FAILED'").fetchone()["c"]
     for i in range(1, max_passes + 1):
         stats = repair(auth, db, settings, dry_run=False)
         total["passes"] = i
@@ -168,8 +181,9 @@ def repair_until_settled(auth, db, settings, max_passes: int = 12,
         total["remaining"] = remaining
         if on_pass:
             on_pass(i, stats["applied"], remaining)
-        if stats["applied"] == 0:
+        if remaining >= previous:
             break
+        previous = remaining
     return total
 
 
