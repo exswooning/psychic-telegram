@@ -163,7 +163,20 @@ PRESSURE_FLOOR_FRACTION = 0.05
 # RAM still binds first on a small box: recommend() divides usable memory by
 # mb_per_worker() before this cap is consulted, and memory pressure collapses
 # the pool to MIN_WORKERS regardless.
-HARD_CAP = 32
+# 48, not 32, and not because 48 is special: it is high enough that RAM
+# becomes the binding term on any box this runs on, which is the term that
+# is actually measured. Raising 16 -> 32 scaled throughput linearly on a
+# live 818k-item run (1,000 -> 1,996 items/min) and left the box at 42% CPU
+# with 51% idle, no quota pushback on either project limiter, and 2.16 GB
+# free -- so nothing the cap was protecting was under any pressure at 32
+# either. Each worker spends about a second per item waiting on a round
+# trip, so concurrency buys throughput until something real binds.
+#
+# recommend() divides usable RAM by mb_per_worker() before consulting this,
+# so a 3 GB box lands near 40 and a small one lands far below it. The cap
+# only stops an enormous host from opening hundreds of delegated clients
+# against one pair of tenants.
+HARD_CAP = 48
 
 # The seeder gets a higher ceiling than HARD_CAP because the quota that
 # sets HARD_CAP does not apply to it. HARD_CAP is about Google's PER-USER

@@ -477,10 +477,17 @@ class TestTheUserPoolCapMatchesItsOwnReasoning:
     Live, 16 workers sustained 1,374 items/min at 52% CPU with both project
     limiters climbing past 690/s: neither CPU nor quota was binding."""
 
-    def test_the_two_pools_agree(self):
-        assert resources.HARD_CAP == resources.SEED_HARD_CAP, (
-            "both pools give each worker its own account, so the per-user "
-            "quota argument applies identically to both")
+    def test_neither_pool_is_capped_below_what_ram_allows(self):
+        """The caps exist to stop an enormous host opening hundreds of
+        delegated clients against one tenant pair -- not to be the number
+        that decides a normal box. On anything ordinary, RAM binds first,
+        and RAM is the term that is actually measured."""
+        r = resources.SystemResources(
+            cpu_logical=8, cpu_physical=8, ram_total_gb=4.0,
+            ram_usable_gb=2.6, swap_total_gb=0.0, swap_used_gb=0.0)
+        rec = resources.recommend(r)
+        assert rec["user_workers"] < resources.HARD_CAP
+        assert rec["seed_workers"] < resources.SEED_HARD_CAP
 
     def test_ram_still_binds_before_the_cap_on_a_small_box(self):
         r = resources.SystemResources(
