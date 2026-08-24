@@ -842,6 +842,75 @@ def _warn_if_ledger_is_stale(db, auth, pairs) -> None:
         "see verify-ledger")
 
 
+def cmd_repair(args, settings: Settings, db: MigrationDB,
+               auth: "AuthManager") -> int:
+    """Survey the failure families a run left behind, and fix the fixable.
+
+    A finished run's failure count is not one number. Live on 201 users it
+    was 119,600 across three causes needing three different responses, and
+    reported as a single red figure that made a migration whose Drive data
+    was intact look broken.
+    """
+    import repair
+
+    survey = repair.survey(db)
+    print(f"{survey['total']:,} failed item(s) recorded")
+    print()
+    named = 0
+    for key, label in (
+            ("acl_no_account",
+             "ACL grants refused because the grantee had no account"),
+            ("acl_quota", "ACL grants refused for quota"),
+            ("gmail_invalid_label",
+             "Gmail messages rejected as \"Invalid label\"")):
+        if survey[key]:
+            named += survey[key]
+            print(f"  {survey[key]:>9,}  {label}")
+    other = survey["total"] - named
+    if other > 0:
+        print(f"  {other:>9,}  other / unclassified")
+    if not survey["total"]:
+        return 0
+
+    print()
+    if survey["gmail_invalid_label"]:
+        print("Gmail label failures are repaired at their source: "
+              "sync_labels() now drops mappings whose target label no longer "
+              "exists and re-creates them, so the next migrate or delta pass "
+              "carries these messages. No action needed here.")
+
+    stale = []
+    if survey["acl_no_account"]:
+        stale = repair.stale_grantee_failures(db, auth.directory("target"))
+        print()
+        print(f"{len(stale):,} ACL failure(s) blame a grantee that has an "
+              f"account now -- the accounts were recreated after those rows "
+              f"were written.")
+
+    if survey["acl_quota"]:
+        print()
+        print(f"{survey['acl_quota']:,} quota-refused ACL grant(s) need the "
+              f"target asked whether the grant landed anyway. Run "
+              f"`acl_reconcile.py` for that; it is a per-file network check "
+              f"and deliberately not bundled into this survey.")
+
+    if not args.apply:
+        print()
+        print("Nothing changed. Re-run with --apply to mark the stale "
+              "grantee failures resolved.")
+        return 1
+
+    n = repair.resolve(db, stale, "SKIPPED_GRANTEE_RECREATED",
+                       "grantee had no account when this was attempted; the "
+                       "account exists now, so the row describes a state that "
+                       "no longer holds",
+                       dry_run=False)
+    print()
+    print(f"Marked {n:,} row(s) resolved. Audit history preserved -- the "
+          f"status changed, the original error is kept in the note.")
+    return 0
+
+
 def cmd_verify_ledger(args, settings: Settings, db: MigrationDB,
                       auth: "AuthManager") -> int:
     """Does the ledger still describe the tenant?
@@ -1430,6 +1499,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("preflight", help="verify DWD for every mapped user")
     s.set_defaults(func=cmd_preflight)
+
+    s = sub.add_parser("repair",
+                       help="survey the failure families a run left behind "
+                            "and fix the fixable ones")
+    s.add_argument("--apply", action="store_true",
+                   help="mark resolvable failures resolved (default: report "
+                        "only)")
+    s.set_defaults(func=cmd_repair)
 
     s = sub.add_parser("verify-ledger",
                        help="check that mapped target items still exist "

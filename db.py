@@ -474,14 +474,24 @@ class MigrationDB:
     def forget_mappings(self, source_user: str) -> int:
         """Drop this user's mappings so the next run migrates them again.
 
-        Only id_mapping. The audit rows are deliberately left alone: they
-        record that the work was done and when, which is the evidence of
-        what happened to it, and a migration that erases its own history
-        cannot explain itself afterwards.
+        id_mapping AND label_map. Both record a TARGET id, and both stop
+        being valid for the same reason -- a recreated target account has
+        new ids for everything. Clearing only id_mapping is what left
+        32,967 Gmail messages failing with "Invalid label" after the
+        accounts were recreated: the files were re-migrated correctly while
+        every message carrying a user label was rejected against a label id
+        belonging to the deleted mailbox.
+
+        The audit rows are deliberately left alone: they record that the
+        work was done and when, which is the evidence of what happened to
+        it, and a migration that erases its own history cannot explain
+        itself afterwards.
         """
         with self.write() as conn:
             n = conn.execute("DELETE FROM id_mapping WHERE source_user=?",
                              (source_user,)).rowcount
+            conn.execute("DELETE FROM label_map WHERE source_user=?",
+                         (source_user,))
         self._mapping_cache.pop(source_user, None)
         self._mapping_cached_users.discard(source_user)
         return n
@@ -539,6 +549,18 @@ class MigrationDB:
                                    WHERE m.source_user = i.source_email)
                   AND migrated > 0
                 ORDER BY migrated DESC""").fetchall()
+
+    def forget_label(self, source_user: str, source_label_id: str) -> None:
+        """Drop one label mapping so the next sync re-creates it.
+
+        Needed because a target label id can stop being valid without the
+        source label changing at all -- a recreated mailbox has new ids for
+        the same names.
+        """
+        with self.write() as conn:
+            conn.execute(
+                "DELETE FROM label_map WHERE source_user=? AND source_label_id=?",
+                (source_user, source_label_id))
 
     def reopen_identity(self, source_email: str) -> None:
         """Clear a user's finished-state so the next run picks them up again.

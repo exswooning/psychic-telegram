@@ -769,3 +769,63 @@ class TestConcurrentMessageMigration:
         m = self._run(auth, db, settings, 1, [RAW_1])
         assert m.stats["inserted"] == 1
         assert len(auth.target_gmail(TGT_USER).messages) == 1
+
+
+class TestStaleLabelMappingsAreRepaired:
+    """label_map records a TARGET label id, and nothing checked the label was
+    still there. A recreated target mailbox has entirely different ids, so
+    every mapping points into the deleted account -- and _map_label_ids then
+    hands those dead ids to messages.insert, which rejects the whole message
+    as "Invalid label". 32,967 messages were lost that way in one run, all
+    retryable, none reported as a label problem.
+    """
+
+    def test_a_mapping_to_a_missing_label_is_remapped(self, gmail_migrator,
+                                                      auth, db):
+        src = auth.source_gmail(SRC_USER)
+        src.add_user_label("Clients")
+        src_id = [l["id"] for l in src.labels if l["name"] == "Clients"][0]
+        # A mapping left over from a mailbox that no longer exists.
+        db.record_label(SRC_USER, src_id, "Label_DEAD", "Clients")
+
+        gmail_migrator.sync_labels()
+
+        mapped = db.get_label_map(SRC_USER)
+        assert "Label_DEAD" not in mapped.values(), (
+            "a target label that no longer exists must not stay mapped")
+        live = {l["id"] for l in auth.target_gmail(TGT_USER).labels}
+        assert set(mapped.values()) <= live
+
+    def test_a_valid_mapping_is_left_alone(self, gmail_migrator, auth, db):
+        """Re-creating labels that are already correct would churn the target
+        and burn quota on every single run."""
+        src = auth.source_gmail(SRC_USER)
+        src.add_user_label("Finance")
+        tgt = auth.target_gmail(TGT_USER)
+        tgt.add_user_label("Finance")
+        real_id = [l["id"] for l in tgt.labels if l["name"] == "Finance"][0]
+        src_id = [l["id"] for l in src.labels if l["name"] == "Finance"][0]
+        db.record_label(SRC_USER, src_id, real_id, "Finance")
+
+        before = len(tgt.calls_to("labels.create"))
+        gmail_migrator.sync_labels()
+        assert len(tgt.calls_to("labels.create")) == before
+        assert db.get_label_map(SRC_USER)[src_id] == real_id
+
+    def test_the_repaired_mapping_points_at_the_same_name(self, gmail_migrator,
+                                                          auth, db):
+        """Remapping must preserve which label a message lands in -- a
+        message re-labelled into the wrong folder is worse than one that
+        failed loudly."""
+        src = auth.source_gmail(SRC_USER)
+        src.add_user_label("Clients/Acme")
+        src_id = [l["id"] for l in src.labels
+                  if l["name"] == "Clients/Acme"][0]
+        db.record_label(SRC_USER, src_id, "Label_DEAD", "Clients/Acme")
+
+        gmail_migrator.sync_labels()
+
+        tgt = auth.target_gmail(TGT_USER)
+        by_id = {l["id"]: l["name"] for l in tgt.labels}
+        new_id = db.get_label_map(SRC_USER).get(src_id)
+        assert new_id and by_id[new_id] == "Clients/Acme"

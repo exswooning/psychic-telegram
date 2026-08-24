@@ -123,6 +123,33 @@ class GmailMigrator:
         ).get("labels", [])
         by_name = {l["name"]: l["id"] for l in tgt_labels}
 
+        # Drop mappings whose target label no longer exists.
+        #
+        # label_map records a target label id, and nothing ever checked that
+        # the label was still there. When a target account is deleted and
+        # recreated -- which is what happened to all 200 accounts on
+        # 2026-08-21 -- the recreated mailbox has entirely different label
+        # ids, so every mapping points at a label in the deleted account.
+        # _map_label_ids then hands those dead ids to messages.insert and
+        # Gmail rejects the whole message with "Invalid label": 32,967
+        # messages lost that way in one run, all of them retryable, none of
+        # them reported as a label problem.
+        #
+        # Checked here rather than repaired by a migration tool elsewhere,
+        # because this is the one place that already holds both sides of the
+        # mapping and is about to rely on it.
+        live_ids = {l["id"] for l in tgt_labels}
+        stale = [sid for sid, tid in existing_map.items() if tid not in live_ids]
+        if stale:
+            log.warning(
+                "[%s] %d of %d label mapping(s) point at labels that no "
+                "longer exist on the target -- remapping. Left alone, every "
+                "message carrying one is rejected as \"Invalid label\".",
+                self.source_user, len(stale), len(existing_map))
+            for sid in stale:
+                self.db.forget_label(self.source_user, sid)
+            existing_map = self.db.get_label_map(self.source_user)
+
         for l in user_labels:
             if l["id"] in existing_map:
                 continue
