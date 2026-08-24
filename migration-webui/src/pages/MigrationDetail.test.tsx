@@ -8,6 +8,12 @@ const startDelta = vi.fn()
 vi.mock('@/api/controlPlane', () => ({
   fetchMigrationDetail: (...a: unknown[]) => fetchMigrationDetail(...a),
   startDelta: (...a: unknown[]) => startDelta(...a),
+  // The page also surveys its failures. A mock missing an export the
+  // component calls throws inside render, which surfaces as every assertion
+  // failing rather than as the one missing name.
+  fetchRepairSurvey: () => Promise.resolve({
+    accountId: 7, total: 0, families: [], unclassified: 0, error: '' }),
+  runRepair: vi.fn(),
 }))
 
 /**
