@@ -13,18 +13,24 @@ from resilience import AdaptiveRateLimiter
 
 
 class TestItBacksOffWhenPushedBack:
-    def test_a_quota_rejection_halves_the_rate(self):
+    def test_a_quota_rejection_lowers_the_rate(self):
+        """Asserted as a property, not as a factor. The factor moved from 0.5
+        to 0.7 on live evidence (a retried 403 costs a retry, not an item),
+        and a test pinned to the constant fails on a deliberate tuning change
+        while saying nothing about whether backoff still works."""
         lim = AdaptiveRateLimiter(80, floor=10, ceiling=200)
-        assert lim.penalise() == 40.0
+        after = lim.penalise()
+        assert 10.0 <= after < 80.0
 
     def test_backoff_is_multiplicative_not_a_single_step(self):
-        """Additive backoff spends one real failed operation per step on the
-        way down, and those are grants that did not transfer -- not retry
-        counters. Halving makes overshoot cheap to correct."""
+        """Additive backoff would spend one rejection per step on the way
+        down from a badly over-driven rate. Multiplicative decrease makes
+        overshoot cheap to correct -- three rejections must cost most of the
+        rate, whatever the exact factor is."""
         lim = AdaptiveRateLimiter(200, floor=1, ceiling=200)
         for _ in range(3):
             lim.penalise()
-        assert lim.rate == 25.0
+        assert lim.rate < 200 / 2.5
 
     def test_it_never_falls_below_the_floor(self):
         """A burst of 429s from an unrelated cause must not be able to drive
@@ -62,8 +68,9 @@ class TestItClimbsWhenClean:
         lim = AdaptiveRateLimiter(40, floor=10, ceiling=200,
                                   step=5, probe_after=60)
         lim.penalise()
+        backed_off = lim.rate
         lim.acquire()
-        assert lim.rate == 20.0
+        assert lim.rate == backed_off, "climbed again inside the quiet window"
 
 
 class TestItSaysWhatItDid:
@@ -226,8 +233,8 @@ class TestEachProjectGetsItsOwnBucket:
         src = drive_engine._project_limiter(40, "source")
         tgt = drive_engine._project_limiter(40, "target")
         src.penalise()
-        assert src.rate == 20.0
-        assert tgt.rate == 40.0
+        assert src.rate < 40.0, "the source bucket did not back off"
+        assert tgt.rate == 40.0, "the target bucket was throttled too"
 
 
 class TestSourceCallsAreChargedToTheSourceProject:
@@ -293,3 +300,66 @@ class TestSourceCallsAreChargedToTheSourceProject:
         args = ast.dump(ast.Module(
             body=[ast.Expr(a) for a in found[0].args], type_ignores=[]))
         assert "attr='src'" in args, "and must see self.src inside the lambda"
+
+
+class TestBackoffIsGentlerThanHalving:
+    """Halving is TCP's factor, chosen where a dropped packet may mean the
+    path is collapsing. Here a 403 rateLimitExceeded is retried and lands:
+    across 41 hours of a live run, 5,050 of them produced zero failed items.
+    Overshoot costs a retry, undershoot costs throughput, and halving paid
+    the expensive one to avoid the cheap one -- 1,281 backoffs, one every two
+    minutes, each halving a rate just shown sustainable.
+    """
+
+    def test_a_rejection_does_not_halve_the_rate(self):
+        from resilience import AdaptiveRateLimiter
+        lim = AdaptiveRateLimiter(80, floor=5, ceiling=1200)
+        lim.penalise()
+        assert lim.rate > 40.0, "still halving"
+        assert lim.rate < 80.0, "must actually back off"
+
+    def test_it_stays_multiplicative(self):
+        """An additive decrease would take far too long to escape a rate that
+        is genuinely too high. Three rejections should still cost most of it."""
+        from resilience import AdaptiveRateLimiter
+        lim = AdaptiveRateLimiter(80, floor=1, ceiling=1200)
+        for _ in range(3):
+            lim.penalise()
+        assert lim.rate < 80 / 2.5
+
+    def test_the_floor_still_holds(self):
+        from resilience import AdaptiveRateLimiter
+        lim = AdaptiveRateLimiter(6, floor=5, ceiling=100)
+        for _ in range(20):
+            lim.penalise()
+        assert lim.rate == 5.0
+
+    def test_recovery_is_faster_than_under_halving(self):
+        """The whole point: fewer probes back to a rate already proven."""
+        from resilience import AdaptiveRateLimiter
+
+        def probes_to_recover(decrease):
+            lim = AdaptiveRateLimiter(80, floor=1, ceiling=1200,
+                                      probe_after=0, decrease=decrease)
+            lim.penalise()
+            n = 0
+            while lim.rate < 80 and n < 100:
+                lim.acquire()
+                n += 1
+            return n
+
+        assert probes_to_recover(0.7) < probes_to_recover(0.5)
+
+    def test_a_nonsense_factor_cannot_disable_backoff(self):
+        """>= 1 would never back off; <= 0 would stall the migration."""
+        from resilience import AdaptiveRateLimiter
+        assert AdaptiveRateLimiter(10, floor=1, ceiling=100,
+                                   decrease=5).decrease < 1.0
+        assert AdaptiveRateLimiter(10, floor=1, ceiling=100,
+                                   decrease=-1).decrease > 0.0
+
+    def test_the_factor_is_reported_in_stats(self):
+        """A limiter that retunes itself must say what it is doing."""
+        from resilience import AdaptiveRateLimiter
+        assert "decrease" in AdaptiveRateLimiter(10, floor=1,
+                                                 ceiling=100).stats()

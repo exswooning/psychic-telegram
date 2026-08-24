@@ -423,7 +423,7 @@ class AdaptiveRateLimiter(RateLimiter):
     def __init__(self, rate_per_sec: float, *, floor: float, ceiling: float,
                  step: float | None = None, growth: float = 0.10,
                  probe_after: float = 20.0,
-                 burst: int = 1, on_change=None):
+                 burst: int = 1, on_change=None, decrease: float = 0.7):
         super().__init__(rate_per_sec, burst=burst)
         self.floor = max(float(floor), 0.001)
         self.ceiling = max(float(ceiling), self.floor)
@@ -442,6 +442,8 @@ class AdaptiveRateLimiter(RateLimiter):
         self.step = float(step) if step is not None else None
         self.growth = max(float(growth), 0.0)
         self.probe_after = float(probe_after)
+        # Bounded: >= 1 would never back off, <= 0 would stall the migration.
+        self.decrease = min(max(float(decrease), 0.05), 0.95)
         self._on_change = on_change
         self.rate = min(max(self.rate, self.floor), self.ceiling)
         self._last_change = time.monotonic()
@@ -449,11 +451,32 @@ class AdaptiveRateLimiter(RateLimiter):
         self._backoffs = 0
 
     def penalise(self) -> float:
-        """Called when the service rejected a call for quota. Halves the rate."""
+        """Called when the service rejected a call for quota.
+
+        Backs off by `decrease`, not by half.
+
+        Halving is TCP's factor, chosen where a dropped packet may mean the
+        path is collapsing and overshoot is expensive. Here a 403
+        rateLimitExceeded is retried and lands: measured across 41 hours of a
+        live run, 5,050 of them produced zero failed items. Overshoot costs a
+        retry; undershoot costs throughput -- and halving pays the expensive
+        one to avoid the cheap one.
+
+        What that looked like: 1,281 backoffs, one every two minutes, each
+        halving a rate that had just been shown sustainable. Climbing back
+        from 40 to 80/s takes about seven probes at 20-second intervals, so
+        the limiter spent most of its life below a rate it had already
+        proven, and 17 of 201 users finished in two days.
+
+        0.7 keeps the multiplicative decrease that makes AIMD stable while
+        cutting recovery to roughly three probes. Still multiplicative, so a
+        genuinely over-driven rate still collapses quickly: three
+        consecutive rejections take it to a third.
+        """
         with self._lock:
             self._rejections += 1
             before = self.rate
-            self.rate = max(self.floor, self.rate / 2.0)
+            self.rate = max(self.floor, self.rate * self.decrease)
             self._last_change = time.monotonic()
             if self.rate < before:
                 self._backoffs += 1
@@ -484,7 +507,7 @@ class AdaptiveRateLimiter(RateLimiter):
         with self._lock:
             return {"rate": round(self.rate, 2), "floor": self.floor,
                     "ceiling": self.ceiling, "rejections": self._rejections,
-                    "backoffs": self._backoffs}
+                    "backoffs": self._backoffs, "decrease": self.decrease}
 
 
 # ======================================================================
