@@ -911,35 +911,22 @@ def cmd_repair(args, settings: Settings, db: MigrationDB,
               "exists and re-creates them, so the next migrate or delta pass "
               "carries these messages. No action needed here.")
 
-    stale = []
-    if survey["acl_no_account"]:
-        stale = repair.stale_grantee_failures(db, auth.directory("target"))
-        print()
-        print(f"{len(stale):,} ACL failure(s) blame a grantee that has an "
-              f"account now -- the accounts were recreated after those rows "
-              f"were written.")
-
-    if survey["acl_quota"]:
-        print()
-        print(f"{survey['acl_quota']:,} quota-refused ACL grant(s) need the "
-              f"target asked whether the grant landed anyway. Run "
-              f"`acl_reconcile.py` for that; it is a per-file network check "
-              f"and deliberately not bundled into this survey.")
-
     if not args.apply:
         print()
-        print("Nothing changed. Re-run with --apply to mark the stale "
-              "grantee failures resolved.")
+        print("Nothing changed. Re-run with --apply to fix what can be fixed.")
         return 1
 
-    n = repair.resolve(db, stale, "SKIPPED_GRANTEE_RECREATED",
-                       "grantee had no account when this was attempted; the "
-                       "account exists now, so the row describes a state that "
-                       "no longer holds",
-                       dry_run=False)
+    # Through run_all, the same entry point cmd_migrate uses when a run
+    # finishes. This once had its own copy of the fix-up sequence, and the
+    # copies drifted immediately: the false-DONE demotion was added to
+    # run_all and `repair --apply` silently kept reporting the finding
+    # without ever applying it. One path, so manual and automatic repair
+    # cannot mean different things.
+    result = repair.run_all(db, auth, settings, apply=True)
     print()
-    print(f"Marked {n:,} row(s) resolved. Audit history preserved -- the "
-          f"status changed, the original error is kept in the note.")
+    print(repair.summarise(result))
+    if result.get("errors"):
+        return 1
     return 0
 
 

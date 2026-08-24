@@ -432,3 +432,26 @@ class TestUsersMarkedDoneThatMigratedNothing:
             "SELECT status FROM audit_log WHERE item_type='user'"
         ).fetchone()["status"] == "FAILED"
         d.close()
+
+
+class TestManualAndAutomaticRepairAgree:
+    """cmd_repair once had its own copy of the fix-up sequence, and the copies
+    drifted immediately: the false-DONE demotion was added to run_all, and
+    `repair --apply` kept reporting the finding on every run without ever
+    applying it. The finding was printed, the fix never happened, and the
+    output gave no hint of the difference."""
+
+    def test_the_cli_applies_every_repair_run_all_does(self):
+        """Asserted against the source, because the failure mode is a second
+        implementation that looks right and does less."""
+        import inspect
+
+        import main
+        src = inspect.getsource(main.cmd_repair)
+        assert "run_all" in src, (
+            "cmd_repair must delegate to repair.run_all, not reimplement it")
+        for own in ("resolve_users(", "demote_false_done(",
+                    "stale_grantee_failures("):
+            assert f"repair.{own}" not in src, (
+                f"cmd_repair calls repair.{own} directly, which is how the "
+                f"two paths drifted before")
