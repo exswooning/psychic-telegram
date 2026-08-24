@@ -640,7 +640,10 @@ def recommend(r: SystemResources | None = None,
         # pool?" -- with a sentence about Google's quotas that never mentions
         # sharing at all. The split is still being applied; it just stopped
         # being what decided the number, and those are different facts.
-        why.append(f"capped at {HARD_CAP}; past this Google's per-user quotas bind first")
+        why.append(
+            f"capped at {HARD_CAP}; each worker owns a different user, so "
+            f"what binds past this is the per-project quota, which the "
+            f"adaptive limiter paces")
         if jobs > 1:
             why.append(f"{budget_mb / 1024:.1f} GB budget "
                        f"({r.ram_usable_gb:.1f} GB usable / {jobs} concurrent jobs) "

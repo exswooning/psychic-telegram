@@ -503,3 +503,18 @@ class TestTheUserPoolCapMatchesItsOwnReasoning:
             cpu_logical=8, cpu_physical=8, ram_total_gb=32.0,
             ram_usable_gb=24.0, swap_total_gb=0.0, swap_used_gb=0.0)
         assert resources.recommend(r)["user_workers"] == resources.HARD_CAP
+
+
+class TestTheReasonStringMatchesTheReasoning:
+    """The reason is shown in the UI and is the only explanation an operator
+    gets for a worker count. It said "past this Google's per-user quotas bind
+    first" -- the premise the cap was raised for being wrong."""
+
+    def test_it_does_not_still_blame_per_user_quotas(self):
+        r = resources.SystemResources(
+            cpu_logical=8, cpu_physical=8, ram_total_gb=32.0,
+            ram_usable_gb=24.0, swap_total_gb=0.0, swap_used_gb=0.0)
+        reason = resources.recommend(r)["reason"]
+        assert f"capped at {resources.HARD_CAP}" in reason
+        assert "per-user quotas bind" not in reason
+        assert "per-project" in reason
