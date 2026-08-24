@@ -25,10 +25,10 @@ const Counts: React.FC<{ row: MigrationRow }> = ({ row }) => {
   return (
     <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', gap: 0.5 }}>
       <Chip size="small" variant="outlined" color="success"
-            label={`${p.done.toLocaleString()} done`} />
+            label={`${p.done.toLocaleString()} users done`} />
       {p.running > 0 && (
         <Chip size="small" variant="outlined" color="primary"
-              label={`${p.running.toLocaleString()} running`} />
+              label={`${p.running.toLocaleString()} users running`} />
       )}
       {p.pending > 0 && (
         <Chip size="small" variant="outlined"
@@ -162,10 +162,27 @@ export const Migrations: React.FC = () => {
                 </Typography>
                 <Counts row={row} />
                 <Box sx={{ flex: 1 }} />
-                <Typography variant="caption" color="text.secondary">
-                  {p.items.toLocaleString()} items migrated
-                  {p.itemsFailed > 0 && `, ${p.itemsFailed.toLocaleString()} failed`}
-                </Typography>
+                {/* Items, given the weight the user counts used to have.
+                    Users are the wrong unit to watch here: one takes hours,
+                    so those chips sit still for a whole afternoon while
+                    hundreds of thousands of items move. Live, this row read
+                    17 users done across two days beside 457,385 items
+                    migrated -- with the moving number set in muted caption
+                    text at the far right and the static one in chips, a
+                    working migration was reported as making no progress.
+                    Same data, opposite emphasis. */}
+                <Stack alignItems="flex-end" data-testid={`items-${row.accountId}`}>
+                  <Typography sx={{ fontWeight: 700, fontSize: 18,
+                                    lineHeight: 1.2,
+                                    fontVariantNumeric: 'tabular-nums' }}>
+                    {p.items.toLocaleString()}
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    items migrated
+                    {p.itemsFailed > 0
+                      && ` · ${p.itemsFailed.toLocaleString()} failed`}
+                  </Typography>
+                </Stack>
               </Stack>
             </Paper>
           )

@@ -48,8 +48,8 @@ describe('Migrations', () => {
     show([row()])
     await waitFor(() => expect(screen.getByTestId('migration-7')).toBeTruthy())
     const card = screen.getByTestId('migration-7')
-    expect(card).toHaveTextContent('19 done')
-    expect(card).toHaveTextContent('9 running')
+    expect(card).toHaveTextContent('19 users done')
+    expect(card).toHaveTextContent('9 users running')
     expect(card).toHaveTextContent('171 pending')
     expect(card).toHaveTextContent('2 failed')
   })
@@ -62,9 +62,28 @@ describe('Migrations', () => {
 
   it('surfaces failed items rather than only the successful count', async () => {
     show([row()])
-    await waitFor(() => expect(screen.getByTestId('migration-7')).toBeTruthy())
-    expect(screen.getByTestId('migration-7')).toHaveTextContent('149,965 items migrated')
-    expect(screen.getByTestId('migration-7')).toHaveTextContent('1 failed')
+    await waitFor(() => expect(screen.getByTestId('items-7')).toBeTruthy())
+    // Asserted on the values, not on one contiguous string: the count and
+    // its label are separate elements so the count can carry the visual
+    // weight, and an assertion spanning both breaks on styling rather than
+    // on behaviour.
+    const items = screen.getByTestId('items-7')
+    expect(items).toHaveTextContent('149,965')
+    expect(items).toHaveTextContent('items migrated')
+    expect(items).toHaveTextContent('1 failed')
+  })
+
+  it('gives the item count more weight than the user chips', async () => {
+    // Users are the wrong unit to watch: one takes hours, so those chips sit
+    // still for a whole afternoon while hundreds of thousands of items move.
+    // Live, this row read 17 users done across two days beside 457,385 items
+    // migrated -- with the moving number in muted caption text at the far
+    // right, a working migration was reported as making no progress.
+    show([row()])
+    await waitFor(() => expect(screen.getByTestId('items-7')).toBeTruthy())
+    const count = screen.getByTestId('items-7').firstElementChild as HTMLElement
+    expect(count.textContent).toBe('149,965')
+    expect(Number.parseInt(getComputedStyle(count).fontWeight, 10)).toBeGreaterThanOrEqual(600)
   })
 
   it('marks a pair with no running job as idle', async () => {
