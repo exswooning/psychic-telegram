@@ -141,7 +141,29 @@ SWAP_DISTRESS = 0.60
 PRESSURE_FLOOR_MB = 128
 PRESSURE_FLOOR_FRACTION = 0.05
 
-HARD_CAP = 16          # beyond this, Google's per-user quotas bind first
+# Ceiling on the per-USER worker pool -- the threads that each own one
+# source/target user pair for the duration of that user's migration.
+#
+# Was 16, justified as "beyond this, Google's per-user quotas bind first".
+# That premise is wrong for this pool, and the comment on SEED_HARD_CAP
+# directly below has always said why: per-user limits bind when many workers
+# act on behalf of the SAME account, and every worker here owns a DIFFERENT
+# user, on both tenants. Those ceilings scale with the worker count instead
+# of being shared by it -- the identical argument that gives the seeder 32.
+# The premise does hold for the intra-user file pool, which is a separate
+# knob (drive_file_workers) and keeps its own limit.
+#
+# What actually binds is the per-PROJECT quota, and that is no longer a
+# guess: the adaptive limiter finds it and backs off when Google pushes
+# back. Measured on a live from-scratch run, 16 workers sustained 1,374
+# items/min at 52% CPU with both project limiters climbing freely past
+# 690/s -- neither CPU nor quota was the constraint, only the number of
+# users being worked at once.
+#
+# RAM still binds first on a small box: recommend() divides usable memory by
+# mb_per_worker() before this cap is consulted, and memory pressure collapses
+# the pool to MIN_WORKERS regardless.
+HARD_CAP = 32
 
 # The seeder gets a higher ceiling than HARD_CAP because the quota that
 # sets HARD_CAP does not apply to it. HARD_CAP is about Google's PER-USER

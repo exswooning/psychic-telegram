@@ -101,19 +101,30 @@ class TestSizing:
         assert rec["user_workers"] == resources.recommend(
             make(ram_usable=3.0, cores=32, swap_used=0.0))["user_workers"]
 
-    def test_the_seed_pool_is_sized_larger_than_the_migrate_pool(self):
-        """These deliberately disagree now. They used to be equal on the
-        premise that "the seeder holds a whole corpus per user", which the
-        live numbers contradict: one seed process with 10 threads held
-        157 MB RSS in total (~17 MB/worker), because it generates small
-        synthetic files in shared threads rather than streaming real ones
-        through memory the way the migrator does. Charging it the
-        migrator's 320 MB left a 2.9 GB box memory-bound at 9 workers and
-        a 201-user run at ~32 hours."""
+    def test_each_pool_is_sized_from_its_own_measured_cost(self):
+        """Neither pool is assumed larger than the other.
+
+        This asserted seed > migrate, which held only while MB_PER_WORKER was
+        a frozen 320 and the seeder's 128 made it the cheaper worker.
+        Deriving MB_PER_WORKER from the real 8 MB download chunk took it to
+        64 and inverted the relationship: a migrate worker is now the lighter
+        of the two, so on a RAM-bound box the migrate pool is the larger one.
+
+        The durable property is that each pool divides usable RAM by its own
+        measured per-worker cost and stops at its own cap -- not that either
+        one wins."""
         rec = resources.recommend(make(ram_usable=3.0, cores=2, swap_used=0.0))
         assert rec["seed_workers"] == min(
-            int(3.0 * 1024 // resources.MB_PER_SEED_WORKER), resources.SEED_HARD_CAP)
-        assert rec["seed_workers"] > rec["user_workers"]
+            int(3.0 * 1024 // resources.MB_PER_SEED_WORKER),
+            resources.SEED_HARD_CAP)
+        assert rec["user_workers"] == min(
+            int(3.0 * 1024 // resources.MB_PER_WORKER), resources.HARD_CAP)
+
+    def test_a_seed_worker_is_budgeted_more_than_a_migrate_worker(self):
+        """The seeder resolves its own API client per leaf and mail thread;
+        the migrator streams through a pinned 8 MB chunk. Measured: ~78 MB
+        against ~38 MB."""
+        assert resources.MB_PER_SEED_WORKER > resources.MB_PER_WORKER
 
     def test_the_seed_pool_is_still_ram_bound_on_a_small_box(self):
         """SEED_HARD_CAP is a ceiling, not a floor -- a genuinely small
@@ -456,3 +467,39 @@ class TestSizingDoesNotDependOnSettings:
         from config import Settings
         assert resources.mb_per_worker() == resources.mb_per_worker(
             Settings().download_chunk_bytes)
+
+
+class TestTheUserPoolCapMatchesItsOwnReasoning:
+    """HARD_CAP was 16 on the grounds that "Google's per-user quotas bind
+    first". Every worker in this pool owns a DIFFERENT user on both tenants,
+    so those ceilings scale with the worker count rather than being shared --
+    which is the exact argument written above SEED_HARD_CAP to justify 32.
+    Live, 16 workers sustained 1,374 items/min at 52% CPU with both project
+    limiters climbing past 690/s: neither CPU nor quota was binding."""
+
+    def test_the_two_pools_agree(self):
+        assert resources.HARD_CAP == resources.SEED_HARD_CAP, (
+            "both pools give each worker its own account, so the per-user "
+            "quota argument applies identically to both")
+
+    def test_ram_still_binds_before_the_cap_on_a_small_box(self):
+        r = resources.SystemResources(
+            cpu_logical=8, cpu_physical=8, ram_total_gb=2.0,
+            ram_usable_gb=1.0, swap_total_gb=0.0, swap_used_gb=0.0)
+        rec = resources.recommend(r)
+        assert rec["user_workers"] < resources.HARD_CAP
+        assert "RAM" in rec["reason"] or "usable" in rec["reason"]
+
+    def test_memory_pressure_still_collapses_the_pool(self):
+        """More concurrency under pressure does not go faster, it goes to
+        swap -- the 30 minutes of socket timeouts this module exists for."""
+        r = resources.SystemResources(
+            cpu_logical=16, cpu_physical=16, ram_total_gb=32.0,
+            ram_usable_gb=1.0, swap_total_gb=8.0, swap_used_gb=7.0)
+        assert resources.recommend(r)["user_workers"] == resources.MIN_WORKERS
+
+    def test_a_large_box_reaches_the_new_cap(self):
+        r = resources.SystemResources(
+            cpu_logical=8, cpu_physical=8, ram_total_gb=32.0,
+            ram_usable_gb=24.0, swap_total_gb=0.0, swap_used_gb=0.0)
+        assert resources.recommend(r)["user_workers"] == resources.HARD_CAP
