@@ -91,6 +91,81 @@ def _project_limiter(qps: float, tenant: str = "target"):
         return _PROJECT_LIMITERS[tenant]
 
 
+# ---------------------------------------------------------------------------
+# Inherited-ACL density: decide once per process whether recreating
+# folder-inherited grants on every file is affordable on THIS corpus.
+# ---------------------------------------------------------------------------
+_INHERIT_LOCK = threading.Lock()
+_INHERIT_STATS = {"files": 0, "inherited": 0, "disabled": False}
+
+# Sample before deciding: a handful of heavily-shared files says nothing about
+# a tenant, and disabling on one outlier would silently change what a small
+# migration preserves.
+INHERIT_SAMPLE_FILES = 50
+# Average inherited grants per file above which per-file recreation stops
+# paying. Normal per-file sharing is a few grantees; a folder shared with a
+# whole department shows up here as dozens. Live on a 201-user tenant: 50.7
+# average, one sampled file carrying 202 inherited grants and zero direct.
+INHERIT_DENSITY_LIMIT = 25.0
+
+
+def _inherited_acls_affordable(settings) -> bool:
+    """Should this run keep recreating folder-inherited grants per file?
+
+    The setting defaults to on, which is right for an ordinary tenant: it
+    makes each document carry its own sharing, so access survives the file
+    being moved out of the folder it was shared through.
+
+    It stops being right when a corpus shares at folder level. Every file in
+    a shared folder then carries a copy of that folder's whole grant list,
+    and the cost is one permissions.create per grantee per file. Measured on
+    a live 201-user tenant: 9,721,368 ACL operations across 191,672 files,
+    roughly 97% of every API call the migration made -- for access the
+    migrated folder tree already provided. Users took 15 to 35 hours each.
+
+    config.py has always carried a flag for this and its comment always said
+    to turn it off "on very large tenants". That requires knowing the flag
+    exists, knowing this tenant is one of those, and knowing before starting.
+    Nobody has all three on the first run, so the measurement is taken here
+    instead, from the grants actually seen.
+    """
+    if not settings.recreate_inherited_acls:
+        return False
+    with _INHERIT_LOCK:
+        return not _INHERIT_STATS["disabled"]
+
+
+def _note_inherited_density(inherited: int, settings, log_fn=None) -> None:
+    """Record one file's inherited-grant count; disable per-file recreation
+    once the sample says it is pathological. Decided once, process-wide,
+    because it is a property of the corpus rather than of a user."""
+    with _INHERIT_LOCK:
+        if _INHERIT_STATS["disabled"]:
+            return
+        _INHERIT_STATS["files"] += 1
+        _INHERIT_STATS["inherited"] += inherited
+        if _INHERIT_STATS["files"] < INHERIT_SAMPLE_FILES:
+            return
+        density = _INHERIT_STATS["inherited"] / _INHERIT_STATS["files"]
+        if density < INHERIT_DENSITY_LIMIT:
+            return
+        _INHERIT_STATS["disabled"] = True
+        _INHERIT_STATS["density"] = density
+    (log_fn or log.warning)(
+        "inherited ACLs average %.0f grants per file over %d files -- this "
+        "corpus shares at FOLDER level, so recreating them per file would "
+        "cost about %.0f extra permissions.create calls for every file "
+        "migrated, for access the copied folder tree already gives. "
+        "Switching to folder-derived sharing for the rest of this run. "
+        "Set MIGRATE_INHERITED_ACLS=true to force per-file grants anyway.",
+        density, INHERIT_SAMPLE_FILES, density)
+
+
+def inherited_acl_stats() -> dict:
+    with _INHERIT_LOCK:
+        return dict(_INHERIT_STATS)
+
+
 def limiter_stats() -> dict:
     """What each project bucket has settled on, for the dashboard.
 
@@ -1454,6 +1529,17 @@ class DriveMigrator:
         applied = 0
         batch: list[tuple[dict, str]] = []
 
+        # Counted before the loop decides anything, so the measurement is of
+        # what this corpus actually contains rather than of what the current
+        # setting happens to let through.
+        _note_inherited_density(
+            sum(1 for x in perms
+                if x.get("role") != "owner"
+                and any(d.get("inherited")
+                        for d in (x.get("permissionDetails") or []))),
+            self.settings)
+        keep_inherited = _inherited_acls_affordable(self.settings)
+
         for p in perms:
             if p.get("role") == "owner":
                 continue
@@ -1465,8 +1551,7 @@ class DriveMigrator:
             # the corpus shares in. Off for very large tenants, where that
             # specificity costs a permissions.create per inherited grantee
             # per file.
-            if any(d.get("inherited") for d in details) \
-                    and not self.settings.recreate_inherited_acls:
+            if any(d.get("inherited") for d in details) and not keep_inherited:
                 continue
 
             body: dict = {"type": p["type"], "role": p["role"]}
