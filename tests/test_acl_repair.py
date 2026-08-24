@@ -104,3 +104,68 @@ class TestAUserWithNoMappingIsCounted:
         stats = acl_repair.repair(None, d, None, dry_run=False)
         assert stats["skipped_no_target"] == 1
         d.close()
+
+
+class TestLoopingUntilItSettles:
+    """One pass never finishes the job, and the reason is the rate limiter
+    rather than the work. The project bucket is per-process and starts at its
+    configured rate, so a short run spends its life being throttled and
+    climbing, recovers a slice, and exits -- taking the adapted rate with it.
+    Live: 5,257 grants went to 4,164 in one pass, and the 3,987 left were
+    almost entirely "Quota exceeded" on the RE-application."""
+
+    def _db(self, tmp_path, acl_failures=3):
+        d = dbmod.MigrationDB(str(tmp_path / "m.db"))
+        d.conn.execute("INSERT INTO identity_map(source_email,target_email) "
+                       "VALUES('u@src','u@tgt')")
+        d.conn.commit()
+        d.record_mapping("u@src", "f1", "t1", "file")
+        for i in range(acl_failures):
+            d.log_audit("u@src", f"f1:g{i}@tgt", "acl", "FAILED", "Quota")
+        return d
+
+    def test_it_stops_when_a_pass_applies_nothing(self, tmp_path, monkeypatch):
+        """The next pass would do the same, so continuing only burns quota."""
+        import acl_repair as mod
+        calls = []
+        monkeypatch.setattr(mod, "repair",
+                            lambda *a, **k: calls.append(1) or
+                            {"applied": 0, "errors": []})
+        d = self._db(tmp_path)
+        out = mod.repair_until_settled(None, d, None)
+        assert out["passes"] == 1 and len(calls) == 1
+        d.close()
+
+    def test_it_keeps_going_while_progress_is_made(self, tmp_path, monkeypatch):
+        import acl_repair as mod
+        seq = iter([{"applied": 5, "errors": []},
+                    {"applied": 2, "errors": []},
+                    {"applied": 0, "errors": []}])
+        monkeypatch.setattr(mod, "repair", lambda *a, **k: next(seq))
+        d = self._db(tmp_path)
+        out = mod.repair_until_settled(None, d, None)
+        assert out["passes"] == 3
+        assert out["applied"] == 7
+        d.close()
+
+    def test_max_passes_caps_a_grant_that_never_succeeds(self, tmp_path,
+                                                          monkeypatch):
+        """A grant failing for a reason unrelated to pacing -- an invalid
+        address, a deleted grantee -- would otherwise loop until the quota
+        ran out."""
+        import acl_repair as mod
+        monkeypatch.setattr(mod, "repair",
+                            lambda *a, **k: {"applied": 1, "errors": []})
+        d = self._db(tmp_path)
+        out = mod.repair_until_settled(None, d, None, max_passes=4)
+        assert out["passes"] == 4
+        d.close()
+
+    def test_it_reports_what_is_left(self, tmp_path, monkeypatch):
+        import acl_repair as mod
+        monkeypatch.setattr(mod, "repair",
+                            lambda *a, **k: {"applied": 0, "errors": []})
+        d = self._db(tmp_path, acl_failures=3)
+        out = mod.repair_until_settled(None, d, None)
+        assert out["remaining"] == 3
+        d.close()

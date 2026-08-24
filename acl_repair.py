@@ -134,6 +134,45 @@ class _NullQuota:
         return None
 
 
+def repair_until_settled(auth, db, settings, max_passes: int = 12,
+                         on_pass=None) -> dict:
+    """Keep re-applying until a pass stops making progress.
+
+    One pass never finishes the job, and the reason is the rate limiter
+    rather than the work. The project bucket is per-process and starts at
+    its configured rate, so a short run spends its whole life being
+    throttled and climbing, recovers a slice, and exits -- taking the
+    adapted rate with it. Run again and it starts from the floor once more.
+    Live: 5,257 grants went to 4,164 in one pass, and the 3,987 that
+    remained were almost entirely "Quota exceeded" on the RE-application.
+
+    Looping inside one process is what fixes that. The limiter climbs once
+    and stays climbed, and each pass has fewer grants to place, so the
+    throttling that ended the previous pass is no longer the binding
+    constraint.
+
+    Stops when a pass applies nothing, because the next one would do the
+    same. max_passes is a backstop against a grant that fails forever for a
+    reason unrelated to pacing -- an invalid address, a deleted grantee --
+    which would otherwise loop until the quota ran out.
+    """
+    total = {"passes": 0, "applied": 0, "remaining": None, "errors": []}
+    for i in range(1, max_passes + 1):
+        stats = repair(auth, db, settings, dry_run=False)
+        total["passes"] = i
+        total["applied"] += stats["applied"]
+        total["errors"] = stats["errors"]
+        remaining = db.conn.execute(
+            "SELECT COUNT(*) c FROM audit_log "
+            "WHERE item_type='acl' AND status='FAILED'").fetchone()["c"]
+        total["remaining"] = remaining
+        if on_pass:
+            on_pass(i, stats["applied"], remaining)
+        if stats["applied"] == 0:
+            break
+    return total
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         description="Re-apply share grants that never landed, to files "
@@ -143,6 +182,12 @@ def main(argv: list[str] | None = None) -> int:
                    help="actually re-apply (default: report only)")
     p.add_argument("--limit", type=int,
                    help="stop after this many files")
+    p.add_argument("--until-settled", action="store_true",
+                   help="keep passing until one applies nothing; the rate "
+                        "limiter only adapts within a process, so a single "
+                        "pass leaves quota-throttled grants behind")
+    p.add_argument("--max-passes", type=int, default=12,
+                   help="backstop for --until-settled (default 12)")
     args = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -154,6 +199,18 @@ def main(argv: list[str] | None = None) -> int:
     db = MigrationDB(settings.db_path)
     try:
         auth = AuthManager(settings)
+        if args.until_settled and args.apply:
+            total = repair_until_settled(
+                auth, db, settings, max_passes=args.max_passes,
+                on_pass=lambda i, applied, left: log.info(
+                    "  pass %d: applied %d, %d acl failure(s) left",
+                    i, applied, left))
+            print(f"settled after {total['passes']} pass(es): "
+                  f"{total['applied']:,} grant(s) applied, "
+                  f"{total['remaining']:,} acl failure(s) remain")
+            for e in total["errors"]:
+                print("   ", e)
+            return 0
         stats = repair(auth, db, settings, dry_run=not args.apply,
                        limit=args.limit,
                        on_progress=lambda i, n: log.info("  %d/%d files", i, n))
