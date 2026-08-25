@@ -191,6 +191,26 @@ def _log_rate_change(kind: str, before: float, after: float,
                  tenant, before, after)
 
 
+# Drive refuses to grant access to an address with no Google account unless
+# the request also emails them. The migration sends
+# sendNotificationEmail=False on purpose -- a tenant move should not mail
+# every collaborator a share notification -- so a grant to such an address
+# cannot be recreated silently at all.
+#
+# That is a Google constraint, not a failure of this tool, and it is the
+# ONLY thing 134 of one run's 422 failures turned out to be: all of them for
+# a single external address on a non-Google domain. Recorded as FAILED it
+# read like something to fix; it is something to decide about. But it is
+# still a real loss of access on the target, so it is a named skip rather
+# than a silent one.
+_NO_ACCOUNT_MARKERS = ("no google account",)
+
+
+def _is_unreachable_grantee(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(m in text for m in _NO_ACCOUNT_MARKERS)
+
+
 _QUOTA_MARKERS = (
     "quota exceeded", "ratelimitexceeded", "userratelimitexceeded",
     "rate limit exceeded", "too many requests",
@@ -1729,6 +1749,18 @@ class DriveMigrator:
             self.db.log_audit(self.source_user, audit_key, "acl", "SUCCESS")
             return 1
         except (PermanentAPIError, RuntimeError) as exc:
+            if _is_unreachable_grantee(exc):
+                # Not a failure to retry: no number of attempts creates a
+                # Google account for this address. Named so the report can
+                # say what was lost and why, instead of burying it in a
+                # count of things that look fixable.
+                self.db.log_audit(
+                    self.source_user, audit_key, "acl",
+                    "SKIPPED_GRANTEE_NOT_ON_GOOGLE",
+                    "Drive will not grant access to an address with no Google "
+                    "account unless the request emails them, and this "
+                    "migration does not send share notifications: " + str(exc))
+                return 0
             self.db.log_audit(self.source_user, audit_key, "acl", "FAILED", str(exc))
             self._bump("acl_failed")
             return 0
