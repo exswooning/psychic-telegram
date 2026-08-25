@@ -37,6 +37,14 @@ log = logging.getLogger("repair")
 NO_ACCOUNT = "no Google account"
 QUOTA = "Quota exceeded"
 INVALID_LABEL = "Invalid label"
+# "Request had insufficient authentication scopes" on a copy. The token is
+# short a scope for a moment after a delegation change, not permanently: 77
+# files failed this way on one run while the identical copy succeeded on the
+# next. Retried on its own budget (resilience.SCOPE_RETRY_BUDGET) rather than
+# the standard ladder, which gave up after six attempts.
+SCOPE_403 = "insufficient authentication scopes"
+# "Active session is invalid" -- the impersonation session, not the item.
+SESSION_INVALID = "Active session is invalid"
 
 
 def survey(db) -> dict:
@@ -67,6 +75,10 @@ def survey(db) -> dict:
                        (f"%{QUOTA}%",)),
         "gmail_invalid_label": n("item_type='message' AND error_message LIKE ?",
                                  (f"%{INVALID_LABEL}%",)),
+        "drive_scope_403": n("item_type='file' AND error_message LIKE ?",
+                             (f"%{SCOPE_403}%",)),
+        "auth_session_invalid": n("error_message LIKE ?",
+                                  (f"%{SESSION_INVALID}%",)),
     }
 
 

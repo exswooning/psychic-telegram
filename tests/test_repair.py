@@ -669,3 +669,38 @@ class TestTheSurveyRunsOnABareConnection:
         d.repair_finished(d.repair_started(), "same")
         assert d.last_repair() == dbmod.last_repair_from(d.conn)
         d.close()
+
+
+class TestTheDominantCausesAreNamed:
+    """88 failures survived a repair and the page called every one of them
+    "not yet classified". 77 were a single known, self-clearing cause."""
+
+    def test_a_scope_403_on_a_copy_is_its_own_family(self, tmp_path):
+        d = dbmod.MigrationDB(str(tmp_path / "m.db"))
+        d.log_audit("u@src", "f1", "file", "FAILED",
+                    'server-side copy failed: exhausted 6 retries on HTTP 403 '
+                    '(insufficientPermissions): returned "Request had '
+                    'insufficient authentication scopes."')
+        s = repair.survey(d)
+        assert s["drive_scope_403"] == 1
+        d.close()
+
+    def test_an_invalid_session_is_its_own_family(self, tmp_path):
+        d = dbmod.MigrationDB(str(tmp_path / "m.db"))
+        d.log_audit("u@src", "u", "user", "FAILED",
+                    "exhausted 6 retries on HTTP 401 (authError): "
+                    "'Active session is invalid. Error code: 4'")
+        assert repair.survey(d)["auth_session_invalid"] == 1
+        d.close()
+
+    def test_an_ordinary_copy_failure_is_not_swept_into_them(self, tmp_path):
+        # The families must stay narrow, or "classified" stops meaning
+        # anything and a real fault hides inside a benign label.
+        d = dbmod.MigrationDB(str(tmp_path / "m.db"))
+        d.log_audit("u@src", "f1", "file", "FAILED",
+                    "exhausted 6 retries on HTTP 500 (internalError)")
+        s = repair.survey(d)
+        assert s["drive_scope_403"] == 0
+        assert s["auth_session_invalid"] == 0
+        assert s["total"] == 1
+        d.close()
