@@ -177,14 +177,17 @@ export const MigrationDetail: React.FC = () => {
               {!!repair.brokenFolders?.folders && (
                 <Alert severity="warning" sx={{ mb: 1.5 }}
                        data-testid="broken-folders">
+                  {/* "inside it" refers to the FOLDER, so it agrees with the
+                      folder count -- keying it off the file count produced
+                      "1 folder share failed, and 60 files inside them". */}
                   <strong>{repair.brokenFolders.folders.toLocaleString()} folder
                   share{repair.brokenFolders.folders === 1 ? '' : 's'} failed</strong>,
                   and{' '}
                   {repair.brokenFolders.files_behind.toLocaleString()} file
                   {repair.brokenFolders.files_behind === 1 ? '' : 's'} inside
-                  {repair.brokenFolders.files_behind === 1 ? ' it' : ' them'} rely
-                  on that share for access. Repair fixes folders first, because
-                  one folder can restore hundreds of files at once.
+                  {repair.brokenFolders.folders === 1 ? ' it rely' : ' them rely'}
+                  {' '}on that share for access. Repair fixes folders first,
+                  because one folder can restore hundreds of files at once.
                 </Alert>
               )}
               <Stack spacing={1}>

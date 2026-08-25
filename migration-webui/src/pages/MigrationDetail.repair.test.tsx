@@ -181,6 +181,21 @@ describe('MigrationDetail flags broken folder shares', () => {
     expect(t).toContain('folders first')
   })
 
+  it('agrees in number with the folder count, not the file count', async () => {
+    // "inside it" refers to the FOLDER. Keying the pronoun off the file
+    // count produced "1 folder share failed, and 60 files inside them".
+    fetchRepairSurvey.mockResolvedValue(survey({
+      brokenFolders: { folders: 1, grants: 2, files_behind: 60 },
+    }))
+    render(<MigrationDetail />)
+    await waitFor(() =>
+      expect(screen.getByTestId('broken-folders')).toBeTruthy())
+    const t = screen.getByTestId('broken-folders').textContent || ''
+    expect(t).toContain('1 folder share failed')
+    expect(t).toContain('inside it')
+    expect(t).not.toContain('inside them')
+  })
+
   it('says nothing when no folder share failed', async () => {
     fetchRepairSurvey.mockResolvedValue(survey({
       brokenFolders: { folders: 0, grants: 0, files_behind: 0 },
