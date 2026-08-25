@@ -197,3 +197,71 @@ class TestTasks:
         assert again["tasks"] == 0
         tgt = auth.target_tasks(TGT_USER)
         assert len(tgt.lists) == 1
+
+
+class TestAnExistingContactGroupIsAdopted:
+    """People rejects a duplicate group name with 409 ALREADY_EXISTS rather
+    than returning the existing group. Without handling that, a re-run fails
+    the same group forever and its contacts lose their membership -- while
+    the group sits on the target, correct.
+
+    gmail_engine has always reused an existing target label; contacts never
+    did, and it surfaced as live failures on an otherwise clean 122,849-item
+    run rather than as a red test, because the fake used to allow duplicates.
+    """
+
+    def test_a_pre_existing_group_is_mapped_not_failed(self, auth, db,
+                                                        settings, identity):
+        import contacts_engine
+        src = auth.source_people(SRC_USER)
+        src.add_group("Clients")
+        tgt = auth.target_people(TGT_USER)
+        existing = tgt.add_group("Clients")
+
+        m = contacts_engine.ContactsMigrator(auth, db, settings,
+                                             SRC_USER, TGT_USER)
+        mapping = m._migrate_groups()
+
+        assert existing in mapping.values(), "must adopt the target's group"
+        assert m.stats["failed"] == 0
+
+    def test_the_mapping_is_recorded_so_the_next_run_skips_it(self, auth, db,
+                                                              settings,
+                                                              identity):
+        import contacts_engine
+        src = auth.source_people(SRC_USER)
+        gid = src.add_group("Projects")
+        auth.target_people(TGT_USER).add_group("Projects")
+
+        m = contacts_engine.ContactsMigrator(auth, db, settings,
+                                             SRC_USER, TGT_USER)
+        m._migrate_groups()
+        assert db.get_target_id(SRC_USER, gid, "contact_group")
+
+    def test_a_genuinely_new_group_is_still_created(self, auth, db, settings,
+                                                    identity):
+        import contacts_engine
+        auth.source_people(SRC_USER).add_group("Brand New")
+        m = contacts_engine.ContactsMigrator(auth, db, settings,
+                                             SRC_USER, TGT_USER)
+        mapping = m._migrate_groups()
+        names = {g["name"] for g in auth.target_people(TGT_USER).groups.values()}
+        assert "Brand New" in names
+        assert len(mapping) == 1
+
+    def test_an_unrelated_failure_is_still_a_failure(self, auth, db, settings,
+                                                     identity, monkeypatch):
+        """Only ALREADY_EXISTS is adopted. Swallowing anything else would
+        report a group as migrated that is not there."""
+        import contacts_engine
+        import fakes
+        auth.source_people(SRC_USER).add_group("Boom")
+        tgt = auth.target_people(TGT_USER)
+        monkeypatch.setattr(
+            type(tgt.contactGroups()), "_create",
+            lambda self, body, **k: (_ for _ in ()).throw(
+                fakes.http_error(500, reason="internalError")))
+        m = contacts_engine.ContactsMigrator(auth, db, settings,
+                                             SRC_USER, TGT_USER)
+        m._migrate_groups()
+        assert m.stats["failed"] == 1

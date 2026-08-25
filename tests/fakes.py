@@ -1682,6 +1682,15 @@ class _PeopleGroups:
 
     def _create(self, body: dict, **_):
         name = (body.get("contactGroup") or {}).get("name") or "unnamed"
+        # People rejects a duplicate name with 409 ALREADY_EXISTS rather than
+        # returning the existing group. The fake used to create a second one
+        # happily, which is why nothing caught contacts_engine failing every
+        # re-run of a group that was already on the target -- and why it
+        # surfaced as live failures instead of a red test.
+        for g in self.s.groups.values():
+            if (g.get("name") or "") == name:
+                raise http_error(409, reason="ALREADY_EXISTS",
+                                 message="Contact group name already exists.")
         rid = f"contactGroups/{self.s._new_id('g')}"
         self.s.groups[rid] = {"resourceName": rid, "name": name,
                               "groupType": "USER_CONTACT_GROUP"}

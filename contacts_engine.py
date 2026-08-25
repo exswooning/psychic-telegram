@@ -163,6 +163,28 @@ class ContactsMigrator:
                     lambda n=name: self.tgt.contactGroups().create(
                         body={"contactGroup": {"name": n}}).execute())
             except (PermanentAPIError, RuntimeError) as exc:
+                # A group of this name already exists on the target, so the
+                # work is done and only the mapping is missing. People
+                # rejects the create with 409 ALREADY_EXISTS rather than
+                # returning the existing group, so without this a re-run
+                # fails the same group forever and its contacts lose their
+                # membership -- while the group sits there, correct.
+                #
+                # gmail_engine has always done this for labels ("existing
+                # target label is reused not duplicated"); contacts never
+                # did, and it surfaced as 2 failures on an otherwise clean
+                # 122,849-item run.
+                found = (self._existing_group(name)
+                         if "ALREADY_EXISTS" in str(exc) else None)
+                if found:
+                    mapping[g["resourceName"]] = found
+                    self.db.record_mapping(self.source_user, g["resourceName"],
+                                           found, "contact_group",
+                                           source_name=name)
+                    self.db.log_audit(self.source_user, g["resourceName"],
+                                      "contact_group", "SUCCESS")
+                    self.stats["groups"] += 1
+                    continue
                 self.db.log_audit(self.source_user, g["resourceName"],
                                   "contact_group", "FAILED", str(exc))
                 self.stats["failed"] += 1
@@ -173,6 +195,31 @@ class ContactsMigrator:
                                    source_name=name)
             self.stats["groups"] += 1
         return mapping
+
+    def _existing_group(self, name: str) -> str | None:
+        """The target's own group of this name, if it has one.
+
+        Only called after a 409, so the extra listing costs nothing on the
+        normal path. Matched on name because that is what People compared to
+        reject the create in the first place -- anything else would answer a
+        different question than the one that failed.
+        """
+        token = None
+        try:
+            while True:
+                resp = self._retry(lambda t=token: self.tgt.contactGroups()
+                                   .list(pageSize=200, pageToken=t).execute())
+                for g in resp.get("contactGroups", []):
+                    if (g.get("name") or "") == name:
+                        return g.get("resourceName")
+                token = resp.get("nextPageToken")
+                if not token:
+                    return None
+        except (PermanentAPIError, RuntimeError) as exc:
+            log.warning("[%s] could not look up existing group %r: %s",
+                        self.source_user, name, exc)
+            return None
+
 
     def _migrate_contact(self, person: dict, group_map: dict) -> None:
         rid = person.get("resourceName")
