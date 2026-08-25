@@ -335,3 +335,48 @@ class TestOrphanedUsers:
         assert ledger_verify.reopen_orphans(d, rows, dry_run=True) == 1
         assert len(ledger_verify.orphans(d)) == 1
         d.close()
+
+
+class TestAMappingIsDatedByItself:
+    """mapping_bounds dated a mapping by joining audit_log, on the reasoning
+    that a lookup table records no time while the audit row dates the same
+    event. But audit_log OUTLIVES id_mapping: wipe_target clears the mappings
+    and deliberately keeps the history, so every fresh mapping inherited the
+    timestamp of an attempt days earlier.
+
+    Live consequence: after a wipe and a clean 704,505-mapping migration, the
+    preflight guard read those new mappings as predating accounts created the
+    day before and refused to start a run whose ledger was entirely correct.
+    """
+
+    def test_a_fresh_mapping_is_dated_now(self, tmp_path):
+        import db as dbmod
+        d = dbmod.MigrationDB(str(tmp_path / "m.db"))
+        d.record_mapping("u@src", "s1", "t1", "file")
+        assert d.mapping_bounds("u@src")["earliest"]
+        d.close()
+
+    def test_old_audit_history_does_not_age_a_new_mapping(self, tmp_path):
+        """The exact shape of the bug: history from a previous attempt,
+        kept on purpose, must not make today's mapping look ancient."""
+        import db as dbmod
+        d = dbmod.MigrationDB(str(tmp_path / "m.db"))
+        d.conn.execute(
+            "INSERT INTO audit_log(source_user,item_id,item_type,status,"
+            "timestamp) VALUES('u@src','s1','file','FAILED','2020-01-01T00:00:00Z')")
+        d.conn.commit()
+        d.record_mapping("u@src", "s1", "t1", "file")
+        assert d.mapping_bounds("u@src")["earliest"] > "2021"
+        d.close()
+
+    def test_every_mapping_carries_a_date(self, tmp_path):
+        """created_at is NOT NULL with a default in the schema and always
+        was -- which is the sharpest part of this bug: the mapping knew its
+        own age all along and the guard asked audit_log instead."""
+        import db as dbmod
+        d = dbmod.MigrationDB(str(tmp_path / "m.db"))
+        cols = {r[1]: r for r in d.conn.execute("PRAGMA table_info(id_mapping)")}
+        assert cols["created_at"][3] == 1, "created_at must stay NOT NULL"
+        d.record_mapping("u@src", "s1", "t1", "file")
+        assert d.mapping_bounds("u@src")["earliest"]
+        d.close()

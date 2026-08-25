@@ -447,17 +447,23 @@ class MigrationDB:
 
         The earliest is what ledger_verify compares against the target
         account's creationTime: a mapping written before the account existed
-        cannot name anything inside it. Taken from audit_log because
-        id_mapping records no timestamp -- it is a lookup table, and the
-        audit row is the dated record of the same event.
+        cannot name anything inside it.
+
+        Taken from id_mapping's own created_at. It used to join audit_log, on
+        the reasoning that a lookup table records no time while the audit row
+        dates the same event -- but audit_log OUTLIVES id_mapping.
+        wipe_target clears the mappings and deliberately keeps the history, so
+        every fresh mapping inherited the timestamp of an attempt days
+        earlier, and this guard then refused to start a migration whose ledger
+        was entirely correct.
+
+        The column was there the whole time, NOT NULL with a default from the
+        original schema -- which is the sharpest part of this: the mapping
+        always knew its own age, and the guard asked a different table for it.
         """
         return self.conn.execute(
-            """SELECT COUNT(*) AS n, MIN(a.timestamp) AS earliest
+            """SELECT COUNT(*) AS n, MIN(m.created_at) AS earliest
                  FROM id_mapping m
-                 LEFT JOIN audit_log a
-                   ON a.source_user = m.source_user
-                  AND a.item_id     = m.source_id
-                  AND a.item_type   = m.type
                 WHERE m.source_user = ?""",
             (source_user,),
         ).fetchone()
@@ -584,14 +590,15 @@ class MigrationDB:
             conn.execute(
                 """INSERT INTO id_mapping
                        (source_user, source_id, target_id, type,
-                        parent_target_id, source_name)
-                   VALUES (?,?,?,?,?,?)
+                        parent_target_id, source_name, created_at)
+                   VALUES (?,?,?,?,?,?,?)
                    ON CONFLICT(source_user, source_id, type) DO UPDATE SET
                        target_id=excluded.target_id,
                        parent_target_id=excluded.parent_target_id,
-                       source_name=excluded.source_name""",
+                       source_name=excluded.source_name,
+                       created_at=excluded.created_at""",
                 (source_user, source_id, target_id, item_type,
-                 parent_target_id, source_name),
+                 parent_target_id, source_name, utc_now()),
             )
         # Write through, after the transaction commits. Ordering matters: a
         # cache updated before the commit would answer "already migrated" for
