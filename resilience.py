@@ -139,6 +139,11 @@ TRANSIENT_400_FRAGMENTS = ("no google account",)
 # retries, and scope_guard refuses the run before it starts.
 TRANSIENT_403_MESSAGES = ("insufficient authentication scopes",)
 
+# Attempts allowed for the token-scope 403 specifically. Beyond the standard
+# ladder every wait is max_delay, so 11 attempts is roughly six minutes of
+# patience against the one transient here that outlives a normal backoff.
+SCOPE_RETRY_BUDGET = 11
+
 # A freshly created Workspace account is not always immediately ready to be
 # impersonated over domain-wide delegation -- confirmed live on
 # seeduser382@source.rohitrokaya.com.np, created by create_until_full
@@ -337,9 +342,31 @@ def retry_on_google_error(
                         ) from exc
 
                     attempt += 1
-                    if attempt > max_retries:
+                    # The token-scope 403 gets a longer budget than anything
+                    # else, because it is the only transient here measured in
+                    # MINUTES rather than seconds.
+                    #
+                    # The standard ladder is 1+2+4+8+16+32 -- about 63
+                    # seconds. Live, that was not enough: 49 files failed
+                    # "Request had insufficient authentication scopes" having
+                    # exhausted all six attempts, on a tenant whose scopes
+                    # were fully authorised, and the identical export
+                    # succeeded by hand minutes later. Every one of the 49
+                    # was a real, unrecoverable file loss -- none had a
+                    # mapping afterwards.
+                    #
+                    # Extra attempts land at max_delay each, so this buys
+                    # roughly six minutes instead of one. Deliberately scoped
+                    # to this single message: a genuine permission denial is
+                    # still permanent and never reaches here at all, and
+                    # widening the budget for everything would spend minutes
+                    # per file on errors that will never clear.
+                    budget = max_retries
+                    if _is_transient_403(exc):
+                        budget = max(max_retries, SCOPE_RETRY_BUDGET)
+                    if attempt > budget:
                         raise RuntimeError(
-                            f"exhausted {max_retries} retries on HTTP {status} "
+                            f"exhausted {budget} retries on HTTP {status} "
                             f"({reason or 'unknown reason'}): {exc}"
                         ) from exc
 
@@ -352,7 +379,7 @@ def retry_on_google_error(
                         )
                     log.debug(
                         "retrying after HTTP %s (%s): attempt %d/%d in %.2fs",
-                        status, reason, attempt, max_retries, delay,
+                        status, reason, attempt, budget, delay,
                     )
                     time.sleep(delay)
                     # A 5xx may have been processed before the error was

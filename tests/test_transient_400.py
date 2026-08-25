@@ -90,3 +90,73 @@ class TestTheTokenScope403IsRetriedButTheFileDenialIsNot:
 
     def test_quota_403_is_unaffected(self):
         assert resilience._is_permanent(403, "rateLimitExceeded") is False
+
+
+class TestTheTokenScope403GetsALongerBudget:
+    """It is the only transient here measured in minutes rather than seconds.
+
+    The standard ladder is 1+2+4+8+16+32 -- about 63 seconds. Live that was
+    not enough: 49 files failed "Request had insufficient authentication
+    scopes" having exhausted all six attempts, on a tenant whose scopes were
+    fully authorised, and the identical export succeeded by hand minutes
+    later. Every one was a real file loss -- none had a mapping afterwards.
+    """
+
+    SCOPES = ('<HttpError 403 ...> "Request had insufficient authentication '
+              'scopes.". Details: [{"reason": "insufficientPermissions"}]')
+    QUOTA = '<HttpError 403 ...> "Quota exceeded" [{"reason": "rateLimitExceeded"}]'
+
+    def _count_attempts(self, monkeypatch, message, status=403):
+        """How many times does the wrapper call fn before giving up?"""
+        import resilience
+        monkeypatch.setattr(resilience.time, "sleep", lambda s: None)
+        calls = []
+
+        class _Resp:
+            def __init__(self):
+                self.status = status
+                self.reason = "fake"
+
+            def get(self, k, default=None):
+                return default
+
+        class Boom(Exception):
+            def __init__(self):
+                super().__init__(message)
+                self.resp = _Resp()
+
+        monkeypatch.setattr(resilience, "HttpError", Boom)
+
+        @resilience.retry_on_google_error(max_retries=6, base_delay=0.0,
+                                          max_delay=0.0)
+        def fn():
+            calls.append(1)
+            raise Boom()
+
+        try:
+            fn()
+        except Exception:
+            pass
+        return len(calls)
+
+    def test_the_scope_error_is_tried_far_more_than_six_times(self, monkeypatch):
+        import resilience
+        n = self._count_attempts(monkeypatch, self.SCOPES)
+        assert n > 6, f"only {n} attempts -- the whole point is more than six"
+        assert n <= resilience.SCOPE_RETRY_BUDGET + 1
+
+    def test_a_quota_403_keeps_the_standard_budget(self, monkeypatch):
+        """Widening the budget for everything would spend minutes per file on
+        errors that will never clear."""
+        n = self._count_attempts(monkeypatch, self.QUOTA)
+        assert n <= 7, f"{n} attempts -- quota should keep the short ladder"
+
+    def test_the_budget_is_longer_than_a_minute_of_backoff(self):
+        """The condition outlives ~63s, which is what the standard ladder
+        buys. The extra attempts each wait max_delay."""
+        import resilience
+        standard = sum(min(60, 2 ** (i - 1)) for i in range(1, 7))
+        scoped = sum(min(60, 2 ** (i - 1))
+                     for i in range(1, resilience.SCOPE_RETRY_BUDGET + 1))
+        assert standard < 100
+        assert scoped > 300
