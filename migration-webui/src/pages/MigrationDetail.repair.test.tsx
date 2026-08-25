@@ -104,3 +104,57 @@ describe('MigrationDetail repair panel', () => {
     expect(screen.queryByTestId('repair-panel')).toBeNull()
   })
 })
+
+describe('MigrationDetail reports what was skipped', () => {
+  beforeEach(() => {
+    fetchMigrationDetail.mockReset(); fetchRepairSurvey.mockReset()
+    fetchRepairSurvey.mockResolvedValue(
+      { accountId: 7, total: 0, families: [], unclassified: 0, error: '' })
+  })
+
+  it('shows skipped items alongside migrated and failed', async () => {
+    // 56,975 items on a live tenant were neither migrated nor failed, and the
+    // page showed nothing between those two numbers.
+    fetchMigrationDetail.mockResolvedValue(detail({
+      progress: { users: 201, done: 201, running: 0, pending: 0, failed: 0,
+                  blocked: 0, items: 818000, itemsFailed: 422,
+                  itemsSkipped: 56975 },
+    }))
+    render(<MigrationDetail />)
+    await waitFor(() =>
+      expect(screen.getByTestId('stat-itemsskipped')).toBeTruthy())
+    expect(screen.getByTestId('stat-itemsskipped').textContent).toContain('56,975')
+  })
+
+  it('breaks the skips down by reason', async () => {
+    fetchMigrationDetail.mockResolvedValue(detail({
+      skipped: [
+        { status: 'SKIPPED_GRANTEE_RECREATED', count: 55316 },
+        { status: 'SKIPPED_IS_DRAFT', count: 1284 },
+      ],
+    }))
+    render(<MigrationDetail />)
+    await waitFor(() => expect(screen.getByTestId('skipped-panel')).toBeTruthy())
+    expect(screen.getByTestId('skip-SKIPPED_IS_DRAFT').textContent)
+      .toContain('1,284')
+  })
+
+  it('does not colour a skip as a failure', async () => {
+    // Folding decisions into the failure count is how a clean run teaches
+    // people to ignore red.
+    fetchMigrationDetail.mockResolvedValue(detail({
+      skipped: [{ status: 'SKIPPED_IS_DRAFT', count: 12 }],
+    }))
+    render(<MigrationDetail />)
+    await waitFor(() => expect(screen.getByTestId('skipped-panel')).toBeTruthy())
+    expect(screen.getByTestId('skipped-panel')
+      .querySelector('.MuiChip-colorError')).toBeNull()
+  })
+
+  it('shows no skip panel when nothing was skipped', async () => {
+    fetchMigrationDetail.mockResolvedValue(detail({ skipped: [] }))
+    render(<MigrationDetail />)
+    await waitFor(() => expect(screen.getByTestId('users-table')).toBeTruthy())
+    expect(screen.queryByTestId('skipped-panel')).toBeNull()
+  })
+})

@@ -172,6 +172,30 @@ export const Metrics: React.FC = () => {
             </Typography>
           </Paper>
 
+          {m.inheritedAcls?.disabled && (
+            <Paper variant="outlined" sx={{ p: 2, mb: 3 }}
+                   data-testid="inherited-acls">
+              <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>
+                Sharing is folder-derived on this tenant
+              </Typography>
+              {/* The engine measured the corpus and stopped recreating
+                  folder-inherited grants on every file. That is the right
+                  call here and about 50x less work -- but it changes what a
+                  migration preserves, so it says so rather than only logging
+                  it once at the moment it was decided. */}
+              <Typography variant="body2" color="text.secondary">
+                Files in a shared folder averaged{' '}
+                <strong>{Math.round(m.inheritedAcls.density ?? 0)} inherited
+                grants each</strong>, so those grants are preserved through the
+                copied folder tree instead of being recreated on every file.
+                Access is the same today. A file later moved out of the folder
+                it was shared through would not carry its own sharing with it.
+                Set <code>MIGRATE_INHERITED_ACLS=true</code> to force per-file
+                grants.
+              </Typography>
+            </Paper>
+          )}
+
           {Object.keys(m.limiters).length > 0 && (
             <Paper variant="outlined" sx={{ p: 2, mb: 3 }} data-testid="limiters">
               <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1.5 }}>

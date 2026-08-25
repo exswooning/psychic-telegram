@@ -2171,6 +2171,7 @@ def _migration_progress(account_id: int | None) -> dict:
     done and 40% failed is not 60% of a migration.
     """
     empty = {"users": 0, "done": 0, "running": 0, "failed": 0, "pending": 0,
+             "itemsSkipped": 0,
              # Waiting on something outside the tool (a Workspace licence),
              # not broken. Counted apart so a failure list keeps meaning
              # "investigate this".
@@ -2198,6 +2199,16 @@ def _migration_progress(account_id: int | None) -> dict:
             out["itemsFailed"] = conn.execute(
                 "SELECT COUNT(*) n FROM audit_log WHERE status='FAILED'"
             ).fetchone()["n"]
+            # Skips were invisible: the page showed migrated and failed with
+            # nothing between them, while 56,975 items on a live tenant were
+            # neither. A skip is a decision the tool made -- a draft it will
+            # not insert, a doc past the export ceiling, a grant it resolved
+            # as no longer failing -- and an operator who cannot see them
+            # cannot tell a clean run from one that quietly declined half the
+            # work.
+            out["itemsSkipped"] = conn.execute(
+                "SELECT COALESCE(SUM(n), 0) n FROM audit_counts "
+                "WHERE status LIKE 'SKIPPED%'").fetchone()["n"]
             return out
     except Exception:      # noqa: BLE001 - a ledger mid-migration, or absent
         return empty
@@ -2668,6 +2679,7 @@ async def migration_metrics(account_id: int, history: int = 60,
             [{"label": k, **v} for k, v in per_label.items()],
             key=lambda o: -(o.get("p95") or 0))
         out["limiters"] = latest.get("limiters") or {}
+        out["inheritedAcls"] = latest.get("inheritedAcls") or {}
 
         # Everything else the tool measures. The API-latency snapshot above
         # is one family of metric; a page called "Metrics" that showed only
@@ -2681,6 +2693,12 @@ async def migration_metrics(account_id: int, history: int = 60,
                     for r in conn.execute(
                         "SELECT item_type, status, SUM(n) n FROM "
                         "audit_counts GROUP BY item_type, status "
+                        "ORDER BY n DESC")]
+                out["skipped"] = [
+                    {"status": r["status"], "count": r["n"]}
+                    for r in conn.execute(
+                        "SELECT status, SUM(n) n FROM audit_counts "
+                        "WHERE status LIKE 'SKIPPED%' GROUP BY status "
                         "ORDER BY n DESC")]
                 out["mappings"] = [
                     {"type": r["type"], "count": r["n"]}

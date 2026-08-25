@@ -490,6 +490,11 @@ export interface MigrationProgress {
    *  broken. Apart from `failed` so that count keeps meaning "investigate". */
   blocked?: number
   items: number; itemsFailed: number
+  /** Items the tool deliberately did not migrate. A skip is a decision — a
+   *  draft it will not insert, a doc past the export ceiling — and folding
+   *  these into the failure count is how a clean run teaches people to
+   *  ignore red. */
+  itemsSkipped?: number
 }
 
 export interface MigrationRow {
@@ -523,6 +528,9 @@ export interface MigrationDetail {
   progress: MigrationProgress
   items: Array<{ type: string; count: number }>
   failures: MigrationFailure[]
+  /** Items the tool deliberately did not migrate, by reason. Distinct from
+   *  failures: a skip is a decision, not an error. */
+  skipped?: { status: string; count: number }[]
   failedUsers: Array<{
     sourceUser: string; targetUser: string; status?: string; detail: string
     /** When the status was last set. Absent on ledgers written before the
@@ -900,6 +908,15 @@ export interface MetricsSnapshot {
   } | null
   operations: OperationMetric[]
   limiters: Record<string, LimiterState>
+  /** Whether the engine stopped recreating folder-inherited grants per file,
+   *  and the density that decided it. A run that changed what it preserves
+   *  has to be able to explain that afterwards. */
+  inheritedAcls?: {
+    files: number
+    inherited: number
+    disabled: boolean
+    density?: number
+  }
   history: { recordedAt: string; requestsPerSec: number; p95: number; failures: number }[]
 }
 

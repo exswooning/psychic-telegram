@@ -215,3 +215,34 @@ describe('Metrics covers more than API latency', () => {
     expect(screen.queryByTestId('host')).toBeNull()
   })
 })
+
+describe('Metrics discloses a changed sharing model', () => {
+  beforeEach(() => {
+    fetchMetrics.mockReset(); fetchMyMetrics.mockReset()
+    params = { accountId: '7' }
+  })
+
+  it('says so when sharing became folder-derived', async () => {
+    // The engine measured the corpus and stopped recreating folder-inherited
+    // grants per file. Right call, ~50x less work -- and it changes what the
+    // migration preserves, so it must not live only in one log line.
+    fetchMetrics.mockResolvedValue(snap({
+      inheritedAcls: { files: 50, inherited: 10050, disabled: true, density: 201 },
+    }))
+    render(<Metrics />)
+    await waitFor(() =>
+      expect(screen.getByTestId('inherited-acls')).toBeTruthy())
+    const t = screen.getByTestId('inherited-acls').textContent || ''
+    expect(t).toContain('201')
+    expect(t).toContain('moved out of the folder')
+  })
+
+  it('says nothing when per-file grants were kept', async () => {
+    fetchMetrics.mockResolvedValue(snap({
+      inheritedAcls: { files: 50, inherited: 100, disabled: false },
+    }))
+    render(<Metrics />)
+    await waitFor(() => expect(screen.getByTestId('metric-rps')).toBeTruthy())
+    expect(screen.queryByTestId('inherited-acls')).toBeNull()
+  })
+})

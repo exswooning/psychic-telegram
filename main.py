@@ -756,6 +756,14 @@ def _metrics_flusher(stop_event: threading.Event, db,
             try:
                 import drive_engine
                 payload["limiters"] = drive_engine.limiter_stats()
+                # A run that quietly changed what it preserves has to be able
+                # to say so. When the corpus shares at folder level the engine
+                # stops recreating inherited grants per file -- correct, and
+                # about 50x less work, but it means a document no longer
+                # carries its own sharing if it is later moved out of the
+                # folder it was shared through. That belongs on a screen, not
+                # only in one log line at the moment it was decided.
+                payload["inheritedAcls"] = drive_engine.inherited_acl_stats()
             except Exception:      # noqa: BLE001
                 pass
             payload["workers_configured"] = getattr(

@@ -147,6 +147,8 @@ export const MigrationDetail: React.FC = () => {
                 <Stat id="failed" label="users failed" value={p.failed} tone="error" />
                 <Stat id="blocked" label="blocked" value={p.blocked ?? 0} />
                 <Stat id="items" label="items migrated" value={p.items} />
+                <Stat id="itemsskipped" label="items skipped"
+                      value={p.itemsSkipped ?? 0} />
                 <Stat id="itemsfailed" label="items failed" value={p.itemsFailed}
                       tone="error" />
               </Stack>
@@ -199,6 +201,28 @@ export const MigrationDetail: React.FC = () => {
                     </Typography>
                   </Stack>
                 )}
+              </Stack>
+            </Paper>
+          )}
+
+          {d.skipped && d.skipped.length > 0 && (
+            <Paper variant="outlined" sx={{ p: 2, mb: 3 }}
+                   data-testid="skipped-panel">
+              <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>
+                What was deliberately skipped
+              </Typography>
+              {/* Separate from failures on purpose. A skip is a decision the
+                  tool made -- a draft it will not insert, a doc past the
+                  export ceiling, a grant it resolved as no longer failing --
+                  and folding them into the failure count is how a clean run
+                  teaches people to ignore red. */}
+              <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', gap: 0.5 }}>
+                {d.skipped.map((s) => (
+                  <Chip key={s.status} size="small" variant="outlined"
+                        data-testid={`skip-${s.status}`}
+                        label={`${s.status.replace(/^SKIPPED_?/, '').toLowerCase()
+                          .replace(/_/g, ' ') || 'skipped'} · ${s.count.toLocaleString()}`} />
+                ))}
               </Stack>
             </Paper>
           )}
