@@ -39,6 +39,32 @@ def _now() -> str:
         "%Y-%m-%dT%H:%M:%SZ")
 
 
+def deleted_user_count(directory) -> int:
+    """How many previously-deleted users the tenant is still holding.
+
+    Google keeps a deleted Workspace user restorable for 20 days, and it goes
+    on consuming a slot in the domain user limit for that whole time. So a
+    wipe does not return capacity -- it borrows against the next 20 days of
+    it, and each cycle borrows again.
+
+    Measured the hard way: three wipes of a 200-user tenant left 600 deleted
+    accounts plus 172 live ones against the limit, and re-provisioning died
+    at 172 with "Domain user limit reached. Start paid subscription." The
+    tenant was then stuck with 29 users missing and no way to create them
+    until the oldest deletions aged out.
+    """
+    n, token = 0, None
+    while True:
+        resp = directory.users().list(
+            customer="my_customer", maxResults=200, pageToken=token,
+            showDeleted=True,
+            fields="nextPageToken,users(primaryEmail)").execute()
+        n += len(resp.get("users", []))
+        token = resp.get("nextPageToken")
+        if not token:
+            return n
+
+
 def deletable_users(directory, admin_email: str, domain: str) -> list[str]:
     """Every user in the target domain except the admin driving this.
 
@@ -157,6 +183,28 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{len(users)} user(s) would be deleted from "
           f"{settings.target_domain}")
     print(f"  admin kept: {admin}")
+
+    # Deleted users keep consuming the domain user limit for 20 days, so a
+    # wipe borrows against future capacity rather than returning any. Said
+    # before the deletion, because afterwards the only remedy is waiting.
+    try:
+        already = deleted_user_count(directory)
+    except Exception as exc:      # noqa: BLE001
+        already = None
+        print(f"  could not count previously-deleted users: {str(exc)[:120]}")
+    if already is not None:
+        after = already + len(users)
+        print(f"  already deleted and still held: {already:,}")
+        print(f"  after this wipe, {after:,} deleted account(s) will occupy "
+              f"domain-limit slots for up to 20 days")
+        if already >= len(users):
+            print()
+            print("  WARNING: this tenant is already holding at least one "
+                  "full wipe's worth of deleted accounts. Re-provisioning "
+                  "after this wipe is likely to fail partway with "
+                  "\"Domain user limit reached\", leaving users missing "
+                  "and no way to create them until the oldest deletions age "
+                  "out.")
 
     db = MigrationDB(settings.db_path)
     try:
