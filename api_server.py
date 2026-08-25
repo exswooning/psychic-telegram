@@ -53,6 +53,7 @@ import asyncio
 import hmac
 from contextlib import asynccontextmanager
 import json
+import datetime as _dt
 import logging
 import os
 import re
@@ -2524,6 +2525,40 @@ async def test_report_run(body: WriteAction, op: Operator = Depends(operator)):
     return {"ok": True, "detail": "test run started; it takes about 3 minutes"}
 
 
+def _repair_payload(d, account_id: int) -> dict:
+    """The failure survey, shaped for display.
+
+    One function, two callers: the standalone /api/v2/repair endpoint and the
+    migration detail payload. Written twice, the two would drift in exactly
+    the way the totals already did.
+    """
+    import repair
+    s = repair.survey(d)
+    out = {"accountId": account_id, "total": s["total"], "families": [],
+           "unclassified": 0, "error": ""}
+    named = 0
+    for key, label, fix in (
+            ("acl_no_account",
+             "share grants refused — the person had no account at the time",
+             "resolvable now"),
+            ("acl_quota", "share grants refused for rate limits",
+             "checked against the target"),
+            ("gmail_invalid_label",
+             "messages rejected — label pointed at a deleted mailbox",
+             "retried on the next migration"),
+            ("user_stale", "users that failed to start and have since migrated",
+             "resolvable now"),
+            ("false_done", "users marked done that migrated nothing",
+             "resolvable now")):
+        if s.get(key):
+            named += s[key]
+            out["families"].append(
+                {"key": key, "count": s[key], "label": label, "fix": fix})
+    out["unclassified"] = max(0, s["total"] - named)
+    out["brokenFolders"] = repair.broken_folder_grants(d)
+    return out
+
+
 @app.get("/api/v2/repair/{account_id}")
 async def repair_survey(account_id: int, op: Operator = Depends(operator)):
     """What the failure count is actually made of, and what can be fixed."""
@@ -2549,30 +2584,7 @@ async def repair_survey(account_id: int, op: Operator = Depends(operator)):
                 pass
             d = _D()
             d.conn = conn
-            s = repair.survey(d)
-            broken = repair.broken_folder_grants(d)
-        out["total"] = s["total"]
-        named = 0
-        for key, label, fix in (
-                ("acl_no_account",
-                 "share grants refused — the person had no account at the time",
-                 "resolvable now"),
-                ("acl_quota", "share grants refused for rate limits",
-                 "checked against the target"),
-                ("gmail_invalid_label",
-                 "messages rejected — label pointed at a deleted mailbox",
-                 "retried on the next migration")):
-            if s[key]:
-                named += s[key]
-                out["families"].append(
-                    {"key": key, "count": s[key], "label": label, "fix": fix})
-        out["unclassified"] = max(0, s["total"] - named)
-        # Folder shares get their own line regardless of count. Sharing is
-        # folder-derived now, so a failed folder grant gates every file
-        # inside it -- 147 folders once accounted for 1,050 inaccessible
-        # files while sitting in the same total as 142 single-file failures.
-        out["brokenFolders"] = broken
-        return out
+            return _repair_payload(d, account_id)
 
     return await _off_loop(_read)
 
@@ -2746,6 +2758,21 @@ async def migration_metrics(account_id: int, history: int = 60,
                         "SELECT item_type, status, SUM(n) n FROM "
                         "audit_counts GROUP BY item_type, status "
                         "ORDER BY n DESC")]
+                # The failure survey is computed HERE, in the same read as
+                # the headline counters, so the page cannot show two totals
+                # that disagree. Served separately it drifted: the header
+                # said 382 while the panel beside it said 383, because the
+                # two endpoints were read seconds apart on a run producing
+                # failures continuously. Both were correct; together they
+                # read as a bug.
+                try:
+                    class _D:
+                        pass
+                    dd = _D()
+                    dd.conn = conn
+                    out["repair"] = _repair_payload(dd, account_id)
+                except Exception as exc:      # noqa: BLE001
+                    out["repair"] = {"error": str(exc)[:160]}
                 out["skipped"] = [
                     {"status": r["status"], "count": r["n"]}
                     for r in conn.execute(
@@ -2928,8 +2955,20 @@ async def migration_detail(account_id: int, op: Operator = Depends(operator)):
     # Cached and deduplicated: see _SingleFlightCache. These are the most
     # expensive reads in the API by a wide margin, and this is the only
     # endpoint anything polls on a timer.
+    #
+    # asOf is stamped inside the cached value, so it ages with the data
+    # rather than with the request. A page polling every 5s against a 15s
+    # cache otherwise shows counters that freeze and then jump, with nothing
+    # on screen explaining why -- on a run moving 40 items a second that is
+    # a 600-item discrepancy against the ledger and looks like a bug.
+    def _timed() -> dict:
+        out = _read()
+        out["asOf"] = _dt.datetime.now(_dt.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
+        return out
+
     return await _off_loop(
-        lambda: _DETAIL_CACHE.get(("migration_detail", account_id), _read))
+        lambda: _DETAIL_CACHE.get(("migration_detail", account_id), _timed))
 
 
 @app.get("/api/v2/nodes/join")

@@ -10,7 +10,7 @@ import {
   Speed as MetricsIcon, HealthAndSafety as RepairIcon,
 } from '@mui/icons-material'
 import {
-  fetchMigrationDetail, startDelta, fetchRepairSurvey, runRepair,
+  fetchMigrationDetail, startDelta, runRepair,
   MigrationDetail as Detail, RepairSurvey,
 } from '@/api/controlPlane'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
@@ -60,12 +60,14 @@ export const MigrationDetail: React.FC = () => {
     if (!Number.isFinite(id)) return
     setLoading(true)
     fetchMigrationDetail(id)
-      .then((r) => { setD(r); setError('') })
+      .then((r) => { setD(r); setRepair(r.repair ?? null); setError('') })
       .catch((e) => setError(e instanceof Error ? e.message : String(e)))
       .finally(() => setLoading(false))
-    // Separate from the detail poll: a failure total means very little until
-    // it is broken into causes, and most of this one usually needs nobody.
-    fetchRepairSurvey(id).then(setRepair).catch(() => setRepair(null))
+    // The survey now rides along in the detail payload, computed in the same
+    // read as the headline counters. Fetched separately it drifted -- the
+    // header said 382 failures while the panel beside it said 383, because
+    // the two requests landed seconds apart on a run producing failures
+    // continuously. Both were right; together they read as a bug.
   }, [id])
 
   useEffect(() => {
@@ -73,6 +75,16 @@ export const MigrationDetail: React.FC = () => {
     const t = window.setInterval(refresh, 5000)
     return () => window.clearInterval(t)
   }, [refresh])
+
+  /** Human age of a server timestamp. Seconds matter here: the whole point
+   *  is distinguishing "a moment ago" from "fifteen seconds of migration
+   *  ago", which on a fast run is hundreds of items. */
+  const ageOf = (iso: string) => {
+    const secs = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000))
+    if (secs < 2) return 'just now'
+    if (secs < 90) return `${secs}s ago`
+    return `${Math.round(secs / 60)}m ago`
+  }
 
   const p = d?.progress
 
@@ -135,6 +147,16 @@ export const MigrationDetail: React.FC = () => {
             <Chip size="small" label={d.running ? 'running' : 'idle'}
                   color={d.running ? 'primary' : 'default'}
                   variant={d.running ? 'filled' : 'outlined'} />
+            {/* These numbers are served from a short server-side cache. On a
+                run moving tens of items a second that is a visible gap
+                against the ledger, and unlabelled it reads as the counters
+                being stuck. */}
+            {d.asOf && (
+              <Typography variant="caption" color="text.secondary"
+                          data-testid="as-of">
+                counted {ageOf(d.asOf)}
+              </Typography>
+            )}
           </Stack>
 
           {p && (

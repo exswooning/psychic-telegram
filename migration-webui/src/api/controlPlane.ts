@@ -538,6 +538,13 @@ export interface MigrationDetail {
      *  as old. */
     statusAt?: string
   }>
+  /** When the server produced these numbers. The payload is cached for a
+   *  few seconds, so this ages with the data rather than with the request —
+   *  without it a fast run looks like it freezes and jumps. */
+  asOf?: string
+  /** The failure survey, computed in the same read as the counters above so
+   *  the page cannot display two totals that disagree. */
+  repair?: RepairSurvey
   /** Earliest status change among users the current run has touched. A
    *  failure older than this happened in a previous run and is queued to be
    *  retried, which is a completely different thing to show someone. */
