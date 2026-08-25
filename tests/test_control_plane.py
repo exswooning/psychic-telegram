@@ -2176,3 +2176,57 @@ class TestTheModuleCanActuallyLog:
                 continue
             assert hasattr(api_server, name) or name in ("self",), (
                 f"api_server logs through {name!r}, which it does not define")
+
+
+class TestTheDetailPayloadCarriesItsPanels:
+    """Two panels shipped into the wrong endpoint and nobody noticed.
+
+    `skipped` and `repair` were both anchored onto a neighbouring line that
+    happened to live in migration_metrics rather than migration_detail, so
+    the detail page asked for them, got nothing, and rendered no panel at
+    all. The frontend tests passed throughout -- they mock the API, so they
+    assert how the page draws a payload, never that the server sends one.
+
+    These assert the response shape itself, which is the gap that let it
+    through.
+    """
+
+    def _signed_in(self, cp, email):
+        cp.post("/api/v2/auth/signup",
+                json={"email": email, "password": "hunter22222",
+                      "name": "User"})
+        return cp.get("/api/v2/auth/me").json()["id"]
+
+    def _detail(self, cp, email):
+        aid = self._signed_in(cp, email)
+        r = cp.get(f"/api/v2/migrations/{aid}")
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    def test_it_offers_the_failure_survey(self, cp):
+        body = self._detail(cp, "shape1@example.com")
+        assert "repair" in body, (
+            "the detail page renders its failure panel from this key; "
+            "without it the panel silently never appears")
+
+    def test_it_offers_the_skip_breakdown(self, cp):
+        body = self._detail(cp, "shape2@example.com")
+        assert "skipped" in body
+
+    def test_it_stamps_when_it_was_counted(self, cp):
+        """The payload is cached, so the page shows its age. Absent, a fast
+        run looks like the counters are stuck."""
+        body = self._detail(cp, "shape3@example.com")
+        assert body.get("asOf")
+
+    def test_progress_counts_skips_apart_from_failures(self, cp):
+        body = self._detail(cp, "shape4@example.com")
+        assert "itemsSkipped" in body["progress"]
+
+    def test_the_metrics_endpoint_keeps_its_own_panels(self, cp):
+        """The other half of the same mistake: these belong to metrics and
+        must not migrate along with the ones that were misplaced."""
+        aid = self._signed_in(cp, "shape5@example.com")
+        body = cp.get(f"/api/v2/metrics/{aid}").json()
+        for key in ("operations", "limiters"):
+            assert key in body

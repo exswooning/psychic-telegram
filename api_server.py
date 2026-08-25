@@ -2758,27 +2758,6 @@ async def migration_metrics(account_id: int, history: int = 60,
                         "SELECT item_type, status, SUM(n) n FROM "
                         "audit_counts GROUP BY item_type, status "
                         "ORDER BY n DESC")]
-                # The failure survey is computed HERE, in the same read as
-                # the headline counters, so the page cannot show two totals
-                # that disagree. Served separately it drifted: the header
-                # said 382 while the panel beside it said 383, because the
-                # two endpoints were read seconds apart on a run producing
-                # failures continuously. Both were correct; together they
-                # read as a bug.
-                try:
-                    class _D:
-                        pass
-                    dd = _D()
-                    dd.conn = conn
-                    out["repair"] = _repair_payload(dd, account_id)
-                except Exception as exc:      # noqa: BLE001
-                    out["repair"] = {"error": str(exc)[:160]}
-                out["skipped"] = [
-                    {"status": r["status"], "count": r["n"]}
-                    for r in conn.execute(
-                        "SELECT status, SUM(n) n FROM audit_counts "
-                        "WHERE status LIKE 'SKIPPED%' GROUP BY status "
-                        "ORDER BY n DESC")]
                 out["mappings"] = [
                     {"type": r["type"], "count": r["n"]}
                     for r in conn.execute(
@@ -2849,7 +2828,12 @@ async def migration_detail(account_id: int, op: Operator = Depends(operator)):
             "sourceDomain": src.get("domain") or "",
             "targetDomain": tgt.get("domain") or "",
             "progress": _migration_progress(account_id),
+            # Declared up here so the payload has ONE shape regardless of
+            # whether this account has a ledger yet. The endpoint returns
+            # early for an unconfigured account, and a client that has to
+            # branch on which keys exist will eventually branch wrong.
             "items": [], "failures": [], "failedUsers": [], "users": [],
+            "skipped": [], "repair": None,
             "running": bool([j for j in job_admission.list_active()
                              if j.get("account_id") == account_id]),
             "error": "",
@@ -2918,6 +2902,31 @@ async def migration_detail(account_id: int, op: Operator = Depends(operator)):
                 # accounts that have since been deleted and recreated reads
                 # exactly like one from this minute -- 160 users appearing
                 # broken while the run retrying them was working fine.
+                # Skips, broken down by reason. Belongs on the DETAIL page
+                # next to the counter that totals them -- it spent its first
+                # deploy in the metrics endpoint, anchored onto a neighbour
+                # that lived there, so the panel never rendered once.
+                out["skipped"] = [
+                    {"status": r["status"], "count": r["n"]}
+                    for r in conn.execute(
+                        "SELECT status, SUM(n) n FROM audit_counts "
+                        "WHERE status LIKE 'SKIPPED%' GROUP BY status "
+                        "ORDER BY n DESC")]
+                # The failure survey is computed HERE, in the same read as
+                # the headline counters, so the page cannot show two totals
+                # that disagree. Served from its own endpoint it drifted: the
+                # header said 382 while the panel beside it said 383, because
+                # the two requests landed seconds apart on a run producing
+                # failures continuously. Both were correct; together they read
+                # as a bug.
+                try:
+                    class _D:
+                        pass
+                    dd = _D()
+                    dd.conn = conn
+                    out["repair"] = _repair_payload(dd, account_id)
+                except Exception as exc:      # noqa: BLE001
+                    out["repair"] = {"error": str(exc)[:160]}
                 out["failedUsers"] = [
                     {"sourceUser": r["source_email"],
                      "targetUser": r["target_email"],
