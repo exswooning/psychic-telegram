@@ -100,6 +100,45 @@ class QuotaExhausted(Exception):
 TRANSIENT_403_REASONS = {"rateLimitExceeded", "userRateLimitExceeded", "quotaExceeded"}
 RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 
+# A 400 is permanent by default, and that is right: a malformed request does
+# not improve on retry. This one is the exception, and it is the same
+# freshly-created-account lag already documented below for 401 impersonation
+# -- Drive's sharing check does not see a new Workspace account for some
+# minutes after the Directory API reports it created.
+#
+# Measured on a from-scratch run into a tenant provisioned two hours earlier:
+# 134 grants refused this way, every one naming an account that existed. As
+# a permanent 400 they were never retried, so each became a failed grant that
+# the post-run repair had to verify against the directory and resolve -- work
+# that only exists because the original call gave up immediately.
+#
+# Matched on the stable fragment: Drive writes "no Google accountS ... these
+# email addressES" for several grantees and "no Google account ... this email
+# address" for one.
+TRANSIENT_400_FRAGMENTS = ("no google account",)
+
+# A 403 insufficientPermissions is permanent by default and usually should
+# be: it is how Drive says a user may not touch a file, and retrying that
+# six times per file wastes the quota real work needs.
+#
+# Google sends TWO different things under that one reason, and only one of
+# them is a denial:
+#
+#   "The user does not have sufficient permissions for this file"
+#       -- a real denial. Permanent, unchanged.
+#   "Request had insufficient authentication scopes"
+#       -- the TOKEN, not the file. Seen intermittently on a run whose
+#          scope_guard reported every required scope authorised on both
+#          tenants, and on files whose owner could export them perfectly
+#          when the same call was repeated by hand minutes later. It tracks
+#          the credential refreshes visible in the same logs.
+#
+# 87 files were lost to the second kind on one run -- every copy strategy
+# "failed", none retried, no mapping written. The blast radius of being
+# wrong here is bounded: a genuinely missing scope still fails after the
+# retries, and scope_guard refuses the run before it starts.
+TRANSIENT_403_MESSAGES = ("insufficient authentication scopes",)
+
 # A freshly created Workspace account is not always immediately ready to be
 # impersonated over domain-wide delegation -- confirmed live on
 # seeduser382@source.rohitrokaya.com.np, created by create_until_full
@@ -168,10 +207,30 @@ def _service_disabled_hint(exc: Exception, reason: str) -> str:
             f"(re-checks, and can enable when permitted)")
 
 
+def _is_transient_400(exc: HttpError | None) -> bool:
+    """Is this 400 the freshly-created-account lag rather than a bad request?"""
+    if exc is None:
+        return False
+    blob = str(exc).lower()
+    return any(f in blob for f in TRANSIENT_400_FRAGMENTS)
+
+
+def _is_transient_403(exc: HttpError | None) -> bool:
+    """Is this 403 about the token rather than about the file?"""
+    if exc is None:
+        return False
+    blob = str(exc).lower()
+    return any(f in blob for f in TRANSIENT_403_MESSAGES)
+
+
 def _is_permanent(status: int, reason: str, exc: HttpError | None = None) -> bool:
     if status == 403:
+        if _is_transient_403(exc):
+            return False
         return reason not in TRANSIENT_403_REASONS
     if status == 401 and exc is not None and _is_transient_401(reason, exc):
+        return False
+    if status == 400 and _is_transient_400(exc):
         return False
     if status in RETRYABLE_STATUSES:
         return False
