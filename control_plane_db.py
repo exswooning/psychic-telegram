@@ -338,7 +338,10 @@ def user_progress() -> list[dict]:
             "FROM identity_map ORDER BY source_email")}
         for email, row in ident.items():
             counts = conn.execute(
-                "SELECT status, COUNT(*) n FROM audit_log WHERE source_user=? "
+                # audit_counts, not audit_log: SUCCESS rows for finished
+                # users are pruned into audit_rollup, and reading the raw
+                # table would report those users as having migrated nothing.
+                "SELECT status, SUM(n) n FROM audit_counts WHERE source_user=? "
                 "GROUP BY status", (email,)).fetchall()
             by = {c["status"]: c["n"] for c in counts}
             done = by.get("SUCCESS", 0)

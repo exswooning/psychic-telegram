@@ -246,6 +246,8 @@ class TestSideTables:
             "discovery",      # a read-only prescan, never consulted for skipping
             "upload_ledger",  # the 750 GB/day cap: real bytes were really sent,
                               # so a re-run must still be charged for them
+            "audit_rollup",   # cleared by type alongside audit_log, in the
+                              # same statement -- see reset_service_ledger
             "run_metrics",    # not per-user at all: process-wide latency and
                               # throughput samples, bounded to the last hour,
                               # and nothing consults them to decide whether an

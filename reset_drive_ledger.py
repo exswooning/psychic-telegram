@@ -116,6 +116,15 @@ def reset_service_ledger(db: MigrationDB, source_email: str,
         audit_deleted = conn.execute(
             f"DELETE FROM audit_log WHERE source_user=? AND item_type IN "
             f"({placeholders})", (source_email, *types)).rowcount
+        # audit_rollup holds the counts of SUCCESS rows already pruned out of
+        # audit_log, and the audit_counts view sums both. Clearing audit_log
+        # for these types while leaving the rollup would leave the view
+        # reporting successes for work this reset just declared un-migrated
+        # -- the same divergence in the opposite direction to the one
+        # audit_rollup exists to prevent.
+        audit_deleted += conn.execute(
+            f"DELETE FROM audit_rollup WHERE source_user=? AND item_type IN "
+            f"({placeholders})", (source_email, *types)).rowcount
         side_deleted = 0
         for svc in services:
             for table, col in SERVICE_SIDE_TABLES.get(svc, ()):

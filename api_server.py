@@ -2679,8 +2679,9 @@ async def migration_metrics(account_id: int, history: int = 60,
                     {"itemType": r["item_type"], "status": r["status"],
                      "count": r["n"]}
                     for r in conn.execute(
-                        "SELECT item_type, status, COUNT(*) n FROM audit_log "
-                        "GROUP BY item_type, status ORDER BY n DESC")]
+                        "SELECT item_type, status, SUM(n) n FROM "
+                        "audit_counts GROUP BY item_type, status "
+                        "ORDER BY n DESC")]
                 out["mappings"] = [
                     {"type": r["type"], "count": r["n"]}
                     for r in conn.execute(

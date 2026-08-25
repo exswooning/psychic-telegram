@@ -94,6 +94,37 @@ CREATE INDEX IF NOT EXISTS ix_audit_item   ON audit_log(item_id);
 -- of a migration that does millions of them.
 CREATE INDEX IF NOT EXISTS ix_audit_status_type ON audit_log(status, item_type);
 
+-- Counts for rows that have been pruned out of audit_log.
+--
+-- audit_log records every attempt and nothing ever removed one. On a single
+-- 818k-item tenant it reached 10,661,866 rows and 6.1 GB, of which
+-- 10,604,474 were SUCCESS -- 99.5% of the database describing work that
+-- id_mapping already proves happened. Zero free pages, so none of it was
+-- reclaimable by VACUUM; it was all live. Several tenants of that size on
+-- one VPS is a full disk.
+--
+-- The two jobs audit_log does have different lifetimes: diagnosing a failure
+-- needs the row, proving what moved does not. So SUCCESS rows for a finished
+-- user collapse to a count here and every non-SUCCESS row is kept forever.
+CREATE TABLE IF NOT EXISTS audit_rollup (
+    source_user TEXT NOT NULL,
+    item_type   TEXT NOT NULL,
+    status      TEXT NOT NULL,
+    n           INTEGER NOT NULL,
+    through     TEXT NOT NULL,     -- pruned up to this timestamp
+    PRIMARY KEY (source_user, item_type, status)
+);
+
+-- Every consumer that counted audit_log must read this instead, or a pruned
+-- user reads as having migrated nothing. That is not hypothetical: the
+-- false-DONE check demotes a DONE user with no SUCCESS rows, so counting the
+-- raw table after a prune would mark every finished user as failed.
+CREATE VIEW IF NOT EXISTS audit_counts AS
+    SELECT source_user, item_type, status, COUNT(*) AS n
+      FROM audit_log GROUP BY source_user, item_type, status
+    UNION ALL
+    SELECT source_user, item_type, status, n FROM audit_rollup;
+
 -- Metrics live in the migrating PROCESS, and every reader lives in another
 -- one. webui_spa read METRICS.snapshot() from inside api_server -- a process
 -- that issues no Drive calls -- so the dashboard has been reporting an empty
@@ -546,7 +577,7 @@ class MigrationDB:
         """
         return self.conn.execute(
             """SELECT i.source_email, i.target_email,
-                      (SELECT COUNT(*) FROM audit_log a
+                      (SELECT COALESCE(SUM(a.n), 0) FROM audit_counts a
                         WHERE a.source_user = i.source_email
                           AND a.status = 'SUCCESS') AS migrated
                  FROM identity_map i
