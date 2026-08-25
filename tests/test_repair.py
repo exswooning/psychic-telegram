@@ -560,3 +560,70 @@ class TestStaleFolderFailuresDoNotRaiseAnAlarm:
         self._fail_at(d, "2026-08-23T08:10:00Z")
         assert repair.broken_folder_grants(d)["folders"] == 1
         d.close()
+
+
+class TestRepairPutsMissingGrantsBack:
+    """Reconciling answers "is this grant actually missing?" and stops there.
+
+    Leaving out the re-apply made "Repair" a misnomer: a live run finished
+    with 447 failures, the pass resolved 1, and the 273 grants it had just
+    confirmed absent stayed absent because nothing put them back.
+    """
+
+    class _Auth:
+        def directory(self, tenant):
+            return FakeDirectory(set())
+
+    def _db(self, tmp_path, quota=3):
+        d = dbmod.MigrationDB(str(tmp_path / "m.db"))
+        d.conn.execute("INSERT INTO identity_map(source_email,target_email) "
+                       "VALUES('u@src','u@tgt')")
+        d.conn.commit()
+        d.record_mapping("u@src", "f1", "t1", "file")
+        for i in range(quota):
+            d.log_audit("u@src", f"f1:g{i}@x", "acl", "FAILED",
+                        "Quota exceeded for quota metric 'Queries'")
+        return d
+
+    def test_applying_calls_the_re_apply_pass(self, tmp_path, monkeypatch):
+        import acl_repair
+        called = {}
+
+        def fake(auth, db, settings, max_passes=6, on_pass=None):
+            called["passes"] = max_passes
+            return {"applied": 42, "passes": 2, "remaining": 0, "errors": []}
+
+        monkeypatch.setattr(acl_repair, "repair_until_settled", fake)
+        d = self._db(tmp_path)
+        out = repair.run_all(d, self._Auth(), None, apply=True)
+        assert out["reapplied"] == 42
+        assert called["passes"] == 6
+        d.close()
+
+    def test_a_dry_run_never_re_applies(self, tmp_path, monkeypatch):
+        """Reporting must not write to the target."""
+        import acl_repair
+        monkeypatch.setattr(
+            acl_repair, "repair_until_settled",
+            lambda *a, **k: (_ for _ in ()).throw(
+                AssertionError("must not run during a dry run")))
+        d = self._db(tmp_path)
+        repair.run_all(d, self._Auth(), None, apply=False)
+        d.close()
+
+    def test_a_failing_re_apply_does_not_break_the_pass(self, tmp_path,
+                                                        monkeypatch):
+        import acl_repair
+        monkeypatch.setattr(
+            acl_repair, "repair_until_settled",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("network down")))
+        d = self._db(tmp_path)
+        out = repair.run_all(d, self._Auth(), None, apply=True)
+        assert any("re-apply" in e for e in out["errors"])
+        d.close()
+
+    def test_the_summary_names_what_was_put_back(self):
+        line = repair.summarise({
+            "survey": {"total": 447}, "reapplied": 273, "reapply_passes": 3,
+            "errors": []})
+        assert "273" in line and "re-applied" in line

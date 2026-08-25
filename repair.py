@@ -276,7 +276,8 @@ def resolve(db, rows, status: str, note: str, dry_run: bool = True) -> int:
 
 
 def run_all(db, auth, settings, apply: bool = False,
-            reconcile_limit: int | None = None) -> dict:
+            reconcile_limit: int | None = None,
+            reapply_passes: int = 6) -> dict:
     """Survey, then fix what can be fixed without guessing.
 
     Called automatically at the end of a migration, so the failure count an
@@ -351,6 +352,22 @@ def run_all(db, auth, settings, apply: bool = False,
             out["reconcile_stats"] = stats
         except Exception as exc:      # noqa: BLE001
             out["errors"].append(f"acl reconcile: {str(exc)[:160]}")
+
+    # Reconciling answers "is this grant actually missing?" and stops there.
+    # Re-applying the ones that ARE missing is a separate pass, and leaving
+    # it out made "Repair" a misnomer: a live run finished with 447 failures,
+    # the pass resolved 1, and the 273 grants it had just confirmed absent
+    # stayed absent because nothing put them back. Folders first, since one
+    # folder's grant is what everything inside it inherits.
+    if apply and out["survey"].get("acl_quota"):
+        try:
+            import acl_repair
+            applied = acl_repair.repair_until_settled(
+                auth, db, settings, max_passes=reapply_passes)
+            out["reapplied"] = applied.get("applied", 0)
+            out["reapply_passes"] = applied.get("passes", 0)
+        except Exception as exc:      # noqa: BLE001
+            out["errors"].append(f"acl re-apply: {str(exc)[:160]}")
     return out
 
 
@@ -364,6 +381,9 @@ def summarise(result: dict) -> str:
         parts.append(f"{result['resolved']:,} resolved (grantee recreated)")
     if result.get("reconciled"):
         parts.append(f"{result['reconciled']:,} resolved (already on target)")
+    if result.get("reapplied"):
+        parts.append(f"{result['reapplied']:,} grant(s) re-applied in "
+                     f"{result.get('reapply_passes', 0)} pass(es)")
     if result.get("demoted"):
         parts.append(f"{result['demoted']:,} user(s) demoted from done "
                      f"(migrated nothing)")
