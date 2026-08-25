@@ -627,3 +627,45 @@ class TestRepairPutsMissingGrantsBack:
             "survey": {"total": 447}, "reapplied": 273, "reapply_passes": 3,
             "errors": []})
         assert "273" in line and "re-applied" in line
+
+
+class TestTheSurveyRunsOnABareConnection:
+    """_repair_payload is handed a throwaway object carrying only `.conn`.
+
+    Reading the last repair through a MigrationDB method raised
+    AttributeError on that object; a broad `except` turned it into a null,
+    and the panel rendered nothing with no error anywhere to explain it.
+    """
+
+    def test_last_repair_reads_from_a_connection_alone(self, tmp_path):
+        d = dbmod.MigrationDB(str(tmp_path / "m.db"))
+        run = d.repair_started()
+        d.repair_finished(run, "299 grant(s) re-applied in 2 pass(es)")
+
+        class _ConnOnly:
+            pass
+
+        bare = _ConnOnly()
+        bare.conn = d.conn
+        got = dbmod.last_repair_from(bare.conn)
+        assert got["summary"] == "299 grant(s) re-applied in 2 pass(es)"
+        assert got["running"] is False
+        d.close()
+
+    def test_a_run_still_in_flight_reads_as_running(self, tmp_path):
+        d = dbmod.MigrationDB(str(tmp_path / "m.db"))
+        d.repair_started()
+        got = dbmod.last_repair_from(d.conn)
+        assert got["running"] is True and got["finishedAt"] is None
+        d.close()
+
+    def test_no_repair_yet_is_none_not_an_error(self, tmp_path):
+        d = dbmod.MigrationDB(str(tmp_path / "m.db"))
+        assert dbmod.last_repair_from(d.conn) is None
+        d.close()
+
+    def test_the_method_and_the_function_agree(self, tmp_path):
+        d = dbmod.MigrationDB(str(tmp_path / "m.db"))
+        d.repair_finished(d.repair_started(), "same")
+        assert d.last_repair() == dbmod.last_repair_from(d.conn)
+        d.close()

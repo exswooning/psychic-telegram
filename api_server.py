@@ -2563,8 +2563,14 @@ def _repair_payload(d, account_id: int, since: str | None = None) -> dict:
     # shows the same total before and after a repair that is still running,
     # which reads as the button being broken.
     try:
-        out["lastRun"] = d.last_repair()
-    except Exception:                 # noqa: BLE001 - an old db predates it
+        import db as _dbmod
+        out["lastRun"] = _dbmod.last_repair_from(d.conn)
+    except (AttributeError, sqlite3.Error) as exc:
+        # Narrow on purpose. A bare `except Exception` here hid a live bug
+        # for a whole deploy cycle: the panel simply rendered nothing and
+        # the payload said null, with no error anywhere to explain it.
+        log.warning("last_repair unavailable for account %s: %r",
+                    account_id, exc)
         out["lastRun"] = None
     return out
 

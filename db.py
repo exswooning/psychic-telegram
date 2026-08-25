@@ -619,14 +619,7 @@ class MigrationDB:
 
     def last_repair(self) -> dict | None:
         """The most recent repair, running or finished."""
-        r = self.conn.execute(
-            "SELECT id, started_at, finished_at, summary, error "
-            "FROM repair_runs ORDER BY id DESC LIMIT 1").fetchone()
-        if r is None:
-            return None
-        return {"id": r[0], "startedAt": r[1], "finishedAt": r[2],
-                "summary": r[3] or "", "error": r[4] or "",
-                "running": r[2] is None}
+        return last_repair_from(self.conn)
 
     def forget_label(self, source_user: str, source_label_id: str) -> None:
         """Drop one label mapping so the next sync re-creates it.
@@ -816,3 +809,21 @@ def bulk_seed_identities(db: MigrationDB, pairs: Iterable[tuple[str, str]]) -> N
             [(a.lower(), b.lower()) for a, b in pairs],
         )
     db._identity_cache = None            # membership changed
+
+
+def last_repair_from(conn) -> dict | None:
+    """The most recent repair, running or finished, from a bare connection.
+
+    Module-level because the API builds its survey around a throwaway object
+    carrying nothing but `.conn`. Written as a MigrationDB method, the call
+    raised AttributeError on that object, a broad `except` turned it into a
+    null, and the panel rendered nothing at all with no error to explain it.
+    """
+    r = conn.execute(
+        "SELECT id, started_at, finished_at, summary, error "
+        "FROM repair_runs ORDER BY id DESC LIMIT 1").fetchone()
+    if r is None:
+        return None
+    return {"id": r[0], "startedAt": r[1], "finishedAt": r[2],
+            "summary": r[3] or "", "error": r[4] or "",
+            "running": r[2] is None}
