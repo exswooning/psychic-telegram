@@ -158,3 +158,42 @@ describe('MigrationDetail reports what was skipped', () => {
     expect(screen.queryByTestId('skipped-panel')).toBeNull()
   })
 })
+
+describe('MigrationDetail flags broken folder shares', () => {
+  beforeEach(() => {
+    fetchMigrationDetail.mockReset(); fetchRepairSurvey.mockReset()
+    fetchMigrationDetail.mockResolvedValue(detail())
+  })
+
+  it('calls out folder shares separately from the total', async () => {
+    // Sharing is folder-derived, so a failed folder grant gates every file
+    // inside it. 147 folders once accounted for 1,050 inaccessible files
+    // while sitting in the same total as 142 single-file failures.
+    fetchRepairSurvey.mockResolvedValue(survey({
+      brokenFolders: { folders: 147, grants: 265, files_behind: 1050 },
+    }))
+    render(<MigrationDetail />)
+    await waitFor(() =>
+      expect(screen.getByTestId('broken-folders')).toBeTruthy())
+    const t = screen.getByTestId('broken-folders').textContent || ''
+    expect(t).toContain('147')
+    expect(t).toContain('1,050')
+    expect(t).toContain('folders first')
+  })
+
+  it('says nothing when no folder share failed', async () => {
+    fetchRepairSurvey.mockResolvedValue(survey({
+      brokenFolders: { folders: 0, grants: 0, files_behind: 0 },
+    }))
+    render(<MigrationDetail />)
+    await waitFor(() => expect(screen.getByTestId('repair-panel')).toBeTruthy())
+    expect(screen.queryByTestId('broken-folders')).toBeNull()
+  })
+
+  it('survives the field being absent entirely', async () => {
+    fetchRepairSurvey.mockResolvedValue(survey())
+    render(<MigrationDetail />)
+    await waitFor(() => expect(screen.getByTestId('repair-panel')).toBeTruthy())
+    expect(screen.queryByTestId('broken-folders')).toBeNull()
+  })
+})

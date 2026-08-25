@@ -972,6 +972,10 @@ export interface RepairFamily {
 export interface RepairSurvey {
   accountId: number
   total: number
+  /** Folder shares that failed. Sharing is folder-derived, so each of these
+   *  gates every file inside that folder — categorically worse than a single
+   *  file's own failed grant, and invisible in the raw total. */
+  brokenFolders?: { folders: number; grants: number; files_behind: number }
   families: RepairFamily[]
   unclassified: number
   error: string

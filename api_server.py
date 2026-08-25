@@ -2550,6 +2550,7 @@ async def repair_survey(account_id: int, op: Operator = Depends(operator)):
             d = _D()
             d.conn = conn
             s = repair.survey(d)
+            broken = repair.broken_folder_grants(d)
         out["total"] = s["total"]
         named = 0
         for key, label, fix in (
@@ -2566,6 +2567,11 @@ async def repair_survey(account_id: int, op: Operator = Depends(operator)):
                 out["families"].append(
                     {"key": key, "count": s[key], "label": label, "fix": fix})
         out["unclassified"] = max(0, s["total"] - named)
+        # Folder shares get their own line regardless of count. Sharing is
+        # folder-derived now, so a failed folder grant gates every file
+        # inside it -- 147 folders once accounted for 1,050 inaccessible
+        # files while sitting in the same total as 142 single-file failures.
+        out["brokenFolders"] = broken
         return out
 
     return await _off_loop(_read)

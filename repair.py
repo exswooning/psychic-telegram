@@ -112,6 +112,55 @@ def stale_grantee_failures(db, directory=None) -> list:
     return out
 
 
+def broken_folder_grants(db) -> dict:
+    """Folder shares that failed, and how many files sit behind them.
+
+    Once inherited grants are folder-derived, a folder's share is the ONLY
+    thing granting access to everything inside it. A failed folder grant
+    therefore takes every file in that folder with it -- where the old
+    per-file recreation would have left each file holding its own copy.
+
+    That makes a failed folder grant categorically more serious than a
+    failed file grant, and the raw failure count says nothing about the
+    difference: live, 265 folder-grant failures across 147 folders sat in
+    the same total as 142 file-grant failures, while accounting for 1,050
+    inaccessible files against those files' own 142.
+
+    Blast radius is counted from direct children only. A folder tree could
+    be walked transitively, but parent_target_id gives the direct answer
+    cheaply and understates rather than overstates -- which is the right
+    direction for a number that decides how alarmed to be.
+    """
+    folders = [r["src"] for r in db.conn.execute(
+        """SELECT DISTINCT substr(a.item_id, 1, instr(a.item_id, ':') - 1) AS src
+             FROM audit_log a
+            WHERE a.item_type = 'acl' AND a.status = 'FAILED'
+              AND instr(a.item_id, ':') > 0
+              AND EXISTS (SELECT 1 FROM id_mapping m
+                           WHERE m.source_user = a.source_user
+                             AND m.source_id = substr(a.item_id, 1,
+                                                      instr(a.item_id, ':') - 1)
+                             AND m.type = 'folder')""") if r["src"]]
+    out = {"folders": len(folders), "grants": 0, "files_behind": 0}
+    if not folders:
+        return out
+    marks = ",".join("?" * len(folders))
+    out["grants"] = db.conn.execute(
+        f"""SELECT COUNT(*) c FROM audit_log
+             WHERE item_type='acl' AND status='FAILED'
+               AND substr(item_id, 1, instr(item_id, ':') - 1) IN ({marks})""",
+        folders).fetchone()["c"]
+    targets = [r["target_id"] for r in db.conn.execute(
+        f"SELECT target_id FROM id_mapping WHERE type='folder' "
+        f"AND source_id IN ({marks})", folders)]
+    if targets:
+        m2 = ",".join("?" * len(targets))
+        out["files_behind"] = db.conn.execute(
+            f"SELECT COUNT(*) c FROM id_mapping WHERE type='file' "
+            f"AND parent_target_id IN ({m2})", targets).fetchone()["c"]
+    return out
+
+
 def false_done_users(db) -> list:
     """Users marked DONE that migrated nothing and recorded failures.
 
@@ -268,6 +317,12 @@ def run_all(db, auth, settings, apply: bool = False,
         except Exception as exc:      # noqa: BLE001
             out["errors"].append(f"user rollup: {str(exc)[:160]}")
 
+    # Folders first, always. Their grants are what everything inside
+    # inherits, so repairing a folder can restore access to hundreds of
+    # files at once -- and repairing the files first would spend the rate
+    # limiter's budget on the cheaper half of the problem.
+    out["doors"] = broken_folder_grants(db)
+
     if out["survey"].get("acl_quota"):
         try:
             import acl_reconcile
@@ -300,6 +355,10 @@ def summarise(result: dict) -> str:
     if s.get("gmail_invalid_label"):
         parts.append(f"{s['gmail_invalid_label']:,} Gmail label failure(s) "
                      f"will retry on the next pass")
+    doors = result.get("doors") or {}
+    if doors.get("folders"):
+        parts.append(f"{doors['folders']:,} folder share(s) failed, gating "
+                     f"{doors['files_behind']:,} file(s)")
     for e in result.get("errors", []):
         parts.append(f"repair step failed: {e}")
     return "; ".join(parts)

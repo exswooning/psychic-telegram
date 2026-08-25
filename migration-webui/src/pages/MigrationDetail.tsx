@@ -174,6 +174,19 @@ export const MigrationDetail: React.FC = () => {
                   live bug and two families describing states that had since
                   stopped being true -- about six times the number that
                   actually needed anybody. */}
+              {!!repair.brokenFolders?.folders && (
+                <Alert severity="warning" sx={{ mb: 1.5 }}
+                       data-testid="broken-folders">
+                  <strong>{repair.brokenFolders.folders.toLocaleString()} folder
+                  share{repair.brokenFolders.folders === 1 ? '' : 's'} failed</strong>,
+                  and{' '}
+                  {repair.brokenFolders.files_behind.toLocaleString()} file
+                  {repair.brokenFolders.files_behind === 1 ? '' : 's'} inside
+                  {repair.brokenFolders.files_behind === 1 ? ' it' : ' them'} rely
+                  on that share for access. Repair fixes folders first, because
+                  one folder can restore hundreds of files at once.
+                </Alert>
+              )}
               <Stack spacing={1}>
                 {repair.families.map((f) => (
                   <Stack key={f.key} direction="row" spacing={1}

@@ -455,3 +455,56 @@ class TestManualAndAutomaticRepairAgree:
             assert f"repair.{own}" not in src, (
                 f"cmd_repair calls repair.{own} directly, which is how the "
                 f"two paths drifted before")
+
+
+class TestBrokenFolderShares:
+    """A folder's share is what everything inside inherits, so a failed
+    folder grant takes every file in that folder with it -- where the old
+    per-file recreation left each file holding its own copy. The raw failure
+    count says nothing about that difference: live, 265 folder-grant failures
+    across 147 folders sat in the same total as 142 file-grant failures,
+    while gating 1,050 files against those files' own 142."""
+
+    def _db(self, tmp_path):
+        d = dbmod.MigrationDB(str(tmp_path / "m.db"))
+        d.conn.execute("INSERT INTO identity_map(source_email,target_email) "
+                       "VALUES('u@src','u@tgt')")
+        d.conn.commit()
+        return d
+
+    def test_it_counts_the_files_behind_a_failed_folder(self, tmp_path):
+        d = self._db(tmp_path)
+        d.record_mapping("u@src", "dir1", "tD", "folder")
+        for i in range(4):
+            d.record_mapping("u@src", f"f{i}", f"t{i}", "file",
+                             parent_target_id="tD")
+        d.log_audit("u@src", "dir1:g@x", "acl", "FAILED", "Quota")
+        out = repair.broken_folder_grants(d)
+        assert out["folders"] == 1
+        assert out["files_behind"] == 4
+        d.close()
+
+    def test_a_failed_file_grant_is_not_counted_as_a_door(self, tmp_path):
+        """A file's own failed grant costs that one file, not a folder's
+        worth -- conflating them is what hid the difference."""
+        d = self._db(tmp_path)
+        d.record_mapping("u@src", "f1", "t1", "file")
+        d.log_audit("u@src", "f1:g@x", "acl", "FAILED", "Quota")
+        assert repair.broken_folder_grants(d)["folders"] == 0
+        d.close()
+
+    def test_a_clean_ledger_reports_none(self, tmp_path):
+        d = self._db(tmp_path)
+        assert repair.broken_folder_grants(d) == {
+            "folders": 0, "grants": 0, "files_behind": 0}
+        d.close()
+
+    def test_run_all_reports_them(self, tmp_path):
+        d = self._db(tmp_path)
+        d.record_mapping("u@src", "dir1", "tD", "folder")
+        d.record_mapping("u@src", "f1", "t1", "file", parent_target_id="tD")
+        d.log_audit("u@src", "dir1:g@x", "acl", "FAILED", "Quota")
+        out = repair.run_all(d, None, None, apply=False)
+        assert out["doors"]["folders"] == 1
+        assert "folder share" in repair.summarise(out)
+        d.close()

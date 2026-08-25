@@ -228,3 +228,37 @@ class TestFoldersCarryGrantsToo:
         d = self._db(tmp_path, "message")
         assert acl_repair.files_needing_grants(d) == {}
         d.close()
+
+
+class TestFoldersAreRepairedFirst:
+    """Once inherited grants are folder-derived, a folder's share is the only
+    thing granting access to everything inside it. Repairing one folder can
+    restore hundreds of files at once; repairing in ledger order spends the
+    rate limiter's budget on the cheaper half and can run out before reaching
+    the folder that would have fixed the rest."""
+
+    def test_a_folder_sorts_ahead_of_files(self, tmp_path):
+        d = dbmod.MigrationDB(str(tmp_path / "m.db"))
+        d.conn.execute("INSERT INTO identity_map(source_email,target_email) "
+                       "VALUES('u@src','u@tgt')")
+        d.conn.commit()
+        d.record_mapping("u@src", "fileA", "tA", "file")
+        d.record_mapping("u@src", "fileB", "tB", "file")
+        d.record_mapping("u@src", "dir1", "tD", "folder")
+        for src in ("fileA", "fileB", "dir1"):
+            d.log_audit("u@src", f"{src}:g@x", "acl", "FAILED", "Quota")
+        order = [p[0] for p in acl_repair.files_needing_grants(d)["u@src"]]
+        assert order[0] == "dir1", f"folder must come first, got {order}"
+        d.close()
+
+    def test_files_are_still_all_included(self, tmp_path):
+        d = dbmod.MigrationDB(str(tmp_path / "m.db"))
+        d.conn.execute("INSERT INTO identity_map(source_email,target_email) "
+                       "VALUES('u@src','u@tgt')")
+        d.conn.commit()
+        d.record_mapping("u@src", "fileA", "tA", "file")
+        d.record_mapping("u@src", "dir1", "tD", "folder")
+        for src in ("fileA", "dir1"):
+            d.log_audit("u@src", f"{src}:g@x", "acl", "FAILED", "Quota")
+        assert len(acl_repair.files_needing_grants(d)["u@src"]) == 2
+        d.close()

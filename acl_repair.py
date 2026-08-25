@@ -55,7 +55,7 @@ def files_needing_grants(db, include_quota_only: bool = False) -> dict:
     rows = db.conn.execute(
         f"""SELECT DISTINCT a.source_user,
                    substr(a.item_id, 1, instr(a.item_id, ':') - 1) AS src_file,
-                   m.target_id
+                   m.target_id, m.type
               FROM audit_log a
               JOIN id_mapping m
                 ON m.source_user = a.source_user
@@ -69,7 +69,17 @@ def files_needing_grants(db, include_quota_only: bool = False) -> dict:
         if not r["src_file"] or not r["target_id"]:
             continue
         out.setdefault(r["source_user"], []).append(
-            (r["src_file"], r["target_id"]))
+            (r["src_file"], r["target_id"], r["type"]))
+    # Folders before files, per user.
+    #
+    # Once inherited grants are folder-derived, a folder's share is the only
+    # thing granting access to everything inside it, so repairing one folder
+    # can restore hundreds of files at once. Repairing in ledger order spends
+    # the rate limiter's budget on the cheaper half first and can run out
+    # before reaching the folder that would have fixed the rest.
+    for user in out:
+        out[user].sort(key=lambda p: 0 if p[2] == "folder" else 1)
+        out[user] = [(a, b) for a, b, _ in out[user]]
     return out
 
 
