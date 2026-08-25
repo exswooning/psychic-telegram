@@ -196,6 +196,22 @@ export const MigrationDetail: React.FC = () => {
                   live bug and two families describing states that had since
                   stopped being true -- about six times the number that
                   actually needed anybody. */}
+              {/* Repair is backgrounded and used to report nothing at all:
+                  the button returned instantly, the totals beside it stayed
+                  put because they are counted from the ledger it is still
+                  writing, and there was no way to tell a run in progress
+                  from a run that did nothing. */}
+              {repair.lastRun && (
+                <Alert data-testid="repair-last-run" sx={{ mb: 1.5 }}
+                       severity={repair.lastRun.error ? 'error'
+                                 : repair.lastRun.running ? 'info' : 'success'}>
+                  {repair.lastRun.running
+                    ? `Repair is running, started ${ageOf(repair.lastRun.startedAt)}. The counts below are from before it finishes.`
+                    : repair.lastRun.error
+                      ? `The last repair stopped: ${repair.lastRun.error}`
+                      : `Last repair ${ageOf(repair.lastRun.finishedAt || repair.lastRun.startedAt)}: ${repair.lastRun.summary || 'nothing needed fixing'}`}
+                </Alert>
+              )}
               {!!repair.brokenFolders?.folders && (
                 <Alert severity="warning" sx={{ mb: 1.5 }}
                        data-testid="broken-folders">

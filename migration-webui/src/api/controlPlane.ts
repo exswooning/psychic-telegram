@@ -983,6 +983,15 @@ export interface RepairSurvey {
    *  gates every file inside that folder — categorically worse than a single
    *  file's own failed grant, and invisible in the raw total. */
   brokenFolders?: { folders: number; grants: number; files_behind: number }
+  /** What the last press of Repair did. Absent on a ledger that predates it. */
+  lastRun?: {
+    id: number
+    startedAt: string
+    finishedAt: string | null
+    summary: string
+    error: string
+    running: boolean
+  } | null
   families: RepairFamily[]
   unclassified: number
   error: string

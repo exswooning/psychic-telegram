@@ -44,8 +44,16 @@ log = logging.getLogger("acl_reconcile")
 
 
 def failed_acl_files(db) -> dict:
-    """{source_file_id: (source_user, [audit_key, ...])} for every file with
-    at least one FAILED acl row. The audit key is "<file>:<grantee>"."""
+    """{(source_user, source_file_id): [audit_key, ...]} for every item with
+    at least one FAILED acl row. The audit key is "<file>:<grantee>".
+
+    Keyed by user AND file, not by file alone. A Drive id is the same id in
+    every drive it is shared into, so keying on the file merged several
+    users' failed grants under whichever user was seen first -- and every one
+    of them was then checked against that one user's copy. Grants that were
+    genuinely missing from one drive read as present because a different
+    user's copy happened to hold them.
+    """
     out: dict = {}
     rows = db.conn.execute(
         "SELECT source_user, item_id FROM audit_log "
@@ -55,8 +63,7 @@ def failed_acl_files(db) -> dict:
         if ":" not in key:
             continue
         file_id = key.split(":", 1)[0]
-        user, keys = out.setdefault(file_id, (r["source_user"], []))
-        keys.append(key)
+        out.setdefault((r["source_user"], file_id), []).append(key)
     return out
 
 
@@ -80,12 +87,19 @@ def reconcile(auth, db, settings, dry_run: bool = False,
     stats = {"files": len(files), "checked": 0, "resolved": 0,
              "still_failed": 0, "unreadable": 0}
 
-    for i, (src_file, (src_user, keys)) in enumerate(files.items()):
+    for i, ((src_user, src_file), keys) in enumerate(files.items()):
         if limit is not None and i >= limit:
             break
+        # Folders as well as files, and scoped to the user whose drive the
+        # grant failed in. Matching type='file' alone skipped every folder:
+        # on this corpus sharing is applied at folder level, so all 273
+        # surviving "quota" failures were folders, every one of them was
+        # counted unreadable, and the reconciler resolved nothing while a
+        # live sample showed the target already held all eight checked.
         row = db.conn.execute(
-            "SELECT target_id FROM id_mapping WHERE source_id=? AND type='file'",
-            (src_file,)).fetchone()
+            "SELECT target_id FROM id_mapping "
+            " WHERE source_id=? AND source_user=? AND type IN ('file','folder')",
+            (src_file, src_user)).fetchone()
         tgt_user = targets.get(src_user)
         if not row or not tgt_user:
             # The file itself never copied. Its grant failures are real and

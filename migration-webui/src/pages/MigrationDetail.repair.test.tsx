@@ -282,3 +282,71 @@ describe('MigrationDetail says how old its numbers are', () => {
     expect(screen.queryByTestId('as-of')).toBeNull()
   })
 })
+
+describe('MigrationDetail reports what Repair itself did', () => {
+  beforeEach(() => { fetchMigrationDetail.mockReset() })
+
+  const withRun = (over: Record<string, unknown>) => detail({
+    repair: survey({
+      lastRun: {
+        id: 1, startedAt: new Date(Date.now() - 30_000).toISOString(),
+        finishedAt: new Date().toISOString(), summary: '', error: '',
+        running: false, ...over,
+      },
+    }),
+  })
+
+  it('says what the last repair actually changed', async () => {
+    // The pass runs in a background thread and threw its own result away, so
+    // a run that re-applied 273 grants looked exactly like one that did
+    // nothing: same totals, no message, no log.
+    fetchMigrationDetail.mockResolvedValue(withRun({
+      summary: '430 failed item(s); 273 grant(s) re-applied in 3 pass(es)',
+    }))
+    render(<MigrationDetail />)
+    await waitFor(() =>
+      expect(screen.getByTestId('repair-last-run')).toBeTruthy())
+    expect(screen.getByTestId('repair-last-run').textContent)
+      .toContain('273 grant(s) re-applied')
+  })
+
+  it('marks a run still in flight, and warns the counts are stale', async () => {
+    // The totals are counted from the ledger the run is still writing.
+    fetchMigrationDetail.mockResolvedValue(withRun({
+      finishedAt: null, running: true,
+    }))
+    render(<MigrationDetail />)
+    await waitFor(() =>
+      expect(screen.getByTestId('repair-last-run')).toBeTruthy())
+    const t = screen.getByTestId('repair-last-run').textContent || ''
+    expect(t).toContain('Repair is running')
+    expect(t).toContain('before it finishes')
+  })
+
+  it('surfaces a repair that crashed instead of staying silent', async () => {
+    fetchMigrationDetail.mockResolvedValue(withRun({
+      error: 'invalid_grant: token expired',
+    }))
+    render(<MigrationDetail />)
+    await waitFor(() =>
+      expect(screen.getByTestId('repair-last-run')).toBeTruthy())
+    expect(screen.getByTestId('repair-last-run').textContent)
+      .toContain('token expired')
+  })
+
+  it('says so plainly when a clean run found nothing to do', async () => {
+    fetchMigrationDetail.mockResolvedValue(withRun({ summary: '' }))
+    render(<MigrationDetail />)
+    await waitFor(() =>
+      expect(screen.getByTestId('repair-last-run')).toBeTruthy())
+    expect(screen.getByTestId('repair-last-run').textContent)
+      .toContain('nothing needed fixing')
+  })
+
+  it('shows nothing when Repair has never been pressed', async () => {
+    fetchMigrationDetail.mockResolvedValue(detail())
+    render(<MigrationDetail />)
+    await waitFor(() => expect(screen.getByTestId('repair-panel')).toBeTruthy())
+    expect(screen.queryByTestId('repair-last-run')).toBeNull()
+  })
+})

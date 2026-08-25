@@ -2559,6 +2559,13 @@ def _repair_payload(d, account_id: int, since: str | None = None) -> dict:
     # as their folders are re-created, and the warning climbs on its own
     # while every folder it names actually holds the grant.
     out["brokenFolders"] = repair.broken_folder_grants(d, since=since)
+    # What the last press of the button actually did. Without this the panel
+    # shows the same total before and after a repair that is still running,
+    # which reads as the button being broken.
+    try:
+        out["lastRun"] = d.last_repair()
+    except Exception:                 # noqa: BLE001 - an old db predates it
+        out["lastRun"] = None
     return out
 
 
@@ -2618,9 +2625,15 @@ async def repair_apply(account_id: int, body: WriteAction,
             import repair
             st = Settings(account_id=account_id)
             d = MigrationDB(st.db_path)
+            run_id = d.repair_started()
             try:
-                repair.run_all(d, AuthManager(st), st, apply=True)
+                out = repair.run_all(d, AuthManager(st), st, apply=True)
+                d.repair_finished(run_id, repair.summarise(out))
+            except Exception as exc:      # noqa: BLE001
+                d.repair_finished(run_id, "", str(exc)[:500])
+                raise
             finally:
+                _DETAIL_CACHE.invalidate(("migration_detail", account_id))
                 d.close()
         except Exception as exc:      # noqa: BLE001
             log.warning("repair failed for account %s: %s", account_id, exc)

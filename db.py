@@ -106,6 +106,19 @@ CREATE INDEX IF NOT EXISTS ix_audit_status_type ON audit_log(status, item_type);
 -- The two jobs audit_log does have different lifetimes: diagnosing a failure
 -- needs the row, proving what moved does not. So SUCCESS rows for a finished
 -- user collapse to a count here and every non-SUCCESS row is kept forever.
+-- Repair used to run in a daemon thread that dropped its own result on the
+-- floor. Clicking the button returned 200 instantly, nothing was logged
+-- unless it crashed, and the only way to tell whether it had done anything
+-- was to poll the failure count and guess. A run that reports nothing is
+-- indistinguishable from a run that did nothing.
+CREATE TABLE IF NOT EXISTS repair_runs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at  TEXT NOT NULL,
+    finished_at TEXT,               -- NULL while still running
+    summary     TEXT,
+    error       TEXT
+);
+
 CREATE TABLE IF NOT EXISTS audit_rollup (
     source_user TEXT NOT NULL,
     item_type   TEXT NOT NULL,
@@ -586,6 +599,34 @@ class MigrationDB:
                                    WHERE m.source_user = i.source_email)
                   AND migrated > 0
                 ORDER BY migrated DESC""").fetchall()
+
+    def repair_started(self) -> int:
+        """Open a repair record and hand back its id."""
+        cur = self.conn.execute(
+            "INSERT INTO repair_runs(started_at) VALUES(?)",
+            (datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),))
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def repair_finished(self, run_id: int, summary: str = "",
+                        error: str = "") -> None:
+        self.conn.execute(
+            "UPDATE repair_runs SET finished_at=?, summary=?, error=? "
+            "WHERE id=?",
+            (datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+             summary[:2000], error[:2000], run_id))
+        self.conn.commit()
+
+    def last_repair(self) -> dict | None:
+        """The most recent repair, running or finished."""
+        r = self.conn.execute(
+            "SELECT id, started_at, finished_at, summary, error "
+            "FROM repair_runs ORDER BY id DESC LIMIT 1").fetchone()
+        if r is None:
+            return None
+        return {"id": r[0], "startedAt": r[1], "finishedAt": r[2],
+                "summary": r[3] or "", "error": r[4] or "",
+                "running": r[2] is None}
 
     def forget_label(self, source_user: str, source_label_id: str) -> None:
         """Drop one label mapping so the next sync re-creates it.

@@ -248,6 +248,11 @@ class TestSideTables:
                               # so a re-run must still be charged for them
             "audit_rollup",   # cleared by type alongside audit_log, in the
                               # same statement -- see reset_service_ledger
+            "repair_runs",    # not per-user at all: a log of when the Repair
+                              # button was pressed and what that pass reported.
+                              # Nothing reads it to decide whether an item
+                              # still needs migrating, and a reset should not
+                              # erase the record of operator actions
             "run_metrics",    # not per-user at all: process-wide latency and
                               # throughput samples, bounded to the last hour,
                               # and nothing consults them to decide whether an
