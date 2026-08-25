@@ -108,10 +108,63 @@ def ensure_users(directory, emails: list[str], dry_run: bool = False) -> dict:
             result["created"].append((email, password))
             log.info("created %s", email)
         except HttpError as exc:
+            # The domain is full -- but a deleted account of this exact name
+            # may be sitting in the recovery pool, already holding the slot
+            # that is being refused.
+            #
+            # Deleting a Workspace user does not release its place in the
+            # domain user limit; Google holds it, restorable, for 20 days. So
+            # a tenant that has been wiped and re-provisioned is refused new
+            # accounts while the names it wants are all still there. Live:
+            # three wipes of a 200-user tenant left 600 held deletions,
+            # re-provisioning died at 172 of 201, and every one of the 29
+            # missing accounts restored without consuming a single new slot.
+            if _is_domain_full(exc):
+                restored = _undelete(directory, email)
+                if restored:
+                    result["created"].append((email, "(restored, password unchanged)"))
+                    log.info("restored %s from the deleted pool", email)
+                    continue
             result["failed"].append((email, str(exc)))
             log.warning("could not create %s: %s", email, exc)
 
     return result
+
+
+def _is_domain_full(exc: HttpError) -> bool:
+    text = str(exc).lower()
+    return "domain user limit" in text or "limitexceeded" in text
+
+
+def _undelete(directory, email: str) -> bool:
+    """Restore a deleted account of this exact name, if one exists.
+
+    Matched on primaryEmail, because that is the name the create was refused
+    for. The restored account keeps its old password, which is fine: nothing
+    here signs in as the user -- delegation impersonates them.
+
+    Returns False rather than raising on any problem. A failed restore should
+    fall through to the original create error, which is the more accurate
+    thing to report.
+    """
+    try:
+        token = None
+        while True:
+            resp = directory.users().list(
+                customer="my_customer", maxResults=200, pageToken=token,
+                showDeleted=True,
+                fields="nextPageToken,users(primaryEmail,id)").execute()
+            for u in resp.get("users", []):
+                if (u.get("primaryEmail") or "").lower() == email.lower():
+                    directory.users().undelete(
+                        userKey=u["id"], body={"orgUnitPath": "/"}).execute()
+                    return True
+            token = resp.get("nextPageToken")
+            if not token:
+                return False
+    except Exception as exc:      # noqa: BLE001
+        log.warning("could not restore %s: %s", email, str(exc)[:160])
+        return False
 
 
 _TRANSIENT_STATUSES = (500, 502, 503, 504)
