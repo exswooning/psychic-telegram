@@ -508,3 +508,55 @@ class TestBrokenFolderShares:
         assert out["doors"]["folders"] == 1
         assert "folder share" in repair.summarise(out)
         d.close()
+
+
+class TestStaleFolderFailuresDoNotRaiseAnAlarm:
+    """audit_log survives a wipe on purpose, so old FAILED rows persist. As a
+    re-run re-creates folders, those stale rows start finding a matching
+    mapping and the warning climbs on its own.
+
+    Live it went 1 -> 9 -> 98 with "952 files at risk" attached, and every
+    folder sampled turned out to HOLD the grant it was reported as missing:
+    they were satisfied by inheritance from a parent, so nothing wrote an
+    explicit SUCCESS row to overwrite the old failure. An operator would have
+    chased 98 folders that were fine.
+    """
+
+    def _db(self, tmp_path):
+        d = dbmod.MigrationDB(str(tmp_path / "m.db"))
+        d.conn.execute("INSERT INTO identity_map(source_email,target_email) "
+                       "VALUES('u@src','u@tgt')")
+        d.conn.commit()
+        d.record_mapping("u@src", "dir1", "tD", "folder")
+        d.record_mapping("u@src", "f1", "t1", "file", parent_target_id="tD")
+        return d
+
+    def _fail_at(self, d, when):
+        d.log_audit("u@src", "dir1:g@x", "acl", "FAILED", "Quota")
+        with d.write() as conn:
+            conn.execute("UPDATE audit_log SET timestamp=? "
+                         "WHERE item_id='dir1:g@x'", (when,))
+
+    def test_a_failure_from_before_the_run_is_not_counted(self, tmp_path):
+        d = self._db(tmp_path)
+        self._fail_at(d, "2026-08-23T08:10:00Z")
+        out = repair.broken_folder_grants(d, since="2026-08-25T02:25:00Z")
+        assert out["folders"] == 0
+        assert out["files_behind"] == 0
+        d.close()
+
+    def test_a_failure_from_this_run_is_counted(self, tmp_path):
+        d = self._db(tmp_path)
+        self._fail_at(d, "2026-08-25T09:00:00Z")
+        out = repair.broken_folder_grants(d, since="2026-08-25T02:25:00Z")
+        assert out["folders"] == 1
+        assert out["files_behind"] == 1
+        d.close()
+
+    def test_without_a_window_everything_is_counted(self, tmp_path):
+        """The post-run repair wants the whole ledger; only the live
+        dashboard scopes to the current run."""
+        d = self._db(tmp_path)
+        self._fail_at(d, "2026-08-23T08:10:00Z")
+        assert repair.broken_folder_grants(d)["folders"] == 1
+        d.close()

@@ -112,7 +112,7 @@ def stale_grantee_failures(db, directory=None) -> list:
     return out
 
 
-def broken_folder_grants(db) -> dict:
+def broken_folder_grants(db, since: str | None = None) -> dict:
     """Folder shares that failed, and how many files sit behind them.
 
     Once inherited grants are folder-derived, a folder's share is the ONLY
@@ -130,17 +130,35 @@ def broken_folder_grants(db) -> dict:
     be walked transitively, but parent_target_id gives the direct answer
     cheaply and understates rather than overstates -- which is the right
     direction for a number that decides how alarmed to be.
+
+    `since` scopes this to failures the CURRENT run produced, and matters
+    more than it looks. audit_log survives a wipe on purpose, so old FAILED
+    rows persist; as a re-run re-creates folders, those stale rows start
+    finding a matching mapping and the count climbs on its own. Live it went
+    1 -> 9 -> 98 with a "952 files at risk" warning attached, and every
+    folder sampled turned out to HOLD the grant it was reported as missing.
+    They are satisfied by inheritance from a parent, so nothing wrote an
+    explicit SUCCESS row to overwrite the old failure.
+
+    Without `since` this still reports everything, which is what a
+    post-run repair wants; the live dashboard passes the run start so it
+    warns about what this run actually broke.
     """
+    where = ""
+    params: list = []
+    if since:
+        where = " AND a.timestamp >= ?"
+        params = [since]
     folders = [r["src"] for r in db.conn.execute(
-        """SELECT DISTINCT substr(a.item_id, 1, instr(a.item_id, ':') - 1) AS src
+        f"""SELECT DISTINCT substr(a.item_id, 1, instr(a.item_id, ':') - 1) AS src
              FROM audit_log a
             WHERE a.item_type = 'acl' AND a.status = 'FAILED'
-              AND instr(a.item_id, ':') > 0
+              AND instr(a.item_id, ':') > 0{where}
               AND EXISTS (SELECT 1 FROM id_mapping m
                            WHERE m.source_user = a.source_user
                              AND m.source_id = substr(a.item_id, 1,
                                                       instr(a.item_id, ':') - 1)
-                             AND m.type = 'folder')""") if r["src"]]
+                             AND m.type = 'folder')""", params) if r["src"]]
     out = {"folders": len(folders), "grants": 0, "files_behind": 0}
     if not folders:
         return out

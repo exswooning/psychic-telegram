@@ -2525,7 +2525,7 @@ async def test_report_run(body: WriteAction, op: Operator = Depends(operator)):
     return {"ok": True, "detail": "test run started; it takes about 3 minutes"}
 
 
-def _repair_payload(d, account_id: int) -> dict:
+def _repair_payload(d, account_id: int, since: str | None = None) -> dict:
     """The failure survey, shaped for display.
 
     One function, two callers: the standalone /api/v2/repair endpoint and the
@@ -2555,7 +2555,10 @@ def _repair_payload(d, account_id: int) -> dict:
             out["families"].append(
                 {"key": key, "count": s[key], "label": label, "fix": fix})
     out["unclassified"] = max(0, s["total"] - named)
-    out["brokenFolders"] = repair.broken_folder_grants(d)
+    # Scoped to this run: stale rows from before a wipe otherwise "activate"
+    # as their folders are re-created, and the warning climbs on its own
+    # while every folder it names actually holds the grant.
+    out["brokenFolders"] = repair.broken_folder_grants(d, since=since)
     return out
 
 
@@ -2912,21 +2915,6 @@ async def migration_detail(account_id: int, op: Operator = Depends(operator)):
                         "SELECT status, SUM(n) n FROM audit_counts "
                         "WHERE status LIKE 'SKIPPED%' GROUP BY status "
                         "ORDER BY n DESC")]
-                # The failure survey is computed HERE, in the same read as
-                # the headline counters, so the page cannot show two totals
-                # that disagree. Served from its own endpoint it drifted: the
-                # header said 382 while the panel beside it said 383, because
-                # the two requests landed seconds apart on a run producing
-                # failures continuously. Both were correct; together they read
-                # as a bug.
-                try:
-                    class _D:
-                        pass
-                    dd = _D()
-                    dd.conn = conn
-                    out["repair"] = _repair_payload(dd, account_id)
-                except Exception as exc:      # noqa: BLE001
-                    out["repair"] = {"error": str(exc)[:160]}
                 out["failedUsers"] = [
                     {"sourceUser": r["source_email"],
                      "targetUser": r["target_email"],
@@ -2957,6 +2945,26 @@ async def migration_detail(account_id: int, op: Operator = Depends(operator)):
                 out["runStartedAt"] = _run_started_at(
                     account_id, job_admission.list_active(),
                     row["t"] if row else None)
+
+                # AFTER runStartedAt, which it consumes. Computed before it,
+                # the scope was always empty and the folder warning counted
+                # every stale row in the ledger -- the exact bug this scoping
+                # exists to fix.
+                #
+                # The survey lives in this read so the page cannot show two
+                # totals that disagree: served from its own endpoint the
+                # header said 382 while the panel beside it said 383, because
+                # the requests landed seconds apart on a run producing
+                # failures continuously.
+                try:
+                    class _D:
+                        pass
+                    dd = _D()
+                    dd.conn = conn
+                    out["repair"] = _repair_payload(
+                        dd, account_id, since=out.get("runStartedAt") or None)
+                except Exception as exc:      # noqa: BLE001
+                    out["repair"] = {"error": str(exc)[:160]}
         except Exception as exc:      # noqa: BLE001 - report, never 500
             out["error"] = f"could not read the ledger: {str(exc)[:160]}"
         return out
