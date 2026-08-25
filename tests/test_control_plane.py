@@ -2082,3 +2082,97 @@ class TestRunStartComesFromTheJobNotAGuess:
         assert api_server._run_started_at(
             7, [self._job(7, "2099-01-01T00:00:00Z", name="benchmark")],
             "2026-08-22T04:30:00Z") == "2026-08-22T04:30:00Z"
+
+
+class TestLedgerSchemasAreBroughtCurrentAtStartup:
+    """Schema additions only take effect when something opens a ledger
+    READ-WRITE, and this server reads them read-only. A deploy that added a
+    table or a view therefore left every existing account broken until some
+    other process happened to open its database -- which for a tenant between
+    migrations may be never.
+
+    Found the hard way: audit_counts shipped, the API queried it, and the live
+    ledger answered "no such table" because the migration process had opened
+    that file before the deploy and nothing since had.
+    """
+
+    def test_it_creates_missing_objects_in_an_existing_ledger(self, tmp_path,
+                                                              monkeypatch):
+        import sqlite3
+
+        import api_server
+        import db as dbmod
+
+        path = str(tmp_path / "acct.db")
+        dbmod.MigrationDB(path).close()
+        with sqlite3.connect(path) as c:
+            c.execute("DROP VIEW IF EXISTS audit_counts")
+            names = [r[0] for r in c.execute(
+                "SELECT name FROM sqlite_master WHERE name='audit_counts'")]
+            assert names == [], "precondition: the view is missing"
+
+        class _S:
+            def __init__(self, account_id=None):
+                self.db_path = path
+
+        monkeypatch.setattr(api_server.accounts_auth, "list_accounts",
+                            lambda: [{"id": 1}])
+        import config
+        monkeypatch.setattr(config, "Settings", _S)
+        api_server._ensure_account_schemas()
+
+        with sqlite3.connect(path) as c:
+            names = [r[0] for r in c.execute(
+                "SELECT name FROM sqlite_master WHERE name='audit_counts'")]
+        assert names == ["audit_counts"]
+
+    def test_one_bad_ledger_does_not_stop_the_others(self, monkeypatch):
+        """A control plane that refuses to start because one tenant's file is
+        unreadable takes every other tenant down with it."""
+        import api_server
+        monkeypatch.setattr(api_server.accounts_auth, "list_accounts",
+                            lambda: [{"id": 1}, {"id": 2}])
+        import config
+
+        class _Boom:
+            def __init__(self, account_id=None):
+                raise RuntimeError("no tenant_configs row")
+
+        monkeypatch.setattr(config, "Settings", _Boom)
+        api_server._ensure_account_schemas()   # must not raise
+
+    def test_an_unenumerable_account_table_does_not_raise(self, monkeypatch):
+        import api_server
+        monkeypatch.setattr(
+            api_server.accounts_auth, "list_accounts",
+            lambda: (_ for _ in ()).throw(RuntimeError("no such table")))
+        api_server._ensure_account_schemas()   # must not raise
+
+
+class TestTheModuleCanActuallyLog:
+    """api_server called log.warning in two handlers written to swallow an
+    error, through a name the module never defined. Both would have raised
+    NameError from inside the except block -- turning a handled failure into
+    an unhandled one at exactly the moment something was already wrong."""
+
+    def test_the_logger_exists(self):
+        import logging
+
+        import api_server
+        assert isinstance(api_server.log, logging.Logger)
+
+    def test_every_log_call_resolves(self):
+        """Asserted against the source: these live in except branches that
+        normal test runs never reach, which is why the missing name survived
+        being committed twice."""
+        import inspect
+        import re
+
+        import api_server
+        src = inspect.getsource(api_server)
+        used = set(re.findall(r"\b(\w+)\.(?:warning|error|info|debug)\(", src))
+        for name in used:
+            if name in ("log", "logging"):
+                continue
+            assert hasattr(api_server, name) or name in ("self",), (
+                f"api_server logs through {name!r}, which it does not define")

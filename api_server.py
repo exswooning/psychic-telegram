@@ -53,6 +53,7 @@ import asyncio
 import hmac
 from contextlib import asynccontextmanager
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -359,6 +360,13 @@ HUB = Hub()
 #
 # Still not 'discover': nothing here admits under that name, and releasing
 # a slot this process did not take is how one job frees another's.
+# This module logged through a name it never defined. Two handlers written to
+# swallow an error -- the schema check and the test-run launcher -- would have
+# raised NameError from inside the except block instead, turning a handled
+# failure into an unhandled one at exactly the moment something was already
+# wrong.
+log = logging.getLogger("api_server")
+
 _OWNED_JOB_NAMES = {"migrate", "delta", "full_setup"}
 
 
@@ -434,6 +442,43 @@ def _reconcile_inventory_scans() -> None:
 
 
 @asynccontextmanager
+def _ensure_account_schemas() -> None:
+    """Bring every account ledger up to the current schema at startup.
+
+    Schema additions only take effect when something opens a ledger
+    READ-WRITE, and this server reads them read-only. So a deploy that added
+    a table or a view left every existing account broken until some other
+    process happened to open its database -- which for a tenant between
+    migrations may be never.
+
+    Found the hard way: audit_counts shipped, the API queried it, and the
+    live ledger answered "no such table" because the migration process had
+    opened that file before the deploy and nothing since had.
+
+    Opening MigrationDB applies the schema and the column upgrades, all of
+    which are IF NOT EXISTS and cheap. Failures are logged per account and
+    never raised: one unreadable ledger must not stop the control plane from
+    starting for everyone else.
+    """
+    from db import MigrationDB
+    try:
+        accounts = accounts_auth.list_accounts()
+    except Exception as exc:      # noqa: BLE001
+        log.warning("could not enumerate accounts for schema check: %s", exc)
+        return
+    for acct in accounts:
+        aid = acct.get("id") if isinstance(acct, dict) else acct
+        try:
+            from config import Settings
+            path = Settings(account_id=aid).db_path
+            if not path or not os.path.isfile(path):
+                continue
+            MigrationDB(path).close()
+        except Exception as exc:      # noqa: BLE001
+            log.warning("schema check failed for account %s: %s",
+                        aid, str(exc)[:160])
+
+
 async def lifespan(_: FastAPI):
     """Apply control-plane migrations, then start the single ledger tailer.
 
@@ -448,6 +493,7 @@ async def lifespan(_: FastAPI):
     await _off_loop(accounts_auth.bootstrap_legacy_account)
     await _off_loop(_reconcile_active_jobs)
     await _off_loop(_reconcile_inventory_scans)
+    await _off_loop(_ensure_account_schemas)
     task = asyncio.create_task(_tailer())
     try:
         yield
