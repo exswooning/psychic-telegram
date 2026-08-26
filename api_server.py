@@ -760,8 +760,13 @@ async def ws_endpoint(ws: WebSocket,
     if op.account_id is None:
         await ws.close(code=1008)
         return
+    # Both the ledger and the delivery key come from the same account, or a
+    # superadmin's socket is keyed to their own tenant while its snapshot
+    # shows the migration in context -- and the tailer's later frames would
+    # then never match what the page first rendered.
+    _ws_account = _account_in_context(op)
     _ws_ledger = _ledger_for(op)
-    await HUB.join(ws, op.account_id)
+    await HUB.join(ws, _ws_account)
     try:
         # Snapshot on connect, so a client that joins mid-run is immediately
         # correct instead of blank until the next change.

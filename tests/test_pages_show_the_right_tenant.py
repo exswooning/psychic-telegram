@@ -172,3 +172,76 @@ class TestTheWebsocketDoesNotFanOutOneTenantToEveryone:
         assert "_account_db_path(account_id)" in tail
         # and the diff is per tenant, or one busy account starves the others
         assert "_last_snapshot.get(account_id)" in tail
+
+
+class TestTheSocketIsKeyedToTheMigrationItShowed:
+    """The snapshot and the frames after it must be about one migration.
+
+    The ledger came from _account_in_context and the delivery key from
+    op.account_id. Those are the same number for a tenant, so nothing broke
+    for the audience the scoping was written for -- and they differ for
+    exactly the caller who reported the bug: a superadmin watching somebody
+    else's run. Their snapshot showed account 7, their socket was filed
+    under their own empty tenant, and every later frame was addressed to 7.
+
+    The page rendered correct once and then never moved again, which reads
+    as a stalled migration rather than a mis-addressed socket.
+    """
+
+    def _superadmin_watching(self, monkeypatch, running_account):
+        import api_server
+        monkeypatch.setattr(api_server.job_admission, "list_active",
+                            lambda: [{"job_name": "migrate",
+                                      "account_id": running_account,
+                                      "pid": 1}])
+        monkeypatch.setattr(api_server.job_admission, "is_live",
+                            lambda j: True)
+        return api_server.Operator(name="boss", role="admin",
+                                   account_id=66, is_superadmin=True)
+
+    def test_the_key_and_the_ledger_name_the_same_account(self, monkeypatch):
+        import api_server
+        op = self._superadmin_watching(monkeypatch, 7)
+        assert op.account_id == 66              # their own tenant, empty
+        assert api_server._account_in_context(op) == 7
+        # so keying the socket by op.account_id would file it under 66
+        # while its snapshot was built from 7's ledger.
+
+    def test_the_handler_keys_by_context_not_by_the_caller(self):
+        import os
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        src = open(os.path.join(root, "api_server.py"), encoding="utf-8").read()
+        body = src.split("async def ws_endpoint")[1].split("\n@app")[0]
+        assert "HUB.join(ws, _ws_account)" in body
+        assert "_ws_account = _account_in_context(op)" in body
+        assert "HUB.join(ws, op.account_id)" not in body, (
+            "the socket is filed under the caller's own tenant while its "
+            "snapshot came from the migration in context")
+
+    def test_frames_for_the_watched_run_reach_the_watcher(self, monkeypatch):
+        """The end-to-end shape: what the tailer sends is what arrives."""
+        import asyncio
+
+        import api_server
+        op = self._superadmin_watching(monkeypatch, 7)
+
+        class _Sock:
+            def __init__(self):
+                self.sent = []
+
+            async def accept(self):
+                pass
+
+            async def send_text(self, payload):
+                self.sent.append(payload)
+
+        async def _run():
+            hub = api_server.Hub()
+            ws = _Sock()
+            await hub.join(ws, api_server._account_in_context(op))
+            # the tailer builds this frame for the account it scanned
+            await hub.broadcast({"type": "JOB_PROGRESS"}, 7)
+            return ws.sent
+
+        assert len(asyncio.run(_run())) == 1, (
+            "the watcher saw a snapshot of account 7 and then nothing")
