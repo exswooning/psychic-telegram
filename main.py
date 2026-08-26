@@ -651,10 +651,41 @@ def _gate_on_delegation(settings: Settings) -> None:
                     gap.tenant, ", ".join(gap.missing))
 
 
+def demote_stale_running(db) -> int:
+    """Mark users left RUNNING by a run that is no longer alive.
+
+    job_admission allows one job per tenant, so at the moment a run starts
+    nothing else is touching this ledger -- any user still marked RUNNING
+    was abandoned by a previous process, not being worked on now.
+
+    That state does outlive its process. A delta deadlocked and had to be
+    killed; nineteen users caught the shutdown and became INTERRUPTED,
+    three did not and stayed RUNNING with nothing behind them. The page
+    then reported three users migrating indefinitely.
+
+    INTERRUPTED rather than PENDING: the work that did land is real, and
+    _already_done treats INTERRUPTED as unfinished, so the next run picks
+    them up without discarding what they achieved.
+    """
+    cur = db.conn.execute(
+        "UPDATE identity_map SET status='INTERRUPTED', "
+        "notes='left RUNNING by a run that is no longer alive' "
+        "WHERE status='RUNNING'")
+    db.conn.commit()
+    return cur.rowcount
+
+
 def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
                            only=None) -> list[dict]:
     """run_batch under the memory watchdog; exits PAUSED if it fires."""
     _gate_on_delegation(settings)
+    try:
+        stale = demote_stale_running(db)
+        if stale:
+            log.warning("%d user(s) were still marked RUNNING by a previous "
+                        "run that is no longer alive; re-opening them", stale)
+    except Exception as exc:      # noqa: BLE001 - advisory, never blocking
+        log.warning("could not demote stale RUNNING users: %s", exc)
     try:
         reopened = reconcile_service_markers(db)
         for user, svc in reopened[:20]:
