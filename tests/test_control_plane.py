@@ -96,7 +96,7 @@ class TestEveryAttemptIsAudited:
         cp.post("/api/v2/migrate/start",
                 json={"reason": "should not be allowed", "services": ["drive"]},
                 headers=VIEWER)
-        rows = cp.get("/api/v2/actions").json()
+        rows = cp.get("/api/v2/actions", headers=ADMIN).json()
         assert [(r["actor"], r["action"], r["outcome"]) for r in rows] == \
                [("intern", "migrate.start", "REFUSED")]
         assert rows[0]["reason"] == "should not be allowed"
@@ -113,7 +113,7 @@ class TestEveryAttemptIsAudited:
         r = cp.post("/api/v2/migrate/start",
                     json={"reason": "will crash", "services": ["drive"]}, headers=ADMIN)
         assert r.status_code == 500
-        rows = cp.get("/api/v2/actions").json()
+        rows = cp.get("/api/v2/actions", headers=ADMIN).json()
         assert rows[0]["outcome"] == "FAILED"
         assert rows[0]["reason"] == "will crash"
         assert "subprocess died" in rows[0]["detail"]
@@ -124,7 +124,9 @@ class TestEveryAttemptIsAudited:
         cp.post("/api/v2/migrate/start",
                 json={"reason": "planned cutover", "services": ["drive"],
                       "users": ["a@x.com"]}, headers=ADMIN)
-        row = cp.get("/api/v2/actions").json()[0]
+        # A credential, because an anonymous caller no longer reads the
+        # audit log -- it was readable from the public internet.
+        row = cp.get("/api/v2/actions", headers=ADMIN).json()[0]
         assert (row["actor"], row["actor_role"], row["outcome"]) == ("boss", "admin", "OK")
         assert row["target"] == "a@x.com"
         assert "planned cutover" in row["reason"]
@@ -154,7 +156,9 @@ class TestProvisioning:
                     json={"reason": "reprovisioning after cleanup",
                           "tenant": "target"}, headers=ADMIN)
         assert r.status_code == 200
-        row = cp.get("/api/v2/actions").json()[0]
+        # A credential, because an anonymous caller no longer reads the
+        # audit log -- it was readable from the public internet.
+        row = cp.get("/api/v2/actions", headers=ADMIN).json()[0]
         assert row["action"] == "provision.start"
         assert row["target"] == "target"
         assert row["outcome"] == "OK"
@@ -164,7 +168,7 @@ class TestProvisioning:
         d = MigrationDB(os.environ["MIGRATION_DB"])
         bulk_seed_identities(d, [("a@s.com", "a@t.com"), ("b@s.com", "b@t.com")])
         d.close()
-        r = cp.get("/api/v2/provision/status?tenant=target").json()
+        r = cp.get("/api/v2/provision/status?tenant=target", headers=ADMIN).json()
         assert r["total"] == 2
         assert r["running"] is False
 
@@ -193,7 +197,7 @@ class TestProvisioning:
             fh.write("\nFailed (1):\n")
             fh.write("    c@t.com: 409 already exists\n")
         try:
-            r = cp.get("/api/v2/provision/status?tenant=target").json()
+            r = cp.get("/api/v2/provision/status?tenant=target", headers=ADMIN).json()
             assert r["created"] == 2
             assert r["failed"] == 1
             assert {u["email"] for u in r["users"]} == {"a@t.com", "b@t.com",
@@ -398,7 +402,7 @@ class TestBenchmarkLiveStatus:
 
     def test_not_running_reports_nothing_else(self, cp):
         """No phase, no progress, no stale numbers left on screen."""
-        r = cp.get("/api/v2/benchmark/running")
+        r = cp.get("/api/v2/benchmark/running", headers=ADMIN)
         assert r.status_code == 200
         body = r.json()
         if not body["running"]:
@@ -492,7 +496,7 @@ class TestCoverageAudit:
     def test_no_audit_yet_is_a_clean_not_running_result_none(self, cp, monkeypatch):
         import api_server
         monkeypatch.setattr(api_server, "HERE", tempfile.mkdtemp())
-        r = cp.get("/api/v2/coverage/status")
+        r = cp.get("/api/v2/coverage/status", headers=ADMIN)
         assert r.status_code == 200
         body = r.json()
         assert body["running"] is False
@@ -520,7 +524,7 @@ class TestCoverageAudit:
         with open(os.path.join(d, "logs", "coverage-20990101T000000Z.json"),
                  "w", encoding="utf-8") as fh:
             _json.dump(payload, fh)
-        r = cp.get("/api/v2/coverage/status")
+        r = cp.get("/api/v2/coverage/status", headers=ADMIN)
         body = r.json()
         assert body["running"] is False
         assert body["result"]["counts"] == {"covered": 1, "absent": 1, "unprobed": 1}
@@ -536,7 +540,7 @@ class TestCoverageAudit:
         with open(os.path.join(d, "logs", "coverage-20990101T000000Z.json"),
                  "w", encoding="utf-8") as fh:
             fh.write('{"rows": [')   # truncated
-        r = cp.get("/api/v2/coverage/status")
+        r = cp.get("/api/v2/coverage/status", headers=ADMIN)
         assert r.status_code == 200
         assert r.json()["result"] is None
 
@@ -550,7 +554,7 @@ class TestDwdStatus:
     """
 
     def test_an_unknown_tenant_is_rejected(self, cp):
-        r = cp.get("/api/v2/dwd/status?tenant=sideways")
+        r = cp.get("/api/v2/dwd/status?tenant=sideways", headers=ADMIN)
         assert r.status_code == 400
 
     def test_a_missing_key_is_reported_not_a_500(self, cp, monkeypatch, settings):
@@ -563,7 +567,7 @@ class TestDwdStatus:
         settings.source_sa_key = "/definitely/does/not/exist.json"
         settings.source_admin = "admin@source.example"
         monkeypatch.setattr(config, "Settings", lambda: settings)
-        r = cp.get("/api/v2/dwd/status?tenant=source")
+        r = cp.get("/api/v2/dwd/status?tenant=source", headers=ADMIN)
         assert r.status_code == 200
         body = r.json()
         assert body["checked"] is False
@@ -657,7 +661,9 @@ class TestCloudProvisioning:
                           "source_domain": "c.example.com",
                           "target_domain": "a.example.com"}, headers=ADMIN)
         assert r.status_code == 200
-        row = cp.get("/api/v2/actions").json()[0]
+        # A credential, because an anonymous caller no longer reads the
+        # audit log -- it was readable from the public internet.
+        row = cp.get("/api/v2/actions", headers=ADMIN).json()[0]
         assert row["action"] == "gcp.provision"
         assert row["target"] == "c.example.com->a.example.com"
         assert row["outcome"] == "OK"
@@ -674,7 +680,7 @@ class TestCloudProvisioning:
         with open(os.path.join(d, "logs", "gcp-provision.json.partial"),
                   "w", encoding="utf-8") as fh:
             fh.write('{"sides": [')      # truncated mid-write
-        r = cp.get("/api/v2/gcp/status")
+        r = cp.get("/api/v2/gcp/status", headers=ADMIN)
         assert r.status_code == 200
         assert r.json()["result"] is None
 
@@ -720,7 +726,9 @@ class TestFullSetup:
                       "admin_email": "admin@c.example.com",
                       "admin_password": "hunter2-super-secret",
                       "dry_run": True}, headers=ADMIN)
-        row = cp.get("/api/v2/actions").json()[0]
+        # A credential, because an anonymous caller no longer reads the
+        # audit log -- it was readable from the public internet.
+        row = cp.get("/api/v2/actions", headers=ADMIN).json()[0]
         assert row["action"] == "full_setup.start"
         assert row["target"] == "source:c.example.com"
         blob = json.dumps(row)
@@ -799,7 +807,7 @@ class TestFullSetup:
         assert "--seed" not in ours[0]
 
     def test_status_reports_not_running_with_no_result_by_default(self, cp):
-        r = cp.get("/api/v2/full-setup/status?side=source")
+        r = cp.get("/api/v2/full-setup/status?side=source", headers=ADMIN)
         assert r.status_code == 200
         body = r.json()
         assert body["running"] is False
@@ -828,13 +836,13 @@ class TestFullSetup:
 
         monkeypatch.setattr(api_server.subprocess, "run", fake_run)
 
-        r = cp.get("/api/v2/full-setup/status?side=source")
+        r = cp.get("/api/v2/full-setup/status?side=source", headers=ADMIN)
         body = r.json()
         assert body["running"] is True
         assert body["pid"] == 1234
 
     def test_an_unknown_side_is_rejected(self, cp):
-        r = cp.get("/api/v2/full-setup/status?side=sideways")
+        r = cp.get("/api/v2/full-setup/status?side=sideways", headers=ADMIN)
         assert r.status_code == 400
 
 
@@ -870,14 +878,18 @@ class TestSecretsNeverReachTheAuditLog:
                       "admin_email": "a@c.example.com",
                       "admin_password": "correct-horse-battery-staple",
                       "dry_run": True}, headers=ADMIN)
-        row = cp.get("/api/v2/actions").json()[0]
+        # A credential, because an anonymous caller no longer reads the
+        # audit log -- it was readable from the public internet.
+        row = cp.get("/api/v2/actions", headers=ADMIN).json()[0]
         assert "correct-horse-battery-staple" not in json.dumps(row)
 
     def test_ai_key_never_reaches_params_json(self, cp):
         cp.post("/api/v2/ai/key",
                 json={"reason": "test", "key": "gsk_live_secret_value_xyz"},
                 headers=ADMIN)
-        row = cp.get("/api/v2/actions").json()[0]
+        # A credential, because an anonymous caller no longer reads the
+        # audit log -- it was readable from the public internet.
+        row = cp.get("/api/v2/actions", headers=ADMIN).json()[0]
         assert "gsk_live_secret_value_xyz" not in json.dumps(row)
 
     def test_a_refused_write_still_does_not_leak_the_password(self, cp):
@@ -890,7 +902,9 @@ class TestSecretsNeverReachTheAuditLog:
                       "admin_email": "a@c.example.com",
                       "admin_password": "should-never-appear-anywhere"},
                 headers=VIEWER)
-        row = cp.get("/api/v2/actions").json()[0]
+        # A credential, because an anonymous caller no longer reads the
+        # audit log -- it was readable from the public internet.
+        row = cp.get("/api/v2/actions", headers=ADMIN).json()[0]
         assert row["outcome"] == "REFUSED"
         assert "should-never-appear-anywhere" not in json.dumps(row)
 
@@ -930,7 +944,7 @@ class TestAccountAuth:
         assert r.json()["ok"] is True
         assert "bp_session" in r.cookies
         # The cookie just set is honored on the very next request.
-        me = cp.get("/api/v2/auth/me")
+        me = cp.get("/api/v2/auth/me", headers=ADMIN)
         assert me.status_code == 200
         assert me.json()["email"] == "new@example.com"
 
@@ -957,7 +971,7 @@ class TestAccountAuth:
         r = cp.post("/api/v2/auth/login",
                     json={"email": "login@example.com", "password": "hunter22222"})
         assert r.status_code == 200
-        assert cp.get("/api/v2/auth/me").json()["email"] == "login@example.com"
+        assert cp.get("/api/v2/auth/me", headers=ADMIN).json()["email"] == "login@example.com"
 
     def test_login_with_wrong_password_fails(self, cp):
         cp.post("/api/v2/auth/signup",
@@ -969,16 +983,16 @@ class TestAccountAuth:
         assert r.status_code == 401
 
     def test_me_without_a_session_is_unauthorized(self, cp):
-        r = cp.get("/api/v2/auth/me")
+        r = cp.get("/api/v2/auth/me", headers=ADMIN)
         assert r.status_code == 401
 
     def test_logout_ends_the_session(self, cp):
         cp.post("/api/v2/auth/signup",
                 json={"email": "out@example.com", "password": "hunter22222",
                       "name": "Out User"})
-        assert cp.get("/api/v2/auth/me").status_code == 200
+        assert cp.get("/api/v2/auth/me", headers=ADMIN).status_code == 200
         cp.post("/api/v2/auth/logout")
-        assert cp.get("/api/v2/auth/me").status_code == 401
+        assert cp.get("/api/v2/auth/me", headers=ADMIN).status_code == 401
 
     def test_a_signed_in_account_is_always_admin_of_its_own_resources(self, cp):
         """No team/role concept yet -- see accounts_auth.py. whoami must
@@ -987,7 +1001,7 @@ class TestAccountAuth:
         cp.post("/api/v2/auth/signup",
                 json={"email": "owner@example.com", "password": "hunter22222",
                       "name": "Owner"})
-        who = cp.get("/api/v2/whoami").json()
+        who = cp.get("/api/v2/whoami", headers=ADMIN).json()
         assert who["role"] == "admin"
         assert who["account_id"] is not None
 
@@ -1008,7 +1022,9 @@ class TestAccountAuth:
                 json={"reason": "test", "source_domain": "c.example.com",
                       "target_domain": "a.example.com", "dry_run": True})
 
-        row = cp.get("/api/v2/actions").json()[0]
+        # A credential, because an anonymous caller no longer reads the
+        # audit log -- it was readable from the public internet.
+        row = cp.get("/api/v2/actions", headers=ADMIN).json()[0]
         assert row["actor"] == "Attrib User <attrib@example.com>"
 
     def test_password_never_appears_in_the_signup_response(self, cp):
@@ -1102,7 +1118,7 @@ class TestSubscriptionEnforcement:
         cp.post("/api/v2/auth/signup",
                 json={"email": "inactive@example.com", "password": "hunter22222",
                       "name": "Inactive User"})
-        me = cp.get("/api/v2/auth/me").json()
+        me = cp.get("/api/v2/auth/me", headers=ADMIN).json()
         accounts_auth.set_subscription_active(me["id"], False)
 
         r = cp.post("/api/v2/migrate/start",
@@ -1118,7 +1134,7 @@ class TestSubscriptionEnforcement:
         cp.post("/api/v2/auth/signup",
                 json={"email": "reactivate@example.com", "password": "hunter22222",
                       "name": "Reactivate User"})
-        me = cp.get("/api/v2/auth/me").json()
+        me = cp.get("/api/v2/auth/me", headers=ADMIN).json()
         accounts_auth.set_subscription_active(me["id"], False)
         assert cp.post("/api/v2/migrate/start",
                        json={"reason": "test reason", "services": ["drive"]}).status_code == 402
@@ -1136,10 +1152,10 @@ class TestSubscriptionEnforcement:
         cp.post("/api/v2/auth/signup",
                 json={"email": "readonly@example.com", "password": "hunter22222",
                       "name": "Read Only"})
-        me = cp.get("/api/v2/auth/me").json()
+        me = cp.get("/api/v2/auth/me", headers=ADMIN).json()
         accounts_auth.set_subscription_active(me["id"], False)
-        assert cp.get("/api/v2/auth/me").status_code == 200
-        assert cp.get("/api/v2/users").status_code == 200
+        assert cp.get("/api/v2/auth/me", headers=ADMIN).status_code == 200
+        assert cp.get("/api/v2/users", headers=ADMIN).status_code == 200
 
     def test_the_legacy_x_operator_path_is_exempt(self, monkeypatch, cp):
         """account_id=None (the SSH-tunnel/CP_OPERATORS path) is the
@@ -1161,12 +1177,12 @@ class TestSubscriptionEnforcement:
         cp.post("/api/v2/auth/signup",
                 json={"email": "audited@example.com", "password": "hunter22222",
                       "name": "Audited User"})
-        me = cp.get("/api/v2/auth/me").json()
+        me = cp.get("/api/v2/auth/me", headers=ADMIN).json()
         accounts_auth.set_subscription_active(me["id"], False)
         cp.post("/api/v2/migrate/start",
                 json={"reason": "should be refused", "services": ["drive"]})
 
-        rows = cp.get("/api/v2/actions").json()
+        rows = cp.get("/api/v2/actions", headers=ADMIN).json()
         assert rows[0]["outcome"] == "REFUSED"
 
 
@@ -1261,11 +1277,11 @@ class TestSuperadminAdminEndpoints:
     def _signed_in(self, cp, email):
         cp.post("/api/v2/auth/signup",
                 json={"email": email, "password": "hunter22222", "name": "User"})
-        return cp.get("/api/v2/auth/me").json()["id"]
+        return cp.get("/api/v2/auth/me", headers=ADMIN).json()["id"]
 
     def test_a_regular_client_cannot_list_accounts(self, cp):
         self._signed_in(cp, "regular@example.com")
-        assert cp.get("/api/v2/admin/accounts").status_code == 403
+        assert cp.get("/api/v2/admin/accounts", headers=ADMIN).status_code == 403
 
     def test_a_superadmin_can_list_every_account(self, cp):
         import accounts_auth
@@ -1278,7 +1294,7 @@ class TestSuperadminAdminEndpoints:
         # is_superadmin comes from operator()'s own accounts_auth.get_account
         # call on *this* request, so no re-login is needed for it to see
         # the fresh flag.
-        r = cp.get("/api/v2/admin/accounts")
+        r = cp.get("/api/v2/admin/accounts", headers=ADMIN)
         assert r.status_code == 200
         emails = {row["email"] for row in r.json()}
         assert {"other@example.com", "boss2@example.com"} <= emails
@@ -1309,7 +1325,7 @@ class TestSuperadminAdminEndpoints:
         self._signed_in(cp, "attacker2@example.com")
         cp.post(f"/api/v2/admin/accounts/{target_id}/subscription",
                 json={"reason": "should be refused", "active": False})
-        rows = cp.get("/api/v2/actions").json()
+        rows = cp.get("/api/v2/actions", headers=ADMIN).json()
         assert rows[0]["outcome"] == "REFUSED"
 
     def test_seed_enabled_defaults_off_for_a_new_account(self, cp):
@@ -1318,7 +1334,7 @@ class TestSuperadminAdminEndpoints:
         self._signed_in(cp, "boss3@example.com")
         import accounts_auth
         accounts_auth.promote_to_superadmin("boss3@example.com")
-        row = next(r for r in cp.get("/api/v2/admin/accounts").json()
+        row = next(r for r in cp.get("/api/v2/admin/accounts", headers=ADMIN).json()
                   if r["id"] == target_id)
         assert row["seed_enabled"] == 0
 
@@ -1354,7 +1370,7 @@ class TestSuperadminAdminEndpoints:
         cp.post("/api/v2/auth/logout")
         cp.post("/api/v2/auth/login",
                json={"email": "seedme@example.com", "password": "hunter22222"})
-        assert cp.get("/api/v2/auth/me").json()["seed_enabled"] is True
+        assert cp.get("/api/v2/auth/me", headers=ADMIN).json()["seed_enabled"] is True
 
 
 _FAKE_SA_KEY = {
@@ -1389,7 +1405,7 @@ class TestUploadCredentials:
         assert body["ok"] is True
         assert body["detail"] == _FAKE_SA_KEY["client_id"]
 
-        me = cp.get("/api/v2/auth/me").json()
+        me = cp.get("/api/v2/auth/me", headers=ADMIN).json()
         # The handler resolves this relative to api_server.HERE (the repo
         # root), not the test process's cwd -- matching where every other
         # account_id-keyed path (accounts_auth.create_account's own
@@ -1403,13 +1419,13 @@ class TestUploadCredentials:
 
     def test_the_tenant_config_status_reflects_the_upload(self, cp):
         self._signed_in(cp, "status@example.com")
-        before = cp.get("/api/v2/setup/tenant-config?side=source").json()
+        before = cp.get("/api/v2/setup/tenant-config?side=source", headers=ADMIN).json()
         assert before["hasKey"] is False
 
         cp.post("/api/v2/setup/credentials",
                 json={"reason": "test", "side": "source", "domain": "c.example.com",
                       "service_account_key": _FAKE_SA_KEY})
-        after = cp.get("/api/v2/setup/tenant-config?side=source").json()
+        after = cp.get("/api/v2/setup/tenant-config?side=source", headers=ADMIN).json()
         assert after["hasKey"] is True
         assert after["clientId"] == _FAKE_SA_KEY["client_id"]
         assert after["domain"] == "c.example.com"
@@ -1445,7 +1461,9 @@ class TestUploadCredentials:
         cp.post("/api/v2/setup/credentials",
                 json={"reason": "test", "side": "source", "domain": "c.example.com",
                       "service_account_key": _FAKE_SA_KEY})
-        row = cp.get("/api/v2/actions").json()[0]
+        # A credential, because an anonymous caller no longer reads the
+        # audit log -- it was readable from the public internet.
+        row = cp.get("/api/v2/actions", headers=ADMIN).json()[0]
         assert "FAKE" not in json.dumps(row)
         assert "BEGIN PRIVATE KEY" not in json.dumps(row)
 
@@ -1898,11 +1916,11 @@ class TestMetricsAndTestEndpointsRespond:
     def _signed_in(self, cp, email):
         cp.post("/api/v2/auth/signup",
                 json={"email": email, "password": "hunter22222", "name": "User"})
-        return cp.get("/api/v2/auth/me").json()["id"]
+        return cp.get("/api/v2/auth/me", headers=ADMIN).json()["id"]
 
     def test_metrics_for_my_account_does_not_error(self, cp):
         self._signed_in(cp, "metrics@example.com")
-        r = cp.get("/api/v2/metrics")
+        r = cp.get("/api/v2/metrics", headers=ADMIN)
         assert r.status_code == 200, r.text
         assert "error" in r.json()
 
@@ -1916,27 +1934,27 @@ class TestMetricsAndTestEndpointsRespond:
         tenant_configs rows. That is a state to explain on the page, not a
         server error."""
         self._signed_in(cp, "metrics3@example.com")
-        r = cp.get("/api/v2/metrics/999999")
+        r = cp.get("/api/v2/metrics/999999", headers=ADMIN)
         assert r.status_code in (200, 403), r.text
 
     def test_metrics_requires_a_login(self, cp):
-        assert cp.get("/api/v2/metrics").status_code in (401, 403)
+        assert cp.get("/api/v2/metrics", headers=ADMIN).status_code in (401, 403)
 
     def test_another_accounts_metrics_are_refused(self, cp):
         """The same tenancy gate migration_detail uses -- one client must
         never read another's throughput, let alone their failure reasons."""
         self._signed_in(cp, "owner-a@example.com")
-        r = cp.get("/api/v2/metrics/424242")
+        r = cp.get("/api/v2/metrics/424242", headers=ADMIN)
         assert r.status_code == 403
 
     def test_the_test_report_is_operator_only(self, cp):
         """It names source files and carries assertion text from a private
         codebase."""
         self._signed_in(cp, "regular-tests@example.com")
-        assert cp.get("/api/v2/tests").status_code == 403
+        assert cp.get("/api/v2/tests", headers=ADMIN).status_code == 403
 
     def test_the_test_report_requires_a_login(self, cp):
-        assert cp.get("/api/v2/tests").status_code in (401, 403)
+        assert cp.get("/api/v2/tests", headers=ADMIN).status_code in (401, 403)
 
 
 class TestJobRegistrationCoversCliRuns:
@@ -2195,7 +2213,7 @@ class TestTheDetailPayloadCarriesItsPanels:
         cp.post("/api/v2/auth/signup",
                 json={"email": email, "password": "hunter22222",
                       "name": "User"})
-        return cp.get("/api/v2/auth/me").json()["id"]
+        return cp.get("/api/v2/auth/me", headers=ADMIN).json()["id"]
 
     def _detail(self, cp, email):
         aid = self._signed_in(cp, email)

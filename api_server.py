@@ -192,6 +192,30 @@ def require_login(op: Operator) -> None:
         raise HTTPException(401, "sign in required")
 
 
+def require_reader(op: Operator) -> None:
+    """Refuse a caller presenting no credential of any kind.
+
+    Distinct from require_login, which demands a real SaaS account and so
+    would retire the documented X-Operator path that an operator on an SSH
+    tunnel uses; and from require_admin, which would stop a viewer reading,
+    which the role exists to allow.
+
+    The hole this closes is narrower and worse than either: operator()
+    turns an absent or unrecognised X-Operator into role="viewer", so every
+    caller on the public internet already WAS a viewer. Live, with no
+    cookie and no header, /api/v2/failures returned user email addresses,
+    Drive file ids and error text, /api/v2/actions returned the operator
+    audit log, and /api/v2/dwd/status returned the OAuth client id and the
+    tenant's granted scopes.
+
+    NOTE: a name listed in CP_OPERATORS is not a secret, so this is only a
+    real credential on a trusted network. On a publicly reachable host the
+    session cookie is the only one -- see the deployment notes.
+    """
+    if op.account_id is None and op.name not in _roles():
+        raise HTTPException(401, "sign in required")
+
+
 def require_active_subscription(op: Operator) -> None:
     """The manual v1 billing gate -- see accounts_auth.set_subscription_active
     and Pricing.tsx's "no card required to start" copy: an operator flips
@@ -633,7 +657,19 @@ async def _tailer() -> None:
 
 
 @app.websocket("/ws")
-async def ws_endpoint(ws: WebSocket) -> None:
+async def ws_endpoint(ws: WebSocket,
+                      op: Operator = Depends(operator)) -> None:
+    # The snapshot below carries user progress, fleet state and share counts
+    # for whoever is connected. Unauthenticated, anyone who could reach the
+    # host received live migration data by opening a socket.
+    #
+    # close() rather than HTTPException: the handshake is already in
+    # progress by the time a dependency runs, so raising here would surface
+    # as an opaque failure instead of a policy violation. 1008 is the
+    # protocol's own "policy violation".
+    if op.account_id is None:
+        await ws.close(code=1008)
+        return
     await HUB.join(ws)
     try:
         # Snapshot on connect, so a client that joins mid-run is immediately
@@ -782,12 +818,14 @@ async def admin_set_seed_enabled(account_id: int, body: SetSeedEnabled,
 # Read endpoints
 # ======================================================================
 @app.get("/api/v2/fleet")
-async def get_fleet():
+async def get_fleet(op: Operator = Depends(operator)):
+    require_reader(op)
     return await _off_loop(cpdb.fleet)
 
 
 @app.get("/api/v2/active-jobs")
-async def get_active_jobs():
+async def get_active_jobs(op: Operator = Depends(operator)):
+    require_reader(op)
     """Every job_admission.py admission right now, across every account --
     the account-scoped views (webui.py's per-account Job, full_setup_status's
     ps scan) each only ever show the calling account's own job, so a
@@ -797,27 +835,36 @@ async def get_active_jobs():
 
 
 @app.get("/api/v2/users")
-async def get_users():
+async def get_users(op: Operator = Depends(operator)):
+    require_reader(op)
     return await _off_loop(cpdb.user_progress)
 
 
 @app.get("/api/v2/failures")
-async def get_failures(limit: int = 200, source_user: str | None = None):
+async def get_failures(limit: int = 200, source_user: str | None = None,
+                       op: Operator = Depends(operator)):
+    require_reader(op)
     return await _off_loop(cpdb.failure_feed, limit, source_user)
 
 
 @app.get("/api/v2/forensics/{source_user}/{item_id}")
-async def get_forensics(source_user: str, item_id: str):
+async def get_forensics(source_user: str, item_id: str,
+                        op: Operator = Depends(operator)):
+    require_reader(op)
     return await _off_loop(cpdb.forensic_detail, source_user, item_id)
 
 
 @app.get("/api/v2/public-shares")
-async def get_public_shares(tenant: str = "target"):
+async def get_public_shares(tenant: str = "target",
+                            op: Operator = Depends(operator)):
+    require_reader(op)
     return await _off_loop(cpdb.open_public_shares, tenant)
 
 
 @app.get("/api/v2/actions")
-async def get_actions(limit: int = 100):
+async def get_actions(limit: int = 100,
+                      op: Operator = Depends(operator)):
+    require_reader(op)
     return await _off_loop(cpdb.recent_actions, limit)
 
 
@@ -1224,6 +1271,7 @@ async def provision_status(tenant: str = "target", op: Operator = Depends(operat
     not dangerous, and this endpoint already has no per-account identity
     table to read from yet.
     """
+    require_reader(op)
     def _read() -> dict:
         log_path = _provision_log_path(tenant, op.account_id)
         ps = subprocess.run(["ps", "-eo", "pid=,args="], capture_output=True,
@@ -1371,7 +1419,9 @@ async def benchmark_start(body: StartBenchmark, op: Operator = Depends(operator)
 
 
 @app.get("/api/v2/benchmark/results")
-async def benchmark_results():
+async def benchmark_results(op: Operator = Depends(operator)):
+    # Operator tooling, same rule as the other status reads.
+    require_reader(op)
     """Every completed run, newest first, read from benchmarks/*.json."""
     def _read() -> list[dict]:
         d = os.path.join(HERE, "benchmarks")
@@ -1446,7 +1496,9 @@ def _etime_seconds(etime: str) -> int:
 
 
 @app.get("/api/v2/benchmark/running")
-async def benchmark_running():
+async def benchmark_running(op: Operator = Depends(operator)):
+    # Operator tooling, same rule as the other status reads.
+    require_reader(op)
     """Is a benchmark in flight, and how far along?
 
     Read from the process table rather than a pidfile, which goes stale after
@@ -1556,7 +1608,8 @@ class AnalyzeRequest(BaseModel):
 
 
 @app.get("/api/v2/ai/status")
-async def ai_status():
+async def ai_status(op: Operator = Depends(operator)):
+    require_reader(op)
     def _s() -> dict:
         key = _groq_key()
         return {"configured": bool(key),
@@ -1577,13 +1630,16 @@ async def ai_save_key(body: SaveAiKey, op: Operator = Depends(operator)):
 
 
 @app.post("/api/v2/ai/context")
-async def ai_context(body: AnalyzeRequest):
+async def ai_context(body: AnalyzeRequest,
+                     op: Operator = Depends(operator)):
     """The exact payload analyze would send, without sending it.
 
     Separate endpoint on purpose: the log tail carries real user addresses
     and real file names, and an operator is entitled to read what leaves
     the building before it does.
     """
+    require_login(op)
+
     def _c() -> dict:
         ctx = ai_diagnostics.gather_context(
             cpdb._db_path(), _newest_log(), body.since_iso)
@@ -1595,6 +1651,7 @@ async def ai_context(body: AnalyzeRequest):
 async def ai_analyze(body: AnalyzeRequest, op: Operator = Depends(operator)):
     """Read-only, so viewers may run it -- but it does ship log content to a
     third party, so who ran it is recorded."""
+    require_login(op)
     def _run() -> dict:
         key = _groq_key()
         ctx = ai_diagnostics.gather_context(
@@ -1651,7 +1708,9 @@ async def coverage_start(body: StartCoverage, op: Operator = Depends(operator)):
 
 
 @app.get("/api/v2/coverage/status")
-async def coverage_status():
+async def coverage_status(op: Operator = Depends(operator)):
+    # Operator tooling, same rule as the other status reads.
+    require_reader(op)
     def _check() -> dict:
         ps = subprocess.run(["ps", "-eo", "pid=,args="], capture_output=True,
                             text=True).stdout
@@ -1706,6 +1765,12 @@ async def coverage_status():
 # ======================================================================
 @app.get("/api/v2/dwd/status")
 async def dwd_status(tenant: str = "source", op: Operator = Depends(operator)):
+    # require_admin, not require_login: these keep the documented
+    # X-Operator path working for an SSH-tunnel operator with no
+    # SaaS account, while still refusing a caller presenting nothing
+    # at all -- which is how the OAuth client id and this tenant's
+    # granted scopes were readable from the public internet.
+    require_reader(op)
     if tenant not in ("source", "target"):
         raise HTTPException(400, "tenant must be source or target")
 
@@ -1845,6 +1910,12 @@ async def gcp_status(op: Operator = Depends(operator)):
     reported as running rather than as an error -- the alternative is a UI
     that flashes 'failed' for the whole minute a project takes to create.
     """
+    # require_admin, not require_login: these keep the documented
+    # X-Operator path working for an SSH-tunnel operator with no
+    # SaaS account, while still refusing a caller presenting nothing
+    # at all -- which is how the OAuth client id and this tenant's
+    # granted scopes were readable from the public internet.
+    require_reader(op)
     def _read() -> dict:
         needle = (f"--account-id {op.account_id}" if op.account_id is not None
                   else "provision_gcp.py")
@@ -2046,6 +2117,12 @@ async def full_setup_start(body: StartFullSetup, op: Operator = Depends(operator
 
 @app.get("/api/v2/full-setup/status")
 async def full_setup_status(side: str, op: Operator = Depends(operator)):
+    # require_admin, not require_login: these keep the documented
+    # X-Operator path working for an SSH-tunnel operator with no
+    # SaaS account, while still refusing a caller presenting nothing
+    # at all -- which is how the OAuth client id and this tenant's
+    # granted scopes were readable from the public internet.
+    require_reader(op)
     if side not in ("source", "target"):
         raise HTTPException(400, "side must be source or target")
 
@@ -2166,6 +2243,12 @@ async def teardown_start(body: StartTeardown, op: Operator = Depends(operator)):
 
 @app.get("/api/v2/teardown/status")
 async def teardown_status(op: Operator = Depends(operator)):
+    # require_admin, not require_login: these keep the documented
+    # X-Operator path working for an SSH-tunnel operator with no
+    # SaaS account, while still refusing a caller presenting nothing
+    # at all -- which is how the OAuth client id and this tenant's
+    # granted scopes were readable from the public internet.
+    require_reader(op)
     def _read() -> dict:
         running = any("teardown_tenant.py" in ln and "grep" not in ln
                       for ln in subprocess.run(
@@ -3548,7 +3631,7 @@ async def verified_domains(op: Operator = Depends(operator)):
 
 
 @app.post("/api/v2/fleet/heartbeat")
-async def heartbeat(hb: Heartbeat):
+async def heartbeat(hb: Heartbeat, _: None = Depends(node_auth)):
     await _off_loop(cpdb.upsert_node, hb.node_id,
                     **hb.model_dump(exclude={"node_id"}))
     await HUB.broadcast(_envelope("NODE_HEARTBEAT", hb.model_dump()))
