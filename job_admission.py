@@ -130,12 +130,51 @@ def record_pid(account_id: int | None, job_name: str, pid: int) -> None:
 
     try_admit runs before Popen, so it has no pid to store; without this the
     column stays NULL and nothing can ever tell whether the slot is live.
+
+    Exactly one row: an unbounded UPDATE stamped every pending reservation
+    for that pair with the same pid, which made two different jobs look like
+    one process.
     """
     with cpdb.rw() as conn:
         conn.execute(
-            "UPDATE active_jobs SET pid=? WHERE account_id IS ? "
-            "AND job_name=? AND pid IS NULL",
+            "UPDATE active_jobs SET pid=? WHERE id = ("
+            "  SELECT id FROM active_jobs WHERE account_id IS ? "
+            "   AND job_name=? AND pid IS NULL ORDER BY id LIMIT 1)",
             (pid, account_id, job_name))
+
+
+def adopt_or_admit(account_id: int | None, job_name: str,
+                   pid: int) -> tuple[bool, str]:
+    """Take over the slot our launcher already reserved, or reserve one.
+
+    A run started from the web UI is admitted twice: once by the API server
+    before it spawns the process, and once by the process itself on the way
+    in. Live, one migration held both rows of a two-job cap -- so nothing
+    else could run on the box, and the Repair button stayed disabled behind
+    "a migration is running" with one migration running.
+
+    A run started from a terminal has no launcher, finds nothing to adopt,
+    and reserves a slot exactly as before.
+    """
+    with cpdb.rw() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute(
+            "SELECT id FROM active_jobs WHERE account_id IS ? AND job_name=? "
+            "  AND (pid = ? OR pid IS NULL) ORDER BY id LIMIT 1",
+            (account_id, job_name, pid)).fetchone()
+        if existing is not None:
+            conn.execute("UPDATE active_jobs SET pid=? WHERE id=?",
+                         (pid, existing["id"]))
+            return True, ""
+        count = conn.execute("SELECT COUNT(*) FROM active_jobs").fetchone()[0]
+        if count >= MAX_CONCURRENT_TENANT_JOBS:
+            conn.rollback()
+            return False, ("capacity is full -- another job is already "
+                           "running; try again shortly")
+        conn.execute(
+            "INSERT INTO active_jobs (account_id, job_name, pid) VALUES (?,?,?)",
+            (account_id, job_name, pid))
+    return True, ""
 
 def list_active() -> list[dict]:
     """Every row in the admission table right now -- the one place that

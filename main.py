@@ -860,8 +860,12 @@ def _registered(job_name: str, account_id):
 
     admitted = False
     try:
-        admitted, detail = job_admission.try_admit(account_id, job_name,
-                                                   os.getpid())
+        # Adopt the slot our launcher reserved rather than booking a second
+        # one. Started from the web UI a run is admitted twice -- once by
+        # the API server before it spawns us, once here -- and one migration
+        # then held both rows of a two-job cap.
+        admitted, detail = job_admission.adopt_or_admit(account_id, job_name,
+                                                        os.getpid())
         if not admitted:
             log.warning("running anyway, but the machine is at its job "
                         "capacity (%s) -- worker pools are sized on the "
