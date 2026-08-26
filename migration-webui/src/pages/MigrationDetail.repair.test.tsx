@@ -350,3 +350,50 @@ describe('MigrationDetail reports what Repair itself did', () => {
     expect(screen.queryByTestId('repair-last-run')).toBeNull()
   })
 })
+
+describe('MigrationDetail names the job that is running', () => {
+  beforeEach(() => { fetchMigrationDetail.mockReset() })
+
+  it('names a delta pass and says how long it has been going', async () => {
+    // Pressing Run delta changed nothing visible on the page: it moves the
+    // same counters a finished migration already left on screen, and the
+    // first press finished in one second.
+    fetchMigrationDetail.mockResolvedValue(detail({
+      running: true,
+      activeJobs: [{ jobName: 'delta', pid: 4242,
+                     startedAt: new Date(Date.now() - 45_000).toISOString() }],
+    }))
+    render(<MigrationDetail />)
+    await waitFor(() => expect(screen.getByTestId('active-job')).toBeTruthy())
+    const t = screen.getByTestId('active-job').textContent || ''
+    expect(t).toContain('Delta pass')
+    expect(t).toMatch(/4[0-9]s ago/)
+  })
+
+  it('shows a job with no start time without printing undefined', async () => {
+    fetchMigrationDetail.mockResolvedValue(detail({
+      running: true,
+      activeJobs: [{ jobName: 'migrate', pid: null, startedAt: null }],
+    }))
+    render(<MigrationDetail />)
+    await waitFor(() => expect(screen.getByTestId('active-job')).toBeTruthy())
+    const t = screen.getByTestId('active-job').textContent || ''
+    expect(t).toContain('migrate')
+    expect(t).not.toContain('undefined')
+    expect(t).not.toContain('null')
+  })
+
+  it('shows nothing when the tenant is idle', async () => {
+    fetchMigrationDetail.mockResolvedValue(detail({ activeJobs: [] }))
+    render(<MigrationDetail />)
+    await waitFor(() => expect(screen.getByTestId('users-table')).toBeTruthy())
+    expect(screen.queryByTestId('active-job')).toBeNull()
+  })
+
+  it('survives a server that does not send the field', async () => {
+    fetchMigrationDetail.mockResolvedValue(detail())
+    render(<MigrationDetail />)
+    await waitFor(() => expect(screen.getByTestId('users-table')).toBeTruthy())
+    expect(screen.queryByTestId('active-job')).toBeNull()
+  })
+})

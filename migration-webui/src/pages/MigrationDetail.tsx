@@ -177,6 +177,22 @@ export const MigrationDetail: React.FC = () => {
             </Paper>
           )}
 
+          {/* Pressing Run delta changed nothing visible: it moves the same
+              counters a finished migration already left on screen, and the
+              first press finished in one second. Name the job and age it. */}
+          {!!d.activeJobs?.length && (
+            <Alert severity="info" sx={{ mb: 2 }} data-testid="active-job">
+              {d.activeJobs.map(j => (
+                <div key={`${j.jobName}-${j.pid ?? 0}`}>
+                  <strong>{j.jobName === 'delta' ? 'Delta pass' : j.jobName}</strong>
+                  {' '}running
+                  {j.startedAt ? ` — started ${ageOf(j.startedAt)}` : ''}
+                  {j.pid ? ` (pid ${j.pid})` : ''}
+                </div>
+              ))}
+            </Alert>
+          )}
+
           {repair && repair.total > 0 && (
             <Paper variant="outlined" sx={{ p: 2, mb: 3 }}
                    data-testid="repair-panel">
@@ -487,7 +503,7 @@ export const MigrationDetail: React.FC = () => {
         onConfirm={async (reason: string) => {
           setDeltaBusy(true); setDeltaError(null)
           try {
-            const r = await startDelta(reason, deltaDays)
+            const r = await startDelta(reason, deltaDays, Number(accountId))
             if (!r.ok) throw new Error(r.detail || 'could not start')
             setAskDelta(false)
             setStarted(r.detail || 'delta pass started')

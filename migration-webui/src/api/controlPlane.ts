@@ -527,6 +527,10 @@ export interface MigrationDetail {
   running: boolean
   progress: MigrationProgress
   items: Array<{ type: string; count: number }>
+  /** Jobs occupying this tenant right now. A bare `running` boolean could
+   *  not name which job, so a delta looked identical to a migration. */
+  activeJobs?: { jobName: string; startedAt: string | null
+                 pid: number | null }[]
   failures: MigrationFailure[]
   /** Items the tool deliberately did not migrate, by reason. Distinct from
    *  failures: a skip is a decision, not an error. */
@@ -558,10 +562,15 @@ export interface MigrationDetail {
 /** The incremental catch-up pass -- re-asks the source what CHANGED in a
  *  recent window, rather than copying what is not yet in the ledger. Run
  *  repeatedly between a bulk copy and a cutover, and once more after. */
-export const startDelta = (reason: string, days = 2, services = ['all']) =>
+export const startDelta = (
+  reason: string, days = 2, accountId?: number, services = ['all']) =>
   cpFetch<ActionResult>('/api/v2/migrate/delta', {
     method: 'POST',
-    body: JSON.stringify({ reason, days, services, users: [] }),
+    // accountId is the migration on screen. Without it the server fell back
+    // to the caller's own account, so a superadmin's press ran a delta
+    // against an empty account of their own and reported success.
+    body: JSON.stringify({ reason, days, services, users: [],
+                           account_id: accountId ?? null }),
   })
 
 export const fetchMigrationDetail = (accountId: number) =>

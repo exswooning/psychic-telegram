@@ -242,6 +242,11 @@ class StartMigration(WriteAction):
     # before anything moves, naming the scope, rather than failing mid-run.
     services: list[str] = Field(default_factory=lambda: ["all"])
     users: list[str] = Field(default_factory=list)   # empty = whole batch
+    # Which migration to run against. None means the caller's own account,
+    # which is what a tenant self-serving always wants; the console sends the
+    # id of the migration on screen, because a superadmin is usually looking
+    # at somebody else's.
+    account_id: int | None = None
     dry_run: bool = False
 
 
@@ -903,14 +908,23 @@ async def migrate_delta(body: StartDelta, op: Operator = Depends(operator)):
     against the same cap. Treating it as "lighter" because it usually moves
     less would let it run alongside a full migration and halve both.
     """
-    argv = ([PY, "main.py"] + _account_argv(op.account_id)
+    # The migration being looked at, not the operator's own account. Built
+    # from op.account_id, the button on account 7's page ran a delta for
+    # whoever was signed in: a superadmin pressing it created and migrated
+    # into an empty account of their own, reported success, and left the
+    # migration on screen untouched. Authorised the same way repair is.
+    account_id = body.account_id if body.account_id is not None else op.account_id
+    if not op.is_superadmin and account_id != op.account_id:
+        raise HTTPException(403, "that migration belongs to another account")
+
+    argv = ([PY, "main.py"] + _account_argv(account_id)
             + ["delta", "--services", ",".join(body.services),
                "--days", str(body.days)])
     for u in body.users:
         argv += ["--user", u]
     target = ",".join(body.users) if body.users else "ALL"
     return await _gated(op, "migrate.delta", body, target,
-                        lambda: _run_admitted(argv, op.account_id, "delta"))
+                        lambda: _run_admitted(argv, account_id, "delta"))
 
 
 @app.post("/api/v2/jobs/{pid}/stop")
@@ -2851,6 +2865,8 @@ async def migration_detail(account_id: int, op: Operator = Depends(operator)):
     def _read() -> dict:
         src = accounts_auth.get_tenant_config(account_id, "source") or {}
         tgt = accounts_auth.get_tenant_config(account_id, "target") or {}
+        _jobs_here = [j for j in job_admission.list_active()
+                      if j.get("account_id") == account_id]
         out = {
             "accountId": account_id,
             "sourceDomain": src.get("domain") or "",
@@ -2862,8 +2878,16 @@ async def migration_detail(account_id: int, op: Operator = Depends(operator)):
             # branch on which keys exist will eventually branch wrong.
             "items": [], "failures": [], "failedUsers": [], "users": [],
             "skipped": [], "repair": None,
-            "running": bool([j for j in job_admission.list_active()
-                             if j.get("account_id") == account_id]),
+            "running": bool(_jobs_here),
+            # Which job, and since when. A bare boolean could not tell a
+            # delta from a full migration, so pressing Run delta changed
+            # nothing visible on the page: it moves the same counters a
+            # finished migration already left sitting there, and a pass that
+            # ended in one second never appeared at all.
+            "activeJobs": [{"jobName": j.get("job_name") or "job",
+                            "startedAt": j.get("started_at"),
+                            "pid": j.get("pid")}
+                           for j in _jobs_here],
             "error": "",
         }
         try:
