@@ -273,7 +273,26 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
     # the sequence this tool's own docs recommend) marks every user DONE and
     # the real run then skips all of them as "already done".
     track_status = not settings.dry_run
+
+    # Nothing to do is not the same as done. `delta --services all` reached
+    # here with the literal service name "all", which matches none of the
+    # real ones: every user ran zero services and was then marked DONE on the
+    # strength of it, including two whose audit rows still read "exhausted 6
+    # retries on HTTP 401". Return before the status is touched at all, so a
+    # pass that does no work leaves the ledger exactly as it found it.
+    if not (services & set(PER_USER_SERVICES)):
+        log.warning("[%s] no runnable service in %s — leaving status "
+                    "untouched", source_user, ",".join(sorted(services)) or "-")
+        result["status"] = "NOOP"
+        result["elapsed_sec"] = 0.0
+        return result
+
+    prior_status = ""
     if track_status:
+        row = db.conn.execute(
+            "SELECT status FROM identity_map WHERE source_email=?",
+            (source_user,)).fetchone()
+        prior_status = (row["status"] if row else "") or ""
         db.set_identity_status(source_user, "RUNNING")
     quota = DailyQuotaGuard(db, target_user, settings.effective_upload_cap())
 
@@ -324,12 +343,28 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
             result["services"]["tasks"] = tm.run()
 
         status = "INTERRUPTED" if SHUTDOWN.is_set() else "DONE"
-        if track_status:
+        # A pass that ran nothing says nothing about whether this user is
+        # finished. Promoting them anyway is how two users whose audit rows
+        # still read "exhausted 6 retries on HTTP 401" came to be reported as
+        # DONE by a delta that touched neither of them -- the headline went
+        # from "2 users failed" to "0 users failed" on the strength of no work
+        # at all. Leave the previous status standing and say so.
+        if track_status and not result["services"]:
+            # RUNNING is already on the row by this point, so put the prior
+            # status back rather than stranding the user mid-flight.
+            log.warning("[%s] every selected service was disabled; restoring "
+                        "status %s rather than marking %s",
+                        source_user, prior_status or "PENDING", status)
+            db.set_identity_status(source_user, prior_status or "PENDING")
+            result["status"] = "NOOP"
+        elif track_status:
             db.set_identity_status(source_user, status)
             if status == "DONE":
                 db.mark_services_done(source_user,
                                       _services_that_succeeded(result["services"]))
-        result["status"] = status
+            result["status"] = status
+        else:
+            result["status"] = status
 
     except Exception as exc:  # noqa: BLE001 - worker must not propagate
         log.exception("[%s] user migration failed", source_user)
@@ -1227,7 +1262,14 @@ def cmd_delta(args, settings: Settings, db: MigrationDB, auth: AuthManager):
     Run this repeatedly in the days between the bulk copy and the cutover, and
     once more immediately after the cutover window closes.
     """
-    services = {s.strip().lower() for s in args.services.split(",") if s.strip()}
+    # resolve_services, exactly as cmd_migrate does. Splitting the string
+    # here instead left `all` -- which is this subcommand's DEFAULT -- as the
+    # literal service name "all", matching nothing. Every user was dispatched,
+    # ran no service, finished in 0.0s with an empty result, and the run
+    # reported success: 201 users "migrated" in about a second, with 88 known
+    # failures untouched. It also skipped the unknown-service check, so a
+    # typo'd name did nothing quietly rather than exiting.
+    services = resolve_services(args.services)
     if "chat" in services:
         settings.migrate_chat = True
     results = _run_with_memory_pause(
