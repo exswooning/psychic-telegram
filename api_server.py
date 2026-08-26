@@ -2596,8 +2596,10 @@ async def test_report_latest(op: Operator = Depends(operator)):
             return {"ok": False, "neverRun": True,
                     "detail": "the suite has not been run on this host yet"}
         report["neverRun"] = False
+        # job_name, not name -- see the metrics endpoint. This reported a
+        # live test run as finished for as long as it ran.
         report["running"] = bool([j for j in job_admission.list_active()
-                                  if j.get("name") == "tests"])
+                                  if j.get("job_name") == "tests"])
         return report
 
     return await _off_loop(_read)
@@ -2617,7 +2619,10 @@ async def test_report_run(body: WriteAction, op: Operator = Depends(operator)):
     if not body.reason.strip():
         raise HTTPException(400, "a reason is required")
 
-    if [j for j in job_admission.list_active() if j.get("name") == "tests"]:
+    # job_name, not name: this guard never fired, so a second suite could be
+    # launched on top of one already running.
+    if [j for j in job_admission.list_active()
+            if j.get("job_name") == "tests"]:
         return {"ok": False, "detail": "a test run is already in progress"}
 
     def _go() -> None:
@@ -2811,8 +2816,14 @@ async def metrics_for_me(history: int = 60, op: Operator = Depends(operator)):
     require_login(op)
     account_id = op.account_id
     if op.is_superadmin:
+        # job_name, not name. list_active has never returned a "name" key,
+        # so this matched nothing and a superadmin silently got their own
+        # empty account instead of the migration actually running -- the
+        # Performance page read "no metrics recorded yet" throughout a live
+        # run. _reconcile_active_jobs a few lines up had it right.
         active = [j for j in job_admission.list_active()
-                  if j.get("name") in _OWNED_JOB_NAMES and j.get("account_id")]
+                  if j.get("job_name") in _OWNED_JOB_NAMES
+                  and j.get("account_id") and job_admission.is_live(j)]
         if active:
             account_id = active[0]["account_id"]
     if not account_id:
