@@ -531,6 +531,10 @@ export interface MigrationDetail {
    *  not name which job, so a delta looked identical to a migration. */
   activeJobs?: { jobName: string; startedAt: string | null
                  pid: number | null }[]
+  /** What THIS run has touched, as opposed to the cumulative totals a
+   *  finished migration already left on screen. */
+  sinceRun?: { moved: number; failed: number; skipped: number
+               since: string } | null
   failures: MigrationFailure[]
   /** Items the tool deliberately did not migrate, by reason. Distinct from
    *  failures: a skip is a decision, not an error. */

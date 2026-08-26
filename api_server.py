@@ -2675,6 +2675,35 @@ async def repair_apply(account_id: int, body: WriteAction,
                       "target and takes a few minutes"}
 
 
+
+def _progress_since(conn, started_at: str | None) -> dict | None:
+    """Rows this run has touched, by outcome.
+
+    audit_log upserts on (user, item, type), so a row's timestamp is its
+    LAST attempt -- which is exactly what "touched by this run" means.
+
+    The bound is truncated to whole seconds first. active_jobs stamps
+    milliseconds (2026-08-26T02:36:57.722Z) and audit_log does not
+    (02:43:27Z); '.' sorts below 'Z', so comparing the two forms directly
+    pulls in rows from up to a second before the run began. Both are ISO
+    with the same T and Z, which is what makes a string comparison safe at
+    all -- SQLite's own datetime() returns a SPACE separator, and 'T' > ' ',
+    so a window built from it matches every row of the day.
+    """
+    if not started_at:
+        return None
+    bound = started_at
+    if "." in bound:
+        bound = bound.split(".", 1)[0] + "Z"
+    row = conn.execute(
+        "SELECT "
+        " SUM(CASE WHEN status='SUCCESS' THEN 1 ELSE 0 END) moved,"
+        " SUM(CASE WHEN status='FAILED'  THEN 1 ELSE 0 END) failed,"
+        " SUM(CASE WHEN status LIKE 'SKIPPED%' THEN 1 ELSE 0 END) skipped "
+        "FROM audit_log WHERE timestamp >= ?", (bound,)).fetchone()
+    return {"moved": row["moved"] or 0, "failed": row["failed"] or 0,
+            "skipped": row["skipped"] or 0, "since": bound}
+
 @app.get("/api/v2/metrics")
 async def metrics_for_me(history: int = 60, op: Operator = Depends(operator)):
     """Metrics without having to name an account.
@@ -2994,6 +3023,13 @@ async def migration_detail(account_id: int, op: Operator = Depends(operator)):
                 out["runStartedAt"] = _run_started_at(
                     account_id, job_admission.list_active(),
                     row["t"] if row else None)
+
+                # What THIS run has done, separately from the cumulative
+                # totals. "817,673 items migrated" is the whole ledger, and a
+                # delta adding seventy items to it moves that number by a
+                # rounding error -- so a run that was working looked
+                # identical to one that was not.
+                out["sinceRun"] = _progress_since(conn, out["runStartedAt"])
 
                 # AFTER runStartedAt, which it consumes. Computed before it,
                 # the scope was always empty and the folder warning counted

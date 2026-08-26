@@ -188,6 +188,19 @@ export const MigrationDetail: React.FC = () => {
                   {' '}running
                   {j.startedAt ? ` — started ${ageOf(j.startedAt)}` : ''}
                   {j.pid ? ` (pid ${j.pid})` : ''}
+                  {/* This run's own numbers. The cumulative counters move by
+                      a rounding error on a delta, so a run that was working
+                      read exactly like one that was not. */}
+                  {d.sinceRun && (
+                    <span data-testid="since-run">
+                      {' · '}{d.sinceRun.moved.toLocaleString()} moved
+                      {d.sinceRun.skipped > 0 &&
+                        ` · ${d.sinceRun.skipped.toLocaleString()} unchanged`}
+                      {d.sinceRun.failed > 0 &&
+                        ` · ${d.sinceRun.failed.toLocaleString()} failed`}
+                      {' this run'}
+                    </span>
+                  )}
                 </div>
               ))}
             </Alert>

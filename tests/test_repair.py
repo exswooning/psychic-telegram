@@ -704,3 +704,63 @@ class TestTheDominantCausesAreNamed:
         assert s["auth_session_invalid"] == 0
         assert s["total"] == 1
         d.close()
+
+
+class TestThisRunsOwnProgress:
+    """"817,673 items migrated" is the whole ledger. A delta adding seventy
+    items to it moves that number by a rounding error, so a run that was
+    working looked identical to one that was not."""
+
+    def _conn(self, tmp_path):
+        d = dbmod.MigrationDB(str(tmp_path / "m.db"))
+        return d
+
+    def test_it_counts_only_what_this_run_touched(self, tmp_path):
+        import api_server
+        d = self._conn(tmp_path)
+        d.conn.execute("INSERT INTO audit_log(source_user,item_id,item_type,"
+                       "status,timestamp) VALUES('u','old','file','SUCCESS',"
+                       "'2026-08-26T02:00:00Z')")
+        d.conn.execute("INSERT INTO audit_log(source_user,item_id,item_type,"
+                       "status,timestamp) VALUES('u','new','file','SUCCESS',"
+                       "'2026-08-26T02:40:00Z')")
+        d.conn.commit()
+        out = api_server._progress_since(d.conn, "2026-08-26T02:36:57.722Z")
+        assert out["moved"] == 1, "the row from before the run must not count"
+        d.close()
+
+    def test_the_millisecond_bound_is_truncated_not_compared_raw(self,
+                                                                 tmp_path):
+        # active_jobs stamps ms, audit_log does not, and '.' sorts below 'Z'
+        # -- so a raw comparison pulls in the second before the run began.
+        import api_server
+        d = self._conn(tmp_path)
+        d.conn.execute("INSERT INTO audit_log(source_user,item_id,item_type,"
+                       "status,timestamp) VALUES('u','edge','file','SUCCESS',"
+                       "'2026-08-26T02:36:57Z')")
+        d.conn.commit()
+        out = api_server._progress_since(d.conn, "2026-08-26T02:36:57.722Z")
+        assert out["since"] == "2026-08-26T02:36:57Z"
+        assert out["moved"] == 1
+        d.close()
+
+    def test_outcomes_are_kept_apart(self, tmp_path):
+        import api_server
+        d = self._conn(tmp_path)
+        for item, status in (("a", "SUCCESS"), ("b", "FAILED"),
+                             ("c", "SKIPPED_IS_DRAFT")):
+            d.conn.execute("INSERT INTO audit_log(source_user,item_id,"
+                           "item_type,status,timestamp) VALUES('u',?,'file',?,"
+                           "'2026-08-26T03:00:00Z')", (item, status))
+        d.conn.commit()
+        out = api_server._progress_since(d.conn, "2026-08-26T02:00:00Z")
+        assert (out["moved"], out["failed"], out["skipped"]) == (1, 1, 1)
+        d.close()
+
+    def test_no_run_means_no_panel_rather_than_zeroes(self, tmp_path):
+        # A fabricated 0 reads as "this run did nothing", which is a
+        # different claim from "there is no run".
+        import api_server
+        d = self._conn(tmp_path)
+        assert api_server._progress_since(d.conn, None) is None
+        d.close()

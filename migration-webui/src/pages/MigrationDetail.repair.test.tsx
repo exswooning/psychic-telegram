@@ -397,3 +397,47 @@ describe('MigrationDetail names the job that is running', () => {
     expect(screen.queryByTestId('active-job')).toBeNull()
   })
 })
+
+describe('MigrationDetail shows what this run has done', () => {
+  beforeEach(() => { fetchMigrationDetail.mockReset() })
+
+  const running = (sinceRun: unknown) => detail({
+    running: true,
+    activeJobs: [{ jobName: 'delta', pid: 1,
+                   startedAt: new Date(Date.now() - 60_000).toISOString() }],
+    sinceRun,
+  })
+
+  it('separates this run from the cumulative total', async () => {
+    // 817,673 items migrated is the whole ledger; a delta moving 1,204
+    // items barely shifts it.
+    fetchMigrationDetail.mockResolvedValue(running({
+      moved: 1204, failed: 12, skipped: 6102, since: '2026-08-26T02:36:57Z',
+    }))
+    render(<MigrationDetail />)
+    await waitFor(() => expect(screen.getByTestId('since-run')).toBeTruthy())
+    const t = screen.getByTestId('since-run').textContent || ''
+    expect(t).toContain('1,204 moved')
+    expect(t).toContain('12 failed')
+    expect(t).toContain('this run')
+  })
+
+  it('does not print zero outcomes as though they were news', async () => {
+    fetchMigrationDetail.mockResolvedValue(running({
+      moved: 40, failed: 0, skipped: 0, since: '2026-08-26T02:36:57Z',
+    }))
+    render(<MigrationDetail />)
+    await waitFor(() => expect(screen.getByTestId('since-run')).toBeTruthy())
+    const t = screen.getByTestId('since-run').textContent || ''
+    expect(t).toContain('40 moved')
+    expect(t).not.toContain('0 failed')
+    expect(t).not.toContain('0 unchanged')
+  })
+
+  it('shows no run figures when there is no run', async () => {
+    fetchMigrationDetail.mockResolvedValue(running(null))
+    render(<MigrationDetail />)
+    await waitFor(() => expect(screen.getByTestId('active-job')).toBeTruthy())
+    expect(screen.queryByTestId('since-run')).toBeNull()
+  })
+})
