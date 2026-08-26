@@ -25,9 +25,13 @@ call this and are unaffected.
 
 from __future__ import annotations
 
+import logging
 import os
+from datetime import datetime, timedelta, timezone
 
 import control_plane_db as cpdb
+
+log = logging.getLogger("job_admission")
 
 # How many heavy jobs may run at once, across every account.
 #
@@ -56,6 +60,7 @@ def try_admit(account_id: int | None, job_name: str, pid: int | None = None) -> 
     letting the cap through by exactly the race this function exists to
     close.
     """
+    reap_dead()
     with cpdb.rw() as conn:
         conn.execute("BEGIN IMMEDIATE")
         count = conn.execute("SELECT COUNT(*) FROM active_jobs").fetchone()[0]
@@ -69,6 +74,68 @@ def try_admit(account_id: int | None, job_name: str, pid: int | None = None) -> 
         )
     return True, ""
 
+
+
+def _alive(pid: int | None) -> bool:
+    """Is that process still on this box?"""
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True          # exists, owned by somebody else
+    return True
+
+
+def reap_dead(grace_seconds: int = 120) -> int:
+    """Free slots whose process is gone, and report how many.
+
+    The slot was released by a daemon thread inside the API server that
+    waited on the subprocess. Deploying restarts that server, so the waiter
+    died while the job it was watching carried on -- and the row stayed
+    forever. Live, a finished delta left (7, 'delta') sitting in the table:
+    Repair stayed disabled behind "runs when the migration finishes" and the
+    next launch would have been refused for capacity, with nothing running.
+
+    A row is reaped when its pid is gone. Rows with no pid yet are left
+    alone for grace_seconds, because that is the window between admission
+    and the pid being recorded -- reaping those immediately would free the
+    slot of a job that is still starting up.
+    """
+    cutoff = (datetime.now(timezone.utc)
+              - timedelta(seconds=grace_seconds)).strftime(
+                  "%Y-%m-%dT%H:%M:%S.000Z")
+    removed = 0
+    with cpdb.rw() as conn:
+        for r in conn.execute(
+                "SELECT id, pid, started_at FROM active_jobs").fetchall():
+            if r["pid"] is None:
+                # Still inside the launch window: leave it alone.
+                if (r["started_at"] or "") >= cutoff:
+                    continue
+            elif _alive(r["pid"]):
+                continue
+            conn.execute("DELETE FROM active_jobs WHERE id=?", (r["id"],))
+            removed += 1
+    if removed:
+        log.warning("reaped %d stale job slot(s) whose process was gone",
+                    removed)
+    return removed
+
+
+def record_pid(account_id: int | None, job_name: str, pid: int) -> None:
+    """Attach the real pid to the slot reserved a moment ago.
+
+    try_admit runs before Popen, so it has no pid to store; without this the
+    column stays NULL and nothing can ever tell whether the slot is live.
+    """
+    with cpdb.rw() as conn:
+        conn.execute(
+            "UPDATE active_jobs SET pid=? WHERE account_id IS ? "
+            "AND job_name=? AND pid IS NULL",
+            (pid, account_id, job_name))
 
 def list_active() -> list[dict]:
     """Every row in the admission table right now -- the one place that
@@ -86,6 +153,22 @@ def list_active() -> list[dict]:
             "ORDER BY started_at").fetchall()
     return [dict(r) for r in rows]
 
+
+
+def is_live(job: dict, grace_seconds: int = 120) -> bool:
+    """Is this row's process actually still here?
+
+    Separate from reap_dead because a read must not delete: list_active is
+    "every row in the table", and callers test it with synthetic pids. A
+    reader filters with this; only try_admit and startup remove rows.
+    """
+    pid = job.get("pid")
+    if pid is None:
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(seconds=grace_seconds)).strftime(
+                      "%Y-%m-%dT%H:%M:%S.000Z")
+        return (job.get("started_at") or "") >= cutoff
+    return _alive(pid)
 
 def release(account_id: int | None, job_name: str) -> None:
     """Free the slot try_admit reserved. Safe to call even if admission was

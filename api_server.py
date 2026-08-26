@@ -866,6 +866,12 @@ def _run_admitted(argv: list[str], account_id: int | None, job_name: str,
     proc = subprocess.Popen(argv, cwd=HERE, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                             text=True, env=env)
+    # Record the pid so the slot can be verified by something other than this
+    # thread. try_admit runs before Popen and has no pid to store, and this
+    # waiter dies whenever the server restarts -- a deploy mid-run left a
+    # finished delta holding the slot forever, disabling Repair and refusing
+    # the next launch for capacity with nothing actually running.
+    job_admission.record_pid(account_id, job_name, proc.pid)
 
     def _wait_then_release() -> None:
         proc.wait()
@@ -2894,8 +2900,15 @@ async def migration_detail(account_id: int, op: Operator = Depends(operator)):
     def _read() -> dict:
         src = accounts_auth.get_tenant_config(account_id, "source") or {}
         tgt = accounts_auth.get_tenant_config(account_id, "target") or {}
+        # Filtered, not just listed. The slot is released by a daemon thread
+        # in this process; restarting the server kills that thread while the
+        # job it was watching carries on, so a finished delta sat in the
+        # table with Repair disabled behind "runs when the migration
+        # finishes". Deleting belongs on the write path -- a read says what
+        # is true now and leaves the table alone.
         _jobs_here = [j for j in job_admission.list_active()
-                      if j.get("account_id") == account_id]
+                      if j.get("account_id") == account_id
+                      and job_admission.is_live(j)]
         out = {
             "accountId": account_id,
             "sourceDomain": src.get("domain") or "",
