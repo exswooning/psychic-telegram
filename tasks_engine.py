@@ -91,9 +91,46 @@ class TasksMigrator:
                         self.source_user, exc)
             return dict(self.stats)
 
+        # Probe the target once, before writing anything.
+        #
+        # Google Tasks answers 404 on users/@me/lists for an account the
+        # service was never provisioned for. Without this, every list the
+        # source has is attempted and recorded FAILED -- live, one user's
+        # two lists failed on every run, were retried forever, and sat in
+        # the UI as work needing a person. Eight other accounts on the same
+        # tenant listed fine, so it is the account, not the tenant, and no
+        # retry or code change reaches it.
+        if lists and not self._target_has_tasks():
+            log.warning("[%s] Google Tasks is not enabled on the target "
+                        "account; %d list(s) not migrated",
+                        self.source_user, len(lists))
+            for tl in lists:
+                self.db.log_audit(
+                    self.source_user, tl["id"], "task_list",
+                    "SKIPPED_SERVICE_UNAVAILABLE",
+                    "Google Tasks is not enabled on the target account")
+            self.stats["skipped"] += len(lists)
+            return dict(self.stats)
+
         for tl in lists:
             self._migrate_list(tl)
         return dict(self.stats)
+
+    def _target_has_tasks(self) -> bool:
+        """Can the target account use Tasks at all?
+
+        A skip is a decision and a failure is a defect; recording the wrong
+        one trains people to ignore the failure list.
+        """
+        try:
+            self.tgt.tasklists().list(maxResults=1).execute()
+            return True
+        except Exception as exc:      # noqa: BLE001 - any refusal means no
+            if "404" in str(exc):
+                return False
+            # Anything else (a network blip, a quota) is not a statement
+            # about provisioning, so do not turn it into a permanent skip.
+            return True
 
     def _migrate_list(self, tl: dict) -> None:
         src_id, title = tl["id"], tl.get("title") or "Imported list"
