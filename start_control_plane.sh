@@ -34,7 +34,11 @@ if [[ -f env.sh ]]; then
   set +a
 fi
 
-export CP_OPERATORS="${CP_OPERATORS:-aryan:admin}"
+# No default. A name in CP_OPERATORS is not a secret: defaulting it meant a
+# publicly reachable host granted admin to anyone who guessed the name. Set
+# it explicitly, and only for a host reachable through the SSH tunnel this
+# script was written for.
+export CP_OPERATORS="${CP_OPERATORS:-}"
 PORT=8090
 mkdir -p logs
 

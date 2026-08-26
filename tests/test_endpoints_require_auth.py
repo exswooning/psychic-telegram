@@ -141,3 +141,48 @@ class TestTheRoutesThatActuallyLeaked:
     def test_the_fleet_heartbeat_authenticates_as_a_node(self):
         # It writes node state and broadcasts to every connected socket.
         assert "Depends(node_auth)" in self._named()["heartbeat"]["args"]
+
+
+class TestTheOperatorHeaderIsNotADefaultCredential:
+    """A name in CP_OPERATORS is not a secret.
+
+    The live host shipped CP_OPERATORS=aryan:admin in its systemd unit and
+    was publicly reachable, so anyone who sent `X-Operator: aryan` was an
+    admin on every route gated by require_admin. Closing the anonymous hole
+    did not touch that -- it is a deployment value, and this is the test
+    that keeps it out of the shipped defaults.
+    """
+
+    def _read(self, name):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return open(os.path.join(root, name), encoding="utf-8").read()
+
+    def test_the_systemd_unit_does_not_set_it(self):
+        unit = self._read("systemd/bitport-api.service")
+        setting = [ln for ln in unit.splitlines()
+                   if ln.strip().startswith("Environment=CP_OPERATORS")]
+        assert not setting, (
+            "the shipped unit grants admin to anyone who guesses the name: "
+            f"{setting}")
+
+    def test_the_start_script_has_no_default(self):
+        script = self._read("start_control_plane.sh")
+        assert 'CP_OPERATORS:-aryan:admin' not in script
+        assert 'CP_OPERATORS:-}' in script or 'CP_OPERATORS:-"}' in script
+
+    def test_an_unlisted_name_earns_nothing(self, monkeypatch):
+        # With no CP_OPERATORS, _roles() is empty, so require_reader refuses
+        # a header-only caller and the cookie is the only credential left.
+        import api_server
+        monkeypatch.delenv("CP_OPERATORS", raising=False)
+        assert api_server._roles() == {}
+        op = api_server.Operator(name="aryan", role="viewer", account_id=None)
+        import pytest
+        with pytest.raises(Exception):
+            api_server.require_reader(op)
+
+    def test_a_signed_in_account_is_unaffected(self, monkeypatch):
+        import api_server
+        monkeypatch.delenv("CP_OPERATORS", raising=False)
+        op = api_server.Operator(name="someone", role="admin", account_id=7)
+        api_server.require_reader(op)      # must not raise

@@ -5,13 +5,20 @@ After=network.target xvfb.service
 [Service]
 WorkingDirectory=/root/migration
 Environment=DISPLAY=:99
-# Without this, api_server.py's own operator() falls back to CP_OPERATORS
-# being empty and every X-Operator/SSH-tunnel caller ends up role='viewer'
-# -- see start_control_plane.sh's own docstring for why that script existed
-# in the first place (a bare `python3 api_server.py &` is easy to run
-# without exporting this). systemd is now what start_control_plane.sh used
-# to be; this line carries the same requirement forward.
-Environment=CP_OPERATORS=aryan:admin
+# CP_OPERATORS is deliberately NOT set here.
+#
+# It maps an X-Operator header to a role, and a name is not a secret. With
+# CP_OPERATORS=aryan:admin on a publicly reachable host, anyone who sent
+# `X-Operator: aryan` was an admin on every route gated by require_admin.
+# Empty, _roles() matches nobody, so the header grants nothing and the
+# session cookie is the only credential -- which is what the browser has
+# been using all along (operator() prefers the cookie over the header, and
+# the SPA sends an empty header unless someone sets cp_operator in
+# localStorage).
+#
+# Restore it only for a host that is NOT publicly reachable -- the
+# SSH-tunnel deployment start_control_plane.sh was written for, where
+# network access is itself the credential.
 # secure=True on the session cookie only makes sense once this is actually
 # reached over real HTTPS (Caddy, in front of this on 8090) -- see
 # api_server.py's _set_session_cookie(). Left unset (defaulting to
