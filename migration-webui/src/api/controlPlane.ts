@@ -540,6 +540,11 @@ export interface MigrationDetail {
    *  finished migration already left on screen. */
   sinceRun?: { moved: number; failed: number; skipped: number
                since: string } | null
+  /** Who is in flight right now. The headline counters go still for hours
+   *  on a real run -- a user flips to DONE only when every service
+   *  finishes -- so this is what shows the run is moving. */
+  runningUsers?: { sourceUser: string; items: number; lastType: string
+                   lastAt: string; startedAt: string }[]
   failures: MigrationFailure[]
   /** Items the tool deliberately did not migrate, by reason. Distinct from
    *  failures: a skip is a decision, not an error. */

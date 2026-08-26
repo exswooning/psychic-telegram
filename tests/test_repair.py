@@ -820,3 +820,79 @@ class TestRepairCoversStrandedItems:
         line = repair.summarise({"survey": {"total": 6},
                                  "stranded_retried": 2, "errors": []})
         assert "2 stranded item(s) re-imported" in line
+
+
+class TestWhoIsInFlight:
+    """The headline counters go still for hours on a real run.
+
+    A user flips to DONE only when every service finishes, so 24 large
+    mailboxes all mid-flight means done/running/pending do not move at all
+    while hundreds of thousands of items do. Live, over 40 seconds:
+    done 0->0, running 24->24, pending 175->175, items 129,668->130,448.
+    """
+
+    def _db(self, tmp_path):
+        d = dbmod.MigrationDB(str(tmp_path / "m.db"))
+        for email, status, at in (("a@src", "RUNNING", "2026-08-26T07:00:00Z"),
+                                  ("b@src", "RUNNING", "2026-08-26T07:30:00Z"),
+                                  ("c@src", "DONE", "2026-08-26T06:00:00Z")):
+            d.conn.execute("INSERT INTO identity_map(source_email,target_email,"
+                           "status,status_at) VALUES(?,?,?,?)",
+                           (email, email + ".tgt", status, at))
+        d.conn.commit()
+        return d
+
+    def _write(self, d, user, item, itype, ts):
+        d.conn.execute("INSERT INTO audit_log(source_user,item_id,item_type,"
+                       "status,timestamp) VALUES(?,?,?,'SUCCESS',?)",
+                       (user, item, itype, ts))
+        d.conn.commit()
+
+    def test_it_reports_only_users_actually_running(self, tmp_path):
+        import api_server
+        d = self._db(tmp_path)
+        self._write(d, "a@src", "f1", "file", "2026-08-26T07:10:00Z")
+        self._write(d, "c@src", "f2", "file", "2026-08-26T06:10:00Z")
+        rows = api_server._running_users(d.conn)
+        assert [r["sourceUser"] for r in rows] == ["a@src"]
+        d.close()
+
+    def test_it_counts_only_this_run_for_that_user(self, tmp_path):
+        # Rows from before the user started belong to an earlier run.
+        import api_server
+        d = self._db(tmp_path)
+        self._write(d, "a@src", "old", "file", "2026-08-26T06:00:00Z")
+        self._write(d, "a@src", "new", "file", "2026-08-26T07:10:00Z")
+        rows = api_server._running_users(d.conn)
+        assert rows[0]["items"] == 1
+        d.close()
+
+    def test_it_says_what_the_user_is_working_on_now(self, tmp_path):
+        # The type from the most recent row, so "still on files" and "now on
+        # messages" are distinguishable without reading a log.
+        import api_server
+        d = self._db(tmp_path)
+        self._write(d, "a@src", "f1", "file", "2026-08-26T07:10:00Z")
+        self._write(d, "a@src", "m1", "message", "2026-08-26T07:20:00Z")
+        rows = api_server._running_users(d.conn)
+        assert rows[0]["lastType"] == "message"
+        assert rows[0]["lastAt"] == "2026-08-26T07:20:00Z"
+        d.close()
+
+    def test_the_busiest_user_comes_first(self, tmp_path):
+        import api_server
+        d = self._db(tmp_path)
+        self._write(d, "a@src", "f1", "file", "2026-08-26T07:10:00Z")
+        for i in range(3):
+            self._write(d, "b@src", f"f{i}", "file", "2026-08-26T07:40:00Z")
+        rows = api_server._running_users(d.conn)
+        assert [r["sourceUser"] for r in rows] == ["b@src", "a@src"]
+        d.close()
+
+    def test_a_user_that_has_written_nothing_yet_is_simply_absent(self,
+                                                                  tmp_path):
+        # Not a fabricated zero row: it has genuinely done nothing to report.
+        import api_server
+        d = self._db(tmp_path)
+        assert api_server._running_users(d.conn) == []
+        d.close()

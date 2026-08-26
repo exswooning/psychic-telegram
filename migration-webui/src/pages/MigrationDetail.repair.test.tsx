@@ -471,3 +471,71 @@ describe('MigrationDetail can start a full migration', () => {
     expect(screen.getByTestId('run-delta')).toBeTruthy()
   })
 })
+
+describe('MigrationDetail shows who is in flight', () => {
+  beforeEach(() => { fetchMigrationDetail.mockReset() })
+
+  const running = (users: unknown) => detail({
+    running: true,
+    progress: {
+      users: 201, done: 0, running: 24, pending: 175, failed: 2, blocked: 0,
+      items: 130448, itemsFailed: 2, itemsSkipped: 175,
+    },
+    runningUsers: users,
+  })
+
+  const someone = (over: Record<string, unknown> = {}) => ({
+    sourceUser: 'george2@source.example.com', items: 7736, lastType: 'file',
+    lastAt: new Date(Date.now() - 4000).toISOString(),
+    startedAt: new Date(Date.now() - 7_200_000).toISOString(),
+    ...over,
+  })
+
+  it('names each working user and what it has moved', async () => {
+    // done/running/pending sat unchanged for hours while 130,000 items
+    // moved, so the page read as stuck.
+    fetchMigrationDetail.mockResolvedValue(running([someone()]))
+    render(<MigrationDetail />)
+    await waitFor(() =>
+      expect(screen.getByTestId('running-users')).toBeTruthy())
+    const row = screen.getByTestId('running-george2@source.example.com')
+    expect(row.textContent).toContain('george2')
+    expect(row.textContent).toContain('7,736')
+    expect(row.textContent).toContain('file')
+  })
+
+  it('says how recently each one wrote, which is what proves it is alive',
+     async () => {
+    fetchMigrationDetail.mockResolvedValue(running([someone()]))
+    render(<MigrationDetail />)
+    await waitFor(() =>
+      expect(screen.getByTestId('running-users')).toBeTruthy())
+    expect(screen.getByTestId('running-george2@source.example.com').textContent)
+      .toMatch(/[0-9]+s ago/)
+  })
+
+  it('counts the users in flight in its own heading', async () => {
+    fetchMigrationDetail.mockResolvedValue(running([
+      someone(), someone({ sourceUser: 'b@source.example.com', items: 12 }),
+    ]))
+    render(<MigrationDetail />)
+    await waitFor(() =>
+      expect(screen.getByTestId('running-users')).toBeTruthy())
+    expect(screen.getByTestId('running-users').textContent)
+      .toContain('In flight now (2)')
+  })
+
+  it('shows nothing when nothing is in flight', async () => {
+    fetchMigrationDetail.mockResolvedValue(running([]))
+    render(<MigrationDetail />)
+    await waitFor(() => expect(screen.getByTestId('users-table')).toBeTruthy())
+    expect(screen.queryByTestId('running-users')).toBeNull()
+  })
+
+  it('survives a server that does not send the field', async () => {
+    fetchMigrationDetail.mockResolvedValue(detail())
+    render(<MigrationDetail />)
+    await waitFor(() => expect(screen.getByTestId('users-table')).toBeTruthy())
+    expect(screen.queryByTestId('running-users')).toBeNull()
+  })
+})

@@ -221,6 +221,48 @@ export const MigrationDetail: React.FC = () => {
             </Alert>
           )}
 
+          {/* The headline counters go still for hours: a user flips to DONE
+              only when every service finishes, so 24 large mailboxes all
+              mid-flight means done/running/pending never move while
+              hundreds of thousands of items do. Watching that, the only
+              honest conclusion is that the tool is stuck. */}
+          {!!d.runningUsers?.length && (
+            <Paper variant="outlined" sx={{ p: 2, mb: 3 }}
+                   data-testid="running-users">
+              <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>
+                In flight now ({d.runningUsers.length})
+              </Typography>
+              <Box sx={{ overflowX: 'auto' }}>
+                <Table size="small">
+                  <TableHead>
+                    <TableRow>
+                      <TableCell>User</TableCell>
+                      <TableCell align="right">Items this run</TableCell>
+                      <TableCell>Working on</TableCell>
+                      <TableCell align="right">Last wrote</TableCell>
+                      <TableCell align="right">Running for</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {d.runningUsers.map(u => (
+                      <TableRow key={u.sourceUser}
+                                data-testid={`running-${u.sourceUser}`}>
+                        <TableCell>{u.sourceUser.split('@')[0]}</TableCell>
+                        <TableCell align="right"
+                                   sx={{ fontVariantNumeric: 'tabular-nums' }}>
+                          {u.items.toLocaleString()}
+                        </TableCell>
+                        <TableCell>{u.lastType}</TableCell>
+                        <TableCell align="right">{ageOf(u.lastAt)}</TableCell>
+                        <TableCell align="right">{ageOf(u.startedAt)}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </Box>
+            </Paper>
+          )}
+
           {repair && repair.total > 0 && (
             <Paper variant="outlined" sx={{ p: 2, mb: 3 }}
                    data-testid="repair-panel">
