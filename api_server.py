@@ -242,11 +242,6 @@ class StartMigration(WriteAction):
     # before anything moves, naming the scope, rather than failing mid-run.
     services: list[str] = Field(default_factory=lambda: ["all"])
     users: list[str] = Field(default_factory=list)   # empty = whole batch
-    # Which migration to run against. None means the caller's own account,
-    # which is what a tenant self-serving always wants; the console sends the
-    # id of the migration on screen, because a superadmin is usually looking
-    # at somebody else's.
-    account_id: int | None = None
     dry_run: bool = False
 
 
@@ -262,6 +257,11 @@ class StartDelta(WriteAction):
     services: list[str] = Field(default_factory=lambda: ["all"])
     users: list[str] = Field(default_factory=list)   # empty = whole batch
     days: int = Field(default=2, ge=1, le=90)
+    # Which migration to run against. None means the caller's own account,
+    # which is what a tenant self-serving always wants; the console sends the
+    # id of the migration on screen, because a superadmin is usually looking
+    # at somebody else's.
+    account_id: int | None = None
 
 
 class JobSignal(WriteAction):

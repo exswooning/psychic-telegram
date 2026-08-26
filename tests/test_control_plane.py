@@ -2230,3 +2230,91 @@ class TestTheDetailPayloadCarriesItsPanels:
         body = cp.get(f"/api/v2/metrics/{aid}").json()
         for key in ("operations", "limiters"):
             assert key in body
+
+
+class TestDeltaTargetsTheMigrationOnScreen:
+    """Run delta built its argv from the signed-in operator's own account.
+
+    A superadmin pressing the button on account 7's page ran a delta against
+    an empty account of their own -- the server created that account's
+    database, initialised a schema, returned 200, and left account 7
+    untouched. The bad field name was found only by reading a live 500 in
+    the journal, which is what these tests are for.
+    """
+
+    def _boot(self, monkeypatch):
+        path = tempfile.mktemp(suffix=".db")
+        monkeypatch.setenv("MIGRATION_DB", path)
+        monkeypatch.setenv("CP_OPERATORS", "")
+        MigrationDB(path)
+        cpdb.apply_migrations()
+        import api_server
+        return api_server
+
+    def test_the_request_carries_an_account_id_at_all(self, monkeypatch):
+        # The live failure was AttributeError: 'StartDelta' object has no
+        # attribute 'account_id' -- the field had been added to the model
+        # directly above it.
+        api_server = self._boot(monkeypatch)
+        assert "account_id" in api_server.StartDelta.model_fields
+
+    @staticmethod
+    def _delta(client, **extra):
+        body = {"reason": "test", "days": 2, "services": ["all"], "users": []}
+        body.update(extra)
+        return client.post("/api/v2/migrate/delta", json=body)
+
+    def test_it_launches_against_the_account_asked_for(self, monkeypatch):
+        api_server = self._boot(monkeypatch)
+        seen = {}
+
+        def fake_admitted(argv, account_id, name):
+            seen["argv"] = argv
+            seen["account_id"] = account_id
+            return {"ok": True, "detail": "started"}
+
+        monkeypatch.setattr(api_server, "_run_admitted", fake_admitted)
+        with TestClient(api_server.app) as client:
+            client.post("/api/v2/auth/signup",
+                        json={"email": "op@example.com",
+                              "password": "hunter22222", "name": "Op"})
+            # Learn this operator's own id rather than assuming it: the
+            # control-plane connection outlives a single test.
+            assert self._delta(client).status_code == 200
+            mine = seen["account_id"]
+            assert self._delta(client, account_id=mine).status_code == 200
+        assert seen["account_id"] == mine
+        assert "--account-id" in seen["argv"]
+        assert seen["argv"][seen["argv"].index("--account-id") + 1] == str(mine)
+
+    def test_omitting_it_still_means_my_own_account(self, monkeypatch):
+        # A tenant self-serving never sends one, and must keep working.
+        api_server = self._boot(monkeypatch)
+        seen = {}
+        monkeypatch.setattr(api_server, "_run_admitted",
+                            lambda argv, aid, name: seen.update(account_id=aid)
+                            or {"ok": True, "detail": ""})
+        with TestClient(api_server.app) as client:
+            client.post("/api/v2/auth/signup",
+                        json={"email": "solo@example.com",
+                              "password": "hunter22222", "name": "Solo"})
+            assert self._delta(client).status_code == 200
+        assert isinstance(seen["account_id"], int)
+
+    def test_another_tenants_migration_is_refused(self, monkeypatch):
+        api_server = self._boot(monkeypatch)
+        seen = {}
+        monkeypatch.setattr(api_server, "_run_admitted",
+                            lambda argv, aid, name: seen.update(account_id=aid)
+                            or {"ok": True, "detail": ""})
+        with TestClient(api_server.app) as client:
+            client.post("/api/v2/auth/signup",
+                        json={"email": "delta-owner-a@example.com",
+                              "password": "hunter22222", "name": "Owner A"})
+            assert self._delta(client).status_code == 200
+            other = seen["account_id"]
+            client.post("/api/v2/auth/logout")
+            client.post("/api/v2/auth/signup",
+                        json={"email": "delta-owner-b@example.com",
+                              "password": "hunter22222", "name": "Owner B"})
+            assert self._delta(client, account_id=other).status_code == 403
