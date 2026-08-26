@@ -251,10 +251,17 @@ export interface HostInfo {
 export interface LogsPayload {
   path: string
   lines: string[]
+  /** Per-job transcripts on disk. A launched run's own stdout and stderr go
+   *  here, so a traceback that kills a migration is in one of these files
+   *  and in no other. */
+  jobs?: { account: string; job: string; bytes: number; modified: number }[]
 }
 
-export async function fetchLogs(): Promise<LogsPayload> {
-  return getJSON<LogsPayload>('/api/logs')
+export async function fetchLogs(job?: string, account?: string):
+    Promise<LogsPayload> {
+  const q = job ? `?job=${encodeURIComponent(job)}&account=${
+    encodeURIComponent(account || '')}` : ''
+  return getJSON<LogsPayload>(`/api/logs${q}`)
 }
 
 export interface ConfigPayload {

@@ -2651,17 +2651,60 @@ def _human_bytes(n: int) -> str:
     return f"{n:.1f} PB"
 
 
-def logs_payload() -> dict:
+def available_job_logs() -> list[dict]:
+    """Every per-job transcript on disk, newest first.
+
+    These are where a launched run's own stdout and stderr land -- so a
+    traceback that kills a migration is in one of these files and in no
+    other. Until this listed them, the only way to read one was to log in
+    to the box.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.join(here, "logs", "jobs")
+    out: list[dict] = []
+    for account in sorted(os.listdir(root)) if os.path.isdir(root) else []:
+        folder = os.path.join(root, account)
+        if not os.path.isdir(folder):
+            continue
+        for name in sorted(os.listdir(folder)):
+            if not name.endswith(".log"):
+                continue
+            full = os.path.join(folder, name)
+            try:
+                st = os.stat(full)
+            except OSError:
+                continue
+            out.append({"account": account, "job": name[: -len(".log")],
+                        "bytes": st.st_size, "modified": st.st_mtime})
+    out.sort(key=lambda r: r["modified"], reverse=True)
+    return out
+
+
+def logs_payload(job: str = "", account: str = "") -> dict:
     """Tail of the engine's own log file (what main.py writes)."""
     from config import Settings
 
-    path = Settings().log_file
+    # A named job reads its own transcript instead of the shared engine log.
+    # Resolved through job_log_path so there is exactly one place that knows
+    # the layout -- a second copy of it is how two other bugs happened today.
+    if job:
+        acct = None
+        if account and account != "_none":
+            try:
+                acct = int(account)
+            except ValueError:
+                acct = None
+        path = job_log_path(acct, job)
+    else:
+        path = Settings().log_file
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
             lines = fh.readlines()
     except OSError:
-        return {"path": path, "lines": ["(no log file yet)"]}
-    return {"path": path, "lines": lines[-600:]}
+        return {"path": path, "lines": ["(no log file yet)"],
+                "jobs": available_job_logs()}
+    return {"path": path, "lines": lines[-600:],
+            "jobs": available_job_logs()}
 
 
 # ----------------------------------------------------------------------
@@ -2875,6 +2918,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = self.path.split("?")[0]
+        query = urllib.parse.parse_qs(self.path.partition("?")[2])
         if path == "/":
             # Bitport (the SPA at /app) is the only UI now. This used to
             # 302 here and also serve an inline dashboard at /legacy from
@@ -2910,7 +2954,8 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/scope":
             self._json(scope_payload())
         elif path == "/api/logs":
-            self._json(logs_payload())
+            self._json(logs_payload(query.get("job", [""])[0],
+                                    query.get("account", [""])[0]))
         elif path == "/api/groq":
             # The panel needs to know whether a key is saved (masked) so it
             # can prompt to enter one, without ever round-tripping the real

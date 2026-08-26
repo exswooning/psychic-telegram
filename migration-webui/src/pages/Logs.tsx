@@ -1,10 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  Box, Typography, Card, CardContent, Stack, IconButton, Tooltip,
-  FormControlLabel, Checkbox, Alert,
+  Alert, Box, Card, CardContent, Checkbox, FormControlLabel, IconButton, MenuItem, Stack, TextField, Tooltip, Typography,
 } from '@mui/material'
 import { Refresh as RefreshIcon, Terminal as LogsIcon } from '@mui/icons-material'
 import { fetchLogs } from '@/api/client'
+import type { LogsPayload } from '@/api/client'
 import AiDiagnostics from '@/components/AiDiagnostics'
 
 const ERROR_RE = /error/i
@@ -21,13 +21,23 @@ const Logs: React.FC = () => {
   const [path, setPath] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [follow, setFollow] = useState(true)
+  /* Which transcript to read. A launched run's own stdout and stderr go to
+     logs/jobs/{account}/{job}.log, so a traceback that kills a migration is
+     in one of those files and in no other -- until this picker existed the
+     only way to read one was to log in to the box. */
+  const [jobs, setJobs] = useState<NonNullable<LogsPayload['jobs']>>([])
+  const [selected, setSelected] = useState('')      // '' = the engine log
   const preRef = useRef<HTMLPreElement | null>(null)
 
   const refresh = useCallback(() => {
-    fetchLogs()
-      .then((r) => { setLines(r.lines); setPath(r.path) })
+    const [job, account] = selected ? selected.split('|') : ['', '']
+    fetchLogs(job, account)
+      .then((r) => {
+        setLines(r.lines); setPath(r.path)
+        if (r.jobs) setJobs(r.jobs)
+      })
       .catch((e) => setError(e instanceof Error ? e.message : String(e)))
-  }, [])
+  }, [selected])
 
   useEffect(() => {
     refresh()
@@ -43,6 +53,20 @@ const Logs: React.FC = () => {
     <Box>
       <Stack direction="row" alignItems="center" sx={{ mb: 0.5 }}>
         <LogsIcon color="action" sx={{ mr: 1 }} />
+        {jobs.length > 0 && (
+          <TextField select size="small" value={selected}
+                     data-testid="log-picker"
+                     onChange={(e) => setSelected(e.target.value)}
+                     sx={{ minWidth: 240, mr: 2 }}>
+            <MenuItem value="">migration engine log</MenuItem>
+            {jobs.map((j) => (
+              <MenuItem key={`${j.account}/${j.job}`}
+                        value={`${j.job}|${j.account}`}>
+                {j.job} · account {j.account} · {Math.round(j.bytes / 1024)} KB
+              </MenuItem>
+            ))}
+          </TextField>
+        )}
         <Typography variant="h4" sx={{ fontWeight: 700, flexGrow: 1 }}>Logs</Typography>
         <Tooltip title="Re-check">
           <span>

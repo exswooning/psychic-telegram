@@ -890,11 +890,13 @@ def _child_output(job_name: str, account_id: int | None):
     Appended, not truncated, so a re-run does not erase the evidence of the
     run before it.
     """
-    folder = os.path.join(HERE, "logs", "jobs",
-                          str(account_id) if account_id is not None else "_none")
-    os.makedirs(folder, exist_ok=True)
-    safe = "".join(c for c in job_name if c.isalnum() or c in "-_") or "job"
-    return open(os.path.join(folder, f"{safe}.log"), "ab", buffering=0)
+    # webui.job_log_path owns the layout, and the Logs page reads the files
+    # it names. A second copy of the same convention here would drift, and
+    # the transcript would quietly stop being visible in the UI.
+    from webui import job_log_path
+    path = job_log_path(account_id, job_name)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    return open(path, "ab", buffering=0)
 
 
 def _spawn(argv: list[str], env: dict[str, str] | None = None) -> tuple[bool, str]:
