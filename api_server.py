@@ -77,6 +77,7 @@ except ImportError:  # pragma: no cover - import guard, not logic
 
 import accounts_auth
 import job_admission
+import job_supervisor
 import ai_diagnostics
 import control_plane_db as cpdb
 import user_claims as user_claims_mod
@@ -485,6 +486,47 @@ def _ensure_account_schemas() -> None:
                         aid, str(exc)[:160])
 
 
+SUPERVISOR_POLL_SEC = int(os.getenv("JOB_SUPERVISOR_POLL_SEC", "120"))
+
+
+def _account_db_path(account_id: int | None) -> str | None:
+    """Where an account's ledger lives, for the supervisor to read."""
+    try:
+        from config import Settings
+        return Settings(account_id=account_id).db_path
+    except (ValueError, KeyError, OSError, sqlite3.Error) as exc:
+        # sqlite3.Error belongs here: resolving a path reads the
+        # control-plane db, and an OperationalError is not an OSError. Left
+        # out, one unreadable account aborted the entire supervisor pass --
+        # including the slot reaping that runs at the end of it.
+        log.warning("no ledger path for account %s: %r", account_id, exc)
+        return None
+
+
+async def _supervise_jobs() -> None:
+    """Watch admitted jobs for one that has stopped making progress.
+
+    A deadlocked process neither finishes nor dies: it holds its slot,
+    keeps its users marked RUNNING, and reports nothing. Live, a delta
+    wedged on the logging lock and stayed wedged until a person went
+    looking with py-spy and killed it by hand -- nothing in the tool would
+    ever have noticed. See job_supervisor for why it takes two signals.
+    """
+    sup = job_supervisor.Supervisor(db_path_for=_account_db_path)
+    while True:
+        try:
+            await asyncio.sleep(SUPERVISOR_POLL_SEC)
+            killed = await _off_loop(sup.check_once)
+            for k in killed or []:
+                log.error("ended wedged %s for account %s after %.0fs with no "
+                          "progress", k["job_name"], k["account_id"],
+                          k["silent_for"])
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:      # noqa: BLE001 - must outlive any error
+            log.warning("job supervisor pass failed: %s", exc)
+
+
 async def lifespan(_: FastAPI):
     """Apply control-plane migrations, then start the single ledger tailer.
 
@@ -501,10 +543,12 @@ async def lifespan(_: FastAPI):
     await _off_loop(_reconcile_inventory_scans)
     await _off_loop(_ensure_account_schemas)
     task = asyncio.create_task(_tailer())
+    watchdog = asyncio.create_task(_supervise_jobs())
     try:
         yield
     finally:
         task.cancel()
+        watchdog.cancel()
 
 
 app = FastAPI(title="Migration Command Center", version="1.0", lifespan=lifespan)
