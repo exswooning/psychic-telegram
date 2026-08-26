@@ -280,44 +280,66 @@ class CalendarMigrator:
     def _migrate_calendar(self, src_cal_id: str, tgt_cal_id: str,
                           updated_min: str | None) -> None:
         for item in self._iter_events(updated_min, calendar_id=src_cal_id):
-            eid = item["id"]
+            self.migrate_event(item, tgt_cal_id, src_cal_id)
 
-            if item.get("recurringEventId"):
-                self._handle_exception(item, tgt_cal_id, src_cal_id)
-                continue
+    def migrate_event(self, item: dict, tgt_cal_id: str = "primary",
+                      src_cal_id: str = "primary") -> None:
+        """Import one event.
 
-            if not item.get("iCalUID"):
-                self.db.log_audit(self.source_user, eid, "event", "SKIPPED_INVALID",
-                                  "missing iCalUID")
-                self.stats["skipped"] += 1
-                continue
+        Lifted out of the enumeration loop so a single event can be retried
+        by id. A delta lists events by updatedMin, which is the event's OWN
+        modification time -- so an event that failed to import is never
+        offered again unless somebody edits it, and its FAILED row simply
+        sits in the ledger forever.
+        """
+        eid = item["id"]
 
-            if self.db.get_target_id(self.source_user,
-                                     self._event_key(src_cal_id, eid), "event"):
-                self.stats["skipped"] += 1
-                continue
+        if item.get("recurringEventId"):
+            self._handle_exception(item, tgt_cal_id, src_cal_id)
+            return
 
-            body = self._build_import_body(item, tgt_cal_id)
+        if not item.get("iCalUID"):
+            self.db.log_audit(self.source_user, eid, "event", "SKIPPED_INVALID",
+                              "missing iCalUID")
+            self.stats["skipped"] += 1
+            return
 
-            if self.settings.dry_run:
-                log.info("[DRY RUN] would import event %s", eid)
-                self.stats["events"] += 1
-                continue
+        if self.db.get_target_id(self.source_user,
+                                 self._event_key(src_cal_id, eid), "event"):
+            self.stats["skipped"] += 1
+            return
 
-            try:
-                result = self._retry(lambda b=body: self.tgt.events().import_(
-                    calendarId=tgt_cal_id, body=b, conferenceDataVersion=0,
-                ).execute())
-            except (PermanentAPIError, RuntimeError) as exc:
-                self.db.log_audit(self.source_user, eid, "event", "FAILED", str(exc))
-                self.stats["failed"] += 1
-                continue
+        body = self._build_import_body(item, tgt_cal_id)
 
-            self.db.record_mapping(self.source_user,
-                                   self._event_key(src_cal_id, eid),
-                                   result["id"], "event")
-            self.db.log_audit(self.source_user, eid, "event", "SUCCESS")
+        if self.settings.dry_run:
+            log.info("[DRY RUN] would import event %s", eid)
             self.stats["events"] += 1
+            return
+
+        try:
+            result = self._retry(lambda b=body: self.tgt.events().import_(
+                calendarId=tgt_cal_id, body=b, conferenceDataVersion=0,
+            ).execute())
+        except (PermanentAPIError, RuntimeError) as exc:
+            self.db.log_audit(self.source_user, eid, "event", "FAILED", str(exc))
+            self.stats["failed"] += 1
+            return
+
+        self.db.record_mapping(self.source_user,
+                               self._event_key(src_cal_id, eid),
+                               result["id"], "event")
+        self.db.log_audit(self.source_user, eid, "event", "SUCCESS")
+        self.stats["events"] += 1
+
+    def fetch_event(self, eid: str, src_cal_id: str = "primary") -> dict | None:
+        """One event by id, for a targeted retry."""
+        try:
+            return self._retry(lambda: self.src.events().get(
+                calendarId=src_cal_id, eventId=eid).execute())
+        except (PermanentAPIError, RuntimeError) as exc:
+            log.warning("[%s] could not re-read event %s: %s",
+                        self.source_user, eid, exc)
+            return None
 
     # -- recurring exceptions --------------------------------------------------------
     def _handle_exception(self, item: dict, tgt_cal_id: str = "primary",

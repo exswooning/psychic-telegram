@@ -764,3 +764,59 @@ class TestThisRunsOwnProgress:
         d = self._conn(tmp_path)
         assert api_server._progress_since(d.conn, None) is None
         d.close()
+
+
+class TestRepairCoversStrandedItems:
+    """Gmail and Calendar failures are the ones nothing else revisits."""
+
+    class _Auth:
+        def directory(self, tenant):
+            return FakeDirectory(set())
+
+    def _db(self, tmp_path):
+        d = dbmod.MigrationDB(str(tmp_path / "m.db"))
+        d.conn.execute("INSERT INTO identity_map(source_email,target_email) "
+                       "VALUES('u@src','u@tgt')")
+        d.conn.commit()
+        d.log_audit("u@src", "m1", "message", "FAILED", "400 failedPrecondition")
+        return d
+
+    def test_applying_re_imports_them(self, tmp_path, monkeypatch):
+        import retry_failed
+        seen = {}
+        monkeypatch.setattr(retry_failed, "retry",
+                            lambda a, d, s, apply=False: seen.update(apply=apply)
+                            or {"messages": 1, "events": 0, "retried": 1,
+                                "unmapped_users": 0, "errors": []})
+        d = self._db(tmp_path)
+        out = repair.run_all(d, self._Auth(), None, apply=True)
+        assert out["stranded_retried"] == 1 and seen["apply"] is True
+        d.close()
+
+    def test_a_dry_run_only_counts_them(self, tmp_path, monkeypatch):
+        import retry_failed
+        seen = {}
+        monkeypatch.setattr(retry_failed, "retry",
+                            lambda a, d, s, apply=False: seen.update(apply=apply)
+                            or {"messages": 1, "events": 0, "retried": 0,
+                                "unmapped_users": 0, "errors": []})
+        d = self._db(tmp_path)
+        out = repair.run_all(d, self._Auth(), None, apply=False)
+        assert seen["apply"] is False and out["stranded"] == 1
+        d.close()
+
+    def test_a_failure_there_does_not_break_the_pass(self, tmp_path,
+                                                     monkeypatch):
+        import retry_failed
+        monkeypatch.setattr(retry_failed, "retry",
+                            lambda *a, **k: (_ for _ in ()).throw(
+                                RuntimeError("gmail down")))
+        d = self._db(tmp_path)
+        out = repair.run_all(d, self._Auth(), None, apply=True)
+        assert any("stranded retry" in e for e in out["errors"])
+        d.close()
+
+    def test_the_summary_names_them(self):
+        line = repair.summarise({"survey": {"total": 6},
+                                 "stranded_retried": 2, "errors": []})
+        assert "2 stranded item(s) re-imported" in line

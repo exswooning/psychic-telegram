@@ -1236,8 +1236,17 @@ def resolve_services(raw: str) -> set[str]:
     return services
 
 
-def cmd_migrate(args, settings: Settings, db: MigrationDB, auth: AuthManager):
-    services = resolve_services(args.services)
+def _enable_selected_services(settings: Settings, services: set[str]) -> None:
+    """Turn on the feature flag for each service actually selected.
+
+    Shared by migrate and delta because keeping two copies is what broke it:
+    cmd_delta set migrate_chat and stopped, so `--services all` ran drive,
+    gmail, calendar and chat while contacts and tasks were silently skipped
+    -- and uma's two failed task lists went unretried for exactly that
+    reason. resolve_services' own docstring promises the opposite: asking
+    for the full scope must not leave services doing nothing because a
+    MIGRATE_* variable was unset.
+    """
     if "chat" in services:
         # Chat is a first-class service: selecting it opts the run in. That
         # widens the scopes (chat.spaces/chat.messages) and enables the
@@ -1247,6 +1256,11 @@ def cmd_migrate(args, settings: Settings, db: MigrationDB, auth: AuthManager):
         settings.migrate_contacts = True
     if "tasks" in services:
         settings.migrate_tasks = True
+
+
+def cmd_migrate(args, settings: Settings, db: MigrationDB, auth: AuthManager):
+    services = resolve_services(args.services)
+    _enable_selected_services(settings, services)
     with _registered("migrate", settings.account_id):
         results = _run_with_memory_pause(
             auth, db, settings, services, delta=False, delta_days=0,
@@ -1270,8 +1284,7 @@ def cmd_delta(args, settings: Settings, db: MigrationDB, auth: AuthManager):
     # failures untouched. It also skipped the unknown-service check, so a
     # typo'd name did nothing quietly rather than exiting.
     services = resolve_services(args.services)
-    if "chat" in services:
-        settings.migrate_chat = True
+    _enable_selected_services(settings, services)
     results = _run_with_memory_pause(
         auth, db, settings, services, delta=True, delta_days=args.days,
         only=args.user)

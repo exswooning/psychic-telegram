@@ -365,6 +365,19 @@ def run_all(db, auth, settings, apply: bool = False,
         except Exception as exc:      # noqa: BLE001
             out["errors"].append(f"acl reconcile: {str(exc)[:160]}")
 
+    # Items no later pass would revisit on its own. Gmail and Calendar list
+    # by the item's own date, so a message or event that failed to import is
+    # never offered again unless somebody edits it -- four such rows survived
+    # two runs and a repair while everything around them was retried.
+    try:
+        import retry_failed
+        rf = retry_failed.retry(auth, db, settings, apply=apply)
+        out["stranded"] = rf["messages"] + rf["events"]
+        out["stranded_retried"] = rf["retried"]
+        out["errors"].extend(rf["errors"])
+    except Exception as exc:          # noqa: BLE001
+        out["errors"].append(f"stranded retry: {str(exc)[:160]}")
+
     # Reconciling answers "is this grant actually missing?" and stops there.
     # Re-applying the ones that ARE missing is a separate pass, and leaving
     # it out made "Repair" a misnomer: a live run finished with 447 failures,
@@ -393,6 +406,9 @@ def summarise(result: dict) -> str:
         parts.append(f"{result['resolved']:,} resolved (grantee recreated)")
     if result.get("reconciled"):
         parts.append(f"{result['reconciled']:,} resolved (already on target)")
+    if result.get("stranded_retried"):
+        parts.append(f"{result['stranded_retried']:,} stranded item(s) "
+                     f"re-imported")
     if result.get("reapplied"):
         parts.append(f"{result['reapplied']:,} grant(s) re-applied in "
                      f"{result.get('reapply_passes', 0)} pass(es)")
