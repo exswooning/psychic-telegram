@@ -35,10 +35,17 @@ if [[ -f env.sh ]]; then
 fi
 
 # No default. A name in CP_OPERATORS is not a secret: defaulting it meant a
-# publicly reachable host granted admin to anyone who guessed the name. Set
-# it explicitly, and only for a host reachable through the SSH tunnel this
-# script was written for.
+# publicly reachable host granted admin to anyone who guessed the name.
+#
+# The name alone no longer suffices either -- api_server only honours an
+# X-Operator claim when the request also presents X-Operator-Token matching
+# BITPORT_OPERATOR_TOKEN. Set both, or neither.
 export CP_OPERATORS="${CP_OPERATORS:-}"
+export BITPORT_OPERATOR_TOKEN="${BITPORT_OPERATOR_TOKEN:-}"
+if [ -n "$CP_OPERATORS" ] && [ -z "$BITPORT_OPERATOR_TOKEN" ]; then
+  echo "CP_OPERATORS is set but BITPORT_OPERATOR_TOKEN is not -- the header" >&2
+  echo "will be ignored and those operators will have no access. Set both." >&2
+fi
 PORT=8090
 mkdir -p logs
 

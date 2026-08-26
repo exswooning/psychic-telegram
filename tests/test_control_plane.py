@@ -39,6 +39,10 @@ def cp(monkeypatch):
     path = tempfile.mktemp(suffix=".db")
     monkeypatch.setenv("MIGRATION_DB", path)
     monkeypatch.setenv("CP_OPERATORS", "boss:admin,intern:viewer")
+    # The X-Operator claim now costs a shared secret, so the fixture holds
+    # one -- see api_server._operator_token_ok. Without it the header is
+    # ignored entirely, which is the point: a name is not a credential.
+    monkeypatch.setenv("BITPORT_OPERATOR_TOKEN", OPERATOR_TOKEN)
     MigrationDB(path)          # base engine schema
     cpdb.apply_migrations()    # control-plane tables
 
@@ -51,8 +55,9 @@ def cp(monkeypatch):
         pass
 
 
-ADMIN = {"X-Operator": "boss"}
-VIEWER = {"X-Operator": "intern"}
+OPERATOR_TOKEN = "test-operator-shared-secret"
+ADMIN = {"X-Operator": "boss", "X-Operator-Token": OPERATOR_TOKEN}
+VIEWER = {"X-Operator": "intern", "X-Operator-Token": OPERATOR_TOKEN}
 
 
 class TestReasonCodeIsMandatory:

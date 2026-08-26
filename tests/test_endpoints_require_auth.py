@@ -186,3 +186,66 @@ class TestTheOperatorHeaderIsNotADefaultCredential:
         monkeypatch.delenv("CP_OPERATORS", raising=False)
         op = api_server.Operator(name="someone", role="admin", account_id=7)
         api_server.require_reader(op)      # must not raise
+
+
+class TestTheOperatorClaimCostsASecret:
+    """X-Operator was a claim, not a credential.
+
+    A name in CP_OPERATORS is not secret, so on a reachable host anyone who
+    guessed it became that operator -- and with aryan:admin shipped in the
+    systemd unit, an admin. Removing the value fixed that one host and left
+    the mechanism, so the next person to set it reopens the same hole.
+
+    It now costs BITPORT_OPERATOR_TOKEN, exactly as worker nodes cost
+    BITPORT_NODE_TOKEN.
+    """
+
+    TOKEN = "a-real-shared-secret"
+
+    def _op(self, monkeypatch, *, name="boss", token="", configured=None):
+        import asyncio
+
+        import api_server
+        monkeypatch.setenv("CP_OPERATORS", "boss:admin,intern:viewer")
+        if configured is None:
+            monkeypatch.delenv("BITPORT_OPERATOR_TOKEN", raising=False)
+        else:
+            monkeypatch.setenv("BITPORT_OPERATOR_TOKEN", configured)
+        return asyncio.run(
+            api_server.operator(x_operator=name, x_operator_token=token,
+                                bp_session=""))
+
+    def test_the_right_secret_honours_the_claim(self, monkeypatch):
+        op = self._op(monkeypatch, token=self.TOKEN, configured=self.TOKEN)
+        assert op.name == "boss" and op.role == "admin"
+
+    def test_a_name_with_no_secret_is_nobody(self, monkeypatch):
+        # The exact live attack: `curl -H "X-Operator: aryan"`.
+        op = self._op(monkeypatch, token="", configured=self.TOKEN)
+        assert op.name == "anonymous" and op.role == "viewer"
+
+    def test_a_wrong_secret_is_nobody(self, monkeypatch):
+        op = self._op(monkeypatch, token="guess", configured=self.TOKEN)
+        assert op.name == "anonymous"
+
+    def test_it_fails_closed_when_no_secret_is_configured(self, monkeypatch):
+        """A host that never sets one cannot be talked into trusting a
+        header -- which is the state the live deployment is in now."""
+        op = self._op(monkeypatch, token="anything", configured=None)
+        assert op.name == "anonymous" and op.role == "viewer"
+
+    def test_an_admin_name_without_the_secret_cannot_write(self, monkeypatch):
+        import api_server
+        import pytest
+        op = self._op(monkeypatch, name="aryan", token="", configured=self.TOKEN)
+        with pytest.raises(Exception):
+            api_server.require_admin(op)
+
+    def test_the_secret_is_compared_in_constant_time(self):
+        # Same reason node_auth does it: a == comparison on a secret leaks
+        # its prefix through timing.
+        import os
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        src = open(os.path.join(root, "api_server.py"), encoding="utf-8").read()
+        body = src.split("def _operator_token_ok")[1].split("\ndef ")[0]
+        assert "compare_digest" in body

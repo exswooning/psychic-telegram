@@ -16,9 +16,15 @@ Environment=DISPLAY=:99
 # the SPA sends an empty header unless someone sets cp_operator in
 # localStorage).
 #
-# Restore it only for a host that is NOT publicly reachable -- the
-# SSH-tunnel deployment start_control_plane.sh was written for, where
-# network access is itself the credential.
+# Setting it is now safe but still not enough on its own: the X-Operator
+# claim is only honoured when the request also presents X-Operator-Token
+# matching BITPORT_OPERATOR_TOKEN, the same shape worker nodes use with
+# BITPORT_NODE_TOKEN. With no token configured the header grants nothing at
+# all, which is the state this host is in.
+#
+# To use the SSH-tunnel operator path, set BOTH here:
+#   Environment=CP_OPERATORS=alice:admin
+#   Environment=BITPORT_OPERATOR_TOKEN=<a real secret, not a name>
 # secure=True on the session cookie only makes sense once this is actually
 # reached over real HTTPS (Caddy, in front of this on 8090) -- see
 # api_server.py's _set_session_cookie(). Left unset (defaulting to

@@ -142,7 +142,21 @@ class Operator(BaseModel):
     seed_enabled: bool = True
 
 
+def _operator_token_ok(presented: str) -> bool:
+    """Does this request carry the operator shared secret?
+
+    Fail closed: with BITPORT_OPERATOR_TOKEN unset there is no secret to
+    match, so no header claim is honoured. That is the safe default for a
+    publicly reachable host, and the SSH-tunnel deployment simply sets it.
+    """
+    expected = os.getenv("BITPORT_OPERATOR_TOKEN", "").strip()
+    if not expected:
+        return False
+    return hmac.compare_digest((presented or "").strip(), expected)
+
+
 async def operator(x_operator: str = Header(default=""),
+                   x_operator_token: str = Header(default=""),
                    bp_session: str = Cookie(default="")) -> Operator:
     # A real signed-in account always wins over the header: the header is
     # the honor-system SSH-tunnel path, the cookie is an actual verified
@@ -173,8 +187,23 @@ async def operator(x_operator: str = Header(default=""),
                 is_superadmin=bool(account["is_superadmin"]) if account else False,
                 seed_enabled=bool(account["seed_enabled"]) if account else True,
             )
+    # The X-Operator header is a CLAIM, not a credential: a name in
+    # CP_OPERATORS is not a secret, so on a reachable host anyone who
+    # guessed it was that operator -- and with aryan:admin shipped in the
+    # systemd unit, an admin. Unsetting the value fixed that host and left
+    # the mechanism, so the next person to set it reopens the same hole.
+    #
+    # It now costs a shared secret, exactly like node_auth: the claim is
+    # honoured only when X-Operator-Token matches BITPORT_OPERATOR_TOKEN.
+    # Unset, the header grants nothing at all -- fail closed, so a host that
+    # never configures this cannot be talked into trusting a header.
+    #
+    # compare_digest rather than ==, for the same reason node_auth uses it.
     name = (x_operator or "").strip() or "anonymous"
-    return Operator(name=name, role=_roles().get(name, "viewer"), account_id=None)
+    if name != "anonymous" and _operator_token_ok(x_operator_token):
+        return Operator(name=name, role=_roles().get(name, "viewer"),
+                        account_id=None)
+    return Operator(name="anonymous", role="viewer", account_id=None)
 
 
 def require_admin(op: Operator) -> None:
