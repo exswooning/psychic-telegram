@@ -203,7 +203,8 @@ def recent_actions(limit: int = 100) -> list[dict]:
 # ----------------------------------------------------------------------
 # Read models for the UI
 # ----------------------------------------------------------------------
-def forensic_detail(source_user: str, item_id: str) -> dict:
+def forensic_detail(source_user: str, item_id: str,
+                    db_path: str | None = None) -> dict:
     """
     Everything known about one item, for ForensicModal.
 
@@ -212,7 +213,7 @@ def forensic_detail(source_user: str, item_id: str) -> dict:
     mapping means a later pass already fixed it, and that distinction decides
     whether Retry is the right button.
     """
-    with ro() as conn:
+    with ro(db_path) as conn:
         rows = [dict(r) for r in conn.execute(
             "SELECT * FROM audit_log WHERE source_user=? AND item_id=? "
             "ORDER BY id DESC", (source_user, item_id))]
@@ -237,7 +238,15 @@ def forensic_detail(source_user: str, item_id: str) -> dict:
     }
 
 
-def failure_feed(limit: int = 200, source_user: str | None = None) -> list[dict]:
+def failure_feed(limit: int = 200, source_user: str | None = None,
+                 db_path: str | None = None) -> list[dict]:
+    """Every FAILED row, for one account's ledger.
+
+    See user_progress on db_path: without it this served the shared
+    control-plane database, so the Failures page showed a different
+    tenant's rows -- and, being unauthenticated at the time, showed them to
+    anyone who asked.
+    """
     q = ("SELECT id, source_user, item_id, item_type, status, error_message, "
          "timestamp FROM audit_log WHERE status='FAILED'")
     args: list[Any] = []
@@ -246,7 +255,7 @@ def failure_feed(limit: int = 200, source_user: str | None = None) -> list[dict]
         args.append(source_user)
     q += " ORDER BY id DESC LIMIT ?"
     args.append(limit)
-    with ro() as conn:
+    with ro(db_path) as conn:
         return [dict(r) for r in conn.execute(q, args)]
 
 
@@ -326,13 +335,21 @@ def drive_migrated_counts(since_iso: str | None = None) -> dict:
             "scopedSince": since_iso}
 
 
-def user_progress() -> list[dict]:
+def user_progress(db_path: str | None = None) -> list[dict]:
     """
     Per-user rollup. Explicitly models the Partial Failure state the spec
     calls out: DONE / RUNNING / FAILED / PENDING coexist in one batch and the
     UI must never average them into a single misleading number.
+
+    `db_path` selects a specific account's ledger. Without it every reader
+    fell back to the shared control-plane database, so a console showing
+    account 7's migration reported the legacy tenant's eleven users --
+    Mission Control said "11 users tracked" and the Final Report said "11
+    of 11 users migrated successfully" while the migration on screen had
+    201 users and 158,204 items. ro() already accepted a path; nothing
+    passed one.
     """
-    with ro() as conn:
+    with ro(db_path) as conn:
         ident = {r["source_email"]: dict(r) for r in conn.execute(
             "SELECT source_email, target_email, status, services_done "
             "FROM identity_map ORDER BY source_email")}

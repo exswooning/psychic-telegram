@@ -385,22 +385,35 @@ class Hub:
     the browser reconnects and re-syncs from the snapshot on connect."""
 
     def __init__(self) -> None:
-        self._clients: set[WebSocket] = set()
+        # Which tenant each socket belongs to. A bare set fanned every frame
+        # out to everyone: the tailer pushed one account's per-user progress
+        # to every connected browser, so a tenant watching their own idle
+        # migration saw somebody else's users go by.
+        self._clients: dict[WebSocket, int | None] = {}
         self._lock = asyncio.Lock()
 
-    async def join(self, ws: WebSocket) -> None:
+    async def join(self, ws: WebSocket, account_id: int | None = None) -> None:
         await ws.accept()
         async with self._lock:
-            self._clients.add(ws)
+            self._clients[ws] = account_id
 
     async def leave(self, ws: WebSocket) -> None:
         async with self._lock:
-            self._clients.discard(ws)
+            self._clients.pop(ws, None)
 
-    async def broadcast(self, event: dict) -> None:
+    async def accounts(self) -> set:
+        """Tenants with somebody watching, so the tailer builds one payload
+        per audience instead of one payload for everybody."""
+        async with self._lock:
+            return {a for a in self._clients.values() if a is not None}
+
+    async def broadcast(self, event: dict, account_id: int | None = None) -> None:
+        """account_id=None is genuinely global (node heartbeats, tailer
+        errors). Anything derived from a tenant's ledger must name it."""
         payload = json.dumps(event, default=str)
         async with self._lock:
-            targets = list(self._clients)
+            targets = [ws for ws, acct in self._clients.items()
+                       if account_id is None or acct == account_id]
         for ws in targets:
             try:
                 await ws.send_text(payload)
@@ -542,6 +555,43 @@ def _ensure_account_schemas() -> None:
                         aid, str(exc)[:160])
 
 
+def _ledger_for(op: Operator) -> str | None:
+    """The in-context account's ledger, or None if it has none yet.
+
+    None means "this account has no migration data", NOT "use the shared
+    control-plane database" -- falling back to that is exactly how these
+    pages came to show another tenant's users. A brand-new signup has no
+    ledger file at all, and ro() cannot open a missing file read-only, so
+    without this check the Users and Failures pages 500 for every account
+    on the day it is created.
+    """
+    path = _account_db_path(_account_in_context(op))
+    return path if path and os.path.isfile(path) else None
+
+
+def _account_in_context(op: Operator) -> int | None:
+    """Which migration a sidebar page is about.
+
+    These pages are reached from the nav, where no migration is named. A
+    tenant has exactly one account, so their own is the answer. An operator
+    looking at somebody else's console gets whichever migration is actually
+    running, because that is what a sidebar click means while anything is
+    going.
+
+    Without this every one of them read the shared control-plane ledger:
+    Mission Control reported "11 users tracked" and the Final Report said
+    "11 of 11 users migrated successfully" while the migration on screen
+    had 201 users and 158,204 items.
+    """
+    if op.is_superadmin:
+        active = [j for j in job_admission.list_active()
+                  if j.get("job_name") in _OWNED_JOB_NAMES
+                  and j.get("account_id") and job_admission.is_live(j)]
+        if active:
+            return active[0]["account_id"]
+    return op.account_id
+
+
 SUPERVISOR_POLL_SEC = int(os.getenv("JOB_SUPERVISOR_POLL_SEC", "120"))
 
 
@@ -661,25 +711,36 @@ async def _tailer() -> None:
     global _last_snapshot
     while True:
         try:
-            progress = await _off_loop(cpdb.user_progress)
             nodes = await _off_loop(cpdb.fleet)
             public = await _off_loop(cpdb.open_public_shares, "target")
 
-            snap = {"users": progress, "nodes": nodes, "publicShares": len(public)}
-            # Diff before broadcasting. An idle migration otherwise pushes an
-            # identical frame every second to every browser forever.
-            if snap != _last_snapshot:
-                await HUB.broadcast(_envelope("JOB_PROGRESS", snap))
-                prev = _last_snapshot.get("publicShares", 0)
-                if public and len(public) > prev:
-                    await HUB.broadcast(_envelope("CRITICAL_ALERT", {
-                        "kind": "PUBLIC_SHARE_DETECTED",
-                        "count": len(public),
-                        "sample": public[:5],
-                        "message": (f"{len(public)} file(s) are publicly shared on "
-                                    f"the target tenant"),
-                    }))
-                _last_snapshot = snap
+            # One payload per watching tenant. Built from that account's own
+            # ledger and delivered only to its own sockets -- the previous
+            # single frame carried one account's per-user progress to every
+            # browser connected to this control plane.
+            for account_id in await HUB.accounts():
+                path = _account_db_path(account_id)
+                if not path or not os.path.isfile(path):
+                    continue          # nothing migrated yet for this tenant
+                progress = await _off_loop(cpdb.user_progress, path)
+                snap = {"users": progress, "nodes": nodes,
+                        "publicShares": len(public)}
+                # Diff per tenant. An idle migration otherwise pushes an
+                # identical frame every second to that browser forever.
+                if snap != _last_snapshot.get(account_id):
+                    await HUB.broadcast(_envelope("JOB_PROGRESS", snap),
+                                        account_id)
+                    prev = (_last_snapshot.get(account_id) or {}).get(
+                        "publicShares", 0)
+                    if public and len(public) > prev:
+                        await HUB.broadcast(_envelope("CRITICAL_ALERT", {
+                            "kind": "PUBLIC_SHARE_DETECTED",
+                            "count": len(public),
+                            "sample": public[:5],
+                            "message": (f"{len(public)} file(s) are publicly "
+                                        f"shared on the target tenant"),
+                        }), account_id)
+                    _last_snapshot[account_id] = snap
         except Exception as exc:  # noqa: BLE001 - the tailer must never die
             await HUB.broadcast(_envelope("TAILER_ERROR", {"error": str(exc)[:300]}))
         await asyncio.sleep(TAIL_INTERVAL_S)
@@ -699,12 +760,14 @@ async def ws_endpoint(ws: WebSocket,
     if op.account_id is None:
         await ws.close(code=1008)
         return
-    await HUB.join(ws)
+    _ws_ledger = _ledger_for(op)
+    await HUB.join(ws, op.account_id)
     try:
         # Snapshot on connect, so a client that joins mid-run is immediately
         # correct instead of blank until the next change.
         await ws.send_text(json.dumps(_envelope("SNAPSHOT", {
-            "users": await _off_loop(cpdb.user_progress),
+            "users": (await _off_loop(cpdb.user_progress, _ws_ledger)
+                      if _ws_ledger else []),
             "nodes": await _off_loop(cpdb.fleet),
             "publicShares": len(await _off_loop(cpdb.open_public_shares, "target")),
         }), default=str))
@@ -866,21 +929,31 @@ async def get_active_jobs(op: Operator = Depends(operator)):
 @app.get("/api/v2/users")
 async def get_users(op: Operator = Depends(operator)):
     require_reader(op)
-    return await _off_loop(cpdb.user_progress)
+    ledger = _ledger_for(op)
+    if ledger is None:
+        return []
+    return await _off_loop(cpdb.user_progress, ledger)
 
 
 @app.get("/api/v2/failures")
 async def get_failures(limit: int = 200, source_user: str | None = None,
                        op: Operator = Depends(operator)):
     require_reader(op)
-    return await _off_loop(cpdb.failure_feed, limit, source_user)
+    ledger = _ledger_for(op)
+    if ledger is None:
+        return []
+    return await _off_loop(cpdb.failure_feed, limit, source_user, ledger)
 
 
 @app.get("/api/v2/forensics/{source_user}/{item_id}")
 async def get_forensics(source_user: str, item_id: str,
                         op: Operator = Depends(operator)):
     require_reader(op)
-    return await _off_loop(cpdb.forensic_detail, source_user, item_id)
+    ledger = _ledger_for(op)
+    if ledger is None:
+        return {}
+    return await _off_loop(cpdb.forensic_detail, source_user, item_id,
+                           ledger)
 
 
 @app.get("/api/v2/public-shares")
@@ -2957,18 +3030,11 @@ async def metrics_for_me(history: int = 60, op: Operator = Depends(operator)):
     running one is what a sidebar click means when anything is running.
     """
     require_login(op)
-    account_id = op.account_id
-    if op.is_superadmin:
-        # job_name, not name. list_active has never returned a "name" key,
-        # so this matched nothing and a superadmin silently got their own
-        # empty account instead of the migration actually running -- the
-        # Performance page read "no metrics recorded yet" throughout a live
-        # run. _reconcile_active_jobs a few lines up had it right.
-        active = [j for j in job_admission.list_active()
-                  if j.get("job_name") in _OWNED_JOB_NAMES
-                  and j.get("account_id") and job_admission.is_live(j)]
-        if active:
-            account_id = active[0]["account_id"]
+    # job_name, not name: list_active has never returned a "name" key, so
+    # the original check matched nothing and a superadmin silently got their
+    # own empty account -- the Performance page read "no metrics recorded
+    # yet" throughout a live run. Shared with the other sidebar pages now.
+    account_id = _account_in_context(op)
     if not account_id:
         return {"accountId": 0, "latest": None, "operations": [],
                 "limiters": {}, "history": [],
