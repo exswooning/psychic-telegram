@@ -76,6 +76,7 @@ except ImportError:  # pragma: no cover - import guard, not logic
     sys.exit("control plane needs: pip install -r requirements-control-plane.txt")
 
 import accounts_auth
+import account_context
 import job_admission
 import job_supervisor
 import ai_diagnostics
@@ -443,7 +444,7 @@ HUB = Hub()
 # wrong.
 log = logging.getLogger("api_server")
 
-_OWNED_JOB_NAMES = {"migrate", "delta", "full_setup"}
+_OWNED_JOB_NAMES = account_context.OWNED_JOB_NAMES
 
 
 def _reconcile_active_jobs() -> None:
@@ -572,24 +573,11 @@ def _ledger_for(op: Operator) -> str | None:
 def _account_in_context(op: Operator) -> int | None:
     """Which migration a sidebar page is about.
 
-    These pages are reached from the nav, where no migration is named. A
-    tenant has exactly one account, so their own is the answer. An operator
-    looking at somebody else's console gets whichever migration is actually
-    running, because that is what a sidebar click means while anything is
-    going.
-
-    Without this every one of them read the shared control-plane ledger:
-    Mission Control reported "11 users tracked" and the Final Report said
-    "11 of 11 users migrated successfully" while the migration on screen
-    had 201 users and 158,204 items.
+    The rule lives in account_context so webui.py answers it the same way
+    -- Mission Control renders this server's user list under that server's
+    header, and when the two disagree the page shows two tenants at once.
     """
-    if op.is_superadmin:
-        active = [j for j in job_admission.list_active()
-                  if j.get("job_name") in _OWNED_JOB_NAMES
-                  and j.get("account_id") and job_admission.is_live(j)]
-        if active:
-            return active[0]["account_id"]
-    return op.account_id
+    return account_context.in_context(op.account_id, op.is_superadmin)
 
 
 SUPERVISOR_POLL_SEC = int(os.getenv("JOB_SUPERVISOR_POLL_SEC", "120"))
@@ -597,16 +585,7 @@ SUPERVISOR_POLL_SEC = int(os.getenv("JOB_SUPERVISOR_POLL_SEC", "120"))
 
 def _account_db_path(account_id: int | None) -> str | None:
     """Where an account's ledger lives, for the supervisor to read."""
-    try:
-        from config import Settings
-        return Settings(account_id=account_id).db_path
-    except (ValueError, KeyError, OSError, sqlite3.Error) as exc:
-        # sqlite3.Error belongs here: resolving a path reads the
-        # control-plane db, and an OperationalError is not an OSError. Left
-        # out, one unreadable account aborted the entire supervisor pass --
-        # including the slot reaping that runs at the end of it.
-        log.warning("no ledger path for account %s: %r", account_id, exc)
-        return None
+    return account_context.db_path(account_id)
 
 
 async def _supervise_jobs() -> None:

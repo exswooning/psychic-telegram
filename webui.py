@@ -40,9 +40,11 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import logging
 import os
 import re
 import signal
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -55,6 +57,7 @@ from typing import Callable
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import account_context  # the one rule both servers answer with
 import accounts_auth  # stdlib-only itself; does not break the no-pip-install promise
 import job_admission  # same -- control_plane_db is stdlib-only too
 
@@ -63,6 +66,8 @@ try:
 except Exception:  # noqa: BLE001 - the UI should still load and say why
     State = None
     build_steps = None
+
+log = logging.getLogger("webui")
 
 PY = sys.executable
 
@@ -2119,24 +2124,31 @@ def scope_diagnosis(tenant: str) -> dict:
 # ----------------------------------------------------------------------
 STATUS_TTL = 30.0
 
-_snap: dict = {"data": None, "at": 0.0}
+# Keyed by account, because the snapshot describes one tenant's ledger and
+# this process serves every tenant. A single shared entry meant whoever
+# polled first was answered to everyone else for the next thirty seconds
+# -- the same fault the websocket hub had when it was a bare set of
+# sockets. None is the key for the operator's own env.sh ledger, which is
+# what the SSH-tunnel path has always read.
+_snaps: dict = {}
 _snap_lock = threading.Lock()
-_snap_busy = threading.Event()
+_snap_busy: set = set()
 
 
-def _compute_status() -> dict:
+def _compute_status(account_id: int | None = None) -> dict:
     if State is None or build_steps is None:
         return {"error": "wizard.py could not be imported; run from the repo root"}
-    return _status_uncached()
+    return _status_uncached(account_id)
 
 
-def _refresh_snapshot() -> None:
+def _refresh_snapshot(key=None, account_id: int | None = None) -> None:
     try:
-        data = _compute_status()
+        data = _compute_status(account_id)
         with _snap_lock:
-            _snap["data"], _snap["at"] = data, time.time()
+            _snaps[key] = {"data": data, "at": time.time()}
     finally:
-        _snap_busy.clear()
+        with _snap_lock:
+            _snap_busy.discard(key)
 
 
 def check_step(n: int) -> dict:
@@ -2181,25 +2193,37 @@ def invalidate_status() -> None:
     run mode appeared to do nothing at all, because the answer had already been
     computed under the old setting and was simply replayed.
     """
+    # Every tenant's entry, not just the caller's: what changed is env.sh
+    # or the run mode, which is a property of the box.
     with _snap_lock:
-        _snap["at"] = 0.0
+        for entry in _snaps.values():
+            entry["at"] = 0.0
 
 
-def status_payload() -> dict:
-    """The cached snapshot. Never blocks on a preflight."""
+def status_payload(account_id: int | None = None) -> dict:
+    """The cached snapshot for one account. Never blocks on a preflight."""
+    key = account_id
     with _snap_lock:
-        data, age = _snap["data"], time.time() - _snap["at"]
+        entry = _snaps.get(key)
+        data = entry["data"] if entry else None
+        age = time.time() - entry["at"] if entry else 0.0
 
     if data is None:
-        # First call only: nothing to show yet, so pay for it once.
-        _snap_busy.set()
-        _refresh_snapshot()
+        # First call for this account: nothing to show yet, so pay for it
+        # once rather than answering with another tenant's numbers.
         with _snap_lock:
-            return dict(_snap["data"], stale=False)
+            _snap_busy.add(key)
+        _refresh_snapshot(key, account_id)
+        with _snap_lock:
+            return dict(_snaps[key]["data"], stale=False)
 
-    if age > STATUS_TTL and not _snap_busy.is_set():
-        _snap_busy.set()
-        threading.Thread(target=_refresh_snapshot, daemon=True).start()
+    with _snap_lock:
+        refresh = age > STATUS_TTL and key not in _snap_busy
+        if refresh:
+            _snap_busy.add(key)
+    if refresh:
+        threading.Thread(target=_refresh_snapshot, args=(key, account_id),
+                         daemon=True).start()
 
     return dict(data, stale=age > STATUS_TTL, age=round(age, 1))
 
@@ -2214,8 +2238,8 @@ def _RUN_MODES() -> dict:
             for k, v in RUN_MODES.items()}
 
 
-def _status_uncached() -> dict:
-    st = State()
+def _status_uncached(account_id: int | None = None) -> dict:
+    st = State(account_id=account_id)
     steps = build_steps(st)
     ok, failed, users_done = st.migration_progress()
     return {
@@ -2891,6 +2915,25 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, obj, code: int = 200) -> None:
         self._send(code, json.dumps(obj).encode(), "application/json")
 
+    def _caller(self) -> tuple[int | None, bool]:
+        """(account, is_superadmin) -- what account_context.in_context needs.
+
+        Resolved from the same cookie as _account_id, plus the one extra
+        fact that decides whether a nav click means "my migration" or "the
+        migration that is running".
+        """
+        aid = self._account_id()
+        if aid is None:
+            return None, False
+        try:
+            account = accounts_auth.get_account(aid)
+        except sqlite3.Error as exc:
+            # The caller is still known; only the elevation is unclear, and
+            # the safe reading of an unclear elevation is "not elevated".
+            log.warning("cannot read account %s: %r", aid, exc)
+            return aid, False
+        return aid, bool(account and account.get("is_superadmin"))
+
     def _account_id(self) -> int | None:
         """None for the legacy path (no cookie, or one that doesn't resolve
         -- same handling api_server.py's operator() dependency gives an
@@ -2960,7 +3003,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
         elif path == "/api/status":
-            self._json(status_payload())
+            self._json(status_payload(
+                account_context.in_context(*self._caller())))
         elif path == "/api/actions":
             self._json({k: {"label": v["label"], "blurb": v["blurb"],
                             "destructive": v.get("destructive", False),
@@ -3179,7 +3223,8 @@ class Handler(BaseHTTPRequestHandler):
             invalidate_status()
             _refresh_snapshot()
             with _snap_lock:
-                data = _snap["data"] or {}
+                entry = _snaps.get(None)
+                data = (entry or {}).get("data") or {}
             self._json({"ok": True, "status": data})
             return
 

@@ -176,11 +176,46 @@ def sh(cmd: list[str], timeout: int = 60) -> tuple[int, str]:
 # State detection — each check answers "is this already true?"
 # ----------------------------------------------------------------------
 class State:
-    def __init__(self) -> None:
+    # Class-level default so a State built with __new__ (the wizard's own
+    # tests do, and so does anything reconstructing one) still answers the
+    # question identities_loaded asks below. Without it that lookup raises
+    # AttributeError inside a broad except, which does not surface as an
+    # error -- it silently turns the WRONG TENANTS guard off.
+    account_id: int | None = None
+
+    def __init__(self, account_id: int | None = None) -> None:
         self.env = load_env()
         for k, v in self.env.items():
             os.environ.setdefault(k, v)
+        # Whose migration this describes. env.sh names one migration.db and
+        # one tenant pair for the whole box, which is right for the operator
+        # running a migration by hand and wrong for every SaaS tenant -- the
+        # Final Report read it and announced "11 of 11 users migrated
+        # successfully" over a run of 201 that was still going.
+        #
+        # The ledger and the domains have to move together. identities_loaded
+        # refuses to count a map whose emails do not match the configured
+        # tenants, so pointing this at another account's ledger while leaving
+        # env.sh's domains in place reports every one of them as WRONG
+        # TENANTS -- zero users, which is what the header said before.
+        self.account_id = account_id
         self.notes: dict[str, str] = {}
+        if account_id is not None:
+            try:
+                from config import Settings
+                cfg = Settings(account_id=account_id)
+                self.env["MIGRATION_DB"] = cfg.db_path
+                self.env["SOURCE_DOMAIN"] = cfg.source_domain
+                self.env["TARGET_DOMAIN"] = cfg.target_domain
+            except Exception as exc:  # noqa: BLE001
+                # A tenant with no config yet is a normal state on signup
+                # day. Blanking the path makes every reader below report
+                # nothing, which is true; falling back to env.sh would show
+                # them the operator's own ledger, which is the bug.
+                self.notes["account"] = (
+                    f"account {account_id} has no configuration yet: "
+                    f"{str(exc)[:160]}")
+                self.env["MIGRATION_DB"] = ""
         self.gcloud = ""
         # preflight mints a token per user against both tenants -- slow, and
         # several steps ask about it. Answer it once per render.
@@ -334,10 +369,17 @@ class State:
             from config import Settings
             from main import identity_domain_mismatch
 
+            # Settings for THIS account: comparing a tenant's identity map
+            # against env.sh's domains marks every row a mismatch.
             mismatch = identity_domain_mismatch(
                 [{"source_email": a, "target_email": b} for a, b in rows],
-                Settings())
-        except Exception:  # noqa: BLE001 - detection must never break the view
+                Settings(account_id=self.account_id))
+        except Exception as exc:  # noqa: BLE001 - must never break the view
+            # Logged, not swallowed: this is a safety check, and failing it
+            # open means counting a map that may target the wrong tenant.
+            # Twice this session a bare except here hid a live bug.
+            print(f"[wizard] tenant mismatch check failed: {exc!r}",
+                  file=sys.stderr)
             mismatch = ""
 
         if mismatch:

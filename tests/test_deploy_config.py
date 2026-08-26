@@ -357,18 +357,20 @@ class TestStatusSnapshotCache:
     After caching: 11 ms.
     """
 
+    # The cache is keyed by account -- see test_status_is_per_account.py.
+    # These exercise the operator path, whose key is None.
     @pytest.fixture(autouse=True)
     def _clear(self):
-        webui._snap["data"], webui._snap["at"] = None, 0.0
+        webui._snaps.clear()
         webui._snap_busy.clear()
         yield
-        webui._snap["data"], webui._snap["at"] = None, 0.0
+        webui._snaps.clear()
         webui._snap_busy.clear()
 
     def test_repeated_polls_compute_once(self, monkeypatch):
         calls = []
         monkeypatch.setattr(webui, "_compute_status",
-                            lambda: (calls.append(1), {"steps": [], "total": 0})[1])
+                            lambda account_id=None: (calls.append(1), {"steps": [], "total": 0})[1])
 
         for _ in range(10):
             webui.status_payload()
@@ -377,22 +379,22 @@ class TestStatusSnapshotCache:
 
     def test_first_call_is_served_synchronously(self, monkeypatch):
         """There is nothing to show yet, so that one pays for itself."""
-        monkeypatch.setattr(webui, "_compute_status", lambda: {"marker": "fresh"})
+        monkeypatch.setattr(webui, "_compute_status", lambda account_id=None: {"marker": "fresh"})
         assert webui.status_payload()["marker"] == "fresh"
 
     def test_expiry_refreshes_in_the_background_without_blocking(self, monkeypatch):
         import time as _t
 
-        monkeypatch.setattr(webui, "_compute_status", lambda: {"n": 1})
+        monkeypatch.setattr(webui, "_compute_status", lambda account_id=None: {"n": 1})
         webui.status_payload()
 
         # age the snapshot past the TTL
         with webui._snap_lock:
-            webui._snap["at"] = _t.time() - (webui.STATUS_TTL + 5)
+            webui._snaps[None]["at"] = _t.time() - (webui.STATUS_TTL + 5)
 
         slow = {"done": False}
 
-        def slow_compute():
+        def slow_compute(account_id=None):
             _t.sleep(0.4)
             slow["done"] = True
             return {"n": 2}
@@ -419,15 +421,16 @@ class TestStatusSnapshotCache:
         the pile-up this cache exists to prevent."""
         import time as _t
 
-        monkeypatch.setattr(webui, "_compute_status", lambda: {"n": 0})
+        monkeypatch.setattr(webui, "_compute_status", lambda account_id=None: {"n": 0})
         webui.status_payload()
         with webui._snap_lock:
-            webui._snap["at"] = _t.time() - (webui.STATUS_TTL + 5)
+            webui._snaps[None]["at"] = _t.time() - (webui.STATUS_TTL + 5)
 
         running = []
         monkeypatch.setattr(webui, "_compute_status",
-                            lambda: (running.append(1), _t.sleep(0.3),
-                                     {"n": len(running)})[2])
+                            lambda account_id=None: (
+                                running.append(1), _t.sleep(0.3),
+                                {"n": len(running)})[2])
 
         for _ in range(6):
             webui.status_payload()
@@ -436,7 +439,7 @@ class TestStatusSnapshotCache:
         assert len(running) == 1, f"{len(running)} concurrent refreshes"
 
     def test_snapshot_reports_its_age(self, monkeypatch):
-        monkeypatch.setattr(webui, "_compute_status", lambda: {"n": 1})
+        monkeypatch.setattr(webui, "_compute_status", lambda account_id=None: {"n": 1})
         webui.status_payload()
         assert "age" in webui.status_payload()
 
@@ -1531,15 +1534,15 @@ class TestRunModeEndpoint:
         """The snapshot is cached for 30s. Without invalidation, switching mode
         appeared to do nothing -- the answer had already been computed under
         the old setting and was simply replayed."""
-        monkeypatch.setattr(webui, "_compute_status", lambda: {"n": 1})
+        monkeypatch.setattr(webui, "_compute_status", lambda account_id=None: {"n": 1})
         webui.status_payload()
         with webui._snap_lock:
-            assert webui._snap["at"] > 0
+            assert webui._snaps[None]["at"] > 0
 
         webui.set_run_mode("seed_only")
 
         with webui._snap_lock:
-            assert webui._snap["at"] == 0.0
+            assert webui._snaps[None]["at"] == 0.0
 
     def test_uploading_a_credential_also_invalidates(self, tmp_path, monkeypatch):
         """Step 3's answer changes the moment a key lands."""
@@ -1550,14 +1553,14 @@ class TestRunModeEndpoint:
             "S", (), {"source_sa_key": str(tmp_path / "k.json"),
                       "target_sa_key": str(tmp_path / "t.json"),
                       "oauth_client_secrets": str(tmp_path / "c.json")})())
-        monkeypatch.setattr(webui, "_compute_status", lambda: {"n": 1})
+        monkeypatch.setattr(webui, "_compute_status", lambda account_id=None: {"n": 1})
         webui.status_payload()
 
         webui.upload_credential("source_key", json.dumps(
             TestCredentialChecker.SA))
 
         with webui._snap_lock:
-            assert webui._snap["at"] == 0.0
+            assert webui._snaps[None]["at"] == 0.0
 
 
 class TestEnvIsRewrittenForTheRemoteHost:
