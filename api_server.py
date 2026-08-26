@@ -831,6 +831,28 @@ async def _gated(op: Operator, action: str, body: WriteAction,
     return JSONResponse({"ok": ok, "actionId": action_id, "detail": detail})
 
 
+def _child_output(job_name: str, account_id: int | None):
+    """A file for a launched process's stdout/stderr.
+
+    NEVER subprocess.PIPE. Both launchers used it with nobody reading the
+    other end, and a pipe holds about 64KB: once a run had written that
+    much, the next log call blocked inside StreamHandler.emit while holding
+    the logging module's handler lock, and every other thread piled up
+    behind it. Live, a delta stopped dead after six minutes with 23 of its
+    31 threads parked on that lock, no CPU, and 271 abandoned sockets --
+    the ledger's last write was the moment the buffer filled. It looked
+    exactly like a hung network call and was nothing of the kind.
+
+    Appended, not truncated, so a re-run does not erase the evidence of the
+    run before it.
+    """
+    folder = os.path.join(HERE, "logs", "jobs",
+                          str(account_id) if account_id is not None else "_none")
+    os.makedirs(folder, exist_ok=True)
+    safe = "".join(c for c in job_name if c.isalnum() or c in "-_") or "job"
+    return open(os.path.join(folder, f"{safe}.log"), "ab", buffering=0)
+
+
 def _spawn(argv: list[str], env: dict[str, str] | None = None) -> tuple[bool, str]:
     """Detached subprocess. Rule 1 -- engines never run in this loop.
 
@@ -838,9 +860,15 @@ def _spawn(argv: list[str], env: dict[str, str] | None = None) -> tuple[bool, st
     Popen's own default, and exactly today's behaviour for every caller
     that has no account to scope to.
     """
-    proc = subprocess.Popen(argv, cwd=HERE, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                            text=True, env=env)
+    out = _child_output(os.path.basename(argv[1] if len(argv) > 1 else "job"),
+                        None)
+    try:
+        proc = subprocess.Popen(argv, cwd=HERE, stdout=out,
+                                stderr=subprocess.STDOUT,
+                                stdin=subprocess.DEVNULL, env=env)
+    finally:
+        # The child has its own descriptor now; ours would otherwise leak.
+        out.close()
     return True, f"started pid {proc.pid}: {' '.join(argv[1:4])}"
 
 
@@ -863,9 +891,13 @@ def _run_admitted(argv: list[str], account_id: int | None, job_name: str,
     admitted, msg = job_admission.try_admit(account_id, job_name)
     if not admitted:
         return False, msg
-    proc = subprocess.Popen(argv, cwd=HERE, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                            text=True, env=env)
+    out = _child_output(job_name, account_id)
+    try:
+        proc = subprocess.Popen(argv, cwd=HERE, stdout=out,
+                                stderr=subprocess.STDOUT,
+                                stdin=subprocess.DEVNULL, env=env)
+    finally:
+        out.close()
     # Record the pid so the slot can be verified by something other than this
     # thread. try_admit runs before Popen and has no pid to store, and this
     # waiter dies whenever the server restarts -- a deploy mid-run left a
