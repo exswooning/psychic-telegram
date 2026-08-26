@@ -1713,6 +1713,35 @@ def reset_target_argv(body: dict, account_id: int | None = None) -> tuple[list[s
     return argv, env, ""
 
 
+def resolve_target_account(caller_id: int | None,
+                           requested) -> tuple[int | None, str]:
+    """Which account an operator action applies to, and whether they may.
+
+    Maintenance actions resolved the account from the caller's own session
+    alone, so a superadmin looking at somebody else's migration could only
+    ever act on their own -- live, a full ledger reset aimed at account 7
+    came back "set the source domain in step 2 first" because it had
+    silently resolved to the operator's own empty tenant. Same shape as the
+    delta button, which built its command from op.account_id and ran against
+    the wrong tenant entirely.
+
+    Returns (account_id, error). An absent request means "my own account",
+    which is what a tenant self-serving always wants.
+    """
+    if requested in (None, "", "null"):
+        return caller_id, ""
+    try:
+        wanted = int(requested)
+    except (TypeError, ValueError):
+        return None, f"{requested!r} is not an account id"
+    if wanted == caller_id:
+        return wanted, ""
+    account = accounts_auth.get_account(caller_id) if caller_id else None
+    if not (account and account.get("is_superadmin")):
+        return None, "that migration belongs to another account"
+    return wanted, ""
+
+
 def reset_drive_ledger_argv(body: dict, account_id: int | None = None) -> tuple[list[str], dict, str]:
     """
     Build the reset_drive_ledger command, or return why it must not run.
@@ -3118,7 +3147,11 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if self.path == "/api/reset_drive_ledger":
-            account_id = self._account_id()
+            account_id, scope_err = resolve_target_account(
+                self._account_id(), body.get("account_id"))
+            if scope_err:
+                self._json({"ok": False, "error": scope_err}, 403)
+                return
             if not _subscription_ok(account_id):
                 self._json({"ok": False, "error": "subscription inactive"}, 402)
                 return

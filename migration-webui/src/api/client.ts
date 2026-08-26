@@ -452,12 +452,17 @@ export async function runResetTarget(
  *  in webui.py: it operates on source_email keys regardless of which
  *  tenant's files were actually wiped). */
 export async function runResetDriveLedger(
-  confirmDomain: string, services?: string
+  confirmDomain: string, services?: string, accountId?: string
 ): Promise<{ ok: boolean; error?: string }> {
   const res = await fetch('/api/reset_drive_ledger', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ confirm_domain: confirmDomain, services }),
+    // account_id is the migration being worked on. Resolved from the
+    // session alone, a superadmin could only ever reset their own tenant --
+    // which came back "set the source domain in step 2 first" rather than
+    // saying the account was wrong.
+    body: JSON.stringify({ confirm_domain: confirmDomain, services,
+                           account_id: accountId || null }),
   })
   return res.json()
 }

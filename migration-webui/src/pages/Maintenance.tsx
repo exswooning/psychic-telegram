@@ -64,6 +64,7 @@ const ResetDriveLedgerCard: React.FC = () => {
   const [domain, setDomain] = useState('')
   const [confirmDomain, setConfirmDomain] = useState('')
   const [services, setServices] = useState('')
+  const [account, setAccount] = useState('')
   const [err, setErr] = useState<string | null>(null)
   const [ok, setOk] = useState(false)
 
@@ -73,7 +74,8 @@ const ResetDriveLedgerCard: React.FC = () => {
 
   const run = async () => {
     setErr(null); setOk(false)
-    const r = await runResetDriveLedger(confirmDomain, services || undefined)
+    const r = await runResetDriveLedger(confirmDomain, services || undefined,
+                                        account || undefined)
     if (r.ok) setOk(true)
     else setErr(r.error || 'could not start')
   }
@@ -99,6 +101,11 @@ const ResetDriveLedgerCard: React.FC = () => {
             size="small" label="Services (optional, e.g. drive)"
             value={services} onChange={(e) => setServices(e.target.value)}
             sx={{ width: 220 }}
+          />
+          <TextField
+            size="small" label="Account id (blank = mine)"
+            value={account} onChange={(e) => setAccount(e.target.value)}
+            sx={{ width: 200 }}
           />
           <Button variant="outlined" color="warning" disabled={!confirmDomain} onClick={run}>
             Reset Drive ledger
