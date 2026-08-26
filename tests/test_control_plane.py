@@ -2318,3 +2318,68 @@ class TestDeltaTargetsTheMigrationOnScreen:
                         json={"email": "delta-owner-b@example.com",
                               "password": "hunter22222", "name": "Owner B"})
             assert self._delta(client, account_id=other).status_code == 403
+
+
+class TestMigrateTargetsTheMigrationOnScreen:
+    """Same fix the delta endpoint needed, in the endpoint beside it.
+
+    migrate_start built its argv from op.account_id, so a superadmin
+    pressing it on somebody else's page would migrate into an empty account
+    of their own and report success.
+    """
+
+    def _boot(self, monkeypatch):
+        path = tempfile.mktemp(suffix=".db")
+        monkeypatch.setenv("MIGRATION_DB", path)
+        monkeypatch.setenv("CP_OPERATORS", "")
+        MigrationDB(path)
+        cpdb.apply_migrations()
+        import api_server
+        return api_server
+
+    @staticmethod
+    def _start(client, **extra):
+        body = {"reason": "test", "services": ["all"], "users": [],
+                "dry_run": False}
+        body.update(extra)
+        return client.post("/api/v2/migrate/start", json=body)
+
+    def test_the_request_carries_an_account_id(self, monkeypatch):
+        api_server = self._boot(monkeypatch)
+        assert "account_id" in api_server.StartMigration.model_fields
+
+    def test_it_launches_against_the_account_asked_for(self, monkeypatch):
+        api_server = self._boot(monkeypatch)
+        seen = {}
+        monkeypatch.setattr(api_server, "_run_admitted",
+                            lambda argv, aid, name: seen.update(
+                                argv=argv, account_id=aid)
+                            or {"ok": True, "detail": ""})
+        with TestClient(api_server.app) as client:
+            client.post("/api/v2/auth/signup",
+                        json={"email": "full-owner@example.com",
+                              "password": "hunter22222", "name": "Full Owner"})
+            assert self._start(client).status_code == 200
+            mine = seen["account_id"]
+            assert self._start(client, account_id=mine).status_code == 200
+        assert seen["account_id"] == mine
+        assert seen["argv"][seen["argv"].index("--account-id") + 1] == str(mine)
+        assert "migrate" in seen["argv"]
+
+    def test_another_tenants_migration_is_refused(self, monkeypatch):
+        api_server = self._boot(monkeypatch)
+        seen = {}
+        monkeypatch.setattr(api_server, "_run_admitted",
+                            lambda argv, aid, name: seen.update(account_id=aid)
+                            or {"ok": True, "detail": ""})
+        with TestClient(api_server.app) as client:
+            client.post("/api/v2/auth/signup",
+                        json={"email": "full-a@example.com",
+                              "password": "hunter22222", "name": "Full A"})
+            assert self._start(client).status_code == 200
+            other = seen["account_id"]
+            client.post("/api/v2/auth/logout")
+            client.post("/api/v2/auth/signup",
+                        json={"email": "full-b@example.com",
+                              "password": "hunter22222", "name": "Full B"})
+            assert self._start(client, account_id=other).status_code == 403

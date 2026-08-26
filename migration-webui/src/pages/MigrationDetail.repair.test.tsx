@@ -9,6 +9,7 @@ vi.mock('@/api/controlPlane', () => ({
   fetchMigrationDetail: (...a: unknown[]) => fetchMigrationDetail(...a),
   runRepair: (...a: unknown[]) => runRepair(...a),
   startDelta: vi.fn(),
+  startMigration: vi.fn(),
 }))
 vi.mock('@/components/ReasonCodeDialog', () => ({ default: () => null }))
 vi.mock('react-router-dom', () => ({
@@ -439,5 +440,34 @@ describe('MigrationDetail shows what this run has done', () => {
     render(<MigrationDetail />)
     await waitFor(() => expect(screen.getByTestId('active-job')).toBeTruthy())
     expect(screen.queryByTestId('since-run')).toBeNull()
+  })
+})
+
+describe('MigrationDetail can start a full migration', () => {
+  beforeEach(() => { fetchMigrationDetail.mockReset() })
+
+  it('offers a full pass when nothing is running', async () => {
+    // "Start a new migration" on the list page opens the setup wizard for a
+    // NEW tenant pair. After a ledger reset there was no way to re-run an
+    // existing migration at all, and a delta would not do it: delta asks
+    // the source what changed in a short window.
+    fetchMigrationDetail.mockResolvedValue(detail())
+    render(<MigrationDetail />)
+    await waitFor(() => expect(screen.getByTestId('run-full')).toBeTruthy())
+    expect(screen.getByTestId('run-full').hasAttribute('disabled')).toBe(false)
+  })
+
+  it('disables it while a migration is running', async () => {
+    fetchMigrationDetail.mockResolvedValue(detail({ running: true }))
+    render(<MigrationDetail />)
+    await waitFor(() => expect(screen.getByTestId('run-full')).toBeTruthy())
+    expect(screen.getByTestId('run-full').hasAttribute('disabled')).toBe(true)
+  })
+
+  it('sits beside the delta control rather than replacing it', async () => {
+    fetchMigrationDetail.mockResolvedValue(detail())
+    render(<MigrationDetail />)
+    await waitFor(() => expect(screen.getByTestId('run-full')).toBeTruthy())
+    expect(screen.getByTestId('run-delta')).toBeTruthy()
   })
 })

@@ -227,10 +227,15 @@ export const fetchActions = () => cpFetch<OperatorAction[]>('/api/v2/actions')
 // UI convention that a future caller could skip.
 export interface ActionResult { ok: boolean; actionId: number; detail: string }
 
-export const startMigration = (reason: string, services: string[], users: string[], dryRun = false) =>
+export const startMigration = (
+  reason: string, services: string[], users: string[], dryRun = false,
+  accountId?: number) =>
   cpFetch<ActionResult>('/api/v2/migrate/start', {
     method: 'POST',
-    body: JSON.stringify({ reason, services, users, dry_run: dryRun }),
+    // accountId is the migration on screen. Without it the server falls back
+    // to the caller's own account -- the same trap the delta button hit.
+    body: JSON.stringify({ reason, services, users, dry_run: dryRun,
+                           account_id: accountId ?? null }),
   })
 
 export const stopJob = (pid: number, reason: string) =>

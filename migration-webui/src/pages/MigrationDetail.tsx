@@ -10,7 +10,7 @@ import {
   Speed as MetricsIcon, HealthAndSafety as RepairIcon,
 } from '@mui/icons-material'
 import {
-  fetchMigrationDetail, startDelta, runRepair,
+  fetchMigrationDetail, startDelta, startMigration, runRepair,
   MigrationDetail as Detail, RepairSurvey,
 } from '@/api/controlPlane'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
@@ -46,6 +46,15 @@ export const MigrationDetail: React.FC = () => {
   const [loading, setLoading] = useState(false)
   const [askDelta, setAskDelta] = useState(false)
   const [deltaBusy, setDeltaBusy] = useState(false)
+  /* A full pass over every user, for when the ledger has been reset and a
+     delta would not do: delta asks the source what CHANGED in a window, so
+     after a reset it re-copies only recent mail and events and leaves the
+     rest unmigrated. There was no way to start one from here at all --
+     "Start a new migration" on the list page opens the setup wizard for a
+     new tenant pair, which is a different thing entirely. */
+  const [askFull, setAskFull] = useState(false)
+  const [fullBusy, setFullBusy] = useState(false)
+  const [fullError, setFullError] = useState<string | null>(null)
   const [deltaError, setDeltaError] = useState<string | null>(null)
   const [deltaDays, setDeltaDays] = useState(2)
   const [started, setStarted] = useState('')
@@ -120,6 +129,12 @@ export const MigrationDetail: React.FC = () => {
                 disabled={d?.running || deltaBusy}
                 onClick={() => setAskDelta(true)}>
           {d?.running ? 'migration running' : 'Run delta'}
+        </Button>
+        <Button size="small" variant="outlined" color="warning"
+                data-testid="run-full"
+                disabled={d?.running || fullBusy}
+                onClick={() => setAskFull(true)}>
+          {d?.running ? 'migration running' : 'Run full migration'}
         </Button>
         <IconButton size="small" onClick={refresh} aria-label="refresh">
           <RefreshIcon fontSize="small" />
@@ -494,6 +509,38 @@ export const MigrationDetail: React.FC = () => {
             setRepairError(e.message)
           } finally {
             setRepairBusy(false)
+          }
+        }}
+      />
+      <ReasonCodeDialog
+        open={askFull}
+        busy={fullBusy}
+        error={fullError}
+        title={`Run a full migration over ${d?.sourceDomain || 'this tenant'}`}
+        description={
+          <>
+            Copies everything the ledger does not already record, for all
+            {' '}{d?.progress?.users ?? 0} users. Use this after a ledger
+            reset, where a delta would not do: a delta asks the source what
+            changed in a short window, so it would re-copy only recent mail
+            and events and leave everything older unmigrated. Anything still
+            in the ledger is skipped, so this is safe to re-run.
+          </>
+        }
+        onCancel={() => { setAskFull(false); setFullError(null) }}
+        onConfirm={async (reason: string) => {
+          setFullBusy(true); setFullError(null)
+          try {
+            const r = await startMigration(reason, ['all'], [], false,
+                                           Number(accountId))
+            if (!r.ok) throw new Error(r.detail || 'could not start')
+            setAskFull(false)
+            setStarted(r.detail || 'migration started')
+            refresh()
+          } catch (e: any) {
+            setFullError(e.message)
+          } finally {
+            setFullBusy(false)
           }
         }}
       />

@@ -243,6 +243,9 @@ class StartMigration(WriteAction):
     # before anything moves, naming the scope, rather than failing mid-run.
     services: list[str] = Field(default_factory=lambda: ["all"])
     users: list[str] = Field(default_factory=list)   # empty = whole batch
+    # Which migration to run. None means the caller's own account; the
+    # console sends the id of the migration on screen.
+    account_id: int | None = None
     dry_run: bool = False
 
 
@@ -972,7 +975,15 @@ def _account_argv(account_id: int | None) -> list[str]:
 
 @app.post("/api/v2/migrate/start")
 async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
-    argv = [PY, "main.py"] + _account_argv(op.account_id)
+    # The migration being looked at, not the operator's own account -- the
+    # same fix the delta endpoint needed, and for the same reason: a
+    # superadmin pressing this on somebody else's page would otherwise
+    # migrate into an empty account of their own and report success.
+    account_id = body.account_id if body.account_id is not None else op.account_id
+    if not op.is_superadmin and account_id != op.account_id:
+        raise HTTPException(403, "that migration belongs to another account")
+
+    argv = [PY, "main.py"] + _account_argv(account_id)
     if body.dry_run:
         argv.append("--dry-run")
     argv += ["migrate", "--services", ",".join(body.services)]
@@ -980,7 +991,7 @@ async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
         argv += ["--user", u]
     target = ",".join(body.users) if body.users else "ALL"
     return await _gated(op, "migrate.start", body, target,
-                        lambda: _run_admitted(argv, op.account_id, "migrate"))
+                        lambda: _run_admitted(argv, account_id, "migrate"))
 
 
 @app.post("/api/v2/migrate/delta")
