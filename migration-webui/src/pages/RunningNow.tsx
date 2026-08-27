@@ -137,7 +137,12 @@ function useRunningNow() {
       const ownAdmission = job?.name
         ? activeJobs.find((r) => r.account_id === myAccountId && r.job_name === job.name)
         : undefined
-      const jobIsMine = !!job?.running && !!job.name && (!job.external || !!ownAdmission)
+      // A running job with no admission row at all is still a running job.
+      // The row is gone whenever the process outlived the restart that
+      // forgot it, and requiring one meant the page showed nothing for a
+      // job the server could see and name -- which is the single thing
+      // this page exists to answer. It is labelled for what it is instead.
+      const jobIsMine = !!job?.running && !!job.name
       if (jobIsMine && job) {
         found.push({
           key: `webui-${job.name}`,
@@ -149,13 +154,20 @@ function useRunningNow() {
           detail: [
             describeElapsed(job.elapsed),
             job.etaSeconds ? `~${describeElapsed(job.etaSeconds)} left` : null,
+            job.external && !ownAdmission
+              ? 'detached — outlived the restart that started it'
+              : null,
             latestLine(job.lines),
           ].filter(Boolean).join(' · '),
           pct: job.progressPct ?? null, lines: job.lines, elapsedSec: job.elapsed,
           stop: async () => { await stopSeedJob() },
         })
       }
-      const fleet = nodes.find((n) => n.active_job && n.job_pid)
+      // healthy, or the claim is as old as the heartbeat that made it. A
+      // node that stopped reporting kept its last active_job forever, so
+      // this page listed a migration that finished hours earlier -- with a
+      // Stop button for a pid that no longer exists.
+      const fleet = nodes.find((n) => n.active_job && n.job_pid && n.healthy)
       if (fleet) {
         found.push({
           key: `fleet-${fleet.job_pid}`, label: fleet.active_job!,
