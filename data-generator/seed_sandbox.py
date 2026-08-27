@@ -1090,8 +1090,19 @@ def reset_gmail(gmail, settings: Settings) -> int:
     deleted = 0
     token = None
     while True:
+        # -in:trash, because this function's idea of "deleted" is trash():
+        # a message already in Trash is already in the state being asked
+        # for. Without it every reset re-lists everything the PREVIOUS
+        # reset trashed and pays a messages.get() per item to read a header
+        # it will then act on by trashing something already trashed -- so
+        # each successive reset is slower than the last. Measured here: a
+        # 201-user reset on a tenant with ~600k previously-trashed messages
+        # completed no user at all in nineteen minutes.
+        #
+        # includeSpamTrash stays: seeded mail that landed in Spam still has
+        # to be found, and the q filter excludes only the trash half.
         resp = retry(lambda t=token: gmail.users().messages().list(
-            userId="me", maxResults=500, pageToken=t,
+            userId="me", maxResults=500, pageToken=t, q="-in:trash",
             includeSpamTrash=True).execute())()
         msgs = resp.get("messages", [])
         for m in msgs:

@@ -732,6 +732,36 @@ class TestResetIsActuallyComplete:
         assert 'type") == "user"' in src or "'user'" in src
         assert "wanted" in src
 
+    def test_reset_skips_mail_it_has_already_trashed(self):
+        """Each reset was slower than the one before it.
+
+        This function's idea of "deleted" is trash(), so a message already
+        in Trash is already in the state being asked for. Without the
+        filter every run re-lists everything the PREVIOUS run trashed and
+        pays a messages.get() per item to read a header it then acts on by
+        trashing something already trashed.
+
+        Measured on the live tenant: a 201-user reset against ~600k
+        previously-trashed messages completed no user at all in nineteen
+        minutes, with all 18 workers inside this function.
+        """
+        import inspect
+
+        import seed_sandbox
+
+        src = inspect.getsource(seed_sandbox.reset_gmail)
+        assert 'q="-in:trash"' in src
+
+    def test_it_still_looks_in_spam(self):
+        """The filter must exclude only the trash half -- seeded mail that
+        landed in Spam still has to be found."""
+        import inspect
+
+        import seed_sandbox
+
+        assert "includeSpamTrash=True" in inspect.getsource(
+            seed_sandbox.reset_gmail)
+
     def test_messages_are_still_matched_by_seed_marker(self):
         """The existing protection: only mail this seeder inserted is touched,
         identified by its @seed.test Message-ID."""
