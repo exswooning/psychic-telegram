@@ -1094,6 +1094,30 @@ def _run_admitted(argv: list[str], account_id: int | None, job_name: str,
     return True, f"started pid {proc.pid}: {' '.join(argv[1:4])}"
 
 
+def _resolve_account(body, op: Operator) -> int | None:
+    """Which account a write acts on, and whether this caller may.
+
+    A superadmin pressing a button on somebody else's page otherwise acts
+    on an empty account of their own and reports success, leaving the
+    migration on screen untouched. Written out by hand at each site until
+    there were three of them.
+    """
+    account_id = getattr(body, "account_id", None)
+    account_id = account_id if account_id is not None else op.account_id
+    _require_account_access(account_id, op)
+    return account_id
+
+
+def _require_account_access(account_id: int | None, op: Operator) -> None:
+    """May this caller act on, or read, that account's migration?
+
+    The path-parameter half of the same rule _resolve_account applies to a
+    body. Six hand-written copies of these two lines existed before this.
+    """
+    if not op.is_superadmin and account_id != op.account_id:
+        raise HTTPException(403, "that migration belongs to another account")
+
+
 def _account_argv(account_id: int | None) -> list[str]:
     """main.py's own --account-id makes it construct Settings(account_id=...)
     itself and resolve its domains/keys/db_path from that account's
@@ -1112,9 +1136,7 @@ async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
     # same fix the delta endpoint needed, and for the same reason: a
     # superadmin pressing this on somebody else's page would otherwise
     # migrate into an empty account of their own and report success.
-    account_id = body.account_id if body.account_id is not None else op.account_id
-    if not op.is_superadmin and account_id != op.account_id:
-        raise HTTPException(403, "that migration belongs to another account")
+    account_id = _resolve_account(body, op)
 
     argv = [PY, "main.py"] + _account_argv(account_id)
     if body.dry_run:
@@ -1141,9 +1163,7 @@ async def migrate_delta(body: StartDelta, op: Operator = Depends(operator)):
     # whoever was signed in: a superadmin pressing it created and migrated
     # into an empty account of their own, reported success, and left the
     # migration on screen untouched. Authorised the same way repair is.
-    account_id = body.account_id if body.account_id is not None else op.account_id
-    if not op.is_superadmin and account_id != op.account_id:
-        raise HTTPException(403, "that migration belongs to another account")
+    account_id = _resolve_account(body, op)
 
     argv = ([PY, "main.py"] + _account_argv(account_id)
             + ["delta", "--services", ",".join(body.services),
@@ -2072,6 +2092,10 @@ class StartFullSetup(WriteAction):
     # caller of _gated is protected automatically, not just this handler.
     admin_password: str = Field(min_length=1, exclude=True)
     org_id: str = ""
+    # Whose tenant this sets up. None means the caller's own; a superadmin
+    # may name another, which is the only way to grant delegation for a
+    # client id that belongs to an account they are not signed in as.
+    account_id: int | None = None
     dry_run: bool = True
     seed: bool = False
     seed_scale: str = "small"
@@ -2133,16 +2157,18 @@ async def full_setup_start(body: StartFullSetup, op: Operator = Depends(operator
                  f"stops applying until this run re-grants it. Type the domain "
                  f"to confirm.")
 
+    setup_account = _resolve_account(body, op)
+
     def _launch() -> tuple[bool, str]:
         # Inlined rather than routed through _run_admitted: this launch's
         # Popen call is already bespoke (file-redirected output,
         # start_new_session=True), unlike migrate_start's plain PIPE case
         # that helper was written for -- forcing both through one shape
         # would cost more than it shares.
-        admitted, admit_msg = job_admission.try_admit(op.account_id, "full_setup")
+        admitted, admit_msg = job_admission.try_admit(setup_account, "full_setup")
         if not admitted:
             return False, admit_msg
-        out = _full_setup_state_path(body.side, op.account_id)
+        out = _full_setup_state_path(body.side, setup_account)
         partial = out + ".partial"
         progress = out + ".progress"
         argv = [PY, "full_setup.py", "--side", body.side,
@@ -2162,13 +2188,13 @@ async def full_setup_start(body: StartFullSetup, op: Operator = Depends(operator
                 argv.append("--create-users")
         if body.provision_users and body.side == "target":
             argv.append("--provision-users")
-        if op.account_id is not None:
+        if setup_account is not None:
             # --account-id: makes the ps-grep in full_setup_status below
             # unambiguous between two accounts both setting up the same
-            # side. --keys-dir: this account's own key files, matching
+            # side. --keys-dir: that account's own key files, matching
             # where its tenant_configs rows already point.
-            argv += ["--account-id", str(op.account_id),
-                     "--keys-dir", os.path.join("keys", str(op.account_id))]
+            argv += ["--account-id", str(setup_account),
+                     "--keys-dir", os.path.join("keys", str(setup_account))]
 
         env = dict(os.environ)
         env["DWD_PASSWORD"] = body.admin_password
@@ -2192,7 +2218,10 @@ async def full_setup_start(body: StartFullSetup, op: Operator = Depends(operator
 
         def _wait_then_release() -> None:
             proc.wait()
-            job_admission.release(op.account_id, "full_setup")
+            # setup_account, not op.account_id: admitted under the tenant
+            # being set up, so releasing the caller's slot would leave the
+            # real one held forever and block every later job on it.
+            job_admission.release(setup_account, "full_setup")
         threading.Thread(target=_wait_then_release, daemon=True).start()
         return True, f"full setup started pid {proc.pid} for {body.side}"
     # Target/domain names the tenant, never the password -- audited like
@@ -2202,7 +2231,8 @@ async def full_setup_start(body: StartFullSetup, op: Operator = Depends(operator
 
 
 @app.get("/api/v2/full-setup/status")
-async def full_setup_status(side: str, op: Operator = Depends(operator)):
+async def full_setup_status(side: str, account: int | None = None,
+                            op: Operator = Depends(operator)):
     # require_admin, not require_login: these keep the documented
     # X-Operator path working for an SSH-tunnel operator with no
     # SaaS account, while still refusing a caller presenting nothing
@@ -2211,9 +2241,15 @@ async def full_setup_status(side: str, op: Operator = Depends(operator)):
     require_reader(op)
     if side not in ("source", "target"):
         raise HTTPException(400, "side must be source or target")
+    # A superadmin can start a setup on another account's tenant, so they
+    # have to be able to watch it. Without this the launch succeeds and the
+    # status endpoint reports on the caller's own empty account forever.
+    watching = op.account_id if account is None else account
+    if account is not None:
+        _require_account_access(account, op)
 
     def _read() -> dict:
-        needle = (f"--account-id {op.account_id}" if op.account_id is not None
+        needle = (f"--account-id {watching}" if watching is not None
                   else "full_setup.py")
         # pid=,args= (not args= alone): a running setup could only ever be
         # reported, never stopped, without it -- there is no other place
@@ -2229,7 +2265,7 @@ async def full_setup_status(side: str, op: Operator = Depends(operator)):
                     pid = int(parts[0])
                 break
         running = pid is not None
-        out = _full_setup_state_path(side, op.account_id)
+        out = _full_setup_state_path(side, watching)
         partial = out + ".partial"
         result = None
         for path in (partial, out):
@@ -2917,8 +2953,7 @@ def _repair_payload(d, account_id: int, since: str | None = None) -> dict:
 async def repair_survey(account_id: int, op: Operator = Depends(operator)):
     """What the failure count is actually made of, and what can be fixed."""
     require_login(op)
-    if not op.is_superadmin and account_id != op.account_id:
-        raise HTTPException(403, "that migration belongs to another account")
+    _require_account_access(account_id, op)
 
     def _read() -> dict:
         from config import Settings
@@ -2953,8 +2988,7 @@ async def repair_apply(account_id: int, body: WriteAction,
     hold open.
     """
     require_login(op)
-    if not op.is_superadmin and account_id != op.account_id:
-        raise HTTPException(403, "that migration belongs to another account")
+    _require_account_access(account_id, op)
     if [j for j in job_admission.list_active()
             if j.get("account_id") == account_id]:
         return {"ok": False,
@@ -3086,8 +3120,7 @@ async def migration_metrics(account_id: int, history: int = 60,
     nonetheless rendering as the run's performance.
     """
     require_login(op)
-    if not op.is_superadmin and account_id != op.account_id:
-        raise HTTPException(403, "that migration belongs to another account")
+    _require_account_access(account_id, op)
 
     def _read() -> dict:
         # Settings(account_id=...).db_path, matching every other endpoint
@@ -3236,8 +3269,7 @@ async def migration_detail(account_id: int, op: Operator = Depends(operator)):
     because "which mailboxes are affected" is the next question every time.
     """
     require_login(op)
-    if not op.is_superadmin and account_id != op.account_id:
-        raise HTTPException(403, "that migration belongs to another account")
+    _require_account_access(account_id, op)
 
     def _read() -> dict:
         src = accounts_auth.get_tenant_config(account_id, "source") or {}
