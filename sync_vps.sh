@@ -23,7 +23,11 @@ SSH=(ssh -p "$PORT" -o BatchMode=yes -o StrictHostKeyChecking=accept-new)
 # credentials or its resume ledger with whatever happens to be local.
 rsync -az -e "${SSH[*]}" \
   --exclude '.git/' --exclude '__pycache__/' --exclude '.pytest_cache/' \
-  --exclude '.venv/' --exclude 'scratch/' --exclude 'migration.db*' \
+  --exclude '.venv' --exclude 'scratch/' --exclude 'migration.db*' \
+  `# .venv without a trailing slash: with one, rsync matches only a`\
+  `# DIRECTORY, and a checkout that symlinks its venv at an existing`\
+  `# deployment then tries to ship the symlink over the real thing --`\
+  `# "could not make way for new symlink: .venv", and the deploy aborts`\
   --exclude '*.log' --exclude 'sandbox_manifest*.json' --exclude 'identities*.csv' \
   --exclude 'keys/' --exclude 'oauth/' --exclude 'env.sh' \
   "$(cd "$(dirname "$0")" && pwd)/" "$TARGET:$DEST/" || exit 1
