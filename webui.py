@@ -1740,9 +1740,16 @@ def wipe_target_argv(body: dict, account_id: int | None = None) -> tuple[list[st
     # reset_target_argv already validated the domain and built the env; only
     # the script and its flags differ.
     domain = argv[argv.index("--confirm-domain") + 1]
+    # Deliberately NOT --account-id, even though wipe_target.py accepts one.
+    # The env above already points MIGRATION_DB at that account's ledger,
+    # and control_plane_db._db_path() is Settings().db_path -- so a child
+    # told to resolve an account follows MIGRATION_DB into the per-account
+    # ledger looking for tenant_configs, a table that only exists in the
+    # control-plane database. Live, that is exactly how this failed:
+    #   sqlite3.OperationalError: no such table: tenant_configs
+    # The env carries TARGET_DOMAIN, TARGET_ADMIN, TARGET_SA_KEY and the
+    # ledger already, which is everything the child actually needs.
     argv = [PY, "wipe_target.py", "--confirm-domain", domain, "--apply"]
-    if account_id is not None:
-        argv += ["--account-id", str(account_id)]
     return argv, env, ""
 
 

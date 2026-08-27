@@ -53,13 +53,28 @@ class TestTheCommand:
         assert "wipe_target.py" in argv[1]
         assert "--apply" in argv, "a button that only reports is a trap"
         assert argv[argv.index("--confirm-domain") + 1] == "tgt.example"
-        assert argv[argv.index("--account-id") + 1] == "7"
 
     def test_it_never_names_the_source_domain(self, monkeypatch):
         _cfg(monkeypatch)
         monkeypatch.delenv("PROTECTED_DOMAINS", raising=False)
         argv, _, _ = webui.wipe_target_argv({"confirm_domain": "tgt.example"}, 7)
         assert "src.example" not in " ".join(argv)
+
+    def test_it_does_not_also_pass_account_id(self, monkeypatch):
+        """The env already points MIGRATION_DB at that account's ledger, and
+        control_plane_db._db_path() is Settings().db_path -- so a child told
+        to resolve an account follows MIGRATION_DB into the per-account
+        ledger looking for tenant_configs, which only exists in the control
+        plane. Live:
+
+            sqlite3.OperationalError: no such table: tenant_configs
+        """
+        _cfg(monkeypatch)
+        monkeypatch.delenv("PROTECTED_DOMAINS", raising=False)
+        argv, env, _ = webui.wipe_target_argv({"confirm_domain": "tgt.example"}, 7)
+        assert "--account-id" not in argv
+        assert env["MIGRATION_DB"] == "/tmp/m.db"
+        assert env["TARGET_DOMAIN"] == "tgt.example"
 
     def test_the_sandbox_flag_survives(self, monkeypatch):
         # wipe_target.py calls reset_target.assert_sandbox, which needs it.
@@ -144,3 +159,46 @@ class TestAJobStartedElsewhereCanBeWatched:
         monkeypatch.setattr(webui.accounts_auth, "get_account",
                             lambda aid: {"is_superadmin": 0})
         assert webui.resolve_target_account(7, "66")[0] is None
+
+
+class TestTheTwoAccountStrategiesAreNeverMixed:
+    """webui.py overlays the account's config onto the child's environment.
+    api_server.py instead passes --account-id and lets the child resolve it
+    from tenant_configs. Either is fine on its own.
+
+    Mixing them is not: control_plane_db._db_path() is Settings().db_path,
+    so a child handed MIGRATION_DB=<that account's ledger> AND told to look
+    up an account follows the env var into the per-account ledger hunting
+    for tenant_configs -- a table only the control-plane database has.
+
+        sqlite3.OperationalError: no such table: tenant_configs
+
+    That is what the wipe button did on its first real press.
+    """
+
+    BUILDERS = ("seed_argv", "reset_target_argv", "reset_drive_ledger_argv",
+                "wipe_target_argv")
+
+    def test_no_builder_sets_the_ledger_and_also_resolves_an_account(
+            self, monkeypatch):
+        _cfg(monkeypatch)
+        monkeypatch.delenv("PROTECTED_DOMAINS", raising=False)
+        body = {"confirm_domain": "tgt.example", "scale": "small"}
+        offenders = []
+        for name in self.BUILDERS:
+            argv, env, err = getattr(webui, name)(dict(body), 7)
+            if err:      # a builder that refuses this body proves nothing
+                continue
+            if env.get("MIGRATION_DB") and "--account-id" in argv:
+                offenders.append(name)
+        assert not offenders, (
+            "these hand the child a ledger path and then tell it to resolve "
+            f"an account through that same path: {offenders}")
+
+    def test_the_builders_still_scope_the_child_somehow(self, monkeypatch):
+        # The invariant above is satisfied trivially by a builder that
+        # scopes nothing at all, which would silently act on env.sh.
+        _cfg(monkeypatch)
+        monkeypatch.delenv("PROTECTED_DOMAINS", raising=False)
+        argv, env, err = webui.wipe_target_argv({"confirm_domain": "tgt.example"}, 7)
+        assert not err and env.get("MIGRATION_DB")
