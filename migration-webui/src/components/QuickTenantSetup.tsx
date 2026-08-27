@@ -923,7 +923,7 @@ const QuickTenantSetup: React.FC<{
           />
           <Collapse in={seed} orientation="horizontal">
             <Stack direction="row" spacing={2} sx={{ flexWrap: 'wrap', gap: 1 }}>
-              <TextField select size="small" label="Scale" value={seedScale}
+              <TextField select size="small" label="Seed scale" value={seedScale}
                          onChange={(e) => setSeedScale(e.target.value)}
                          sx={{ width: 110 }}>
                 {['tiny', 'small', 'medium', 'large', 'huge'].map((s) => (
@@ -1029,7 +1029,7 @@ const QuickTenantSetup: React.FC<{
             Setup done — seed it
           </Typography>
           <Stack direction="row" spacing={2} sx={{ flexWrap: 'wrap', gap: 1, alignItems: 'center' }}>
-            <TextField select size="small" label="Scale" value={seedScale}
+            <TextField select size="small" label="Seed scale" value={seedScale}
                        onChange={(e) => setSeedScale(e.target.value)}
                        sx={{ width: 110 }}>
               {['tiny', 'small', 'medium', 'large', 'huge'].map((s) => (

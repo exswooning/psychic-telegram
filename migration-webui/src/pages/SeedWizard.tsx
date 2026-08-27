@@ -374,6 +374,7 @@ const SeedStep: React.FC = () => {
         <Grid item xs={12} sm={3}>
           <TextField
             fullWidth size="small" select label="Scale" value={scale}
+            inputProps={{ 'data-testid': 'seed-form-scale' }}
             onChange={(e) => setScale(e.target.value)}
           >
             {['tiny', 'small', 'medium', 'large', 'huge'].map((s) => (
