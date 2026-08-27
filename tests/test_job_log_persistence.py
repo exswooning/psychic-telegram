@@ -86,18 +86,26 @@ class TestOutputGoesToARealFile:
         """The property that actually prevents all three failures above --
         asserted directly, because every one of them is invisible in a
         short, fast-finishing test like the ones here."""
-        seen = {}
+        # Keyed by argv, not "the last call": start() also records the
+        # child's pid, which constructs Settings(), which asks resources.py
+        # about the box -- and that shells out to sysctl/vm_stat with
+        # capture_output=True. Those are Popen(stdout=PIPE) calls, so a spy
+        # that keeps only the newest kwargs ends up asserting about sysctl.
+        calls = []
 
         real_popen = webui.subprocess.Popen
 
         def spy(argv, **kwargs):
-            seen.update(kwargs)
+            calls.append((list(argv), kwargs))
             return real_popen(argv, **kwargs)
 
         monkeypatch.setattr(webui.subprocess, "Popen", spy)
         job = webui.Job(account_id=7)
         _run(job, "seed", "pass")
 
+        launched = [kw for argv, kw in calls if argv[:2] == [sys.executable, "-c"]]
+        assert launched, f"the job's own launch is not among {len(calls)} calls"
+        seen = launched[0]
         assert seen["stdout"] is not webui.subprocess.PIPE
         assert hasattr(seen["stdout"], "write"), "stdout should be a file object"
 

@@ -33,6 +33,32 @@ interface RunningJob {
   stop?: (reason: string) => Promise<void>
 }
 
+/** "32m 08s", because "1928s elapsed" makes a reader do arithmetic. */
+const describeElapsed = (sec: number): string => {
+  if (!sec || sec < 0) return '0s'
+  const h = Math.floor(sec / 3600)
+  const m = Math.floor((sec % 3600) / 60)
+  const s = Math.floor(sec % 60)
+  if (h) return `${h}h ${String(m).padStart(2, '0')}m`
+  if (m) return `${m}m ${String(s).padStart(2, '0')}s`
+  return `${s}s`
+}
+
+/** The newest line that says something, skipping blanks and the warnings
+ *  every Google client prints on import -- those are the last lines of a
+ *  transcript far more often than anything about the actual work. */
+const latestLine = (lines?: string[]): string | null => {
+  if (!lines?.length) return null
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const t = lines[i].trim()
+    if (!t) continue
+    if (/^(warnings\.warn|FutureWarning|\s*$)/.test(t)) continue
+    if (t.startsWith('/') && t.includes('site-packages')) continue
+    return t.length > 160 ? `${t.slice(0, 157)}…` : t
+  }
+  return null
+}
+
 // job_admission.py job_name -> a readable label for the fallback,
 // cross-account entry (see below). 'migrate'/'delta'/'discover' are
 // deliberately absent: fleet_agent.py's ps scan already finds those for
@@ -114,7 +140,17 @@ function useRunningNow() {
       const jobIsMine = !!job?.running && !!job.name && (!job.external || !!ownAdmission)
       if (jobIsMine && job) {
         found.push({
-          key: `webui-${job.name}`, label: job.name, detail: `${job.elapsed}s elapsed`,
+          key: `webui-${job.name}`,
+          label: job.name,
+          // "1928s elapsed" was the whole description of a 32-minute run.
+          // The job's own newest line says what it is doing right now --
+          // which user, how many items -- and that is the thing an operator
+          // is actually looking for when they open this page.
+          detail: [
+            describeElapsed(job.elapsed),
+            job.etaSeconds ? `~${describeElapsed(job.etaSeconds)} left` : null,
+            latestLine(job.lines),
+          ].filter(Boolean).join(' · '),
           pct: job.progressPct ?? null, lines: job.lines, elapsedSec: job.elapsed,
           stop: async () => { await stopSeedJob() },
         })

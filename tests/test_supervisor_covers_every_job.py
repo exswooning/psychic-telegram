@@ -29,12 +29,20 @@ class _Fixture:
         self.interrupted, self.killed = [], []
         self.job = {"pid": 4242, "job_name": "seed", "account_id": 66}
 
-    def supervisor(self, stall=900):
-        job_supervisor.job_admission.list_active = lambda: [self.job]
-        job_supervisor.job_admission.is_live = lambda j: True
-        job_supervisor.job_admission.reap_dead = lambda *a, **k: None
-        job_supervisor.last_ledger_write = lambda db: "ledger" if self.ledger_age is not None else None
-        job_supervisor._age_seconds = lambda iso, now: self.ledger_age
+    def supervisor(self, monkeypatch, stall=900):
+        # monkeypatch, not bare assignment: these are module-level names
+        # other tests rely on, and setting them directly leaked a
+        # permanently-live is_live into the rest of the session.
+        monkeypatch.setattr(job_supervisor.job_admission, "list_active",
+                            lambda: [self.job])
+        monkeypatch.setattr(job_supervisor.job_admission, "is_live",
+                            lambda j, **k: True)
+        monkeypatch.setattr(job_supervisor.job_admission, "reap_dead",
+                            lambda *a, **k: None)
+        monkeypatch.setattr(job_supervisor, "last_ledger_write",
+                            lambda db: "ledger" if self.ledger_age is not None else None)
+        monkeypatch.setattr(job_supervisor, "_age_seconds",
+                            lambda iso, now: self.ledger_age)
         return job_supervisor.Supervisor(
             db_path_for=lambda aid: "/x.db" if self.ledger_age is not None else None,
             stall_seconds=stall,
@@ -62,51 +70,51 @@ class _Fixture:
 
 
 class TestATranscriptCountsAsBeingAlive:
-    def test_a_seed_writing_its_log_is_left_alone(self):
+    def test_a_seed_writing_its_log_is_left_alone(self, monkeypatch):
         """No ledger rows ever, but the transcript moved ten seconds ago."""
         f = _Fixture(ledger_age=99_999, output_age=10)
-        sup = f.supervisor()
+        sup = f.supervisor(monkeypatch)
         for _ in range(4):
             f.pass_(sup, 1000)
         assert f.interrupted == [] and f.killed == []
 
-    def test_a_job_with_no_ledger_path_is_still_watched(self):
+    def test_a_job_with_no_ledger_path_is_still_watched(self, monkeypatch):
         # db_path_for returning None used to skip the job entirely.
         f = _Fixture(ledger_age=None, output_age=5000)
-        sup = f.supervisor()
+        sup = f.supervisor(monkeypatch)
         f.until_acted(sup)
         assert f.interrupted == [4242]
 
-    def test_no_evidence_at_all_is_never_a_kill(self):
+    def test_no_evidence_at_all_is_never_a_kill(self, monkeypatch):
         f = _Fixture(ledger_age=None, output_age=None)
-        sup = f.supervisor()
+        sup = f.supervisor(monkeypatch)
         for _ in range(4):
             f.pass_(sup, 1000)
         assert f.interrupted == [] and f.killed == []
 
-    def test_the_freshest_signal_wins(self):
+    def test_the_freshest_signal_wins(self, monkeypatch):
         """A migration whose ledger is quiet but whose log is moving --
         counting the ledger alone would kill it."""
         f = _Fixture(ledger_age=99_999, output_age=3)
-        sup = f.supervisor()
+        sup = f.supervisor(monkeypatch)
         for _ in range(4):
             f.pass_(sup, 1000)
         assert f.killed == []
 
 
 class TestItInterruptsBeforeItKills:
-    def _wedged(self):
+    def _wedged(self, monkeypatch):
         f = _Fixture(ledger_age=99_999, output_age=99_999)
-        return f, f.supervisor()
+        return f, f.supervisor(monkeypatch)
 
-    def test_the_first_action_is_an_interrupt_not_a_kill(self):
-        f, sup = self._wedged()
+    def test_the_first_action_is_an_interrupt_not_a_kill(self, monkeypatch):
+        f, sup = self._wedged(monkeypatch)
         f.until_acted(sup)
         assert f.interrupted == [4242]
         assert f.killed == [], "SIGKILL throws away committed state"
 
-    def test_a_child_that_obeys_is_never_killed(self):
-        f, sup = self._wedged()
+    def test_a_child_that_obeys_is_never_killed(self, monkeypatch):
+        f, sup = self._wedged(monkeypatch)
         f.until_acted(sup)
         assert f.interrupted == [4242]
         # it starts writing again -- the cooperative path worked
@@ -115,22 +123,22 @@ class TestItInterruptsBeforeItKills:
             f.pass_(sup, 1000)
         assert f.killed == []
 
-    def test_a_child_that_ignores_the_interrupt_is_killed(self):
+    def test_a_child_that_ignores_the_interrupt_is_killed(self, monkeypatch):
         """seed_sandbox in _wait_for_tstate_lock: the exact live case."""
-        f, sup = self._wedged()
+        f, sup = self._wedged(monkeypatch)
         f.until_acted(sup)
         assert f.interrupted == [4242] and f.killed == []
         f.pass_(sup, 1000)        # grace window elapsed, still silent
         assert f.killed == [4242]
 
-    def test_it_does_not_kill_immediately_after_interrupting(self):
-        f, sup = self._wedged()
+    def test_it_does_not_kill_immediately_after_interrupting(self, monkeypatch):
+        f, sup = self._wedged(monkeypatch)
         f.until_acted(sup)
         f.pass_(sup, 10)          # well inside the grace window
         assert f.killed == []
 
-    def test_recovery_clears_the_interrupt_so_it_starts_over(self):
-        f, sup = self._wedged()
+    def test_recovery_clears_the_interrupt_so_it_starts_over(self, monkeypatch):
+        f, sup = self._wedged(monkeypatch)
         f.until_acted(sup)
         assert f.interrupted == [4242]
         f.output_age = 1          # alive again
@@ -152,38 +160,38 @@ class TestAnOldTranscriptIsNotEvidence:
     version of this sent a real SIGINT to the pytest process running it.
     """
 
-    def test_a_transcript_older_than_the_run_is_ignored(self):
+    def test_a_transcript_older_than_the_run_is_ignored(self, monkeypatch):
         f = _Fixture(ledger_age=None, output_age=99_999)
         f.job["started_at"] = "2026-08-27T12:00:00Z"
-        sup = f.supervisor()
+        sup = f.supervisor(monkeypatch)
         # transcript mtime a day before the job started
         sup.output_fn = lambda name, aid: job_supervisor._epoch(
             "2026-08-26T12:00:00Z")
         f.until_acted(sup, passes=4)
         assert f.interrupted == [] and f.killed == []
 
-    def test_a_transcript_written_by_this_run_still_counts(self):
+    def test_a_transcript_written_by_this_run_still_counts(self, monkeypatch):
         f = _Fixture(ledger_age=None, output_age=None)
         f.job["started_at"] = "2026-08-27T12:00:00Z"
-        sup = f.supervisor()
+        sup = f.supervisor(monkeypatch)
         started = job_supervisor._epoch("2026-08-27T12:00:00Z")
         f.now = started + 200_000
         sup.output_fn = lambda name, aid: started + 10   # this run, long ago
         f.until_acted(sup, passes=4)
         assert f.interrupted == [4242]
 
-    def test_a_row_with_no_start_time_still_uses_the_transcript(self):
+    def test_a_row_with_no_start_time_still_uses_the_transcript(self, monkeypatch):
         # Older rows predate started_at; refusing to look would silently
         # stop watching them.
         f = _Fixture(ledger_age=None, output_age=50_000)
         f.job.pop("started_at", None)
-        sup = f.supervisor()
+        sup = f.supervisor(monkeypatch)
         f.until_acted(sup, passes=4)
         assert f.interrupted == [4242]
 
 
 class TestASignalStubCoversBothPaths:
-    def test_supplying_only_kill_fn_never_sends_a_real_signal(self):
+    def test_supplying_only_kill_fn_never_sends_a_real_signal(self, monkeypatch):
         """A caller that took control of how the process ends did so to stop
         real signals. A second signalling path with its own os.kill default
         quietly re-armed that."""

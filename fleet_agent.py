@@ -58,6 +58,32 @@ def _pct_cpu_ram_disk() -> tuple[float | None, float | None, float | None]:
     return cpu, ram, disk
 
 
+# main.py's own subcommands. Named explicitly rather than "the token after
+# main.py", because that token is a FLAG whenever one is passed:
+# api_server.py launches migrations as
+#     main.py --account-id 7 migrate --services drive,gmail
+# so the naive read called every migration "--account-id", which is what
+# Running Now displayed for a live run. webui.py imports this set so both
+# process scanners agree on what a job is called.
+MAIN_COMMANDS = frozenset({
+    "init-db", "preflight", "provision-users", "discover", "migrate",
+    "delta", "syncacls", "report", "backfill-services", "scope",
+})
+
+
+def main_command(args: str) -> str | None:
+    """The subcommand in a `python main.py ... <cmd> ...` command line."""
+    words = args.split()
+    for i, w in enumerate(words):
+        if not w.endswith("main.py"):
+            continue
+        for token in words[i + 1:]:
+            if token in MAIN_COMMANDS:
+                return token
+        return None
+    return None
+
+
 def _active_job() -> tuple[str | None, int | None]:
     """The running engine, found by process table rather than a pidfile — a
     pidfile goes stale after a hard kill and would report a job that is not
@@ -68,13 +94,14 @@ def _active_job() -> tuple[str | None, int | None]:
     except Exception:  # noqa: BLE001
         return None, None
     for line in out.splitlines():
-        if "main.py" in line and "grep" not in line:
-            parts = line.split(None, 1)
-            if len(parts) == 2 and " main.py " in f" {parts[1]} ":
-                words = parts[1].split()
-                for i, w in enumerate(words):
-                    if w.endswith("main.py") and i + 1 < len(words):
-                        return words[i + 1], int(parts[0])
+        if "main.py" not in line or "grep" in line:
+            continue
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        cmd = main_command(parts[1])
+        if cmd:
+            return cmd, int(parts[0])
     return None, None
 
 

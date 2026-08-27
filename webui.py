@@ -59,6 +59,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import account_context  # the one rule both servers answer with
 import accounts_auth  # stdlib-only itself; does not break the no-pip-install promise
+import fleet_agent  # stdlib-only; shares the process-scan naming rule
 import job_admission  # same -- control_plane_db is stdlib-only too
 
 try:
@@ -269,6 +270,32 @@ _SEED_DONE_RE = re.compile(r"^\s*\[.+?\]\s+done in\b")
 _SEED_FAILED_RE = re.compile(r"^\s*!\s+\S+\s+FAILED:")
 
 
+# "[7/201] someone@example.com: 4292 messages deleted" -- any job that
+# counts its own work this way gets a progress bar for free. Added for the
+# seeder's reset, which prints nothing else a percentage could come from:
+# _SEED_TOTAL_RE only matches the "Seeding N users" banner a seeding run
+# prints, so a reset-only run sat at no progress at all for its whole life.
+_COUNTER_RE = re.compile(r"^\s*\[(\d+)\s*/\s*(\d+)\]")
+
+
+def _counter_progress_pct(lines: list[str]) -> int | None:
+    """Highest [done/total] seen, as a percentage. None if nothing counts.
+
+    Highest rather than last: the lines arrive in completion order from a
+    thread pool, so the newest line is not reliably the largest.
+    """
+    best = None
+    for ln in lines:
+        m = _COUNTER_RE.match(ln)
+        if not m:
+            continue
+        done, total = int(m.group(1)), int(m.group(2))
+        if total > 0:
+            pct = round(min(done, total) / total * 100)
+            best = pct if best is None else max(best, pct)
+    return best
+
+
 def _seed_progress_pct(lines: list[str]) -> int | None:
     total = None
     for ln in lines:
@@ -377,6 +404,21 @@ class Job:
                 # permanently running after a failed launch.
                 self.proc = None
                 return False, str(exc)
+            # Tell job_admission which process this admission is for.
+            # Only api_server.py did this, so every job webui launches --
+            # seed, reset target, reset drive ledger, wipe target, and every
+            # ACTIONS button -- left pid NULL in active_jobs. is_live() reads
+            # a pid-less row as dead once it is 120s old, so two minutes into
+            # any seed the row was reaped and:
+            #   * Running Now went blank while the seed was plainly running
+            #   * MAX_CONCURRENT_TENANT_JOBS silently stopped applying, so a
+            #     second heavy job could start on top of the first
+            #   * job_supervisor never saw it, because it iterates the table
+            # Confirmed live: a 32-minute seed, mid-run, with active_jobs [].
+            try:
+                job_admission.record_pid(self.account_id, name, self.proc.pid)
+            except Exception as exc:  # noqa: BLE001 - never fail a launch
+                print(f"could not record pid for {name!r}: {exc}", flush=True)
             threading.Thread(target=self._drain, daemon=True).start()
             return True, "started"
 
@@ -645,9 +687,10 @@ _PENDING: dict[str, str] = {}
 # main.py, plus the standalone job scripts the webui itself can also launch
 # (seed/reset/deploy), are the things worth surfacing as "active".
 # ----------------------------------------------------------------------
-_EXT_MAIN_CMDS = {"init-db", "preflight", "provision-users", "discover",
-                  "migrate", "delta", "syncacls", "report",
-                  "backfill-services", "scope"}
+# One definition, shared with fleet_agent.py: both scan the process table
+# for the same jobs, and when they disagreed on the name Running Now showed
+# a live migration as "--account-id".
+from fleet_agent import MAIN_COMMANDS as _EXT_MAIN_CMDS
 _EXT_SCRIPTS = {"seed_sandbox.py": "seed", "reset_target.py": "reset target",
                 "deploy_remote.py": "deploy", "verify.py": "verify",
                 "resolve_failures.py": "resolve-failures",
@@ -746,9 +789,10 @@ def _external_processes() -> list[dict]:
                      if re.search(r"(?:^|[\s/])" + re.escape(script) + r"(?:\s|$)",
                                   args)), None)
         if name is None:
-            m = re.search(r"(?:^|[\s/])main\.py\s+(\S+)", args)
-            if m and m.group(1) in _EXT_MAIN_CMDS:
-                name = m.group(1)
+            # Not "the token after main.py": that is a FLAG whenever one
+            # is passed -- api_server launches as
+            #   main.py --account-id 7 migrate --services drive,gmail
+            name = fleet_agent.main_command(args)
         if name is None:
             continue
         found.append({"pid": int(pid), "elapsed": elapsed, "name": name})
@@ -2548,13 +2592,16 @@ def _job_progress(name: str, lines: list[str], elapsed: float
     anyone has ever used makes, and it gets more accurate as fraction
     grows -- which is exactly when an operator starts actually watching it.
     """
-    if name == "seed":
+    # A job that counts itself wins over every heuristic below: it is the
+    # job's own statement of where it is, not an inference about it.
+    pct = _counter_progress_pct(lines)
+    if pct is not None:
+        pass
+    elif name == "seed":
         pct = _seed_progress_pct(lines)
     elif name in ("migrate", "delta", "discover"):
         frac = _ledger_progress_fraction()
         pct = round(frac * 100) if frac is not None else None
-    else:
-        pct = None
     if pct is None or pct <= 0 or elapsed <= 0:
         return pct, None
     eta = round(elapsed * (100 - pct) / pct)
