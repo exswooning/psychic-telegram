@@ -444,10 +444,24 @@ class Job:
                 # losing the ability to see that the job ran at all.
                 pass
 
-    def stop(self) -> str:
+    def stop(self, force: bool = False) -> str:
         with self.lock:
             if not self.running:
                 return "nothing running"
+            if force:
+                # SIGKILL, for a child that took the interrupt and then hung
+                # anyway. seed_sandbox's reset does exactly this: SIGINT
+                # unwinds into ThreadPoolExecutor.__exit__, which joins
+                # worker threads that are themselves blocked in a Google API
+                # call, so the process sits in _wait_for_tstate_lock and the
+                # UI reports "running" forever with no way to end it.
+                #
+                # Not the default, and never the first thing tried: the
+                # engine's cooperative SIGINT commits state so a re-run
+                # resumes cleanly, and killing instead of interrupting
+                # throws that away.
+                self.proc.kill()  # type: ignore[union-attr]
+                return f"killed {self.name}"
             # SIGINT, not SIGKILL: the engine handles it cooperatively,
             # finishing in-flight items and committing state so a re-run
             # resumes cleanly.
@@ -3558,9 +3572,10 @@ class Handler(BaseHTTPRequestHandler):
             if scope_err:
                 self._json({"ok": False, "msg": scope_err}, 403)
                 return
+            force = bool(body.get("force"))
             job = get_job(account_id)
             if job.running:
-                self._json({"ok": True, "msg": job.stop()})
+                self._json({"ok": True, "msg": job.stop(force)})
             else:
                 jobs = _external_processes()
                 if not jobs:
@@ -3571,11 +3586,13 @@ class Handler(BaseHTTPRequestHandler):
                         try:
                             # Same cooperative SIGINT the webui's own Stop uses:
                             # the engine finishes in-flight items, then resumes.
-                            os.kill(j["pid"], signal.SIGINT)
+                            os.kill(j["pid"], signal.SIGKILL if force
+                                    else signal.SIGINT)
                             sent.append(str(j["pid"]))
                         except (ProcessLookupError, PermissionError):
                             pass
-                    msg = (f"interrupt sent to {len(sent)} external "
+                    verb = "kill" if force else "interrupt"
+                    msg = (f"{verb} sent to {len(sent)} external "
                            f"process(es): {', '.join(sent)}") if sent \
                         else "external process(es) already gone"
                     self._json({"ok": True, "msg": msg})

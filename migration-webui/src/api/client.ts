@@ -97,11 +97,16 @@ export async function runAction(
   return res.json()
 }
 
-export async function stopJob(accountId?: string): Promise<{ ok: boolean; msg: string }> {
+export async function stopJob(
+  accountId?: string, force = false
+): Promise<{ ok: boolean; msg: string }> {
+  // force is SIGKILL, for a child that took the interrupt and hung anyway
+  // -- see Job.stop. Never the first thing to try: the cooperative SIGINT
+  // commits state so a re-run resumes cleanly.
   const res = await fetch('/api/stop', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ account_id: accountId }),
+    body: JSON.stringify({ account_id: accountId, force }),
   })
   return res.json()
 }

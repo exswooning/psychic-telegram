@@ -44,6 +44,7 @@ const JobProgress: React.FC<{
   const [rc, setRc] = useState<number | null>(null)
   const [progressPct, setProgressPct] = useState<number | null>(null)
   const [history, setHistory] = useState<JobResult | null>(null)
+  const [stopAsked, setStopAsked] = useState(false)
   const sinceRef = useRef(0)
   const wasRunning = useRef(false)
   const donePosted = useRef(false)
@@ -157,8 +158,20 @@ const JobProgress: React.FC<{
                 {progressPct}%
               </Typography>
             )}
-            <Button size="small" startIcon={<StopIcon />} onClick={() => stopJob()}>
-              Stop
+            <Button
+              size="small" startIcon={<StopIcon />}
+              onClick={() => {
+                // Second press force-kills. A child can take the interrupt
+                // and still hang -- seed_sandbox's reset unwinds into a
+                // thread join that blocks on an in-flight API call -- and
+                // without this the UI says "running" forever.
+                if (stopAsked) { stopJob(undefined, true); return }
+                setStopAsked(true)
+                stopJob()
+              }}
+              data-testid="stop-job"
+            >
+              {stopAsked ? 'Force stop' : 'Stop'}
             </Button>
           </>
         ) : rc !== null ? (
