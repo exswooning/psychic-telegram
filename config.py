@@ -187,6 +187,12 @@ def source_scopes(settings: "Settings") -> list[str]:
         # No read-only variant exists for either scope.
         scopes.extend(CHAT_SCOPES)
         scopes.append(CHAT_MEMBERSHIP_READONLY_SCOPE)
+        # The seeder and reset_target both act on the SOURCE tenant, and
+        # deleting a space needs its own scope -- chat.spaces does not
+        # cover delete. Without this branch the flag existed but could
+        # never reach a source grant, so the reset went on 403ing.
+        if settings.chat_allow_delete:
+            scopes.append(CHAT_DELETE_SCOPE)
     if settings.migrate_contacts:
         scopes.append(CONTACTS_READONLY_SCOPE)
     if settings.migrate_tasks:

@@ -153,7 +153,12 @@ def every_toggle_scopes(settings: Settings, tenant: str) -> set[str]:
     combos = [
         {"transfer_mode": m, "migrate_gmail_settings": g, "migrate_chat": c,
          "chat_space_mode": cm, "migrate_contacts": co, "migrate_tasks": t,
-         "migrate_sso": ss, "migrate_calendar_acls": ca}
+         "migrate_sso": ss, "migrate_calendar_acls": ca,
+         # chat_allow_delete is a toggle like any other here. Added late,
+         # and omitting it meant chat.delete never reached a written grant
+         # -- so turning the flag on could only ever produce the
+         # unauthorized_client this function exists to prevent.
+         "chat_allow_delete": cd}
         for m in TRANSFER_MODES
         for g in (False, True)
         for c in (False, True)
@@ -162,6 +167,7 @@ def every_toggle_scopes(settings: Settings, tenant: str) -> set[str]:
         for t in (False, True)
         for ss in (False, True)
         for ca in (False, True)
+        for cd in (False, True)
     ]
     for combo in combos:
         try:
