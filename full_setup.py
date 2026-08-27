@@ -397,6 +397,14 @@ def run_full_setup(
         cloudsdk_config = ""
         _progress(3, "checking for an existing gcloud sign-in")
         ready, account_or_err = provision_gcp.gcloud_ready()
+        if ready and not provision_gcp.can_create_projects(account_or_err):
+            # Somebody is signed in, but not somebody who can create a
+            # project -- so this is not a reason to skip the browser
+            # sign-in, it is the reason to do it. See
+            # provision_gcp.can_create_projects.
+            ready = False
+            account_or_err = (f"active gcloud account {account_or_err} is a "
+                              "service account; signing in as the admin")
         if not ready:
             auth_phase = Phase(f"authenticate gcloud as {admin_email}")
             phases.append(auth_phase)

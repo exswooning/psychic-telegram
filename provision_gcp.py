@@ -142,6 +142,26 @@ def gcloud_ready(env: dict | None = None) -> tuple[bool, str]:
     return True, account
 
 
+def can_create_projects(account: str) -> bool:
+    """Whether that gcloud identity is allowed to create a project at all.
+
+    Google refuses this for service accounts by design:
+
+        ERROR: (gcloud.projects.create) PERMISSION_DENIED:
+        Service accounts cannot create projects
+
+    which matters because gcloud_ready() answers "is anybody signed in",
+    and on a box that has already run a migration the answer is usually a
+    service account left active by the previous tenant's setup. Live, that
+    made Quick Setup skip its own browser sign-in, adopt
+    source-sa@wsmig-src-96030.iam.gserviceaccount.com, and fail on the
+    first real call -- reported to the operator as a permission problem
+    with their admin account, which it was not.
+    """
+    account = (account or "").strip().lower()
+    return bool(account) and not account.endswith(".iam.gserviceaccount.com")
+
+
 def detect_org(env: dict | None = None) -> str:
     """The org id, if this account can see exactly one.
 
@@ -688,6 +708,11 @@ def provision(source_domain: str, target_domain: str, org: str = "",
     ready, account = gcloud_ready()
     if not ready:
         return {"ok": False, "error": account, "sides": []}
+    if not can_create_projects(account):
+        return {"ok": False, "sides": [], "error": (
+            f"signed in as {account}, which is a service account -- Google "
+            "refuses 'gcloud projects create' for those. Run 'gcloud auth "
+            "login' as a user who can create projects in this org.")}
 
     org = org or detect_org()
     rnd = random.randint(10000, 99999)
