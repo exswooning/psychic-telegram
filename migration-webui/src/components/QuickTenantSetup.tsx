@@ -482,6 +482,10 @@ const QuickTenantSetup: React.FC<{
     setInv((prev) => (!force && prev?.deep && !next.deep ? prev : next))
   }, [])
 
+  // How old the inventory on screen is. Declared above loadInventory
+  // because that is where it is first set.
+  const [scanAge, setScanAge] = useState<number | null>(null)
+
   const loadInventory = useCallback((deep = false, force = false) => {
     setInvBusy(true)
     setInvError('')
@@ -489,6 +493,13 @@ const QuickTenantSetup: React.FC<{
       .then((r) => applyInv(r, force))
       .catch((e) => setInvError(e instanceof Error ? e.message : String(e)))
       .finally(() => setInvBusy(false))
+    // The stored deep scan is what those numbers actually come from, and
+    // the only thing that knows when they were true. Asked on every load,
+    // not just while a scan is being watched -- a page opened hours later
+    // is exactly the case where the age matters.
+    fetchTenantScan(side)
+      .then((st) => setScanAge(st.ageSeconds ?? null))
+      .catch(() => { /* the panel still works without an age */ })
   }, [side, applyInv])
 
   // Deep scan: start it, then poll. It walks every file every account owns,
@@ -510,6 +521,7 @@ const QuickTenantSetup: React.FC<{
         if (scanPoll.current) { window.clearInterval(scanPoll.current); scanPoll.current = null }
         setInvBusy(false)
         setScanProgress(null)
+        setScanAge(st.ageSeconds ?? null)
         if (st.error) setInvError(st.error)
         else applyInv(st as TenantInventory)
       })
@@ -990,6 +1002,7 @@ const QuickTenantSetup: React.FC<{
           {setUpOk && (
             <TenantInventoryPanel inv={inv} busy={invBusy} error={invError}
                                   domain={domain} scanProgress={scanProgress}
+                                  ageSeconds={scanAge}
                                   onRefresh={() => loadInventory(false, true)}
                                   onDeepScan={runDeepScan} />
           )}

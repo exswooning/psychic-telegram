@@ -3600,6 +3600,13 @@ async def start_tenant_inventory_scan(side: str, limit: int = 250,
             except Exception as exc:      # noqa: BLE001 - report, never 500
                 snap = {"running": False, "error": str(exc)[:300],
                         "elapsed": round(time.time() - started, 1)}
+            # WHEN, not just how long it took. Without this a finished scan
+            # has no age at all, and the panel renders an 18-minute walk of
+            # the tenant as current fact forever. Live, it reported 223,624
+            # emails and 515,292 files for a tenant a reset had just emptied
+            # -- the same shape of wrong as a Final Report calling a running
+            # migration complete.
+            snap["finishedAt"] = time.time()
             _write(snap)
 
         t = threading.Thread(target=_run, name=f"inv-scan-{side}", daemon=True)
@@ -3627,7 +3634,11 @@ async def get_tenant_inventory_scan(side: str,
             return {"running": False, "present": False,
                     "error": f"could not read scan result: {str(exc)[:120]}"}
         data["present"] = True
-
+        # How old the answer is, so the page can say so rather than
+        # presenting a stale walk of the tenant as what is there now.
+        finished = data.get("finishedAt")
+        data["ageSeconds"] = (round(time.time() - finished, 1)
+                              if finished else None)
         return _mark_stale_scan(data)
 
     return await _off_loop(_read)

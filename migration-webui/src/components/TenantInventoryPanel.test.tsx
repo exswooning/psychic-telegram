@@ -156,16 +156,20 @@ describe('TenantInventoryPanel — licences and deep scan', () => {
     expect(screen.getByTestId('drive-kinds')).toHaveTextContent('document · 12')
   })
 
-  it('offers the deep scan only while it has not been run', () => {
+  it('keeps offering the scan after one has been run, renamed', () => {
+    // It used to disappear once a deep scan existed, which removed the
+    // only way to ask again from here -- exactly when the tenant had just
+    // been changed. Live: a reset emptied the source and the panel went on
+    // reporting 223,624 emails with no control to correct it.
     const { rerender } = render(
       <TenantInventoryPanel inv={inv()} busy={false} error=""
                             domain="src.example.com" onRefresh={() => {}}
                             onDeepScan={() => {}} />)
-    expect(screen.getByTestId('deep-scan')).toBeTruthy()
+    expect(screen.getByTestId('deep-scan').textContent).toBe('Scan sharing')
     rerender(<TenantInventoryPanel inv={inv({ deep: true })} busy={false} error=""
                                    domain="src.example.com" onRefresh={() => {}}
                                    onDeepScan={() => {}} />)
-    expect(screen.queryByTestId('deep-scan')).toBeNull()
+    expect(screen.getByTestId('deep-scan').textContent).toBe('Rescan')
   })
 })
 
@@ -285,5 +289,56 @@ describe('a scan in flight shows what is still coming', () => {
     expect(screen.getByTestId('stat-shared')).toHaveTextContent('9')
     // A genuine measured zero renders as 0, not a dash.
     expect(screen.getByTestId('stat-anyone')).toHaveTextContent('0')
+  })
+})
+
+/**
+ * A deep scan takes ~18 minutes and is then kept. Nothing said how old it
+ * was, so the panel presented it as what is in the tenant now -- live, it
+ * reported 223,624 emails and 515,292 files for a source tenant a reset
+ * had just finished emptying, and there was no rescan button either
+ * because that one vanished as soon as a deep scan existed.
+ */
+describe('TenantInventoryPanel scan age', () => {
+  // The file's own fixture, so this stays valid as TenantInventory grows.
+  const base = {
+    inv: inv({ deep: true }), busy: false, error: '',
+    domain: 'source.example', onRefresh: () => {}, onDeepScan: () => {},
+  }
+
+  it('says how old the answer is', () => {
+    render(<TenantInventoryPanel {...base} ageSeconds={4 * 3600} />)
+    expect(screen.getByTestId('scan-age').textContent).toMatch(/4h .*ago/)
+  })
+
+  it('warns when it is old enough to be wrong', () => {
+    render(<TenantInventoryPanel {...base} ageSeconds={4 * 3600} />)
+    expect(screen.getByTestId('scan-age').textContent)
+      .toMatch(/may not reflect the tenant now/)
+  })
+
+  it('does not cry stale about a scan that just finished', () => {
+    render(<TenantInventoryPanel {...base} ageSeconds={10} />)
+    const t = screen.getByTestId('scan-age').textContent
+    expect(t).toMatch(/just now/)
+    expect(t).not.toMatch(/may not reflect/)
+  })
+
+  it('says nothing at all when the age is unknown', () => {
+    // Better silent than claiming freshness it cannot vouch for.
+    render(<TenantInventoryPanel {...base} ageSeconds={null} />)
+    expect(screen.queryByTestId('scan-age')).toBeNull()
+  })
+
+  it('offers a rescan even once a deep scan exists', () => {
+    // It used to disappear exactly when the tenant had been changed.
+    render(<TenantInventoryPanel {...base} ageSeconds={4 * 3600} />)
+    expect(screen.getByTestId('deep-scan').textContent).toBe('Rescan')
+  })
+
+  it('still calls the first one Scan sharing', () => {
+    render(<TenantInventoryPanel {...base} inv={inv({ deep: false })}
+                                 ageSeconds={null} />)
+    expect(screen.getByTestId('deep-scan').textContent).toBe('Scan sharing')
   })
 })

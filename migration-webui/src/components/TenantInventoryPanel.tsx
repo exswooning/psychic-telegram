@@ -73,12 +73,34 @@ export interface TenantInventoryPanelProps {
   /** Walks every file to read ACLs -- minutes, not seconds -- so it is a
    *  deliberate action rather than part of the panel's own load. */
   onDeepScan?: () => void
+  /** How old this answer is. A deep scan takes ~18 minutes and is then
+   *  kept, so without saying so the panel presents a walk of the tenant
+   *  from hours ago as what is there now -- live, it reported 223,624
+   *  emails and 515,292 files for a tenant a reset had just emptied. */
+  ageSeconds?: number | null
 }
 
+/** "4h ago" / "12m ago". Whole units: nobody needs the seconds on an
+ *  answer this old, and precision here would imply freshness. */
+const describeAge = (sec: number): string => {
+  if (sec < 90) return 'just now'
+  const m = Math.round(sec / 60)
+  if (m < 60) return `${m}m ago`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h}h ${m % 60}m ago`
+  return `${Math.floor(h / 24)}d ${h % 24}h ago`
+}
+
+/** Past this, the panel stops presenting the number as current fact. A
+ *  reset or a migration can empty a tenant in far less. */
+export const SCAN_LOOKS_STALE_AFTER_S = 30 * 60
+
 export const TenantInventoryPanel: React.FC<TenantInventoryPanelProps> = ({
-  inv, busy, error, domain, scanProgress, onRefresh, onDeepScan,
+  inv, busy, error, domain, scanProgress, onRefresh, onDeepScan, ageSeconds,
 }) => {
   const scanning = !!scanProgress
+  const stale = typeof ageSeconds === 'number'
+    && ageSeconds > SCAN_LOOKS_STALE_AFTER_S
   return (
   <Box sx={{ mt: 2 }} data-testid="tenant-inventory">
     <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
@@ -95,11 +117,25 @@ export const TenantInventoryPanel: React.FC<TenantInventoryPanelProps> = ({
             : 'reading the tenant…'}
         </Typography>
       )}
+      {!busy && typeof ageSeconds === 'number' && (
+        <Typography
+          variant="caption"
+          color={stale ? 'warning.main' : 'text.secondary'}
+          data-testid="scan-age"
+        >
+          scanned {describeAge(ageSeconds)}
+          {stale && ' — may not reflect the tenant now'}
+        </Typography>
+      )}
       <Box sx={{ flex: 1 }} />
-      {onDeepScan && !inv?.deep && (
+      {/* Offered whether or not a deep scan already exists. It used to
+          vanish the moment one did, so after anything that changed the
+          tenant -- a reset, a migration -- there was no way to ask again
+          from here at all. */}
+      {onDeepScan && (
         <Button size="small" onClick={onDeepScan} disabled={busy}
                 data-testid="deep-scan">
-          Scan sharing
+          {inv?.deep ? 'Rescan' : 'Scan sharing'}
         </Button>
       )}
       <IconButton size="small" onClick={onRefresh} disabled={busy}

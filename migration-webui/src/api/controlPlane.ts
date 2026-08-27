@@ -783,6 +783,10 @@ export interface TenantScanState extends Partial<TenantInventory> {
    *  under it. Distinguished from "still running" so the panel can offer to
    *  start it again instead of polling something that will never answer. */
   interrupted?: boolean
+  /** Seconds since this scan finished, or null while one has never run.
+   *  Computed on read -- a finished scan recorded only how long it took,
+   *  never when, so its answer had no age and was rendered as current. */
+  ageSeconds?: number | null
 }
 
 export const startTenantScan = (side: 'source' | 'target', accounts = 0) =>
