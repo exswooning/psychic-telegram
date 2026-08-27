@@ -149,6 +149,33 @@ class TestAFailedDeleteIsNoLongerSilent:
         # tells you the tenant is still dirty.
         assert "space(s) matched" in cap.err
 
+    def test_a_failed_LIST_is_reported_too(self, capsys):
+        """The other half of the same silence.
+
+        Fixing only the delete left "0 chat spaces" still covering a failed
+        list. The first reset after that fix reported zero deletes AND zero
+        delete-failures across 201 users, for a tenant with 200 spaces
+        still standing -- which is precisely what this branch produces, and
+        is indistinguishable from a tenant that had no seeded spaces.
+        """
+        import seed_sandbox
+        from config import Settings
+
+        class _Boom:
+            def spaces(self):
+                class _S:
+                    def list(self_inner, **kw):
+                        class _R:
+                            def execute(self_i):
+                                raise RuntimeError("403 insufficient scopes")
+                        return _R()
+                return _S()
+
+        deleted = seed_sandbox.reset_chat(_Boom(), Settings(), local="alice")
+        cap = capsys.readouterr()
+        assert deleted == 0
+        assert "could not list spaces" in cap.err
+
     def test_a_working_delete_stays_quiet_and_counts(self, capsys):
         deleted, cap = self._run(False, capsys)
         assert deleted > 0

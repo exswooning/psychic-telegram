@@ -665,7 +665,15 @@ def reset_chat(chat, settings: Settings, local: str) -> int:
         try:
             resp = retry(lambda t=token: chat.spaces().list(
                 pageSize=100, pageToken=t).execute())()
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            # The other half of the same silence. Fixing only the delete
+            # left "0 chat spaces" still covering a failed LIST -- and the
+            # first run after that fix reported zero deletes AND zero
+            # delete-failures for a tenant with 200 spaces standing, which
+            # is exactly the shape this branch produces. A reset that could
+            # not look must not read as a reset that found nothing.
+            print(f"    ! chat: could not list spaces ({str(exc)[:140]})",
+                  file=sys.stderr, flush=True)
             return deleted
         for sp in resp.get("spaces", []):
             if (sp.get("displayName") or "") in wanted:
@@ -686,7 +694,7 @@ def reset_chat(chat, settings: Settings, local: str) -> int:
             break
     if failures:
         print(f"    ! chat: {len(failures)} space(s) matched but could not be "
-              f"deleted, first: {failures[0]}", file=sys.stderr)
+              f"deleted, first: {failures[0]}", file=sys.stderr, flush=True)
     return deleted
 
 
