@@ -1718,6 +1718,34 @@ def reset_target_argv(body: dict, account_id: int | None = None) -> tuple[list[s
     return argv, env, ""
 
 
+def wipe_target_argv(body: dict, account_id: int | None = None) -> tuple[list[str], dict, str]:
+    """
+    Build the wipe_target command, or return why it must not run.
+
+    reset_target empties the seeded *data*; this deletes the target
+    ACCOUNTS provisioning created. After a real run the target holds a user
+    per source identity, and leaving them behind makes the next rehearsal's
+    fidelity check meaningless -- provisioning skips the users that already
+    exist and the copy lands on top of the previous one.
+
+    Same typed-domain gate and the same three-deep guard as reset_target:
+    the domain compared against comes from Settings(), never the body, and
+    wipe_target.py re-runs reset_target.assert_sandbox() itself regardless
+    of what this decides. --apply is passed because a UI button that
+    reports without doing anything is the one thing nobody wants twice.
+    """
+    argv, env, err = reset_target_argv(body, account_id)
+    if err:
+        return [], {}, err
+    # reset_target_argv already validated the domain and built the env; only
+    # the script and its flags differ.
+    domain = argv[argv.index("--confirm-domain") + 1]
+    argv = [PY, "wipe_target.py", "--confirm-domain", domain, "--apply"]
+    if account_id is not None:
+        argv += ["--account-id", str(account_id)]
+    return argv, env, ""
+
+
 def resolve_target_account(caller_id: int | None,
                            requested) -> tuple[int | None, str]:
     """Which account an operator action applies to, and whether they may.
@@ -3196,6 +3224,27 @@ class Handler(BaseHTTPRequestHandler):
                 on_finish=lambda rc: job_admission.release(account_id, "reset target"))
             if not ok:
                 job_admission.release(account_id, "reset target")
+            self._json({"ok": ok, "error": "" if ok else msg})
+            return
+
+        if self.path == "/api/wipe_target":
+            account_id = self._account_id()
+            if not _subscription_ok(account_id):
+                self._json({"ok": False, "error": "subscription inactive"}, 402)
+                return
+            argv, env, err = wipe_target_argv(body, account_id)
+            if err:
+                self._json({"ok": False, "error": err}, 400)
+                return
+            admitted, admit_msg = job_admission.try_admit(account_id, "wipe target")
+            if not admitted:
+                self._json({"ok": False, "error": admit_msg}, 503)
+                return
+            ok, msg = get_job(account_id).start(
+                "wipe target", argv, env=env,
+                on_finish=lambda rc: job_admission.release(account_id, "wipe target"))
+            if not ok:
+                job_admission.release(account_id, "wipe target")
             self._json({"ok": ok, "error": "" if ok else msg})
             return
 

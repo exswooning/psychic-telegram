@@ -3,7 +3,7 @@ import {
   Box, Typography, Card, CardContent, Stack, TextField, Button, Alert,
 } from '@mui/material'
 import { Build as MaintenanceIcon } from '@mui/icons-material'
-import { fetchActions, fetchConfig, runResetDriveLedger, ActionSpec } from '@/api/client'
+import { fetchActions, fetchConfig, runResetDriveLedger, runWipeTarget, ActionSpec } from '@/api/client'
 import JobRunner from '@/components/JobRunner'
 
 /**
@@ -49,6 +49,7 @@ const Maintenance: React.FC = () => {
       </Card>
 
       <ResetDriveLedgerCard />
+      <WipeTargetCard />
     </Box>
   )
 }
@@ -109,6 +110,58 @@ const ResetDriveLedgerCard: React.FC = () => {
           />
           <Button variant="outlined" color="warning" disabled={!confirmDomain} onClick={run}>
             Reset Drive ledger
+          </Button>
+        </Stack>
+        {ok && <Alert severity="success" sx={{ mt: 2 }}>Started -- check Mission Control for output.</Alert>}
+        {err && <Alert severity="error" sx={{ mt: 2 }}>{err}</Alert>}
+      </CardContent>
+    </Card>
+  )
+}
+
+/**
+ * reset_target empties the seeded data; the users provisioning created stay.
+ * A rehearsal on top of them is not a rehearsal -- provisioning skips users
+ * that already exist, so the copy lands on the previous one and the fidelity
+ * check compares the tenant against itself.
+ */
+const WipeTargetCard: React.FC = () => {
+  const [domain, setDomain] = useState('')
+  const [confirmDomain, setConfirmDomain] = useState('')
+  const [err, setErr] = useState<string | null>(null)
+  const [ok, setOk] = useState(false)
+
+  useEffect(() => {
+    fetchConfig().then((c) => setDomain(c.config.target_domain || ''))
+  }, [])
+
+  const run = async () => {
+    setErr(null); setOk(false)
+    const r = await runWipeTarget(confirmDomain)
+    if (r.ok) setOk(true)
+    else setErr(r.error || 'could not start')
+  }
+
+  return (
+    <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', mt: 3 }}>
+      <CardContent>
+        <Typography variant="h6" sx={{ fontWeight: 600, mb: 1 }}>Wipe target accounts</Typography>
+        <Alert severity="error" sx={{ mb: 2 }}>
+          Deletes every provisioned user on the TARGET tenant (
+          <strong>{domain || 'not set'}</strong>) and invalidates the ledger
+          describing them. The admin driving it is never deleted. Deleted
+          Workspace users are restorable for 20 days. Type the target domain
+          to confirm.
+        </Alert>
+        <Stack direction="row" spacing={2} sx={{ flexWrap: 'wrap', gap: 2 }}>
+          <TextField
+            size="small" label="Type the target domain to confirm"
+            inputProps={{ 'data-testid': 'wipe-target-domain' }}
+            value={confirmDomain} onChange={(e) => setConfirmDomain(e.target.value)}
+            sx={{ width: 280 }}
+          />
+          <Button variant="outlined" color="error" disabled={!confirmDomain} onClick={run}>
+            Wipe target accounts
           </Button>
         </Stack>
         {ok && <Alert severity="success" sx={{ mt: 2 }}>Started -- check Mission Control for output.</Alert>}

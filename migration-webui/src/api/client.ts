@@ -447,6 +447,24 @@ export async function runResetTarget(
   return res.json()
 }
 
+/**
+ * Deletes the target tenant's provisioned USERS (wipe_target.py), which
+ * runResetTarget leaves behind -- it empties their data, not their
+ * accounts. Same typed-domain gate: the server compares against
+ * TARGET_DOMAIN from Settings(), never from this body, and wipe_target.py
+ * re-runs reset_target.assert_sandbox() itself.
+ */
+export async function runWipeTarget(
+  confirmDomain: string
+): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetch('/api/wipe_target', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ confirm_domain: confirmDomain }),
+  })
+  return res.json()
+}
+
 /** Mirrors runResetTarget exactly, against reset_drive_ledger.py --
  *  always the SOURCE domain (see reset_drive_ledger_argv's own docstring
  *  in webui.py: it operates on source_email keys regardless of which
