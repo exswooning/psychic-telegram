@@ -828,14 +828,29 @@ def _reconcile_active_jobs() -> None:
         active = job_admission.list_active()
     except Exception:  # noqa: BLE001 - best-effort, must not block startup
         return
-    still_alive = {p["name"] for p in _external_processes()}
+    running = {p["name"]: p for p in _external_processes()}
     for row in active:
         name = row.get("job_name")
-        if name not in _OWNED_JOB_NAMES or name in still_alive:
+        if name not in _OWNED_JOB_NAMES:
             continue
-        job_admission.release(row.get("account_id"), name)
-        print(f"released orphaned job_admission row: account={row.get('account_id')} "
-              f"job={name!r} (no matching process found at startup)", flush=True)
+        proc = running.get(name)
+        if proc is None:
+            job_admission.release(row.get("account_id"), name)
+            print(f"released orphaned job_admission row: account={row.get('account_id')} "
+                  f"job={name!r} (no matching process found at startup)", flush=True)
+            continue
+        # Still running: re-attach the row to it. The row this process
+        # inherited was written before record_pid existed here, so its pid
+        # is NULL -- and is_live() reads a pid-less row as dead once it is
+        # 120s old, which reaped the admission of a job that was plainly
+        # still going. That emptied Running Now, lifted the one-job cap,
+        # and hid the job from job_supervisor, all while it worked.
+        try:
+            job_admission.record_pid(row.get("account_id"), name, proc["pid"])
+            print(f"re-adopted running job: account={row.get('account_id')} "
+                  f"job={name!r} pid={proc['pid']}", flush=True)
+        except Exception as exc:  # noqa: BLE001 - never block startup
+            print(f"could not re-adopt {name!r}: {exc}", flush=True)
 
 
 def _external_job_snapshot(since: int = 0) -> dict | None:

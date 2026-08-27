@@ -82,3 +82,64 @@ class TestAPidlessRowIsWhyThisMattered:
     def test_a_row_with_a_live_pid_survives(self):
         assert job_admission.is_live({"pid": os.getpid(),
                                       "started_at": "2020-01-01T00:00:00.000Z"})
+
+
+class TestARestartReAdoptsItsChildren:
+    """A deploy mid-job forgot the job.
+
+    systemd's KillMode=process deliberately keeps these children alive
+    across a restart, and the fresh process reconciles the admission table
+    against them. It only ever RELEASED rows whose process was gone; a row
+    whose process was still running it left exactly as it found it -- with
+    pid NULL, because record_pid was never called here. Two minutes later
+    is_live() called that row dead and it was reaped, mid-job.
+    """
+
+    def _reconcile(self, monkeypatch, active, running):
+        released, recorded = [], []
+        monkeypatch.setattr(webui.job_admission, "list_active", lambda: active)
+        monkeypatch.setattr(webui.job_admission, "release",
+                            lambda a, n: released.append((a, n)))
+        monkeypatch.setattr(webui.job_admission, "record_pid",
+                            lambda a, n, p: recorded.append((a, n, p)))
+        monkeypatch.setattr(webui, "_external_processes", lambda: running)
+        webui._reconcile_active_jobs()
+        return released, recorded
+
+    def test_a_row_whose_process_still_runs_is_re_adopted(self, monkeypatch):
+        released, recorded = self._reconcile(
+            monkeypatch,
+            active=[{"account_id": 66, "job_name": "seed", "pid": None}],
+            running=[{"pid": 2747119, "name": "seed", "elapsed": 1900}])
+        assert recorded == [(66, "seed", 2747119)]
+        assert released == [], "released a job that was still running"
+
+    def test_a_row_whose_process_is_gone_is_still_released(self, monkeypatch):
+        # The original bug this function exists for: a phantom row wedged
+        # the whole box at zero capacity.
+        released, recorded = self._reconcile(
+            monkeypatch,
+            active=[{"account_id": 66, "job_name": "seed", "pid": None}],
+            running=[])
+        assert released == [(66, "seed")]
+        assert recorded == []
+
+    def test_a_job_this_process_does_not_own_is_left_alone(self, monkeypatch):
+        released, recorded = self._reconcile(
+            monkeypatch,
+            active=[{"account_id": 7, "job_name": "migrate", "pid": 1}],
+            running=[])
+        assert released == [] and recorded == []
+
+    def test_a_failure_to_re_adopt_does_not_block_startup(self, monkeypatch):
+        def boom(*a):
+            raise RuntimeError("control plane unreachable")
+
+        monkeypatch.setattr(webui.job_admission, "list_active",
+                            lambda: [{"account_id": 66, "job_name": "seed",
+                                      "pid": None}])
+        monkeypatch.setattr(webui.job_admission, "record_pid", boom)
+        monkeypatch.setattr(webui.job_admission, "release", lambda a, n: None)
+        monkeypatch.setattr(webui, "_external_processes",
+                            lambda: [{"pid": 5, "name": "seed", "elapsed": 1}])
+        webui._reconcile_active_jobs()      # must not raise
