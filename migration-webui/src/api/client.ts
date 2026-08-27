@@ -97,8 +97,12 @@ export async function runAction(
   return res.json()
 }
 
-export async function stopJob(): Promise<{ ok: boolean; msg: string }> {
-  const res = await fetch('/api/stop', { method: 'POST' })
+export async function stopJob(accountId?: string): Promise<{ ok: boolean; msg: string }> {
+  const res = await fetch('/api/stop', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ account_id: accountId }),
+  })
   return res.json()
 }
 

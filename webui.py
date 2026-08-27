@@ -3549,8 +3549,18 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if self.path == "/api/stop":
-            if JOB.running:
-                self._json({"ok": True, "msg": JOB.stop()})
+            # The account whose job this is. /api/run starts jobs under
+            # get_job(account_id); stopping the global JOB instead meant a
+            # tenant could start work it could not then stop -- pressed
+            # live, Stop reported success and the run carried on.
+            account_id, scope_err = resolve_target_account(
+                self._account_id(), body.get("account_id"))
+            if scope_err:
+                self._json({"ok": False, "msg": scope_err}, 403)
+                return
+            job = get_job(account_id)
+            if job.running:
+                self._json({"ok": True, "msg": job.stop()})
             else:
                 jobs = _external_processes()
                 if not jobs:

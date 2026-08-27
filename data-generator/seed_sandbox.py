@@ -1887,7 +1887,9 @@ def main(argv: list[str] | None = None) -> int:
 
     # --- Reset -----------------------------------------------------------
     if args.reset:
-        print(f"About to DELETE all Drive files, mail, events and Chat for:")
+        print("Reset only -- this deletes seeded data and does NOT seed. "
+              "Run again without reset to put fresh data back.")
+        print("About to DELETE all Drive files, mail, events and Chat for:")
         for u in all_users:
             print(f"    {u}")
         # --yes satisfies this because --confirm-domain is already a typed
@@ -1902,11 +1904,30 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(f"  (--yes, and --confirm-domain already matched "
                   f"{settings.source_domain})")
+        # as_completed, not pool.map: map yields in SUBMISSION order, so a
+        # slow first user holds back every line behind it. Resetting 201
+        # users printed nothing at all for fifteen minutes while it was
+        # working normally -- from the UI that is indistinguishable from a
+        # wedged job, which is the failure this whole progress surface
+        # exists to tell apart.
+        done = 0
         with futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
-            for r in pool.map(lambda u: reset_one_user(settings, u), all_users):
-                print(f"  {r['user']}: {r['drive']} files, {r['gmail']} "
-                      f"messages, {r['calendar']} events, "
-                      f"{r['chat']} chat spaces, {r['contacts']} contacts, "
+            pending = {pool.submit(reset_one_user, settings, u): u
+                       for u in all_users}
+            for fut in futures.as_completed(pending):
+                done += 1
+                user = pending[fut]
+                try:
+                    r = fut.result()
+                except Exception as exc:  # noqa: BLE001
+                    # One user's reset failing must not abandon the other
+                    # 200 -- and the run has to say which one.
+                    print(f"  [{done}/{len(all_users)}] {user}: FAILED {exc!r}")
+                    continue
+                print(f"  [{done}/{len(all_users)}] {r['user']}: "
+                      f"{r['drive']} files, {r['gmail']} messages, "
+                      f"{r['calendar']} events, {r['chat']} chat spaces, "
+                      f"{r['contacts']} contacts, "
                       f"{r['tasks']} task list(s) deleted")
         for f in (args.manifest,):
             if os.path.exists(f):

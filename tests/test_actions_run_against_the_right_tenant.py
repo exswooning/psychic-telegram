@@ -119,3 +119,34 @@ class TestTheInvariantStillHolds:
         # migrate/delta build argv dynamically rather than from spec["argv"].
         for name in ("migrate", "delta"):
             assert "--account-id" not in webui._action_argv(name)
+
+
+class TestStopReachesTheJobThatWasStarted:
+    """Start was scoped and Stop was not, which is worse than neither.
+
+    /api/run launches under get_job(account_id); /api/stop checked the
+    global JOB, found it idle, fell through to the external-process branch
+    and reported success. Pressed live on a 24-minute reset, Stop returned
+    ok and the run carried on -- the operator has no way to end a job the
+    UI itself started.
+    """
+
+    def _block(self):
+        import os
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        src = open(os.path.join(root, "webui.py"), encoding="utf-8").read()
+        return src.split('if self.path == "/api/stop":')[1].split(
+            'if self.path != "/api/run":')[0]
+
+    def test_stop_resolves_the_same_account_run_does(self):
+        assert "resolve_target_account" in self._block()
+
+    def test_stop_targets_that_accounts_job(self):
+        b = self._block()
+        assert "get_job(account_id)" in b
+        assert "JOB.running" not in b, "the global job again"
+
+    def test_the_external_fallback_survives(self):
+        # A migration started from the CLI has no Job object here at all;
+        # SIGINT to the process is the only way to end it.
+        assert "_external_processes()" in self._block()

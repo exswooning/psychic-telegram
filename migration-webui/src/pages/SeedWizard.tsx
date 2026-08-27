@@ -392,7 +392,11 @@ const SeedStep: React.FC = () => {
           <FormControlLabel
             control={<Checkbox checked={reset}
                               onChange={(e) => setReset(e.target.checked)} />}
-            label={<Typography variant="body2">Reset first</Typography>}
+            label={
+              <Typography variant="body2">
+                Reset only (deletes, does not seed)
+              </Typography>
+            }
           />
         </Grid>
         <Grid item xs={12} sm={4}>
@@ -408,8 +412,15 @@ const SeedStep: React.FC = () => {
         </Grid>
       </Grid>
       <Button sx={{ mt: 1 }} size="small" variant="contained" onClick={start} disabled={jobRunning}>
-        Start seeding
+        {reset ? 'Delete seeded data' : 'Start seeding'}
       </Button>
+      {reset && (
+        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+          seed_sandbox.py --reset returns as soon as the delete finishes, so
+          this run will not seed. Uncheck it and press again to put fresh
+          data back.
+        </Typography>
+      )}
       {err && <Alert severity="error" sx={{ mt: 1 }}>{err}</Alert>}
       <JobProgress active={jobActive} expectedName="seed" onRunningChange={setJobRunning} />
     </Box>
