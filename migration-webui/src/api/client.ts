@@ -130,8 +130,12 @@ export interface JobStatus {
   external: boolean
 }
 
-export async function fetchJob(since = 0): Promise<JobStatus> {
-  return getJSON<JobStatus>(`/api/job?since=${since}`)
+export async function fetchJob(since = 0, accountId?: string): Promise<JobStatus> {
+  // account is for an operator watching a job they started on somebody
+  // else's tenant -- the wipe and reset cards can target one, and a job
+  // you can start but not watch is worse than one you cannot start.
+  const acct = accountId ? `&account=${encodeURIComponent(accountId)}` : ''
+  return getJSON<JobStatus>(`/api/job?since=${since}${acct}`)
 }
 
 export interface JobResult {

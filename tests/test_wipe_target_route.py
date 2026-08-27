@@ -121,3 +121,26 @@ class TestItCanTargetAnotherAccount:
 
     def test_blank_means_my_own(self):
         assert webui.resolve_target_account(7, None) == (7, "")
+
+
+class TestAJobStartedElsewhereCanBeWatched:
+    """The wipe card can aim at another account; /api/job could not follow.
+
+    Live: the wipe started under account 7 and /api/job -- scoped to the
+    caller -- answered {"running": false, "lines": []}. The UI had launched
+    work it could not then show, which leaves the box as the only way to
+    see whether a destructive job did anything.
+    """
+
+    def test_the_route_resolves_the_account_being_watched(self):
+        import os
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        src = open(os.path.join(root, "webui.py"), encoding="utf-8").read()
+        block = src.split('elif path == "/api/job":')[1][:1100]
+        assert "resolve_target_account" in block
+        assert '_job_snapshot(watching' in block
+
+    def test_it_refuses_another_tenants_job_for_a_plain_caller(self, monkeypatch):
+        monkeypatch.setattr(webui.accounts_auth, "get_account",
+                            lambda aid: {"is_superadmin": 0})
+        assert webui.resolve_target_account(7, "66")[0] is None

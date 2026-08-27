@@ -3116,7 +3116,16 @@ class Handler(BaseHTTPRequestHandler):
                     since = int(self.path.split("since=")[1].split("&")[0])
                 except ValueError:
                     since = 0
-            self._json(_job_snapshot(self._account_id(), since))
+            # An operator can start a job on another account's tenant (the
+            # wipe and reset buttons take an account id), so they have to be
+            # able to watch it -- otherwise the UI launches work it cannot
+            # then show, and the only way to see the output is the box.
+            watching, scope_err = resolve_target_account(
+                self._account_id(), query.get("account", [""])[0] or None)
+            if scope_err:
+                self._json({"error": scope_err}, 403)
+                return
+            self._json(_job_snapshot(watching, since))
         elif path == "/api/job_history":
             # The last COMPLETED run of a given job name, read back from
             # disk -- covers exactly the gap /api/job can't: a browser tab
