@@ -313,6 +313,12 @@ def _seed_progress_pct(lines: list[str]) -> int | None:
 # ----------------------------------------------------------------------
 # One job at a time, with its output buffered for streaming to the page.
 # ----------------------------------------------------------------------
+# How long Stop waits for a cooperative exit before saying so. Long
+# enough for an engine to finish an in-flight item, short enough that the
+# operator is not left staring at a spinner.
+STOP_GRACE_SECONDS = 10.0
+
+
 class Job:
     def __init__(self, account_id: int | None = None) -> None:
         self.account_id = account_id
@@ -508,7 +514,29 @@ class Job:
             # finishing in-flight items and committing state so a re-run
             # resumes cleanly.
             self.proc.send_signal(2)  # type: ignore[union-attr]
-            return f"interrupt sent to {self.name}"
+            proc, name = self.proc, self.name
+        # Outside the lock: waiting on the child must not block snapshot(),
+        # which the page polls every couple of seconds.
+        #
+        # And WAIT, rather than reporting success immediately. The force
+        # branch above documents that this child can take the interrupt and
+        # hang anyway -- seed_sandbox's reset unwinds into
+        # ThreadPoolExecutor.__exit__ and joins workers blocked in a Google
+        # API call. Live, Stop answered "interrupt sent" for a reset that
+        # was still running thirty-six minutes later; a deploy then
+        # restarted this process, the orphan outlived the Job object
+        # tracking it, and a SECOND reset was admitted against the same
+        # tenant. Two destructive jobs on one tenant is the exact thing the
+        # one-heavy-job rule exists to prevent.
+        deadline = time.time() + STOP_GRACE_SECONDS
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                return f"stopped {name}"
+            time.sleep(0.25)
+        return (f"interrupt sent to {name}, but it is STILL RUNNING after "
+                f"{STOP_GRACE_SECONDS}s -- it is most likely joining worker "
+                f"threads blocked in an API call. Press Stop again with "
+                f"force to kill it.")
 
     def snapshot(self, since: int = 0) -> dict:
         # Pull in anything the child wrote since the last read, rather than

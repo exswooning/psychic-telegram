@@ -104,6 +104,15 @@ class TestMissingSubjectOrKeyFailsClearly:
         `except Exception` -- dwd_helper's merge fallback catches Exception,
         so raising SystemExit here would crash the whole grant attempt
         instead of degrading to an unmerged submission."""
+        # verify() checks the KEY before the subject, so this assertion
+        # only reaches the subject guard on a machine where the configured
+        # key path happens to exist. tmp_path was already in the signature
+        # and unused; without it the test passed on a dev box and failed in
+        # a checkout with no keys/ dir, reporting the wrong guard:
+        #   assert 'SOURCE_ADMIN' in 'no service-account key for source at ...'
+        key = tmp_path / "source-sa.json"
+        key.write_text("{}")
+        settings.source_sa_key = str(key)
         settings.source_admin = ""
         try:
             vs.verify(settings, "source", ["https://example.com/scope"])

@@ -1290,6 +1290,17 @@ class TestJobBackedActivity:
     @pytest.fixture(autouse=True)
     def _reset_job(self, monkeypatch):
         monkeypatch.setattr(webui, "JOB", webui.Job())
+        # And the ps-scan fallback. _job_activity_entry consults it whenever
+        # the in-memory JOB is idle, so on a box that is actually running a
+        # migration -- which is now where this suite gets run -- these tests
+        # picked up the real job and failed:
+        #
+        #   assert {'action': 'seed running', ...} is None
+        #
+        # A suite that fails for reasons outside itself teaches people to
+        # ignore it. The external path has its own tests; these are about
+        # the in-memory Job.
+        monkeypatch.setattr(webui, "_external_job_snapshot", lambda: None)
 
     def test_no_job_ever_run_is_no_entry(self):
         assert webui._job_activity_entry() is None
