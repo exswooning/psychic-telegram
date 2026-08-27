@@ -2922,6 +2922,43 @@ def set_toggles(body: dict) -> dict:
     return {"ok": True, "toggles": dict(_RUN_STATE)}
 
 
+def _account_env(account_id: int | None, base: dict | None = None) -> dict:
+    """Point a child process at one account's tenants and ledger.
+
+    Every ACTIONS button ran with plain gcloud_env(), which is env.sh --
+    so a signed-in tenant pressing "Check seed accounts" got a report about
+    c.example.com, the placeholder domain, and five users named alice
+    through erin that have never existed. Confirmed live from the UI:
+
+        Checking 5 account(s) in c.example.com as admin@c.example.com ...
+          MISS alice@c.example.com -> invalid_grant
+
+    while that account's own source tenant was source.rohitrokaya.com.np
+    with 201 users. Everything the buttons did -- discover, provision,
+    migrate, verify, report -- was aimed at the same wrong place.
+
+    Both sides, because these actions span them: migrate reads source and
+    writes target, and a half-overlaid environment is how you migrate one
+    tenant's users into another tenant's placeholder.
+
+    NOTE: this sets MIGRATION_DB, so a child pointed here must NOT also be
+    passed --account-id -- control_plane_db._db_path() is Settings().db_path
+    and would follow it into the per-account ledger looking for
+    tenant_configs. See wipe_target_argv.
+    """
+    env = dict(base) if base is not None else gcloud_env()
+    if account_id is None:
+        return env
+    from config import Settings
+
+    st = Settings(account_id=account_id)
+    env.update(SOURCE_DOMAIN=st.source_domain, TARGET_DOMAIN=st.target_domain,
+               SOURCE_ADMIN=st.source_admin, TARGET_ADMIN=st.target_admin,
+               SOURCE_SA_KEY=st.source_sa_key, TARGET_SA_KEY=st.target_sa_key,
+               MIGRATION_DB=st.db_path)
+    return env
+
+
 def _action_argv(name: str) -> list:
     """Fixed argv for most actions; migrate/delta follow the launch toggles
     (dry-run + selected services), exactly like the TUI's m/x keys."""
@@ -3550,8 +3587,28 @@ class Handler(BaseHTTPRequestHandler):
                         "error": f"{spec['label']} needs confirmation"}, 400)
             return
 
-        env = _service_env() if name in _PHASE_GATED_ACTIONS else gcloud_env()
-        ok, msg = JOB.start(spec["label"], _action_argv(name), env=env)
+        # Which tenant this action is about. Without it every button ran
+        # against env.sh -- see _account_env.
+        account_id, scope_err = resolve_target_account(
+            self._account_id(), body.get("account_id"))
+        if scope_err:
+            self._json({"ok": False, "error": scope_err}, 403)
+            return
+        if not _subscription_ok(account_id):
+            self._json({"ok": False, "error": "subscription inactive"}, 402)
+            return
+
+        base = _service_env() if name in _PHASE_GATED_ACTIONS else gcloud_env()
+        env = _account_env(account_id, base)
+        admitted, admit_msg = job_admission.try_admit(account_id, spec["label"])
+        if not admitted:
+            self._json({"ok": False, "error": admit_msg}, 503)
+            return
+        ok, msg = get_job(account_id).start(
+            spec["label"], _action_argv(name), env=env,
+            on_finish=lambda rc: job_admission.release(account_id, spec["label"]))
+        if not ok:
+            job_admission.release(account_id, spec["label"])
         self._json({"ok": ok, "error": None if ok else msg})
 
 
