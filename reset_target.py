@@ -141,14 +141,16 @@ def main(argv: list[str] | None = None) -> int:
 
     settings = Settings()
     assert_sandbox(settings, args.confirm_domain)
-    # Ask for the Chat delete scope. chat.spaces covers create/list/patch but
-    # not delete, so without this every spaces().delete() came back 403 and
-    # the run printed "0 chat spaces" for each of 201 users while leaving all
-    # 200 seeded spaces standing -- which then inflated the target side of
-    # every Chat fidelity comparison. Set here rather than in CHAT_SCOPES
-    # because a migration never deletes a space, and asking for a scope the
-    # Admin Console has not granted fails every Chat call for the whole run.
-    settings.chat_allow_delete = True
+    # CHAT_ALLOW_DELETE is deliberately NOT forced on here. chat.spaces does
+    # not cover delete, so the Chat half of this reset cannot work until
+    # chat.delete is granted to the service account in the Admin Console --
+    # but requesting an ungranted scope fails the whole token exchange and
+    # would take Drive, Gmail and Calendar down with it. Confirmed live:
+    #
+    #     FAIL seed write scopes -> unauthorized_client
+    #
+    # So: grant it, then set CHAT_ALLOW_DELETE=true. Until then reset_chat
+    # reports every space it could not delete rather than printing 0.
 
     if not args.workers:
         try:

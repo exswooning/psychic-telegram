@@ -144,10 +144,6 @@ SEED_SCOPES = [
     "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/chat.spaces",
     "https://www.googleapis.com/auth/chat.messages",
-    # chat.spaces covers create/list/patch but NOT delete, so reset_chat's
-    # spaces().delete() came back 403 for every space and the reset reported
-    # "0 chat spaces" for 201 users while leaving all 200 of them standing.
-    "https://www.googleapis.com/auth/chat.delete",
     # build_people_tasks() builds the People and Tasks clients with this same
     # list, so without these two `seed_contacts` and `seed_tasks` fail with
     # unauthorized_client no matter what the Admin Console has authorised --
@@ -157,6 +153,32 @@ SEED_SCOPES = [
     "https://www.googleapis.com/auth/contacts",
     "https://www.googleapis.com/auth/tasks",
 ]
+
+# chat.spaces covers create/list/patch but NOT delete, so reset_chat's
+# spaces().delete() returns 403 under SEED_SCOPES alone -- which is why a
+# reset reported "0 chat spaces" for 201 users while all 200 stayed up.
+#
+# NOT folded into SEED_SCOPES, for the same reason contacts/tasks are not
+# (see build_people_tasks below): a scope the Admin Console has not granted
+# fails the ENTIRE token exchange, so adding it unconditionally breaks
+# drive/gmail/calendar seeding too. Confirmed live the moment it was tried:
+#
+#     FAIL seed write scopes -> unauthorized_client: Client is unauthorized
+#     to retrieve access tokens using this method
+#
+# Grant it to the seeder's client id in the Admin Console, then set
+# CHAT_ALLOW_DELETE=true. Until then the reset says out loud that it could
+# not delete, instead of printing 0 and looking clean.
+CHAT_DELETE_SCOPE = "https://www.googleapis.com/auth/chat.delete"
+
+
+def seed_scopes(settings=None) -> list[str]:
+    """SEED_SCOPES, plus chat.delete only once it has been granted."""
+    scopes = list(SEED_SCOPES)
+    if getattr(settings, "chat_allow_delete", False):
+        scopes.append(CHAT_DELETE_SCOPE)
+    return scopes
+
 
 # Not part of SEED_SCOPES on purpose. `--fit-to-licenses` is opt-in, and
 # adding a scope the Admin Console has not authorised makes *every* delegated
@@ -1228,7 +1250,7 @@ def build_services(settings: Settings, user: str):
 
     key = _resolve_key_path(settings)
     creds = service_account.Credentials.from_service_account_file(
-        key, scopes=SEED_SCOPES
+        key, scopes=seed_scopes(settings)
     ).with_subject(user)
 
     def svc(api, version):
@@ -1252,7 +1274,7 @@ def build_chat(settings: Settings, user: str):
     from googleapiclient.discovery import build
 
     creds = service_account.Credentials.from_service_account_file(
-        _resolve_key_path(settings), scopes=SEED_SCOPES
+        _resolve_key_path(settings), scopes=seed_scopes(settings)
     ).with_subject(user)
     http = google_auth_httplib2.AuthorizedHttp(
         creds, http=httplib2.Http(timeout=300)

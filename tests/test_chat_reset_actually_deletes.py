@@ -29,40 +29,67 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "data-generator"))
 
 
-class TestTheScopeIsRequested:
-    def test_the_seeder_asks_for_chat_delete(self):
-        import seed_sandbox
-        assert "https://www.googleapis.com/auth/chat.delete" in \
-            seed_sandbox.SEED_SCOPES
+class TestTheScopeIsAvailableButNotForced:
+    """Requesting an ungranted scope fails the WHOLE token exchange.
 
-    def test_chat_spaces_alone_is_not_enough(self):
-        # The whole bug in one assertion: these are different grants.
+    Adding chat.delete to SEED_SCOPES unconditionally was tried and broke
+    seeding outright -- confirmed live, through the UI's own check:
+
+        FAIL seed write scopes -> unauthorized_client: Client is
+        unauthorized to retrieve access tokens using this method
+
+    Drive, Gmail and Calendar seeding all went down with it, for a Chat
+    delete nobody had granted yet. So the scope is available behind a flag
+    and off until the Admin Console grant exists -- the same shape as
+    contacts/tasks, which build_people_tasks keeps on their own credential
+    for exactly this reason.
+    """
+
+    def test_the_scope_is_named_somewhere(self):
         import seed_sandbox
-        assert "https://www.googleapis.com/auth/chat.spaces" in \
-            seed_sandbox.SEED_SCOPES
-        assert "https://www.googleapis.com/auth/chat.spaces" != \
+        assert seed_sandbox.CHAT_DELETE_SCOPE == \
             "https://www.googleapis.com/auth/chat.delete"
 
-    def test_the_reset_path_asks_for_it(self):
+    def test_it_is_not_in_the_default_seed_scopes(self):
+        import seed_sandbox
+        assert seed_sandbox.CHAT_DELETE_SCOPE not in seed_sandbox.SEED_SCOPES, (
+            "an ungranted scope here fails drive/gmail/calendar seeding too")
+
+    def test_the_flag_adds_it(self):
+        import seed_sandbox
+        from config import Settings
+        st = Settings()
+        st.chat_allow_delete = True
+        assert seed_sandbox.CHAT_DELETE_SCOPE in seed_sandbox.seed_scopes(st)
+
+    def test_the_flag_is_off_by_default(self):
+        import seed_sandbox
+        from config import Settings
+        assert seed_sandbox.CHAT_DELETE_SCOPE not in \
+            seed_sandbox.seed_scopes(Settings())
+
+    def test_no_settings_at_all_still_works(self):
+        # Callers that predate the flag pass nothing.
+        import seed_sandbox
+        assert seed_sandbox.seed_scopes(None) == seed_sandbox.SEED_SCOPES
+
+    def test_the_target_side_has_the_same_switch(self):
         from config import CHAT_DELETE_SCOPE, Settings, target_scopes
         st = Settings()
         st.migrate_chat = True
+        assert CHAT_DELETE_SCOPE not in target_scopes(st)
         st.chat_allow_delete = True
         assert CHAT_DELETE_SCOPE in target_scopes(st)
 
-    def test_a_migration_does_not(self):
-        """Asking for a scope the Admin Console has not granted fails every
-        delegated call for that client, so a migration must not request a
-        delete it never performs."""
-        from config import CHAT_DELETE_SCOPE, Settings, target_scopes
-        st = Settings()
-        st.migrate_chat = True
-        st.chat_allow_delete = False
-        assert CHAT_DELETE_SCOPE not in target_scopes(st)
+    def test_a_migration_never_asks_for_delete_by_default(self):
+        from config import CHAT_DELETE_SCOPE, CHAT_SCOPES
+        assert CHAT_DELETE_SCOPE not in CHAT_SCOPES
 
-    def test_reset_target_turns_it_on(self):
+    def test_reset_target_does_not_force_it_on(self):
+        # It did, briefly, and that would fail every target call on any
+        # tenant without the grant.
         src = open(os.path.join(ROOT, "reset_target.py"), encoding="utf-8").read()
-        assert "settings.chat_allow_delete = True" in src
+        assert "settings.chat_allow_delete = True" not in src
 
 
 class TestAFailedDeleteIsNoLongerSilent:
