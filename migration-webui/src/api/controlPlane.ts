@@ -681,6 +681,24 @@ export const startTeardown = (
 export const fetchTeardownStatus = () =>
   cpFetch<TeardownStatus>('/api/v2/teardown/status')
 
+/** What is on file to tear down. teardown/start needs a project id or a DWD
+ *  client id and can discover neither -- both are fields of the
+ *  service-account key, not columns in tenant_configs. */
+export interface KnownTenant {
+  accountId: number
+  accountEmail: string
+  side: string
+  domain: string
+  adminEmail: string
+  keyPath: string
+  projectId: string
+  clientId: string
+  keyPresent: boolean
+}
+
+export const fetchTeardownKnown = () =>
+  cpFetch<{ tenants: KnownTenant[] }>('/api/v2/teardown/known')
+
 // -- Client-side Cloud provisioning handoff ----------------------------------
 // The Cloud project itself is created on the admin's own machine (their own
 // gcloud identity, their own org permissions -- see provision_gcp.py, which

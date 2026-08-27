@@ -1,10 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react'
 import {
   Box, Typography, Card, CardContent, Stack, TextField, Button, Alert,
-  LinearProgress, Chip,
+  LinearProgress, Chip, Table, TableBody, TableCell, TableHead, TableRow,
 } from '@mui/material'
 import { DeleteForever as TeardownIcon } from '@mui/icons-material'
-import { startTeardown, fetchTeardownStatus, TeardownStatus } from '@/api/controlPlane'
+import { startTeardown, fetchTeardownStatus, fetchTeardownKnown, TeardownStatus, KnownTenant } from '@/api/controlPlane'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
 
 /**
@@ -24,6 +24,7 @@ const GcpTeardown: React.FC = () => {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [status, setStatus] = useState<TeardownStatus | null>(null)
+  const [known, setKnown] = useState<KnownTenant[]>([])
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const poll = () => {
@@ -32,6 +33,7 @@ const GcpTeardown: React.FC = () => {
 
   useEffect(() => {
     poll()
+    fetchTeardownKnown().then((r) => setKnown(r.tenants || [])).catch(() => {})
     return () => { if (pollRef.current) clearInterval(pollRef.current) }
   }, [])
 
@@ -76,6 +78,62 @@ const GcpTeardown: React.FC = () => {
         delegation entry. The project delete is soft (30-day recovery); the
         delegation revoke is not.
       </Typography>
+
+      {known.length > 0 && (
+        <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 3 }}>
+          <CardContent>
+            <Typography variant="h6" sx={{ fontWeight: 600, mb: 0.5 }}>On file</Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              The project and client id below are read out of each tenant's
+              service-account key -- the form needs one of them and cannot
+              find it on its own. Use fills the form; nothing runs until you
+              confirm.
+            </Typography>
+            <Box sx={{ overflowX: 'auto' }}>
+              <Table size="small" data-testid="teardown-known">
+                <TableHead>
+                  <TableRow>
+                    <TableCell>Account</TableCell>
+                    <TableCell>Side</TableCell>
+                    <TableCell>Domain</TableCell>
+                    <TableCell>Admin</TableCell>
+                    <TableCell>GCP project</TableCell>
+                    <TableCell>DWD client id</TableCell>
+                    <TableCell />
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {known.map((t) => (
+                    <TableRow key={`${t.accountId}-${t.side}`} hover>
+                      <TableCell>{t.accountEmail || t.accountId}</TableCell>
+                      <TableCell><Chip size="small" label={t.side} /></TableCell>
+                      <TableCell>{t.domain || '--'}</TableCell>
+                      <TableCell>{t.adminEmail || '--'}</TableCell>
+                      <TableCell sx={{ fontFamily: 'monospace', fontSize: 12 }}>
+                        {t.projectId || (t.keyPresent ? '--' : 'no key on disk')}
+                      </TableCell>
+                      <TableCell sx={{ fontFamily: 'monospace', fontSize: 12 }}>
+                        {t.clientId || '--'}
+                      </TableCell>
+                      <TableCell>
+                        <Button
+                          size="small"
+                          disabled={!t.projectId && !t.clientId}
+                          onClick={() => {
+                            setProject(t.projectId)
+                            setClientId(t.clientId)
+                            setEmail(t.adminEmail)
+                          }}
+                        >Use</Button>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </Box>
+          </CardContent>
+        </Card>
+      )}
 
       <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>
         <CardContent>

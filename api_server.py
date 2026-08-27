@@ -2280,6 +2280,55 @@ def _teardown_state_path(account_id: int | None) -> str:
     return os.path.join(d, "teardown.json")
 
 
+@app.get("/api/v2/teardown/known")
+async def teardown_known(op: Operator = Depends(operator)):
+    """What is actually on file to tear down.
+
+    teardown_start needs a project id or a DWD client id and can discover
+    neither -- they live inside the service-account key, not in
+    tenant_configs. So the page asked an operator to type identifiers that
+    nothing in the UI ever showed them, which in practice means SSH-ing in
+    to cat a JSON file.
+
+    Superadmins see every account because the tenants worth tearing down
+    are usually somebody else's abandoned trial; everyone else sees their
+    own two rows.
+    """
+    require_reader(op)
+    accounts = (accounts_auth.list_accounts() if op.is_superadmin
+                else [{"id": op.account_id, "email": "", "name": ""}])
+    out = []
+    for acct in accounts:
+        aid = acct.get("id")
+        if aid is None:
+            continue
+        for side in ("source", "target"):
+            try:
+                cfg = accounts_auth.get_tenant_config(aid, side) or {}
+            except (ValueError, sqlite3.Error):
+                continue
+            key_path = cfg.get("sa_key_path") or ""
+            row = {"accountId": aid, "accountEmail": acct.get("email", ""),
+                   "side": side, "domain": cfg.get("domain") or "",
+                   "adminEmail": cfg.get("admin_email") or "",
+                   "keyPath": key_path, "projectId": "", "clientId": "",
+                   "keyPresent": False}
+            # The two identifiers teardown actually needs are fields of the
+            # key itself. Read only those; never return the private key.
+            if key_path and os.path.isfile(key_path):
+                row["keyPresent"] = True
+                try:
+                    with open(key_path, encoding="utf-8") as fh:
+                        key = json.load(fh)
+                    row["projectId"] = key.get("project_id", "")
+                    row["clientId"] = key.get("client_id", "")
+                except (OSError, ValueError) as exc:
+                    log.warning("unreadable key %s: %r", key_path, exc)
+            if row["domain"] or row["keyPresent"]:
+                out.append(row)
+    return {"tenants": out}
+
+
 @app.post("/api/v2/teardown/start")
 async def teardown_start(body: StartTeardown, op: Operator = Depends(operator)):
     """Runs teardown_tenant.py detached -- same shape as full_setup_start,
