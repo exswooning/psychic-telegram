@@ -1947,6 +1947,27 @@ def main(argv: list[str] | None = None) -> int:
         # wedged job, which is the failure this whole progress surface
         # exists to tell apart.
         done = 0
+        # as_completed fixed the ORDER of the output; it did not fix the
+        # silence before the first user finishes. Deleting one mailbox is a
+        # few hundred serial Gmail calls, so with 201 users the log stayed
+        # on its preamble for twelve minutes while every worker was busy --
+        # and "busy" and "wedged" look identical from the page. Confirmed
+        # live with py-spy: all 18 workers inside reset_gmail, 56 open
+        # connections, 472 CPU ticks in 15s, and nothing on screen.
+        #
+        # A heartbeat says which it is without waiting for a completion.
+        # Daemon thread so it can never hold the run open.
+        stop_beat = threading.Event()
+
+        def _heartbeat() -> None:
+            waited = 0
+            while not stop_beat.wait(30):
+                waited += 30
+                print(f"  ... still deleting: {done}/{len(all_users)} users "
+                      f"done after {waited // 60}m{waited % 60:02d}s "
+                      f"({args.workers} in parallel)", flush=True)
+
+        threading.Thread(target=_heartbeat, daemon=True).start()
         with futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
             pending = {pool.submit(reset_one_user, settings, u): u
                        for u in all_users}
@@ -1965,6 +1986,7 @@ def main(argv: list[str] | None = None) -> int:
                       f"{r['calendar']} events, {r['chat']} chat spaces, "
                       f"{r['contacts']} contacts, "
                       f"{r['tasks']} task list(s) deleted")
+        stop_beat.set()
         for f in (args.manifest,):
             if os.path.exists(f):
                 os.remove(f)
