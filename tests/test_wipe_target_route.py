@@ -105,10 +105,19 @@ class TestItCanTargetAnotherAccount:
         b = self._block("/api/reset_target")
         assert "resolve_target_account" in b
 
-    def test_someone_elses_account_is_refused_for_a_plain_caller(self):
+    def test_someone_elses_account_is_refused_for_a_plain_caller(self, monkeypatch):
         # resolve_target_account owns that rule; assert it still holds.
+        # get_account reads the control-plane db, which a unit test has no
+        # business opening -- stub the one fact the rule turns on.
+        monkeypatch.setattr(webui.accounts_auth, "get_account",
+                            lambda aid: {"is_superadmin": 0})
         assert webui.resolve_target_account(7, "66")[1] == \
             "that migration belongs to another account"
+
+    def test_a_superadmin_may_target_another_account(self, monkeypatch):
+        monkeypatch.setattr(webui.accounts_auth, "get_account",
+                            lambda aid: {"is_superadmin": 1})
+        assert webui.resolve_target_account(66, "7") == (7, "")
 
     def test_blank_means_my_own(self):
         assert webui.resolve_target_account(7, None) == (7, "")
