@@ -3206,7 +3206,14 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if self.path == "/api/reset_target":
-            account_id = self._account_id()
+            # Same targeting as reset_drive_ledger: an operator cleaning up
+            # somebody else's tenant is the normal case here, and resolving
+            # from the session alone silently aims at their own empty one.
+            account_id, scope_err = resolve_target_account(
+                self._account_id(), body.get("account_id"))
+            if scope_err:
+                self._json({"ok": False, "error": scope_err}, 403)
+                return
             if not _subscription_ok(account_id):
                 self._json({"ok": False, "error": "subscription inactive"}, 402)
                 return
@@ -3228,7 +3235,14 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if self.path == "/api/wipe_target":
-            account_id = self._account_id()
+            # Same targeting as reset_drive_ledger: an operator cleaning up
+            # somebody else's tenant is the normal case here, and resolving
+            # from the session alone silently aims at their own empty one.
+            account_id, scope_err = resolve_target_account(
+                self._account_id(), body.get("account_id"))
+            if scope_err:
+                self._json({"ok": False, "error": scope_err}, 403)
+                return
             if not _subscription_ok(account_id):
                 self._json({"ok": False, "error": "subscription inactive"}, 402)
                 return

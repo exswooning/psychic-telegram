@@ -455,12 +455,12 @@ export async function runResetTarget(
  * re-runs reset_target.assert_sandbox() itself.
  */
 export async function runWipeTarget(
-  confirmDomain: string
+  confirmDomain: string, accountId?: string
 ): Promise<{ ok: boolean; error?: string }> {
   const res = await fetch('/api/wipe_target', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ confirm_domain: confirmDomain }),
+    body: JSON.stringify({ confirm_domain: confirmDomain, account_id: accountId }),
   })
   return res.json()
 }

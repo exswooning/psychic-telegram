@@ -78,3 +78,37 @@ class TestTheRouteIsWired:
         assert "wipe_target_argv" in block
         assert "job_admission.try_admit" in block, "two at once corrupt the run"
         assert "_subscription_ok" in block
+
+
+class TestItCanTargetAnotherAccount:
+    """Cleaning up somebody else's tenant is the normal case for this button.
+
+    Resolving from the session alone aims a superadmin at their own empty
+    account, which is how a full ledger reset once came back "set the source
+    domain in step 2 first" while pointed at a tenant that had one.
+    """
+
+    def _block(self, path):
+        import os
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        src = open(os.path.join(root, "webui.py"), encoding="utf-8").read()
+        return src.split(f'if self.path == "{path}":')[1][:700]
+
+    def test_wipe_resolves_the_requested_account(self):
+        b = self._block("/api/wipe_target")
+        assert "resolve_target_account" in b
+        assert 'body.get("account_id")' in b
+
+    def test_reset_target_does_too(self):
+        # Same button row, same expectation -- one of them targeting and the
+        # other not is worse than neither.
+        b = self._block("/api/reset_target")
+        assert "resolve_target_account" in b
+
+    def test_someone_elses_account_is_refused_for_a_plain_caller(self):
+        # resolve_target_account owns that rule; assert it still holds.
+        assert webui.resolve_target_account(7, "66")[1] == \
+            "that migration belongs to another account"
+
+    def test_blank_means_my_own(self):
+        assert webui.resolve_target_account(7, None) == (7, "")

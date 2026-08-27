@@ -128,6 +128,7 @@ const ResetDriveLedgerCard: React.FC = () => {
 const WipeTargetCard: React.FC = () => {
   const [domain, setDomain] = useState('')
   const [confirmDomain, setConfirmDomain] = useState('')
+  const [account, setAccount] = useState('')
   const [err, setErr] = useState<string | null>(null)
   const [ok, setOk] = useState(false)
 
@@ -137,7 +138,7 @@ const WipeTargetCard: React.FC = () => {
 
   const run = async () => {
     setErr(null); setOk(false)
-    const r = await runWipeTarget(confirmDomain)
+    const r = await runWipeTarget(confirmDomain, account || undefined)
     if (r.ok) setOk(true)
     else setErr(r.error || 'could not start')
   }
@@ -148,8 +149,9 @@ const WipeTargetCard: React.FC = () => {
         <Typography variant="h6" sx={{ fontWeight: 600, mb: 1 }}>Wipe target accounts</Typography>
         <Alert severity="error" sx={{ mb: 2 }}>
           Deletes every provisioned user on the TARGET tenant (
-          <strong>{domain || 'not set'}</strong>) and invalidates the ledger
-          describing them. The admin driving it is never deleted. Deleted
+          <strong>{account ? `whichever target account ${account} has configured`
+                           : (domain || 'not set')}</strong>) and invalidates
+          the ledger describing them. The admin driving it is never deleted. Deleted
           Workspace users are restorable for 20 days. Type the target domain
           to confirm.
         </Alert>
@@ -159,6 +161,12 @@ const WipeTargetCard: React.FC = () => {
             inputProps={{ 'data-testid': 'wipe-target-domain' }}
             value={confirmDomain} onChange={(e) => setConfirmDomain(e.target.value)}
             sx={{ width: 280 }}
+          />
+          <TextField
+            size="small" label="Account id (blank = mine)"
+            inputProps={{ 'data-testid': 'wipe-target-account' }}
+            value={account} onChange={(e) => setAccount(e.target.value)}
+            sx={{ width: 200 }}
           />
           <Button variant="outlined" color="error" disabled={!confirmDomain} onClick={run}>
             Wipe target accounts
