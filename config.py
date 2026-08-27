@@ -119,6 +119,16 @@ CHAT_SCOPES = [
     "https://www.googleapis.com/auth/chat.messages",
 ]
 
+# Deleting a space needs its own scope: chat.spaces covers create/list/patch
+# but NOT delete, so spaces().delete() returns 403 under CHAT_SCOPES alone.
+#
+# Deliberately not in CHAT_SCOPES. A migration never deletes a space, and a
+# scope the Admin Console has not authorised fails every delegated call for
+# that client outright -- adding it there would make Chat migration refuse
+# to run on every tenant that had not granted a delete it never needed.
+# Only the reset path asks for it, via settings.chat_allow_delete.
+CHAT_DELETE_SCOPE = "https://www.googleapis.com/auth/chat.delete"
+
 # Contacts and Tasks. Both have a readonly variant, so the source keeps its
 # read-only property; the target needs the write scope to create anything.
 CONTACTS_READONLY_SCOPE = "https://www.googleapis.com/auth/contacts.readonly"
@@ -200,6 +210,10 @@ def target_scopes(settings: "Settings") -> list[str]:
     if settings.migrate_chat:
         scopes.extend(CHAT_SCOPES)
         scopes.append(CHAT_MEMBERSHIP_SCOPE)
+        # reset_target.py only. Without it every spaces().delete() 403s and
+        # the reset reports "0 chat spaces" for a tenant it did not clean.
+        if settings.chat_allow_delete:
+            scopes.append(CHAT_DELETE_SCOPE)
         # Only `import` needs it, and it is the scope most likely to be
         # refused, so `direct` exists precisely to not ask for it.
         if settings.chat_space_mode == "import":
@@ -574,6 +588,12 @@ class Settings:
     )
     chat_space_mode: str = field(
         default_factory=lambda: os.getenv("CHAT_SPACE_MODE", "import").strip().lower()
+    )
+    # Asks for CHAT_DELETE_SCOPE. Only reset_target.py sets it: a migration
+    # never deletes a space, and requesting a delete the Admin Console has
+    # not authorised would fail every Chat call for the whole run.
+    chat_allow_delete: bool = field(
+        default_factory=lambda: _env_bool("CHAT_ALLOW_DELETE", False)
     )
     # Off by default, despite both being cheap and worth having. Turning them
     # on adds scopes, and a scope the Admin Console has not authorised makes

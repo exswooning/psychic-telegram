@@ -144,6 +144,10 @@ SEED_SCOPES = [
     "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/chat.spaces",
     "https://www.googleapis.com/auth/chat.messages",
+    # chat.spaces covers create/list/patch but NOT delete, so reset_chat's
+    # spaces().delete() came back 403 for every space and the reset reported
+    # "0 chat spaces" for 201 users while leaving all 200 of them standing.
+    "https://www.googleapis.com/auth/chat.delete",
     # build_people_tasks() builds the People and Tasks clients with this same
     # list, so without these two `seed_contacts` and `seed_tasks` fail with
     # unauthorized_client no matter what the Admin Console has authorised --
@@ -633,6 +637,7 @@ def reset_chat(chat, settings: Settings, local: str) -> int:
     retry = _retry_factory(settings)
     wanted = set(_chat_names(local))
     deleted = 0
+    failures: list[str] = []
     token = None
     while True:
         try:
@@ -646,11 +651,20 @@ def reset_chat(chat, settings: Settings, local: str) -> int:
                     retry(lambda n=sp["name"]: chat.spaces().delete(
                         name=n).execute())()
                     deleted += 1
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    # Counted and reported, not swallowed. This except hid a
+                    # missing scope for the life of the seeder: every delete
+                    # 403'd, `deleted` stayed 0, and "0 chat spaces" printed
+                    # identically for success, a failed list and a failed
+                    # delete -- so a reset that cleaned nothing looked like a
+                    # tenant that had nothing to clean.
+                    failures.append(str(exc)[:160])
         token = resp.get("nextPageToken")
         if not token:
             break
+    if failures:
+        print(f"    ! chat: {len(failures)} space(s) matched but could not be "
+              f"deleted, first: {failures[0]}", file=sys.stderr)
     return deleted
 
 

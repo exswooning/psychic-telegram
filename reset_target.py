@@ -141,6 +141,14 @@ def main(argv: list[str] | None = None) -> int:
 
     settings = Settings()
     assert_sandbox(settings, args.confirm_domain)
+    # Ask for the Chat delete scope. chat.spaces covers create/list/patch but
+    # not delete, so without this every spaces().delete() came back 403 and
+    # the run printed "0 chat spaces" for each of 201 users while leaving all
+    # 200 seeded spaces standing -- which then inflated the target side of
+    # every Chat fidelity comparison. Set here rather than in CHAT_SCOPES
+    # because a migration never deletes a space, and asking for a scope the
+    # Admin Console has not granted fails every Chat call for the whole run.
+    settings.chat_allow_delete = True
 
     if not args.workers:
         try:
