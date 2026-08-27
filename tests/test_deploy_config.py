@@ -1331,7 +1331,7 @@ class TestJobBackedActivity:
     def test_spa_activity_payload_puts_the_job_entry_first(self, monkeypatch):
         """Real ledger rows must still show -- the job is additional
         context at the top, not a replacement for them."""
-        monkeypatch.setattr(webui, "_db_conn", lambda: None)
+        monkeypatch.setattr(webui, "_db_conn", lambda account_id=None: None)
         webui.JOB.name = "seed"
         webui.JOB.lines = ["working"]
         webui.JOB.proc = _FakeRunningProc()
@@ -1343,7 +1343,7 @@ class TestJobBackedActivity:
         assert payload["error"] == "no database yet"
 
     def test_no_job_and_no_database_is_an_empty_list_not_a_crash(self, monkeypatch):
-        monkeypatch.setattr(webui, "_db_conn", lambda: None)
+        monkeypatch.setattr(webui, "_db_conn", lambda account_id=None: None)
         payload = webui.spa_activity_payload()
         assert payload["activity"] == []
         assert payload["error"] == "no database yet"

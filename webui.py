@@ -2305,13 +2305,18 @@ def _service_env() -> dict:
     return env
 
 
-def _db_conn():
-    """A read-only connection to the resume ledger, or None."""
+def _db_conn(account_id: int | None = None):
+    """A read-only connection to one account's resume ledger, or None.
+
+    Every SPA payload below opens the ledger through here, so an account
+    threaded to this call scopes all of them at once. None keeps the
+    operator's env.sh ledger, which is what the SSH-tunnel path reads.
+    """
     import sqlite3
 
     from config import Settings
 
-    path = Settings().db_path
+    path = Settings(account_id=account_id).db_path
     if not os.path.exists(path):
         return None
     try:
@@ -2344,19 +2349,19 @@ def _serialize_snapshot(snap) -> dict:
     }
 
 
-def snapshot_payload() -> dict:
+def snapshot_payload(account_id: int | None = None) -> dict:
     """The TUI snapshot plus the launch toggles, for the page's poll loop."""
     import sqlite3
 
     import tui
     from config import Settings
 
-    conn = _db_conn()
+    conn = _db_conn(account_id)
     if conn is None:
         return {"error": "no database yet — run init-db or create identities.csv",
                 "toggles": dict(_RUN_STATE), "snapshot": None}
     try:
-        snap = tui.collect_snapshot(conn, Settings().effective_upload_cap())
+        snap = tui.collect_snapshot(conn, Settings(account_id=account_id).effective_upload_cap())
     except sqlite3.Error as exc:
         return {"error": f"db read error: {exc}",
                 "toggles": dict(_RUN_STATE), "snapshot": None}
@@ -2366,7 +2371,7 @@ def snapshot_payload() -> dict:
             "snapshot": _serialize_snapshot(snap)}
 
 
-def identities_payload() -> dict:
+def identities_payload(account_id: int | None = None) -> dict:
     """Every identity_map row, for the Identities page.
 
     The legacy dashboard's own identities tab called this route and
@@ -2375,7 +2380,7 @@ def identities_payload() -> dict:
     """
     import sqlite3
 
-    conn = _db_conn()
+    conn = _db_conn(account_id)
     if conn is None:
         return {"error": "no database yet — run init-db or create identities.csv",
                 "rows": []}
@@ -2438,27 +2443,27 @@ def read_identity_csv_domains_safe(path: str) -> list[dict]:
     return out
 
 
-def spa_users_payload() -> dict:
+def spa_users_payload(account_id: int | None = None) -> dict:
     """User[] for migration-webui, read-only from the ledger. See webui_spa.py."""
     import sqlite3
 
     import webui_spa
     from config import Settings
 
-    conn = _db_conn()
+    conn = _db_conn(account_id)
     if conn is None:
         return {"error": "no database yet — run init-db or create identities.csv",
                "users": []}
     try:
         return {"error": "", "users": webui_spa.users_payload(
-            conn, Settings().effective_upload_cap())}
+            conn, Settings(account_id=account_id).effective_upload_cap())}
     except sqlite3.Error as exc:
         return {"error": f"db read error: {exc}", "users": []}
     finally:
         conn.close()
 
 
-def _ledger_progress_fraction() -> float | None:
+def _ledger_progress_fraction(account_id: int | None = None) -> float | None:
     """The same items_done/items_expected fraction the header progress bar
     and snapshot_payload() already compute from the ledger -- reused here
     rather than re-derived, since tui.collect_snapshot() is the one place
@@ -2467,13 +2472,13 @@ def _ledger_progress_fraction() -> float | None:
 
     from config import Settings
 
-    conn = _db_conn()
+    conn = _db_conn(account_id)
     if conn is None:
         return None
     try:
         import tui
 
-        totals = tui.collect_snapshot(conn, Settings().effective_upload_cap()).totals
+        totals = tui.collect_snapshot(conn, Settings(account_id=account_id).effective_upload_cap()).totals
         return totals.get("fraction")
     except sqlite3.Error:
         return None
@@ -2552,13 +2557,13 @@ def _job_activity_entry() -> dict | None:
     }
 
 
-def spa_activity_payload() -> dict:
+def spa_activity_payload(account_id: int | None = None) -> dict:
     import sqlite3
 
     import webui_spa
 
     job_entry = _job_activity_entry()
-    conn = _db_conn()
+    conn = _db_conn(account_id)
     if conn is None:
         # Still surfaced: a job can run before init-db has ever been done
         # (a seed-only session, say), and the operator should see it -- but
@@ -2576,15 +2581,15 @@ def spa_activity_payload() -> dict:
         conn.close()
 
 
-def spa_metrics_payload() -> dict:
+def spa_metrics_payload(account_id: int | None = None) -> dict:
     import sqlite3
 
     import tui
     import webui_spa
     from config import Settings
 
-    settings = Settings()
-    conn = _db_conn()
+    settings = Settings(account_id=account_id)
+    conn = _db_conn(account_id)
     totals: dict = {}
     if conn is not None:
         try:
@@ -2596,55 +2601,55 @@ def spa_metrics_payload() -> dict:
     return webui_spa.metrics_payload(settings, settings.effective_upload_cap(), totals)
 
 
-def spa_stages_payload() -> dict:
+def spa_stages_payload(account_id: int | None = None) -> dict:
     import sqlite3
 
     import webui_spa
     from config import Settings
 
-    conn = _db_conn()
+    conn = _db_conn(account_id)
     if conn is None:
         return {"error": "no database yet", "stages": []}
     try:
         return {"error": "", "stages": webui_spa.stages_payload(
-            conn, Settings(), JOB.finished)}
+            conn, Settings(account_id=account_id), JOB.finished)}
     except sqlite3.Error as exc:
         return {"error": f"db read error: {exc}", "stages": []}
     finally:
         conn.close()
 
 
-def spa_verification_payload() -> dict:
+def spa_verification_payload(account_id: int | None = None) -> dict:
     import sqlite3
 
     import webui_spa
     from config import Settings
 
-    conn = _db_conn()
+    conn = _db_conn(account_id)
     if conn is None:
         return {"error": "no database yet", "verification": []}
     try:
         return {"error": "", "verification": webui_spa.verification_payload(
-            conn, Settings())}
+            conn, Settings(account_id=account_id))}
     except sqlite3.Error as exc:
         return {"error": f"db read error: {exc}", "verification": []}
     finally:
         conn.close()
 
 
-def spa_report_payload() -> dict:
+def spa_report_payload(account_id: int | None = None) -> dict:
     import sqlite3
 
     import webui_spa
     from config import Settings
 
-    conn = _db_conn()
+    conn = _db_conn(account_id)
     if conn is None:
         return {"error": "no database yet", "report": None}
     try:
         # The most recently run job's own timing, not a scan over audit_log --
         # see webui_spa.report_payload's docstring for why.
-        report = webui_spa.report_payload(conn, Settings(), JOB.started, JOB.finished)
+        report = webui_spa.report_payload(conn, Settings(account_id=account_id), JOB.started, JOB.finished)
         return {"error": "", "report": report}
     except sqlite3.Error as exc:
         return {"error": f"db read error: {exc}", "report": None}
@@ -2652,11 +2657,11 @@ def spa_report_payload() -> dict:
         conn.close()
 
 
-def scope_payload() -> dict:
+def scope_payload(account_id: int | None = None) -> dict:
     """The scope matrix plus discovered volume, rendered server-side."""
     import scope as scope_mod
 
-    conn = _db_conn()
+    conn = _db_conn(account_id)
     volume = {}
     if conn is not None:
         try:
@@ -2915,6 +2920,16 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, obj, code: int = 200) -> None:
         self._send(code, json.dumps(obj).encode(), "application/json")
 
+    def _on_screen(self) -> int | None:
+        """The account every read on this page is about.
+
+        One resolver rather than one per route: /api/status and
+        /api/spa/users render on the same screen -- Mission Control's
+        header came from one and its "11 users tracked" from the other,
+        and they named different tenants.
+        """
+        return account_context.in_context(*self._caller())
+
     def _caller(self) -> tuple[int | None, bool]:
         """(account, is_superadmin) -- what account_context.in_context needs.
 
@@ -3003,29 +3018,28 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
         elif path == "/api/status":
-            self._json(status_payload(
-                account_context.in_context(*self._caller())))
+            self._json(status_payload(self._on_screen()))
         elif path == "/api/actions":
             self._json({k: {"label": v["label"], "blurb": v["blurb"],
                             "destructive": v.get("destructive", False),
                             "confirm": v.get("confirm", "")}
                         for k, v in ACTIONS.items()})
         elif path == "/api/snapshot":
-            self._json(snapshot_payload())
+            self._json(snapshot_payload(self._on_screen()))
         elif path == "/api/spa/users":
-            self._json(spa_users_payload())
+            self._json(spa_users_payload(self._on_screen()))
         elif path == "/api/spa/activity":
-            self._json(spa_activity_payload())
+            self._json(spa_activity_payload(self._on_screen()))
         elif path == "/api/spa/metrics":
-            self._json(spa_metrics_payload())
+            self._json(spa_metrics_payload(self._on_screen()))
         elif path == "/api/spa/stages":
-            self._json(spa_stages_payload())
+            self._json(spa_stages_payload(self._on_screen()))
         elif path == "/api/spa/verification":
-            self._json(spa_verification_payload())
+            self._json(spa_verification_payload(self._on_screen()))
         elif path == "/api/spa/report":
-            self._json(spa_report_payload())
+            self._json(spa_report_payload(self._on_screen()))
         elif path == "/api/scope":
-            self._json(scope_payload())
+            self._json(scope_payload(self._on_screen()))
         elif path == "/api/logs":
             self._json(logs_payload(query.get("job", [""])[0],
                                     query.get("account", [""])[0]))

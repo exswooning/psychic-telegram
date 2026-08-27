@@ -179,8 +179,10 @@ class TestTheEndpointResolvesTheMigrationOnScreen:
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         src = open(os.path.join(root, "webui.py"), encoding="utf-8").read()
         route = src.split('elif path == "/api/status":')[1][:220]
-        assert "account_context.in_context" in route
+        assert "_on_screen()" in route
         assert "status_payload()" not in route, "unscoped, serves env.sh"
+        # and _on_screen is the shared rule, not a fourth copy of it
+        assert "account_context.in_context" in src.split("def _on_screen")[1][:400]
 
     def test_a_tenant_gets_their_own_account(self):
         assert account_context.in_context(7, is_superadmin=False) == 7
@@ -235,3 +237,39 @@ class TestBothServersAnswerWithTheSameRule:
                                  is_superadmin=True)
         assert api_server._account_in_context(op) == \
             account_context.in_context(66, True) == 7
+
+
+class TestEveryLedgerRouteIsScoped:
+    """/api/status was scoped and Mission Control still said "11 users".
+
+    The header came from /api/status and the count beside it from
+    /api/spa/users -- a different route, on the same screen, naming a third
+    tenant. Scoping them one at a time is how that happens, so this asserts
+    the whole set rather than the one that was reported.
+    """
+
+    LEDGER_ROUTES = ("/api/status", "/api/snapshot", "/api/spa/users",
+                     "/api/spa/activity", "/api/spa/metrics",
+                     "/api/spa/stages", "/api/spa/verification",
+                     "/api/spa/report", "/api/scope")
+
+    def _src(self):
+        import os
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return open(os.path.join(root, "webui.py"), encoding="utf-8").read()
+
+    def test_each_one_asks_which_migration_is_on_screen(self):
+        src = self._src()
+        unscoped = [r for r in self.LEDGER_ROUTES
+                    if "_on_screen()" not in
+                    src.split(f'path == "{r}":')[1][:200]]
+        assert not unscoped, f"serve env.sh's ledger to every tenant: {unscoped}"
+
+    def test_the_readers_default_to_the_operator_ledger(self):
+        # None must keep meaning env.sh, or the SSH-tunnel path breaks.
+        import inspect
+
+        import webui
+        for fn in (webui.spa_users_payload, webui.snapshot_payload,
+                   webui.scope_payload, webui.spa_report_payload):
+            assert inspect.signature(fn).parameters["account_id"].default is None
