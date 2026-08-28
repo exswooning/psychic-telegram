@@ -197,6 +197,27 @@ ACTIONS: dict[str, dict] = {
         "blurb": "Retry every FAILED item with the current code.",
         "argv": [PY, "resolve_failures.py"],
     },
+    # The Maintenance page has listed this in MAINTENANCE_KEYS since it was
+    # written, and there was no ACTIONS entry to match -- the page renders
+    # `actions[key] && <JobRunner .../>`, so the slot silently drew nothing.
+    # A working repair tool, reachable only by SSH, behind a UI that already
+    # believed it was offering it.
+    "repair_modified_times_dry": {
+        "label": "Repair Drive timestamps (dry run)",
+        "blurb": "Count files whose target modifiedTime does not match the "
+                 "source. Granting an ACL bumps modifiedTime, so data "
+                 "migrated before that fix is stamped with the migration "
+                 "date -- and neither a re-run nor a delta corrects it.",
+        "argv": [PY, "repair_modified_times.py", "--dry-run"],
+    },
+    "repair_modified_times": {
+        "label": "Repair Drive timestamps",
+        "blurb": "Patch modifiedTime on the target to match the source. "
+                 "Read-only against the source, touches nothing else, safe "
+                 "to re-run.",
+        "argv": [PY, "repair_modified_times.py"],
+    },
+
     "backfill_drive": {
         "label": "Backfill: Drive done",
         "blurb": "Mark Drive complete on a ledger from before per-service "
