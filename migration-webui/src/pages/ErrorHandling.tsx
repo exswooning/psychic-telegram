@@ -62,6 +62,10 @@ const ErrorHandling: React.FC = () => {
         || (f.error_message ?? '').toLowerCase().includes(needle))
     : failures
 
+  // Counted, not filtered out: blocked still belongs on this page,
+  // it just is not a failure.
+  const blockedCount = failures.filter((f) => f.status === 'BLOCKED').length
+
   const byType = new Map<string, number>()
   for (const f of failures) byType.set(f.item_type, (byType.get(f.item_type) ?? 0) + 1)
 
@@ -93,8 +97,16 @@ const ErrorHandling: React.FC = () => {
       <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 3 }}>
         <CardContent>
           <Typography variant="h6" sx={{ fontWeight: 600, mb: 2 }}>
-            By type ({failures.length} total)
+            By type ({failures.length} total
+            {blockedCount > 0 && `, ${blockedCount} blocked`})
           </Typography>
+          {blockedCount > 0 && (
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              Blocked rows are not failures -- they are waiting on something
+              outside this tool, usually a Workspace licence. They retry on
+              their own once that is resolved; nothing here needs a re-run.
+            </Typography>
+          )}
           {byType.size > 0 ? (
             <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', gap: 1 }}>
               {[...byType.entries()].sort((a, b) => b[1] - a[1]).map(([type, count]) => (
@@ -141,7 +153,16 @@ const ErrorHandling: React.FC = () => {
                     </TableCell>
                     <TableCell>{f.source_user}</TableCell>
                     <TableCell>
-                      <Chip size="small" color="error" variant="outlined" label={f.item_type} />
+                      <Stack direction="row" spacing={0.5} alignItems="center">
+                        <Chip size="small" variant="outlined"
+                              color={f.status === 'BLOCKED' ? 'warning' : 'error'}
+                              label={f.item_type} />
+                        {f.status === 'BLOCKED' && (
+                          <Chip size="small" color="warning" variant="filled"
+                                data-testid={`blocked-${f.id}`}
+                                label="waiting on you" />
+                        )}
+                      </Stack>
                     </TableCell>
                     <TableCell sx={{ maxWidth: 480 }}>
                       <Typography variant="body2" noWrap title={f.error_message ?? ''}>

@@ -100,3 +100,52 @@ class TestTheReadersUseTheSameRule:
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         src = open(os.path.join(root, "control_plane_db.py"), encoding="utf-8").read()
         assert 'startswith("SKIPPED")' in src
+
+
+class TestBlockedIsVisibleWithoutBeingCalledAFailure:
+    """BLOCKED means "waiting on you", not "broken".
+
+    An account with no Workspace licence is recorded BLOCKED so it retries
+    the moment a seat frees. But the feed matched FAILED% only, so it
+    vanished from the one page people open to ask what is wrong -- which is
+    worse than the mislabelling it replaced. seeduser382 is the live case:
+    201 accounts against 200 Business Starter seats.
+    """
+
+    def _ledger(self, tmp_path):
+        d = MigrationDB(str(tmp_path / "b.db"))
+        d.log_audit("u1@src", "u1@src", "user", "BLOCKED", "no licence")
+        d.log_audit("u2@src", "i9", "file", "FAILED", "real failure")
+        d.log_audit("u3@src", "i8", "file", "SUCCESS", "")
+        d.conn.commit()
+        d.close()
+        return str(tmp_path / "b.db")
+
+    def test_a_blocked_row_is_listed(self, tmp_path):
+        rows = cpdb.failure_feed(db_path=self._ledger(tmp_path))
+        assert "u1@src" in {r["source_user"] for r in rows}
+
+    def test_it_keeps_its_own_status(self, tmp_path):
+        # The page colours on this; collapsing it to FAILED would put the
+        # error styling back on something that is not an error.
+        rows = cpdb.failure_feed(db_path=self._ledger(tmp_path))
+        blocked = [r for r in rows if r["source_user"] == "u1@src"]
+        assert blocked and blocked[0]["status"] == "BLOCKED"
+
+    def test_real_failures_still_appear(self, tmp_path):
+        rows = cpdb.failure_feed(db_path=self._ledger(tmp_path))
+        assert "u2@src" in {r["source_user"] for r in rows}
+
+    def test_success_still_does_not(self, tmp_path):
+        rows = cpdb.failure_feed(db_path=self._ledger(tmp_path))
+        assert "u3@src" not in {r["source_user"] for r in rows}
+
+    def test_the_page_distinguishes_them(self):
+        import os
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        src = open(os.path.join(root, "migration-webui/src/pages/ErrorHandling.tsx"),
+                   encoding="utf-8").read()
+        assert "f.status === 'BLOCKED' ? 'warning' : 'error'" in src, (
+            "blocked rows still render as errors")
+        assert "waiting on you" in src
+        assert "blockedCount" in src

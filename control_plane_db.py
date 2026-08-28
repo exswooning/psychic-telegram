@@ -266,8 +266,15 @@ def failure_feed(limit: int = 200, source_user: str | None = None,
     # test already writes it -- was counted as neither done, nor failed, nor
     # skipped. It simply vanished from this page and from itemsFailed while
     # activity_payload, which does match by prefix, still showed it failing.
+    # BLOCKED belongs here too. It is not a failure -- it is "waiting on
+    # you", which still wants attention and still needs somewhere to be
+    # seen. Leaving it out meant an account with no Workspace licence
+    # vanished from the one page people open to ask what is wrong, which is
+    # worse than the mislabelling it replaced. The caller renders the two
+    # differently; see ErrorHandling.tsx.
     q = ("SELECT id, source_user, item_id, item_type, status, error_message, "
-         "timestamp FROM audit_log WHERE status LIKE 'FAILED%'")
+         "timestamp FROM audit_log "
+         "WHERE status LIKE 'FAILED%' OR status='BLOCKED'")
     args: list[Any] = []
     if source_user:
         q += " AND source_user=?"
