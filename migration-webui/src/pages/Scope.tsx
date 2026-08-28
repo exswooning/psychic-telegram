@@ -47,10 +47,17 @@ const Scope: React.FC = () => {
 
       {error && <Alert severity="warning" sx={{ mb: 3 }}>{error}</Alert>}
 
-      {actions.export_scope && (
+      {(actions.export_scope || actions.scope) && (
         <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 3 }}>
           <CardContent>
-            <JobRunner name="export_scope" spec={actions.export_scope} />
+            <Stack spacing={2}>
+              {/* "scope" prints what migrates AND the exact OAuth scopes this
+                  configuration needs -- the list to paste into the Admin
+                  console. It had an ACTIONS entry and no button anywhere. */}
+              {actions.scope && <JobRunner name="scope" spec={actions.scope} />}
+              {actions.export_scope &&
+                <JobRunner name="export_scope" spec={actions.export_scope} />}
+            </Stack>
           </CardContent>
         </Card>
       )}

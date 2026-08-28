@@ -102,6 +102,7 @@ const OPERATOR_NAV_ITEMS = [
   { path: '/tests', label: 'Test suite', icon: <TestsIconNav /> },
   { path: '/identities', label: 'Identities', icon: <IdentitiesIconNav /> },
   { path: '/maintenance', label: 'Maintenance', icon: <MaintenanceIconNav /> },
+  { path: '/services', label: 'Other services', icon: <ScopeIconNav /> },
   { path: '/scope', label: 'Scope', icon: <ScopeIconNav /> },
   { path: '/logs', label: 'Logs', icon: <LogsIconNav /> },
   { path: '/gcp-teardown', label: 'GCP Teardown', icon: <TeardownIconNav /> },

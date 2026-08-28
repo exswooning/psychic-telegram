@@ -26,6 +26,7 @@ import AdminAccounts from '@/pages/AdminAccounts'
 import Deploy from '@/pages/Deploy'
 import Identities from '@/pages/Identities'
 import Maintenance from '@/pages/Maintenance'
+import Services from '@/pages/Services'
 import Scope from '@/pages/Scope'
 import Logs from '@/pages/Logs'
 import GcpTeardown from '@/pages/GcpTeardown'
@@ -111,6 +112,7 @@ const App: React.FC = () => {
             <Route path="/deploy" element={<Deploy />} />
             <Route path="/identities" element={<Identities />} />
             <Route path="/maintenance" element={<Maintenance />} />
+            <Route path="/services" element={<Services />} />
             <Route path="/scope" element={<Scope />} />
             <Route path="/logs" element={<Logs />} />
             <Route path="/gcp-teardown" element={<GcpTeardown />} />
