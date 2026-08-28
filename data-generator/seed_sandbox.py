@@ -2052,13 +2052,36 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  ~{mail_count} messages and ~{event_count} events per user")
 
     # Rough forecast so nobody starts a 'huge' run expecting it to take a
-    # minute. Drive sustains roughly 7 successful writes/sec/user in practice.
+    # minute.
+    #
+    # The figure this multiplies by is the whole forecast, so it is worth
+    # saying where it comes from. It was 7 writes/sec/user, which produced
+    # an estimate of 218 minutes for 201 users at 'huge'. Measured on that
+    # exact run:
+    #
+    #     51 users seeded in 181 minutes at 29 parallel workers
+    #     -> 112 minutes of worker time per user
+    #     -> 13,240 writes / 6,720 s  =  ~2.0 writes/sec/user
+    #
+    # a 3.3x miss, which is the difference between "start it after lunch"
+    # and "this finishes tomorrow". 7 was plausibly right for a small scale
+    # where most writes are small files; it is not what a tenant sustains
+    # under a corpus this size.
+    #
+    # Overridable because it is a property of the tenant and the day, not of
+    # this code: a quieter tenant, a smaller scale or a raised quota all move
+    # it, and a number baked in here goes stale next to the comment that
+    # explains it.
+    writes_per_sec = float(os.getenv("SEED_WRITES_PER_SEC_PER_USER", "2.0"))
     est_files = cfg["per_leaf"] * 60 + cfg["wide"] + cfg["archive_years"] * 4 * (
         cfg["per_leaf"] // 3 or 1)
     est_calls = (est_files + mail_count + event_count) * len(entries)
-    est_min = est_calls / (min(args.workers, len(entries)) * 7) / 60
-    print(f"  estimated ~{est_calls:,} API writes, roughly {est_min:.0f} minute(s) "
-          f"at {args.workers} parallel users\n")
+    est_min = est_calls / (min(args.workers, len(entries)) * writes_per_sec) / 60
+    est_h, est_m = divmod(int(est_min), 60)
+    pretty = f"{est_h}h {est_m}m" if est_h else f"{est_m} minute(s)"
+    print(f"  estimated ~{est_calls:,} API writes, roughly {pretty} "
+          f"at {args.workers} parallel users "
+          f"({writes_per_sec:g} writes/sec/user)\n")
     if est_min > 5 and not args.yes:
         if input("This is a long run. Continue? [y/N] ").strip().lower() != "y":
             print("Aborted.")
