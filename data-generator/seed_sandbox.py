@@ -1781,6 +1781,16 @@ def main(argv: list[str] | None = None) -> int:
                  "many accounts to create, so it only acts on that path.")
     if args.fit_to_licenses and args.reset:
         sys.exit("--fit-to-licenses makes no sense with --reset.")
+    # Before ANY username is generated. --create-until-full builds its
+    # candidate list far earlier than the seeding path does, so a later
+    # assignment silently produced unprefixed accounts: a run asked for
+    # "r2-" and created fiona@, george@, hannah@ -- exactly the names it
+    # had just deleted, which is the collision the prefix exists to avoid.
+    if args.localpart_prefix:
+        global GENERATED_PREFIX
+        GENERATED_PREFIX = args.localpart_prefix.strip()
+        print(f"Generated usernames will be prefixed {GENERATED_PREFIX!r}")
+
     if args.create_until_full and not args.create_users:
         sys.exit("--create-until-full requires --create-users.")
     if args.create_until_full and args.reset:
@@ -1936,11 +1946,6 @@ def main(argv: list[str] | None = None) -> int:
         # Freshly created accounts take a moment before delegation works.
         print("\nWaiting 20s for new accounts to become usable ...")
         time.sleep(20)
-
-    if args.localpart_prefix:
-        global GENERATED_PREFIX
-        GENERATED_PREFIX = args.localpart_prefix.strip()
-        print(f"Generated usernames will be prefixed {GENERATED_PREFIX!r}")
 
     # Resolve the pool size before either branch. --workers 0 means "size it
     # to this machine"; the reset path used to run before that resolution and

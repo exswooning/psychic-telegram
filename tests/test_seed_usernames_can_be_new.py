@@ -153,3 +153,43 @@ class TestAnEmptyTenantCanBeFilledFromTheForm:
                       encoding="utf-8").read()
         assert "--create-until-full replaces --users/--all-users/" in seeder
         assert "--create-until-full requires --create-users." in seeder
+
+
+class TestThePrefixIsSetBeforeAnyNameIsGenerated:
+    """Ordering, not logic, is what broke this.
+
+    _generated_localpart honoured GENERATED_PREFIX correctly and the unit
+    tests above passed -- but main() assigned it ~140 lines AFTER
+    --create-until-full had already built its candidate list. A run asked
+    for "r2-" and created fiona@, george@, hannah@: exactly the names it had
+    just deleted, which is the collision the prefix exists to prevent.
+
+    A test that only checks _generated_localpart cannot see this. It has to
+    look at the order things happen in main().
+    """
+
+    def _main_src(self):
+        import inspect
+
+        import seed_sandbox
+        return inspect.getsource(seed_sandbox.main)
+
+    def test_the_prefix_is_assigned_before_create_until_full(self):
+        src = self._main_src()
+        assert src.index("GENERATED_PREFIX = args.localpart_prefix") < \
+            src.index("if args.create_until_full:")
+
+    def test_the_prefix_is_assigned_before_candidates_are_built(self):
+        src = self._main_src()
+        assert src.index("GENERATED_PREFIX = args.localpart_prefix") < \
+            src.index("_candidates()")
+
+    def test_it_is_assigned_only_once(self):
+        # Two assignments would mean one of them is the stale path again.
+        assert self._main_src().count(
+            "GENERATED_PREFIX = args.localpart_prefix") == 1
+
+    def test_the_comment_records_why(self):
+        src = self._main_src()
+        head = src[:src.index("GENERATED_PREFIX = args.localpart_prefix")]
+        assert "before any username is generated" in head.lower()

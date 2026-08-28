@@ -433,8 +433,13 @@ const SeedStep: React.FC = () => {
           />
         </Grid>
         <Grid item xs={6} sm={2.5}>
+          {/* Four controls in this app are labelled "Create users", two of
+              them visible on this tab (the sign-in card renders here too).
+              Addressable by testid so nothing has to guess by position --
+              the same fix the two "Scale" selects needed. */}
           <FormControlLabel
             control={<Checkbox checked={createUsers}
+                              data-testid="seed-form-create-users"
                               onChange={(e) => setCreateUsers(e.target.checked)} />}
             label={<Typography variant="body2">Create users</Typography>}
           />
