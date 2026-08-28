@@ -17,6 +17,7 @@ import JobRunner from '@/components/JobRunner'
  */
 const MAINTENANCE_KEYS = [
   'backup_now', 'backup_list',
+  'audit_prune_dry', 'audit_prune',
   'resolve_dry', 'resolve',
   'repair_modified_times_dry', 'repair_modified_times', 'backfill_drive',
   'undo_dry', 'undo',

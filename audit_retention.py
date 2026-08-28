@@ -113,6 +113,13 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         description="Collapse SUCCESS rows of finished users into counts.")
     p.add_argument("--account-id", type=int)
+    p.add_argument("--vacuum", action="store_true",
+                   help="reclaim the freed pages to the filesystem. Without "
+                        "this the rows go but the FILE does not shrink -- "
+                        "SQLite keeps the pages for reuse, which is the "
+                        "right default and not what someone watching a full "
+                        "disk wants. Needs free space roughly equal to the "
+                        "database, and holds a write lock while it runs.")
     p.add_argument("--apply", action="store_true",
                    help="actually prune (default: report only)")
     args = p.parse_args(argv)
@@ -141,7 +148,28 @@ def main(argv: list[str] | None = None) -> int:
         print(f"audit_log rows now      : {after:,}")
         ok, detail = counts_match(db)
         print(f"count check             : {'OK' if ok else 'FAILED'} -- {detail}")
-        return 0 if ok else 1
+        if not ok:
+            # Never reclaim on top of a failed check: VACUUM rewrites the
+            # file, and doing that while the counts disagree destroys the
+            # evidence needed to work out why.
+            print("skipping --vacuum: the count check must pass first")
+            return 1
+        if args.vacuum:
+            import os
+            import shutil
+            size = os.path.getsize(settings.db_path)
+            free = shutil.disk_usage(os.path.dirname(settings.db_path) or ".").free
+            if free < int(size * 1.2):
+                print(f"skipping --vacuum: needs ~{size * 1.2 / 1e9:.1f} GB "
+                      f"free, {free / 1e9:.1f} GB available")
+                return 0
+            print(f"vacuuming {size / 1e9:.2f} GB ...")
+            db.conn.execute("VACUUM")
+            now = os.path.getsize(settings.db_path)
+            print(f"file size               : {size / 1e9:.2f} GB -> "
+                  f"{now / 1e9:.2f} GB "
+                  f"(reclaimed {(size - now) / 1e9:.2f} GB)")
+        return 0
     finally:
         db.close()
 

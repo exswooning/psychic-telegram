@@ -201,6 +201,25 @@ ACTIONS: dict[str, dict] = {
     # what a migration moved was one SQLite file on one box, 5.7 GB of it
     # for a single account. VACUUM INTO rather than a copy, because a live
     # ledger has committed pages in the WAL the main file does not have yet.
+    # audit_log records every attempt and nothing ever removed one. On the
+    # live box one account's ledger reached 5.7 GB, ~99.5% of it SUCCESS
+    # rows describing work id_mapping already proves happened -- on a disk
+    # 67% full. The tool to collapse them has existed all along with no way
+    # to run it.
+    "audit_prune_dry": {
+        "label": "Prune audit log (dry run)",
+        "blurb": "How many SUCCESS rows could be collapsed into counts. "
+                 "Only finished users, never a FAILED or SKIPPED row, and "
+                 "the counts move to audit_rollup rather than being lost.",
+        "argv": [PY, "audit_retention.py"],
+    },
+    "audit_prune": {
+        "label": "Prune audit log",
+        "blurb": "Collapse them, verify the counts still add up, then "
+                 "reclaim the freed space to the filesystem.",
+        "argv": [PY, "audit_retention.py", "--apply", "--vacuum"],
+    },
+
     "backup_now": {
         "label": "Back up the ledgers",
         "blurb": "Consistent, verified copy of the control plane and every "
