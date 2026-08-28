@@ -306,10 +306,19 @@ def _installed_browser_launch(p, headful: bool):
     return p.chromium.launch(headless=not headful, args=root_args, env=env)
 
 
-def _open_dwd_console(p, headful: bool, timeout: int):
+DWD_URL = "https://admin.google.com/ac/owl/domainwidedelegation"
+
+
+def _open_dwd_console(p, headful: bool, timeout: int, url: str = DWD_URL,
+                      ready_prefix: str = "https://admin.google.com/ac/owl/"):
     """Launch a browser, sign in (best-effort auto-fill, human fallback),
-    and land on the Domain-Wide Delegation console with its onboarding
-    banner dismissed.
+    and land on an Admin console page with its onboarding banner dismissed.
+
+    `url`/`ready_prefix` are parameters so a second console tool can reuse
+    this sign-in rather than copy two hundred lines of Google login
+    handling -- see dms_migrate.py, which lands on the Data Migration page.
+    Both default to Domain-Wide Delegation, so every existing caller is
+    unchanged.
 
     Shared by run() (add/edit a grant) and revoke() (remove one) -- both
     need nothing else before they diverge into their own console actions.
@@ -320,8 +329,7 @@ def _open_dwd_console(p, headful: bool, timeout: int):
     browser = _installed_browser_launch(p, headful)
     page = browser.new_page()
     nav = max(timeout * 1000, 30000)
-    page.goto("https://admin.google.com/ac/owl/domainwidedelegation",
-              wait_until="domcontentloaded", timeout=nav)
+    page.goto(url, wait_until="domcontentloaded", timeout=nav)
 
     log("SIGN IN BY HAND now (password, 2FA, SSO...). "
         f"I will wait up to {timeout}s for the console to load.")
@@ -417,8 +425,8 @@ def _open_dwd_console(p, headful: bool, timeout: int):
                 last_title = t
         if admin_page is not None:
             page = admin_page
-            if not page.url.startswith("https://admin.google.com/ac/owl/"):
-                page.goto("https://admin.google.com/ac/owl/domainwidedelegation",
+            if not page.url.startswith(ready_prefix):
+                page.goto(url,
                           wait_until="domcontentloaded", timeout=nav)
                 page.wait_for_timeout(1500)
             if page.locator("text=Add new").count() > 0:

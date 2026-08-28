@@ -3,6 +3,9 @@ import { useParams, useNavigate } from 'react-router-dom'
 import {
   Alert, Box, Button, Chip, CircularProgress, IconButton, Paper, Stack,
   Table, TableBody, TableCell, TableHead, TableRow, TextField, Typography,
+  RadioGroup,
+  Radio,
+  FormControlLabel,
 } from '@mui/material'
 import {
   Refresh as RefreshIcon, ArrowBack as BackIcon,
@@ -53,6 +56,7 @@ export const MigrationDetail: React.FC = () => {
      "Start a new migration" on the list page opens the setup wizard for a
      new tenant pair, which is a different thing entirely. */
   const [askFull, setAskFull] = useState(false)
+  const [mailBy, setMailBy] = useState('engine')
   const [fullBusy, setFullBusy] = useState(false)
   const [fullError, setFullError] = useState<string | null>(null)
   const [deltaError, setDeltaError] = useState<string | null>(null)
@@ -567,13 +571,58 @@ export const MigrationDetail: React.FC = () => {
             changed in a short window, so it would re-copy only recent mail
             and events and leave everything older unmigrated. Anything still
             in the ledger is skipped, so this is safe to re-run.
+            {/* Mail was 349,560 of 593,816 items in the last real run --
+                58.9% -- and it is the only service behind a ceiling that
+                cannot be raised (3 sustained writes/sec/account, which
+                Google states is not adjustable). Handing it to Google's own
+                Data Migration Service sidesteps that limit instead of
+                pacing against it. Offered as a choice, not a default: DMS
+                gives per-user console status, not the per-item ledger that
+                makes a re-run here idempotent. */}
+            <Box sx={{ mt: 2 }}>
+              <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 0.5 }}>
+                Who moves the mail?
+              </Typography>
+              <RadioGroup value={mailBy}
+                          onChange={(e) => setMailBy(e.target.value)}>
+                <FormControlLabel
+                  value="engine" control={<Radio size="small" />}
+                  data-testid="mail-by-engine"
+                  label={
+                    <Typography variant="body2">
+                      <strong>This tool</strong> — full per-item ledger, exact
+                      failure accounting, idempotent re-runs. Paced against
+                      3 writes/sec/account, so mail sets the run&apos;s length.
+                    </Typography>
+                  } />
+                <FormControlLabel
+                  value="dms" control={<Radio size="small" />}
+                  data-testid="mail-by-dms"
+                  label={
+                    <Typography variant="body2">
+                      <strong>Google Data Migration Service</strong> — moves
+                      mail inside Google, spending none of this
+                      project&apos;s Gmail quota. Set it up in the Admin
+                      console (Nodes → Deploy has the helper); this run then
+                      migrates everything <em>except</em> mail, so nothing is
+                      copied twice. You give up the per-item ledger for mail.
+                    </Typography>
+                  } />
+              </RadioGroup>
+            </Box>
           </>
         }
         onCancel={() => { setAskFull(false); setFullError(null) }}
         onConfirm={async (reason: string) => {
           setFullBusy(true); setFullError(null)
           try {
-            const r = await startMigration(reason, ['all'], [], false,
+            // Excluding mail is the whole point of choosing DMS: running
+            // both would insert every message twice, and the ledger cannot
+            // see what Google moved internally.
+            const services = mailBy === 'dms'
+              ? ['drive', 'calendar', 'contacts', 'tasks', 'chat']
+              : ['all']
+            const r = await startMigration(reason, services, [], false,
                                            Number(accountId))
             if (!r.ok) throw new Error(r.detail || 'could not start')
             setAskFull(false)
