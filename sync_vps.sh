@@ -79,12 +79,34 @@ if ! "${SSH[@]}" "$TARGET" "cd $DEST && .venv/bin/python3 -m compileall -q . \
 fi
 echo "  syntax ok under the target's Python"
 
-COMMIT="$(cd "$(dirname "$0")" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-if [[ -n "$(cd "$(dirname "$0")" && git status --porcelain 2>/dev/null)" ]]; then
+REPO="$(dirname "$0")"
+COMMIT="$(cd "$REPO" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+DIRTY="$(cd "$REPO" && git status --porcelain 2>/dev/null)"
+if [[ -n "$DIRTY" ]]; then
   COMMIT="$COMMIT-dirty"
 fi
 "${SSH[@]}" "$TARGET" "printf '%s\n' '$COMMIT' > $DEST/DEPLOYED_COMMIT"
 echo "  stamped DEPLOYED_COMMIT=$COMMIT"
+
+# Say it out loud. Both of these shipped silently once and cost real time to
+# untangle: a deploy stamped 204168a-dirty -- code matching no commit, so
+# neither reproducible nor revertable -- while nine commits sat unpushed on
+# a single box with no copy anywhere. Warn, never block: a hotfix from a
+# dirty tree is a legitimate thing to want at 3am. The point is that the
+# operator knows which one they just did.
+if [[ -n "$DIRTY" ]]; then
+  echo "  WARNING: deployed from a DIRTY tree -- what is now running matches" >&2
+  echo "           no commit, cannot be reproduced, and cannot be reverted to." >&2
+  echo "$DIRTY" | head -5 | sed 's/^/             /' >&2
+  [[ $(echo "$DIRTY" | wc -l) -gt 5 ]] && echo "             ... $(echo "$DIRTY" | wc -l) files total" >&2
+fi
+if UPSTREAM="$(cd "$REPO" && git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null)"; then
+  AHEAD="$(cd "$REPO" && git rev-list --count "$UPSTREAM"..HEAD 2>/dev/null || echo 0)"
+  if [[ "$AHEAD" != "0" ]]; then
+    echo "  WARNING: $AHEAD commit(s) not pushed to $UPSTREAM -- this deploy" >&2
+    echo "           exists only on this machine and the target." >&2
+  fi
+fi
 
 # Restart both servers, then PROVE each restart happened.
 #
