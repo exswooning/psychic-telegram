@@ -109,3 +109,47 @@ class TestTheFormOffersIt:
             os.path.join(ROOT, "migration-webui/src/pages/SeedWizard.tsx"),
             encoding="utf-8").read())
         assert "20 days" in src and "Entity already exists" in src
+
+
+class TestAnEmptyTenantCanBeFilledFromTheForm:
+    """After a wipe there is one account left -- the admin.
+
+    "Create users" creates the accounts the tenant already implies, so it
+    found one and the run ended "FAILED: 0 of 1 users seeded". The flag
+    that generates its own candidates existed in client.ts and the form
+    never offered it, so filling an empty tenant was impossible from the
+    UI.
+
+    It is also the honest way to meet a domain user limit: deleted accounts
+    hold their slots for 20 days, so no count known in advance is right --
+    creating until the Directory API refuses is the only thing that is.
+    """
+
+    def _src(self):
+        return open(os.path.join(ROOT, "migration-webui/src/pages/SeedWizard.tsx"),
+                    encoding="utf-8").read()
+
+    def test_the_form_offers_it(self):
+        assert "seed-form-until-full" in self._src()
+
+    def test_it_is_wired_to_the_call(self):
+        src = self._src()
+        assert "allUsers, createUntilFull" in src, (
+            "the checkbox exists but the request still sends undefined")
+
+    def test_it_is_off_by_default(self):
+        # It creates real accounts; that must be asked for.
+        assert "useState(false)" in self._src().split("createUntilFull")[1][:80]
+
+    def test_the_form_says_what_it_is_for(self):
+        import re
+        src = re.sub(r"\s+", " ", self._src())
+        assert "fills an empty tenant" in src
+
+    def test_the_seeder_still_refuses_the_bad_combinations(self):
+        """--create-until-full replaces --users/--all-users/--fit-to-licenses
+        rather than combining with them."""
+        seeder = open(os.path.join(ROOT, "data-generator/seed_sandbox.py"),
+                      encoding="utf-8").read()
+        assert "--create-until-full replaces --users/--all-users/" in seeder
+        assert "--create-until-full requires --create-users." in seeder

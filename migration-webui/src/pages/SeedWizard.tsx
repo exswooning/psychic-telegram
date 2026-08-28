@@ -345,6 +345,7 @@ const SeedStep: React.FC = () => {
   const [scale, setScale] = useState('small')
   const [workers, setWorkers] = useState('')
   const [prefix, setPrefix] = useState('')
+  const [createUntilFull, setCreateUntilFull] = useState(false)
   const [createUsers, setCreateUsers] = useState(false)
   const [allUsers, setAllUsers] = useState(false)
   const [reset, setReset] = useState(false)
@@ -356,7 +357,7 @@ const SeedStep: React.FC = () => {
     setErr(null)
     setJobActive(false)
     const r = await runSeed(confirmDomain, scale, createUsers, reset,
-                            allUsers, undefined, workers, prefix)
+                            allUsers, createUntilFull, workers, prefix)
     if (r.ok) setJobActive(true)
     else setErr(r.error || 'could not start')
   }
@@ -408,6 +409,27 @@ const SeedStep: React.FC = () => {
             inputProps={{ 'data-testid': 'seed-form-workers' }}
             value={workers} onChange={(e) => setWorkers(e.target.value)}
             helperText="blank = auto"
+          />
+        </Grid>
+        <Grid item xs={6} sm={3}>
+          {/* The only way to populate an EMPTY tenant from here. "Create
+              users" alone creates the accounts the tenant already implies,
+              so after a wipe it finds one (the admin) and seeds one. This
+              generates its own candidates and creates them one at a time
+              until the Directory API refuses -- which is also the honest
+              way to meet a domain user limit, since deleted accounts hold
+              their slots for 20 days and no count known in advance is
+              right. */}
+          <FormControlLabel
+            control={<Checkbox checked={createUntilFull}
+                              data-testid="seed-form-until-full"
+                              onChange={(e) => setCreateUntilFull(e.target.checked)} />}
+            label={<Typography variant="body2">
+              Create until full<br />
+              <Typography component="span" variant="caption" color="text.secondary">
+                fills an empty tenant
+              </Typography>
+            </Typography>}
           />
         </Grid>
         <Grid item xs={6} sm={2.5}>
