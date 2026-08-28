@@ -1782,6 +1782,41 @@ def seed_argv(body: dict, account_id: int | None = None) -> tuple[list[str], dic
         argv.append("--all-users")
     if body.get("reset"):
         argv.append("--reset")
+    # Parallel users. Blank means "size it to this machine" -- seed_sandbox
+    # asks resources.recommend(), which budgets memory per worker and is the
+    # right default. An override exists because that budget is deliberately
+    # conservative and an operator watching a run may know better.
+    #
+    # Ceiling derived, never hardcoded: a seed worker costs real memory
+    # (~101 MB measured), so the cap follows the machine's own recommendation
+    # rather than a number that goes stale next time the box changes. Twice
+    # the recommendation is the most that has ever been reasonable; beyond
+    # that the kernel kills the seed hours in, which is strictly worse than
+    # seeding slowly.
+    workers = body.get("workers")
+    if workers not in (None, "", 0, "0"):
+        try:
+            n = int(workers)
+        except (TypeError, ValueError):
+            return [], {}, f"workers must be a whole number, got {workers!r}"
+        if n < 1:
+            return [], {}, "workers must be at least 1"
+        try:
+            import resources
+            rec = resources.recommend()
+            safe = int(rec.get("seed_workers") or 1)
+        except Exception:      # noqa: BLE001 - never block a seed on the probe
+            safe = n
+        ceiling = max(safe * 2, 1)
+        if n > ceiling:
+            return [], {}, (
+                f"{n} workers is more than this machine can hold. It sizes "
+                f"itself to {safe} ({rec.get('seed_reason') or 'memory'}), "
+                f"and {ceiling} is the most this will accept -- past that the "
+                f"kernel kills the seed part-way through, which costs more "
+                f"than seeding slowly.")
+        argv += ["--workers", str(n)]
+
     target_gb = body.get("target_gb_per_user")
     if target_gb:
         try:

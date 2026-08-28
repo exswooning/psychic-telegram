@@ -343,6 +343,7 @@ const SeedScopesCard: React.FC<{ dwd: DwdPayload | null }> = ({ dwd }) => {
 const SeedStep: React.FC = () => {
   const [confirmDomain, setConfirmDomain] = useState('')
   const [scale, setScale] = useState('small')
+  const [workers, setWorkers] = useState('')
   const [createUsers, setCreateUsers] = useState(false)
   const [allUsers, setAllUsers] = useState(false)
   const [reset, setReset] = useState(false)
@@ -353,7 +354,8 @@ const SeedStep: React.FC = () => {
   const start = async () => {
     setErr(null)
     setJobActive(false)
-    const r = await runSeed(confirmDomain, scale, createUsers, reset, allUsers)
+    const r = await runSeed(confirmDomain, scale, createUsers, reset,
+                            allUsers, undefined, workers)
     if (r.ok) setJobActive(true)
     else setErr(r.error || 'could not start')
   }
@@ -381,6 +383,19 @@ const SeedStep: React.FC = () => {
               <MenuItem key={s} value={s}>{s}</MenuItem>
             ))}
           </TextField>
+        </Grid>
+        <Grid item xs={12} sm={2}>
+          {/* Blank = size to the machine (resources.recommend budgets memory
+              per worker). Offered because that budget is deliberately
+              conservative; the server refuses anything past twice it, since
+              a seed the kernel kills hours in costs more than a slow one. */}
+          <TextField
+            fullWidth size="small" label="Parallel users"
+            placeholder="auto"
+            inputProps={{ 'data-testid': 'seed-form-workers' }}
+            value={workers} onChange={(e) => setWorkers(e.target.value)}
+            helperText="blank = auto"
+          />
         </Grid>
         <Grid item xs={6} sm={2.5}>
           <FormControlLabel

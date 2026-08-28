@@ -424,7 +424,8 @@ export async function runSeed(
   createUsers: boolean,
   reset: boolean,
   allUsers?: boolean,
-  createUntilFull?: boolean
+  createUntilFull?: boolean,
+  workers?: string
 ): Promise<SeedResult> {
   const res = await fetch('/api/seed', {
     method: 'POST',
@@ -436,6 +437,10 @@ export async function runSeed(
       reset,
       all_users: allUsers,
       create_until_full: createUntilFull,
+      // Blank = size to the machine. The server refuses anything past twice
+      // its own recommendation; a seed the kernel kills hours in costs more
+      // than a slow one.
+      workers: workers || undefined,
     }),
   })
   return res.json()
