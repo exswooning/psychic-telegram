@@ -2613,12 +2613,64 @@ _LAUNCH_KEYS = ("migrate", "delta")
 _PHASE_GATED_ACTIONS = ("phased_migrate", "phased_count_only")
 
 
-def _service_env() -> dict:
-    """gcloud_env(), plus the per-user service toggles made explicit."""
+# Which ledger item types prove a service ran. Mirrors main.py's
+# _SERVICE_ITEMS -- the same question asked for the same reason.
+_SERVICE_ITEMS = {
+    "chat": ("space", "chat_message"),
+    "contacts": ("contact", "contact_group"),
+    "tasks": ("task", "task_list"),
+}
+
+
+def _services_in_ledger(account_id: int | None) -> set:
+    """Which optional services this migration actually moved something for.
+
+    A verification pass must check what was DONE, not what the toggles
+    happen to say now. Live: a reconcile over a run that had migrated 4,975
+    contacts and 3,980 tasks reported
+
+        note: contacts requested but MIGRATE_CONTACTS is off -- skipping.
+        note: tasks requested but MIGRATE_TASKS is off -- skipping.
+
+    and went on to compare three services out of six. The toggles default
+    those off, and they had never been turned on in this process -- so the
+    fidelity check silently covered half the migration while presenting
+    itself as the fidelity check.
+    """
+    conn = _db_conn(account_id)
+    if conn is None:
+        return set()
+    found = set()
+    try:
+        for svc, types in _SERVICE_ITEMS.items():
+            marks = ",".join("?" * len(types))
+            row = conn.execute(
+                f"SELECT 1 FROM audit_log WHERE item_type IN ({marks}) "
+                "AND status='SUCCESS' LIMIT 1", types).fetchone()
+            if row:
+                found.add(svc)
+    except Exception as exc:      # noqa: BLE001 - never block an action
+        log.warning("could not read services from the ledger: %r", exc)
+    finally:
+        conn.close()
+    return found
+
+
+def _service_env(account_id: int | None = None,
+                 from_ledger: bool = False) -> dict:
+    """gcloud_env(), plus the per-user service toggles made explicit.
+
+    from_ledger unions in whatever the ledger proves was migrated, so a
+    verification pass covers the run it is verifying rather than the
+    checkboxes someone last touched.
+    """
     env = gcloud_env()
+    on = {k for k, v in _RUN_STATE["services"].items() if v}
+    if from_ledger:
+        on |= _services_in_ledger(account_id)
     for key, flag in (("chat", "MIGRATE_CHAT"), ("contacts", "MIGRATE_CONTACTS"),
                       ("tasks", "MIGRATE_TASKS")):
-        env[flag] = "true" if _RUN_STATE["services"].get(key) else "false"
+        env[flag] = "true" if key in on else "false"
     return env
 
 
@@ -3896,7 +3948,13 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": False, "error": "subscription inactive"}, 402)
             return
 
-        base = _service_env() if name in _PHASE_GATED_ACTIONS else gcloud_env()
+        # count-only verifies; phased_migrate performs. Only the verifier
+        # widens itself from the ledger -- a migration must still do exactly
+        # what its checkboxes say, or a toggle would mean nothing.
+        if name in _PHASE_GATED_ACTIONS:
+            base = _service_env(account_id, from_ledger=(name == "phased_count_only"))
+        else:
+            base = gcloud_env()
         env = _account_env(account_id, base)
         admitted, admit_msg = job_admission.try_admit(account_id, spec["label"])
         if not admitted:
