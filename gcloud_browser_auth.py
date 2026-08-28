@@ -552,6 +552,44 @@ def _save_chat_diagnostics(page, project: str, tag: str) -> None:
         pass
 
 
+def _open_chat_configuration_tab(page, attempts: int = 3) -> bool:
+    """Click through to the Chat app form, or report that it is not there.
+
+    Several candidate selectors because the console renders this as a tab, a
+    link, or a left-nav item depending on rollout and viewport -- and a
+    single brittle one is how this whole step silently stopped working.
+
+    Returns True if the form is reachable, including when it is already open
+    (a reload can land straight on it), so the caller never has to know
+    which of those happened.
+    """
+    for _ in range(attempts):
+        # Already there? The name field is the only proof that matters.
+        for sel in _CHAT_NAME_SEL:
+            loc = page.locator(sel)
+            if loc.count() > 0 and loc.first.is_visible():
+                return True
+        for sel in ('a:has-text("Configuration")',
+                    'button:has-text("Configuration")',
+                    '[role="tab"]:has-text("Configuration")',
+                    'text="Configuration"'):
+            loc = page.locator(sel)
+            if loc.count() > 0 and loc.first.is_visible():
+                try:
+                    loc.first.click()
+                    page.wait_for_timeout(4000)   # the form renders client-side
+                except Exception:      # noqa: BLE001 - try the next shape
+                    continue
+                break
+        else:
+            page.wait_for_timeout(1500)
+    for sel in _CHAT_NAME_SEL:
+        loc = page.locator(sel)
+        if loc.count() > 0 and loc.first.is_visible():
+            return True
+    return False
+
+
 def _fill_chat_app_form(page, project: str, timeout: int) -> tuple[bool, str]:
     """Best-effort, same shape as _accept_cloud_console_tos: types a
     default app name, sets status to LIVE if that control is found, and
@@ -564,6 +602,23 @@ def _fill_chat_app_form(page, project: str, timeout: int) -> tuple[bool, str]:
     leaving the form in an error state that blocks Save entirely.
     """
     _save_chat_diagnostics(page, project, "before-fill")
+
+    # The app form lives behind the Configuration tab. The hangouts-chat URL
+    # lands on the API's service-details overview -- "Status: Enabled", with
+    # tabs for Metrics, Quotas & System Limits, Credentials and
+    # Configuration -- and the name field simply is not rendered until that
+    # last one is opened.
+    #
+    # Confirmed from this function's own saved diagnostics: the page it gave
+    # up on was the overview, captured in full, with no form on it at all.
+    # It reported "console may have changed", which sent the reader looking
+    # for a redesign instead of a missing click, and Chat was never
+    # configured on any tenant this tool set up.
+    if not _open_chat_configuration_tab(page):
+        _save_chat_diagnostics(page, project, "no-configuration-tab")
+        return False, ("the Chat API page has no Configuration tab -- the "
+                       "API may not be enabled on this project yet, or this "
+                       "account cannot administer it")
 
     name_box = None
     for sel in _CHAT_NAME_SEL:

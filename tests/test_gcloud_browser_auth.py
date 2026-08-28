@@ -570,13 +570,21 @@ class TestFillChatAppForm:
         assert page.name_field.typed is None
 
     def test_missing_name_field_reports_clearly_without_touching_anything_else(self):
-        """A console redesign that moves the name field must degrade to a
-        distinguishable failure, not silently click Save on a blank form."""
+        """A console that does not show the name field must degrade to a
+        distinguishable failure, not silently click Save on a blank form.
+
+        The message changed once the Configuration tab was understood: this
+        fake renders neither the tab nor the field, which is now reported as
+        the tab being absent rather than as a form redesign. That is the
+        more accurate of the two -- the old wording sent readers looking for
+        a console change when the real cause was a missing click.
+        """
         page = _FakeChatFormPage(name_field=None, status_label="LIVE", save_label="SAVE")
         ok, detail = ga._fill_chat_app_form(page, "wsmig-src-12345", timeout=30)
 
         assert ok is False
-        assert "app name field" in detail
+        assert "Configuration tab" in detail or "app name field" in detail
+        # The part that actually matters and has not changed.
         assert page.status_control.clicked is False
         assert page.save_button.clicked is False
 
