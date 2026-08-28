@@ -111,3 +111,55 @@ class TestScopeGotItsOwnAction:
                    encoding="utf-8").read()
         assert 'name="scope"' in src
         assert 'name="export_scope"' in src
+
+
+class TestThePhasedRunCanChooseItsServices:
+    """The switches those two actions read had no UI at all.
+
+    _RUN_STATE's chat/contacts/tasks default OFF, and the phased actions
+    read them from there rather than from a per-run --services flag. So
+    "Migrate: full scope" would silently cover three services of six, and
+    nothing on screen said which. The reconcile hit exactly this: it
+    skipped chat, contacts and tasks over a run that had migrated 4,975
+    contacts and 3,980 tasks.
+
+    setToggles existed in client.ts and no page called it. There was also
+    no GET, so a UI could only discover the state by mutating it.
+    """
+
+    def _page(self):
+        return open(os.path.join(ROOT, "migration-webui/src/pages/Services.tsx"),
+                    encoding="utf-8").read()
+
+    def test_the_three_optional_services_are_offered(self):
+        src = self._page()
+        for k in ("chat", "contacts", "tasks"):
+            assert f"toggle-{k}" in src or "'chat', 'contacts', 'tasks'" in src
+
+    def test_the_switches_are_read_from_the_server(self):
+        src = self._page()
+        assert "fetchToggles()" in src, "the page would render what it assumed"
+
+    def test_flipping_one_persists_it(self):
+        assert "setToggles(" in self._page()
+
+    def test_the_state_is_readable_over_GET(self):
+        src = open(os.path.join(ROOT, "webui.py"), encoding="utf-8").read()
+        block = src.split('elif path == "/api/toggles":')[1][:400]
+        assert "_RUN_STATE" in block
+
+    def test_the_client_has_a_getter(self):
+        src = open(os.path.join(ROOT, "migration-webui/src/api/client.ts"),
+                   encoding="utf-8").read()
+        assert "export async function fetchToggles" in src
+
+    def test_the_page_says_why_they_are_opt_in(self):
+        # A scope the console has not granted fails every call for that
+        # service -- that is why these are not simply on.
+        import re
+        src = re.sub(r"\s+", " ", self._page())
+        assert "widen the OAuth grant" in src
+
+    def test_a_failed_toggles_fetch_does_not_break_the_page(self):
+        src = self._page()
+        assert "the actions still work without the switches" in src

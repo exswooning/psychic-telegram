@@ -1,9 +1,12 @@
 import React, { useEffect, useState } from 'react'
 import {
-  Alert, Box, Card, CardContent, Stack, Typography,
+  Alert, Box, Card, CardContent, Checkbox, FormControlLabel, Stack,
+  Typography,
 } from '@mui/material'
 import { Hub as ServicesIcon } from '@mui/icons-material'
-import { fetchActions, ActionSpec } from '@/api/client'
+import {
+  fetchActions, fetchToggles, setToggles, ActionSpec,
+} from '@/api/client'
 import JobRunner from '@/components/JobRunner'
 
 /**
@@ -22,10 +25,30 @@ import JobRunner from '@/components/JobRunner'
 const Services: React.FC = () => {
   const [actions, setActions] = useState<Record<string, ActionSpec>>({})
   const [err, setErr] = useState<string | null>(null)
+  // The phased actions below read these from the server, not from the
+  // per-run --services flag. They default OFF, so without this the
+  // full-scope button silently skipped Chat, Contacts and Tasks and
+  // nothing on screen said so.
+  const [svc, setSvc] = useState<Record<string, boolean>>({})
+  const [dry, setDry] = useState(false)
 
   useEffect(() => {
     fetchActions().then(setActions).catch((e) => setErr(String(e)))
+    fetchToggles()
+      .then((t) => { setSvc(t.toggles.services || {}); setDry(!!t.toggles.dry_run) })
+      .catch(() => { /* the actions still work without the switches */ })
   }, [])
+
+  const flip = async (key: string, on: boolean) => {
+    const next = { ...svc, [key]: on }
+    setSvc(next)
+    try {
+      const t = await setToggles(next, dry)
+      setSvc(t.toggles.services || next)
+    } catch (e) {
+      setErr(String(e))
+    }
+  }
 
   const has = (k: string) => Boolean(actions[k])
 
@@ -99,6 +122,23 @@ const Services: React.FC = () => {
             <Typography variant="h6" sx={{ fontWeight: 600, mb: 1 }}>
               Full-scope run
             </Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+              Which services these two cover. Drive, Gmail and Calendar are
+              always included; these three each widen the OAuth grant, and a
+              scope the Admin console has not authorised fails every call for
+              that service — so they are opt-in.
+            </Typography>
+            <Stack direction="row" spacing={2} sx={{ mb: 2, flexWrap: 'wrap' }}>
+              {['chat', 'contacts', 'tasks'].map((k) => (
+                <FormControlLabel
+                  key={k}
+                  control={<Checkbox size="small" checked={!!svc[k]}
+                                     data-testid={`toggle-${k}`}
+                                     onChange={(e) => flip(k, e.target.checked)} />}
+                  label={<Typography variant="body2">{k}</Typography>}
+                />
+              ))}
+            </Stack>
             <Alert severity="info" sx={{ mb: 2 }}>
               Every service in order, each reconciled against the tenants
               directly rather than trusted from the ledger. Reconcile counts

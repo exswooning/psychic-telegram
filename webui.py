@@ -3505,6 +3505,12 @@ class Handler(BaseHTTPRequestHandler):
             self._json(_cached_payload("spa_verification_payload", spa_verification_payload, self._on_screen()))
         elif path == "/api/spa/report":
             self._json(_cached_payload("spa_report_payload", spa_report_payload, self._on_screen()))
+        elif path == "/api/toggles":
+            # Readable, not only settable. set_toggles returns the state,
+            # but a UI that can only POST has to mutate something to find
+            # out what it is -- so the switches rendered from whatever the
+            # page happened to assume rather than from the server.
+            self._json({"ok": True, "toggles": dict(_RUN_STATE)})
         elif path == "/api/scope":
             self._json(scope_payload(self._on_screen()))
         elif path == "/api/logs":

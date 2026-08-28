@@ -166,10 +166,21 @@ export async function fetchJobHistory(name: string): Promise<JobResult | null> {
   return result
 }
 
+export interface TogglesPayload {
+  ok: boolean
+  toggles: { dry_run: boolean; services: Record<string, boolean> }
+}
+
+/** The launch toggles the phased actions read. GET, so the switches can be
+ *  drawn from the server rather than from what the page assumes. */
+export async function fetchToggles(): Promise<TogglesPayload> {
+  return getJSON<TogglesPayload>('/api/toggles')
+}
+
 export async function setToggles(
   services: Record<string, boolean>,
   dryRun?: boolean
-): Promise<{ ok: boolean }> {
+): Promise<TogglesPayload> {
   const res = await fetch('/api/toggles', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
