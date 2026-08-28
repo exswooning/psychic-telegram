@@ -437,7 +437,8 @@ class Job:
             #   * job_supervisor never saw it, because it iterates the table
             # Confirmed live: a 32-minute seed, mid-run, with active_jobs [].
             try:
-                job_admission.record_pid(self.account_id, name, self.proc.pid)
+                job_admission.record_launch(self.account_id, name,
+                                            self.proc.pid, argv, HERE)
             except Exception as exc:  # noqa: BLE001 - never fail a launch
                 print(f"could not record pid for {name!r}: {exc}", flush=True)
             threading.Thread(target=self._drain, daemon=True).start()

@@ -29,11 +29,14 @@ class _Proc:
 
 class TestTheLaunchRecordsThePid:
     def test_start_records_the_child_pid(self, monkeypatch, tmp_path):
+        # record_launch now, not record_pid: the argv is stored alongside
+        # the pid so job_supervisor can put a wedged job back. See
+        # test_supervisor_resumes.py.
         recorded = []
-        monkeypatch.setattr(job_admission, "record_pid",
-                            lambda a, n, p: recorded.append((a, n, p)))
-        monkeypatch.setattr(webui.job_admission, "record_pid",
-                            lambda a, n, p: recorded.append((a, n, p)))
+        monkeypatch.setattr(job_admission, "record_launch",
+                            lambda a, n, p, argv, cwd: recorded.append((a, n, p)))
+        monkeypatch.setattr(webui.job_admission, "record_launch",
+                            lambda a, n, p, argv, cwd: recorded.append((a, n, p)))
         monkeypatch.setattr(webui.subprocess, "Popen", lambda *a, **k: _Proc())
         monkeypatch.setattr(webui.threading, "Thread",
                             lambda *a, **k: type("T", (), {"start": lambda s: None})())
@@ -49,10 +52,10 @@ class TestTheLaunchRecordsThePid:
                                                           tmp_path):
         """The job is already running by then -- refusing to report it
         started would leave a real child nobody is tracking."""
-        def boom(*a):
+        def boom(*a, **k):
             raise RuntimeError("control plane unreachable")
 
-        monkeypatch.setattr(webui.job_admission, "record_pid", boom)
+        monkeypatch.setattr(webui.job_admission, "record_launch", boom)
         monkeypatch.setattr(webui.subprocess, "Popen", lambda *a, **k: _Proc())
         monkeypatch.setattr(webui.threading, "Thread",
                             lambda *a, **k: type("T", (), {"start": lambda s: None})())
@@ -138,7 +141,7 @@ class TestARestartReAdoptsItsChildren:
         monkeypatch.setattr(webui.job_admission, "list_active",
                             lambda: [{"account_id": 66, "job_name": "seed",
                                       "pid": None}])
-        monkeypatch.setattr(webui.job_admission, "record_pid", boom)
+        monkeypatch.setattr(webui.job_admission, "record_launch", boom)
         monkeypatch.setattr(webui.job_admission, "release", lambda a, n: None)
         monkeypatch.setattr(webui, "_external_processes",
                             lambda: [{"pid": 5, "name": "seed", "elapsed": 1}])

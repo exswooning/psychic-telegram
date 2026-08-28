@@ -26,6 +26,7 @@ call this and are unaffected.
 from __future__ import annotations
 
 import logging
+import json
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -141,6 +142,64 @@ def record_pid(account_id: int | None, job_name: str, pid: int) -> None:
             "  SELECT id FROM active_jobs WHERE account_id IS ? "
             "   AND job_name=? AND pid IS NULL ORDER BY id LIMIT 1)",
             (pid, account_id, job_name))
+
+
+# How many times the supervisor may resume one wedged job before leaving it
+# down for a person. A run that wedges on its own first item would otherwise
+# relaunch for ever, burning the tenant's API quota to make no progress.
+MAX_RESUMES = int(os.getenv("JOB_MAX_RESUMES", "3"))
+
+
+def record_launch(account_id: int | None, job_name: str, pid: int,
+                  argv: list[str], cwd: str) -> None:
+    """Store what it would take to start this job again.
+
+    The supervisor can kill a wedged run and free its slot, but until this
+    existed nothing could resume it: the argv lived only in the API process
+    that spawned it, and that process had usually been restarted by a deploy
+    long before the stall was noticed. So an unattended migration that
+    wedged at 3am stayed down until somebody looked.
+
+    Same one-row discipline as record_pid -- an unbounded UPDATE would stamp
+    every pending reservation for the pair with this argv.
+    """
+    with cpdb.rw() as conn:
+        conn.execute(
+            "UPDATE active_jobs SET pid=?, argv=?, cwd=? WHERE id = ("
+            "  SELECT id FROM active_jobs WHERE account_id IS ? "
+            "   AND job_name=? AND (pid IS NULL OR pid=?) ORDER BY id LIMIT 1)",
+            (pid, json.dumps(list(argv)), cwd, account_id, job_name, pid))
+
+
+def resumable(job: dict) -> tuple[list[str] | None, str | None]:
+    """The argv and cwd to relaunch this job with, or (None, None).
+
+    None means "not resumable", which is the honest answer for a run started
+    from a terminal: its slot is recorded but its command was never ours to
+    reproduce, and inventing one would run something the operator did not
+    ask for.
+    """
+    raw = job.get("argv")
+    if not raw:
+        return None, None
+    try:
+        argv = json.loads(raw)
+    except (TypeError, ValueError):
+        return None, None
+    if not isinstance(argv, list) or not argv:
+        return None, None
+    return [str(a) for a in argv], job.get("cwd") or None
+
+
+def note_resume(job_id: int) -> int:
+    """Count one resume against this job's budget, and return the new total."""
+    with cpdb.rw() as conn:
+        conn.execute(
+            "UPDATE active_jobs SET resumes = COALESCE(resumes,0) + 1 "
+            "WHERE id=?", (job_id,))
+        row = conn.execute(
+            "SELECT resumes FROM active_jobs WHERE id=?", (job_id,)).fetchone()
+    return int(row["resumes"]) if row else 0
 
 
 def adopt_or_admit(account_id: int | None, job_name: str,

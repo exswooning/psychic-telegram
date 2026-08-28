@@ -1085,7 +1085,11 @@ def _run_admitted(argv: list[str], account_id: int | None, job_name: str,
     # waiter dies whenever the server restarts -- a deploy mid-run left a
     # finished delta holding the slot forever, disabling Repair and refusing
     # the next launch for capacity with nothing actually running.
-    job_admission.record_pid(account_id, job_name, proc.pid)
+    # argv too, not just the pid: the supervisor can kill a wedged run, and
+    # without the command that started it nothing can put it back. The API
+    # process that knew the argv is usually long restarted by the time a
+    # stall is noticed.
+    job_admission.record_launch(account_id, job_name, proc.pid, argv, HERE)
 
     def _wait_then_release() -> None:
         proc.wait()

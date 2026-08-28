@@ -101,6 +101,19 @@ def _apply_column_upgrades(conn: sqlite3.Connection) -> None:
             # account from AdminAccounts, not grandfathered in.
             ("seed_enabled", "INTEGER NOT NULL DEFAULT 0"),
         ],
+        # What it takes to start this job again. The supervisor could kill a
+        # wedged run and free its slot, but nothing could resume it -- a
+        # person had to notice and press the button, which is the one thing
+        # an unattended migration cannot rely on. NULL argv means "started
+        # some way this cannot reproduce" (a terminal run), and is left
+        # alone rather than guessed at.
+        "active_jobs": [
+            ("argv", "TEXT"),
+            ("cwd", "TEXT"),
+            # Bounded, or a job that wedges on its own first item relaunches
+            # for ever and burns the tenant's quota doing nothing.
+            ("resumes", "INTEGER NOT NULL DEFAULT 0"),
+        ],
     }
     for table, cols in upgrades.items():
         # Positional index, not row_factory["name"]: this connection (from

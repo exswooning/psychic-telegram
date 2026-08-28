@@ -110,11 +110,31 @@ def _age_seconds(iso: str | None, now: float) -> float | None:
     return now - calendar.timegm(stamp)
 
 
+def _spawn(argv: list[str], cwd: str | None) -> int:
+    """Relaunch detached, with its output on a file.
+
+    start_new_session so the child outlives this process -- the supervisor
+    lives inside the API server, and a deploy restarts that. DEVNULL on
+    stdin and a file for output because a pipe with nobody reading it fills
+    its ~64KB buffer and deadlocks the child inside logging: that is a
+    failure this codebase has already paid for once.
+    """
+    import subprocess
+
+    out = os.path.join(cwd or os.getcwd(), "logs", "supervisor-resume.log")
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    with open(out, "ab", buffering=0) as fh:
+        proc = subprocess.Popen(argv, cwd=cwd or None, stdin=subprocess.DEVNULL,
+                                stdout=fh, stderr=fh, start_new_session=True)
+    return proc.pid
+
+
 class Supervisor:
     """Holds the previous CPU reading, so 'burned no CPU' has a baseline."""
 
     def __init__(self, db_path_for, stall_seconds: int = STALL_SECONDS,
                  cpu_fn=cpu_ticks, kill_fn=None, now_fn=None,
+                 spawn_fn=None,
                  output_fn=None, signal_fn=None):
         self.db_path_for = db_path_for
         self.stall_seconds = stall_seconds
@@ -129,6 +149,7 @@ class Supervisor:
         # real signals being sent, and adding a second signalling path with
         # its own default quietly re-armed that. A test doing exactly this
         # SIGINT-ed the pytest process running it.
+        self.spawn_fn = spawn_fn or _spawn
         self.signal_fn = signal_fn or kill_fn or (
             lambda pid: os.kill(pid, signal.SIGINT))
         self.now_fn = now_fn or time.time
@@ -136,6 +157,31 @@ class Supervisor:
         self._last_cpu: dict[int, int] = {}
         self._first_seen_stale: dict[int, float] = {}
         self._interrupted: dict[int, float] = {}
+
+    def _resume(self, job: dict) -> str:
+        """Start the killed job again, or say why not.
+
+        Returns a short reason string rather than a bool: "why didn't it come
+        back" is the first question asked, and a silent False leaves the
+        supervisor looking like the thing that broke it.
+        """
+        argv, cwd = job_admission.resumable(job)
+        if argv is None:
+            return "not resumable (no recorded command -- started outside the UI)"
+        used = int(job.get("resumes") or 0)
+        if used >= job_admission.MAX_RESUMES:
+            log.error("job %s has already been resumed %s time(s); leaving it "
+                      "down for a person to look at", job.get("job_name"), used)
+            return f"budget spent ({used}/{job_admission.MAX_RESUMES})"
+        try:
+            n = job_admission.note_resume(job["id"])
+            proc = self.spawn_fn(argv, cwd)
+        except Exception as exc:      # noqa: BLE001 - never break the pass
+            log.error("could not resume %s: %r", job.get("job_name"), exc)
+            return f"resume failed: {str(exc)[:120]}"
+        log.error("resumed %s as pid %s (resume %s of %s)",
+                  job.get("job_name"), proc, n, job_admission.MAX_RESUMES)
+        return f"resumed as pid {proc} ({n}/{job_admission.MAX_RESUMES})"
 
     def check_once(self) -> list[dict]:
         """One pass. Returns what it killed, so a caller can report it."""
@@ -215,9 +261,15 @@ class Supervisor:
                       job.get("job_name"), pid, now - interrupted_at)
             try:
                 self.kill_fn(pid)
-                killed.append({"pid": pid, "job_name": job.get("job_name"),
-                               "account_id": job.get("account_id"),
-                               "silent_for": age})
+                entry = {"pid": pid, "job_name": job.get("job_name"),
+                         "account_id": job.get("account_id"),
+                         "silent_for": age}
+                # Freeing the slot was only ever half of it. Until this, a
+                # migration that wedged unattended stayed down until a person
+                # noticed and pressed the button again -- which is precisely
+                # what an unattended run cannot depend on.
+                entry["resumed"] = self._resume(job)
+                killed.append(entry)
             except (OSError, ProcessLookupError) as exc:
                 log.warning("could not kill wedged pid %s: %s", pid, exc)
             self._first_seen_stale.pop(pid, None)
