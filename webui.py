@@ -1838,6 +1838,19 @@ def seed_argv(body: dict, account_id: int | None = None) -> tuple[list[str], dic
                 f"than seeding slowly.")
         argv += ["--workers", str(n)]
 
+    # Prefix for generated usernames. A deleted Workspace address stays
+    # taken for 20 days, so a wipe-and-recreate that reuses the fixed
+    # GENERATED_LOCALPARTS list fails with "Entity already exists" until the
+    # deletions age out. It also makes a run identifiable afterwards.
+    prefix = (body.get("localpart_prefix") or "").strip()
+    if prefix:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,15}", prefix):
+            return [], {}, (
+                f"{prefix!r} is not a usable username prefix -- letters, "
+                "digits, dot, dash and underscore only, starting with a "
+                "letter or digit, at most 16 characters.")
+        argv += ["--localpart-prefix", prefix]
+
     target_gb = body.get("target_gb_per_user")
     if target_gb:
         try:

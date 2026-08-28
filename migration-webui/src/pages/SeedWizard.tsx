@@ -344,6 +344,7 @@ const SeedStep: React.FC = () => {
   const [confirmDomain, setConfirmDomain] = useState('')
   const [scale, setScale] = useState('small')
   const [workers, setWorkers] = useState('')
+  const [prefix, setPrefix] = useState('')
   const [createUsers, setCreateUsers] = useState(false)
   const [allUsers, setAllUsers] = useState(false)
   const [reset, setReset] = useState(false)
@@ -355,7 +356,7 @@ const SeedStep: React.FC = () => {
     setErr(null)
     setJobActive(false)
     const r = await runSeed(confirmDomain, scale, createUsers, reset,
-                            allUsers, undefined, workers)
+                            allUsers, undefined, workers, prefix)
     if (r.ok) setJobActive(true)
     else setErr(r.error || 'could not start')
   }
@@ -383,6 +384,18 @@ const SeedStep: React.FC = () => {
               <MenuItem key={s} value={s}>{s}</MenuItem>
             ))}
           </TextField>
+        </Grid>
+        <Grid item xs={12} sm={2}>
+          {/* A deleted Workspace address stays taken for 20 days, so
+              recreating users after a wipe needs new names or every
+              create fails with "Entity already exists". */}
+          <TextField
+            fullWidth size="small" label="Username prefix"
+            placeholder="none"
+            inputProps={{ 'data-testid': 'seed-form-prefix' }}
+            value={prefix} onChange={(e) => setPrefix(e.target.value)}
+            helperText="new names after a wipe"
+          />
         </Grid>
         <Grid item xs={12} sm={2}>
           {/* Blank = size to the machine (resources.recommend budgets memory

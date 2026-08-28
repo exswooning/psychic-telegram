@@ -1526,9 +1526,24 @@ def discover_tenant_entries(settings: Settings) -> tuple[list[dict], str]:
     return entries, ""
 
 
+# Prefixed onto every generated localpart. Empty keeps the historical names.
+#
+# Needed because deleting a Workspace user does NOT free its address: Google
+# holds the account restorable for 20 days and the email stays taken for that
+# whole time. So a wipe-and-recreate cycle that reuses the same names fails
+# with "Entity already exists" until the deletions age out -- and the fixed
+# GENERATED_LOCALPARTS list means the seeder would otherwise ask for exactly
+# the names it just deleted.
+#
+# A prefix also makes a run identifiable after the fact: r2-aiden.kumar28 came
+# from the second reseed, which the ledger alone cannot tell you.
+GENERATED_PREFIX = os.getenv("SEED_LOCALPART_PREFIX", "")
+
+
 def _generated_localpart(i: int, taken: set[str]) -> str:
     base = GENERATED_LOCALPARTS[i] if i < len(GENERATED_LOCALPARTS) \
         else f"seeduser{i + 1}"
+    base = f"{GENERATED_PREFIX}{base}" if GENERATED_PREFIX else base
     candidate, n = base, 1
     while candidate in taken:
         n += 1
@@ -1689,6 +1704,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--workers", type=int, default=0,
                     help="0 (default) sizes the pool to this machine; "
                          "see resources.py")
+    ap.add_argument("--localpart-prefix", default="",
+                    help="prefix every generated username. A deleted "
+                         "Workspace address stays taken for 20 days, so a "
+                         "wipe-and-recreate that reuses names fails with "
+                         "'Entity already exists' until they age out.")
     ap.add_argument("--manifest", default="sandbox_manifest.json")
     ap.add_argument("--identities-out", default="identities.csv")
     ap.add_argument("--edge-cases", default="first",
@@ -1916,6 +1936,11 @@ def main(argv: list[str] | None = None) -> int:
         # Freshly created accounts take a moment before delegation works.
         print("\nWaiting 20s for new accounts to become usable ...")
         time.sleep(20)
+
+    if args.localpart_prefix:
+        global GENERATED_PREFIX
+        GENERATED_PREFIX = args.localpart_prefix.strip()
+        print(f"Generated usernames will be prefixed {GENERATED_PREFIX!r}")
 
     # Resolve the pool size before either branch. --workers 0 means "size it
     # to this machine"; the reset path used to run before that resolution and

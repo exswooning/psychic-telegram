@@ -425,7 +425,8 @@ export async function runSeed(
   reset: boolean,
   allUsers?: boolean,
   createUntilFull?: boolean,
-  workers?: string
+  workers?: string,
+  localpartPrefix?: string
 ): Promise<SeedResult> {
   const res = await fetch('/api/seed', {
     method: 'POST',
@@ -441,6 +442,9 @@ export async function runSeed(
       // its own recommendation; a seed the kernel kills hours in costs more
       // than a slow one.
       workers: workers || undefined,
+      // A deleted Workspace address stays taken for 20 days, so a
+      // wipe-and-recreate that reuses names fails until they age out.
+      localpart_prefix: localpartPrefix || undefined,
     }),
   })
   return res.json()
