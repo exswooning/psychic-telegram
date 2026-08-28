@@ -466,6 +466,23 @@ export async function runResetTarget(
 }
 
 /**
+ * Deletes the SOURCE tenant's users -- the corpus being migrated. Only ever
+ * right when reseeding under different usernames, where the old accounts
+ * must be gone rather than merely emptied. Gated on the SOURCE domain, so
+ * muscle memory from the target button cannot fire this one.
+ */
+export async function runWipeSource(
+  confirmDomain: string, accountId?: string
+): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetch('/api/wipe_source', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ confirm_domain: confirmDomain, account_id: accountId }),
+  })
+  return res.json()
+}
+
+/**
  * Deletes the target tenant's provisioned USERS (wipe_target.py), which
  * runResetTarget leaves behind -- it empties their data, not their
  * accounts. Same typed-domain gate: the server compares against

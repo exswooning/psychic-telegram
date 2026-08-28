@@ -155,6 +155,10 @@ def main(argv: list[str] | None = None) -> int:
         description="Delete every migrated user on the target tenant and "
                     "invalidate the ledger describing them.")
     p.add_argument("--account-id", type=int)
+    p.add_argument("--side", choices=("source", "target"), default="target",
+                   help="which tenant to empty. Defaults to target; source "
+                        "destroys the corpus being migrated, which is only "
+                        "ever right when reseeding under new usernames.")
     p.add_argument("--confirm-domain", required=True,
                    help="must match TARGET_DOMAIN exactly")
     p.add_argument("--apply", action="store_true",
@@ -173,15 +177,23 @@ def main(argv: list[str] | None = None) -> int:
     import reset_target
 
     settings = Settings(account_id=args.account_id)
-    reset_target.assert_sandbox(settings, args.confirm_domain)
+    reset_target.assert_sandbox(settings, args.confirm_domain, args.side)
 
+    # Which tenant is being emptied. Defaults to target, so every existing
+    # caller and every existing script behaves exactly as before.
+    #
+    # --side source is for reseeding under different usernames: the old
+    # accounts have to be gone, not merely emptied, or the new identity map
+    # points at users that still exist with the old corpus attached.
     auth = AuthManager(settings)
-    directory = auth.directory("target", writable=True)
-    admin = settings.target_admin
-    users = deletable_users(directory, admin, settings.target_domain)
+    directory = auth.directory(args.side, writable=True)
+    admin = (settings.source_admin if args.side == "source"
+             else settings.target_admin)
+    domain = (settings.source_domain if args.side == "source"
+              else settings.target_domain)
+    users = deletable_users(directory, admin, domain)
 
-    print(f"{len(users)} user(s) would be deleted from "
-          f"{settings.target_domain}")
+    print(f"{len(users)} user(s) would be deleted from {domain} ({args.side})")
     print(f"  admin kept: {admin}")
 
     # Deleted users keep consuming the domain user limit for 20 days, so a

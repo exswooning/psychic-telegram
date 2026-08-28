@@ -1946,6 +1946,51 @@ def wipe_target_argv(body: dict, account_id: int | None = None) -> tuple[list[st
     return argv, env, ""
 
 
+def wipe_source_argv(body: dict, account_id: int | None = None) -> tuple[list[str], dict, str]:
+    """Delete the SOURCE tenant's users -- the corpus being migrated.
+
+    Separate from wipe_target_argv rather than a flag on it, because these
+    two are not variations of one action. Emptying the target is routine
+    between rehearsals; emptying the source destroys what the migration
+    exists to move, and is only ever right when reseeding under different
+    usernames, where the old accounts must be gone rather than merely
+    emptied.
+
+    The typed domain is therefore the SOURCE domain, so muscle memory from
+    the target button cannot fire this one.
+    """
+    from config import Settings
+
+    st = Settings(account_id=account_id)
+    domain = (st.source_domain or "").strip().lower()
+    typed = (body.get("confirm_domain") or "").strip().lower()
+
+    if not domain:
+        return [], {}, "set the source domain in step 2 first"
+    if not typed:
+        return [], {}, f"type the source domain ({domain}) to confirm"
+    if typed != domain:
+        target = (st.target_domain or "").strip().lower()
+        extra = (" -- that is the TARGET domain; this button deletes the "
+                 "SOURCE corpus" if typed and typed == target else "")
+        return [], {}, f"{typed!r} does not match the source domain {domain!r}{extra}"
+
+    protected = [d.strip().lower()
+                 for d in os.getenv("PROTECTED_DOMAINS", "").split(",") if d.strip()]
+    if domain in protected:
+        return [], {}, f"{domain} is listed in PROTECTED_DOMAINS"
+
+    argv = [PY, "wipe_target.py", "--side", "source",
+            "--confirm-domain", domain, "--apply"]
+    env = gcloud_env()
+    env["SANDBOX_MODE"] = "true"
+    if account_id is not None:
+        env.update(SOURCE_DOMAIN=st.source_domain, SOURCE_ADMIN=st.source_admin,
+                   SOURCE_SA_KEY=st.source_sa_key, TARGET_DOMAIN=st.target_domain,
+                   MIGRATION_DB=st.db_path)
+    return argv, env, ""
+
+
 def resolve_target_account(caller_id: int | None,
                            requested) -> tuple[int | None, str]:
     """Which account an operator action applies to, and whether they may.
@@ -3621,6 +3666,31 @@ class Handler(BaseHTTPRequestHandler):
                 on_finish=lambda rc: job_admission.release(account_id, "reset target"))
             if not ok:
                 job_admission.release(account_id, "reset target")
+            self._json({"ok": ok, "error": "" if ok else msg})
+            return
+
+        if self.path == "/api/wipe_source":
+            account_id, scope_err = resolve_target_account(
+                self._account_id(), body.get("account_id"))
+            if scope_err:
+                self._json({"ok": False, "error": scope_err}, 403)
+                return
+            if not _subscription_ok(account_id):
+                self._json({"ok": False, "error": "subscription inactive"}, 402)
+                return
+            argv, env, err = wipe_source_argv(body, account_id)
+            if err:
+                self._json({"ok": False, "error": err}, 400)
+                return
+            admitted, admit_msg = job_admission.try_admit(account_id, "wipe source")
+            if not admitted:
+                self._json({"ok": False, "error": admit_msg}, 503)
+                return
+            ok, msg = get_job(account_id).start(
+                "wipe source", argv, env=env,
+                on_finish=lambda rc: job_admission.release(account_id, "wipe source"))
+            if not ok:
+                job_admission.release(account_id, "wipe source")
             self._json({"ok": ok, "error": "" if ok else msg})
             return
 

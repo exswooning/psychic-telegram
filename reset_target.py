@@ -74,24 +74,43 @@ def _load_seeder():
     return module
 
 
-def assert_sandbox(settings: Settings, confirm_domain: str) -> None:
-    """The seeder's guards, pointed at the target instead of the source."""
+def assert_sandbox(settings: Settings, confirm_domain: str,
+                   side: str = "target") -> None:
+    """The seeder's guards, pointed at whichever tenant is being emptied.
+
+    side="source" exists because deleting the source corpus is sometimes
+    exactly the intent -- reseeding under different usernames, say, which
+    needs the old accounts gone rather than merely emptied. It is NOT the
+    default, and it keeps every guard: SANDBOX_MODE, the typed domain, and
+    PROTECTED_DOMAINS all still apply, just against the domain actually
+    being destroyed.
+
+    The same-domain check is the one that changes shape. Against the target
+    it means "you are about to delete the corpus you are supposed to be
+    migrating". Against the source it means the same thing from the other
+    end, so it stays -- what it can no longer be is a proxy for "this is
+    the target", because now it might not be.
+    """
+    if side not in ("source", "target"):
+        raise ValueError(f"side must be source or target, got {side!r}")
     protected = {d.strip().lower()
                  for d in os.getenv("PROTECTED_DOMAINS", "").split(",") if d.strip()}
-    domain = settings.target_domain.lower()
+    domain = (settings.source_domain if side == "source"
+              else settings.target_domain).lower()
+    env_name = "SOURCE_DOMAIN" if side == "source" else "TARGET_DOMAIN"
 
     if os.getenv("SANDBOX_MODE", "").lower() != "true":
         sys.exit("REFUSING: set SANDBOX_MODE=true to empty a tenant.")
     if confirm_domain.lower() != domain:
         sys.exit(f"REFUSING: --confirm-domain {confirm_domain!r} does not match "
-                 f"TARGET_DOMAIN {settings.target_domain!r}.")
+                 f"{env_name} {domain!r}.")
     if domain in protected:
         sys.exit(f"REFUSING: {domain} is listed in PROTECTED_DOMAINS.")
-    # The one guard the seeder does not need: emptying the source would destroy
-    # the corpus this migration is supposed to move.
-    if domain == settings.source_domain.lower():
+    # Both tenants pointing at one domain means a wipe of either destroys
+    # both sides of the migration at once.
+    if settings.source_domain.lower() == settings.target_domain.lower():
         sys.exit("REFUSING: target and source domains are the same.")
-    print(f"Sandbox guard passed for {domain} (target).")
+    print(f"Sandbox guard passed for {domain} ({side}).")
 
 
 ALL_SERVICES = ("drive", "gmail", "calendar", "chat")

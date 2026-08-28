@@ -3,7 +3,7 @@ import {
   Box, Typography, Card, CardContent, Stack, TextField, Button, Alert,
 } from '@mui/material'
 import { Build as MaintenanceIcon } from '@mui/icons-material'
-import { fetchActions, fetchConfig, runResetDriveLedger, runWipeTarget, ActionSpec } from '@/api/client'
+import { fetchActions, fetchConfig, runResetDriveLedger, runWipeTarget, runWipeSource, ActionSpec } from '@/api/client'
 import JobRunner from '@/components/JobRunner'
 
 /**
@@ -51,6 +51,7 @@ const Maintenance: React.FC = () => {
 
       <ResetDriveLedgerCard />
       <WipeTargetCard />
+      <WipeSourceCard />
     </Box>
   )
 }
@@ -174,6 +175,70 @@ const WipeTargetCard: React.FC = () => {
           </Button>
         </Stack>
         {ok && <Alert severity="success" sx={{ mt: 2 }}>Started -- check Mission Control for output.</Alert>}
+        {err && <Alert severity="error" sx={{ mt: 2 }}>{err}</Alert>}
+      </CardContent>
+    </Card>
+  )
+}
+
+/**
+ * Emptying the target is routine between rehearsals. Emptying the SOURCE
+ * destroys what the migration exists to move, so it is a separate card with
+ * its own typed domain -- not a checkbox on the one above, where muscle
+ * memory would eventually fire it.
+ */
+const WipeSourceCard: React.FC = () => {
+  const [domain, setDomain] = useState('')
+  const [confirmDomain, setConfirmDomain] = useState('')
+  const [account, setAccount] = useState('')
+  const [err, setErr] = useState<string | null>(null)
+  const [ok, setOk] = useState(false)
+
+  useEffect(() => {
+    fetchConfig().then((c) => setDomain(c.config.source_domain || ''))
+  }, [])
+
+  const run = async () => {
+    setErr(null); setOk(false)
+    const r = await runWipeSource(confirmDomain, account || undefined)
+    if (r.ok) setOk(true)
+    else setErr(r.error || 'could not start')
+  }
+
+  return (
+    <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'error.main', mt: 3 }}>
+      <CardContent>
+        <Typography variant="h6" sx={{ fontWeight: 600, mb: 1 }}>
+          Wipe SOURCE accounts
+        </Typography>
+        <Alert severity="error" sx={{ mb: 2 }}>
+          Deletes every user on the SOURCE tenant (
+          <strong>{account ? `whichever source account ${account} has configured`
+                           : (domain || 'not set')}</strong>) — the corpus this
+          migration exists to move. Only correct when reseeding under different
+          usernames, where the old accounts must be gone rather than emptied.
+          Deleted users keep consuming the domain user limit for 20 days, so
+          this borrows against the next three weeks of capacity rather than
+          returning any. Type the source domain to confirm.
+        </Alert>
+        <Stack direction="row" spacing={2} sx={{ flexWrap: 'wrap', gap: 2 }}>
+          <TextField
+            size="small" label="Type the source domain to confirm"
+            inputProps={{ 'data-testid': 'wipe-source-domain' }}
+            value={confirmDomain} onChange={(e) => setConfirmDomain(e.target.value)}
+            sx={{ width: 280 }}
+          />
+          <TextField
+            size="small" label="Account id (blank = mine)"
+            inputProps={{ 'data-testid': 'wipe-source-account' }}
+            value={account} onChange={(e) => setAccount(e.target.value)}
+            sx={{ width: 200 }}
+          />
+          <Button variant="contained" color="error" disabled={!confirmDomain} onClick={run}>
+            Wipe source accounts
+          </Button>
+        </Stack>
+        {ok && <Alert severity="success" sx={{ mt: 2 }}>Started — check Running Now.</Alert>}
         {err && <Alert severity="error" sx={{ mt: 2 }}>{err}</Alert>}
       </CardContent>
     </Card>
