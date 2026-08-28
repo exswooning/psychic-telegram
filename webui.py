@@ -1368,7 +1368,7 @@ def write_config(clean: dict) -> None:
     # So the running process picks the values up without a restart.
     for k, v in clean.items():
         os.environ[k] = v
-    invalidate_status()
+    _invalidate_all()
 
 
 # ----------------------------------------------------------------------
@@ -1488,7 +1488,7 @@ def upload_credential(kind: str, content: str) -> dict:
         detail = root.get("client_id", "")[:32]
     else:
         detail = data.get("client_email", "")
-    invalidate_status()
+    _invalidate_all()
     msg = f"saved {spec['label']} to {path} (mode 0600)"
     if backup:
         msg += f"; previous file kept as {os.path.basename(backup)}"
@@ -1522,7 +1522,7 @@ def set_run_mode(mode: str) -> dict:
     if mode not in RUN_MODES:
         return {"ok": False, "error": f"unknown run mode {mode!r}"}
     write_config_raw({"RUN_MODE": mode})
-    invalidate_status()
+    _invalidate_all()
     return {"ok": True, "run_mode": mode,
             "msg": f"this run is now: {RUN_MODES[mode]['label']}"}
 
@@ -1538,7 +1538,7 @@ def set_auth_mode(mode: str) -> dict:
     if mode not in AUTH_MODES:
         return {"ok": False, "error": f"unknown auth mode {mode!r}"}
     write_config_raw({"AUTH_MODE": mode})
-    invalidate_status()
+    _invalidate_all()
     return {"ok": True, "auth_mode": mode,
             "msg": f"credential mode set to {AUTH_MODES[mode]['label']}"}
 
@@ -2331,7 +2331,7 @@ def check_step(n: int) -> dict:
     what I just did work?", and the answer has to reflect the last thirty
     seconds, not a snapshot taken before they went to the Admin Console.
     """
-    invalidate_status()
+    _invalidate_all()
     try:
         data = _compute_status()
     except Exception as exc:  # noqa: BLE001
@@ -2354,6 +2354,13 @@ def check_step(n: int) -> dict:
                 "not needed for this run" if state == "skip" else
                 "still outstanding"),
     }
+
+
+def _invalidate_all() -> None:
+    """Both caches. A button press that only clears one leaves half the
+    dashboard reporting the world as it was before the press."""
+    invalidate_status()
+    invalidate_spa_cache()
 
 
 def invalidate_status() -> None:
@@ -2398,6 +2405,88 @@ def status_payload(account_id: int | None = None) -> dict:
                          daemon=True).start()
 
     return dict(data, stale=age > STATUS_TTL, age=round(age, 1))
+
+
+# ----------------------------------------------------------------------
+# Cache for the SPA reads that scan the ledger.
+#
+# Measured against a live 200k-row audit_log, per full dashboard refresh:
+#
+#     spa_stages_payload        2018 ms
+#     spa_users_payload         1263 ms
+#     spa_metrics_payload        805 ms
+#     snapshot_payload           788 ms
+#     spa_verification_payload   783 ms
+#                                ------
+#                                5.7 s of CPU
+#
+# useMigration.ts polls every 4000 ms. One open dashboard tab therefore
+# asked for more CPU than the box has, and took it from the migration it
+# was displaying: webui.py held 43% of a 2-core VPS during a live run, and
+# closing the browser returned ~13% throughput to the migration.
+#
+# A UI whose job is to show progress must not be a meaningful cost to that
+# progress. Same shape as the status snapshot above: serve what we have,
+# refresh behind it, never block a request on a scan.
+# ----------------------------------------------------------------------
+SPA_TTL = float(os.getenv("SPA_CACHE_TTL", "15"))
+
+_spa_cache: dict = {}
+_spa_lock = threading.Lock()
+_spa_busy: set = set()
+
+
+def _cached_payload(name: str, fn, account_id: int | None):
+    """fn(account_id), memoised per (reader, account) for SPA_TTL seconds.
+
+    The first call for a key pays for itself -- there is nothing to show yet
+    and a wrong answer is worse than a slow one. Every later call is served
+    from the entry while a single background thread refreshes it, so N
+    pollers cost the same as one.
+    """
+    key = (name, account_id)
+    now = time.time()
+    with _spa_lock:
+        entry = _spa_cache.get(key)
+
+    if entry is None:
+        data = fn(account_id)
+        with _spa_lock:
+            _spa_cache[key] = {"data": data, "at": time.time()}
+        return data
+
+    if now - entry["at"] > SPA_TTL:
+        with _spa_lock:
+            start = key not in _spa_busy
+            if start:
+                _spa_busy.add(key)
+
+        def _refresh() -> None:
+            try:
+                data = fn(account_id)
+                with _spa_lock:
+                    _spa_cache[key] = {"data": data, "at": time.time()}
+            except Exception as exc:      # noqa: BLE001
+                # Keep serving the stale entry: a failed refresh is not a
+                # reason to blank a dashboard that was working a moment ago.
+                log.warning("could not refresh %s for account %s: %r",
+                            name, account_id, exc)
+            finally:
+                with _spa_lock:
+                    _spa_busy.discard(key)
+
+        if start:
+            threading.Thread(target=_refresh, daemon=True).start()
+
+    return entry["data"]
+
+
+def invalidate_spa_cache() -> None:
+    """Drop it, so the next poll recomputes. Anything that changes what
+    these describe -- a launch, a stop, a reset -- should call this, or the
+    UI looks frozen for up to SPA_TTL after a button press."""
+    with _spa_lock:
+        _spa_cache.clear()
 
 
 def _RUN_MODES() -> dict:
@@ -3237,19 +3326,19 @@ class Handler(BaseHTTPRequestHandler):
                             "confirm": v.get("confirm", "")}
                         for k, v in ACTIONS.items()})
         elif path == "/api/snapshot":
-            self._json(snapshot_payload(self._on_screen()))
+            self._json(_cached_payload("snapshot_payload", snapshot_payload, self._on_screen()))
         elif path == "/api/spa/users":
-            self._json(spa_users_payload(self._on_screen()))
+            self._json(_cached_payload("spa_users_payload", spa_users_payload, self._on_screen()))
         elif path == "/api/spa/activity":
             self._json(spa_activity_payload(self._on_screen()))
         elif path == "/api/spa/metrics":
-            self._json(spa_metrics_payload(self._on_screen()))
+            self._json(_cached_payload("spa_metrics_payload", spa_metrics_payload, self._on_screen()))
         elif path == "/api/spa/stages":
-            self._json(spa_stages_payload(self._on_screen()))
+            self._json(_cached_payload("spa_stages_payload", spa_stages_payload, self._on_screen()))
         elif path == "/api/spa/verification":
-            self._json(spa_verification_payload(self._on_screen()))
+            self._json(_cached_payload("spa_verification_payload", spa_verification_payload, self._on_screen()))
         elif path == "/api/spa/report":
-            self._json(spa_report_payload(self._on_screen()))
+            self._json(_cached_payload("spa_report_payload", spa_report_payload, self._on_screen()))
         elif path == "/api/scope":
             self._json(scope_payload(self._on_screen()))
         elif path == "/api/logs":
