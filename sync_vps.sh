@@ -126,12 +126,29 @@ fi
 #
 # --no-reload on the copy, then one daemon-reload: cheap, idempotent, and it
 # makes the units in git the units that actually run.
+#
+# *.timer as well as *.service: a timer left out of this copy sits in git
+# looking installed and never fires, which is the same shape as the
+# xvfb.service problem above. Timers are also enabled here -- an installed
+# timer that nobody started is indistinguishable from one that does not
+# exist, and "did the backup run" is not a question to answer in an
+# incident.
 if [[ -d "$(cd "$(dirname "$0")" && pwd)/systemd" ]]; then
-  rsync -az -e "${SSH[*]}" \
-    "$(cd "$(dirname "$0")" && pwd)/systemd/"*.service \
-    "$TARGET:/etc/systemd/system/" 2>/dev/null \
-    && "${SSH[@]}" "$TARGET" "systemctl daemon-reload" >/dev/null 2>&1 \
-    && echo "  systemd units installed"
+  SD="$(cd "$(dirname "$0")" && pwd)/systemd"
+  if rsync -az -e "${SSH[*]}" "$SD/"*.service "$TARGET:/etc/systemd/system/" 2>/dev/null; then
+    if compgen -G "$SD/"'*.timer' >/dev/null; then
+      rsync -az -e "${SSH[*]}" "$SD/"*.timer "$TARGET:/etc/systemd/system/" 2>/dev/null || true
+    fi
+    "${SSH[@]}" "$TARGET" "systemctl daemon-reload" >/dev/null 2>&1 && \
+      echo "  systemd units installed"
+    for t in $(cd "$SD" && ls *.timer 2>/dev/null); do
+      if "${SSH[@]}" "$TARGET" "systemctl enable --now $t" >/dev/null 2>&1; then
+        echo "  timer enabled: $t"
+      else
+        echo "  WARNING: could not enable $t -- it will not fire" >&2
+      fi
+    done
+  fi
 fi
 
 if "${SSH[@]}" "$TARGET" "systemctl list-unit-files bitport-webui.service >/dev/null 2>&1"; then

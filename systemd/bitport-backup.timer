@@ -1,0 +1,13 @@
+[Unit]
+Description=Back up the Bitport ledgers daily
+
+[Timer]
+# Daily, with a randomised delay so a fleet of nodes does not all VACUUM at
+# once. Persistent so a box that was off through the window catches up on
+# boot rather than silently skipping a day.
+OnCalendar=daily
+RandomizedDelaySec=30m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,15 @@
+[Unit]
+Description=Bitport ledger backup (VACUUM INTO + integrity check)
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/migration
+# Nice/ionice: this runs while migrations do, and a backup that starves the
+# thing it is protecting is a bad trade. VACUUM INTO is read-heavy on a
+# ledger that can be several GB.
+Nice=10
+IOSchedulingClass=idle
+ExecStart=/root/migration/.venv/bin/python backup_db.py --keep 3
+StandardOutput=append:/root/migration/logs/backup.log
+StandardError=append:/root/migration/logs/backup.log

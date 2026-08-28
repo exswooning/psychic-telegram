@@ -197,6 +197,23 @@ ACTIONS: dict[str, dict] = {
         "blurb": "Retry every FAILED item with the current code.",
         "argv": [PY, "resolve_failures.py"],
     },
+    # There were no backups at all until this existed -- the only record of
+    # what a migration moved was one SQLite file on one box, 5.7 GB of it
+    # for a single account. VACUUM INTO rather than a copy, because a live
+    # ledger has committed pages in the WAL the main file does not have yet.
+    "backup_now": {
+        "label": "Back up the ledgers",
+        "blurb": "Consistent, verified copy of the control plane and every "
+                 "account ledger. Safe to run mid-migration -- it takes a "
+                 "read snapshot rather than copying the file underneath.",
+        "argv": [PY, "backup_db.py"],
+    },
+    "backup_list": {
+        "label": "List backups",
+        "blurb": "What is on file, and how big.",
+        "argv": [PY, "backup_db.py", "--list"],
+    },
+
     # The Maintenance page has listed this in MAINTENANCE_KEYS since it was
     # written, and there was no ACTIONS entry to match -- the page renders
     # `actions[key] && <JobRunner .../>`, so the slot silently drew nothing.
