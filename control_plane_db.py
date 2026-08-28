@@ -247,8 +247,14 @@ def failure_feed(limit: int = 200, source_user: str | None = None,
     tenant's rows -- and, being unauthenticated at the time, showed them to
     anyone who asked.
     """
+    # LIKE, not '=': skips are already read by prefix everywhere
+    # (SKIPPED_UNEXPORTABLE, SKIPPED_GRANTEE_RECREATED, ...), so a failure
+    # variant written the same way -- FAILED_QUOTA is the obvious one, and a
+    # test already writes it -- was counted as neither done, nor failed, nor
+    # skipped. It simply vanished from this page and from itemsFailed while
+    # activity_payload, which does match by prefix, still showed it failing.
     q = ("SELECT id, source_user, item_id, item_type, status, error_message, "
-         "timestamp FROM audit_log WHERE status='FAILED'")
+         "timestamp FROM audit_log WHERE status LIKE 'FAILED%'")
     args: list[Any] = []
     if source_user:
         q += " AND source_user=?"
@@ -323,11 +329,11 @@ def drive_migrated_counts(since_iso: str | None = None) -> dict:
         ).fetchall()
         counts = {r["type"]: r["n"] for r in rows}
         failed = conn.execute(
-            "SELECT COUNT(*) n FROM audit_log WHERE status='FAILED' "
+            "SELECT COUNT(*) n FROM audit_log WHERE status LIKE 'FAILED%' "
             "AND item_type IN ('file','folder')" + where, args
         ).fetchone()["n"]
         acl_failed = conn.execute(
-            "SELECT COUNT(*) n FROM audit_log WHERE status='FAILED' "
+            "SELECT COUNT(*) n FROM audit_log WHERE status LIKE 'FAILED%' "
             "AND item_type='acl'" + where, args
         ).fetchone()["n"]
     return {"files": counts.get("file", 0), "folders": counts.get("folder", 0),
@@ -362,7 +368,7 @@ def user_progress(db_path: str | None = None) -> list[dict]:
                 "GROUP BY status", (email,)).fetchall()
             by = {c["status"]: c["n"] for c in counts}
             done = by.get("SUCCESS", 0)
-            failed = by.get("FAILED", 0)
+            failed = sum(n for st, n in by.items() if st.startswith("FAILED"))
             row["itemsDone"] = done
             row["itemsFailed"] = failed
             row["itemsSkipped"] = sum(

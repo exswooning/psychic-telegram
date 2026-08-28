@@ -1205,7 +1205,8 @@ async def retry_item(body: RetryItem, op: Operator = Depends(operator)):
             with cpdb.rw() as conn:
                 n = conn.execute(
                     "DELETE FROM audit_log WHERE source_user=? AND item_id=? "
-                    "AND status='FAILED'", (body.source_user, body.item_id)).rowcount
+                    "AND status LIKE 'FAILED%'",
+                    (body.source_user, body.item_id)).rowcount
         else:
             from config import Settings
 
@@ -1215,7 +1216,8 @@ async def retry_item(body: RetryItem, op: Operator = Depends(operator)):
                 conn.execute("PRAGMA busy_timeout=30000")
                 n = conn.execute(
                     "DELETE FROM audit_log WHERE source_user=? AND item_id=? "
-                    "AND status='FAILED'", (body.source_user, body.item_id)).rowcount
+                    "AND status LIKE 'FAILED%'",
+                    (body.source_user, body.item_id)).rowcount
                 conn.commit()
             finally:
                 conn.close()
@@ -2607,7 +2609,10 @@ def _migration_progress(account_id: int | None) -> dict:
             out["items"] = conn.execute(
                 "SELECT COUNT(*) n FROM id_mapping").fetchone()["n"]
             out["itemsFailed"] = conn.execute(
-                "SELECT COUNT(*) n FROM audit_log WHERE status='FAILED'"
+                # Prefix, matching itemsSkipped just below and the Failures
+                # page: an exact match drops any FAILED_* variant into a gap
+                # where it is counted as done, failed and skipped all zero.
+                "SELECT COUNT(*) n FROM audit_log WHERE status LIKE 'FAILED%'"
             ).fetchone()["n"]
             # Skips were invisible: the page showed migrated and failed with
             # nothing between them, while 56,975 items on a live tenant were
@@ -3081,7 +3086,7 @@ def _progress_since(conn, started_at: str | None) -> dict | None:
     row = conn.execute(
         "SELECT "
         " SUM(CASE WHEN status='SUCCESS' THEN 1 ELSE 0 END) moved,"
-        " SUM(CASE WHEN status='FAILED'  THEN 1 ELSE 0 END) failed,"
+        " SUM(CASE WHEN status LIKE 'FAILED%' THEN 1 ELSE 0 END) failed,"
         " SUM(CASE WHEN status LIKE 'SKIPPED%' THEN 1 ELSE 0 END) skipped "
         "FROM audit_log WHERE timestamp >= ?", (bound,)).fetchone()
     return {"moved": row["moved"] or 0, "failed": row["failed"] or 0,
@@ -3341,7 +3346,7 @@ async def migration_detail(account_id: int, op: Operator = Depends(operator)):
                 out["failures"] = _group_failures(conn.execute(
                     "SELECT item_type, error_message, source_user, "
                     "       COUNT(*) AS n "
-                    "FROM audit_log WHERE status='FAILED' "
+                    "FROM audit_log WHERE status LIKE 'FAILED%' "
                     "GROUP BY item_type, error_message, source_user "
                     "LIMIT 200000"))
 
