@@ -334,6 +334,47 @@ export interface UploadStatus {
   warning?: string
 }
 
+export interface OAuthTenant {
+  connected?: boolean
+  email?: string
+  scopes?: string[]
+  expires?: string
+  detail?: string
+}
+
+export interface OAuthStatus {
+  configured: boolean
+  client_secrets_path: string
+  auth_mode: string
+  source: OAuthTenant | null
+  target: OAuthTenant | null
+}
+
+/** Connecting a tenant by an administrator's OAuth consent, instead of by
+ *  domain-wide delegation. The endpoints existed from the start and no page
+ *  ever called them. */
+export const fetchOAuthStatus = () => getJSON<OAuthStatus>('/api/oauth/status')
+
+export async function oauthBegin(tenant: 'source' | 'target'):
+    Promise<{ ok: boolean; url?: string; error?: string }> {
+  const res = await fetch('/api/oauth/begin', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tenant }),
+  })
+  return res.json()
+}
+
+export async function oauthDisconnect(tenant: 'source' | 'target'):
+    Promise<{ ok: boolean; error?: string }> {
+  const res = await fetch('/api/oauth/disconnect', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tenant }),
+  })
+  return res.json()
+}
+
 export type UploadKind = 'source_key' | 'target_key' | 'oauth_client'
 
 /** Reads the file as text client-side; the raw JSON is what /api/upload

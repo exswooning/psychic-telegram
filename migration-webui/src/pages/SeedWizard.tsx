@@ -12,6 +12,7 @@ import {
 import JobRunner from '@/components/JobRunner'
 import JobProgress from '@/components/JobProgress'
 import CloudSetup from '@/components/CloudSetup'
+import OAuthConnect from '@/components/OAuthConnect'
 import DwdSetup from '@/components/DwdSetup'
 import QuickTenantSetup from '@/components/QuickTenantSetup'
 import { DwdStatus, fetchDwdStatus } from '@/api/controlPlane'
@@ -127,6 +128,7 @@ const SeedWizard: React.FC = () => {
                              Verified by minting a token per scope, so green here
                              means it genuinely works." />
           <DwdSetup />
+          <OAuthConnect />
 
           <Box sx={{ mt: 3 }} />
           <StepHeading n={3} title="Create users and seed data"
