@@ -71,6 +71,9 @@ except Exception:  # noqa: BLE001 - the UI should still load and say why
 log = logging.getLogger("webui")
 
 PY = sys.executable
+# This deployment's root. Jobs run from here unless told otherwise (see
+# Job.start), so a relative path in an action's argv resolves against it.
+HERE = os.path.dirname(os.path.abspath(__file__))
 
 # ----------------------------------------------------------------------
 # The complete set of things the browser may ask for. Anything not here
@@ -117,8 +120,20 @@ ACTIONS: dict[str, dict] = {
     },
     "init_db_auto": {
         "label": "Load identities by matching localparts",
-        "blurb": "Derives pairs from both directories. Needs delegation first.",
-        "argv": [PY, "main.py", "init-db", "--auto-map"],
+        "blurb": "Reads the source directory live and maps each user to the "
+                 "same localpart on the target domain, including users the "
+                 "target does not have yet so provision-users can create "
+                 "them. Needs delegation first. Creates no accounts.",
+        # --include-missing is not optional here, whatever its flag name
+        # suggests. Without it auto-map pairs only accounts that ALREADY
+        # exist on the target, while provision-users only creates accounts
+        # already in identity_map -- so on a fresh target neither command
+        # can start the other. main.py's own comment records the observed
+        # result: a target holding only info@ mapped 1 of 201 source users
+        # and reported "nothing to create", correctly and uselessly. This
+        # button is reached from the wizard, whose whole premise is a target
+        # that has not been provisioned yet.
+        "argv": [PY, "main.py", "init-db", "--auto-map", "--include-missing"],
     },
     "provision_dry": {
         "label": "Provision users (dry run)",
@@ -1733,6 +1748,17 @@ def seed_argv(body: dict, account_id: int | None = None) -> tuple[list[str], dic
         return [], {}, f"unknown scale {scale!r}"
 
     argv = [PY, "seed_sandbox.py", "--confirm-domain", domain, "--scale", scale]
+    # Write the identity map where init-db actually reads it.
+    #
+    # The seeder runs with cwd=<root>/data-generator (see the /api/seed
+    # handler), so its default relative --identities-out landed in
+    # data-generator/identities.csv. The "Create database + load identities"
+    # action runs from <root> and reads <root>/identities.csv. Nothing
+    # connected the two, so after a 201-user seed that button silently
+    # loaded a ten-row file left over from an unrelated tenant pair
+    # (c.anupam-poudel.com.np), and the wizard would have reported step 4
+    # done with an identity map for a migration that is not this one.
+    argv += ["--identities-out", os.path.join(HERE, "identities.csv")]
     # --yes skips the seeder's interactive "long run?" prompt. In this subprocess
     # stdin is inherited (or DEVNULL, see Job.start), so input() would block
     # forever and the run would seed nothing. The typed-domain gate above is the
@@ -1769,6 +1795,15 @@ def seed_argv(body: dict, account_id: int | None = None) -> tuple[list[str], dic
     if account_id is not None:
         env.update(SOURCE_DOMAIN=st.source_domain, SOURCE_ADMIN=st.source_admin,
                    SOURCE_SA_KEY=st.source_sa_key, MIGRATION_DB=st.db_path)
+        # TARGET_DOMAIN too, even though the seeder never writes to the
+        # target: it names every row of the identity map
+        # `<localpart>@{settings.target_domain}`. Overlaying only the source
+        # left that read falling through to env.sh's global placeholder, so a
+        # 201-user seed of source.rohitrokaya.com.np produced 201 rows
+        # pointing at a.example.com -- a domain in no part of this migration.
+        # Loading that map would have aimed provision-users and the whole
+        # migration at accounts that cannot exist.
+        env.update(TARGET_DOMAIN=st.target_domain, TARGET_ADMIN=st.target_admin)
     return argv, env, ""
 
 
