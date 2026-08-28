@@ -31,6 +31,11 @@ Environment=DISPLAY=:99
 # secure=False) anywhere this unit isn't the one being used, e.g. a bare
 # `python3 api_server.py` run for local/tunnel-only testing.
 Environment=BITPORT_COOKIE_SECURE=1
+# The node token lives in a root-only file on the box, NOT here: this unit
+# is rsynced from the repo on every deploy, so a secret written inline would
+# be committed. The leading `-` makes the file optional, so a host that has
+# never configured multi-node still starts.
+EnvironmentFile=-/etc/bitport/node.env
 ExecStart=/root/migration/.venv/bin/python api_server.py --port 8090
 Restart=always
 RestartSec=2

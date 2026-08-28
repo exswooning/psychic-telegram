@@ -176,6 +176,7 @@ describe('MigrationDetail — delta pass', () => {
   it('offers a delta run when the migration is idle', async () => {
     show(detail({ running: false }))
     await waitFor(() => expect(screen.getByTestId('run-delta')).toBeTruthy())
+    expect(screen.getByTestId('run-delta')).toHaveTextContent('Run delta')
     expect(screen.getByTestId('run-delta')).not.toBeDisabled()
   })
 
@@ -184,9 +185,13 @@ describe('MigrationDetail — delta pass', () => {
        so starting it mid-run would be refused by job_admission anyway --
        better to say so before asking for a Reason Code. */
     show(detail({ running: true }))
-    await waitFor(() => expect(screen.getByTestId('run-delta')).toBeTruthy())
+    // Wait for the LOADED state, not just for the button to exist: it
+    // renders before the detail fetch resolves, and in that frame `d` is
+    // null so `disabled={d?.running || …}` is false. Waiting on existence
+    // alone made this a race that only lost under full-suite load.
+    await waitFor(() =>
+      expect(screen.getByTestId('run-delta')).toHaveTextContent('migration running'))
     expect(screen.getByTestId('run-delta')).toBeDisabled()
-    expect(screen.getByTestId('run-delta')).toHaveTextContent('migration running')
   })
 
   it('asks for a Reason Code before starting', async () => {

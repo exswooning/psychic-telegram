@@ -1,0 +1,21 @@
+[Unit]
+Description=Bitport fleet agent (fleet_agent.py node heartbeat)
+After=network.target bitport-api.service
+
+[Service]
+WorkingDirectory=/root/migration
+# Heartbeats are what the UI uses to find a running migration and offer a
+# Stop button for it. /api/v2/fleet/heartbeat is gated behind node_auth, so
+# without this the agent is refused 503 on every tick and the node's row
+# goes stale -- which is exactly the state this box was found in.
+EnvironmentFile=-/etc/bitport/node.env
+ExecStart=/root/migration/.venv/bin/python fleet_agent.py \
+  --api http://localhost:8090 --node-id vps-garud --interval 30
+Restart=always
+RestartSec=5
+# Same reasoning as bitport-api.service: never kill the whole cgroup, which
+# on this box contains detached migration children.
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target

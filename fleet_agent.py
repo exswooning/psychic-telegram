@@ -135,19 +135,49 @@ def build_payload(node_id: str) -> dict:
     }
 
 
-def send(api: str, payload: dict, timeout: float = 10.0) -> bool:
+def send(api: str, payload: dict, timeout: float = 10.0) -> tuple[bool, str]:
+    """Post one heartbeat. Returns (accepted, reason-if-not).
+
+    The reason is the point. This used to return a bare bool and every
+    caller printed "unreachable", so a control plane that was up, answering,
+    and stating exactly what was wrong --
+
+        503 this control plane is not accepting worker nodes:
+            set BITPORT_NODE_TOKEN to enable multi-node migration
+
+    -- was indistinguishable from a dead socket. That ran for nineteen days:
+    the node stopped reporting, its last row went stale in the database, and
+    the Jobs page kept rendering that stale row as a live job with a Stop
+    button, while the only diagnostic anybody could find said "unreachable"
+    about a server that was fine. A refusal and an outage are different
+    facts and have different fixes.
+    """
     req = urllib.request.Request(
         f"{api.rstrip('/')}/api/v2/fleet/heartbeat",
         data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"}, method="POST")
+        headers={
+            "Content-Type": "application/json",
+            # Same shape user_claims.py uses. Empty unless multi-node is
+            # configured, and empty is fine against a coordinator that has
+            # no token set either.
+            "X-Node-Token": os.getenv("BITPORT_NODE_TOKEN", ""),
+        }, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return 200 <= resp.status < 300
-    except (urllib.error.URLError, OSError):
+            if 200 <= resp.status < 300:
+                return True, ""
+            return False, f"HTTP {resp.status}"
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = exc.read().decode()[:200]
+        except Exception:  # noqa: BLE001
+            detail = ""
+        return False, f"HTTP {exc.code} {detail}".strip()
+    except (urllib.error.URLError, OSError) as exc:
         # The control plane being down is not this node's problem, and it
         # certainly is not a reason to stop migrating. Fail quietly and retry
-        # on the next tick.
-        return False
+        # on the next tick -- but say what happened.
+        return False, f"unreachable: {exc}"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -159,8 +189,9 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     while True:
-        ok = send(args.api, build_payload(args.node_id))
-        print(f"{'sent' if ok else 'unreachable'}: {args.node_id} -> {args.api}", flush=True)
+        ok, why = send(args.api, build_payload(args.node_id))
+        status = "sent" if ok else f"REFUSED ({why})"
+        print(f"{status}: {args.node_id} -> {args.api}", flush=True)
         if args.once:
             return 0 if ok else 1
         time.sleep(args.interval)

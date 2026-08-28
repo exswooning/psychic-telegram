@@ -453,14 +453,23 @@ describe('MigrationDetail can start a full migration', () => {
     // the source what changed in a short window.
     fetchMigrationDetail.mockResolvedValue(detail())
     render(<MigrationDetail />)
-    await waitFor(() => expect(screen.getByTestId('run-full')).toBeTruthy())
+    // Wait for the LOADED state, not merely for the button to exist. The
+    // button renders before the detail fetch resolves, and in that first
+    // frame `d` is null, so `disabled={d?.running || fullBusy}` is false --
+    // which is what this test asserts. Waiting only for existence therefore
+    // passed without ever observing the loaded data, and its sibling below
+    // (which expects the opposite) lost the same race whenever the suite
+    // was under enough load to delay the microtask. Assert on settled text.
+    await waitFor(() =>
+      expect(screen.getByTestId('run-full').textContent).toContain('Run full migration'))
     expect(screen.getByTestId('run-full').hasAttribute('disabled')).toBe(false)
   })
 
   it('disables it while a migration is running', async () => {
     fetchMigrationDetail.mockResolvedValue(detail({ running: true }))
     render(<MigrationDetail />)
-    await waitFor(() => expect(screen.getByTestId('run-full')).toBeTruthy())
+    await waitFor(() =>
+      expect(screen.getByTestId('run-full').textContent).toContain('migration running'))
     expect(screen.getByTestId('run-full').hasAttribute('disabled')).toBe(true)
   })
 
