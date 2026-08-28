@@ -818,9 +818,21 @@ async def auth_signup(body: SignupRequest, response: Response):
 async def auth_login(body: LoginRequest, response: Response):
     account_id = await _off_loop(accounts_auth.authenticate, body.email, body.password)
     if account_id is None:
-        # Same message for "no such email" and "wrong password" -- a
-        # distinguishing error lets a login form enumerate registered
-        # emails one guess at a time.
+        # Same message for "no such email", "wrong password" AND "locked" --
+        # a distinguishing error lets a login form enumerate registered
+        # emails one guess at a time, and "this account is locked" confirms
+        # an account exists just as loudly as "wrong password" would.
+        #
+        # The cost is a legitimate user who is locked out gets no
+        # explanation, so the reason is logged here instead: the operator
+        # can see it, the internet cannot.
+        try:
+            held = await _off_loop(accounts_auth.login_locked_for, body.email)
+            if held:
+                log.warning("login refused: %s is locked for another %ss",
+                            body.email, held)
+        except Exception:      # noqa: BLE001 - never fail a login on logging
+            pass
         raise HTTPException(401, "wrong email or password")
     token = await _off_loop(accounts_auth.create_session, account_id)
     _set_session_cookie(response, token)

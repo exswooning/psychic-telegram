@@ -25,6 +25,7 @@ from each account's own per-customer migration.db under data/accounts/.
 
 from __future__ import annotations
 
+import datetime as _dt
 import hashlib
 import os
 import re
@@ -113,19 +114,109 @@ def create_account(email: str, password: str, name: str, plan: str = "trial") ->
     return account_id
 
 
+# How many wrong passwords before an account stops answering, and for how
+# long. Short on purpose: keyed by email, so a long window would let anyone
+# lock out a user they can name. Long enough that guessing is pointless --
+# 8 tries per 15 minutes is 768 a day against a 200,000-iteration KDF.
+MAX_LOGIN_ATTEMPTS = int(os.getenv("BITPORT_MAX_LOGIN_ATTEMPTS", "8"))
+LOGIN_LOCKOUT_SECONDS = int(os.getenv("BITPORT_LOGIN_LOCKOUT_SECONDS", "900"))
+
+# A real hash to verify against when the email does not exist, so an unknown
+# address costs the same PBKDF2 work as a known one. Without it the
+# deliberate "same None either way" above is undone by a stopwatch: a
+# missing account returned before any KDF ran.
+_DUMMY_HASH = hash_password("not-a-real-password-only-here-for-timing")
+
+
+def _now_iso() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def login_locked_for(email: str) -> int:
+    """Seconds remaining on this account's lockout, 0 if it is not locked."""
+    with cpdb.ro() as conn:
+        row = conn.execute(
+            "SELECT locked_until FROM login_attempts WHERE email=?",
+            (email.strip().lower(),)).fetchone()
+    if not row or not row["locked_until"]:
+        return 0
+    try:
+        until = _dt.datetime.strptime(row["locked_until"], "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return 0
+    left = (until.replace(tzinfo=_dt.timezone.utc)
+            - _dt.datetime.now(_dt.timezone.utc)).total_seconds()
+    return int(left) if left > 0 else 0
+
+
+def _record_failure(email: str) -> None:
+    """One more wrong password, and lock the account if that was the last
+    one allowed. The window restarts from the first failure, so slow
+    guessing does not accumulate forever."""
+    now = _dt.datetime.now(_dt.timezone.utc)
+    with cpdb.rw() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT failed_count, first_failed_at FROM login_attempts "
+            "WHERE email=?", (email,)).fetchone()
+        count, first = (row["failed_count"], row["first_failed_at"]) if row else (0, None)
+        stale = True
+        if first:
+            try:
+                started = _dt.datetime.strptime(first, "%Y-%m-%dT%H:%M:%SZ")
+                stale = (now - started.replace(tzinfo=_dt.timezone.utc)
+                         ).total_seconds() > LOGIN_LOCKOUT_SECONDS
+            except ValueError:
+                stale = True
+        count = 1 if stale else count + 1
+        first_at = _now_iso() if stale else first
+        locked = None
+        if count >= MAX_LOGIN_ATTEMPTS:
+            locked = (now + _dt.timedelta(seconds=LOGIN_LOCKOUT_SECONDS)
+                      ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        conn.execute(
+            "INSERT INTO login_attempts (email, failed_count, first_failed_at, "
+            "locked_until) VALUES (?,?,?,?) ON CONFLICT(email) DO UPDATE SET "
+            "failed_count=excluded.failed_count, "
+            "first_failed_at=excluded.first_failed_at, "
+            "locked_until=excluded.locked_until",
+            (email, count, first_at, locked))
+
+
+def clear_login_failures(email: str) -> None:
+    """A correct password wipes the slate -- otherwise a user who mistyped
+    twice this morning is closer to a lockout all day."""
+    with cpdb.rw() as conn:
+        conn.execute("DELETE FROM login_attempts WHERE email=?",
+                     (email.strip().lower(),))
+
+
 def authenticate(email: str, password: str) -> int | None:
     """Returns the account id on success, None on any failure -- deliberately
     the same None for 'no such email' and 'wrong password' so a login form
-    can't be used to enumerate registered emails."""
+    can't be used to enumerate registered emails.
+
+    Throttled: MAX_LOGIN_ATTEMPTS wrong passwords lock the account for
+    LOGIN_LOCKOUT_SECONDS. A locked account returns None without checking
+    the password, so the lock costs an attacker the full window.
+
+    The unknown-email path still runs a full PBKDF2 verify against a dummy
+    hash. Returning early there made the "same None either way" promise
+    above measurable with a stopwatch -- a missing account answered in
+    microseconds, a real one in 200,000 iterations.
+    """
     email = email.strip().lower()
+    if login_locked_for(email):
+        return None
     with cpdb.ro() as conn:
         row = conn.execute(
             "SELECT id, password_hash FROM accounts WHERE email=?", (email,)
         ).fetchone()
-    if row is None:
+    ok = verify_password(password, row["password_hash"] if row else _DUMMY_HASH)
+    if row is None or not ok:
+        _record_failure(email)
         return None
-    if not verify_password(password, row["password_hash"]):
-        return None
+    clear_login_failures(email)
     return int(row["id"])
 
 
