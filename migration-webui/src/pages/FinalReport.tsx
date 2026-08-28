@@ -35,7 +35,15 @@ import { useMigrationStore } from '@/store'
 const FinalReport: React.FC = () => {
   const { report } = useMigrationStore()
 
-  if (!report) {
+  // /api/spa/report answers with a fully ZEROED object, never null, when no
+  // migration has run -- so `!report` was never once true and the honest
+  // fallback below was unreachable. What rendered instead was a green
+  // "Migration Complete -- 0 of 0 users migrated successfully in --", which
+  // is the worst possible reading of an empty ledger: it is the same screen
+  // a real completed migration produces, and this project's ledger HAS been
+  // reset (see reset_drive_ledger), which zeroes a finished run's numbers.
+  // "Never ran" and "ran and moved nothing" must not look alike.
+  if (!report || report.totalUsers === 0) {
     return (
       <Box>
         <Typography variant="h4" sx={{ fontWeight: 700, mb: 0.5 }}>Final Report</Typography>
@@ -43,6 +51,10 @@ const FinalReport: React.FC = () => {
       </Box>
     )
   }
+
+  // Finishing is not the same as succeeding. A run that moved nobody, or
+  // lost users on the way, must not be announced in success green.
+  const clean = report.failedUsers === 0 && report.successfulUsers === report.totalUsers
 
   const stats = [
     { label: 'Total Users', value: report.totalUsers, icon: <PeopleIcon />, color: 'primary' },
@@ -62,9 +74,10 @@ const FinalReport: React.FC = () => {
       <Typography variant="h4" sx={{ fontWeight: 700, mb: 0.5 }}>Final Report</Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>Migration completion summary and exports</Typography>
 
-      <Alert severity="success" sx={{ mb: 3 }}>
-        <AlertTitle>Migration Complete</AlertTitle>
+      <Alert severity={clean ? 'success' : 'warning'} sx={{ mb: 3 }}>
+        <AlertTitle>{clean ? 'Migration Complete' : 'Migration finished with failures'}</AlertTitle>
         {report.successfulUsers} of {report.totalUsers} users migrated successfully in {report.totalDuration}.
+        {report.failedUsers > 0 && ` ${report.failedUsers} failed.`}
       </Alert>
 
       <Grid container spacing={2} sx={{ mb: 3 }}>

@@ -324,7 +324,8 @@ const RunningNow: React.FC = () => {
             )}
             {j.lines && j.lines.length > 0 && (
               <Box sx={{ px: 2, pb: 2 }}>
-                <SeedRunDashboard lines={j.lines} elapsedSec={j.elapsedSec} />
+                {/* Running Now only ever lists live jobs. */}
+                <SeedRunDashboard lines={j.lines} elapsedSec={j.elapsedSec} running />
                 <Box component="pre" sx={{
                   fontSize: 11, p: 1.5, bgcolor: 'action.hover', borderRadius: 1,
                   overflowX: 'auto', maxHeight: 260, whiteSpace: 'pre-wrap', m: 0, mt: 1.5,

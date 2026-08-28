@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Box, Typography, Card, CardContent, Stack, Chip, IconButton, Tooltip,
   Collapse, LinearProgress, Divider, CircularProgress, Button, TextField,
@@ -41,13 +41,32 @@ const HEALTH_COLOR: Record<Health, 'success' | 'warning' | 'error' | 'info' | 'd
   attention: 'error', not_set_up: 'default', unknown: 'default',
 }
 
-interface SideJob {
+// The cheap poll: job state, tenant config, full-setup progress. Every
+// endpoint behind it answers in well under a second.
+const POLL_MS = 5000
+// The expensive one -- see refreshScopes for why it cannot share the above.
+const SCOPE_POLL_MS = 60000
+
+type Caveat = { api: string; note: string }
+
+/** Delegation state, which the fast poll deliberately does not carry. */
+interface ScopeState {
+  domains: VerifiedDomain[]
+  srcCaveats: Caveat[]
+  tgtCaveats: Caveat[]
+}
+
+/** What the fast poll alone can establish. */
+interface RawSide {
   side: 'source' | 'target'
   cfg: TenantConfigStatus | null
-  dwd: VerifiedDomain | null
   setup: FullSetupStatus | null
+}
+
+interface SideJob extends RawSide {
+  dwd: VerifiedDomain | null
   health: Health
-  caveats: { api: string; note: string }[]
+  caveats: Caveat[]
 }
 
 function deriveHealth(cfg: TenantConfigStatus | null, dwd: VerifiedDomain | null,
@@ -72,7 +91,7 @@ function deriveHealth(cfg: TenantConfigStatus | null, dwd: VerifiedDomain | null
  * just one place that composes them.
  */
 const Jobs: React.FC = () => {
-  const [sides, setSides] = useState<SideJob[] | null>(null)
+  const [rawSides, setSides] = useState<RawSide[] | null>(null)
   const [seedJob, setSeedJob] = useState<JobStatus | null>(null)
   const [seedHistory, setSeedHistory] = useState<JobResult | null>(null)
   // The migrate/delta/discover slot -- fleet_agent.py's own ps scan is what
@@ -83,39 +102,38 @@ const Jobs: React.FC = () => {
   const [expanded, setExpanded] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [seedEnabled, setSeedEnabled] = useState(false)
+  // Delegation state, polled on its own much slower clock -- see SCOPE_POLL_MS.
+  const [scopes, setScopes] = useState<ScopeState>(
+    { domains: [], srcCaveats: [], tgtCaveats: [] })
+  // Guards against a slow round overlapping itself. Deliberately a ref, not
+  // state: it must be readable and writable inside the same tick without
+  // scheduling a render.
+  const busy = useRef(false)
 
   useEffect(() => { fetchMe().then((a) => setSeedEnabled(a.seed_enabled)).catch(() => {}) }, [])
 
   const refresh = useCallback(async () => {
+    // Without this, a round slower than POLL_MS overlaps its own successor
+    // and the overlap compounds: the interval keeps firing regardless of
+    // whether the last one came back.
+    if (busy.current) return
+    busy.current = true
     setLoading(true)
     try {
-      const [srcCfg, tgtCfg, dwd, srcSetup, tgtSetup, job, hist, srcDwdStatus, tgtDwdStatus, nodes, activeJobs, me] = await Promise.all([
+      const [srcCfg, tgtCfg, srcSetup, tgtSetup, job, hist, nodes, activeJobs, me] = await Promise.all([
         fetchTenantConfigStatus('source').catch(() => null),
         fetchTenantConfigStatus('target').catch(() => null),
-        fetchVerifiedDomains().catch(() => ({ domains: [] as VerifiedDomain[] })),
         fetchFullSetupStatus('source').catch(() => null),
         fetchFullSetupStatus('target').catch(() => null),
         fetchJob(0).catch(() => null),
         fetchJobHistory('seed').catch(() => null),
-        // An API can report ENABLED and still 404 every call -- Chat needs
-        // an app configured in the Cloud console, which has no API, so this
-        // is the only way to know before a seed/migrate run hits it. Same
-        // check DwdSetup.tsx already surfaces in the Wizard; the Jobs page
-        // needs its own copy since a seed can also be launched from here.
-        fetchDwdStatus('source').catch(() => null),
-        fetchDwdStatus('target').catch(() => null),
         fetchFleet().catch(() => [] as FleetNode[]),
         fetchActiveJobs().catch(() => []),
         fetchMe().catch(() => null),
       ])
-      const byDwd = (side: 'source' | 'target') => dwd.domains.find((d) => d.side === side) ?? null
       setSides([
-        { side: 'source', cfg: srcCfg, dwd: byDwd('source'), setup: srcSetup,
-         health: deriveHealth(srcCfg, byDwd('source'), srcSetup),
-         caveats: srcDwdStatus?.caveats ?? [] },
-        { side: 'target', cfg: tgtCfg, dwd: byDwd('target'), setup: tgtSetup,
-         health: deriveHealth(tgtCfg, byDwd('target'), tgtSetup),
-         caveats: tgtDwdStatus?.caveats ?? [] },
+        { side: 'source', cfg: srcCfg, setup: srcSetup },
+        { side: 'target', cfg: tgtCfg, setup: tgtSetup },
       ])
       // `external` means "not in this server process's memory", NOT "not
       // mine": every webui restart drops the in-memory Job while the child
@@ -129,17 +147,71 @@ const Jobs: React.FC = () => {
         : false
       setSeedJob(job && job.name === 'seed' && (!job.external || mine) ? job : null)
       setSeedHistory(hist)
-      setFleetJob(nodes.find((n) => n.active_job && n.job_pid) ?? null)
+      // A node reports its own active job, so the report is only worth as
+      // much as the node's liveness. This box carried active_job
+      // "--account-id" against a dead pid with a 43-HOUR-old heartbeat, and
+      // healthy:false on the record itself -- and the card rendered a
+      // spinner, an indeterminate progress bar and a working Stop button
+      // over the top of it, four hours after everything had finished. The
+      // server already computes `healthy` from last_seen for exactly this
+      // reason; not consulting it was the whole bug.
+      setFleetJob(nodes.find(fleetJobIsLive) ?? null)
     } finally {
       setLoading(false)
+      busy.current = false
     }
+  }, [])
+
+  // Delegation is verified FUNCTIONALLY -- Google offers no way to read a
+  // delegation entry back, so each of these mints a real token per scope.
+  // Measured against this deployment: verified-domains 29.2s, dwd/status
+  // source 18.2s, target 14.3s. On the old 5s loop that meant roughly six
+  // rounds in flight at once, permanently, each holding three live Google
+  // round-trips; first paint was 12-30s of blank spinner and `loading`
+  // never cleared, so Refresh sat disabled forever. A finished 5.5-hour,
+  // 200-user seed read as "nothing here". Delegation changes when somebody
+  // edits it in the Admin Console, not second to second -- a minute is far
+  // more resolution than it needs.
+  const refreshScopes = useCallback(async () => {
+    const [dwd, srcDwdStatus, tgtDwdStatus] = await Promise.all([
+      fetchVerifiedDomains().catch(() => ({ domains: [] as VerifiedDomain[] })),
+      // An API can report ENABLED and still 404 every call -- Chat needs an
+      // app configured in the Cloud console, which has no API, so this is
+      // the only way to know before a seed/migrate run hits it.
+      fetchDwdStatus('source').catch(() => null),
+      fetchDwdStatus('target').catch(() => null),
+    ])
+    setScopes({
+      domains: dwd.domains,
+      srcCaveats: srcDwdStatus?.caveats ?? [],
+      tgtCaveats: tgtDwdStatus?.caveats ?? [],
+    })
   }, [])
 
   useEffect(() => {
     refresh()
-    const id = setInterval(refresh, 5000)
+    const id = setInterval(refresh, POLL_MS)
     return () => clearInterval(id)
   }, [refresh])
+
+  useEffect(() => {
+    refreshScopes()
+    const id = setInterval(refreshScopes, SCOPE_POLL_MS)
+    return () => clearInterval(id)
+  }, [refreshScopes])
+
+  // Composed from both clocks. Until the slow one has answered once, dwd is
+  // null and deriveHealth reports 'unknown' -- which is the truth at that
+  // moment, and is shown rather than withholding the whole page behind it.
+  const sides: SideJob[] | null = useMemo(() => rawSides?.map((r) => {
+    const dwd = scopes.domains.find((d) => d.side === r.side) ?? null
+    return {
+      ...r,
+      dwd,
+      health: deriveHealth(r.cfg, dwd, r.setup),
+      caveats: r.side === 'source' ? scopes.srcCaveats : scopes.tgtCaveats,
+    }
+  }) ?? null, [rawSides, scopes])
 
   const toggle = (key: string) => setExpanded((cur) => (cur === key ? null : key))
 
@@ -191,6 +263,21 @@ const Jobs: React.FC = () => {
 // webui.py's per-account Job, or main.py found live via fleet_agent.py's ps
 // scan) -- so the collapsed header never has to be expanded just to learn
 // something is in flight, and Stop always has one consistent place to live.
+// fleet_agent.py posts on a 30s interval, so a node that has not been heard
+// from in several intervals is not reporting -- whatever it last said about
+// a running job is a stale claim, not an observation.
+const HEARTBEAT_STALE_AFTER_S = 150
+
+function fleetJobIsLive(n: FleetNode): boolean {
+  if (!n.active_job || !n.job_pid) return false
+  if (!n.healthy) return false
+  // null means the server could not derive an age; treat unknown as stale
+  // rather than live -- the failure mode of the opposite default is a Stop
+  // button pointed at a process that no longer exists.
+  if (n.secondsSinceHeartbeat == null) return false
+  return n.secondsSinceHeartbeat <= HEARTBEAT_STALE_AFTER_S
+}
+
 type ActiveRun = {
   kind: 'setup' | 'seed' | 'fleet'; label: string; pct: number | null
   stop: (reason: string) => Promise<void>
@@ -525,6 +612,13 @@ const SeedJobCard: React.FC<{
   const label = running ? 'Running' : rc === 0 ? 'ok' : rc === null ? 'Unknown' : `exit ${rc}`
   const color = running ? 'info' : rc === 0 ? 'success' : rc === null ? 'default' : 'error'
   const lines = (running ? job?.lines : history?.lines) ?? []
+  // "exit 2" on its own is a number, not a finding. seed_sandbox.py states
+  // its own outcome on the way out ("PARTIAL: 200 of 201 users seeded; 1
+  // failed"), and that sentence is the actual answer to why the code is
+  // non-zero -- it was sitting in the transcript, below the fold, unread.
+  const outcome = !running && rc !== 0
+    ? [...lines].reverse().find((l) => /^\s*(PARTIAL|FAILED|ABORTED)\b/.test(l))?.trim()
+    : undefined
   const [stopAsk, setStopAsk] = useState(false)
   const [stopBusy, setStopBusy] = useState(false)
   const [stopError, setStopError] = useState<string | null>(null)
@@ -555,6 +649,11 @@ const SeedJobCard: React.FC<{
             {running ? `${job?.elapsed ?? 0}s elapsed` : history
               ? `${new Date(history.finished * 1000).toLocaleString()} · ${history.elapsed}s` : 'no run yet'}
           </Typography>
+          {outcome && (
+            <Typography variant="caption" color="error.main" sx={{ display: 'block', fontWeight: 600 }}>
+              {outcome}
+            </Typography>
+          )}
         </Box>
         {running && <CircularProgress size={16} />}
         {running && (
@@ -593,7 +692,8 @@ const SeedJobCard: React.FC<{
         <CardContent sx={{ pt: 2 }}>
           {lines.length > 0 ? (
             <>
-              <SeedRunDashboard lines={lines} elapsedSec={job?.elapsed ?? history?.elapsed} />
+              <SeedRunDashboard lines={lines} running={running}
+                                elapsedSec={job?.elapsed ?? history?.elapsed} />
               <Box component="pre" sx={{
                 fontSize: 11, p: 1.5, bgcolor: 'action.hover', borderRadius: 1,
                 overflowX: 'auto', maxHeight: 260, whiteSpace: 'pre-wrap', m: 0, mt: 1.5,

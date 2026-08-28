@@ -123,3 +123,61 @@ describe('surfacing what the run measured', () => {
     expect(container).toBeEmptyDOMElement()
   })
 })
+
+/**
+ * A user with a "starting" line and no "done" line is in flight while the
+ * process lives and FAILED once it has exited. The dashboard knew only the
+ * first reading, so the single failed user of a real 201-user seed rendered
+ * as "in flight" four hours after the run ended -- the one user that got no
+ * data was the one user the screen said nothing about.
+ */
+describe('a run that has exited', () => {
+  const stranded = [
+    ...banner({ users: 3, workers: 1 }),
+    '  [ghost@source.example.com] starting (People, PRJ-005)',
+    doneUser(1),
+    doneUser(2),
+  ]
+
+  it('calls a user that never finished failed, not in flight', () => {
+    render(<SeedRunDashboard lines={stranded} elapsedSec={900} running={false} />)
+    expect(screen.getByText('never finished')).toBeTruthy()
+    expect(screen.queryByText('in flight')).toBeNull()
+    expect(statValue('Never finished')).toBe('1')
+  })
+
+  it('still calls it in flight while the process is alive', () => {
+    render(<SeedRunDashboard lines={stranded} elapsedSec={900} running />)
+    expect(screen.getByText('in flight')).toBeTruthy()
+    expect(screen.queryByText('never finished')).toBeNull()
+  })
+
+  it('withholds an ETA once there is nothing left to estimate', () => {
+    render(<SeedRunDashboard lines={stranded} elapsedSec={900} running={false} />)
+    expect(statValue('ETA (observed)')).toBe('--')
+  })
+
+  it('gives the failed user a reason in the Failed column', () => {
+    render(<SeedRunDashboard lines={stranded} elapsedSec={900} running={false} />)
+    const row = screen.getByText('ghost@source.example.com').closest('tr')!
+    expect(within(row).getByText('no result line')).toBeTruthy()
+  })
+})
+
+/**
+ * The User column carried an email plus a department line, both noWrap and
+ * unbounded, so auto table layout sized it to 2,513px against a 1,256px
+ * container and pushed all fourteen other columns -- including Failed --
+ * off screen behind horizontal scroll.
+ */
+describe('the per-user table stays readable', () => {
+  it('bounds the User column so the other columns stay on screen', () => {
+    render(<SeedRunDashboard lines={[...banner(), doneUser(1)]} elapsedSec={5400} />)
+    // sx compiles to an emotion class, so the value is only visible through
+    // the computed style, not the inline style attribute.
+    const header = screen.getByText('User').closest('th')!
+    const maxW = getComputedStyle(header).maxWidth
+    expect(maxW).toMatch(/^\d+px$/)
+    expect(parseInt(maxW, 10)).toBeLessThanOrEqual(400)
+  })
+})

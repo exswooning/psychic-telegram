@@ -30,6 +30,14 @@ const COUNT_ORDER = [
   'secondary calendars', 'chat messages', 'spaces', 'contacts', 'tasks',
 ]
 
+// The User column carries an email plus a department/project line, both
+// noWrap. Unbounded, auto table layout sized it to the longest of those --
+// measured at 2,513px against a 1,256px container, which pushed all
+// fourteen remaining columns (Status, Took, every count, and Failed) off
+// screen behind 2,450px of horizontal scroll with no visible affordance.
+// The one column identifying a failed user was the furthest out of reach.
+const USER_COL = 260
+
 const fmt = (n: number) => n.toLocaleString()
 
 const dur = (sec: number): string => {
@@ -66,12 +74,22 @@ const Stat: React.FC<{
   </Box>
 )
 
-const SeedRunDashboard: React.FC<{ lines: string[]; elapsedSec?: number }> = ({
-  lines, elapsedSec,
-}) => {
+const SeedRunDashboard: React.FC<{
+  lines: string[]; elapsedSec?: number; running?: boolean
+}> = ({ lines, elapsedSec, running }) => {
   const run: SeedRun = React.useMemo(() => parseSeedRun(lines), [lines])
 
   if (run.users.length === 0 && run.totalUsers === undefined) return null
+
+  // A user with a "starting" line and no "done" line means two opposite
+  // things depending on whether the process is still alive. While the run
+  // is live it is genuinely in flight. Once the run has exited it is a
+  // user that FAILED -- seed_sandbox.py prints its own "PARTIAL: N of M
+  // users seeded" line for exactly this case. Rendering it as "in flight"
+  // on a dead run is how the single failed user of a 201-user seed came to
+  // be the one user the dashboard said nothing about.
+  const ended = running === false
+  const stranded = ended ? run.runningCount : 0
 
   const pct = run.totalUsers ? Math.round((run.doneCount / run.totalUsers) * 100) : null
 
@@ -104,8 +122,16 @@ const SeedRunDashboard: React.FC<{ lines: string[]; elapsedSec?: number }> = ({
         <Stat label="Users" value={run.totalUsers != null
           ? `${fmt(run.doneCount)} / ${fmt(run.totalUsers)}` : fmt(run.doneCount)}
           hint="Finished / total, counted from the run's own per-user lines" />
-        <Stat label="In flight" value={run.runningCount || '--'} accent={run.runningCount > 0}
-              hint="Users started but not yet finished" />
+        {ended ? (
+          <Stat label="Never finished" value={stranded || '--'} accent={stranded > 0}
+                hint={stranded > 0
+                  ? `${stranded} user(s) started and produced no result line before the run `
+                    + `exited -- they failed. See the per-user table and the '!' lines in the log.`
+                  : 'Every user that started also finished'} />
+        ) : (
+          <Stat label="In flight" value={run.runningCount || '--'} accent={run.runningCount > 0}
+                hint="Users started but not yet finished" />
+        )}
         <Stat label="Workers" value={run.workers ?? '--'} hint={run.workerReason} />
         <Stat label="Scale" value={run.scale ?? '--'} />
         <Stat label="Elapsed" value={elapsedSec != null ? dur(elapsedSec) : '--'} />
@@ -113,9 +139,10 @@ const SeedRunDashboard: React.FC<{ lines: string[]; elapsedSec?: number }> = ({
               value={perMin ? `${perMin.toFixed(2)}/min` : '--'}
               hint={sampleHint
                 ?? "Users finished per minute so far -- measured, not the run's estimate"} />
-        <Stat label="ETA (observed)" value={etaSec != null ? dur(etaSec) : '--'}
-              accent={etaSec != null}
-              hint={sampleHint
+        <Stat label="ETA (observed)" value={ended ? '--' : etaSec != null ? dur(etaSec) : '--'}
+              accent={!ended && etaSec != null}
+              hint={ended ? 'The run has finished -- there is nothing left to estimate'
+                : sampleHint
                 ?? 'Extrapolated from the observed rate above, not from the run’s up-front estimate'} />
         <Stat label="Est. at start"
               value={run.estimatedMinutes != null ? dur(run.estimatedMinutes * 60) : '--'}
@@ -128,7 +155,7 @@ const SeedRunDashboard: React.FC<{ lines: string[]; elapsedSec?: number }> = ({
         <Box sx={{ mb: 1.5 }}>
           <LinearProgress variant="determinate" value={pct} sx={{ height: 6, borderRadius: 3 }} />
           <Typography variant="caption" color="text.secondary">
-            {pct}% of users finished
+            {pct}% of users finished{ended && stranded > 0 && ` · ${fmt(stranded)} failed`}
             {run.domain && ` · ${run.domain}`}
             {run.externalCollaborator && ` · external collaborator ${run.externalCollaborator}`}
           </Typography>
@@ -141,8 +168,8 @@ const SeedRunDashboard: React.FC<{ lines: string[]; elapsedSec?: number }> = ({
           <Typography variant="caption" color="text.secondary" sx={{
             display: 'block', mb: 0.5, fontWeight: 600,
           }}>
-            Created so far (summed across {fmt(run.doneCount)} finished user
-            {run.doneCount === 1 ? '' : 's'})
+            {ended ? 'Created' : 'Created so far'} (summed across {fmt(run.doneCount)} finished
+            user{run.doneCount === 1 ? '' : 's'})
           </Typography>
           <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', gap: 1, mb: 1.5 }}>
             {counts.map((k) => (
@@ -189,7 +216,9 @@ const SeedRunDashboard: React.FC<{ lines: string[]; elapsedSec?: number }> = ({
         <Table size="small" stickyHeader>
           <TableHead>
             <TableRow>
-              <TableCell sx={{ fontWeight: 600 }}>User</TableCell>
+              <TableCell sx={{ fontWeight: 600, width: USER_COL, maxWidth: USER_COL }}>
+                User
+              </TableCell>
               <TableCell sx={{ fontWeight: 600 }}>Status</TableCell>
               <TableCell sx={{ fontWeight: 600 }} align="right">Took</TableCell>
               {COUNT_ORDER.filter((k) => counts.includes(k)).map((k) => (
@@ -205,19 +234,25 @@ const SeedRunDashboard: React.FC<{ lines: string[]; elapsedSec?: number }> = ({
               .sort((a, b) => (a.status === 'running' ? 0 : 1) - (b.status === 'running' ? 0 : 1))
               .map((u) => (
                 <TableRow key={u.email} hover>
-                  <TableCell>
-                    <Typography variant="body2" sx={{ fontWeight: 600 }} noWrap>{u.email}</Typography>
+                  <TableCell sx={{ width: USER_COL, maxWidth: USER_COL }}>
+                    <Typography variant="body2" title={u.email} noWrap
+                                sx={{ fontWeight: 600, maxWidth: USER_COL }}>
+                      {u.email}
+                    </Typography>
                     {u.context && (
-                      <Typography variant="caption" color="text.secondary" noWrap>
+                      <Typography variant="caption" color="text.secondary" noWrap
+                                  title={u.context} sx={{ display: 'block', maxWidth: USER_COL }}>
                         {u.context}
                       </Typography>
                     )}
                   </TableCell>
                   <TableCell>
                     <Chip size="small"
-                          label={u.status === 'running' ? 'in flight' : u.status}
-                          color={u.status === 'running' ? 'info' : 'success'}
-                          variant={u.status === 'running' ? 'filled' : 'outlined'} />
+                          label={u.status !== 'running' ? u.status
+                            : ended ? 'never finished' : 'in flight'}
+                          color={u.status !== 'running' ? 'success'
+                            : ended ? 'error' : 'info'}
+                          variant={u.status === 'running' && !ended ? 'filled' : 'outlined'} />
                   </TableCell>
                   <TableCell align="right" sx={{ fontVariantNumeric: 'tabular-nums' }}>
                     {u.elapsedSec != null ? dur(u.elapsedSec) : '--'}
@@ -233,6 +268,9 @@ const SeedRunDashboard: React.FC<{ lines: string[]; elapsedSec?: number }> = ({
                           <Chip key={s} size="small" label={s} color="error"
                                 variant="outlined" sx={{ mr: 0.5 }} />
                         ))
+                      : ended && u.status === 'running'
+                      ? <Chip size="small" label="no result line" color="error"
+                              variant="outlined" />
                       : <Typography variant="caption" color="text.secondary">--</Typography>}
                   </TableCell>
                 </TableRow>
