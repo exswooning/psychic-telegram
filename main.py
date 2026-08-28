@@ -122,6 +122,37 @@ def _install_signal_handlers() -> None:
 # HTTP 400 that named no cause anyone could act on.
 _NO_MAILBOX = ("mail service not enabled", "failedprecondition")
 
+# The SAME root cause, seen from Drive instead of Gmail. An account with no
+# Workspace licence has no Drive either, and drive/v3/files/root answers 401
+# "Active session is invalid. Error code: 4" -- which names no cause at all.
+#
+# Drive runs before Gmail in migrate_user, so for an unlicensed account this
+# is the signature that actually occurs; _NO_MAILBOX describes a symptom the
+# run never reaches. Confirmed live: seeduser382 failed this way in two
+# separate migrations and was reported FAILED both times, while the
+# Licensing API answered HTTP 412 "There aren't enough available licenses"
+# for a tenant holding 201 accounts against 200 seats.
+#
+# "Active session is invalid" alone is NOT enough: resilience.py retries it
+# precisely because a freshly-provisioned account says the same thing for a
+# minute or two. Only a version that outlived every retry is a candidate,
+# and even then it is a candidate -- a revoked delegation reads identically,
+# which is why the licence is checked rather than assumed.
+_MAYBE_UNLICENSED = ("exhausted", "retries", "active session is invalid")
+
+
+def _licence_of(settings, source_user: str) -> tuple[str | None, str]:
+    """That user's licence SKU, or None if they have none. ("", reason) when
+    the question could not be answered -- never guessed at."""
+    try:
+        import tenant_inventory
+        by_email, err = tenant_inventory.licenses(settings, "source")
+    except Exception as exc:      # noqa: BLE001 - diagnosis must not throw
+        return "", f"could not read licences: {str(exc)[:100]}"
+    if err:
+        return "", err
+    return by_email.get(source_user.lower()) or None, ""
+
 
 # Which ledger item types prove a service actually did something.
 _SERVICE_ITEMS = {
@@ -233,11 +264,13 @@ def is_blocked_externally(exc: Exception) -> bool:
     can change -- and a failure count nobody trusts is a failure count
     nobody reads.
     """
-    return all(k in str(exc).lower() for k in _NO_MAILBOX)
+    low = str(exc).lower()
+    return (all(k in low for k in _NO_MAILBOX)
+            or all(k in low for k in _MAYBE_UNLICENSED))
 
 
 def explain_user_failure(exc: Exception, source_user: str,
-                         target_user: str) -> str:
+                         target_user: str, settings=None) -> str:
     """Turn an engine exception into something an operator can act on.
 
     Only rewrites what it recognises. Anything else keeps its original text
@@ -254,6 +287,28 @@ def explain_user_failure(exc: Exception, source_user: str,
                 f"outage. Check {source_user} and {target_user} in the Admin "
                 f"Console under Billing > Licences; assign one and re-run "
                 f"this user. Nothing was migrated for them.")
+    if all(k in low for k in _MAYBE_UNLICENSED):
+        # Ask, rather than assert. This signature has three causes -- no
+        # licence, a suspended account, a revoked delegation -- and naming
+        # the wrong one sends somebody to the wrong console page.
+        sku, why = (_licence_of(settings, source_user) if settings is not None
+                    else ("", "no settings available to check"))
+        if sku is None:
+            return (f"{raw}\n\n{source_user} has NO Workspace licence, so it "
+                    f"has no Drive and no Gmail -- which is what this 401 "
+                    f"actually means; the error names no cause. Assign a "
+                    f"licence in the Admin Console under Billing > Licences "
+                    f"and re-run this user. If the tenant is out of seats, "
+                    f"the Licensing API refuses with HTTP 412 and a seat has "
+                    f"to be bought or freed first. Nothing was migrated.")
+        if sku:
+            return (f"{raw}\n\n{source_user} DOES hold a licence ({sku}), so "
+                    f"this is not the usual unlicensed-account cause. Check "
+                    f"whether the account is suspended, or whether domain-wide "
+                    f"delegation still covers the Drive scopes.")
+        return (f"{raw}\n\nCould not check whether {source_user} holds a "
+                f"Workspace licence ({why}), which is the most common cause "
+                f"of this error. Check Billing > Licences for that account.")
     return raw
 
 
@@ -368,7 +423,8 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
 
     except Exception as exc:  # noqa: BLE001 - worker must not propagate
         log.exception("[%s] user migration failed", source_user)
-        detail = explain_user_failure(exc, source_user, target_user)
+        detail = explain_user_failure(exc, source_user, target_user,
+                                      settings)
         # BLOCKED, not FAILED, when the obstacle is outside this tool.
         #
         # An account with no Workspace licence has no Gmail at all. No
