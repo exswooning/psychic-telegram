@@ -147,6 +147,12 @@ export async function fetchJob(since = 0, accountId?: string): Promise<JobStatus
   return getJSON<JobStatus>(`/api/job?since=${since}${acct}`)
 }
 
+// The DMS mail import runs on its own Job, parallel to the migration, so it
+// has a separate status feed -- /api/job stays pointed at the migration.
+export async function fetchDmsStatus(since = 0): Promise<JobStatus> {
+  return getJSON<JobStatus>(`/api/dms_status?since=${since}`)
+}
+
 export interface JobResult {
   name: string
   rc: number | null

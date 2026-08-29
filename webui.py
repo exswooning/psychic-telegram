@@ -278,6 +278,27 @@ ACTIONS: dict[str, dict] = {
         "confirm": "MIGRATE",
     },
 
+    # -- Google's own Data Migration Service moves the mail. This drives the
+    # Admin-console flow (dms_migrate handles all four steps) and then just
+    # clicks Start import; Google does the copying server-side, so it does
+    # NOT hold the one-heavy-job slot and runs in parallel with the engine
+    # migration above. That parallelism is the whole reason mail is handed
+    # off: mail is the only service behind Google's 3-writes/sec ceiling.
+    "dms_import": {
+        "label": "Start Google DMS mail import",
+        "blurb": "Hand the mail to Google's Data Migration Service. Runs in "
+                 "the browser against the Admin console, spends none of this "
+                 "project's Gmail quota, and runs alongside the engine "
+                 "migration. Run the full-scope migration with Gmail OFF "
+                 "first, so nothing is copied twice.",
+        "argv": [PY, "dms_migrate.py", "--apply",
+                 "--identities", "identities.csv", "--timeout", "200"],
+        "browser": True,        # needs DISPLAY + DWD creds
+        "parallel": True,       # exempt from the one-heavy-job admission
+        "destructive": True,
+        "confirm": "DMS",
+    },
+
     # -- shared drives: tenant-wide, so not part of the per-user toggles --
     "shared_drives_inventory": {
         "label": "Shared drives: inventory",
@@ -746,6 +767,18 @@ def get_job(account_id: int | None) -> Job:
 
 
 JOB = get_job(None)
+
+_PARALLEL_JOBS: dict = {}
+
+
+def get_parallel_job(account_id: int | None, name: str) -> Job:
+    """A Job instance for an action that runs alongside the account's main
+    migration (e.g. the DMS mail import). Keyed separately so it neither
+    blocks nor is blocked by the primary Job, and so its output is its own."""
+    key = (account_id, name)
+    if key not in _PARALLEL_JOBS:
+        _PARALLEL_JOBS[key] = Job(account_id)
+    return _PARALLEL_JOBS[key]
 
 
 def _subscription_ok(account_id: int | None) -> bool:
@@ -3393,6 +3426,33 @@ def _account_env(account_id: int | None, base: dict | None = None) -> dict:
     return env
 
 
+DWD_ENV_FILE = os.getenv("BITPORT_DWD_ENV", "/etc/bitport/dwd.env")
+
+
+def _dms_env(account_id: int | None) -> dict:
+    """Environment for the DMS browser run: the account's tenants plus a
+    headless display and the admin login the Admin console requires.
+
+    The super-admin password is not an API credential Bitport otherwise
+    holds, so it lives in a root-only file (mode 600, outside the checkout)
+    read only here, never passed on argv where `ps` could see it. DWD_EMAIL
+    defaults to the account's target admin so only the secret needs storing.
+    """
+    env = _account_env(account_id)
+    env.setdefault("DISPLAY", os.getenv("BITPORT_XVFB_DISPLAY", ":99"))
+    env.setdefault("DWD_EMAIL", env.get("TARGET_ADMIN", ""))
+    try:
+        with open(DWD_ENV_FILE, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    env[k.strip()] = v.strip()
+    except FileNotFoundError:
+        pass
+    return env
+
+
 def _phase_argv(base: list) -> list:
     """The phased run, limited to the services actually toggled on.
 
@@ -3642,6 +3702,17 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": scope_err}, 403)
                 return
             self._json(_job_snapshot(watching, since))
+        elif path == "/api/dms_status":
+            # The DMS import runs on its own Job (parallel to the migration),
+            # so it has its own status feed rather than /api/job's.
+            since = 0
+            if "since=" in self.path:
+                try:
+                    since = int(self.path.split("since=")[1].split("&")[0])
+                except ValueError:
+                    since = 0
+            self._json(get_parallel_job(self._account_id(),
+                                        "dms_import").snapshot(since))
         elif path == "/api/job_history":
             # The last COMPLETED run of a given job name, read back from
             # disk -- covers exactly the gap /api/job can't: a browser tab
@@ -4111,11 +4182,28 @@ class Handler(BaseHTTPRequestHandler):
         # count-only verifies; phased_migrate performs. Only the verifier
         # widens itself from the ledger -- a migration must still do exactly
         # what its checkboxes say, or a toggle would mean nothing.
-        if name in _PHASE_GATED_ACTIONS:
-            base = _service_env(account_id, from_ledger=(name == "phased_count_only"))
+        # The DMS import only drives a browser to press Start; Google does the
+        # copying server-side, so it neither needs env.sh's service accounts
+        # nor the one-heavy-job slot -- it runs in parallel with the engine
+        # migration, which is the point of handing mail to Google.
+        if spec.get("browser"):
+            env = _dms_env(account_id)
+        elif name in _PHASE_GATED_ACTIONS:
+            env = _account_env(account_id,
+                               _service_env(account_id,
+                                            from_ledger=(name == "phased_count_only")))
         else:
-            base = gcloud_env()
-        env = _account_env(account_id, base)
+            env = _account_env(account_id, gcloud_env())
+
+        if spec.get("parallel"):
+            # A dedicated Job instance so it does not collide with the
+            # account's primary migration Job (one process each). /api/job
+            # keeps showing the migration; this job has its own status feed.
+            job = get_parallel_job(account_id, name)
+            ok, msg = job.start(spec["label"], _action_argv(name), env=env)
+            self._json({"ok": ok, "error": None if ok else msg})
+            return
+
         admitted, admit_msg = job_admission.try_admit(account_id, spec["label"])
         if not admitted:
             self._json({"ok": False, "error": admit_msg}, 503)

@@ -85,7 +85,12 @@ class TestTheRouteUsesIt:
         assert "resolve_target_account" in b
 
     def test_it_overlays_that_account(self):
-        assert "_account_env(account_id, base)" in self._block()
+        # every non-browser branch overlays the account onto its base env;
+        # the browser (DMS) branch uses _dms_env, which itself calls
+        # _account_env, so the tenant overlay is never skipped.
+        b = self._block()
+        assert "_account_env(account_id," in b
+        assert "_dms_env(account_id)" in b
 
     def test_it_uses_that_accounts_job_not_the_global_one(self):
         # The global JOB is why the transcript landed in logs/jobs/_none/.

@@ -8,6 +8,7 @@ import {
   fetchActions, fetchToggles, setToggles, ActionSpec,
 } from '@/api/client'
 import JobRunner from '@/components/JobRunner'
+import DmsImportButton from '@/components/DmsImportButton'
 
 /**
  * The migration capabilities that the per-user run does not cover.
@@ -167,6 +168,20 @@ const Services: React.FC = () => {
               {has('phased_migrate') &&
                 <JobRunner name="phased_migrate" spec={actions.phased_migrate} />}
             </Stack>
+            {has('dms_import') && (
+              <Box sx={{ mt: 2, pt: 2, borderTop: '1px solid', borderColor: 'divider' }}>
+                <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 0.5 }}>
+                  Mail via Google DMS
+                </Typography>
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                  Run the full-scope migration with Gmail switched off (above),
+                  then hand the mail to Google&apos;s Data Migration Service.
+                  It runs in parallel and spends none of this project&apos;s
+                  Gmail quota; watch per-user progress in the Admin console.
+                </Typography>
+                <DmsImportButton spec={actions.dms_import} />
+              </Box>
+            )}
           </CardContent>
         </Card>
       )}

@@ -125,29 +125,54 @@ def _find_first(page, selectors: list[str], timeout_ms: int = 8000):
     return None
 
 
-def open_console(headful: bool, timeout: int):
-    """Sign in and land on Data Migration, reusing dwd_helper's login."""
+def open_console(headful: bool, timeout: int, attempts: int = 3):
+    """Sign in and land on Data Migration, reusing dwd_helper's login.
+
+    Chromium on the headless box intermittently fails the very first
+    navigation to admin.google.com with net::ERR_CERT_VERIFIER_CHANGED (its
+    cert-verifier state changes under it mid-request). It clears on a fresh
+    try, so retry the whole sign-in rather than surfacing a transient TLS
+    hiccup as a failed import -- which matters most when the run is launched
+    unattended from the UI.
+    """
     from playwright.sync_api import sync_playwright
 
-    p = sync_playwright().start()
-    # Sign in on the console HOME, then navigate. Going straight to
-    # /ac/migrate makes Google serve "You need to be a super admin" instead
-    # of redirecting to sign-in -- and the sign-in loop only types
-    # credentials while the URL contains accounts.google.com, so it exited
-    # immediately having authenticated nobody. The denial then looked like
-    # a permissions problem on an account that is, in fact, a super admin.
-    out = dwd_helper._open_dwd_console(p, headful, timeout,
-                                       url="https://admin.google.com/",
-                                       ready_prefix="https://admin.google.com/",
-                                       ready_text="Directory")
-    if out is None:
-        p.stop()
-        return None
-    browser, page = out
-    page.goto(DMS_URL, wait_until="domcontentloaded",
-              timeout=max(timeout * 1000, 30000))
-    page.wait_for_timeout(6000)   # the console paints client-side
-    return p, browser, page
+    last = None
+    for attempt in range(attempts):
+        p = sync_playwright().start()
+        try:
+            # Sign in on the console HOME, then navigate. Going straight to
+            # /ac/migrate makes Google serve "You need to be a super admin"
+            # instead of redirecting to sign-in -- and the sign-in loop only
+            # types credentials while the URL contains accounts.google.com,
+            # so it exited immediately having authenticated nobody.
+            out = dwd_helper._open_dwd_console(
+                p, headful, timeout,
+                url="https://admin.google.com/",
+                ready_prefix="https://admin.google.com/",
+                ready_text="Directory")
+            if out is None:
+                p.stop()
+                return None
+            browser, page = out
+            page.goto(DMS_URL, wait_until="domcontentloaded",
+                      timeout=max(timeout * 1000, 30000))
+            page.wait_for_timeout(6000)   # the console paints client-side
+            return p, browser, page
+        except Exception as exc:      # noqa: BLE001
+            last = exc
+            try:
+                p.stop()
+            except Exception:         # noqa: BLE001
+                pass
+            if "ERR_CERT" in str(exc) or "ERR_NETWORK" in str(exc):
+                log(f"transient sign-in error, retrying ({attempt + 1}/{attempts}): "
+                    f"{str(exc)[:80]}")
+                continue
+            raise
+    if last:
+        raise last
+    return None
 
 
 
