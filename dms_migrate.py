@@ -97,6 +97,8 @@ STEP1_FIELD = "Source super admin email address"
 STEP1_BUTTON = "Request connection"
 STEP2_HEADING = "Upload data import maps"
 STEP4_BUTTON = "Start import"
+STEP1_PENDING = "Pending authorization"
+STEP1_VERIFY = "Verify authorization"
 
 
 log = dwd_helper.log
@@ -221,15 +223,43 @@ def start(source_domain: str, source_admin: str, timeout: int,
 
         # --- Step 1 -----------------------------------------------------
         result["step"] = "step1-connect"
-        box = _find_first(page, [
-            f'input[placeholder="{STEP1_FIELD}"]',
-            f'input[aria-label="{STEP1_FIELD}"]',
-            f'//input[contains(@placeholder,"super admin")]',
-        ])
-        if box is None:
-            result["detail"] = (f"no {STEP1_FIELD!r} field on {page.url}")
-            return result
-        existing = (box.input_value() or "").strip()
+        pending = _find_first(page, [f'text="{STEP1_PENDING}"'])
+        if pending is not None:
+            # A request is already out. The only thing that can advance it is
+            # a super admin in the SOURCE tenant clicking the link Google
+            # mailed them; until then "Verify authorization" just re-checks.
+            result["did"].append("step 1 request is pending authorization")
+            verify = _find_first(page, [f'button:has-text("{STEP1_VERIFY}")'])
+            if verify is not None and not dry_run:
+                verify.click()
+                page.wait_for_timeout(6000)
+                still = _find_first(page, [f'text="{STEP1_PENDING}"'])
+                if still is not None:
+                    result["ok"] = True
+                    result["step"] = "step1-pending"
+                    result["detail"] = (
+                        "still pending: the authorization email sent to the "
+                        "source super admin has not been approved yet. "
+                        "Nothing on this side can approve it.")
+                    return result
+                result["did"].append("authorization verified")
+            else:
+                result["ok"] = True
+                result["step"] = "step1-pending"
+                result["detail"] = ("a connection request is pending the "
+                                    "source admin's approval")
+                return result
+            box = None
+        else:
+            box = _find_first(page, [
+                f'input[placeholder="{STEP1_FIELD}"]',
+                f'input[aria-label="{STEP1_FIELD}"]',
+                f'//input[contains(@placeholder,"super admin")]',
+            ])
+            if box is None:
+                result["detail"] = (f"no {STEP1_FIELD!r} field on {page.url}")
+                return result
+        existing = (box.input_value() or "").strip() if box else "connected"
         if existing:
             result["did"].append(f"step 1 already connected as {existing}")
         elif dry_run:
@@ -261,16 +291,31 @@ def start(source_domain: str, source_admin: str, timeout: int,
             head = _find_first(page, [f'text="{STEP2_HEADING}"'])
             if head is not None:
                 head.click()
-                page.wait_for_timeout(2500)
+                page.wait_for_timeout(3000)
             up = page.locator('input[type="file"]')
-            if up.count():
+            # The input exists in the DOM even while the panel is collapsed and
+            # disabled, so its presence proves nothing. An earlier version set
+            # files on it and reported success against a panel that never
+            # opened. Require a visible, enabled control instead.
+            usable = bool(up.count()) and up.first.is_editable()
+            if usable:
+                before = page.inner_text("body")
                 up.first.set_input_files(path)
-                page.wait_for_timeout(4000)
-                result["did"].append(f"uploaded an import map of {n} users")
+                page.wait_for_timeout(6000)
+                after = page.inner_text("body")
+                got = os.path.basename(path) in after or after != before
+                if got:
+                    result["did"].append(
+                        f"uploaded an import map of {n} users")
+                else:
+                    result["did"].append(
+                        f"prepared {path} ({n} users) -- the console did not "
+                        "acknowledge the upload")
             else:
                 result["did"].append(
-                    f"prepared {path} ({n} users) -- no file input found, "
-                    "upload it by hand in Step 2")
+                    f"prepared {path} ({n} users) -- step 2 is still locked "
+                    "(it unlocks once step 1 is authorized), so upload it "
+                    "there once the source admin approves")
         else:
             result["did"].append("no identities file given, skipped Step 2")
 
