@@ -634,6 +634,19 @@ def start(source_domain: str, source_admin: str, timeout: int,
         page.wait_for_timeout(2000)
         go = _find_first(page, [f'button:has-text("{STEP4_BUTTON}")'])
         if go is None:
+            # After an import has run once, the console no longer offers a
+            # fresh "Start import" -- its documented way to run again is
+            # "Run delta import" (copies new/modified and retries failed).
+            # So a re-run continues the mail rather than re-scanning from
+            # scratch, which is exactly what you want after a stop.
+            delta = _find_first(page, ['button:has-text("Run delta import")'])
+            if delta is not None and not dry_run:
+                delta.click()
+                page.wait_for_timeout(5000)
+                result["ok"] = True
+                result["detail"] = "delta import started (continues the mail)"
+                result["did"].append("pressed Run delta import")
+                return result
             result["detail"] = f"no {STEP4_BUTTON!r} button found"
             result["ok"] = True     # everything up to here did happen
             return result
