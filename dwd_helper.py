@@ -310,7 +310,8 @@ DWD_URL = "https://admin.google.com/ac/owl/domainwidedelegation"
 
 
 def _open_dwd_console(p, headful: bool, timeout: int, url: str = DWD_URL,
-                      ready_prefix: str = "https://admin.google.com/ac/owl/"):
+                      ready_prefix: str = "https://admin.google.com/ac/owl/",
+                      ready_text: str = "Add new"):
     """Launch a browser, sign in (best-effort auto-fill, human fallback),
     and land on an Admin console page with its onboarding banner dismissed.
 
@@ -429,12 +430,19 @@ def _open_dwd_console(p, headful: bool, timeout: int, url: str = DWD_URL,
                 page.goto(url,
                           wait_until="domcontentloaded", timeout=nav)
                 page.wait_for_timeout(1500)
-            if page.locator("text=Add new").count() > 0:
+            # ready_text, not a hardcoded "Add new": that string belongs to
+            # the Domain-Wide Delegation page. A caller landing anywhere
+            # else waited the full timeout ON THE CORRECT PAGE and then
+            # reported failure -- confirmed against the Data Migration
+            # console, which the sign-in reached successfully and this
+            # check then declared unreachable.
+            if page.locator(f"text={ready_text}").count() > 0:
                 log("  detected: signed in and on the DWD page")
                 break
         time.sleep(2)
     else:
-        log("timed out waiting for the console. Re-run when signed in, "
+        log(f"timed out waiting for {ready_text!r} on {page.url}. "
+            "Re-run when signed in, "
             "or finish this by hand: "
             "Security > Access and data control > API controls > "
             "Manage Domain Wide Delegation")

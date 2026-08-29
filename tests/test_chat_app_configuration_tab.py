@@ -108,3 +108,41 @@ class TestTheFormFillerUsesIt:
         src = inspect.getsource(g._fill_chat_app_form)
         assert "no Configuration tab" in src
         assert "may not be enabled" in src
+
+
+class TestTheConsoleOpenerIsNotHardcodedToDWD:
+    """It reported the console unreachable while sitting on it.
+
+    _open_dwd_console waited for the literal string "Add new" -- which
+    belongs to the Domain-Wide Delegation page. A caller landing anywhere
+    else waited the full timeout ON THE CORRECT PAGE and then reported
+    failure, with DWD's manual instructions attached.
+
+    Confirmed live against the Data Migration console: sign-in succeeded,
+    the URL was right, and it still said "timed out waiting for the
+    console."
+    """
+
+    def test_the_readiness_string_is_a_parameter(self):
+        import inspect
+
+        import dwd_helper
+        sig = inspect.signature(dwd_helper._open_dwd_console)
+        assert "ready_text" in sig.parameters
+
+    def test_dwd_callers_are_unchanged(self):
+        import inspect
+
+        import dwd_helper
+        sig = inspect.signature(dwd_helper._open_dwd_console)
+        assert sig.parameters["ready_text"].default == "Add new"
+        assert sig.parameters["url"].default == dwd_helper.DWD_URL
+
+    def test_the_timeout_message_names_what_it_waited_for(self):
+        """"timed out waiting for the console" gives the reader nothing.
+        The page it was on and the string it wanted are the whole diagnosis."""
+        import inspect
+
+        import dwd_helper
+        src = inspect.getsource(dwd_helper._open_dwd_console)
+        assert "timed out waiting for {ready_text!r} on {page.url}" in src

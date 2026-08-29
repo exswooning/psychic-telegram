@@ -90,8 +90,13 @@ def open_console(headful: bool, timeout: int):
     from playwright.sync_api import sync_playwright
 
     p = sync_playwright().start()
+    # "Data migration" is the page's own heading; "Add new" is the DWD
+    # page's and would never appear here. Landing on the right page and
+    # then timing out on someone else's readiness string is how this
+    # reported the console unreachable while sitting on it.
     out = dwd_helper._open_dwd_console(p, headful, timeout, url=DMS_URL,
-                                       ready_prefix=DMS_PREFIX)
+                                       ready_prefix=DMS_PREFIX,
+                                       ready_text="Data migration")
     if out is None:
         p.stop()
         return None
