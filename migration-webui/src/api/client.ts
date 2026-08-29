@@ -153,6 +153,22 @@ export async function fetchDmsStatus(since = 0): Promise<JobStatus> {
   return getJSON<JobStatus>(`/api/dms_status?since=${since}`)
 }
 
+export interface DmsMetrics {
+  status: string
+  metrics: Record<string, number>
+  read_at: number
+}
+export interface DmsMetricsResponse {
+  data: DmsMetrics | null
+  ageSeconds: number | null
+}
+
+// The DMS counters live only in Google's console; the server scrapes them
+// into a cache (dms_migrate --status) and serves the last read here.
+export async function fetchDmsMetrics(): Promise<DmsMetricsResponse> {
+  return getJSON<DmsMetricsResponse>('/api/dms_metrics')
+}
+
 export interface JobResult {
   name: string
   rc: number | null

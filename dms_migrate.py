@@ -319,6 +319,71 @@ def _set_earliest_date(page) -> bool:
     return True
 
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+METRICS_FILE = os.getenv("DMS_METRICS_FILE",
+                         os.path.join(HERE, "dms_metrics.json"))
+
+# The labelled counters Step 4 shows once an import is running or done.
+_METRIC_FIELDS = ("Discovered tasks", "Warning", "Failed", "Skipped",
+                  "Successful", "Users processed", "Emails discovered",
+                  "Emails imported", "Emails skipped", "Emails failed")
+
+
+def read_metrics(page) -> dict:
+    """Scrape Step 4's live counters and status into a plain dict.
+
+    Google shows the real per-user progress here, not in this tool's ledger
+    (that is the trade-off of handing mail to DMS), so this is the only place
+    the numbers exist -- read them off the page rather than inventing any.
+    """
+    body = re.sub(r"\s+", " ", page.inner_text("body"))
+    j = body.find("Import data")
+    seg = body[j:j + 900] if j >= 0 else body
+    status = "unknown"
+    for s in ("In progress", "Stopped", "complete", "Not started"):
+        if s.lower() in seg.lower():
+            status = s
+            break
+    metrics = {}
+    for label in _METRIC_FIELDS:
+        m = re.search(re.escape(label) + r"\s+([\d,]+)", seg)
+        if m:
+            metrics[label] = int(m.group(1).replace(",", ""))
+    return {"status": status, "metrics": metrics,
+            "read_at": int(time.time())}
+
+
+def status(timeout: int, headful: bool) -> dict:
+    """Open the console, read the import metrics, cache them to a file."""
+    out = {"ok": False, "status": "unknown", "metrics": {}, "detail": ""}
+    opened = open_console(headful, timeout)
+    if opened is None:
+        out["detail"] = "sign-in did not complete"
+        return out
+    p, browser, page = opened
+    try:
+        page.goto(DMS_WORKSPACE_URL, wait_until="domcontentloaded",
+                  timeout=max(timeout * 1000, 30000))
+        page.wait_for_timeout(7000)
+        got = read_metrics(page)
+        out.update(ok=True, **got)
+        try:
+            with open(METRICS_FILE, "w", encoding="utf-8") as fh:
+                json.dump(got, fh)
+        except Exception:             # noqa: BLE001
+            pass
+        return out
+    except Exception as exc:          # noqa: BLE001
+        out["detail"] = str(exc)[:300]
+        return out
+    finally:
+        if not headful:
+            try:
+                browser.close(); p.stop()
+            except Exception:         # noqa: BLE001
+                pass
+
+
 def start(source_domain: str, source_admin: str, timeout: int,
           headful: bool, dry_run: bool, identities: str | None = None) -> dict:
     """Drive the Google Workspace email data import as far as it can go.
@@ -348,6 +413,23 @@ def start(source_domain: str, source_admin: str, timeout: int,
                 f"expected the Workspace email import page, got {page.url}")
             return result
         result["did"].append("opened the Workspace email import page")
+
+        # A previously stopped import leaves Step 4 on a 'Stopped -- your
+        # import is complete' screen that offers 'Exit import' (back to the
+        # setup page) or 'Run delta import', but NOT 'Start import'. To run a
+        # fresh import, click 'Exit import' first to return to the setup
+        # steps. Without this a re-run reported "no Start import button".
+        exit_btn = _find_first(page, ['button:has-text("Exit import")'])
+        if exit_btn is not None:
+            exit_btn.click()
+            page.wait_for_timeout(5000)
+            # Exit import returns to the Data Import landing, not the setup
+            # steps, so re-navigate and let the console repaint before the
+            # step selectors run -- otherwise the Step 2 click times out.
+            page.goto(DMS_WORKSPACE_URL, wait_until="domcontentloaded",
+                      timeout=max(timeout * 1000, 30000))
+            page.wait_for_timeout(7000)
+            result["did"].append("cleared a stopped import (Exit import)")
 
         # --- Step 1 -----------------------------------------------------
         result["step"] = "step1-connect"
@@ -427,8 +509,11 @@ def start(source_domain: str, source_admin: str, timeout: int,
                 '[aria-expanded]:has-text("Upload data import maps")',
                 f'text="{STEP2_HEADING}"'])
             if head is not None and head.get_attribute("aria-expanded") != "true":
-                head.click()
-                page.wait_for_timeout(3000)
+                try:
+                    head.click(timeout=8000)
+                    page.wait_for_timeout(3000)
+                except Exception:      # noqa: BLE001 - already-open is fine
+                    pass
             # If a processed map is already present (server-side, survives
             # sessions), don't re-upload -- that restarts the slow job.
             s2 = page.inner_text("body")
@@ -603,7 +688,22 @@ def main(argv: list[str] | None = None) -> int:
                     help="actually drive the flow (default: stop at the "
                          "setup control without moving mail)")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--status", action="store_true",
+                    help="read the import's live counters and cache them, "
+                         "then exit (does not touch the import)")
     args = ap.parse_args(argv)
+
+    if args.status:
+        out = status(args.timeout, args.headful)
+        if args.json:
+            print(json.dumps(out))
+        else:
+            print(f"status: {out.get('status')}")
+            for k, v in (out.get("metrics") or {}).items():
+                print(f"  {k}: {v}")
+            if not out["ok"]:
+                print("  (could not read: " + out.get("detail", "") + ")")
+        return 0 if out["ok"] else 1
 
     def _run():
         return start(args.source_domain, args.source_admin or args.target_admin,

@@ -9,6 +9,7 @@ import {
 } from '@/api/client'
 import JobRunner from '@/components/JobRunner'
 import DmsImportButton from '@/components/DmsImportButton'
+import DmsMetrics from '@/components/DmsMetrics'
 
 /**
  * The migration capabilities that the per-user run does not cover.
@@ -180,6 +181,7 @@ const Services: React.FC = () => {
                   Gmail quota; watch per-user progress in the Admin console.
                 </Typography>
                 <DmsImportButton spec={actions.dms_import} />
+                <DmsMetrics />
               </Box>
             )}
           </CardContent>

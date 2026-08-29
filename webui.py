@@ -298,6 +298,14 @@ ACTIONS: dict[str, dict] = {
         "destructive": True,
         "confirm": "DMS",
     },
+    "dms_metrics_refresh": {
+        "label": "Refresh DMS metrics",
+        "blurb": "Read the live import counters from the Admin console and "
+                 "cache them for the UI. Read-only; safe to run any time.",
+        "argv": [PY, "dms_migrate.py", "--status", "--timeout", "150"],
+        "browser": True,
+        "parallel": True,
+    },
 
     # -- shared drives: tenant-wide, so not part of the per-user toggles --
     "shared_drives_inventory": {
@@ -769,6 +777,25 @@ def get_job(account_id: int | None) -> Job:
 JOB = get_job(None)
 
 _PARALLEL_JOBS: dict = {}
+
+
+DMS_METRICS_FILE = os.getenv("DMS_METRICS_FILE",
+                             os.path.join(HERE, "dms_metrics.json"))
+
+
+def _dms_metrics_payload() -> dict:
+    """The last DMS counters scraped from the console, plus their age and
+    whether a refresh scrape is running right now."""
+    data, age = None, None
+    try:
+        with open(DMS_METRICS_FILE, encoding="utf-8") as fh:
+            data = json.load(fh)
+        read_at = data.get("read_at")
+        if read_at:
+            age = int(time.time()) - int(read_at)
+    except (FileNotFoundError, ValueError):
+        pass
+    return {"data": data, "ageSeconds": age}
 
 
 def get_parallel_job(account_id: int | None, name: str) -> Job:
@@ -3713,6 +3740,11 @@ class Handler(BaseHTTPRequestHandler):
                     since = 0
             self._json(get_parallel_job(self._account_id(),
                                         "dms_import").snapshot(since))
+        elif path == "/api/dms_metrics":
+            # DMS counters live only in Google's console, so they are scraped
+            # into a cache file (dms_migrate --status) and served from there;
+            # a refresh is a separate browser job the UI can trigger.
+            self._json(_dms_metrics_payload())
         elif path == "/api/job_history":
             # The last COMPLETED run of a given job name, read back from
             # disk -- covers exactly the gap /api/job can't: a browser tab

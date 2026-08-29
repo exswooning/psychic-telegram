@@ -35,3 +35,43 @@ def test_dms_env_defaults_email_to_target_admin(monkeypatch, tmp_path):
     env = webui._dms_env(66)
     assert env["DWD_EMAIL"] == "info@t.example"
     assert env["DISPLAY"]
+
+
+def test_dms_metrics_refresh_is_readonly_parallel():
+    spec = webui.ACTIONS["dms_metrics_refresh"]
+    assert spec.get("parallel") is True and spec.get("browser") is True
+    assert "--status" in spec["argv"]      # reads, never touches the import
+    assert "confirm" not in spec           # read-only, no gate
+
+
+def test_metrics_payload_handles_missing_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(webui, "DMS_METRICS_FILE", str(tmp_path / "none.json"))
+    p = webui._dms_metrics_payload()
+    assert p == {"data": None, "ageSeconds": None}
+
+
+def test_metrics_payload_reads_and_ages(monkeypatch, tmp_path):
+    import json as _j, time as _t
+    f = tmp_path / "m.json"
+    f.write_text(_j.dumps({"status": "In progress",
+                           "metrics": {"Emails imported": 20900},
+                           "read_at": int(_t.time()) - 30}))
+    monkeypatch.setattr(webui, "DMS_METRICS_FILE", str(f))
+    p = webui._dms_metrics_payload()
+    assert p["data"]["metrics"]["Emails imported"] == 20900
+    assert 25 <= p["ageSeconds"] <= 40
+
+
+def test_read_metrics_parses_labelled_counters():
+    import dms_migrate
+
+    class _Page:
+        def inner_text(self, _):
+            return ("Import data In progress Stop import Discovered tasks "
+                    "272,327 Warning 0 Failed 0 Skipped 0 Successful 272,327 "
+                    "Users processed 78 Emails imported 20,900 Emails failed 2")
+
+    r = dms_migrate.read_metrics(_Page())
+    assert r["status"] == "In progress"
+    assert r["metrics"]["Discovered tasks"] == 272327
+    assert r["metrics"]["Emails imported"] == 20900
