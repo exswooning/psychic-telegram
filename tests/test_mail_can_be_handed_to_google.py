@@ -92,7 +92,9 @@ class TestTheDriver:
         # dwd_helper's rule: the console changes, so never leave the
         # operator stuck -- tell them where to click.
         import dms_migrate
-        assert "Data migration" in dms_migrate.MANUAL
+        assert "Data Import" in dms_migrate.MANUAL
+        # the wall this tool cannot climb must be spelled out
+        assert "approve" in dms_migrate.MANUAL
         assert "--services drive,calendar,contacts,tasks,chat" in dms_migrate.MANUAL
 
     def test_it_tries_several_selectors(self):

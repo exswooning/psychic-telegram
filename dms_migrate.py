@@ -155,17 +155,23 @@ MANUAL = """
 Could not drive the console automatically. Do it by hand -- it is a short
 flow and this tool has already signed you in:
 
-  1. admin.google.com/ac/migrate
-       (Data -> Data import & export -> Data Import)
-  2. Expand "Business Gmail" -- NOT the "Gmail" section above it, which is
-     for importing from a personal Gmail account
-  3. Connection protocol:   auto / OAuth
-  4. Role account:          the SOURCE super admin
-  5. Migration start date:  choose how far back to bring mail
-  6. Select users, or upload a CSV of source->target pairs
-  7. Start
+  1. admin.google.com/ac/migrate/googleworkspace
+       (Data -> Data import & export -> Data Import -> Business Gmail)
+       Do NOT use the "Gmail" section above Business Gmail: that one is for
+       importing from a personal Gmail account.
+  2. Step 1: enter the SOURCE super admin address, "Request connection".
+  3. Google emails that address. A super admin ON THE SOURCE TENANT has to
+     open that mail and approve it. Nothing on the target side can do this,
+     and Steps 2-4 stay locked until it is done. Then click
+     "Verify authorization".
+  4. Step 2: upload a two-column CSV of source,target addresses -- no
+     header. This tool writes one from identities.csv for you.
+  5. Step 3: choose how far back to bring mail.
+  6. Step 4: "Start import".
 
-Then run the rest here WITHOUT mail, so nothing is migrated twice:
+Then run the rest here WITHOUT mail, so nothing is migrated twice: on the
+Services page turn the Gmail toggle off before "Migrate: full scope", or
+from a shell:
 
     main.py --account-id <n> migrate --services drive,calendar,contacts,tasks,chat
 """

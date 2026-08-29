@@ -2697,6 +2697,9 @@ _RUN_STATE: dict = {
 # fixed ACTIONS argv verbatim).
 _LAUNCH_KEYS = ("migrate", "delta")
 
+# The order phases.py runs them in, filtered to the ones that have a toggle.
+PHASE_ORDER = ("drive", "gmail", "calendar", "contacts", "tasks", "chat")
+
 # Actions that read the toggles through the environment rather than argv.
 # main.py's migrate/delta infer MIGRATE_CHAT/CONTACTS/TASKS from --services,
 # so a checkbox reaches them through _action_argv above. phases.py does not:
@@ -3390,10 +3393,42 @@ def _account_env(account_id: int | None, base: dict | None = None) -> dict:
     return env
 
 
+def _phase_argv(base: list) -> list:
+    """The phased run, limited to the services actually toggled on.
+
+    phases.py takes --phase, so the toggles can drive it the same way they
+    drive migrate. Without this the full-scope button always ran Gmail, and
+    there was no way to say "everything except mail" from the UI -- which is
+    exactly what you need when Google's own Data Import tool owns the
+    mailboxes and the engine should not touch them.
+
+    The phases are always named explicitly. They used to be gated
+    indirectly through MIGRATE_CHAT/CONTACTS/TASKS in the environment, which
+    meant the argv in the job log claimed to run every phase while the env
+    quietly dropped three of them. Naming them makes the log match the run.
+
+    An empty selection falls back to the unfiltered argv rather than
+    silently migrating nothing.
+    """
+    on = [k for k in PHASE_ORDER if _RUN_STATE["services"].get(k)]
+    if not on:
+        return list(base)
+    argv = list(base)
+    for k in on:
+        argv += ["--phase", k]
+        if k == "drive":
+            # shared drives are Drive data with no owning user, so they ride
+            # with Drive rather than getting a checkbox of their own.
+            argv += ["--phase", "shared_drives"]
+    return argv
+
+
 def _action_argv(name: str) -> list:
     """Fixed argv for most actions; migrate/delta follow the launch toggles
     (dry-run + selected services), exactly like the TUI's m/x keys."""
     spec = ACTIONS[name]
+    if name in ("phased_migrate", "phased_count_only"):
+        return _phase_argv(spec["argv"])
     if name not in _LAUNCH_KEYS:
         return list(spec["argv"])
     chosen = [k for k, v in _RUN_STATE["services"].items() if v]

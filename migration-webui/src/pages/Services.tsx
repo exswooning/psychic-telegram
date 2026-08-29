@@ -123,13 +123,13 @@ const Services: React.FC = () => {
               Full-scope run
             </Typography>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-              Which services these two cover. Drive, Gmail and Calendar are
-              always included; these three each widen the OAuth grant, and a
-              scope the Admin console has not authorised fails every call for
-              that service — so they are opt-in.
+              Which services these two cover. Drive, Gmail and Calendar are on
+              by default; Chat, Contacts and Tasks each widen the OAuth grant,
+              and a scope the Admin console has not authorised fails every
+              call for that service — so they start off.
             </Typography>
-            <Stack direction="row" spacing={2} sx={{ mb: 2, flexWrap: 'wrap' }}>
-              {['chat', 'contacts', 'tasks'].map((k) => (
+            <Stack direction="row" spacing={2} sx={{ mb: 1, flexWrap: 'wrap' }}>
+              {['drive', 'gmail', 'calendar', 'chat', 'contacts', 'tasks'].map((k) => (
                 <FormControlLabel
                   key={k}
                   control={<Checkbox size="small" checked={!!svc[k]}
@@ -139,6 +139,20 @@ const Services: React.FC = () => {
                 />
               ))}
             </Stack>
+            {svc.gmail === false && (
+              <Alert severity="warning" sx={{ mb: 2 }} data-testid="gmail-off">
+                Gmail is switched off, so the full-scope run will not touch
+                mailboxes. That is the right setting while Google&apos;s own
+                Data Import tool is doing the mail — and the wrong one if
+                nothing else is.
+              </Alert>
+            )}
+            {!Object.values(svc).some(Boolean) && (
+              <Alert severity="error" sx={{ mb: 2 }} data-testid="nothing-on">
+                Nothing is selected. Turn at least one service on — an empty
+                selection runs every phase, not none.
+              </Alert>
+            )}
             <Alert severity="info" sx={{ mb: 2 }}>
               Every service in order, each reconciled against the tenants
               directly rather than trusted from the ledger. Reconcile counts
