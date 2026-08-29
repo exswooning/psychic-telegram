@@ -54,6 +54,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import time
 import sys
 
@@ -181,9 +182,11 @@ from a shell:
 def import_map_csv(identities: str, out: str) -> tuple[int, str]:
     """Turn the migration's identity map into Google's import map.
 
-    Step 2 wants source and target addresses. identities.csv carries a
-    third column (entity_type) and a header the console does not expect, so
-    it is rewritten rather than uploaded as-is.
+    Step 2 wants a two-column CSV of source,target addresses WITH a header
+    row -- the console's own example shows 'Source GUser / Target GUser'
+    columns, and a headerless file is rejected silently (the upload control
+    never registers it). identities.csv carries a different header and a
+    third column (entity_type), so it is rewritten.
     """
     import csv
 
@@ -191,11 +194,104 @@ def import_map_csv(identities: str, out: str) -> tuple[int, str]:
     with open(identities, newline="", encoding="utf-8") as fh:
         for row in csv.reader(fh):
             if len(row) < 2 or "@" not in row[0] or row[0].startswith("source_"):
-                continue          # header, or a malformed line
+                continue          # our own header, or a malformed line
             rows.append((row[0].strip(), row[1].strip()))
     with open(out, "w", newline="", encoding="utf-8") as fh:
-        csv.writer(fh).writerows(rows)
+        w = csv.writer(fh)
+        w.writerow(("Source GUser", "Target GUser"))   # the header Google shows
+        w.writerows(rows)
     return len(rows), out
+
+
+def _set_earliest_date(page) -> bool:
+    """Set the migration start date to the earliest the picker allows, by
+    SELECTING it in the calendar -- not by typing.
+
+    Typing the value into the field updates the DOM but not the datepicker's
+    model, so the Step 3 form never becomes dirty and its Save button stays
+    disabled (which keeps Start import off). Clicking a real calendar day
+    dirties the form and lights up Save. So: open the calendar, walk back
+    'Previous year'/'Previous month' while the view still has an in-range
+    day, click the first such day, then confirm with the picker's Ok.
+    'No emails missed' only needs a date at or before the oldest message,
+    and the earliest in-range day is exactly that.
+    """
+    # Target a specific start date (01/01/1971 -- just above the console's
+    # ~1970 floor, which is why 1929 was rejected). It must be SELECTED in
+    # the calendar, not typed: typing updates the DOM but not the datepicker
+    # model, so the Step 3 form never dirties and its Save button stays off.
+    TARGET_YEAR, TARGET_MONTH, TARGET_DAY = 1971, "January", "1"
+
+    def open_cal():
+        t = _find_first(page, ['button[aria-label*="calendar" i]',
+                               'button[aria-label*="Open calendar" i]'])
+        if t is None:
+            return False
+        try:
+            t.click(timeout=4000)
+            page.wait_for_timeout(1200)
+            return page.locator('[role="gridcell"]').count() > 0
+        except Exception:               # noqa: BLE001
+            return False
+
+    def shown_year():
+        # the calendar header carries a year (e.g. a '2026' button/label)
+        yb = page.get_by_role("button", name=re.compile(r"^(19|20)\d\d$"))
+        if yb.count():
+            try:
+                return int(yb.first.inner_text().strip())
+            except Exception:           # noqa: BLE001
+                return None
+        m = re.search(r"\b(19|20)\d\d\b", page.inner_text("body"))
+        return int(m.group()) if m else None
+
+    if not open_cal():
+        return False
+
+    # walk Previous year until the header reads the target year
+    prev_year = page.get_by_role("button", name="Previous year")
+    for _ in range(80):
+        y = shown_year()
+        if y is None or y <= TARGET_YEAR:
+            break
+        if not prev_year.count() or not prev_year.first.is_enabled():
+            break
+        prev_year.first.click(); page.wait_for_timeout(250)
+
+    # walk Previous month back to January of that year
+    prev_month = page.get_by_role("button", name="Previous month")
+    for _ in range(12):
+        if TARGET_MONTH.lower() in page.inner_text("body").lower()[:4000] \
+                and f" {TARGET_YEAR}" in page.inner_text("body")[:4000]:
+            break
+        if not prev_month.count() or not prev_month.first.is_enabled():
+            break
+        prev_month.first.click(); page.wait_for_timeout(250)
+
+    # click day 1 (exactly -- not 10/11/...), then Ok
+    target = None
+    for bd in page.locator('[role="gridcell"] button').all():
+        try:
+            if (bd.inner_text() or "").strip() == TARGET_DAY and bd.is_enabled():
+                target = bd
+                break
+        except Exception:               # noqa: BLE001
+            continue
+    if target is None:
+        return False
+    try:
+        target.click(timeout=3000)
+        page.wait_for_timeout(600)
+    except Exception:                   # noqa: BLE001
+        return False
+    ok = page.get_by_role("button", name=re.compile("^Ok$", re.I))
+    if ok.count() and ok.first.is_enabled():
+        try:
+            ok.first.click(timeout=3000)
+            page.wait_for_timeout(1200)
+        except Exception:               # noqa: BLE001
+            pass
+    return True
 
 
 def start(source_domain: str, source_admin: str, timeout: int,
@@ -230,8 +326,15 @@ def start(source_domain: str, source_admin: str, timeout: int,
 
         # --- Step 1 -----------------------------------------------------
         result["step"] = "step1-connect"
+        # Already connected: a green 'Connected' badge and a 'Disconnect'
+        # button, no email field and no 'Pending'. Skip straight to Step 2.
+        connected = _find_first(page, ['text="Connected"',
+                                       'button:has-text("Disconnect")'])
         pending = _find_first(page, [f'text="{STEP1_PENDING}"'])
-        if pending is not None:
+        if connected is not None and pending is None:
+            result["did"].append("step 1 already connected")
+            box = None
+        elif pending is not None:
             # A request is already out. The only thing that can advance it is
             # a super admin in the SOURCE tenant clicking the link Google
             # mailed them; until then "Verify authorization" just re-checks.
@@ -295,51 +398,142 @@ def start(source_domain: str, source_admin: str, timeout: int,
         result["step"] = "step2-map"
         if identities and os.path.isfile(identities):
             n, path = import_map_csv(identities, "/tmp/dms-import-map.csv")
-            head = _find_first(page, [f'text="{STEP2_HEADING}"'])
-            if head is not None:
+            head = _find_first(page, [
+                '[aria-expanded]:has-text("Upload data import maps")',
+                f'text="{STEP2_HEADING}"'])
+            if head is not None and head.get_attribute("aria-expanded") != "true":
                 head.click()
                 page.wait_for_timeout(3000)
-            up = page.locator('input[type="file"]')
-            # The input exists in the DOM even while the panel is collapsed and
-            # disabled, so its presence proves nothing. An earlier version set
-            # files on it and reported success against a panel that never
-            # opened. Require a visible, enabled control instead.
-            usable = bool(up.count()) and up.first.is_editable()
-            if usable:
-                before = page.inner_text("body")
-                up.first.set_input_files(path)
-                page.wait_for_timeout(6000)
-                after = page.inner_text("body")
-                got = os.path.basename(path) in after or after != before
-                if got:
+            # If a processed map is already present (server-side, survives
+            # sessions), don't re-upload -- that restarts the slow job.
+            s2 = page.inner_text("body")
+            i2 = s2.find("Upload data import maps")
+            s2seg = s2[i2:i2 + 500].lower() if i2 >= 0 else ""
+            # Any .csv already shown means a map is uploaded (processing or
+            # done); re-uploading would restart the slow job, so skip it and
+            # let the wait loop below ride out any remaining processing.
+            if ".csv" in s2seg:
+                state = "processing" if "processing" in s2seg else "processed"
+                result["did"].append(f"import map already uploaded ({state})")
+                already = True
+            else:
+                already = False
+            # Set the hidden <input type=file> directly. This once looked like
+            # it did nothing, but the real fault was a headerless CSV -- with
+            # the header row the console accepts it, and a direct set avoids
+            # the racy native file-chooser (which fires only sometimes).
+            uploaded = already
+            if not already:
+                up = page.locator('input[type="file"]')
+                if up.count():
+                    try:
+                        up.first.set_input_files(path)
+                        page.wait_for_timeout(4000)
+                        uploaded = True
+                    except Exception:      # noqa: BLE001
+                        pass
+                if not uploaded:           # fall back to the button's chooser
+                    btn = _find_first(page,
+                                      ['button:has-text("Upload data import map")'])
+                    if btn is not None:
+                        try:
+                            with page.expect_file_chooser(timeout=8000) as fc:
+                                btn.click()
+                            fc.value.set_files(path)
+                            page.wait_for_timeout(4000)
+                            uploaded = True
+                        except Exception:  # noqa: BLE001
+                            pass
+            if uploaded:
+                # Uploading kicks off a SERVER-SIDE 'Processing migration maps'
+                # job (visible in the Tasks panel) that can take minutes for
+                # hundreds of users; the map does not register -- and Start
+                # import stays disabled -- until it finishes. Poll the file
+                # row until its 'Processing' tag clears. This is server-side,
+                # so it survives across sessions.
+                done = False
+                for _ in range(100):           # up to ~5 minutes
+                    page.wait_for_timeout(3000)
+                    b = page.inner_text("body")
+                    i2 = b.find("Upload data import maps")
+                    seg = b[i2:i2 + 500] if i2 >= 0 else b
+                    if "processing" not in seg.lower():
+                        done = True
+                        break
+                if done:
                     result["did"].append(
-                        f"uploaded an import map of {n} users")
+                        f"uploaded and processed an import map of {n} users")
                 else:
                     result["did"].append(
-                        f"prepared {path} ({n} users) -- the console did not "
-                        "acknowledge the upload")
+                        f"uploaded an import map of {n} users -- still "
+                        "processing server-side; re-run to finish once done")
             else:
                 result["did"].append(
-                    f"prepared {path} ({n} users) -- step 2 is still locked "
-                    "(it unlocks once step 1 is authorized), so upload it "
-                    "there once the source admin approves")
+                    f"prepared {path} ({n} users) -- could not reach the "
+                    "upload control")
         else:
             result["did"].append("no identities file given, skipped Step 2")
 
+        # --- Step 3: settings, and the earliest start date -------------
+        # "No emails missed" means the earliest date the picker allows, plus
+        # deleted and spam included.
+        result["step"] = "step3-settings"
+        # Clicking the heading text does not toggle the panel; the expandable
+        # control is the header element carrying aria-expanded.
+        s3 = _find_first(page, [
+            '[aria-expanded]:has-text("Configure data import settings")',
+            'text="Configure data import settings"'])
+        if s3 is not None and s3.get_attribute("aria-expanded") != "true":
+            s3.click()
+            page.wait_for_timeout(3000)
+        for label in ("Import deleted emails", "Import spam emails"):
+            box = page.get_by_role("checkbox", name=label)
+            try:
+                if box.count() and not box.first.is_checked():
+                    box.first.check(timeout=4000)
+                    result["did"].append(f"enabled {label!r}")
+            except Exception:          # noqa: BLE001
+                pass
+        if _set_earliest_date(page):
+            result["did"].append("set the start date to the earliest offered")
+        else:
+            result["did"].append("could not set the start date automatically")
+
+        # Commit Step 3. Its Save control is a div[role=button] whose text is
+        # 'Save' (shown uppercase); get_by_role with a plain STRING matches it
+        # case-insensitively where a regex did not, and a normal click fires
+        # its jsaction where force=True missed. Saving it flips Start import
+        # live -- that is the confirmation.
+        page.wait_for_timeout(2000)
+        start_btn = page.get_by_role("button", name="Start import")
+        for _ in range(4):
+            sv = page.get_by_role("button", name="Save")
+            if sv.count():
+                try:
+                    sv.first.click(timeout=3000)
+                    page.wait_for_timeout(3500)
+                except Exception:      # noqa: BLE001
+                    pass
+            if start_btn.count() and start_btn.first.is_enabled():
+                result["did"].append("saved Step 3 settings")
+                break
+            page.wait_for_timeout(1500)
+
         # --- Step 4 -----------------------------------------------------
         result["step"] = "step4-start"
+        page.wait_for_timeout(2000)
         go = _find_first(page, [f'button:has-text("{STEP4_BUTTON}")'])
         if go is None:
             result["detail"] = f"no {STEP4_BUTTON!r} button found"
             result["ok"] = True     # everything up to here did happen
             return result
         if not go.is_enabled():
+            page.screenshot(path="/tmp/dms_step4_disabled.png", full_page=True)
             result["ok"] = True
             result["detail"] = (
-                f"{STEP4_BUTTON!r} is still disabled -- the console enables it "
-                "only once Steps 1-3 are complete, and Step 1 needs a super "
-                "admin in the SOURCE tenant to approve the connection "
-                "request. That approval is the remaining manual step.")
+                f"{STEP4_BUTTON!r} still disabled after Steps 1-3 -- see "
+                "/tmp/dms_step4_disabled.png for which field the console is "
+                "still waiting on.")
             return result
         if dry_run:
             result["ok"] = True
