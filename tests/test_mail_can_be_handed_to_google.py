@@ -111,3 +111,26 @@ class TestTheDriver:
                 raise RuntimeError("no such element")
 
         assert dms_migrate._find_first(_Page(), ["a", "b"]) is None
+
+
+class TestWatchMode:
+    """The approval lands in another tenant's mailbox. The only thing this
+    side can do is keep asking -- and then finish without a person."""
+
+    def test_watch_only_loops_on_the_pending_state(self):
+        src = open("dms_migrate.py", encoding="utf-8").read()
+        assert 'out.get("step") == "step1-pending"' in src
+        # any other outcome must fall straight through, not spin
+        assert 'if out.get("step") != "step1-pending":' in src
+
+    def test_watch_is_bounded(self):
+        src = open("dms_migrate.py", encoding="utf-8").read()
+        assert "deadline = time.time() + args.watch * 60" in src
+        assert "gave up after" in src
+
+    def test_each_pass_signs_in_again(self):
+        """A silently expired session is how the first driver 'succeeded'
+        against a login page."""
+        src = open("dms_migrate.py", encoding="utf-8").read()
+        body = src[src.index("def _run():"):src.index("if args.watch")]
+        assert "start(" in body

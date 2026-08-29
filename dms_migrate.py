@@ -54,6 +54,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 import sys
 
 import dwd_helper
@@ -369,6 +370,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--source-admin", default=os.getenv("SOURCE_ADMIN", ""),
                     help="the SOURCE super admin whose organisation the mail "
                          "is coming from -- this is what Step 1 asks for")
+    ap.add_argument("--watch", type=int, default=0, metavar="MINUTES",
+                    help="keep checking until the source admin approves the "
+                         "connection, then finish the setup unattended")
+    ap.add_argument("--watch-interval", type=int, default=300,
+                    help="seconds between checks (default 300)")
     ap.add_argument("--identities", default="",
                     help="identities.csv; rewritten into Google's two-column "
                          "import map for Step 2")
@@ -380,9 +386,29 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
-    out = start(args.source_domain, args.source_admin or args.target_admin,
-                args.timeout, args.headful, dry_run=not args.apply,
-                identities=args.identities or None)
+    def _run():
+        return start(args.source_domain, args.source_admin or args.target_admin,
+                     args.timeout, args.headful, dry_run=not args.apply,
+                     identities=args.identities or None)
+
+    out = _run()
+    if args.watch and out.get("step") == "step1-pending":
+        # The approval happens in the other tenant's mailbox, so the only
+        # thing this side can do is keep asking. Each pass re-signs in,
+        # which is slow but keeps every attempt independent -- a session
+        # that quietly expired was how the earlier driver "succeeded"
+        # against a login page.
+        deadline = time.time() + args.watch * 60
+        while time.time() < deadline:
+            left = int(deadline - time.time())
+            log(f"waiting for the source admin to approve; {left // 60}m left")
+            time.sleep(min(args.watch_interval, max(left, 1)))
+            out = _run()
+            if out.get("step") != "step1-pending":
+                log("the request was approved -- continuing the setup")
+                break
+        else:
+            log(f"gave up after {args.watch} minutes still pending")
     if args.json:
         print(json.dumps(out))
     else:
