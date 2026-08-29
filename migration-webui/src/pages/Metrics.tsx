@@ -9,6 +9,29 @@ import {
   fetchMetrics, fetchMyMetrics, MetricsSnapshot, LimiterState,
 } from '@/api/controlPlane'
 
+/** Past this, the page says so rather than presenting an old run as current.
+ *  A migration can legitimately be quiet for a while; three days cannot. */
+const STALE_AFTER_S = 30 * 60
+
+/** Seconds since an ISO timestamp, or null if it cannot be parsed -- an
+ *  unreadable date must not render as "0 seconds ago". */
+const ageOf = (iso: string | undefined): number | null => {
+  if (!iso) return null
+  const t = Date.parse(iso)
+  if (Number.isNaN(t)) return null
+  return Math.max(0, Math.round((Date.now() - t) / 1000))
+}
+
+const describeAge = (sec: number): string => {
+  if (sec < 90) return 'just now'
+  const m = Math.round(sec / 60)
+  if (m < 60) return `${m} minutes ago`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h}h ${m % 60}m ago`
+  const d = Math.floor(h / 24)
+  return `${d} day${d === 1 ? '' : 's'} ago`
+}
+
 /**
  * What the migration is actually doing, per operation.
  *
@@ -166,9 +189,22 @@ export const Metrics: React.FC = () => {
                     value={l.failures.toLocaleString()}
                     tone={l.failures > 0 ? 'error' : undefined} />
             </Stack>
+            {ageOf(l.recordedAt) !== null
+              && ageOf(l.recordedAt)! > STALE_AFTER_S && (
+              <Alert severity="warning" sx={{ mt: 1.5 }} data-testid="metrics-stale">
+                These numbers are from a run that finished{' '}
+                <strong>{describeAge(ageOf(l.recordedAt)!)}</strong> and are not
+                being updated. Metrics are written by the migrating process, so
+                a finished run leaves its last snapshot here indefinitely —
+                nothing overwrites it until the next migration records its own.
+              </Alert>
+            )}
             <Typography variant="caption" color="text.secondary"
                         sx={{ mt: 1.5, display: 'block' }}>
-              recorded {l.recordedAt} · run elapsed {Math.round(l.elapsedSec)}s
+              recorded {l.recordedAt}
+              {ageOf(l.recordedAt) !== null
+                && ` (${describeAge(ageOf(l.recordedAt)!)})`}
+              {' '}· run elapsed {Math.round(l.elapsedSec)}s
             </Typography>
           </Paper>
 
