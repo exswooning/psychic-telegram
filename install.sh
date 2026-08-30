@@ -35,6 +35,19 @@ for a in "$@"; do case "$a" in
   -h|--help) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 esac; done
 run() { if [ "$DRY_RUN" = 1 ]; then echo "  ${DIM}[dry-run] $*${RESET}"; else eval "$@"; fi; }
+# Network-sensitive commands, retried. A constrained/flaky box (asuswb hit
+# "Error: Timeout was reached" on the first apt-get update, contacting several
+# repos) must not fail the whole install on one transient download timeout.
+# Three tries with backoff; a genuine, persistent failure still aborts loudly.
+runnet() {
+  [ "$DRY_RUN" = 1 ] && { echo "  ${DIM}[dry-run] $*${RESET}"; return 0; }
+  local n=1
+  until eval "$@"; do
+    [ "$n" -ge 3 ] && { warn "still failing after $n attempts: $*"; return 1; }
+    warn "network step failed (attempt $n) -- retrying in $((n*8))s"
+    sleep $((n * 8)); n=$((n + 1))
+  done
+}
 
 # ---------------------------------------------------------------------------
 # 0. preflight
@@ -177,8 +190,8 @@ fi
 step "System packages"
 PKGS="python3 python3-venv python3-pip git rsync curl ca-certificates openssl"
 [ "$ENABLE_BROWSER" = yes ] && PKGS="$PKGS xvfb"
-run "apt-get update -qq"
-run "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $PKGS"
+runnet "apt-get update -qq"
+runnet "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $PKGS"
 ok "base packages installed"
 
 # Node.js (for the SPA build) -- only if npm is missing AND no prebuilt SPA
@@ -187,8 +200,8 @@ ok "base packages installed"
 if [ -f "$SRC_DIR/migration-webui/dist/index.html" ]; then
   ok "prebuilt SPA present -- skipping Node"
 elif ! command -v npm >/dev/null; then
-  run "curl -fsSL https://deb.nodesource.com/setup_20.x | bash -"
-  run "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs"
+  runnet "curl -fsSL https://deb.nodesource.com/setup_20.x | bash -"
+  runnet "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs"
   ok "node: $(command -v node >/dev/null && node -v || echo 'MISSING')"
 else
   ok "node: $(node -v 2>/dev/null || echo present)"
@@ -196,10 +209,10 @@ fi
 
 # Caddy (official repo) -- only if missing.
 if ! command -v caddy >/dev/null; then
-  run "apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https"
-  run "curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg"
-  run "curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' > /etc/apt/sources.list.d/caddy-stable.list"
-  run "apt-get update -qq && apt-get install -y -qq caddy"
+  runnet "apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https"
+  runnet "curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg"
+  runnet "curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' > /etc/apt/sources.list.d/caddy-stable.list"
+  runnet "apt-get update -qq && apt-get install -y -qq caddy"
 fi
 ok "caddy: $(command -v caddy >/dev/null && caddy version 2>/dev/null | head -1 || echo 'MISSING')"
 
