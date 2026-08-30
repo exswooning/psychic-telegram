@@ -272,14 +272,23 @@ def failure_feed(limit: int = 200, source_user: str | None = None,
     # vanished from the one page people open to ask what is wrong, which is
     # worse than the mislabelling it replaced. The caller renders the two
     # differently; see ErrorHandling.tsx.
+    # Corpus-scoped, like itemsFailed and repair.survey: a reseed leaves
+    # FAILED rows for deleted users, and this page showing them made a clean
+    # tenant read as "4 failures" against three people who no longer exist.
+    # The NOT EXISTS fallback keeps a corpus-less ledger's failures visible.
+    # The status test is parenthesised so an optional source_user filter (or
+    # the corpus AND) cannot bind to only the BLOCKED half.
     q = ("SELECT id, source_user, item_id, item_type, status, error_message, "
-         "timestamp FROM audit_log "
-         "WHERE status LIKE 'FAILED%' OR status='BLOCKED'")
+         "timestamp FROM audit_log a "
+         "WHERE (a.status LIKE 'FAILED%' OR a.status='BLOCKED') "
+         "AND (NOT EXISTS (SELECT 1 FROM identity_map) "
+         "     OR EXISTS (SELECT 1 FROM identity_map m "
+         "                WHERE m.source_email = a.source_user))")
     args: list[Any] = []
     if source_user:
-        q += " AND source_user=?"
+        q += " AND a.source_user=?"
         args.append(source_user)
-    q += " ORDER BY id DESC LIMIT ?"
+    q += " ORDER BY a.id DESC LIMIT ?"
     args.append(limit)
     with ro(db_path) as conn:
         return [dict(r) for r in conn.execute(q, args)]
