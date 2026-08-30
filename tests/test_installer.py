@@ -33,3 +33,11 @@ def test_config_is_root_only_and_outside_checkout():
 
 def test_requires_a_strong_admin_password():
     assert "-ge 12" in SH        # refuses a weak superadmin password
+
+
+def test_installer_creates_the_schema_before_use():
+    # the control-plane schema must be applied, or a fresh box fails with
+    # "unable to open database file" at the superadmin step
+    assert "apply_migrations" in SH
+    # and it must run before the superadmin account step
+    assert SH.index("apply_migrations") < SH.index("Superadmin account")

@@ -160,6 +160,18 @@ run "'$INSTALL_DIR/.venv/bin/pip' install -q -r '$INSTALL_DIR/requirements.txt'"
   run "'$INSTALL_DIR/.venv/bin/pip' install -q -r '$INSTALL_DIR/requirements-control-plane.txt'"
 ok "venv ready"
 
+step "Database"
+# Create the control-plane schema (migrations/*.sql) up front. Without it the
+# DB file does not exist, and the services -- plus the superadmin step, which
+# calls authenticate() -> a read-only open -- fail with "unable to open
+# database file". Run from INSTALL_DIR so Settings().db_path resolves here.
+if [ "$DRY_RUN" = 1 ]; then
+  echo "  ${DIM}[dry-run] apply_migrations() to create the control-plane schema${RESET}"
+else
+  ( cd "$INSTALL_DIR" && "$INSTALL_DIR/.venv/bin/python" -c \
+      "import control_plane_db as c; print('  applied:', ', '.join(c.apply_migrations()) or 'none')" )
+fi
+
 step "Frontend"
 if [ -f "$INSTALL_DIR/migration-webui/dist/index.html" ] \
    || { [ "$DRY_RUN" = 1 ] && [ -f "$SRC_DIR/migration-webui/dist/index.html" ]; }; then
@@ -219,8 +231,12 @@ else
   # No domain: serve HTTP on :80 so it is at least reachable.
   run "printf ':80 {\n\treverse_proxy /api/v2/* 127.0.0.1:8090\n\treverse_proxy /ws 127.0.0.1:8090\n\treverse_proxy /* 127.0.0.1:8080\n}\n' > /etc/caddy/Caddyfile"
 fi
-run "systemctl reload caddy || systemctl restart caddy"
+# enable + (re)start, not just reload: on a fresh box caddy is installed but
+# may not be running yet, so a bare reload fails with "not active".
+run "systemctl enable caddy >/dev/null 2>&1 || true"
+run "systemctl restart caddy || systemctl reload caddy || true"
 ok "caddy configured for ${BITPORT_DOMAIN:-:80}"
+[ -n "$BITPORT_DOMAIN" ] && warn "if $BITPORT_DOMAIN does not resolve to this server's public IP, Caddy cannot get a TLS cert -- leave the domain blank to serve HTTP on :80"
 
 # ---------------------------------------------------------------------------
 # 7. first superadmin account
@@ -234,6 +250,8 @@ else
   "$INSTALL_DIR/.venv/bin/python" - <<'PY'
 import os, sys
 sys.path.insert(0, os.getcwd())   # cwd is INSTALL_DIR, so the control-plane DB resolves here
+import control_plane_db as cpdb
+cpdb.apply_migrations()           # ensure the schema exists before any read
 import accounts_auth as a
 email = os.environ["BP_EMAIL"].strip().lower()
 pw = os.environ["BP_PASS"]
