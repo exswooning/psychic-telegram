@@ -23,11 +23,16 @@ PAYLOAD="$(mktemp)"
 # extended header keyword" warnings on unpack. Strip them at the source.
 export COPYFILE_DISABLE=1
 TAR_MAC=(); [ "$(uname)" = Darwin ] && TAR_MAC=(--no-mac-metadata)
-# Runtime code only: no deps, no build output, no logs/data/secrets, and not
-# the installer we are writing. install.sh rebuilds the venv and the SPA.
+# Runtime code + the PREBUILT SPA (migration-webui/dist) -- but no deps, logs,
+# data or secrets. Shipping dist means install.sh skips both the Node install
+# and the vite build: a constrained box (asuswb: 4 CPUs, swapping, load ~15,
+# also running Rocket.Chat) spent 20+ minutes thrashing through a 11,593-module
+# MUI build for no reason. install.sh still rebuilds the venv on the server.
+[ -f migration-webui/dist/index.html ] \
+  || echo "  WARNING: no prebuilt SPA -- run 'cd migration-webui && VITE_CP_BASE= npm run build' first (else the server builds it)" >&2
 tar "${TAR_MAC[@]}" \
   --exclude=.git --exclude=.venv --exclude=node_modules \
-  --exclude='migration-webui/dist' --exclude='__pycache__' \
+  --exclude='__pycache__' \
   --exclude='.pytest_cache' --exclude='*.pyc' --exclude='*.log' \
   --exclude='*.db' --exclude='*.db-*' --exclude=logs --exclude=data \
   --exclude=keys --exclude='*.png' --exclude=scratch --exclude='.claude' \
