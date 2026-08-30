@@ -51,3 +51,15 @@ def test_installer_scans_and_cleans_broken_installs():
     # it must not kill its own process group (the self-kill hazard)
     assert 'pg" != "$MYPGID"' in SH or 'MYPGID' in SH
     assert SH.index("Scan for prior/broken installs") < SH.index("System packages")
+
+
+def test_scan_step_is_best_effort_not_fatal():
+    # The scan step is pure cleanup of a PRIOR install; a hidden non-zero in
+    # it (a BusyBox `ps` that rejects -o pgid=, a missing pgrep) must never
+    # abort THIS install via `set -e`+pipefail. Regression: an installer that
+    # died silently right after printing the scan header on a fresh box.
+    scan = SH[SH.index("Scan for prior/broken installs"):SH.index("System packages")]
+    assert "set +e" in scan, "scan step must disable -e so cleanup can't abort the install"
+    assert "set -e" in scan.split("set +e", 1)[1], "scan step must restore -e before real work"
+    # and it only hunts strays when it actually knows its own group
+    assert 'if [ -n "$MYPGID" ]' in scan

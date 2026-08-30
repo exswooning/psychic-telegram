@@ -64,7 +64,10 @@ you connect its tenants in the UI's Setup Wizard.
 TXT
 
 echo "packing $OUT ..."
-tar -C "$STAGE" -czf "$OUT" bitport
+# Strip macOS Apple-xattrs so a GNU-tar unpack on the target stays quiet.
+export COPYFILE_DISABLE=1
+TAR_MAC=(); [ "$(uname)" = Darwin ] && TAR_MAC=(--no-mac-metadata)
+tar "${TAR_MAC[@]}" -C "$STAGE" -czf "$OUT" bitport
 rm -rf "$STAGE"
 SIZE=$(( $(wc -c < "$OUT") / 1024 ))
 echo "wrote $OUT (${SIZE} KB)"

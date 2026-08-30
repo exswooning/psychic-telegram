@@ -18,9 +18,14 @@ OUT="${1:-bitport-selfinstall.sh}"
 
 echo "packaging runtime tree..."
 PAYLOAD="$(mktemp)"
+# On macOS, bsdtar embeds Apple xattrs (com.apple.quarantine/provenance) as
+# pax headers; GNU tar on the target then prints a wall of "Ignoring unknown
+# extended header keyword" warnings on unpack. Strip them at the source.
+export COPYFILE_DISABLE=1
+TAR_MAC=(); [ "$(uname)" = Darwin ] && TAR_MAC=(--no-mac-metadata)
 # Runtime code only: no deps, no build output, no logs/data/secrets, and not
 # the installer we are writing. install.sh rebuilds the venv and the SPA.
-tar \
+tar "${TAR_MAC[@]}" \
   --exclude=.git --exclude=.venv --exclude=node_modules \
   --exclude='migration-webui/dist' --exclude='__pycache__' \
   --exclude='.pytest_cache' --exclude='*.pyc' --exclude='*.log' \

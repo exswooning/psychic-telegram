@@ -110,14 +110,24 @@ step "Scan for prior/broken installs"
 if [ "$DRY_RUN" = 1 ]; then
   ok "dry-run: would kill stray installers, repair apt, stop existing services"
 else
+  # This whole step is best-effort cleanup: repairing a broken PRIOR install
+  # must never abort THIS one. Run it with -e off so a fussy `ps`, a missing
+  # `pgrep`, or a hidden non-zero (all redirected to /dev/null) can't silently
+  # kill the installer via pipefail. Restored to -e before the next step.
+  set +e
+
   # 1. Stray installers from earlier attempts -- identified by running in a
   #    DIFFERENT process group than this one, so we never kill ourselves.
   MYPGID=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')
   killed=0
-  for pid in $(pgrep -f "install.sh" 2>/dev/null); do
-    pg=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
-    [ -n "$pg" ] && [ "$pg" != "$MYPGID" ] && { kill -9 "$pid" 2>/dev/null && killed=$((killed+1)); }
-  done
+  # Only hunt strays if we actually know our own group; without it we cannot
+  # tell "someone else's installer" from "us" and must not guess.
+  if [ -n "$MYPGID" ]; then
+    for pid in $(pgrep -f "install.sh" 2>/dev/null); do
+      pg=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
+      [ -n "$pg" ] && [ "$pg" != "$MYPGID" ] && { kill -9 "$pid" 2>/dev/null && killed=$((killed+1)); }
+    done
+  fi
   # apt/dpkg children a dead installer left mid-package
   pkill -9 -f "apt-get install" 2>/dev/null && killed=$((killed+1)) || true
   [ "$killed" -gt 0 ] && warn "cleared $killed stray installer/apt process(es) from a previous run" \
@@ -149,6 +159,8 @@ else
   if [ -d "$INSTALL_DIR" ] && [ -f "$INSTALL_DIR/webui.py" ]; then
     warn "code already present at $INSTALL_DIR -- refreshing it"
   fi
+
+  set -e   # cleanup done -- real steps below must fail loudly again
 fi
 
 # ---------------------------------------------------------------------------
