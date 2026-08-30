@@ -123,7 +123,15 @@ else
   # Only hunt strays if we actually know our own group; without it we cannot
   # tell "someone else's installer" from "us" and must not guess.
   if [ -n "$MYPGID" ]; then
-    for pid in $(pgrep -f "install.sh" 2>/dev/null); do
+    # The leading [ /] is load-bearing: a bare "install.sh" is a SUBSTRING of
+    # this run's own `sudo bash .../bitport-SELFINSTALL.sh` parent. sudo runs
+    # us in a fresh process group, so the pgid test below would see that
+    # parent as a stray in another group and SIGKILL it -- killing the whole
+    # run ("Killed" at this step). Requiring a space or slash before it
+    # matches a real `bash install.sh` / `/path/install.sh` but never
+    # `selfinstall.sh`. And we never signal our own pid or our parent (sudo).
+    for pid in $(pgrep -f "[ /]install\.sh" 2>/dev/null); do
+      { [ "$pid" = "$$" ] || [ "$pid" = "$PPID" ]; } && continue
       pg=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
       [ -n "$pg" ] && [ "$pg" != "$MYPGID" ] && { kill -9 "$pid" 2>/dev/null && killed=$((killed+1)); }
     done

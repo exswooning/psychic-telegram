@@ -63,3 +63,15 @@ def test_scan_step_is_best_effort_not_fatal():
     assert "set -e" in scan.split("set +e", 1)[1], "scan step must restore -e before real work"
     # and it only hunts strays when it actually knows its own group
     assert 'if [ -n "$MYPGID" ]' in scan
+
+
+def test_stray_hunt_cannot_kill_its_own_sudo_parent():
+    # "install.sh" is a substring of "bitport-selfinstall.sh"; sudo runs the
+    # installer in a different process group, so a bare `pgrep -f install.sh`
+    # would flag the run's own sudo parent as a stray and SIGKILL the whole
+    # run. Regression: the installer died with "Killed" at the scan step.
+    scan = SH[SH.index("Scan for prior/broken installs"):SH.index("System packages")]
+    assert 'pgrep -f "[ /]install\\.sh"' in scan, \
+        "stray-hunt pattern must require a space/slash so selfinstall.sh can't match"
+    assert '"$$"' in scan and '"$PPID"' in scan, \
+        "stray hunt must never signal its own pid or its parent (sudo)"
