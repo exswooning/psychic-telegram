@@ -96,12 +96,18 @@ run "apt-get update -qq"
 run "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $PKGS"
 ok "base packages installed"
 
-# Node.js (for the SPA build) -- only if npm is missing.
-if ! command -v npm >/dev/null; then
+# Node.js (for the SPA build) -- only if npm is missing AND no prebuilt SPA
+# was shipped in the archive. The flash-drive tarball bundles dist/, so a
+# server with no internet for NodeSource still installs.
+if [ -f "$SRC_DIR/migration-webui/dist/index.html" ]; then
+  ok "prebuilt SPA present -- skipping Node"
+elif ! command -v npm >/dev/null; then
   run "curl -fsSL https://deb.nodesource.com/setup_20.x | bash -"
   run "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs"
+  ok "node: $(command -v node >/dev/null && node -v || echo 'MISSING')"
+else
+  ok "node: $(node -v 2>/dev/null || echo present)"
 fi
-ok "node: $(command -v node >/dev/null && node -v || echo 'MISSING')"
 
 # Caddy (official repo) -- only if missing.
 if ! command -v caddy >/dev/null; then
@@ -139,15 +145,20 @@ run "'$INSTALL_DIR/.venv/bin/pip' install -q -r '$INSTALL_DIR/requirements.txt'"
   run "'$INSTALL_DIR/.venv/bin/pip' install -q -r '$INSTALL_DIR/requirements-control-plane.txt'"
 ok "venv ready"
 
-step "Frontend build"
-if [ -d "$INSTALL_DIR/migration-webui" ] || { [ "$DRY_RUN" = 1 ] && [ -d "$SRC_DIR/migration-webui" ]; }; then
+step "Frontend"
+if [ -f "$INSTALL_DIR/migration-webui/dist/index.html" ] \
+   || { [ "$DRY_RUN" = 1 ] && [ -f "$SRC_DIR/migration-webui/dist/index.html" ]; }; then
+  # A prebuilt SPA shipped in the archive (the offline/flash-drive path):
+  # no Node needed on the server. It was built with a relative API base.
+  ok "using bundled prebuilt SPA (no build needed)"
+elif [ -d "$INSTALL_DIR/migration-webui" ] || { [ "$DRY_RUN" = 1 ] && [ -d "$SRC_DIR/migration-webui" ]; }; then
   # VITE_CP_BASE="" makes the SPA call the API on its own origin (Caddy
   # routes /api/v2 and /ws to :8090); a baked-in localhost:8090 would make
   # every browser hit its own machine and fail. This is a known-real bug.
   run "cd '$INSTALL_DIR/migration-webui' && (npm ci --silent || npm install --silent) && VITE_CP_BASE='' npm run build --silent"
   ok "SPA built (relative API base)"
 else
-  warn "no migration-webui/ -- skipping SPA build"
+  warn "no migration-webui/ -- skipping SPA"
 fi
 
 # ---------------------------------------------------------------------------
