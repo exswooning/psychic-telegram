@@ -82,6 +82,18 @@ ask BITPORT_ADMIN_EMAIL "First superadmin email"   "admin@bitport.local"
 ask_secret BITPORT_ADMIN_PASSWORD "Superadmin password"
 ask ENABLE_BROWSER      "Enable browser automation for DWD/DMS (yes/no)" "yes"
 
+# The install dir gets an rsync'd tree; a system path here would be
+# catastrophic. Require an absolute, non-system, reasonably specific path.
+INSTALL_DIR="${INSTALL_DIR%/}"                       # strip a trailing slash
+case "$INSTALL_DIR" in
+  "" | "/" ) die "refusing install dir '${INSTALL_DIR:-/}': pick a directory like /opt/bitport" ;;
+  /bin|/boot|/dev|/etc|/home|/lib|/lib32|/lib64|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var )
+    die "refusing a system directory '$INSTALL_DIR' -- use something like /opt/bitport or /root/migration" ;;
+esac
+[ "${INSTALL_DIR#/}" != "$INSTALL_DIR" ] || die "install dir must be an absolute path (start with /)"
+case "$INSTALL_DIR" in "$SRC_DIR"|"$SRC_DIR"/*) die "install dir must not be inside the bundle ($SRC_DIR)";; esac
+ok "install directory: $INSTALL_DIR"
+
 [ -n "$BITPORT_DOMAIN" ] || warn "no domain given -- Caddy will serve on :80 only (no HTTPS); set BITPORT_DOMAIN to enable TLS"
 case "${#BITPORT_ADMIN_PASSWORD}" in [0-9]) die "password too short";; esac
 [ "${#BITPORT_ADMIN_PASSWORD}" -ge 12 ] || die "superadmin password must be at least 12 characters"
@@ -131,7 +143,10 @@ fi
 step "Application code"
 if [ "$SRC_DIR" != "$INSTALL_DIR" ]; then
   run "mkdir -p '$INSTALL_DIR'"
-  run "rsync -a --delete --exclude '.venv' --exclude '.git' --exclude 'node_modules' '$SRC_DIR/' '$INSTALL_DIR/'"
+  # No --delete: it is not needed for a copy and would remove anything the
+  # operator already had in the target -- the whole reason a mistyped path
+  # like '/' must never reach this line (see the guard in Settings).
+  run "rsync -a --exclude '.venv' --exclude '.git' --exclude 'node_modules' '$SRC_DIR/' '$INSTALL_DIR/'"
   ok "copied to $INSTALL_DIR"
 else
   ok "installing in place at $INSTALL_DIR"
