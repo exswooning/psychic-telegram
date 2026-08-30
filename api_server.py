@@ -2628,7 +2628,16 @@ def _migration_progress(account_id: int | None) -> dict:
                 # Prefix, matching itemsSkipped just below and the Failures
                 # page: an exact match drops any FAILED_* variant into a gap
                 # where it is counted as done, failed and skipped all zero.
-                "SELECT COUNT(*) n FROM audit_log WHERE status LIKE 'FAILED%'"
+                #
+                # Scoped to the current corpus (users in identity_map). A
+                # reseed leaves audit rows for users that no longer exist --
+                # confirmed live: 3 of 4 "failures" belonged to deleted users
+                # from a superseded run, so a clean 199-user migration read as
+                # "4 failed, 2 retried on the next migration" against people
+                # who cannot be retried because they are gone.
+                "SELECT COUNT(*) n FROM audit_log a WHERE a.status LIKE 'FAILED%' "
+                "AND EXISTS (SELECT 1 FROM identity_map m "
+                "            WHERE m.source_email = a.source_user)"
             ).fetchone()["n"]
             # Skips were invisible: the page showed migrated and failed with
             # nothing between them, while 56,975 items on a live tenant were
@@ -2637,9 +2646,18 @@ def _migration_progress(account_id: int | None) -> dict:
             # as no longer failing -- and an operator who cannot see them
             # cannot tell a clean run from one that quietly declined half the
             # work.
+            # Corpus-scoped like itemsFailed above: audit_counts is a
+            # pre-aggregated (item_type,status) table with no user dimension,
+            # so it cannot exclude a previous run's deleted users -- it was
+            # what folded 1,592 old-run draft-email skips into this run's
+            # count. Reading audit_log with the corpus filter costs a scan of
+            # SKIPPED rows against the indexed source_user, which a real
+            # tenant can afford in exchange for a count that means this run.
             out["itemsSkipped"] = conn.execute(
-                "SELECT COALESCE(SUM(n), 0) n FROM audit_counts "
-                "WHERE status LIKE 'SKIPPED%'").fetchone()["n"]
+                "SELECT COUNT(*) n FROM audit_log a WHERE a.status LIKE 'SKIPPED%' "
+                "AND EXISTS (SELECT 1 FROM identity_map m "
+                "            WHERE m.source_email = a.source_user)"
+            ).fetchone()["n"]
             return out
     except Exception:      # noqa: BLE001 - a ledger mid-migration, or absent
         return empty
@@ -3359,10 +3377,14 @@ async def migration_detail(account_id: int, op: Operator = Depends(operator)):
                 # 12,198 distinct (type, message) pairs live -- and every
                 # duplicate used to pay for its own pair of regex
                 # substitutions in _group_failures.
+                # Corpus-scoped, matching itemsFailed: a previous run's
+                # deleted users must not appear as this run's failures.
                 out["failures"] = _group_failures(conn.execute(
                     "SELECT item_type, error_message, source_user, "
                     "       COUNT(*) AS n "
-                    "FROM audit_log WHERE status LIKE 'FAILED%' "
+                    "FROM audit_log a WHERE a.status LIKE 'FAILED%' "
+                    "AND EXISTS (SELECT 1 FROM identity_map m "
+                    "            WHERE m.source_email = a.source_user) "
                     "GROUP BY item_type, error_message, source_user "
                     "LIMIT 200000"))
 
@@ -3395,12 +3417,17 @@ async def migration_detail(account_id: int, op: Operator = Depends(operator)):
                 # next to the counter that totals them -- it spent its first
                 # deploy in the metrics endpoint, anchored onto a neighbour
                 # that lived there, so the panel never rendered once.
+                # Corpus-scoped from audit_log (not audit_counts, which has no
+                # user dimension), matching itemsSkipped: excludes a previous
+                # run's draft-email skips for users that no longer exist.
                 out["skipped"] = [
                     {"status": r["status"], "count": r["n"]}
                     for r in conn.execute(
-                        "SELECT status, SUM(n) n FROM audit_counts "
-                        "WHERE status LIKE 'SKIPPED%' GROUP BY status "
-                        "ORDER BY n DESC")]
+                        "SELECT status, COUNT(*) n FROM audit_log a "
+                        "WHERE a.status LIKE 'SKIPPED%' "
+                        "AND EXISTS (SELECT 1 FROM identity_map m "
+                        "            WHERE m.source_email = a.source_user) "
+                        "GROUP BY status ORDER BY n DESC")]
                 out["failedUsers"] = [
                     {"sourceUser": r["source_email"],
                      "targetUser": r["target_email"],
