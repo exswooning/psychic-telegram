@@ -208,9 +208,17 @@ fi
 step "Application code"
 if [ "$SRC_DIR" != "$INSTALL_DIR" ]; then
   run "mkdir -p '$INSTALL_DIR'"
-  # No --delete: it is not needed for a copy and would remove anything the
-  # operator already had in the target -- the whole reason a mistyped path
-  # like '/' must never reach this line (see the guard in Settings).
+  # Migrations are pure shipped code that apply_migrations() executes blindly
+  # over the WHOLE dir. A refresh rsync (below, no --delete) would leave a
+  # stale .sql from an older install in place, and one non-UTF-8 junk file
+  # there aborted a whole install at the Database step. Clear the shipped
+  # migrations first so only this bundle's set remains; rsync repopulates it.
+  # ponytail: only migrations/ is cleaned, not stale .py generally -- add a
+  # scoped `rsync --delete` (data/keys/db excluded) if stale code bites again.
+  run "rm -f '$INSTALL_DIR/migrations/'*.sql"
+  # No blanket --delete: it would remove anything the operator already had in
+  # the target -- the whole reason a mistyped path like '/' must never reach
+  # this line (see the guard in Settings).
   run "rsync -a --exclude '.venv' --exclude '.git' --exclude 'node_modules' '$SRC_DIR/' '$INSTALL_DIR/'"
   ok "copied to $INSTALL_DIR"
 else

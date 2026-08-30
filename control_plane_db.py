@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import sys
 import time
 from contextlib import contextmanager
 from typing import Any, Iterator
@@ -62,8 +63,18 @@ def apply_migrations(db_path: str | None = None) -> list[str]:
         for name in sorted(os.listdir(MIGRATIONS_DIR)):
             if not name.endswith(".sql"):
                 continue
-            with open(os.path.join(MIGRATIONS_DIR, name), encoding="utf-8") as fh:
-                conn.executescript(fh.read())
+            try:
+                with open(os.path.join(MIGRATIONS_DIR, name), encoding="utf-8") as fh:
+                    script = fh.read()
+            except UnicodeDecodeError as exc:
+                # Our migrations are ASCII/UTF-8 by construction. A .sql here
+                # that will not decode is foreign -- a stale drop left by an
+                # older install in a non-UTF-8 dir. Skipping it is safe (it is
+                # not one of ours) and keeps one junk file from aborting the
+                # whole schema build with a raw traceback mid-install.
+                sys.stderr.write(f"apply_migrations: skipping non-UTF-8 {name}: {exc}\n")
+                continue
+            conn.executescript(script)
             applied.append(name)
         _apply_column_upgrades(conn)
         conn.commit()

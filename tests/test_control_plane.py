@@ -280,6 +280,24 @@ class TestLedgerSafety:
         assert cpdb.apply_migrations() == expected   # no error
         os.unlink(path)
 
+    def test_a_foreign_non_utf8_sql_is_skipped_not_fatal(self, tmp_path, monkeypatch):
+        """A stale non-UTF-8 .sql left in the migrations dir by an older
+        install must not abort the whole schema build. This bricked a real
+        install at the Database step with a raw UnicodeDecodeError traceback;
+        our own migrations are ASCII, so a file that will not decode is
+        foreign and is skipped."""
+        mig = tmp_path / "migrations"
+        mig.mkdir()
+        for name in os.listdir(cpdb.MIGRATIONS_DIR):
+            if name.endswith(".sql"):
+                src = os.path.join(cpdb.MIGRATIONS_DIR, name)
+                (mig / name).write_bytes(open(src, "rb").read())
+        (mig / "999_junk.sql").write_bytes(b"\xff\xfe not utf-8 \x80\x81;")
+        monkeypatch.setattr(cpdb, "MIGRATIONS_DIR", str(mig))
+        applied = cpdb.apply_migrations(str(tmp_path / "cp.db"))   # must not raise
+        assert "999_junk.sql" not in applied
+        assert any(a.endswith(".sql") for a in applied)            # real ones ran
+
     def test_migrations_do_not_touch_engine_tables(self):
         """The DDL must be additive. Anything else risks the live ledger."""
         migrations_dir = os.path.join(os.path.dirname(os.path.dirname(
