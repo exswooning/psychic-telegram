@@ -41,3 +41,13 @@ def test_installer_creates_the_schema_before_use():
     assert "apply_migrations" in SH
     # and it must run before the superadmin account step
     assert SH.index("apply_migrations") < SH.index("Superadmin account")
+
+
+def test_installer_scans_and_cleans_broken_installs():
+    # a prior/broken install must be detected and cleaned, before packages
+    assert "Scan for prior/broken installs" in SH
+    assert "dpkg --configure -a" in SH        # repairs a wedged package system
+    assert "systemctl stop" in SH             # stops an existing/broken service
+    # it must not kill its own process group (the self-kill hazard)
+    assert 'pg" != "$MYPGID"' in SH or 'MYPGID' in SH
+    assert SH.index("Scan for prior/broken installs") < SH.index("System packages")

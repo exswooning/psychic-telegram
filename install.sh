@@ -99,6 +99,59 @@ case "${#BITPORT_ADMIN_PASSWORD}" in [0-9]) die "password too short";; esac
 [ "${#BITPORT_ADMIN_PASSWORD}" -ge 12 ] || die "superadmin password must be at least 12 characters"
 
 # ---------------------------------------------------------------------------
+# 1b. scan for a prior or BROKEN install and clean it up
+#
+# A half-finished run (a killed installer, a crash-looping service with no
+# schema, a wedged apt) must not poison this one. This ran the hard way: a
+# mistyped install left several installers fighting over apt and a service
+# restarting against a database that did not exist.
+# ---------------------------------------------------------------------------
+step "Scan for prior/broken installs"
+if [ "$DRY_RUN" = 1 ]; then
+  ok "dry-run: would kill stray installers, repair apt, stop existing services"
+else
+  # 1. Stray installers from earlier attempts -- identified by running in a
+  #    DIFFERENT process group than this one, so we never kill ourselves.
+  MYPGID=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')
+  killed=0
+  for pid in $(pgrep -f "install.sh" 2>/dev/null); do
+    pg=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
+    [ -n "$pg" ] && [ "$pg" != "$MYPGID" ] && { kill -9 "$pid" 2>/dev/null && killed=$((killed+1)); }
+  done
+  # apt/dpkg children a dead installer left mid-package
+  pkill -9 -f "apt-get install" 2>/dev/null && killed=$((killed+1)) || true
+  [ "$killed" -gt 0 ] && warn "cleared $killed stray installer/apt process(es) from a previous run" \
+                      || ok "no stray installer processes"
+
+  # 2. A wedged package system (dpkg interrupted by a kill).
+  if dpkg --audit 2>/dev/null | grep -q . || fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
+    warn "package system was interrupted -- repairing (dpkg --configure -a)"
+    dpkg --configure -a >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive apt-get -f install -y -qq >/dev/null 2>&1 || true
+  fi
+
+  # 3. An existing/broken Bitport: stop its services so files and DB can be
+  #    refreshed cleanly. A unit that is enabled but inactive is exactly the
+  #    crash-loop-without-a-schema case this whole fix is about.
+  found_prev=0
+  for svc in bitport-webui bitport-api bitport-fleet xvfb; do
+    if systemctl list-unit-files "$svc.service" >/dev/null 2>&1 \
+       && systemctl cat "$svc.service" >/dev/null 2>&1; then
+      st=$(systemctl is-active "$svc" 2>/dev/null || true)
+      systemctl stop "$svc" >/dev/null 2>&1 || true
+      [ "$svc" = xvfb ] || { warn "stopped existing $svc (was: ${st:-unknown})"; found_prev=1; }
+    fi
+  done
+  [ "$found_prev" = 0 ] && ok "no existing Bitport services" \
+                       || warn "existing install found -- it will be refreshed (config, keys and data kept)"
+
+  # 4. Report the install dir's state without touching config/keys/data.
+  if [ -d "$INSTALL_DIR" ] && [ -f "$INSTALL_DIR/webui.py" ]; then
+    warn "code already present at $INSTALL_DIR -- refreshing it"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # 2. system packages
 # ---------------------------------------------------------------------------
 step "System packages"
