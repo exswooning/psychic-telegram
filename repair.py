@@ -49,9 +49,18 @@ SESSION_INVALID = "Active session is invalid"
 
 def survey(db) -> dict:
     """Count the failure families without touching the network."""
+    # Corpus-scoped: audit_log keeps a previous run's FAILED rows for users
+    # deleted in a reseed, and counting them made a clean run's survey read
+    # "4 failures, 2 impersonation-session-invalid" against people who no
+    # longer exist. Only rows whose user is still in identity_map count --
+    # UNLESS there is no corpus at all (a bare ledger), where scoping to an
+    # empty set would hide every failure, so all of them count instead.
     def n(where: str, params=()) -> int:
         return db.conn.execute(
-            f"SELECT COUNT(*) c FROM audit_log WHERE status='FAILED' AND {where}",
+            f"SELECT COUNT(*) c FROM audit_log a WHERE a.status='FAILED' AND {where} "
+            "AND (NOT EXISTS (SELECT 1 FROM identity_map) "
+            "     OR EXISTS (SELECT 1 FROM identity_map m "
+            "                WHERE m.source_email = a.source_user))",
             params).fetchone()["c"]
 
     return {
