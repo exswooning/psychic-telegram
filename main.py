@@ -246,12 +246,22 @@ def _services_that_succeeded(services: dict) -> list[str]:
             done.append(name)
             continue
         failed = sum(v for k, v in stats.items()
-                     if k.endswith("failed") and isinstance(v, int))
+                     if isinstance(v, int) and "fail" in k.lower())
+        skipped = sum(v for k, v in stats.items()
+                      if isinstance(v, int) and "skip" in k.lower())
+        # 'moved' is real data landed on the target -- NOT skipped items.
+        # Counting skips as moved is how Chat, which skipped all 398 of its
+        # not-a-space entities and copied nothing, came to be listed under
+        # "services done" as if it had migrated. It had not.
         moved = sum(v for k, v in stats.items()
-                    if isinstance(v, int) and not k.endswith("failed"))
-        if failed and not moved:
-            continue
-        done.append(name)
+                    if isinstance(v, int)
+                    and "fail" not in k.lower() and "skip" not in k.lower())
+        if moved > 0:
+            done.append(name)                 # actually migrated something
+        elif failed == 0 and skipped == 0:
+            done.append(name)                 # nothing at all to process
+        # else: moved nothing while items were skipped/failed -> not "done",
+        # because "done" in the report reads as "migrated", and it did not.
     return done
 
 
