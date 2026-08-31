@@ -22,11 +22,18 @@ mkdir -p "$DIR"
 
 echo "staging runtime tree..."
 # Copy the tree, excluding everything the server rebuilds or must not carry.
+# env.sh is gitignored but this rsync doesn't consult .gitignore -- it must
+# be excluded explicitly. It is per-developer/per-tenant config (MIGRATION_DB,
+# SOURCE/TARGET admin+domain, SA key paths); api_server.py's main() loads it
+# into the process env unconditionally. Shipping the packager author's own
+# env.sh once poisoned a fresh install with their local dev machine's
+# MIGRATION_DB path, crash-looping bitport-api with "unable to open database
+# file" from the moment it started.
 rsync -a \
   --exclude='.git' --exclude='.venv' --exclude='node_modules' \
   --exclude='__pycache__' --exclude='.pytest_cache' --exclude='*.pyc' \
   --exclude='*.log' --exclude='*.db' --exclude='*.db-*' \
-  --exclude='logs/' --exclude='data/' --exclude='keys/' \
+  --exclude='logs/' --exclude='data/' --exclude='keys/' --exclude='env.sh' \
   --exclude='*.png' --exclude='scratch/' --exclude='.claude/' \
   --exclude='bitport.tar.gz' --exclude='bitport-selfinstall.sh' \
   ./ "$DIR/"

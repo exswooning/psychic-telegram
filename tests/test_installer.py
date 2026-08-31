@@ -75,3 +75,16 @@ def test_stray_hunt_cannot_kill_its_own_sudo_parent():
         "stray-hunt pattern must require a space/slash so selfinstall.sh can't match"
     assert '"$$"' in scan and '"$PPID"' in scan, \
         "stray hunt must never signal its own pid or its parent (sudo)"
+
+
+def test_packagers_exclude_dev_env_sh():
+    # env.sh is gitignored but the packagers use rsync/tar directly, which do
+    # not consult .gitignore. api_server.py's main() loads env.sh into its
+    # process env unconditionally on startup (so subprocesses inherit tenant
+    # config); shipping the packaging author's own dev env.sh once poisoned a
+    # fresh install with their local machine's MIGRATION_DB path, sending
+    # bitport-api into a permanent "unable to open database file" crash loop.
+    tarball = open(os.path.join(ROOT, "make-tarball.sh"), encoding="utf-8").read()
+    selfinstall = open(os.path.join(ROOT, "make-selfinstall.sh"), encoding="utf-8").read()
+    assert "exclude='env.sh'" in tarball or "exclude=env.sh" in tarball
+    assert "exclude=env.sh" in selfinstall or "exclude='env.sh'" in selfinstall

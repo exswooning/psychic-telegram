@@ -30,12 +30,19 @@ TAR_MAC=(); [ "$(uname)" = Darwin ] && TAR_MAC=(--no-mac-metadata)
 # MUI build for no reason. install.sh still rebuilds the venv on the server.
 [ -f migration-webui/dist/index.html ] \
   || echo "  WARNING: no prebuilt SPA -- run 'cd migration-webui && VITE_CP_BASE= npm run build' first (else the server builds it)" >&2
+# env.sh is gitignored but tar doesn't consult .gitignore, so it needs its own
+# --exclude below. It's per-developer/tenant config (MIGRATION_DB, SA key
+# paths) that api_server.py loads into its process env unconditionally on
+# startup -- shipping the packaging author's own env.sh once poisoned a fresh
+# install with their local machine's MIGRATION_DB path, crash-looping
+# bitport-api forever with "unable to open database file".
 tar "${TAR_MAC[@]}" \
   --exclude=.git --exclude=.venv --exclude=node_modules \
   --exclude='__pycache__' \
   --exclude='.pytest_cache' --exclude='*.pyc' --exclude='*.log' \
   --exclude='*.db' --exclude='*.db-*' --exclude=logs --exclude=data \
   --exclude=keys --exclude='*.png' --exclude=scratch --exclude='.claude' \
+  --exclude=env.sh \
   --exclude="$OUT" --exclude=bitport-selfinstall.sh \
   -cf - . | gzip -9 | base64 > "$PAYLOAD"
 
