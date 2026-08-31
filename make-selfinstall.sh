@@ -77,12 +77,18 @@ LINE=$(awk "/^${MARKER}\$/{print NR+1; exit}" "$SELF")
 
 command -v base64 >/dev/null || { echo "base64 missing (install coreutils)" >&2; exit 1; }
 DEST="$(mktemp -d /tmp/bitport-src.XXXXXX)"
-trap 'rm -rf "$DEST"' EXIT
+# NOTE: the `trap ... EXIT` idiom does NOT work here -- `exec` below replaces
+# this process image entirely, so this shell never reaches its own EXIT and
+# the trap never fires. That silently leaked a fresh /tmp/bitport-src.XXXXXX
+# on every run (several piled up on one box before this was noticed).
+# install.sh itself removes BITPORT_SRC_DEST as its very last action instead,
+# whether it ran to completion here or re-exec'd itself into the background.
 echo "unpacking Bitport into $DEST ..."
 tail -n +"$LINE" "$SELF" | base64 -d | tar xz -C "$DEST"
 [ -f "$DEST/install.sh" ] || { echo "install.sh missing after unpack -- corrupt installer" >&2; exit 1; }
 
 cd "$DEST"
+export BITPORT_SRC_DEST="$DEST"
 exec bash install.sh "$@"
 HEADER
 echo "__BITPORT_ARCHIVE_BELOW__"

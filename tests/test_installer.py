@@ -102,3 +102,48 @@ def test_no_domain_install_gets_non_secure_cookie():
     assert "BITPORT_COOKIE_SECURE=1" in services_block
     assert "BITPORT_COOKIE_SECURE=0" in services_block
     assert '-z "$BITPORT_DOMAIN"' in services_block
+
+
+def test_installer_auto_backgrounds_an_interactive_run():
+    # A human running this by hand over SSH used to lose the whole install
+    # the moment their connection dropped -- "Killed" or a broken pipe
+    # partway through, recoverable only by knowing to re-run inside tmux.
+    # Once settings are gathered, install.sh must re-exec itself detached
+    # (setsid+nohup) so a dropped connection can't take the install with it,
+    # UNLESS the caller was already unattended (CI/Ansible), which controls
+    # its own supervision and must keep running synchronously.
+    assert "ORIG_NONINTERACTIVE=" in SH
+    assert "setsid nohup bash" in SH
+    assert 'ORIG_NONINTERACTIVE" != 1' in SH
+    # the daemonize block must sit after Settings validation, before Scan
+    assert SH.index("Superadmin password") < SH.index("setsid nohup bash") \
+        < SH.index("Scan for prior/broken installs")
+
+
+def test_installer_picks_free_ports_instead_of_failing():
+    # webui.py's default 8080 and Caddy's default :80 are common ports for
+    # OTHER software on a shared box to have grabbed first (asuswb had
+    # SABnzbd on 8080, Nextcloud's Apache on 80) -- Bitport's own services
+    # crash-looped/failed forever until someone noticed and hand-patched the
+    # units. install.sh must detect a busy default and fall back to a free
+    # port automatically, for both the internal webui port and (when no
+    # domain is set, so Caddy isn't required to use the ACME-mandated 80/443)
+    # the public Caddy port.
+    assert "pick_port" in SH and "port_free" in SH
+    assert "WEBUI_PORT=$(pick_port 8080)" in SH
+    assert "PUBLIC_PORT=$(pick_port 80)" in SH
+    # the webui target must be patched into BOTH the unit and BOTH Caddyfile
+    # branches (domain and no-domain), not just one
+    assert "--port $WEBUI_PORT" in SH
+    assert "127.0.0.1:$WEBUI_PORT" in SH
+
+
+def test_selfinstall_temp_dir_is_actually_cleaned_up():
+    # The wrapper's `trap ... EXIT` never fires because `exec bash install.sh`
+    # replaces that process image entirely -- this silently leaked a fresh
+    # /tmp/bitport-src.XXXXXX on every single run (five accumulated on one
+    # box before anyone noticed). install.sh must remove it itself, as the
+    # last thing it does, using the DEST path the wrapper hands it via env.
+    selfinstall = open(os.path.join(ROOT, "make-selfinstall.sh"), encoding="utf-8").read()
+    assert 'export BITPORT_SRC_DEST="$DEST"' in selfinstall
+    assert 'rm -rf "$BITPORT_SRC_DEST"' in SH

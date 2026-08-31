@@ -48,6 +48,29 @@ runnet() {
     sleep $((n * 8)); n=$((n + 1))
   done
 }
+# Whether THIS invocation was already unattended -- captured before the
+# Settings section can flip NONINTERACTIVE for its own internal use. A
+# caller that already ran fully unattended (CI, Ansible, an already-detached
+# process) controls its own supervision and gets the old synchronous
+# behaviour; an interactive human over SSH gets auto-backgrounded below so a
+# dropped connection can't take the install down with it.
+ORIG_NONINTERACTIVE="${NONINTERACTIVE:-0}"
+
+# Is TCP port $1 free on this host right now?
+port_free() { ! ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "[.:]$1\$"; }
+# First free port at-or-after $1 (checked up to +50). Ports get squatted by
+# whatever else runs on a shared box -- asuswb had SABnzbd already sitting on
+# 8080 and Nextcloud's own Apache already on 80, silently breaking Bitport's
+# own services until someone noticed and hand-patched the units. Picking a
+# free port up front means a busy box just works instead of needing that.
+pick_port() {
+  local p="$1" tries=0
+  while [ "$tries" -lt 50 ]; do
+    port_free "$p" && { echo "$p"; return 0; }
+    p=$((p + 1)); tries=$((tries + 1))
+  done
+  die "no free port found starting at $1"
+}
 
 # ---------------------------------------------------------------------------
 # 0. preflight
@@ -110,6 +133,39 @@ ok "install directory: $INSTALL_DIR"
 [ -n "$BITPORT_DOMAIN" ] || warn "no domain given -- Caddy will serve on :80 only (no HTTPS); set BITPORT_DOMAIN to enable TLS"
 case "${#BITPORT_ADMIN_PASSWORD}" in [0-9]) die "password too short";; esac
 [ "${#BITPORT_ADMIN_PASSWORD}" -ge 12 ] || die "superadmin password must be at least 12 characters"
+
+# ---------------------------------------------------------------------------
+# 1a. detach from the terminal for everything from here on
+#
+# Everything below this line is the long, network- and CPU-heavy part of the
+# install (packages, a possible SPA build, services). Run over SSH by a human
+# typing answers to the prompts above, that part used to die the moment the
+# SSH session dropped -- "Killed" or a broken pipe partway through, with no
+# way to resume short of knowing to re-run it inside tmux. Once every answer
+# above is settled, re-exec this same script fully unattended (the answers
+# just given become its env) under setsid+nohup, detached from this
+# terminal's session entirely, and hand control back to the human
+# immediately with a log to follow. A caller that was ALREADY unattended
+# (ORIG_NONINTERACTIVE=1 -- CI, Ansible, a process that already detached
+# itself) is left running exactly as invoked: it controls its own
+# supervision and expects this process's real exit code.
+# ---------------------------------------------------------------------------
+if [ "$ORIG_NONINTERACTIVE" != 1 ] && [ "$DRY_RUN" != 1 ] && [ "${BITPORT_DAEMONIZED:-0}" != 1 ]; then
+  LOG="/var/log/bitport-install.log"
+  install -d -m 755 "$(dirname "$LOG")" 2>/dev/null || LOG="/tmp/bitport-install.log"
+  echo
+  echo "${BOLD}Settings collected.${RESET} Continuing in the background so a dropped"
+  echo "connection can't interrupt the install -- this terminal is free to close."
+  echo "  Log:    $LOG"
+  echo "  Follow: tail -f $LOG"
+  export INSTALL_DIR BITPORT_DOMAIN BITPORT_ADMIN_EMAIL BITPORT_ADMIN_PASSWORD ENABLE_BROWSER
+  export NONINTERACTIVE=1 BITPORT_DAEMONIZED=1
+  setsid nohup bash "$0" >>"$LOG" 2>&1 </dev/null &
+  disown
+  echo "  PID:    $!"
+  echo "  Done when the log ends with \"Bitport installed.\""
+  exit 0
+fi
 
 # ---------------------------------------------------------------------------
 # 1b. scan for a prior or BROKEN install and clean it up
@@ -300,6 +356,17 @@ fi
 # 5. systemd services (path-patched to INSTALL_DIR)
 # ---------------------------------------------------------------------------
 step "Services"
+# webui.py's default port (8080) is a common one for other software to have
+# grabbed first on a shared box -- asuswb had SABnzbd already sitting on it,
+# and Bitport's own webui crash-looped forever until someone noticed and
+# hand-patched the unit. Pick a free one up front instead; harmless no-op
+# when 8080 is actually free (the overwhelmingly common case).
+if [ "$DRY_RUN" = 1 ]; then
+  WEBUI_PORT=8080
+else
+  WEBUI_PORT=$(pick_port 8080)
+  [ "$WEBUI_PORT" != 8080 ] && warn "port 8080 is already in use -- Bitport's web UI will use $WEBUI_PORT internally instead"
+fi
 SVC_SRC="$INSTALL_DIR/systemd"
 UNITS="bitport-webui.service bitport-api.service"
 [ "$ENABLE_BROWSER" = yes ] && UNITS="xvfb.service $UNITS"
@@ -308,6 +375,9 @@ for u in $UNITS bitport-backup.service bitport-backup.timer; do
   # WorkingDirectory and the venv ExecStart both hardcode /root/migration in
   # the repo; rewrite them for this install dir.
   PATCH="s#/root/migration#$INSTALL_DIR#g"
+  if [ "$u" = "bitport-webui.service" ]; then
+    PATCH="$PATCH; s/--port 8080/--port $WEBUI_PORT/"
+  fi
   if [ "$u" = "bitport-api.service" ] && [ -z "$BITPORT_DOMAIN" ]; then
     # The shipped unit hardcodes BITPORT_COOKIE_SECURE=1, correct only when
     # Caddy terminates real HTTPS (the $BITPORT_DOMAIN branch below). With no
@@ -332,17 +402,32 @@ ok "systemd units installed and enabled"
 # ---------------------------------------------------------------------------
 step "Reverse proxy"
 if [ -n "$BITPORT_DOMAIN" ]; then
-  run "sed 's/^everything\.nishantbohara\.com\.np/$BITPORT_DOMAIN/' '$INSTALL_DIR/Caddyfile' > /etc/caddy/Caddyfile"
+  # ACME (Let's Encrypt) needs the standard 80/443 for the HTTP-01 challenge
+  # and to serve; those can't be freely relocated without a different
+  # challenge type, so a domain install still requires them free. The
+  # webui target port, though, is the same one picked above regardless of
+  # domain -- rewrite it here too, not just the hostname.
+  run "sed 's/^everything\.nishantbohara\.com\.np/$BITPORT_DOMAIN/; s/127\.0\.0\.1:8080/127.0.0.1:$WEBUI_PORT/' '$INSTALL_DIR/Caddyfile' > /etc/caddy/Caddyfile"
+  PUBLIC_PORT=""
 else
-  # No domain: serve HTTP on :80 so it is at least reachable.
-  run "printf ':80 {\n\treverse_proxy /api/v2/* 127.0.0.1:8090\n\treverse_proxy /ws 127.0.0.1:8090\n\treverse_proxy /* 127.0.0.1:8080\n}\n' > /etc/caddy/Caddyfile"
+  # No domain: serve plain HTTP. :80 is the nicest default when free, but a
+  # shared box may already have something else on it (asuswb had Nextcloud's
+  # bundled Apache there) -- fall back to another free port rather than
+  # leaving Caddy failed and the install silently unreachable.
+  if [ "$DRY_RUN" = 1 ]; then
+    PUBLIC_PORT=80
+  else
+    PUBLIC_PORT=$(pick_port 80)
+    [ "$PUBLIC_PORT" != 80 ] && warn "port 80 is already in use -- Bitport will be reachable on port $PUBLIC_PORT instead"
+  fi
+  run "printf ':$PUBLIC_PORT {\n\treverse_proxy /api/v2/* 127.0.0.1:8090\n\treverse_proxy /ws 127.0.0.1:8090\n\treverse_proxy /* 127.0.0.1:$WEBUI_PORT\n}\n' > /etc/caddy/Caddyfile"
 fi
 # enable + (re)start, not just reload: on a fresh box caddy is installed but
 # may not be running yet, so a bare reload fails with "not active".
 run "systemctl enable caddy >/dev/null 2>&1 || true"
 run "systemctl restart caddy || systemctl reload caddy || true"
-ok "caddy configured for ${BITPORT_DOMAIN:-:80}"
-[ -n "$BITPORT_DOMAIN" ] && warn "if $BITPORT_DOMAIN does not resolve to this server's public IP, Caddy cannot get a TLS cert -- leave the domain blank to serve HTTP on :80"
+ok "caddy configured for ${BITPORT_DOMAIN:-:$PUBLIC_PORT}"
+[ -n "$BITPORT_DOMAIN" ] && warn "if $BITPORT_DOMAIN does not resolve to this server's public IP, Caddy cannot get a TLS cert -- leave the domain blank to serve HTTP instead"
 
 # ---------------------------------------------------------------------------
 # 7. first superadmin account
@@ -388,7 +473,7 @@ if [ "$DRY_RUN" = 1 ]; then
   ok "dry-run: skipped"
 else
   sleep 3
-  for p in 8080 8090; do
+  for p in "$WEBUI_PORT" 8090; do
     code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$p/" 2>/dev/null || echo 000)
     [ "$code" != 000 ] && ok "port $p responding (HTTP $code)" || warn "port $p not responding yet"
   done
@@ -398,11 +483,23 @@ echo
 echo "${BOLD}${GREEN}Bitport installed.${RESET}"
 if [ -n "$BITPORT_DOMAIN" ]; then
   echo "  URL:      https://$BITPORT_DOMAIN/app"
-else
+elif [ "${PUBLIC_PORT:-80}" = 80 ]; then
   echo "  URL:      http://<server-ip>/app"
+else
+  echo "  URL:      http://<server-ip>:$PUBLIC_PORT/app"
 fi
 echo "  Login:    $BITPORT_ADMIN_EMAIL"
-[ "${NONINTERACTIVE:-0}" = 1 ] && echo "  Password: ${DIM}(as supplied / generated -- check your env or the prompt output)${RESET}"
+[ "${ORIG_NONINTERACTIVE:-0}" = 1 ] && echo "  Password: ${DIM}(as supplied / generated -- check your env or the prompt output)${RESET}"
 echo
 echo "  Next: open the URL, sign in, and use the ${BOLD}Setup Wizard${RESET} in the"
 echo "  sidebar to connect your source and target Google Workspace tenants."
+
+# The self-extracting installer's own EXIT trap never fires (see
+# make-selfinstall.sh's comment: `exec` replaces that process, so it never
+# reaches its own exit) -- clean up its temp extraction dir here instead, as
+# the last thing this script does. Matched against the known mktemp pattern
+# before deleting anything, and a no-op for the plain-tarball path where this
+# var was never set.
+case "${BITPORT_SRC_DEST:-}" in
+  /tmp/bitport-src.*) rm -rf "$BITPORT_SRC_DEST" ;;
+esac
