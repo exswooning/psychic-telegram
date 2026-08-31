@@ -88,3 +88,17 @@ def test_packagers_exclude_dev_env_sh():
     selfinstall = open(os.path.join(ROOT, "make-selfinstall.sh"), encoding="utf-8").read()
     assert "exclude='env.sh'" in tarball or "exclude=env.sh" in tarball
     assert "exclude=env.sh" in selfinstall or "exclude='env.sh'" in selfinstall
+
+
+def test_no_domain_install_gets_non_secure_cookie():
+    # systemd/bitport-api.service hardcodes BITPORT_COOKIE_SECURE=1, correct
+    # only when Caddy terminates real HTTPS. install.sh's own no-domain
+    # branch serves plain HTTP -- a browser silently drops a Secure cookie
+    # over HTTP, so login succeeds server-side but every following request
+    # looks signed-out and the SPA bounces back to /login forever.
+    # Regression: confirmed live (login 200 + Set-Cookie, but /auth/me still
+    # 401'd on the next request) until this patch was applied.
+    services_block = SH[SH.index('step "Services"'):SH.index('step "Reverse proxy"')]
+    assert "BITPORT_COOKIE_SECURE=1" in services_block
+    assert "BITPORT_COOKIE_SECURE=0" in services_block
+    assert '-z "$BITPORT_DOMAIN"' in services_block

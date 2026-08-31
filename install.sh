@@ -307,7 +307,19 @@ for u in $UNITS bitport-backup.service bitport-backup.timer; do
   [ -f "$SVC_SRC/$u" ] || continue
   # WorkingDirectory and the venv ExecStart both hardcode /root/migration in
   # the repo; rewrite them for this install dir.
-  run "sed 's#/root/migration#$INSTALL_DIR#g' '$SVC_SRC/$u' > '/etc/systemd/system/$u'"
+  PATCH="s#/root/migration#$INSTALL_DIR#g"
+  if [ "$u" = "bitport-api.service" ] && [ -z "$BITPORT_DOMAIN" ]; then
+    # The shipped unit hardcodes BITPORT_COOKIE_SECURE=1, correct only when
+    # Caddy terminates real HTTPS (the $BITPORT_DOMAIN branch below). With no
+    # domain, install.sh's own Caddy step serves plain HTTP -- a browser
+    # silently refuses to send a Secure cookie back over HTTP, so login
+    # succeeds server-side but every following request looks signed-out and
+    # the SPA bounces back to /login forever. Confirmed live: login returned
+    # 200 with a Set-Cookie, curl's cookie jar showed it, and it never came
+    # back on the next request because of exactly this flag.
+    PATCH="$PATCH; s/BITPORT_COOKIE_SECURE=1/BITPORT_COOKIE_SECURE=0/"
+  fi
+  run "sed '$PATCH' '$SVC_SRC/$u' > '/etc/systemd/system/$u'"
 done
 run "systemctl daemon-reload"
 [ "$ENABLE_BROWSER" = yes ] && run "systemctl enable --now xvfb.service"
