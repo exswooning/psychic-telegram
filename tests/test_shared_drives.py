@@ -257,6 +257,18 @@ class TestAccessToDrivesTheAdminIsNotIn:
         assert sd.src.call_count("permissions.create") == 0
 
 
+def _source_domain() -> str:
+    """Whatever domain the ambient config actually has.
+
+    seed_argv() gates on Settings().source_domain, which other tests in the
+    suite change. Hardcoding one here passes in isolation and fails in the
+    full run, which is worse than not testing it.
+    """
+    from config import Settings
+
+    return (Settings().source_domain or "").strip().lower()
+
+
 class TestTheSeederCanMakeThem:
     """
     shared_drives.py had nothing to migrate: the per-user seeder cannot make
@@ -277,7 +289,8 @@ class TestTheSeederCanMakeThem:
     def test_the_seed_endpoint_passes_the_count_through(self):
         import webui
         argv, _env, err = webui.seed_argv(
-            {"confirm_domain": "tenanta.com", "scale": "small", "shared_drives": 3})
+            {"confirm_domain": _source_domain(), "scale": "small",
+             "shared_drives": 3})
         assert err is None or err == ""
         assert "--shared-drives" in argv
         assert argv[argv.index("--shared-drives") + 1] == "3"
@@ -285,13 +298,13 @@ class TestTheSeederCanMakeThem:
     def test_a_seed_without_the_flag_makes_no_shared_drives(self):
         import webui
         argv, _env, _err = webui.seed_argv(
-            {"confirm_domain": "tenanta.com", "scale": "small"})
+            {"confirm_domain": _source_domain(), "scale": "small"})
         assert "--shared-drives" not in argv
 
     def test_a_nonsense_count_is_refused_not_passed_to_the_tenant(self):
         import webui
         _argv, _env, err = webui.seed_argv(
-            {"confirm_domain": "tenanta.com", "scale": "small",
+            {"confirm_domain": _source_domain(), "scale": "small",
              "shared_drives": "lots"})
         assert err and "whole number" in err
 
