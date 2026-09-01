@@ -141,9 +141,15 @@ export const Metrics: React.FC = () => {
       .finally(() => setLoading(false))
   }, [id, scoped])
 
+  // 3s, not 10s. The 10s timer was sized around a volume query that took
+  // 4.17s because it read the audit_counts VIEW, which groups by source_user
+  // and forced a 1.27M-row intermediate this page never wanted. Reading the
+  // base tables directly returns byte-identical numbers in 0.18s, so the
+  // reason for waiting is gone and these counters can actually track a
+  // running migration instead of lagging it.
   useEffect(() => {
     refresh()
-    const t = window.setInterval(refresh, 10_000)
+    const t = window.setInterval(refresh, 3_000)
     return () => window.clearInterval(t)
   }, [refresh])
 
@@ -307,6 +313,16 @@ export const Metrics: React.FC = () => {
               <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>
                 Items by type and outcome
               </Typography>
+              {/* The server reports why it could not read these. Without
+                  this the table just rendered empty, which reads as
+                  "migrated nothing" rather than "could not count" -- and
+                  that is exactly what happened when a ledger holding
+                  1,270,474 audit rows was missing the audit_counts view. */}
+              {m.volumeError && (
+                <Alert severity="warning" sx={{ mb: 2 }} data-testid="volume-error">
+                  Counts unavailable: {m.volumeError}
+                </Alert>
+              )}
               {/* Counts, never averaged into a percentage. DONE, FAILED,
                   SKIPPED and BLOCKED coexist in one run and mean different
                   things; a single "94% complete" hides all four. */}

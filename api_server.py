@@ -3242,13 +3242,37 @@ async def migration_metrics(account_id: int, history: int = 60,
         # numbers most people actually came to read.
         try:
             with cpdb.ro(path) as conn:
+                # Not `FROM audit_counts`, for two measured reasons.
+                #
+                # Speed: that view groups by source_user as well, so this
+                # consumer -- which does not want a per-user breakdown --
+                # pays for a 1.27M-row intermediate grouping and then
+                # re-aggregates it. Measured on a real ledger: 4.17s via the
+                # view, 0.18s this way, byte-identical output. 4s per poll is
+                # what made this page refresh on a 10s timer instead of
+                # live.
+                #
+                # Availability: a VIEW only appears when something opens the
+                # ledger READ-WRITE, and this server reads read-only. Account
+                # 66 had 1,270,474 audit rows and no audit_counts view, so
+                # the query threw "no such table", the except below swallowed
+                # it into volumeError, and the Metrics page showed an empty
+                # volume table -- every metric recorded, none displayed.
+                # Reading the base tables cannot go missing that way.
+                #
+                # audit_rollup is still unioned in: pruned users' counts live
+                # only there, and dropping it would report a finished user as
+                # having migrated nothing.
                 out["volume"] = [
                     {"itemType": r["item_type"], "status": r["status"],
                      "count": r["n"]}
                     for r in conn.execute(
-                        "SELECT item_type, status, SUM(n) n FROM "
-                        "audit_counts GROUP BY item_type, status "
-                        "ORDER BY n DESC")]
+                        "SELECT item_type, status, SUM(n) n FROM ("
+                        "  SELECT item_type, status, COUNT(*) n FROM audit_log"
+                        "   GROUP BY item_type, status"
+                        "  UNION ALL"
+                        "  SELECT item_type, status, n FROM audit_rollup"
+                        ") GROUP BY item_type, status ORDER BY n DESC")]
                 out["mappings"] = [
                     {"type": r["type"], "count": r["n"]}
                     for r in conn.execute(
