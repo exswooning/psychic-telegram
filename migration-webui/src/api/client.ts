@@ -500,7 +500,8 @@ export async function runSeed(
   allUsers?: boolean,
   createUntilFull?: boolean,
   workers?: string,
-  localpartPrefix?: string
+  localpartPrefix?: string,
+  sharedDrives?: string
 ): Promise<SeedResult> {
   const res = await fetch('/api/seed', {
     method: 'POST',
@@ -519,6 +520,10 @@ export async function runSeed(
       // A deleted Workspace address stays taken for 20 days, so a
       // wipe-and-recreate that reuses names fails until they age out.
       localpart_prefix: localpartPrefix || undefined,
+      // Shared drives belong to no user, so the per-user seed never makes
+      // one and shared_drives.py has nothing to migrate. Opt-in: they cost
+      // real tenant objects and most seeds do not need them.
+      shared_drives: sharedDrives || undefined,
     }),
   })
   return res.json()

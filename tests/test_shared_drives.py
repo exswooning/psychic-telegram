@@ -613,3 +613,36 @@ class TestExternalMembersKeepTheirAccess:
         got = self._grant(sd, [{"type": "user", "role": "fileOrganizer",
                                 "emailAddress": "p@vendor.io"}])
         assert got["p@vendor.io"] == "fileOrganizer"
+
+
+class TestTheSeedUIOffersSharedDrives:
+    """The server accepted a shared_drives count from the day the seeder
+    grew one, but nothing on screen could send it -- so the only way to seed
+    a shared drive was to POST /api/seed by hand. An option the UI cannot
+    reach is an option the product does not have."""
+
+    def _page(self):
+        import os
+        return open(os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))),
+            "migration-webui/src/pages/SeedWizard.tsx"), encoding="utf-8").read()
+
+    def test_the_wizard_has_a_control_for_it(self):
+        src = self._page()
+        assert "shared-drives" in src
+        assert "sharedDrives" in src
+
+    def test_it_reaches_runSeed(self):
+        assert "sharedDrives)" in self._page()
+
+    def test_the_client_sends_it_to_the_server(self):
+        import os
+        src = open(os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))),
+            "migration-webui/src/api/client.ts"), encoding="utf-8").read()
+        assert "shared_drives: sharedDrives" in src
+
+    def test_it_says_why_the_per_user_seed_cannot_make_one(self):
+        import re
+        src = re.sub(r"\s+", " ", self._page())
+        assert "belongs to no user" in src
