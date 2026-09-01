@@ -173,12 +173,20 @@ def seed(settings: Settings, admin: str, members: list[str],
 
 
 def reset(settings: Settings, admin: str) -> int:
-    """Delete only drives this script created, by name prefix."""
+    """Delete only drives this script created, by name prefix.
+
+    useDomainAdminAccess because a plain list only returns drives `admin` is
+    a MEMBER of, and a seeded drive does not have to be one: anything created
+    by another user (or whose admin membership was removed) is invisible
+    without it and silently survives the reset. Hit for real -- a
+    SEEDED-SD-NOADMIN left behind by a --reset that reported success.
+    """
     drive = _drive_client(settings, admin)
     retry = _retry(settings)
     removed = 0
     resp = retry(lambda: drive.drives().list(
-        pageSize=100, fields="drives(id,name)").execute())()
+        pageSize=100, useDomainAdminAccess=True,
+        fields="drives(id,name)").execute())()
     for d in resp.get("drives", []):
         if not (d.get("name") or "").startswith(PREFIX):
             continue

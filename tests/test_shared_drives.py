@@ -443,3 +443,17 @@ class TestDriveLevelRolesAreNotReplayedPerFile:
              "emailAddress": SRC_USER},   # mapped, so it is not skipped as unmapped
         ])
         assert "writer" in roles
+
+
+class TestResetCanSeeWhatItSeeded:
+    def test_it_lists_with_domain_admin_access(self):
+        """A plain drives().list only returns drives the admin is a MEMBER
+        of. A seeded drive need not be one -- anything created by another
+        user is invisible without this and survives a --reset that reports
+        success. Hit for real: SEEDED-SD-NOADMIN outlived its own cleanup."""
+        import os
+        src = open(os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "data-generator",
+            "seed_shared_drives.py"), encoding="utf-8").read()
+        body = src[src.index("def reset("):src.index("def main(")]
+        assert "useDomainAdminAccess=True" in body
