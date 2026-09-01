@@ -400,3 +400,46 @@ class TestTheSeederBuildsTheCorpusItClaimsTo:
         drive, _made, ssd = seeded
         names = [c["body"]["name"] for c in drive.calls_to("drives.create")]
         assert all(n.startswith(ssd.PREFIX) for n in names)
+
+
+class TestDriveLevelRolesAreNotReplayedPerFile:
+    """
+    A shared drive's membership is inherited by every file inside it, so
+    organizer/fileOrganizer turn up in each file's permission list. They are
+    not per-file grants, and Drive refuses them as such:
+
+        403 organizerOnNonTeamDriveNotSupported
+
+    Replaying them can never succeed, so every attempt is a permanent
+    FAILED row. The first live shared-drive migration wrote 29 of them.
+    shared_drives.py restores drive-level membership in _sync_members, which
+    is where these belong.
+    """
+
+    def _acl_roles_sent(self, migrator, perms):
+        src, tgt = migrator.src, migrator.tgt
+        src.store["f1"] = {"id": "f1", "name": "f.txt", "parents": ["root-source"],
+                           "mimeType": "text/plain"}
+        src.perms["f1"] = perms
+        tgt.store["t1"] = {"id": "t1", "name": "f.txt", "parents": ["root-target"],
+                           "mimeType": "text/plain"}
+        migrator._sync_acls("f1", "t1")
+        return [c["body"]["role"] for c in tgt.calls_to("permissions.create")]
+
+    def test_organizer_and_fileorganizer_are_skipped(self, migrator, identity):
+        roles = self._acl_roles_sent(migrator, [
+            {"id": "p1", "type": "user", "role": "organizer",
+             "emailAddress": "o@tenanta.com"},
+            {"id": "p2", "type": "user", "role": "fileOrganizer",
+             "emailAddress": "fo@tenanta.com"},
+        ])
+        assert roles == []
+
+    def test_real_per_file_roles_still_go_through(self, migrator, identity):
+        """The guard must not swallow the grants that are genuinely
+        per-file -- that would be a worse bug than the one it fixes."""
+        roles = self._acl_roles_sent(migrator, [
+            {"id": "p3", "type": "user", "role": "writer",
+             "emailAddress": SRC_USER},   # mapped, so it is not skipped as unmapped
+        ])
+        assert "writer" in roles

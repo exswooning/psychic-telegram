@@ -1563,6 +1563,20 @@ class DriveMigrator:
         for p in perms:
             if p.get("role") == "owner":
                 continue
+            # organizer/fileOrganizer exist only at SHARED DRIVE level. They
+            # show up in a file's permission list because a shared drive's
+            # membership is inherited by everything inside it, but they are
+            # not per-file grants and Drive refuses them as such:
+            #
+            #   403 organizerOnNonTeamDriveNotSupported
+            #
+            # Replaying them per file therefore cannot ever succeed -- it
+            # only writes permanent failures into the ledger (29 of them on
+            # the first shared-drive run, all unfixable by any retry).
+            # shared_drives.py restores drive-level membership itself, in
+            # _sync_members, which is where these actually belong.
+            if p.get("role") in ("organizer", "fileOrganizer"):
+                continue
             details = p.get("permissionDetails") or []
             # An inherited grant is really the parent folder's permission, so
             # preserving the copy tree already keeps the access. Recreating it
