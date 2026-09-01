@@ -333,11 +333,90 @@ class SharedDriveMigrator:
                           f"{result.get('files', 0)} file(s) in {name}")
 
 
+def cleanup_staging_drives(auth: AuthManager, settings: Settings,
+                          target_admin: str, apply: bool = False) -> dict:
+    """Reclaim MIGRATION-STAGING-* drives the engine could not tear down.
+
+    DriveMigrator deletes its own staging drive in a `finally`, but only when
+    it is verifiably empty -- and a run that is killed outright never reaches
+    that block at all. Worse, the drive's only organizers are the users it
+    was staging for, so once those accounts are deleted the drive has no
+    living member: it cannot be read, listed by name, or deleted by anybody.
+    Found on a real tenant as 188 of 188 target shared drives, every single
+    one an orphan, spanning nine days of runs.
+
+    The target credential holds full drive scope (unlike the deliberately
+    read-only source one), so the admin can add itself and reclaim them.
+
+    Emptiness is re-checked with the admin's own eyes before anything is
+    deleted, and a drive holding ANY file is left alone: those are files that
+    were copied but never moved, and deleting the drive would destroy them.
+    That is the same invariant _teardown_staging_drive protects.
+    """
+    tgt = auth.target_drive(target_admin)
+    prefix = settings.staging_drive_prefix
+    out = {"found": 0, "deleted": 0, "not_empty": 0, "failed": 0}
+
+    drives, token = [], None
+    while True:
+        r = tgt.drives().list(pageSize=100, pageToken=token,
+                              useDomainAdminAccess=True,
+                              fields="nextPageToken,drives(id,name)").execute()
+        drives += r.get("drives", [])
+        token = r.get("nextPageToken")
+        if not token:
+            break
+
+    for d in drives:
+        name = d.get("name") or ""
+        if not name.startswith(prefix):
+            continue
+        out["found"] += 1
+        try:
+            # Idempotent; "already exists" is the normal case.
+            try:
+                tgt.permissions().create(
+                    fileId=d["id"], supportsAllDrives=True,
+                    useDomainAdminAccess=True, sendNotificationEmail=False,
+                    body={"type": "user", "role": "organizer",
+                          "emailAddress": target_admin}).execute()
+            except Exception:          # noqa: BLE001
+                pass
+
+            left = tgt.files().list(
+                corpora="drive", driveId=d["id"], includeItemsFromAllDrives=True,
+                supportsAllDrives=True, pageSize=10,
+                fields="files(id,name)").execute().get("files", [])
+            if left:
+                out["not_empty"] += 1
+                log.warning("%s holds %d item(s) -- left in place (copied but "
+                            "never moved; re-run the migration to finish them)",
+                            name, len(left))
+                continue
+            if not apply:
+                log.info("[DRY RUN] would delete empty staging drive %s", name)
+                continue
+            tgt.drives().delete(driveId=d["id"]).execute()
+            out["deleted"] += 1
+            log.info("deleted empty staging drive %s", name)
+        except Exception as exc:       # noqa: BLE001 - one drive must not lose the rest
+            out["failed"] += 1
+            log.warning("could not reclaim %s: %s", name, str(exc)[:120])
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Migrate Shared Drives.")
     ap.add_argument("--inventory", action="store_true",
                     help="count without copying anything")
     ap.add_argument("--migrate", action="store_true")
+    ap.add_argument("--cleanup-staging", action="store_true",
+                    help="delete leftover MIGRATION-STAGING-* drives on the "
+                         "TARGET that the engine could not tear down. Only "
+                         "ones verifiably empty; add --apply to really do it.")
+    ap.add_argument("--apply", action="store_true",
+                    help="with --cleanup-staging, actually delete (default "
+                         "is a dry run)")
     ap.add_argument("--all-drives", action="store_true",
                     help="every shared drive in the tenant, via domain admin "
                          "access (otherwise only the admin's own memberships)")
@@ -353,6 +432,15 @@ def main(argv: list[str] | None = None) -> int:
 
     mig = SharedDriveMigrator(auth, db, settings, settings.source_admin,
                               settings.target_admin)
+
+    if args.cleanup_staging:
+        r = cleanup_staging_drives(auth, settings, settings.target_admin,
+                                   apply=args.apply)
+        print(f"staging drives found={r['found']} deleted={r['deleted']} "
+              f"not_empty={r['not_empty']} failed={r['failed']}")
+        if not args.apply:
+            print("  (dry run -- re-run with --apply to delete)")
+        return 1 if r["failed"] else 0
 
     if args.inventory or not args.migrate:
         drives = mig.list_source_drives(args.all_drives)

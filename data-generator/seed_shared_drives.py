@@ -190,6 +190,20 @@ def reset(settings: Settings, admin: str) -> int:
     for d in resp.get("drives", []):
         if not (d.get("name") or "").startswith(PREFIX):
             continue
+        # Listing with domain-admin access finds drives this admin is not a
+        # member of, but reading and deleting one still needs membership --
+        # so without this the reset now SEES those drives and then fails on
+        # every one. Unlike the migration's read-only source credential, the
+        # seeder holds full drive scope, so it can simply add itself.
+        try:
+            retry(lambda i=d["id"]: drive.permissions().create(
+                fileId=i, supportsAllDrives=True, useDomainAdminAccess=True,
+                sendNotificationEmail=False,
+                body={"type": "user", "role": "organizer",
+                      "emailAddress": admin}).execute())()
+        except Exception:              # noqa: BLE001 - already a member is the normal case
+            pass
+
         # A shared drive with content refuses to delete, so empty it first.
         try:
             files = retry(lambda i=d["id"]: drive.files().list(

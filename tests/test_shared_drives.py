@@ -505,3 +505,60 @@ class TestSharedDriveStatsReachTheUI:
         assert "shared-drive-stats" in src
         # a row of zeros reads as "migrated nothing", not "has not run"
         assert "{sd && (" in src
+
+
+class TestStagingLeftoversCanBeReclaimed:
+    """
+    DriveMigrator tears down its staging drive in a `finally`, but a run that
+    is killed outright never reaches it -- and the drive's only organizers are
+    the users it staged for, so once those accounts are deleted it has no
+    living member: unreadable, unlistable by name, undeletable by anyone.
+
+    Found on a real tenant as 188 of 188 target shared drives, every one an
+    orphan, spanning nine days of runs.
+    """
+
+    @pytest.fixture
+    def tgt_with_staging(self, auth, settings, monkeypatch):
+        from tests.fakes import FakeDrive
+        t = FakeDrive(TGT_USER, "target")
+        t.shared_drives["s1"] = {"id": "s1", "name": f"{settings.staging_drive_prefix}-alice"}
+        t.shared_drives["s2"] = {"id": "s2", "name": f"{settings.staging_drive_prefix}-bob"}
+        t.shared_drives["keep"] = {"id": "keep", "name": "Finance"}
+        monkeypatch.setattr(auth, "target_drive", lambda u: t)
+        return t
+
+    def _run(self, auth, settings, tgt, apply):
+        import shared_drives
+        return shared_drives.cleanup_staging_drives(auth, settings, TGT_USER,
+                                                    apply=apply)
+
+    def test_it_only_touches_staging_drives(self, auth, settings, tgt_with_staging):
+        r = self._run(auth, settings, tgt_with_staging, apply=True)
+        assert r["found"] == 2          # "Finance" is not ours to delete
+        deleted = [c["driveId"] for c in tgt_with_staging.calls_to("drives.delete")]
+        assert "keep" not in deleted
+
+    def test_a_dry_run_deletes_nothing(self, auth, settings, tgt_with_staging):
+        r = self._run(auth, settings, tgt_with_staging, apply=False)
+        assert r["found"] == 2 and r["deleted"] == 0
+        assert tgt_with_staging.call_count("drives.delete") == 0
+
+    def test_a_staging_drive_holding_files_is_left_alone(
+            self, auth, settings, tgt_with_staging):
+        """Those are files copied but never moved. Deleting the drive would
+        destroy them -- the same invariant _teardown_staging_drive keeps."""
+        tgt_with_staging.store["orphan"] = {
+            "id": "orphan", "name": "half-copied.bin", "parents": ["s1"],
+            "mimeType": "application/octet-stream"}
+
+        r = self._run(auth, settings, tgt_with_staging, apply=True)
+
+        assert r["not_empty"] == 1
+        assert "s1" not in [c["driveId"] for c in tgt_with_staging.calls_to("drives.delete")]
+
+    def test_it_is_reachable_from_the_ui(self):
+        import webui
+        act = webui.ACTIONS["staging_drives_cleanup"]
+        assert act["destructive"] is True and act["confirm"]
+        assert "--cleanup-staging" in act["argv"]

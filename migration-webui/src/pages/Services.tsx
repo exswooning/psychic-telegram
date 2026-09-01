@@ -128,6 +128,9 @@ const Services: React.FC = () => {
               {has('shared_drives_migrate') &&
                 <JobRunner name="shared_drives_migrate"
                            spec={actions.shared_drives_migrate} />}
+              {has('staging_drives_cleanup') &&
+                <JobRunner name="staging_drives_cleanup"
+                           spec={actions.staging_drives_cleanup} />}
             </Stack>
           </CardContent>
         </Card>

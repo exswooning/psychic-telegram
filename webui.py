@@ -313,6 +313,17 @@ ACTIONS: dict[str, dict] = {
         "blurb": "Count files per shared drive. Read-only.",
         "argv": [PY, "shared_drives.py", "--inventory", "--all-drives"],
     },
+    "staging_drives_cleanup": {
+        "label": "Shared drives: reclaim staging leftovers",
+        "blurb": "Delete MIGRATION-STAGING-* drives the engine could not tear "
+                 "down. A killed run never reaches its cleanup, and once the "
+                 "user it staged for is deleted the drive has no living "
+                 "member at all -- unreadable and undeletable by anyone. Only "
+                 "verifiably empty ones are removed.",
+        "argv": [PY, "shared_drives.py", "--cleanup-staging", "--apply"],
+        "destructive": True,
+        "confirm": "RECLAIM",
+    },
     "shared_drives_migrate": {
         "label": "Shared drives: migrate",
         "blurb": "Create each shared drive on the target, restore membership "
