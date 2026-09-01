@@ -313,16 +313,6 @@ ACTIONS: dict[str, dict] = {
         "blurb": "Count files per shared drive. Read-only.",
         "argv": [PY, "shared_drives.py", "--inventory", "--all-drives"],
     },
-    "shared_drives_grant_access": {
-        "label": "Shared drives: grant access",
-        "blurb": "Add the source admin as organizer on every shared drive it "
-                 "cannot already read. Domain-admin access lists a drive but "
-                 "does not let you read its files, so without this a drive "
-                 "nobody granted you inventories and migrates as empty.",
-        "argv": [PY, "shared_drives.py", "--grant-access", "--all-drives"],
-        "destructive": True,
-        "confirm": "GRANT",
-    },
     "shared_drives_migrate": {
         "label": "Shared drives: migrate",
         "blurb": "Create each shared drive on the target, restore membership "

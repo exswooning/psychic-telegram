@@ -168,93 +168,105 @@ def _raise_on_create(sd, message: str) -> None:
     sd.src.permissions = lambda: _Raising()
 
 
-class TestAccessToDrivesTheAdminIsNotIn:
+class TestReadingADriveTheAdminIsNotIn:
     """
-    Domain-admin access is not a skeleton key. It covers drives().list and
-    permissions().list -- which is why --all-drives can enumerate the whole
-    tenant -- but files().list(corpora="drive") has no such override and
-    needs real membership.
+    Domain-admin access covers drives().list and permissions().list -- which
+    is why --all-drives can enumerate the whole tenant -- but
+    files().list(corpora="drive") has no such override. Verified live against
+    a real tenant, the admin gets:
 
-    So --all-drives lists a drive the admin does not belong to and then reads
-    nothing out of it. The drive inventories as empty and migrates as empty,
-    which is indistinguishable from a drive that genuinely is empty: the exact
-    silent-undercount this module exists to prevent, one level up.
+        403 teamDriveMembershipRequired
+        "The attempted action requires shared drive membership."
+
+    The first attempt at this granted the admin organizer on the source
+    drive. That cannot work and should not: SOURCE_SCOPES is drive.readonly
+    on purpose, so the write is refused with insufficientPermissions (also
+    verified live), and widening the scope would break both the read-only
+    guarantee and every deployment whose Admin Console grant lacks it.
+
+    Reading as a member needs no write and no new scope.
     """
 
-    def test_the_admin_is_added_as_organizer_on_the_source_drive(self, sd):
-        assert sd.ensure_access("drv-1", "Finance") is True
+    def test_a_member_is_chosen_to_read_a_drive_the_admin_is_not_in(self, sd):
+        sd._members = lambda drive_id: [
+            {"type": "user", "role": "reader", "emailAddress": "r@tenanta.com"},
+            {"type": "user", "role": "organizer", "emailAddress": "o@tenanta.com"},
+        ]
 
-        call = sd.src.calls_to("permissions.create")[0]
-        assert call["fileId"] == "drv-1"
-        # organizer, not writer: a lesser role cannot read every file in the
-        # drive, which is the whole point of asking.
-        assert call["body"]["role"] == "organizer"
-        assert call["body"]["emailAddress"] == SRC_USER
-        # Without this the grant is refused for a drive the admin is not in
-        # -- which is precisely the drive that needs it.
-        assert call["useDomainAdminAccess"] is True
-        assert call["sendNotificationEmail"] is False
+        # Organizer first: the role least likely to lose access mid-run.
+        assert sd.reader_for("drv-1", "Finance") == "o@tenanta.com"
 
-    def test_it_targets_the_source_tenant_not_the_target(self, sd):
-        """Every other permissions.create in this codebase writes to the
-        target. This one is the exception and must not drift into it."""
-        sd.ensure_access("drv-1", "Finance")
+    def test_the_admin_is_kept_when_it_is_already_a_member(self, sd):
+        """No reason to impersonate anyone else, and the admin's access is
+        the least likely to be revoked underneath the run."""
+        sd._members = lambda drive_id: [
+            {"type": "user", "role": "organizer", "emailAddress": SRC_USER},
+            {"type": "user", "role": "writer", "emailAddress": "w@tenanta.com"},
+        ]
 
-        assert sd.src.call_count("permissions.create") == 1
-        assert sd.tgt.call_count("permissions.create") == 0
+        assert sd.reader_for("drv-1", "Finance") == SRC_USER
 
-    def test_the_grant_is_audited_because_it_changes_the_source_tenant(
-            self, sd, db):
-        sd.ensure_access("drv-1", "Finance")
+    def test_group_only_membership_is_reported_not_guessed(self, sd, db):
+        """A group grant cannot be impersonated -- there is no mailbox to be.
+        Skipping loudly beats copying an empty drive."""
+        sd._members = lambda drive_id: [
+            {"type": "group", "role": "organizer", "emailAddress": "eng@tenanta.com"}]
 
+        assert sd.reader_for("drv-1", "Finance") is None
         row = db.conn.execute(
-            "SELECT status, error_message FROM audit_log "
-            "WHERE item_type='shared_drive_access'").fetchone()
-        assert row["status"] == "SUCCESS"
-        assert "Finance" in row["error_message"]
-        assert sd.stats["granted"] == 1
+            "SELECT status FROM audit_log WHERE item_type='shared_drive'").fetchone()
+        assert row["status"] == "SKIPPED_NO_READABLE_MEMBER"
 
-    def test_an_existing_membership_is_success_not_failure(self, sd, db):
-        """Idempotent: re-running must not count a no-op as a failure."""
-        _raise_on_create(sd, "Permission already exists on this item")
+    def test_nothing_is_written_to_the_source_tenant(self, sd):
+        """The whole point of the redesign: the source credential is
+        read-only by construction and must stay that way."""
+        sd._members = lambda drive_id: [
+            {"type": "user", "role": "organizer", "emailAddress": "o@tenanta.com"}]
 
-        assert sd.ensure_access("drv-1", "Finance") is True
-        assert sd.stats["failed"] == 0
-        assert sd.stats["granted"] == 0
+        sd.reader_for("drv-1", "Finance")
 
-    def test_a_real_refusal_is_recorded_and_stops_that_drive(self, sd, db):
-        _raise_on_create(sd, "insufficientFilePermissions")
-
-        assert sd.ensure_access("drv-1", "Finance") is False
-        row = db.conn.execute(
-            "SELECT status FROM audit_log "
-            "WHERE item_type='shared_drive_access'").fetchone()
-        assert row["status"] == "FAILED"
-        assert sd.stats["failed"] == 1
-
-    def test_dry_run_grants_nothing(self, sd):
-        sd.settings.dry_run = True
-
-        assert sd.ensure_access("drv-1", "Finance") is True
         assert sd.src.call_count("permissions.create") == 0
 
-    def test_a_drive_we_cannot_reach_is_not_then_copied_as_empty(self, sd):
-        """The failure that motivated this: reading on regardless produces a
-        confident, wrong "0 files" instead of a recorded access problem."""
-        sd.ensure_access = lambda drive_id, name="": False
+    def test_an_unreadable_drive_is_skipped_not_copied_as_empty(self, sd):
+        sd.reader_for = lambda drive_id, name="": None
         sd._sync_members = lambda *a: pytest.fail("must not sync members")
-        sd._copy_contents = lambda *a: pytest.fail("must not copy contents")
+        sd._copy_contents = lambda *a, **k: pytest.fail("must not copy contents")
 
         sd._migrate_one({"id": "drv-1", "name": "Finance"})
 
-    def test_no_grant_leaves_source_permissions_alone(self, sd):
-        """An operator who does not want the tool touching source ACLs."""
-        sd._sync_members = lambda *a: None
-        sd._copy_contents = lambda *a: None
+        assert sd.stats["unreadable"] == 1
 
-        sd._migrate_one({"id": "drv-1", "name": "Finance"}, grant=False)
+    def test_the_engine_reads_as_the_member_but_bills_the_ledger_to_the_admin(
+            self, sd, monkeypatch):
+        """Which member is readable can change between runs. If the ledger
+        key moved with it, a re-run would re-copy the whole drive instead of
+        resuming it."""
+        seen = {}
 
-        assert sd.src.call_count("permissions.create") == 0
+        class _Engine:
+            def __init__(self, auth, db, settings, source_user, target_user, quota):
+                seen["ledger_user"] = source_user
+                self.shared_drive = self.target_drive_id = None
+
+            @property
+            def src(self):
+                return None
+
+            @src.setter
+            def src(self, v):
+                seen["impersonated"] = v
+
+            def run(self):
+                return {"files": 0, "folders": 0, "failed": 0}
+
+        import shared_drives
+        monkeypatch.setattr(shared_drives, "DriveMigrator", _Engine)
+        sd.auth.source_drive = lambda u: f"client:{u}"
+
+        sd._copy_contents("drv-1", "drv-2", "Finance", "o@tenanta.com")
+
+        assert seen["ledger_user"] == SRC_USER
+        assert seen["impersonated"] == "client:o@tenanta.com"
 
 
 def _source_domain() -> str:
@@ -307,17 +319,6 @@ class TestTheSeederCanMakeThem:
             {"confirm_domain": _source_domain(), "scale": "small",
              "shared_drives": "lots"})
         assert err and "whole number" in err
-
-
-class TestGrantAccessIsReachableFromTheUI:
-    def test_the_action_exists_and_is_confirm_gated(self):
-        import webui
-        act = webui.ACTIONS["shared_drives_grant_access"]
-        # It writes to the customer's SOURCE tenant, so it must not be a
-        # one-click: every other source-mutating action here is gated too.
-        assert act["destructive"] is True
-        assert act["confirm"]
-        assert "--grant-access" in act["argv"]
 
 
 class TestTheSeederBuildsTheCorpusItClaimsTo:

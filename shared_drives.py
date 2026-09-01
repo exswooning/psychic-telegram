@@ -39,15 +39,23 @@ Enumerating is not reading
 --------------------------
 Domain-admin access covers `drives().list` and `permissions().list`, but
 `files().list(corpora="drive")` has no such override -- it needs real
-membership. So --all-drives lists drives the admin does not belong to and
-then reads nothing out of them: they inventory as empty and migrate as
-empty, which looks exactly like a drive that is genuinely empty. Inventory
-and migrate therefore add the admin as an organizer first (idempotent, and
-audited as `shared_drive_access` because it does change the source tenant).
-`--no-grant` opts out; `--grant-access` does only that and stops.
+membership. Verified live, the admin gets:
 
-    python3 shared_drives.py --inventory
-    python3 shared_drives.py --grant-access --all-drives
+    403 teamDriveMembershipRequired
+    "The attempted action requires shared drive membership."
+
+so --all-drives lists every drive in the tenant and then 403s on the first
+one the admin is not in, losing the whole run's counts with it.
+
+Granting the admin access is not the answer: SOURCE_SCOPES is
+`drive.readonly` deliberately, so a source write is refused
+(insufficientPermissions), and widening that scope would break both the
+read-only guarantee and every deployment whose Admin Console grant does not
+already include it. Instead each drive is read as one of its own members
+(`reader_for`), which needs no write and no new scope. A drive with no user
+member is reported and skipped, not fatal.
+
+    python3 shared_drives.py --inventory --all-drives
     python3 shared_drives.py --migrate --all-drives
 """
 
@@ -86,7 +94,7 @@ class SharedDriveMigrator:
         self.tgt = auth.target_drive(target_admin)
         self.stats = {"drives": 0, "members": 0, "files": 0, "folders": 0,
                       "skipped": 0, "failed": 0, "unmapped_members": 0,
-                      "granted": 0}
+                      "unreadable": 0}
 
     # -- reading -------------------------------------------------------------
     def list_source_drives(self, all_drives: bool) -> list[dict]:
@@ -102,12 +110,17 @@ class SharedDriveMigrator:
             if not token:
                 return out
 
-    def count_drive(self, drive_id: str) -> dict:
-        """Files, folders and bytes in one shared drive, without copying."""
+    def count_drive(self, drive_id: str, reader: str | None = None) -> dict:
+        """Files, folders and bytes in one shared drive, without copying.
+
+        `reader` is whoever can actually see it (see reader_for). Defaults to
+        the admin, which is correct only for drives the admin is in.
+        """
+        src = self.auth.source_drive(reader) if reader else self.src
         totals = {"files": 0, "folders": 0, "bytes": 0}
         token = None
         while True:
-            resp = self.src.files().list(
+            resp = src.files().list(
                 q="trashed = false", corpora="drive", driveId=drive_id,
                 includeItemsFromAllDrives=True, supportsAllDrives=True,
                 pageSize=1000, pageToken=token,
@@ -123,48 +136,54 @@ class SharedDriveMigrator:
                 return totals
 
     # -- access ---------------------------------------------------------------
-    def ensure_access(self, drive_id: str, name: str = "") -> bool:
-        """Make `admin_user` an organizer on a SOURCE drive it isn't in yet.
+    def reader_for(self, drive_id: str, name: str = "") -> str | None:
+        """Someone who can actually read this drive, or None if nobody can.
 
         Domain-admin access is not a skeleton key. It covers `drives().list`
         and `permissions().list`, which is why --all-drives can enumerate the
-        whole tenant -- but `files().list(corpora="drive", driveId=...)` has
-        no such override and needs real membership. So --all-drives happily
-        lists a drive the admin does not belong to and then reads zero files
-        out of it: the drive inventories as empty and migrates as empty, which
-        is indistinguishable from a drive that genuinely has nothing in it.
-        That is the silent-undercount this whole module exists to prevent,
-        reappearing one level up.
+        whole tenant -- but `files().list(corpora="drive")` has no such
+        override. Google is explicit about it (verified live):
 
-        Granting is idempotent -- an existing membership comes back as an
-        "already exists" error, which is the success case, not a failure.
-        Every grant is audited: this changes permissions on the customer's
-        source tenant, so it must not be invisible.
+            403 teamDriveMembershipRequired
+            "The attempted action requires shared drive membership."
+
+        So --all-drives lists drives the admin does not belong to and then
+        403s on the first one, taking the whole run with it.
+
+        The fix is NOT to grant the admin access. SOURCE_SCOPES is
+        `drive.readonly` on purpose -- "a source credential that cannot write
+        is a structural guarantee, not just a policy" (config.py) -- so
+        permissions().create against the source is refused with
+        insufficientPermissions, and widening the scope to get around that
+        would break the guarantee AND every deployment whose Admin Console
+        grant does not already include it.
+
+        A shared drive always has members, and domain-wide delegation can
+        impersonate any of them. So read as a member instead: no source
+        write, no new scope, nothing to undo afterwards. Organizer first
+        merely because it is the role least likely to lose access mid-run.
         """
-        if self.settings.dry_run:
-            log.info("[DRY RUN] would grant %s organizer on %r",
-                     self.admin_user, name or drive_id)
-            return True
         try:
-            self.src.permissions().create(
-                fileId=drive_id, supportsAllDrives=True,
-                useDomainAdminAccess=True, sendNotificationEmail=False,
-                body={"type": "user", "role": "organizer",
-                      "emailAddress": self.admin_user}).execute()
+            members = self._members(drive_id)
         except Exception as exc:      # noqa: BLE001 - one drive must not lose the rest
-            if "already" in str(exc).lower():
-                return True           # already a member: nothing to do
-            self.db.log_audit(self.admin_user, drive_id, "shared_drive_access",
-                              "FAILED", f"{name}: {exc}")
-            self.stats["failed"] += 1
-            log.warning("could not grant access to %r: %s", name or drive_id,
+            log.warning("cannot list members of %r: %s", name or drive_id,
                         str(exc)[:120])
-            return False
-        self.db.log_audit(self.admin_user, drive_id, "shared_drive_access",
-                          "SUCCESS", f"granted organizer on {name}")
-        self.stats["granted"] += 1
-        log.info("granted %s organizer on %r", self.admin_user, name or drive_id)
-        return True
+            return None
+        users = [p for p in members if p.get("type") == "user"
+                 and p.get("emailAddress")]
+        # Already a member? Stay as the admin -- fewer impersonations, and the
+        # admin is the account whose access is least likely to be revoked.
+        if any(p["emailAddress"].lower() == self.admin_user.lower() for p in users):
+            return self.admin_user
+        users.sort(key=lambda p: ROLE_ORDER.index(p.get("role"))
+                   if p.get("role") in ROLE_ORDER else len(ROLE_ORDER))
+        if not users:
+            self.db.log_audit(self.admin_user, drive_id, "shared_drive",
+                              "SKIPPED_NO_READABLE_MEMBER",
+                              f"{name}: no user member to read it as")
+            log.warning("no member can read %r -- skipping", name or drive_id)
+            return None
+        return users[0]["emailAddress"]
 
     def _members(self, drive_id: str) -> list[dict]:
         out, token = [], None
@@ -180,17 +199,20 @@ class SharedDriveMigrator:
                 return out
 
     # -- writing -------------------------------------------------------------
-    def migrate_all(self, all_drives: bool, grant: bool = True) -> dict:
+    def migrate_all(self, all_drives: bool) -> dict:
         for drive in self.list_source_drives(all_drives):
-            self._migrate_one(drive, grant)
+            self._migrate_one(drive)
         return dict(self.stats)
 
-    def _migrate_one(self, drive: dict, grant: bool = True) -> None:
+    def _migrate_one(self, drive: dict) -> None:
         src_id, name = drive["id"], drive.get("name") or "Shared drive"
 
-        # Before anything reads the tree. A drive the admin cannot see copies
-        # as empty rather than failing loudly, so this comes first.
-        if grant and not self.ensure_access(src_id, name):
+        # Who can read this one. Not the admin by default: the admin is not a
+        # member of every drive in the tenant, and files().list refuses with
+        # teamDriveMembershipRequired for the ones it isn't.
+        reader = self.reader_for(src_id, name)
+        if reader is None:
+            self.stats["unreadable"] += 1
             return
 
         existing = self.db.get_target_id(self.admin_user, src_id, "shared_drive")
@@ -218,7 +240,7 @@ class SharedDriveMigrator:
         # Members before files: an interrupted run must not leave a drive that
         # nobody on the target can administer.
         self._sync_members(src_id, tgt_id, name)
-        self._copy_contents(src_id, tgt_id, name)
+        self._copy_contents(src_id, tgt_id, name, reader)
 
     def _sync_members(self, src_id: str, tgt_id: str, name: str) -> None:
         try:
@@ -267,7 +289,8 @@ class SharedDriveMigrator:
                 continue
             self.stats["members"] += 1
 
-    def _copy_contents(self, src_id: str, tgt_id: str, name: str) -> None:
+    def _copy_contents(self, src_id: str, tgt_id: str, name: str,
+                       reader: str | None = None) -> None:
         """Hand the tree to the engine that already knows how to copy one."""
         quota = DailyQuotaGuard(self.db, self.target_admin,
                                 self.settings.effective_upload_cap())
@@ -275,6 +298,12 @@ class SharedDriveMigrator:
                                self.admin_user, self.target_admin, quota)
         engine.shared_drive = src_id
         engine.target_drive_id = tgt_id
+        # Read as the member, but keep source_user=admin_user so the ledger
+        # keys stay stable: which member happens to be readable can change
+        # between runs, and a moving key would re-copy the whole drive
+        # instead of resuming it.
+        if reader and reader != self.admin_user:
+            engine.src = self.auth.source_drive(reader)
         try:
             result = engine.run()
         except Exception as exc:  # noqa: BLE001 - one drive must not lose the rest
@@ -305,14 +334,6 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--all-drives", action="store_true",
                     help="every shared drive in the tenant, via domain admin "
                          "access (otherwise only the admin's own memberships)")
-    ap.add_argument("--grant-access", action="store_true",
-                    help="only add SOURCE_ADMIN as organizer to every shared "
-                         "drive it cannot already read, then stop. Inventory "
-                         "and migrate do this themselves; use this to do it "
-                         "up front, or to fix access without copying.")
-    ap.add_argument("--no-grant", action="store_true",
-                    help="never touch source permissions. Drives the admin is "
-                         "not a member of will read as empty.")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -326,29 +347,24 @@ def main(argv: list[str] | None = None) -> int:
     mig = SharedDriveMigrator(auth, db, settings, settings.source_admin,
                               settings.target_admin)
 
-    grant = not args.no_grant
-
-    if args.grant_access:
-        drives = mig.list_source_drives(args.all_drives)
-        print(f"Granting {settings.source_admin} organizer on "
-              f"{len(drives)} shared drive(s):\n")
-        for d in drives:
-            mig.ensure_access(d["id"], d.get("name") or "?")
-        print(f"\n  granted={mig.stats['granted']} failed={mig.stats['failed']} "
-              f"(already a member counts as neither)")
-        return 1 if mig.stats["failed"] else 0
-
     if args.inventory or not args.migrate:
         drives = mig.list_source_drives(args.all_drives)
         grand = {"files": 0, "folders": 0, "bytes": 0}
         print(f"{len(drives)} shared drive(s)\n")
         for d in drives:
-            # Counting has the same membership requirement as copying: without
-            # this a drive the admin is not in reports 0 files and reads as
-            # empty rather than as unreachable.
-            if grant:
-                mig.ensure_access(d["id"], d.get("name") or "?")
-            t = mig.count_drive(d["id"])
+            name = d.get("name") or "?"
+            reader = mig.reader_for(d["id"], name)
+            if reader is None:
+                print(f"  {name[:46]:48} {'unreadable':>7}  (no member to read it as)")
+                continue
+            try:
+                t = mig.count_drive(d["id"], reader)
+            except Exception as exc:      # noqa: BLE001
+                # One drive must not cost the whole inventory. This crashed
+                # the entire run before: 403 teamDriveMembershipRequired on
+                # drive 3 of 3 and not a single count was printed.
+                print(f"  {name[:46]:48} {'FAILED':>7}  {str(exc)[:60]}")
+                continue
             for k in grand:
                 grand[k] += t[k]
             print(f"  {d.get('name', '?')[:46]:48} "
@@ -360,12 +376,12 @@ def main(argv: list[str] | None = None) -> int:
                   "--all-drives for the whole tenant.")
         return 0
 
-    stats = mig.migrate_all(args.all_drives, grant)
+    stats = mig.migrate_all(args.all_drives)
     print(f"\ndrives={stats['drives']} members={stats['members']} "
           f"files={stats['files']} folders={stats['folders']} "
           f"skipped={stats['skipped']} failed={stats['failed']} "
           f"unmapped_members={stats['unmapped_members']} "
-          f"granted={stats['granted']}")
+          f"unreadable={stats['unreadable']}")
     return 1 if stats["failed"] else 0
 
 

@@ -71,8 +71,7 @@ const Services: React.FC = () => {
         <Typography variant="body2" color="text.secondary">Loading…</Typography>
       )}
 
-      {(has('shared_drives_inventory') || has('shared_drives_migrate')
-        || has('shared_drives_grant_access')) && (
+      {(has('shared_drives_inventory') || has('shared_drives_migrate')) && (
         <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 3 }}>
           <CardContent>
             <Typography variant="h6" sx={{ fontWeight: 600, mb: 1 }}>
@@ -86,15 +85,12 @@ const Services: React.FC = () => {
             </Alert>
             <Alert severity="warning" sx={{ mb: 2 }}>
               Being a domain admin lets you <em>list</em> every shared drive,
-              but not read the files inside one you are not a member of. Those
-              drives count as empty and migrate as empty, which looks exactly
-              like a drive that really is empty. Grant access first if the
-              inventory shows drives with 0 files.
+              but not read inside one you are not a member of. Each drive is
+              therefore read as one of its own members. A drive with no user
+              member is reported as unreadable and skipped rather than
+              failing the run.
             </Alert>
             <Stack spacing={2}>
-              {has('shared_drives_grant_access') &&
-                <JobRunner name="shared_drives_grant_access"
-                           spec={actions.shared_drives_grant_access} />}
               {has('shared_drives_inventory') &&
                 <JobRunner name="shared_drives_inventory"
                            spec={actions.shared_drives_inventory} />}
