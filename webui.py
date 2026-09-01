@@ -313,6 +313,16 @@ ACTIONS: dict[str, dict] = {
         "blurb": "Count files per shared drive. Read-only.",
         "argv": [PY, "shared_drives.py", "--inventory", "--all-drives"],
     },
+    "shared_drives_grant_access": {
+        "label": "Shared drives: grant access",
+        "blurb": "Add the source admin as organizer on every shared drive it "
+                 "cannot already read. Domain-admin access lists a drive but "
+                 "does not let you read its files, so without this a drive "
+                 "nobody granted you inventories and migrates as empty.",
+        "argv": [PY, "shared_drives.py", "--grant-access", "--all-drives"],
+        "destructive": True,
+        "confirm": "GRANT",
+    },
     "shared_drives_migrate": {
         "label": "Shared drives: migrate",
         "blurb": "Create each shared drive on the target, restore membership "
@@ -1899,6 +1909,18 @@ def seed_argv(body: dict, account_id: int | None = None) -> tuple[list[str], dic
         argv.append("--all-users")
     if body.get("reset"):
         argv.append("--reset")
+    # Shared drives belong to no user, so the per-user seed never creates one
+    # and shared_drives.py has nothing to migrate. Opt-in: they cost real
+    # tenant objects and most seeds do not need them.
+    sd = body.get("shared_drives")
+    if sd not in (None, "", 0, "0", False):
+        try:
+            n_sd = int(sd)
+        except (TypeError, ValueError):
+            return [], {}, f"shared_drives must be a whole number, got {sd!r}"
+        if n_sd < 1:
+            return [], {}, "shared_drives must be at least 1"
+        argv += ["--shared-drives", str(n_sd)]
     # Parallel users. Blank means "size it to this machine" -- seed_sandbox
     # asks resources.recommend(), which budgets memory per worker and is the
     # right default. An override exists because that budget is deliberately

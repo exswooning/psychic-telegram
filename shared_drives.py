@@ -35,7 +35,19 @@ domain-admin access to enumerate every shared drive in the tenant rather than
 only those the impersonated user belongs to; without it the pass silently
 covers just one person's memberships.
 
+Enumerating is not reading
+--------------------------
+Domain-admin access covers `drives().list` and `permissions().list`, but
+`files().list(corpora="drive")` has no such override -- it needs real
+membership. So --all-drives lists drives the admin does not belong to and
+then reads nothing out of them: they inventory as empty and migrate as
+empty, which looks exactly like a drive that is genuinely empty. Inventory
+and migrate therefore add the admin as an organizer first (idempotent, and
+audited as `shared_drive_access` because it does change the source tenant).
+`--no-grant` opts out; `--grant-access` does only that and stops.
+
     python3 shared_drives.py --inventory
+    python3 shared_drives.py --grant-access --all-drives
     python3 shared_drives.py --migrate --all-drives
 """
 
@@ -73,7 +85,8 @@ class SharedDriveMigrator:
         self.src = auth.source_drive(admin_user)
         self.tgt = auth.target_drive(target_admin)
         self.stats = {"drives": 0, "members": 0, "files": 0, "folders": 0,
-                      "skipped": 0, "failed": 0, "unmapped_members": 0}
+                      "skipped": 0, "failed": 0, "unmapped_members": 0,
+                      "granted": 0}
 
     # -- reading -------------------------------------------------------------
     def list_source_drives(self, all_drives: bool) -> list[dict]:
@@ -109,6 +122,50 @@ class SharedDriveMigrator:
             if not token:
                 return totals
 
+    # -- access ---------------------------------------------------------------
+    def ensure_access(self, drive_id: str, name: str = "") -> bool:
+        """Make `admin_user` an organizer on a SOURCE drive it isn't in yet.
+
+        Domain-admin access is not a skeleton key. It covers `drives().list`
+        and `permissions().list`, which is why --all-drives can enumerate the
+        whole tenant -- but `files().list(corpora="drive", driveId=...)` has
+        no such override and needs real membership. So --all-drives happily
+        lists a drive the admin does not belong to and then reads zero files
+        out of it: the drive inventories as empty and migrates as empty, which
+        is indistinguishable from a drive that genuinely has nothing in it.
+        That is the silent-undercount this whole module exists to prevent,
+        reappearing one level up.
+
+        Granting is idempotent -- an existing membership comes back as an
+        "already exists" error, which is the success case, not a failure.
+        Every grant is audited: this changes permissions on the customer's
+        source tenant, so it must not be invisible.
+        """
+        if self.settings.dry_run:
+            log.info("[DRY RUN] would grant %s organizer on %r",
+                     self.admin_user, name or drive_id)
+            return True
+        try:
+            self.src.permissions().create(
+                fileId=drive_id, supportsAllDrives=True,
+                useDomainAdminAccess=True, sendNotificationEmail=False,
+                body={"type": "user", "role": "organizer",
+                      "emailAddress": self.admin_user}).execute()
+        except Exception as exc:      # noqa: BLE001 - one drive must not lose the rest
+            if "already" in str(exc).lower():
+                return True           # already a member: nothing to do
+            self.db.log_audit(self.admin_user, drive_id, "shared_drive_access",
+                              "FAILED", f"{name}: {exc}")
+            self.stats["failed"] += 1
+            log.warning("could not grant access to %r: %s", name or drive_id,
+                        str(exc)[:120])
+            return False
+        self.db.log_audit(self.admin_user, drive_id, "shared_drive_access",
+                          "SUCCESS", f"granted organizer on {name}")
+        self.stats["granted"] += 1
+        log.info("granted %s organizer on %r", self.admin_user, name or drive_id)
+        return True
+
     def _members(self, drive_id: str) -> list[dict]:
         out, token = [], None
         while True:
@@ -123,13 +180,18 @@ class SharedDriveMigrator:
                 return out
 
     # -- writing -------------------------------------------------------------
-    def migrate_all(self, all_drives: bool) -> dict:
+    def migrate_all(self, all_drives: bool, grant: bool = True) -> dict:
         for drive in self.list_source_drives(all_drives):
-            self._migrate_one(drive)
+            self._migrate_one(drive, grant)
         return dict(self.stats)
 
-    def _migrate_one(self, drive: dict) -> None:
+    def _migrate_one(self, drive: dict, grant: bool = True) -> None:
         src_id, name = drive["id"], drive.get("name") or "Shared drive"
+
+        # Before anything reads the tree. A drive the admin cannot see copies
+        # as empty rather than failing loudly, so this comes first.
+        if grant and not self.ensure_access(src_id, name):
+            return
 
         existing = self.db.get_target_id(self.admin_user, src_id, "shared_drive")
         if existing:
@@ -243,6 +305,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--all-drives", action="store_true",
                     help="every shared drive in the tenant, via domain admin "
                          "access (otherwise only the admin's own memberships)")
+    ap.add_argument("--grant-access", action="store_true",
+                    help="only add SOURCE_ADMIN as organizer to every shared "
+                         "drive it cannot already read, then stop. Inventory "
+                         "and migrate do this themselves; use this to do it "
+                         "up front, or to fix access without copying.")
+    ap.add_argument("--no-grant", action="store_true",
+                    help="never touch source permissions. Drives the admin is "
+                         "not a member of will read as empty.")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -256,11 +326,28 @@ def main(argv: list[str] | None = None) -> int:
     mig = SharedDriveMigrator(auth, db, settings, settings.source_admin,
                               settings.target_admin)
 
+    grant = not args.no_grant
+
+    if args.grant_access:
+        drives = mig.list_source_drives(args.all_drives)
+        print(f"Granting {settings.source_admin} organizer on "
+              f"{len(drives)} shared drive(s):\n")
+        for d in drives:
+            mig.ensure_access(d["id"], d.get("name") or "?")
+        print(f"\n  granted={mig.stats['granted']} failed={mig.stats['failed']} "
+              f"(already a member counts as neither)")
+        return 1 if mig.stats["failed"] else 0
+
     if args.inventory or not args.migrate:
         drives = mig.list_source_drives(args.all_drives)
         grand = {"files": 0, "folders": 0, "bytes": 0}
         print(f"{len(drives)} shared drive(s)\n")
         for d in drives:
+            # Counting has the same membership requirement as copying: without
+            # this a drive the admin is not in reports 0 files and reads as
+            # empty rather than as unreachable.
+            if grant:
+                mig.ensure_access(d["id"], d.get("name") or "?")
             t = mig.count_drive(d["id"])
             for k in grand:
                 grand[k] += t[k]
@@ -273,11 +360,12 @@ def main(argv: list[str] | None = None) -> int:
                   "--all-drives for the whole tenant.")
         return 0
 
-    stats = mig.migrate_all(args.all_drives)
+    stats = mig.migrate_all(args.all_drives, grant)
     print(f"\ndrives={stats['drives']} members={stats['members']} "
           f"files={stats['files']} folders={stats['folders']} "
           f"skipped={stats['skipped']} failed={stats['failed']} "
-          f"unmapped_members={stats['unmapped_members']}")
+          f"unmapped_members={stats['unmapped_members']} "
+          f"granted={stats['granted']}")
     return 1 if stats["failed"] else 0
 
 

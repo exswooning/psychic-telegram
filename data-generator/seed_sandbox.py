@@ -1752,6 +1752,13 @@ def main(argv: list[str] | None = None) -> int:
                          "'how many licences are actually free' when "
                          "--fit-to-licenses's Reports API is lagging. "
                          "Requires --create-users.")
+    ap.add_argument("--shared-drives", type=int, default=0, metavar="N",
+                    help="also create N Shared Drives (SEEDED-SD-*) once the "
+                         "per-user seed finishes. Shared drives belong to no "
+                         "user, so nothing else here creates them and "
+                         "shared_drives.py has nothing to migrate without "
+                         "this. Members are taken from the seeded users, one "
+                         "per drive-level role.")
     ap.add_argument("--reset", action="store_true", help="DELETE everything")
     ap.add_argument("--target-gb-per-user", type=float, default=None,
                     help="after normal seeding, add large filler files until "
@@ -2155,6 +2162,28 @@ def main(argv: list[str] | None = None) -> int:
         for e in entries:
             fh.write(f"{e['email']},{e['local']}@{settings.target_domain},user\n")
 
+    # Shared drives, after the per-user seed: their membership list is drawn
+    # from the users just created, and a drive-level role granted to an
+    # account that does not exist yet is silently dropped by Drive.
+    sd_made: dict = {}
+    if args.shared_drives > 0:
+        import seed_shared_drives
+        members = [e["email"] for e in entries][:len(seed_shared_drives.ROLES)]
+        print(f"\nSeeding {args.shared_drives} shared drive(s), "
+              f"members: {', '.join(members)}")
+        try:
+            sd_made = seed_shared_drives.seed(
+                settings, settings.source_admin, members, args.shared_drives)
+        except Exception as exc:      # noqa: BLE001 - the user seed still stands
+            # Not fatal: a completed per-user seed is worth keeping and
+            # reporting even when the shared-drive extra fails. Reported
+            # loudly in the summary rather than swallowed.
+            print(f"  ! shared drives failed: {str(exc)[:160]}")
+            sd_made = {"error": str(exc)[:160]}
+        manifest["shared_drives"] = sd_made
+        with open(args.manifest, "w", encoding="utf-8") as fh:
+            json.dump(manifest, fh, indent=2)
+
     print(f"\n{'='*66}")
     print(f"Seeded {totals['users']} users in {manifest['elapsed_sec']}s")
     print(f"  OWNED files : {totals['owned_files']:,}  "
@@ -2174,6 +2203,14 @@ def main(argv: list[str] | None = None) -> int:
           f"{totals['grants_anyone']:,} anyone")
     print(f"  Contacts    : {totals['contacts']:,}")
     print(f"  Tasks       : {totals['tasks']:,}")
+    if args.shared_drives > 0:
+        if sd_made.get("error"):
+            print(f"  SharedDrives: FAILED -- {sd_made['error']}")
+        else:
+            print(f"  SharedDrives: {len(sd_made.get('drives', [])):,} drive(s), "
+                  f"{sd_made.get('folders', 0):,} folder(s), "
+                  f"{sd_made.get('files', 0):,} file(s), "
+                  f"{sd_made.get('members', 0):,} membership(s)")
     if args.target_gb_per_user:
         print(f"  Filler      : {totals['filler_files']:,} file(s), "
               f"{totals['filler_gb']:.2f} GB added toward "
