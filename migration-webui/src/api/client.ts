@@ -708,3 +708,23 @@ export async function runDeploy(
   })
   return res.json()
 }
+
+export interface SharedDriveStats {
+  drives: number
+  members: number
+  unmappedMembers: number
+  unreadable: number
+  failed: number
+}
+
+export async function fetchSharedDrives(): Promise<SharedDriveStats | null> {
+  const data = await getJSON<{ error: string; sharedDrives: SharedDriveStats }>(
+    '/api/spa/shared_drives'
+  )
+  if (data.error) throw new Error(data.error)
+  // {} before the shared-drive pass has ever run -- the caller renders
+  // nothing rather than a row of confident zeros.
+  return data.sharedDrives && Object.keys(data.sharedDrives).length
+    ? data.sharedDrives
+    : null
+}

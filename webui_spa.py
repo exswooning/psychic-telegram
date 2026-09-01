@@ -563,3 +563,48 @@ def report_payload(conn: sqlite3.Connection, settings, job_started: float,
             round((total_users - failed_users) / total_users * 100, 1)
             if total_users else 0.0),
     }
+
+
+def shared_drives_payload(conn: sqlite3.Connection) -> dict:
+    """What the shared-drive pass actually did, straight from the ledger.
+
+    The Services page could start a shared-drive migration and then show
+    nothing about it: the only number anywhere was a single "Shared Drives"
+    tile on the Final Report, which counts drives and says nothing about the
+    membership restored or the drives that could not be read at all.
+
+    Members and unreadable drives matter more than the drive count. A
+    drive-level role that lands on nobody is access silently lost, and an
+    unreadable drive is a whole body of data the run never saw -- both are
+    invisible if you only report how many drives were created.
+
+    Files and folders are deliberately NOT here. They go into id_mapping as
+    plain 'file'/'folder' rows, indistinguishable from My Drive ones, so any
+    number reported would either be the whole tenant's or a fabricated zero.
+    Counting them needs bookkeeping that does not exist yet; showing a
+    confident 0 in the meantime is worse than showing nothing.
+    """
+    out = {"drives": 0, "members": 0, "unmappedMembers": 0,
+           "unreadable": 0, "failed": 0}
+
+    row = conn.execute("SELECT COUNT(*) n FROM id_mapping "
+                       "WHERE type = 'shared_drive'").fetchone()
+    out["drives"] = row["n"] if row else 0
+
+    for r in conn.execute(
+        "SELECT item_type, status, COUNT(*) n FROM audit_log "
+        "WHERE item_type IN ('shared_drive', 'shared_drive_member') "
+        "GROUP BY 1, 2"
+    ):
+        it, st, n = r["item_type"], r["status"], r["n"]
+        if it == "shared_drive_member":
+            if st == "SUCCESS":
+                out["members"] += n
+            elif st == "SKIPPED_UNMAPPED_IDENTITY":
+                out["unmappedMembers"] += n
+        elif it == "shared_drive":
+            if st == "SKIPPED_NO_READABLE_MEMBER":
+                out["unreadable"] += n
+            elif st == "FAILED":
+                out["failed"] += n
+    return out

@@ -5,7 +5,8 @@ import {
 } from '@mui/material'
 import { Hub as ServicesIcon } from '@mui/icons-material'
 import {
-  fetchActions, fetchToggles, setToggles, ActionSpec,
+  fetchActions, fetchToggles, setToggles, fetchSharedDrives,
+  ActionSpec, SharedDriveStats,
 } from '@/api/client'
 import JobRunner from '@/components/JobRunner'
 import DmsImportButton from '@/components/DmsImportButton'
@@ -33,12 +34,20 @@ const Services: React.FC = () => {
   // nothing on screen said so.
   const [svc, setSvc] = useState<Record<string, boolean>>({})
   const [dry, setDry] = useState(false)
+  // Null until the shared-drive pass has actually run: a row of zeros
+  // reads as "migrated nothing" rather than "has not run yet".
+  const [sd, setSd] = useState<SharedDriveStats | null>(null)
 
   useEffect(() => {
     fetchActions().then(setActions).catch((e) => setErr(String(e)))
     fetchToggles()
       .then((t) => { setSvc(t.toggles.services || {}); setDry(!!t.toggles.dry_run) })
       .catch(() => { /* the actions still work without the switches */ })
+    // Polled, not fetched once: these change while a migrate job runs.
+    const poll = () => fetchSharedDrives().then(setSd).catch(() => { /* stats are not worth breaking the page for */ })
+    poll()
+    const id = setInterval(poll, 5000)
+    return () => clearInterval(id)
   }, [])
 
   const flip = async (key: string, on: boolean) => {
@@ -90,6 +99,28 @@ const Services: React.FC = () => {
               member is reported as unreadable and skipped rather than
               failing the run.
             </Alert>
+            {sd && (
+              <Stack direction="row" spacing={3} sx={{ mb: 2, flexWrap: 'wrap' }}
+                     data-testid="shared-drive-stats">
+                {([
+                  ['Drives', sd.drives, false],
+                  ['Members restored', sd.members, false],
+                  ['Members unmapped', sd.unmappedMembers, sd.unmappedMembers > 0],
+                  ['Unreadable', sd.unreadable, sd.unreadable > 0],
+                  ['Failed', sd.failed, sd.failed > 0],
+                ] as [string, number, boolean][]).map(([label, value, warn]) => (
+                  <Box key={label}>
+                    <Typography variant="caption" color="text.secondary"
+                                sx={{ display: 'block' }}>{label}</Typography>
+                    <Typography variant="h6"
+                                sx={{ fontWeight: 700,
+                                      color: warn ? 'warning.main' : 'text.primary' }}>
+                      {value.toLocaleString()}
+                    </Typography>
+                  </Box>
+                ))}
+              </Stack>
+            )}
             <Stack spacing={2}>
               {has('shared_drives_inventory') &&
                 <JobRunner name="shared_drives_inventory"

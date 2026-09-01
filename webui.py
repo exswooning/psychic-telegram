@@ -3160,6 +3160,20 @@ def spa_stages_payload(account_id: int | None = None) -> dict:
         conn.close()
 
 
+def spa_shared_drives_payload(account_id: int | None = None) -> dict:
+    import sqlite3
+
+    import webui_spa
+
+    conn = _db_conn(account_id)
+    if conn is None:
+        return {"error": "no database yet", "sharedDrives": {}}
+    try:
+        return {"error": "", "sharedDrives": webui_spa.shared_drives_payload(conn)}
+    except sqlite3.Error as exc:
+        return {"error": str(exc), "sharedDrives": {}}
+
+
 def spa_verification_payload(account_id: int | None = None) -> dict:
     import sqlite3
 
@@ -3673,6 +3687,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json(_cached_payload("spa_stages_payload", spa_stages_payload, self._on_screen()))
         elif path == "/api/spa/verification":
             self._json(_cached_payload("spa_verification_payload", spa_verification_payload, self._on_screen()))
+        elif path == "/api/spa/shared_drives":
+            self._json(_cached_payload("spa_shared_drives_payload",
+                                       spa_shared_drives_payload, self._on_screen()))
         elif path == "/api/spa/report":
             self._json(_cached_payload("spa_report_payload", spa_report_payload, self._on_screen()))
         elif path == "/api/toggles":

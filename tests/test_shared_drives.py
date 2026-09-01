@@ -457,3 +457,51 @@ class TestResetCanSeeWhatItSeeded:
             "seed_shared_drives.py"), encoding="utf-8").read()
         body = src[src.index("def reset("):src.index("def main(")]
         assert "useDomainAdminAccess=True" in body
+
+
+class TestSharedDriveStatsReachTheUI:
+    """
+    A shared-drive migration could be started from the Services page and then
+    report nothing back to it. The only number anywhere was one "Shared
+    Drives" tile on the Final Report, counting drives -- silent about the
+    files inside them, the membership restored, and the drives that could not
+    be read at all.
+    """
+
+    def _payload(self, db):
+        import webui_spa
+        return webui_spa.shared_drives_payload(db.conn)
+
+    def test_it_counts_drives_members_and_losses(self, db):
+        db.record_mapping(SRC_USER, "d1", "t1", "shared_drive", source_name="Fin")
+        db.log_audit(SRC_USER, "u1", "shared_drive_member", "SUCCESS")
+        db.log_audit(SRC_USER, "u2", "shared_drive_member", "SUCCESS")
+        db.log_audit(SRC_USER, "ghost@x", "shared_drive_member",
+                     "SKIPPED_UNMAPPED_IDENTITY", "organizer lost")
+        db.log_audit(SRC_USER, "d2", "shared_drive", "SKIPPED_NO_READABLE_MEMBER")
+        db.log_audit(SRC_USER, "d3", "shared_drive", "FAILED", "boom")
+
+        p = self._payload(db)
+
+        assert p["drives"] == 1
+        assert p["members"] == 2
+        # The two that matter most: access lost, and data never seen.
+        assert p["unmappedMembers"] == 1
+        assert p["unreadable"] == 1
+        assert p["failed"] == 1
+
+    def test_a_ledger_with_no_shared_drive_pass_reports_zeros_not_noise(self, db):
+        """Distinct from "ran and found nothing" only at the UI layer, which
+        renders nothing at all until the pass has run."""
+        p = self._payload(db)
+        assert p["drives"] == 0 and p["members"] == 0 and p["unreadable"] == 0
+
+    def test_the_page_polls_it_and_hides_the_row_until_it_has_run(self):
+        import os
+        src = open(os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))),
+            "migration-webui/src/pages/Services.tsx"), encoding="utf-8").read()
+        assert "fetchSharedDrives" in src
+        assert "shared-drive-stats" in src
+        # a row of zeros reads as "migrated nothing", not "has not run"
+        assert "{sd && (" in src

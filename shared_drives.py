@@ -287,6 +287,13 @@ class SharedDriveMigrator:
                                   "shared_drive_member", "FAILED", str(exc))
                 self.stats["failed"] += 1
                 continue
+            # Audited, not just counted. Only failures and skips were recorded
+            # before, so a restored drive-level role left no trace at all --
+            # nothing could answer "who got organizer on this drive, and when"
+            # after the run, and the UI's member count read 0 on a migration
+            # that had just restored eleven of them.
+            self.db.log_audit(self.admin_user, mapped, "shared_drive_member",
+                              "SUCCESS", f"{p.get('role', 'reader')} on {name}")
             self.stats["members"] += 1
 
     def _copy_contents(self, src_id: str, tgt_id: str, name: str,
