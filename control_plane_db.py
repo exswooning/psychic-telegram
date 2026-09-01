@@ -149,6 +149,23 @@ def ro(path: str | None = None) -> Iterator[sqlite3.Connection]:
     conn = sqlite3.connect(f"file:{path or _db_path()}?mode=ro", uri=True,
                            timeout=15.0)
     conn.row_factory = sqlite3.Row
+    # Lets SQLite use an index for `status LIKE 'FAILED%'`.
+    #
+    # LIKE is case-INSENSITIVE by default, which disqualifies it from the
+    # prefix optimisation, so every one of the dozen `LIKE 'FAILED%'` /
+    # `LIKE 'SKIPPED%'` reads in this codebase fell back to a full scan of
+    # audit_log. Measured on a 1.27M-row ledger, byte-identical results:
+    #
+    #     failure_feed   0.420s -> 0.001s   (SCAN -> MULTI-INDEX OR)
+    #     failed count   0.138s -> 0.000s   (SCAN -> SEARCH)
+    #
+    # Safe because every status this codebase writes is an uppercase
+    # constant (SUCCESS, FAILED*, SKIPPED_*, BLOCKED) and every LIKE on a
+    # read connection matches one of those -- there is no case-insensitive
+    # search here to break. Set on the connection rather than rewriting a
+    # dozen query strings into range predicates, which would have to be got
+    # right a dozen times and again on the next one written.
+    conn.execute("PRAGMA case_sensitive_like=ON")
     try:
         yield conn
     finally:
@@ -399,14 +416,33 @@ def user_progress(db_path: str | None = None) -> list[dict]:
         ident = {r["source_email"]: dict(r) for r in conn.execute(
             "SELECT source_email, target_email, status, services_done "
             "FROM identity_map ORDER BY source_email")}
+
+        # One pass for every user, not one query each.
+        #
+        # This was `WHERE source_user=?` against audit_counts, executed once
+        # per identity. audit_counts is a VIEW that groups the whole audit_log
+        # by source_user, so each of those 200 calls re-grouped 1.27M rows and
+        # then threw away all but one user's share of it. Measured: 2.67s,
+        # which Caddy turned into a 502 on Mission Control under load.
+        #
+        # Reading the base tables also means this cannot break where the view
+        # is absent -- a VIEW only exists once something opens the ledger
+        # read-write, and this server is read-only. audit_rollup stays unioned
+        # in: pruned users' counts live only there, and dropping it would
+        # report a finished user as having migrated nothing.
+        per_user: dict = {}
+        for r in conn.execute(
+            "SELECT source_user, status, SUM(n) n FROM ("
+            "  SELECT source_user, status, COUNT(*) n FROM audit_log"
+            "   GROUP BY source_user, status"
+            "  UNION ALL"
+            "  SELECT source_user, status, n FROM audit_rollup"
+            ") GROUP BY source_user, status"
+        ):
+            per_user.setdefault(r["source_user"], {})[r["status"]] = r["n"]
+
         for email, row in ident.items():
-            counts = conn.execute(
-                # audit_counts, not audit_log: SUCCESS rows for finished
-                # users are pruned into audit_rollup, and reading the raw
-                # table would report those users as having migrated nothing.
-                "SELECT status, SUM(n) n FROM audit_counts WHERE source_user=? "
-                "GROUP BY status", (email,)).fetchall()
-            by = {c["status"]: c["n"] for c in counts}
+            by = per_user.get(email, {})
             done = by.get("SUCCESS", 0)
             failed = sum(n for st, n in by.items() if st.startswith("FAILED"))
             row["itemsDone"] = done
