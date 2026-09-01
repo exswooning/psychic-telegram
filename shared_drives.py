@@ -94,7 +94,7 @@ class SharedDriveMigrator:
         self.tgt = auth.target_drive(target_admin)
         self.stats = {"drives": 0, "members": 0, "files": 0, "folders": 0,
                       "skipped": 0, "failed": 0, "unmapped_members": 0,
-                      "unreadable": 0}
+                      "unreadable": 0, "external_members": 0}
 
     # -- reading -------------------------------------------------------------
     def list_source_drives(self, all_drives: bool) -> list[dict]:
@@ -263,14 +263,32 @@ class SharedDriveMigrator:
                     f"type={p.get('type')} role={p.get('role')}")
                 self.stats["skipped"] += 1
                 continue
-            mapped = self.db.resolve_identity((p.get("emailAddress") or "").lower())
-            if not mapped:
+            email = (p.get("emailAddress") or "").lower()
+            mapped = self.db.resolve_identity(email)
+            if mapped:
+                grantee = mapped
+            elif email.split("@")[-1] == (self.settings.source_domain or "").lower():
+                # Someone in the source domain with no target account: they
+                # are not migrating, so there is nobody to grant this to.
                 self.db.log_audit(
                     self.admin_user, p.get("emailAddress") or "?",
                     "shared_drive_member", "SKIPPED_UNMAPPED_IDENTITY",
                     f"no target account; role={p.get('role')} lost on {name}")
                 self.stats["unmapped_members"] += 1
                 continue
+            else:
+                # An EXTERNAL member -- a partner, a contractor, a personal
+                # account. They are not in identity_map and never will be,
+                # because they are not part of this migration. Their address
+                # is equally valid on the target, so it carries over as-is.
+                #
+                # drive_engine._sync_acls has always done this for per-file
+                # grants. Doing the opposite here meant an external
+                # collaborator kept their grants on individual files inside a
+                # shared drive and silently lost their membership OF it --
+                # the access that actually cascades.
+                grantee = email
+                self.stats["external_members"] += 1
             if self.settings.dry_run:
                 self.stats["members"] += 1
                 continue
@@ -279,11 +297,11 @@ class SharedDriveMigrator:
                     fileId=tgt_id, supportsAllDrives=True,
                     sendNotificationEmail=False,
                     body={"type": "user", "role": p.get("role", "reader"),
-                          "emailAddress": mapped}).execute()
+                          "emailAddress": grantee}).execute()
             except Exception as exc:  # noqa: BLE001
                 if "already" in str(exc).lower():
                     continue
-                self.db.log_audit(self.admin_user, mapped,
+                self.db.log_audit(self.admin_user, grantee,
                                   "shared_drive_member", "FAILED", str(exc))
                 self.stats["failed"] += 1
                 continue
@@ -292,7 +310,7 @@ class SharedDriveMigrator:
             # nothing could answer "who got organizer on this drive, and when"
             # after the run, and the UI's member count read 0 on a migration
             # that had just restored eleven of them.
-            self.db.log_audit(self.admin_user, mapped, "shared_drive_member",
+            self.db.log_audit(self.admin_user, grantee, "shared_drive_member",
                               "SUCCESS", f"{p.get('role', 'reader')} on {name}")
             self.stats["members"] += 1
 
@@ -476,6 +494,7 @@ def main(argv: list[str] | None = None) -> int:
           f"files={stats['files']} folders={stats['folders']} "
           f"skipped={stats['skipped']} failed={stats['failed']} "
           f"unmapped_members={stats['unmapped_members']} "
+          f"external_members={stats['external_members']} "
           f"unreadable={stats['unreadable']}")
     return 1 if stats["failed"] else 0
 

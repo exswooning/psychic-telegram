@@ -562,3 +562,54 @@ class TestStagingLeftoversCanBeReclaimed:
         act = webui.ACTIONS["staging_drives_cleanup"]
         assert act["destructive"] is True and act["confirm"]
         assert "--cleanup-staging" in act["argv"]
+
+
+class TestExternalMembersKeepTheirAccess:
+    """
+    drive_engine._sync_acls has always carried an external grantee's address
+    over unchanged: they are not in identity_map and never will be, because
+    they are not part of this migration, but their address is just as valid
+    on the target.
+
+    _sync_members did the opposite -- anything unmapped was dropped. So an
+    external partner kept their grants on individual files inside a shared
+    drive and silently lost their membership OF it, which is the access that
+    actually cascades.
+    """
+
+    def _grant(self, sd, members):
+        sd._members = lambda drive_id: members
+        sd._sync_members("drv-1", "drv-2", "Finance")
+        return {c["body"]["emailAddress"]: c["body"]["role"]
+                for c in sd.tgt.calls_to("permissions.create")}
+
+    def test_an_external_member_carries_over_unchanged(self, sd):
+        got = self._grant(sd, [{"type": "user", "role": "writer",
+                                "emailAddress": "partner@othercorp.com"}])
+
+        assert got == {"partner@othercorp.com": "writer"}
+        assert sd.stats["external_members"] == 1
+        assert sd.stats["unmapped_members"] == 0
+
+    def test_a_mapped_in_domain_member_is_rewritten(self, sd):
+        got = self._grant(sd, [{"type": "user", "role": "organizer",
+                                "emailAddress": SRC_USER}])
+
+        assert got == {TGT_USER: "organizer"}
+
+    def test_an_unmapped_source_domain_member_is_still_dropped(self, sd, db):
+        """Not the same case: they ARE part of this migration and simply have
+        no target account, so there is nobody to grant it to."""
+        got = self._grant(sd, [{"type": "user", "role": "writer",
+                                "emailAddress": "ghost@tenanta.com"}])
+
+        assert got == {}
+        assert sd.stats["unmapped_members"] == 1
+        assert sd.stats["external_members"] == 0
+
+    def test_the_role_survives_for_an_external_member(self, sd):
+        """Dropping them to reader would quietly demote a partner who had
+        edit rights."""
+        got = self._grant(sd, [{"type": "user", "role": "fileOrganizer",
+                                "emailAddress": "p@vendor.io"}])
+        assert got["p@vendor.io"] == "fileOrganizer"
