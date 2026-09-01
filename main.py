@@ -366,6 +366,12 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
             try:
                 dm = DriveMigrator(auth, db, settings, source_user,
                                    target_user, quota)
+                # Consolidation: several source users into one target. Nest
+                # each one's tree under a folder named for them, or they all
+                # mirror into the same My Drive root and interleave with
+                # nothing saying which file came from whom.
+                if db.sources_for_target(target_user) > 1:
+                    dm.consolidate_under = source_user
                 result["services"]["drive"] = dm.run(delta=delta)
             except QuotaExhausted as exc:
                 log.warning("[%s] %s", source_user, exc)

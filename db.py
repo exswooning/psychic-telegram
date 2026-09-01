@@ -351,6 +351,24 @@ class MigrationDB:
         log.info("Loaded %d identity mappings from %s", len(rows), csv_path)
         return len(rows)
 
+    def sources_for_target(self, target_email: str) -> int:
+        """How many source users migrate INTO this target account.
+
+        >1 means consolidation: several people's data landing in one place
+        (leavers into an archive, duplicate accounts merged). The schema has
+        always allowed it -- source_email is the primary key, target_email is
+        not unique and even carries its own index -- but the Drive engine
+        mirrored every one of them into the same My Drive root, so their
+        trees interleaved with nothing recording which was whose.
+        """
+        if not target_email:
+            return 0
+        row = self.conn.execute(
+            "SELECT COUNT(*) n FROM identity_map "
+            "WHERE lower(target_email) = lower(?) AND entity_type = 'user'",
+            (target_email,)).fetchone()
+        return int(row["n"]) if row else 0
+
     def resolve_identity(self, source_email: Optional[str]) -> Optional[str]:
         """
         Translate a source address to its target equivalent.

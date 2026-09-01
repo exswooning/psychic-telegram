@@ -288,6 +288,16 @@ class DriveMigrator:
         self._file_futures: list[futures.Future] = []
         self._file_slots = threading.Semaphore(1)
         self._quota_exc: QuotaExhausted | None = None
+        # Set by main.py when several source users migrate into ONE target
+        # account (consolidating leavers into an archive, merging duplicate
+        # accounts). Their trees would otherwise mirror into the same My
+        # Drive root and interleave: two "Documents" folders, two of every
+        # top-level file, and nothing on the target saying which came from
+        # whom. Drive permits duplicate names, so this fails silently rather
+        # than erroring. Set to a source address to nest that user's whole
+        # tree under a folder of that name instead.
+        self.consolidate_under: str | None = None
+
         # Set by shared_drives.py to point this engine at a shared drive
         # instead of the user's My Drive. Everything downstream -- the walk,
         # all three transfer modes, ACLs, comments, the modifiedTime restore
@@ -466,6 +476,9 @@ class DriveMigrator:
             tgt_root = self._retry(
                 lambda: self.tgt.files().get(fileId="root", fields="id").execute(),
                 write=False)["id"]
+            if self.consolidate_under:
+                tgt_root = self._ensure_consolidation_folder(
+                    tgt_root, self.consolidate_under)
 
         if self.server_side and not self.settings.dry_run:
             self._ensure_staging_drive()
@@ -515,6 +528,33 @@ class DriveMigrator:
         # staging drive rather than leaving a trail of orphaned ones.
         local = self.source_user.split("@")[0]
         return f"{self.settings.staging_drive_prefix}-{local}"
+
+    def _ensure_consolidation_folder(self, parent_id: str, name: str) -> str:
+        """The folder this source user's tree is nested under, created once.
+
+        Looked up by name rather than kept in id_mapping on purpose: it is
+        addressed by the thing that identifies it (the source address) and
+        must survive a ledger that was reset, which is exactly when a re-run
+        would otherwise build a second copy beside the first.
+        """
+        q = ("mimeType = 'application/vnd.google-apps.folder' and trashed = false "
+             f"and name = '{name.replace(chr(39), chr(92) + chr(39))}' "
+             f"and '{parent_id}' in parents")
+        found = self._retry(lambda: self.tgt.files().list(
+            q=q, pageSize=1, fields="files(id)", supportsAllDrives=True,
+        ).execute(), write=False).get("files", [])
+        if found:
+            log.info("[%s] consolidating under existing folder %r",
+                     self.source_user, name)
+            return found[0]["id"]
+        if self.settings.dry_run:
+            log.info("[DRY RUN] would create consolidation folder %r", name)
+            return parent_id
+        created = self._retry(lambda: self.tgt.files().create(
+            body={"name": name, "mimeType": FOLDER_MIME, "parents": [parent_id]},
+            fields="id", supportsAllDrives=True).execute())
+        log.info("[%s] consolidating under new folder %r", self.source_user, name)
+        return created["id"]
 
     def _ensure_staging_drive(self) -> None:
         """Find or create the target-org staging drive, with the source user
