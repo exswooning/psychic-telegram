@@ -147,3 +147,22 @@ def test_selfinstall_temp_dir_is_actually_cleaned_up():
     selfinstall = open(os.path.join(ROOT, "make-selfinstall.sh"), encoding="utf-8").read()
     assert 'export BITPORT_SRC_DEST="$DEST"' in selfinstall
     assert 'rm -rf "$BITPORT_SRC_DEST"' in SH
+
+
+def test_caddyfile_is_readable_by_the_caddy_user():
+    # Both Caddyfile branches write with a plain `>`, which takes the
+    # invoking shell's umask -- and the installer daemonises itself, so that
+    # umask is whatever systemd/ssh handed it. Where the file already exists
+    # the redirect keeps the package's 0644, which is why this only appeared
+    # on a genuinely clean install: it landed 0600 root:root and caddy died
+    # with "reading config from file: ... permission denied".
+    assert "chmod 644 /etc/caddy/Caddyfile" in SH
+
+
+def test_the_reverse_proxy_step_verifies_caddy_actually_started():
+    # It printed "caddy configured" on a run where caddy had just failed to
+    # start: backends up, health check green, and the URL in the summary
+    # served nothing at all.
+    block = SH[SH.index('step "Reverse proxy"'):SH.index('step "Superadmin account"')]
+    assert "systemctl is-active caddy" in block
+    assert "caddy is NOT running" in block

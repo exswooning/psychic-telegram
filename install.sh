@@ -422,11 +422,30 @@ else
   fi
   run "printf ':$PUBLIC_PORT {\n\treverse_proxy /api/v2/* 127.0.0.1:8090\n\treverse_proxy /ws 127.0.0.1:8090\n\treverse_proxy /* 127.0.0.1:$WEBUI_PORT\n}\n' > /etc/caddy/Caddyfile"
 fi
+# caddy runs as the `caddy` user and must be able to READ this file. Both
+# branches above write it with a plain `>`, which takes the invoking shell's
+# umask -- and the installer daemonises itself, so that umask is whatever
+# systemd/ssh handed it. On a box where /etc/caddy/Caddyfile already exists
+# the redirect keeps the package's own 0644, which is why this never showed
+# up until a genuinely clean install: the file landed 0600 root:root and
+# caddy died on startup with
+#     Error: reading config from file: open /etc/caddy/Caddyfile: permission denied
+# while this step still printed a tick.
+run "chmod 644 /etc/caddy/Caddyfile"
 # enable + (re)start, not just reload: on a fresh box caddy is installed but
 # may not be running yet, so a bare reload fails with "not active".
 run "systemctl enable caddy >/dev/null 2>&1 || true"
 run "systemctl restart caddy || systemctl reload caddy || true"
-ok "caddy configured for ${BITPORT_DOMAIN:-:$PUBLIC_PORT}"
+# Verify, do not assume. This printed "caddy configured" on a run where caddy
+# had just failed to start -- the backends were up, the health check below
+# passed, and the URL the summary handed the operator served nothing at all.
+if [ "$DRY_RUN" = 1 ]; then
+  ok "caddy configured for ${BITPORT_DOMAIN:-:$PUBLIC_PORT}"
+elif [ "$(systemctl is-active caddy 2>/dev/null)" = active ]; then
+  ok "caddy serving ${BITPORT_DOMAIN:-:$PUBLIC_PORT}"
+else
+  warn "caddy is NOT running -- the UI will not be reachable. Check: systemctl status caddy"
+fi
 [ -n "$BITPORT_DOMAIN" ] && warn "if $BITPORT_DOMAIN does not resolve to this server's public IP, Caddy cannot get a TLS cert -- leave the domain blank to serve HTTP instead"
 
 # ---------------------------------------------------------------------------
