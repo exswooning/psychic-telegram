@@ -578,6 +578,16 @@ class Settings:
     migrate_gmail_settings: bool = field(
         default_factory=lambda: _env_bool("MIGRATE_GMAIL_SETTINGS", False)
     )
+    # A Drive URL names a file by id alone -- there is no domain in it -- and
+    # files.copy mints a new id, so every Drive link inside migrated mail
+    # still points at the source file and dies with the source tenant.
+    # Rewriting them repoints the ones we can reach. Opt-in because it
+    # rewrites message bodies, which invalidates their DKIM signatures:
+    # harmless in normal use, disqualifying under a legal hold. Requires
+    # Drive to have been migrated first, or there is no mapping to resolve.
+    rewrite_drive_links: bool = field(
+        default_factory=lambda: _env_bool("REWRITE_DRIVE_LINKS", False)
+    )
     # Drive comments need no extra scope, but they cost an extra API call per
     # file and cannot preserve the original author, so they are opt-in too.
     migrate_comments: bool = field(

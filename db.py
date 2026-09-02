@@ -61,6 +61,10 @@ CREATE TABLE IF NOT EXISTS id_mapping (
 );
 CREATE INDEX IF NOT EXISTS ix_map_target ON id_mapping(target_id);
 CREATE INDEX IF NOT EXISTS ix_map_parent ON id_mapping(parent_target_id);
+-- Link rewriting looks a source file id up without knowing who owned it:
+-- a link in Alice's mail almost always names Bob's file, and the primary
+-- key leads with source_user, so that lookup is a full scan without this.
+CREATE INDEX IF NOT EXISTS ix_map_source ON id_mapping(source_id);
 
 -- Module 1/6: append-only-ish audit trail. One row per item per user; the
 -- delta pass reads modified_time from here to decide whether to re-copy.
@@ -523,6 +527,21 @@ class MigrationDB:
             """SELECT target_id FROM id_mapping
                WHERE source_user=? AND source_id=? AND type=?""",
             (source_user, source_id, item_type),
+        ).fetchone()
+        return row["target_id"] if row else None
+
+    def target_for_source_id(self, source_id: str) -> Optional[str]:
+        """The target id for a source file/folder, whoever owned it.
+
+        Deliberately ignores the source_user half of the primary key.
+        Rewriting a Drive link inside a message means resolving an id that
+        belongs to whoever created the file, which is rarely the mailbox
+        the link is sitting in.
+        """
+        row = self.conn.execute(
+            """SELECT target_id FROM id_mapping
+               WHERE source_id=? AND type IN ('file','folder') LIMIT 1""",
+            (source_id,),
         ).fetchone()
         return row["target_id"] if row else None
 

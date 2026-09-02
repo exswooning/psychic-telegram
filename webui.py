@@ -342,6 +342,16 @@ ACTIONS: dict[str, dict] = {
         "argv": [PY, "acl_audit.py", "--json", "acl_audit.json"],
     },
 
+    "external_shares": {
+        "label": "External collaborators",
+        "blurb": "Who outside both tenants still holds access, and the new "
+                 "URL for every file they hold. Their existing links point at "
+                 "the source tenant and break when it is deleted -- grants "
+                 "are created silently, so this is the only thing that tells "
+                 "them where their files went.",
+        "argv": [PY, "external_shares.py", "--json", "external_shares.json"],
+    },
+
     # -- SSO: org-wide login configuration, so this stays manual on purpose.
     # MIGRATE_SSO must already be set in env.sh; this button does not set it,
     # unlike the per-user services above, because writing an SSO profile
@@ -1202,7 +1212,7 @@ STEP_ACTIONS: dict[int, list[str]] = {
     6: ["provision_dry", "provision"],
     7: ["check_seed_accounts", "check_seed_scopes"],
     8: ["discover", "migrate_dry", "migrate"],
-    9: ["verify", "report", "acl_audit", "resolve"],
+    9: ["verify", "report", "acl_audit", "resolve", "external_shares"],
 }
 
 

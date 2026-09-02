@@ -29,6 +29,7 @@ from google.auth.exceptions import RefreshError
 from googleapiclient.http import MediaFileUpload  # noqa: F401
 
 from config import Settings
+from link_rewrite import rewrite_raw
 from resilience import (PermanentAPIError, RateLimiter, TransportExhausted,
                         retry_on_google_error)
 
@@ -68,7 +69,13 @@ class GmailMigrator:
             "inserted": 0, "failed": 0, "skipped": 0,
             "drafts_inserted": 0, "drafts_failed": 0, "drafts_skipped": 0,
             "filters_inserted": 0, "filters_failed": 0, "filters_skipped": 0,
+            "links_rewritten": 0,
         }
+        # source file id -> target id, for rewrite_drive_links. Bounded by the
+        # number of distinct files the mail actually links to, which is small
+        # and heavily repeated (one document linked across a whole thread),
+        # so this turns a per-link query into a per-file one.
+        self._link_map: dict[str, str | None] = {}
 
     # -- API clients ------------------------------------------------------
     #
@@ -94,6 +101,15 @@ class GmailMigrator:
     @tgt.setter
     def tgt(self, value):
         self._tgt_override = value
+
+    def _drive_link_target(self, source_id: str) -> str | None:
+        """Where a source Drive id ended up, whoever owned it."""
+        try:
+            return self._link_map[source_id]
+        except KeyError:
+            hit = self.db.target_for_source_id(source_id)
+            self._link_map[source_id] = hit
+            return hit
 
     def _bump(self, key: str, n: int = 1) -> None:
         with self._stats_lock:
@@ -358,6 +374,12 @@ class GmailMigrator:
         # instead: base64 is 4 chars per 3 bytes, and `raw` is unpadded
         # urlsafe, so this is exact to within two bytes -- far tighter than
         # a threshold whose job is only to choose an upload strategy.
+        if self.settings.rewrite_drive_links:
+            # Before approx_bytes, which sizes the upload strategy off the
+            # encoded length -- a rewrite can change it.
+            raw, rewritten = rewrite_raw(raw, self._drive_link_target)
+            if rewritten:
+                self._bump("links_rewritten", rewritten)
         approx_bytes = (len(raw) * 3) // 4
         mapped_labels = self._map_label_ids(label_ids)
 

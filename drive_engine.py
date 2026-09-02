@@ -27,6 +27,8 @@ import threading
 import time
 import uuid
 
+from datetime import datetime, timedelta, timezone
+
 import metrics
 
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload  # noqa: F401
@@ -204,6 +206,26 @@ def _log_rate_change(kind: str, before: float, after: float,
 # still a real loss of access on the target, so it is a named skip rather
 # than a silent one.
 _NO_ACCOUNT_MARKERS = ("no google account",)
+
+
+def _expiry_is_settable(stamp: str) -> bool:
+    """Whether Drive will accept `stamp` as an expirationTime.
+
+    Drive takes an expiry only between now and a year out, and rejects the
+    whole permissions.create if it is outside that -- so a value we cannot
+    carry has to be dropped rather than allowed to fail the grant it is
+    attached to. A live source permission is normally comfortably inside
+    the window; this guards the boundary (a share expiring in the seconds
+    it takes us to copy it) and a clock that disagrees with Google's.
+    """
+    try:
+        when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    return now < when < now + timedelta(days=365)
 
 
 def _is_unreachable_grantee(exc: Exception) -> bool:
@@ -1667,6 +1689,22 @@ class DriveMigrator:
                 audit_key = f"{source_id}:anyone"
             else:
                 continue
+
+            # A share set to expire has to stay set to expire. Dropping the
+            # field silently converted every timed external share into a
+            # permanent one -- the migration quietly granting more access
+            # than the source ever did. Drive only accepts an expiry on user
+            # and group grants, so the other types keep none by definition.
+            expires = p.get("expirationTime")
+            if expires and p["type"] in ("user", "group"):
+                if _expiry_is_settable(expires):
+                    body["expirationTime"] = expires
+                else:
+                    log.warning(
+                        "[%s] %s: cannot carry the %s expiry on the grant to %s "
+                        "(outside Drive's now..+1y window); it lands permanent",
+                        self.source_user, source_id, expires,
+                        body.get("emailAddress", "?"))
 
             batch.append((body, audit_key))
 

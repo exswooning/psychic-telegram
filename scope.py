@@ -75,6 +75,18 @@ DRIVE_SCOPE = [
     ScopeItem("drive", "Direct ACLs (reader / commenter / writer / organizer)", FULL,
               "Identity-translated via identity_map; applied with "
               "sendNotificationEmail=False"),
+    ScopeItem("drive", "Timed shares (expirationTime)", FULL,
+              "Carried onto the new grant. Drive only accepts an expiry on "
+              "user/group grants between now and a year out; one outside that "
+              "window is dropped with a warning rather than failing the grant"),
+    ScopeItem("drive", "Drive links inside migrated mail", PARTIAL,
+              "A Drive URL names a file by id, and files.copy mints a new one, "
+              "so every link in a migrated message still points at the source "
+              "file and dies with the source tenant. REWRITE_DRIVE_LINKS=true "
+              "repoints the ones in mail we migrate (Drive must run first). "
+              "Links held by external parties -- their mailbox, their "
+              "bookmarks -- cannot be reached; external_shares.py reports who "
+              "to tell and what their new URLs are"),
     ScopeItem("drive", "Domain-wide ACLs", FULL,
               "@tenantA.com rewritten to @tenantB.com; other domains pass through"),
     ScopeItem("drive", "'Anyone with the link' ACLs", FULL,
