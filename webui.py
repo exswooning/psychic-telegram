@@ -3670,6 +3670,22 @@ class Handler(BaseHTTPRequestHandler):
         ".json": "application/json", ".woff2": "font/woff2",
     }
 
+    def _serve_console(self) -> None:
+        """The alternative console at /console.
+
+        A single self-contained file, deliberately: it is meant to be
+        compared against the React SPA at /app and possibly replace it, and
+        that comparison is only honest if adopting it costs nothing and
+        dropping it breaks nothing. No build step, no bundle, no shared
+        components -- /app is untouched whatever happens to this.
+        """
+        page = os.path.join(HERE, "console.html")
+        if not os.path.isfile(page):
+            self._send(404, b"console.html not found", "text/plain; charset=utf-8")
+            return
+        with open(page, "rb") as f:
+            self._send(200, f.read(), "text/html; charset=utf-8")
+
     def _serve_spa_index(self) -> None:
         index = os.path.join(SPA_DIST_DIR, "index.html")
         if not os.path.isfile(index):
@@ -3829,6 +3845,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"result": result})
         elif path == "/api/deploy_history":
             self._json({"history": load_deploy_history()})
+        elif path == "/console" or path == "/console/":
+            self._serve_console()
         elif path.startswith("/app/assets/"):
             self._serve_spa_asset(path)
         elif path == "/app" or path == "/app/" or path.startswith("/app/"):

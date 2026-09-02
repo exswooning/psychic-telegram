@@ -1,0 +1,523 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bitport Console</title>
+<style>
+/* ---------------------------------------------------------------------------
+   Tokens. Every colour is semantic and defined once on :root, so the dark
+   block below only has to restate the values -- nothing downstream refers to
+   a raw hex. Light is the base; dark is a token swap, not a second stylesheet.
+   --------------------------------------------------------------------------- */
+:root{
+  --bg:#f6f7f9; --surface:#fff; --surface-2:#f0f2f5; --line:#d7dbe0;
+  --ink:#12161c; --ink-2:#4a5462; --ink-3:#6b7684;
+  --accent:#1849a9; --accent-ink:#fff; --accent-soft:#e8effb;
+  --ok:#0b6b3a; --ok-soft:#e4f4ea;
+  --warn:#8a5300; --warn-soft:#fdf1dc;
+  --bad:#a3211a; --bad-soft:#fdeceb;
+  --focus:#1849a9;
+  --r:8px; --sp:8px;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#0e1116; --surface:#161b22; --surface-2:#1c222b; --line:#2b333d;
+    --ink:#e8edf3; --ink-2:#aeb9c6; --ink-3:#8593a3;
+    --accent:#6ea8fe; --accent-ink:#0e1116; --accent-soft:#16233a;
+    --ok:#5fd39b; --ok-soft:#10281d;
+    --warn:#e8b464; --warn-soft:#2a2013;
+    --bad:#ff8b82; --bad-soft:#2d1614;
+    --focus:#6ea8fe;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0e1116; --surface:#161b22; --surface-2:#1c222b; --line:#2b333d;
+  --ink:#e8edf3; --ink-2:#aeb9c6; --ink-3:#8593a3;
+  --accent:#6ea8fe; --accent-ink:#0e1116; --accent-soft:#16233a;
+  --ok:#5fd39b; --ok-soft:#10281d;
+  --warn:#e8b464; --warn-soft:#2a2013;
+  --bad:#ff8b82; --bad-soft:#2d1614;
+  --focus:#6ea8fe;
+}
+
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font:16px/1.5 var(--sans);            /* 16px base, 1.5 line-height */
+}
+h1,h2,h3{line-height:1.25; text-wrap:balance; margin:0}
+h1{font-size:1.35rem; font-weight:650}
+h2{font-size:1.0rem; font-weight:650; letter-spacing:.01em}
+p{margin:0}
+
+/* Keyboard focus must always be visible. Removing the ring is the single
+   most common accessibility regression in admin UIs. */
+:focus-visible{outline:2px solid var(--focus); outline-offset:2px; border-radius:4px}
+
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.001ms!important; transition-duration:.001ms!important}
+}
+
+/* skip link: keyboard users should not tab the whole nav to reach content */
+.skip{position:absolute;left:-9999px}
+.skip:focus{left:8px;top:8px;z-index:99;background:var(--surface);padding:10px 14px;border:1px solid var(--line);border-radius:var(--r)}
+
+header.top{
+  position:sticky; top:0; z-index:20; background:var(--surface);
+  border-bottom:1px solid var(--line);
+  display:flex; align-items:center; gap:12px; padding:10px 16px; flex-wrap:wrap;
+}
+.brand{font-weight:700; letter-spacing:-.01em}
+.tenant{
+  font:12px/1.3 var(--mono); color:var(--ink-2);
+  background:var(--surface-2); border:1px solid var(--line);
+  padding:4px 8px; border-radius:999px; max-width:100%; overflow-wrap:anywhere;
+}
+.top .right{margin-left:auto; display:flex; align-items:center; gap:8px}
+
+main{padding:16px; max-width:1400px; margin:0 auto}
+.grid{display:grid; gap:16px; grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
+section.card{
+  background:var(--surface); border:1px solid var(--line);
+  border-radius:var(--r); padding:14px 16px;
+}
+section.card > header{display:flex; align-items:center; gap:8px; margin-bottom:10px}
+.hint{font-size:.8125rem; color:var(--ink-3); margin-top:2px}
+
+/* Status is never colour alone -- every state carries a glyph and a word. */
+.pill{
+  display:inline-flex; align-items:center; gap:6px;
+  font:600 12px/1 var(--sans); padding:5px 9px; border-radius:999px;
+  border:1px solid transparent; white-space:nowrap;
+}
+.pill.ok{background:var(--ok-soft); color:var(--ok); border-color:currentColor}
+.pill.warn{background:var(--warn-soft); color:var(--warn); border-color:currentColor}
+.pill.bad{background:var(--bad-soft); color:var(--bad); border-color:currentColor}
+.pill.idle{background:var(--surface-2); color:var(--ink-2); border-color:var(--line)}
+.pill svg{width:13px;height:13px;flex:none}
+
+/* Numbers line up in columns. */
+.stat{display:flex; flex-direction:column; gap:2px}
+.stat .n{font:700 1.5rem/1.1 var(--sans); font-variant-numeric:tabular-nums}
+.stat .k{font-size:.75rem; color:var(--ink-3); text-transform:uppercase; letter-spacing:.04em}
+.stat.attn .n{color:var(--bad)}
+.stats{display:grid; gap:14px; grid-template-columns:repeat(auto-fit,minmax(110px,1fr))}
+
+/* Wide content scrolls in its own box; the page never scrolls sideways.
+   This is the exact defect visible in the old orders screen. */
+.scroll{overflow-x:auto; -webkit-overflow-scrolling:touch}
+table{border-collapse:collapse; width:100%; font-size:.875rem}
+th,td{text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); white-space:nowrap}
+th{position:sticky; top:0; background:var(--surface-2); font-weight:650; font-size:.75rem;
+   text-transform:uppercase; letter-spacing:.04em; color:var(--ink-2)}
+td.num,th.num{text-align:right; font-variant-numeric:tabular-nums}
+td.wrap{white-space:normal; min-width:220px; overflow-wrap:anywhere}
+tbody tr:hover{background:var(--surface-2)}
+
+/* Controls: 44px minimum target, real spacing between them. */
+button, .btn{
+  font:600 .875rem/1 var(--sans); color:var(--ink); background:var(--surface);
+  border:1px solid var(--line); border-radius:var(--r);
+  min-height:44px; padding:0 14px; display:inline-flex; align-items:center; gap:8px;
+  cursor:pointer;
+}
+button:hover:not(:disabled){background:var(--surface-2)}
+button:disabled{opacity:.55; cursor:not-allowed}
+button.primary{background:var(--accent); color:var(--accent-ink); border-color:transparent}
+button.danger{color:var(--bad); border-color:currentColor}
+.row{display:flex; gap:8px; flex-wrap:wrap; align-items:center}
+
+input[type=text],input[type=search],select{
+  font:.875rem var(--sans); color:var(--ink); background:var(--surface);
+  border:1px solid var(--line); border-radius:var(--r);
+  min-height:44px; padding:0 12px; width:100%;
+}
+label{display:block; font:600 .8125rem/1.4 var(--sans); margin-bottom:4px}
+
+.actions{display:grid; gap:8px; grid-template-columns:repeat(auto-fill,minmax(260px,1fr))}
+.action{
+  border:1px solid var(--line); border-radius:var(--r); padding:10px;
+  background:var(--surface-2); display:flex; flex-direction:column; gap:8px;
+}
+.action .nm{font:600 .875rem/1.3 var(--sans)}
+.action .bl{font-size:.75rem; color:var(--ink-3); line-height:1.45}
+
+pre.log{
+  margin:0; font:12px/1.55 var(--mono); background:var(--surface-2);
+  border:1px solid var(--line); border-radius:var(--r);
+  padding:10px; max-height:340px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere;
+}
+dialog{
+  border:1px solid var(--line); border-radius:12px; background:var(--surface);
+  color:var(--ink); padding:0; max-width:min(520px,92vw); width:100%;
+}
+dialog::backdrop{background:rgba(0,0,0,.5)}
+dialog .body{padding:18px}
+dialog .foot{display:flex; gap:8px; justify-content:flex-end; padding:14px 18px; border-top:1px solid var(--line)}
+.err{color:var(--bad); font-size:.8125rem}
+.muted{color:var(--ink-3)}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="top">
+  <span class="brand">Bitport</span>
+  <span class="tenant" id="tenant" aria-label="Tenants for the signed-in account">loading…</span>
+  <span class="pill idle" id="jobpill" role="status" aria-live="polite">
+    <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+    <span id="jobtext">checking…</span>
+  </span>
+  <div class="right">
+    <button id="refresh" title="Refresh now">
+      <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7">
+        <path d="M13.6 8a5.6 5.6 0 1 1-1.7-4"/><path d="M13.9 2.2v3.6h-3.6"/></svg>
+      Refresh
+    </button>
+    <button id="theme" aria-label="Toggle colour theme">
+      <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7">
+        <path d="M13.4 9.4A5.8 5.8 0 0 1 6.6 2.6a5.8 5.8 0 1 0 6.8 6.8Z"/></svg>
+      Theme
+    </button>
+  </div>
+</header>
+
+<main id="main">
+  <div id="banner"></div>
+
+  <div class="grid" style="margin-bottom:16px">
+    <section class="card" aria-labelledby="h-progress">
+      <header><h2 id="h-progress">Migration</h2></header>
+      <div class="stats" id="progress">
+        <div class="stat"><span class="n">—</span><span class="k">Users</span></div>
+      </div>
+      <p class="hint" id="progress-hint">Counts, never averaged into one number: done, failed and pending mean different things.</p>
+    </section>
+
+    <section class="card" aria-labelledby="h-sd">
+      <header><h2 id="h-sd">Shared drives</h2></header>
+      <div class="stats" id="sdstats"><div class="stat"><span class="n">—</span><span class="k">Drives</span></div></div>
+      <p class="hint">A shared drive belongs to no user, so the per-user run cannot reach one.</p>
+    </section>
+
+    <section class="card" aria-labelledby="h-host">
+      <header><h2 id="h-host">Host</h2></header>
+      <div class="stats" id="hoststats"><div class="stat"><span class="n">—</span><span class="k">CPU</span></div></div>
+      <p class="hint" id="host-hint"></p>
+    </section>
+  </div>
+
+  <section class="card" style="margin-bottom:16px" aria-labelledby="h-vol">
+    <header>
+      <h2 id="h-vol">Items by type and outcome</h2>
+      <span class="pill idle" id="volcount">—</span>
+    </header>
+    <div class="scroll">
+      <table id="voltable">
+        <caption class="sr">Every item type the ledger records, with its outcome and count</caption>
+        <thead><tr><th scope="col">Type</th><th scope="col">Outcome</th><th scope="col" class="num">Count</th></tr></thead>
+        <tbody><tr><td colspan="3" class="muted">loading…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <div class="grid" style="margin-bottom:16px">
+    <section class="card" aria-labelledby="h-fail">
+      <header><h2 id="h-fail">Failures</h2><span class="pill idle" id="failcount">—</span></header>
+      <div class="scroll">
+        <table id="failtable">
+          <thead><tr><th scope="col">User</th><th scope="col">Type</th><th scope="col">Status</th><th scope="col" class="wrap">Reason</th></tr></thead>
+          <tbody><tr><td colspan="4" class="muted">loading…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="h-users">
+      <header><h2 id="h-users">Users</h2><span class="pill idle" id="usercount">—</span></header>
+      <div style="margin-bottom:8px">
+        <label for="ufilter">Filter users</label>
+        <input type="search" id="ufilter" placeholder="email or status" autocomplete="off">
+      </div>
+      <div class="scroll">
+        <table id="usertable">
+          <thead><tr><th scope="col">User</th><th scope="col">Status</th><th scope="col" class="num">Progress</th><th scope="col" class="num">Errors</th></tr></thead>
+          <tbody><tr><td colspan="4" class="muted">loading…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <section class="card" style="margin-bottom:16px" aria-labelledby="h-actions">
+    <header>
+      <h2 id="h-actions">Actions</h2>
+      <span class="pill idle" id="actcount">—</span>
+    </header>
+    <p class="hint" style="margin-bottom:10px">
+      Anything that writes to a tenant asks you to type a confirmation word first.
+      Read-only checks run immediately.
+    </p>
+    <div class="row" style="margin-bottom:10px">
+      <label for="afilter" class="sr">Filter actions</label>
+      <input type="search" id="afilter" placeholder="Filter actions…" style="max-width:280px" autocomplete="off">
+    </div>
+    <div class="actions" id="actions"><p class="muted">loading…</p></div>
+  </section>
+
+  <section class="card" aria-labelledby="h-log">
+    <header><h2 id="h-log">Live output</h2><span class="pill idle" id="logpill">idle</span></header>
+    <pre class="log" id="log" tabindex="0" role="region" aria-label="Job output">No job running.</pre>
+  </section>
+</main>
+
+<dialog id="confirm" aria-labelledby="cf-t">
+  <form method="dialog">
+    <div class="body">
+      <h2 id="cf-t">Confirm</h2>
+      <p id="cf-blurb" class="hint" style="margin:8px 0 12px"></p>
+      <label for="cf-in">Type <strong id="cf-word"></strong> to run this</label>
+      <input type="text" id="cf-in" autocomplete="off" spellcheck="false">
+      <p class="err" id="cf-err" role="alert"></p>
+    </div>
+    <div class="foot">
+      <button value="cancel" id="cf-cancel">Cancel</button>
+      <button value="ok" id="cf-ok" class="danger" disabled>Run</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+const $ = (s,r=document)=>r.querySelector(s);
+const el=(t,c,x)=>{const n=document.createElement(t); if(c)n.className=c; if(x!=null)n.textContent=x; return n;};
+const num=n=>(typeof n==='number'?n:0).toLocaleString();
+
+/* Every state is glyph + word, never colour on its own. */
+const GLYPH={ok:'M3 8.5l3.2 3.2L13 5',warn:'M8 4.6v4.2M8 11.4h.01',bad:'M5 5l6 6M11 5l-6 6',idle:''};
+function pill(node,kind,text){
+  node.className='pill '+kind;
+  node.innerHTML='';
+  if(GLYPH[kind]){
+    const s=document.createElementNS('http://www.w3.org/2000/svg','svg');
+    s.setAttribute('viewBox','0 0 16 16'); s.setAttribute('aria-hidden','true');
+    s.innerHTML='<path d="'+GLYPH[kind]+'" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>';
+    node.appendChild(s);
+  }
+  node.appendChild(document.createTextNode(text));
+}
+async function get(u){const r=await fetch(u,{headers:{'Accept':'application/json'}});
+  if(!r.ok) throw new Error(u.split('/').pop()+': HTTP '+r.status); return r.json();}
+
+function banner(msg,kind='bad'){
+  const b=$('#banner');
+  if(!msg){b.innerHTML='';return;}
+  b.innerHTML='';
+  const c=el('section','card'); c.style.borderColor='var(--'+kind+')'; c.style.marginBottom='16px';
+  const p=el('span','pill '+kind); pill(p,kind,'Problem'); c.appendChild(p);
+  c.appendChild(el('p','hint',msg)); b.appendChild(c);
+}
+
+/* ---- loaders. Each one fails on its own; a dead panel must not blank the
+   page, because five live panels beat six stale ones. ---------------------- */
+async function loadTenant(){
+  try{const r=await get('/api/config'); const c=r.config||r;
+    $('#tenant').textContent=(c.source_domain||'?')+'  →  '+(c.target_domain||'?');
+  }catch(e){$('#tenant').textContent='tenants unavailable';}
+}
+async function loadProgress(){
+  try{
+    const u=await get('/api/spa/users'); const rows=u.users||[];
+    // The payload speaks lowercase words ('completed'), not ledger enums.
+    const by=s=>rows.filter(r=>(r.status||'').toLowerCase()===s).length;
+    const done=by('completed'), failed=by('failed'), running=by('running');
+    const pend=Math.max(0, rows.length-done-failed-running);
+    const g=$('#progress'); g.innerHTML='';
+    [['Users',rows.length,0],['Done',done,0],['Running',running,0],
+     ['Failed',failed,1],['Pending',pend,0]].forEach(([k,v,attn])=>{
+      const d=el('div','stat'+(attn&&v?' attn':'')); d.appendChild(el('span','n',num(v)));
+      d.appendChild(el('span','k',k)); g.appendChild(d);
+    });
+    const t=$('#usertable tbody'); t.innerHTML='';
+    window._users=rows; renderUsers();
+    pill($('#usercount'), rows.length?'ok':'idle', rows.length+' tracked');
+  }catch(e){banner(e.message);}
+}
+function renderUsers(){
+  const q=($('#ufilter').value||'').toLowerCase();
+  const rows=(window._users||[]).filter(r=>!q||
+    (r.source_email||'').toLowerCase().includes(q)||(r.status||'').toLowerCase().includes(q));
+  const t=$('#usertable tbody'); t.innerHTML='';
+  if(!rows.length){t.appendChild(el('tr')).appendChild(Object.assign(el('td','muted','No matching users'),{colSpan:4}));return;}
+  rows.slice(0,300).forEach(r=>{
+    const tr=el('tr');
+    tr.appendChild(el('td','wrap',r.email||'—'));
+    const st=el('td'); const p=el('span');
+    const k=(r.status||'').toLowerCase();
+    pill(p,k==='completed'?'ok':k==='failed'?'bad':k==='running'?'warn':'idle',k||'—');
+    st.appendChild(p); tr.appendChild(st);
+    tr.appendChild(el('td','num',(r.progress??0)+'%'));
+    const f=el('td','num',num(r.errors)); if(r.errors)f.style.color='var(--bad)';
+    tr.appendChild(f); t.appendChild(tr);
+  });
+}
+async function loadVolume(){
+  try{
+    const m=await get('/api/v2/metrics'); const v=m.volume||[];
+    const t=$('#voltable tbody'); t.innerHTML='';
+    if(m.volumeError){banner('Counts unavailable: '+m.volumeError,'warn');}
+    if(!v.length){t.appendChild(el('tr')).appendChild(Object.assign(el('td','muted','Nothing recorded yet'),{colSpan:3}));}
+    v.forEach(r=>{
+      const tr=el('tr'); tr.appendChild(el('td',null,r.itemType));
+      const s=el('td'); const p=el('span'); const st=(r.status||'');
+      pill(p, st==='SUCCESS'?'ok':st.startsWith('FAILED')?'bad':st.startsWith('SKIPPED')?'warn':'idle', st);
+      s.appendChild(p); tr.appendChild(s);
+      tr.appendChild(el('td','num',num(r.count))); t.appendChild(tr);
+    });
+    pill($('#volcount'),'idle',v.length+' kinds');
+  }catch(e){/* panel-local */}
+}
+async function loadFailures(){
+  try{
+    const f=await get('/api/v2/failures');
+    const t=$('#failtable tbody'); t.innerHTML='';
+    if(!f.length){
+      const tr=el('tr'); const td=el('td','muted','No failures recorded.'); td.colSpan=4;
+      tr.appendChild(td); t.appendChild(tr); pill($('#failcount'),'ok','none'); return;
+    }
+    pill($('#failcount'),'bad',f.length+' total');
+    f.slice(0,100).forEach(r=>{
+      const tr=el('tr');
+      tr.appendChild(el('td','wrap',(r.source_user||'—')));
+      tr.appendChild(el('td',null,r.item_type||'—'));
+      const s=el('td'); const p=el('span'); pill(p,'bad',r.status||'FAILED'); s.appendChild(p); tr.appendChild(s);
+      tr.appendChild(el('td','wrap',(r.error_message||'').slice(0,180)));
+      t.appendChild(tr);
+    });
+  }catch(e){/* panel-local */}
+}
+async function loadShared(){
+  try{
+    const d=(await get('/api/spa/shared_drives')).sharedDrives||{};
+    const g=$('#sdstats'); g.innerHTML='';
+    [['Drives',d.drives,0],['Members',d.members,0],['Unmapped',d.unmappedMembers,1],
+     ['Unreadable',d.unreadable,1],['Failed',d.failed,1]].forEach(([k,v,attn])=>{
+      const s=el('div','stat'+(attn&&v?' attn':'')); s.appendChild(el('span','n',num(v)));
+      s.appendChild(el('span','k',k)); g.appendChild(s);
+    });
+  }catch(e){/* panel-local */}
+}
+async function loadHost(){
+  try{
+    const m=await get('/api/spa/metrics');
+    const g=$('#hoststats'); g.innerHTML='';
+    [['CPU',(m.cpu??0)+'%'],['RAM',(m.ram?.percentage??0)+'%'],
+     ['Workers',num(m.workers?.current)],['Queue',num(m.uploadQueue)]].forEach(([k,v])=>{
+      const s=el('div','stat'); s.appendChild(el('span','n',v)); s.appendChild(el('span','k',k)); g.appendChild(s);
+    });
+    $('#host-hint').textContent=m.workers?.reason||'';
+  }catch(e){/* panel-local */}
+}
+async function loadStatus(){
+  try{
+    const s=await get('/api/status');
+    const running=!!(s.job&&s.job.running);
+    pill($('#jobpill'),running?'warn':'ok',running?('running: '+(s.job.name||'job')):'idle');
+    $('#jobtext')&&0;
+    if(running&&s.job.lines){$('#log').textContent=s.job.lines.join('\n');
+      pill($('#logpill'),'warn','streaming'); $('#log').scrollTop=$('#log').scrollHeight;}
+    else if(s.job&&s.job.lines&&s.job.lines.length){$('#log').textContent=s.job.lines.join('\n');
+      pill($('#logpill'),s.job.rc===0?'ok':'bad', s.job.rc===0?'exit 0':'exit '+s.job.rc);}
+  }catch(e){pill($('#jobpill'),'bad','status unavailable');}
+}
+async function loadActions(){
+  try{
+    const a=await get('/api/actions');
+    window._actions=a;
+    renderActions();
+    pill($('#actcount'),'idle',Object.keys(a).length+' available');
+  }catch(e){$('#actions').innerHTML='<p class="err">Actions unavailable: '+e.message+'</p>';}
+}
+function renderActions(){
+  const q=($('#afilter').value||'').toLowerCase();
+  const a=window._actions||{}; const box=$('#actions'); box.innerHTML='';
+  const keys=Object.keys(a).sort().filter(k=>!q||k.includes(q)||(a[k].label||'').toLowerCase().includes(q));
+  if(!keys.length){box.appendChild(el('p','muted','No actions match that filter.')); return;}
+  keys.forEach(k=>{
+    const spec=a[k]; const c=el('div','action');
+    const top=el('div','row');
+    top.appendChild(el('span','nm',spec.label||k));
+    if(spec.destructive){const p=el('span'); pill(p,'bad','writes'); top.appendChild(p);}
+    c.appendChild(top);
+    c.appendChild(el('p','bl',spec.blurb||''));
+    const b=el('button',spec.destructive?'danger':'');
+    b.textContent=spec.destructive?'Run…':'Run';
+    b.setAttribute('data-action',k);
+    b.addEventListener('click',()=>runAction(k,spec));
+    c.appendChild(b); box.appendChild(c);
+  });
+}
+
+/* Destructive actions type-to-confirm, matching the server's own gate. */
+let pending=null;
+function runAction(name,spec){
+  if(spec.confirm){
+    pending={name,spec};
+    $('#cf-t').textContent='Confirm: '+(spec.label||name);
+    $('#cf-blurb').textContent=spec.blurb||'';
+    $('#cf-word').textContent=spec.confirm;
+    $('#cf-in').value=''; $('#cf-err').textContent=''; $('#cf-ok').disabled=true;
+    $('#confirm').showModal(); $('#cf-in').focus();
+  }else{ fire(name,null); }
+}
+$('#cf-in').addEventListener('input',e=>{
+  $('#cf-ok').disabled = e.target.value !== (pending&&pending.spec.confirm);
+});
+$('#confirm').addEventListener('close',()=>{
+  if($('#confirm').returnValue==='ok'&&pending){fire(pending.name,$('#cf-in').value);}
+  pending=null;
+});
+async function fire(name,confirm){
+  const btn=document.querySelector('[data-action="'+name+'"]');
+  if(btn){btn.disabled=true; btn.textContent='Starting…';}
+  pill($('#logpill'),'warn','starting');
+  $('#log').textContent='Starting '+name+'…';
+  try{
+    const r=await fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(confirm?{action:name,confirm}:{action:name})});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok||j.ok===false){throw new Error(j.error||('HTTP '+r.status));}
+    banner('');
+  }catch(e){
+    banner('Could not start '+name+': '+e.message);
+    pill($('#logpill'),'bad','failed to start');
+  }finally{
+    if(btn){btn.disabled=false; btn.textContent=(window._actions?.[name]?.destructive)?'Run…':'Run';}
+    loadStatus();
+  }
+}
+
+$('#ufilter').addEventListener('input',renderUsers);
+$('#afilter').addEventListener('input',renderActions);
+$('#refresh').addEventListener('click',()=>refreshAll(true));
+$('#theme').addEventListener('click',()=>{
+  const cur=document.documentElement.getAttribute('data-theme');
+  const next=cur==='dark'?'light':cur==='light'?'dark':
+    (matchMedia('(prefers-color-scheme:dark)').matches?'light':'dark');
+  document.documentElement.setAttribute('data-theme',next);
+  try{localStorage.setItem('bp-theme',next);}catch(e){}
+});
+try{const t=localStorage.getItem('bp-theme'); if(t)document.documentElement.setAttribute('data-theme',t);}catch(e){}
+
+function refreshAll(manual){
+  loadStatus(); loadProgress(); loadVolume(); loadFailures(); loadShared(); loadHost();
+  if(manual){loadTenant(); loadActions();}
+}
+loadTenant(); loadActions(); refreshAll(false);
+setInterval(loadStatus,3000);
+setInterval(()=>{loadProgress();loadVolume();loadFailures();loadShared();loadHost();},8000);
+</script>
+</body>
+</html>
