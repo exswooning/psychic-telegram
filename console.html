@@ -115,7 +115,8 @@ th,td{text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); wh
 th{position:sticky; top:0; background:var(--surface-2); font-weight:650; font-size:.75rem;
    text-transform:uppercase; letter-spacing:.04em; color:var(--ink-2)}
 td.num,th.num{text-align:right; font-variant-numeric:tabular-nums}
-td.wrap{white-space:normal; min-width:220px; overflow-wrap:anywhere}
+td.wrap{white-space:normal; min-width:220px; overflow-wrap:break-word;
+  word-break:normal; line-break:anywhere}
 tbody tr:hover{background:var(--surface-2)}
 
 /* Controls: 44px minimum target, real spacing between them. */
@@ -356,6 +357,16 @@ async function loadProgress(){
 // operator actually needs pushed far above the fold. Cap them, say plainly
 // how much is hidden, and let it be unfolded rather than lost.
 const CAP=15, _showAll={};
+// A panel whose fetch fails used to swallow the error and leave "loading…"
+// on screen forever, which reads as "still working" rather than "this is
+// broken" -- the same class of lie as a fabricated 0%. Say so instead.
+function panelFail(tableSel, pillSel, cols, err){
+  const t=tableSel && $(tableSel);
+  if(t){ t.innerHTML=''; const tr=el('tr');
+    const td=el('td','err','Could not load: '+(err&&err.message||err)); td.colSpan=cols;
+    tr.appendChild(td); t.appendChild(tr); }
+  if(pillSel) pill($(pillSel),'bad','unavailable');
+}
 function capNote(host, shown, total, key, redraw){
   host.innerHTML='';
   if(total<=CAP) return;
@@ -399,12 +410,12 @@ async function loadVolume(){
       tr.appendChild(el('td','num',num(r.count))); t.appendChild(tr);
     });
     pill($('#volcount'),'idle',v.length+' kinds');
-  }catch(e){/* panel-local */}
+  }catch(e){panelFail('#voltable tbody','#volcount',3,e);}
 }
 async function loadFailures(){
   try{
     window._fails=await get('/api/v2/failures'); renderFailures();
-  }catch(e){/* panel-local */}
+  }catch(e){panelFail('#failtable tbody','#failcount',4,e);}
 }
 function renderFailures(){
     const f=window._fails||[];
@@ -435,7 +446,8 @@ async function loadShared(){
       const s=el('div','stat'+(attn&&v?' attn':'')); s.appendChild(el('span','n',num(v)));
       s.appendChild(el('span','k',k)); g.appendChild(s);
     });
-  }catch(e){/* panel-local */}
+  }catch(e){$('#sdstats').innerHTML=
+      '<p class="err">Shared-drive stats unavailable: '+(e.message||e)+'</p>';}
 }
 async function loadHost(){
   try{
@@ -446,7 +458,8 @@ async function loadHost(){
       const s=el('div','stat'); s.appendChild(el('span','n',v)); s.appendChild(el('span','k',k)); g.appendChild(s);
     });
     $('#host-hint').textContent=m.workers?.reason||'';
-  }catch(e){/* panel-local */}
+  }catch(e){$('#hoststats').innerHTML=
+      '<p class="err">Host metrics unavailable: '+(e.message||e)+'</p>';}
 }
 async function loadStatus(){
   try{

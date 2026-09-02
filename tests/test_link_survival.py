@@ -194,3 +194,67 @@ class TestATimedShareStaysTimed:
             "type": "domain", "role": "reader", "domain": "partner.test",
             "expirationTime": "2030-01-01T00:00:00.000Z"})
         assert created and "expirationTime" not in created[0]
+
+
+# ----------------------------------------------------------------------
+# Mail must not migrate ahead of Drive while link rewriting is on.
+#
+# Not a tidiness rule. Rewriting resolves ids through id_mapping, so with no
+# Drive rows every link silently stays pointed at the source -- and the run
+# reports full success. Re-running does not repair it either: the dedup skips
+# a message already inserted, so those links are wrong permanently. The flag
+# has to fail loudly or it is worse than being off.
+# ----------------------------------------------------------------------
+class TestMailWillNotRunAheadOfDrive:
+    def test_it_refuses_before_inserting_anything(self, gmail_migrator, settings):
+        settings.rewrite_drive_links = True
+        with pytest.raises(RuntimeError, match="no Drive files have migrated"):
+            gmail_migrator.run()
+
+    def test_it_runs_once_drive_has_migrated(self, gmail_migrator, settings, db):
+        settings.rewrite_drive_links = True
+        db.record_mapping("alice@tenanta.com", "f1", "t1", "file")
+        gmail_migrator.run()          # must not raise
+
+    def test_the_guard_is_off_when_the_feature_is(self, gmail_migrator, settings):
+        """An empty ledger is the normal state for a mail-only migration. The
+        guard must not break every run that never asked for rewriting."""
+        settings.rewrite_drive_links = False
+        gmail_migrator.run()
+
+
+class TestBothFindingsAreActionableNotJustCounted:
+    @pytest.fixture
+    def ledger(self, tmp_path):
+        db = MigrationDB(str(tmp_path / "m.db"))
+        db.init_schema()
+        db.record_mapping("u@old.test", SRC, TGT, "file", source_name="Budget")
+        db.log_audit("u@old.test", f"{SRC}:anyone", "acl", "SUCCESS")
+        db.log_audit("u@old.test", f"{SRC}:ext@partner.test", "acl", "SUCCESS")
+        # granted, but nothing says where the file went
+        db.log_audit("u@old.test", "ORPHAN1:ext@partner.test", "acl", "SUCCESS")
+        return db
+
+    @pytest.fixture
+    def settings(self):
+        class S:
+            source_domain = "old.test"
+            target_domain = "new.test"
+        return S()
+
+    def test_public_links_are_named_with_their_new_url(self, ledger, settings):
+        """A public link has nobody to notify, so the only remedy is knowing
+        which file it was and where it went."""
+        r = external_shares.collect(ledger, settings)
+        assert r["public_links"] == [
+            {"name": "Budget", "url": f"https://drive.google.com/open?id={TGT}"}]
+
+    def test_unmapped_grants_name_the_file_not_just_a_count(self, ledger, settings):
+        c = external_shares.collect(ledger, settings)["collaborators"][0]
+        assert c["unresolved"] == 1
+        assert c["unresolved_source_ids"] == ["ORPHAN1"]
+
+    def test_the_rendered_report_says_what_to_do_about_them(self, ledger, settings):
+        text = external_shares.render(external_shares.collect(ledger, settings))
+        assert "ORPHAN1" in text
+        assert "no address to notify" in text

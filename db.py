@@ -530,6 +530,17 @@ class MigrationDB:
         ).fetchone()
         return row["target_id"] if row else None
 
+    def has_drive_mappings(self) -> bool:
+        """Whether any Drive file or folder has been migrated yet, at all.
+
+        Deliberately global rather than per-user: a link in one mailbox names
+        whoever created the file, so "has Drive run for this user" is the
+        wrong question.
+        """
+        return self.conn.execute(
+            "SELECT 1 FROM id_mapping WHERE type IN ('file','folder') LIMIT 1"
+        ).fetchone() is not None
+
     def target_for_source_id(self, source_id: str) -> Optional[str]:
         """The target id for a source file/folder, whoever owned it.
 

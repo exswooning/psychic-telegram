@@ -47,7 +47,8 @@ def collect(db: MigrationDB, settings: Settings) -> dict:
 
     files: dict[str, list] = defaultdict(list)
     stranded: dict[str, int] = defaultdict(int)
-    public = 0
+    orphans: dict[str, list] = defaultdict(list)
+    public: list = []
 
     # ix_map_source makes the join indexed; without it this is a nested scan.
     rows = db.conn.execute("""
@@ -59,9 +60,14 @@ def collect(db: MigrationDB, settings: Settings) -> dict:
          WHERE a.item_type = 'acl' AND a.status = 'SUCCESS'
     """)
     for r in rows:
-        _, _, grantee = (r["item"] or "").partition(":")
+        src_id, _, grantee = (r["item"] or "").partition(":")
         if grantee == "anyone":
-            public += 1
+            # Counting these was not enough to act on. A public link is the
+            # one grant with nobody to notify -- no address exists -- so the
+            # only remedy is knowing which files they are, and where each one
+            # now lives, before the source tenant goes away.
+            public.append({"name": r["name"] or "(unnamed)",
+                           "url": LINK.format(r["tgt"]) if r["tgt"] else None})
             continue
         if grantee.startswith("domain:"):
             domain = grantee.split(":", 1)[1].lower()
@@ -72,8 +78,13 @@ def collect(db: MigrationDB, settings: Settings) -> dict:
             continue
         if not r["tgt"]:
             # Granted, but the file it was granted on has no mapping -- so we
-            # cannot tell them where it went. Counted, never guessed at.
+            # cannot tell them where it went. Never guessed at, and now named
+            # rather than merely counted: a bare number is not something an
+            # operator can chase, and this divergence (audit_log says the
+            # copy succeeded, id_mapping cannot say where it landed) is a
+            # ledger problem in its own right, not just a gap in this report.
             stranded[grantee] += 1
+            orphans[grantee].append(src_id)
             continue
         files[grantee].append({"name": r["name"] or "(unnamed)",
                                "url": LINK.format(r["tgt"])})
@@ -91,7 +102,8 @@ def collect(db: MigrationDB, settings: Settings) -> dict:
     return {
         "source_domain": settings.source_domain,
         "target_domain": settings.target_domain,
-        "public_link_grants": public,
+        "public_link_grants": len(public),
+        "public_links": sorted(public, key=lambda f: f["name"])[:500],
         "collaborators": [
             {
                 "email": who,
@@ -99,6 +111,7 @@ def collect(db: MigrationDB, settings: Settings) -> dict:
                 "file_count": len(files.get(who, [])),
                 "shared_drives": sorted(drives.get(who, [])),
                 "unresolved": stranded.get(who, 0),
+                "unresolved_source_ids": orphans.get(who, [])[:200],
             }
             for who in people
         ],
@@ -127,7 +140,14 @@ def render(report: dict, only: str | None = None) -> str:
                        f"(--email {c['email']} for the full list)")
         if c["unresolved"]:
             out.append(f"    !! {c['unresolved']} grant(s) on files with no "
-                       f"mapping -- new location unknown")
+                       f"mapping -- new location unknown. audit_log says the "
+                       f"copy succeeded; id_mapping cannot say where it went, "
+                       f"so these need a re-run before the source is deleted.")
+            for sid in c["unresolved_source_ids"][:5 if not only else 200]:
+                out.append(f"       source id {sid}")
+            if not only and c["unresolved"] > 5:
+                out.append(f"       ... --email {c['email']} for all "
+                           f"{c['unresolved']}")
 
     if only:
         return "\n".join(out)
@@ -135,8 +155,16 @@ def render(report: dict, only: str | None = None) -> str:
     out.append(f"\n{len(report['collaborators'])} external collaborator(s) "
                f"still hold access after the move.")
     if report["public_link_grants"]:
-        out.append(f"{report['public_link_grants']} file(s) are shared by public "
-                   f"link; those links change too and cannot be notified.")
+        out.append(f"\n{report['public_link_grants']} file(s) are shared by "
+                   f"public link. Those URLs die with the source too, and "
+                   f"there is no address to notify -- anyone holding one just "
+                   f"loses access. The new URL for each:")
+        for f in report["public_links"][:10]:
+            where = f["url"] or "(no mapping -- location unknown)"
+            out.append("    %s\n        %s" % (f["name"], where))
+        if report["public_link_grants"] > 10:
+            out.append(f"    ... and {report['public_link_grants'] - 10} more "
+                       f"(--json for the full list)")
     for dom, n in sorted(report["domain_grants"].items()):
         out.append(f"{dom}: {n} file(s)")
     out.append("\nTheir existing links point at the source tenant and stop "

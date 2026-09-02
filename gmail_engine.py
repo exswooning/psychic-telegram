@@ -418,6 +418,23 @@ class GmailMigrator:
         self._bump("inserted")
 
     def run(self, delta: bool = False, since_epoch_days: int = 0) -> dict:
+        # Link rewriting resolves source file ids through id_mapping, so Drive
+        # has to have run first. Checked here, before a single message is
+        # inserted, because the damage is not recoverable by re-running: an
+        # inserted message is skipped by the dedup on every later pass, so
+        # mail migrated ahead of Drive keeps links pointing at the source
+        # tenant permanently, and the run reports full success while doing it.
+        #
+        # A flag that silently does nothing is worse than one that is off --
+        # off is at least honest about it.
+        if self.settings.rewrite_drive_links and not self.db.has_drive_mappings():
+            raise RuntimeError(
+                "REWRITE_DRIVE_LINKS is on but no Drive files have migrated "
+                "yet, so every link in this mail would stay pointed at the "
+                "source tenant -- permanently, because re-running skips "
+                "messages already inserted. Migrate Drive first (or unset "
+                "REWRITE_DRIVE_LINKS to accept dead links)."
+            )
         # A mailbox is the largest item count in the system, and every message
         # costs a get_target_id before anything else happens.
         self.db.preload_mappings(self.source_user)
