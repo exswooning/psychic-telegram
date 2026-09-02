@@ -532,6 +532,20 @@ class Settings:
     #                   it from the source). Kept for regression/benchmark
     #                   reproducibility; do not run on a live migration.
     #                   See link_transfer.py.
+    # How many shared drives migrate at once. A tenant's shared drives are
+    # independent trees with no ordering between them, and the per-drive work
+    # is almost entirely waiting on Google -- which overlaps well. Quota-safe
+    # at any value: every DriveMigrator shares the process-wide adaptive
+    # project limiter, so N drives in flight present the same total rate as
+    # one, they just stop taking turns to wait for it.
+    #
+    # 2, not the core count: in download_upload mode each drive in flight
+    # also holds file buffers, and this is the constant resources.py sizes
+    # its whole memory budget around. A real win over serial without turning
+    # a small VPS into the swap stall that module exists to prevent.
+    shared_drive_workers: int = field(
+        default_factory=lambda: int(os.getenv("SHARED_DRIVE_WORKERS", "0")) or 2
+    )
     transfer_mode: str = field(
         default_factory=lambda: os.getenv("TRANSFER_MODE", "download_upload")
     )

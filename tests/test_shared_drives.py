@@ -646,3 +646,57 @@ class TestTheSeedUIOffersSharedDrives:
         import re
         src = re.sub(r"\s+", " ", self._page())
         assert "belongs to no user" in src
+
+
+class TestDrivesMigrateConcurrently:
+    """A tenant's shared drives are independent trees with no ordering
+    between them; only the loop serialised them. The per-drive work is
+    almost entirely waiting on Google, which is what overlaps well."""
+
+    def test_several_drives_are_migrated_in_parallel(self, sd, monkeypatch):
+        import threading, time
+        seen, lock = [], threading.Lock()
+        concurrent = {"max": 0, "now": 0}
+
+        def slow(drive):
+            with lock:
+                concurrent["now"] += 1
+                concurrent["max"] = max(concurrent["max"], concurrent["now"])
+            time.sleep(0.25)
+            with lock:
+                concurrent["now"] -= 1
+                seen.append(drive["id"])
+
+        sd.list_source_drives = lambda all_drives: [
+            {"id": f"d{i}", "name": f"D{i}"} for i in range(4)]
+        sd._migrate_one = slow
+
+        sd.migrate_all(True, workers=2)
+
+        assert sorted(seen) == ["d0", "d1", "d2", "d3"], "a drive was dropped"
+        assert concurrent["max"] > 1, "drives still ran one at a time"
+
+    def test_one_drive_failing_does_not_lose_the_others(self, sd, db):
+        def boom(drive):
+            if drive["id"] == "d1":
+                raise RuntimeError("drive exploded")
+        sd.list_source_drives = lambda all_drives: [
+            {"id": "d0", "name": "A"}, {"id": "d1", "name": "B"},
+            {"id": "d2", "name": "C"}]
+        sd._migrate_one = boom
+
+        stats = sd.migrate_all(True, workers=2)
+
+        assert stats["failed"] == 1
+        row = db.conn.execute(
+            "SELECT status FROM audit_log WHERE item_type='shared_drive' "
+            "AND status='FAILED'").fetchone()
+        assert row is not None, "the failure was not recorded anywhere"
+
+    def test_workers_of_one_is_still_the_serial_path(self, sd):
+        order = []
+        sd.list_source_drives = lambda all_drives: [
+            {"id": "d0"}, {"id": "d1"}]
+        sd._migrate_one = lambda d: order.append(d["id"])
+        sd.migrate_all(True, workers=1)
+        assert order == ["d0", "d1"]
