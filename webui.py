@@ -1387,11 +1387,41 @@ def host_info() -> dict:
     return _HOST_INFO_CACHE
 
 
-def read_config() -> dict:
+def read_config(account_id: int | None = None) -> dict:
+    """The tenant pair on screen -- this account's, not the box's.
+
+    This read env.sh unconditionally, so a signed-in SaaS account saw the
+    placeholder tenants the box happens to carry. Confirmed live: the header
+    read "Source: c.example.com" for an account whose real source tenant is
+    source.rohitrokaya.com.np with 200 users. It is the same fault
+    _account_env() already fixes for the action buttons -- a signed-in
+    tenant being shown, and acting on, another set of domains entirely --
+    reappearing on the one line of chrome that is visible from every page.
+
+    env.sh stays the fallback: a single-tenant box (and every install before
+    accounts existed) has no tenant_configs row and is correctly described
+    by it.
+    """
     from wizard import load_env
 
     env = load_env(ENV_PATH)
-    return {field: env.get(key, "") for field, key, _, _ in _CONFIG_FIELDS}
+    out = {field: env.get(key, "") for field, key, _, _ in _CONFIG_FIELDS}
+    if account_id is None:
+        return out
+    try:
+        from config import Settings
+
+        st = Settings(account_id=account_id)
+        for field, attr in (("source_domain", "source_domain"),
+                            ("target_domain", "target_domain"),
+                            ("source_admin", "source_admin"),
+                            ("target_admin", "target_admin")):
+            val = (getattr(st, attr, "") or "").strip()
+            if val:
+                out[field] = val
+    except Exception:      # noqa: BLE001 - the header must never 500 a page
+        pass
+    return out
 
 
 def validate_config(body: dict) -> tuple[dict, str]:
@@ -3732,7 +3762,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(identities_payload())
         elif path == "/api/config":
             from config import Settings as _S
-            self._json({"config": read_config(), "env_path": ENV_PATH,
+            self._json({"config": read_config(self._on_screen()),
+                        "env_path": ENV_PATH,
                         "uploads": uploads_status(),
                         "auth_modes": AUTH_MODES,
                         "auth_mode": _S().auth_mode,
@@ -4078,8 +4109,31 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": False, "error": err}, 400)
                 return
             write_config(clean)
-            self._json({"ok": True, "msg": f"saved to {ENV_PATH}",
-                        "config": read_config()})
+            # A signed-in account's tenant pair lives in tenant_configs, not
+            # env.sh -- that is what every action button and the header read.
+            # Writing only env.sh meant an account could correct its domain
+            # here, be told "saved", and see nothing change anywhere, because
+            # every reader was looking at the other place. env.sh is still
+            # written for the single-tenant box that has no account row.
+            acct = self._on_screen()
+            saved_to = ENV_PATH
+            if acct is not None:
+                try:
+                    import accounts_auth
+                    accounts_auth.update_tenant_config(
+                        acct, "source", domain=clean.get("SOURCE_DOMAIN"),
+                        admin_email=clean.get("SOURCE_ADMIN"))
+                    accounts_auth.update_tenant_config(
+                        acct, "target", domain=clean.get("TARGET_DOMAIN"),
+                        admin_email=clean.get("TARGET_ADMIN"))
+                    saved_to = f"this account's tenant config (and {ENV_PATH})"
+                except Exception as exc:      # noqa: BLE001
+                    self._json({"ok": False,
+                                "error": f"saved to {ENV_PATH} but not to this "
+                                         f"account's tenant config: {exc}"}, 500)
+                    return
+            self._json({"ok": True, "msg": f"saved to {saved_to}",
+                        "config": read_config(acct)})
             return
 
         if self.path == "/api/groq":
@@ -4120,7 +4174,11 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if self.path == "/api/setup":
-            cfg = read_config()
+            # This account's tenants, not the box's. Worse than the header
+            # bug it shares a cause with: this one builds a setup.sh command
+            # line out of the domains, so an unscoped read does not merely
+            # display the wrong tenant -- it runs against it.
+            cfg = read_config(self._on_screen())
             missing = [k for k, v in cfg.items() if not v]
             if missing:
                 self._json({"ok": False,
