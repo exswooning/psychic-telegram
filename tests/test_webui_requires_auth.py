@@ -99,3 +99,69 @@ class TestOnlyThePageShellsArePublic:
                   "/api/identities", "/api/dwd", "/api/scope",
                   "/api/snapshot", "/api/job", "/api/deploy_history"):
             assert not h._is_public(p), f"{p} must require a credential"
+
+
+# ----------------------------------------------------------------------
+# The positive half, against the real server.
+#
+# Refusing anonymous callers is only half the change; the other half is that
+# a signed-in one still gets through. Testing _authorised() alone would not
+# catch a mistake in routing, cookie parsing, or the order the gate runs in
+# -- and that mistake locks every customer out of the product. So this
+# starts the actual HTTPServer and speaks HTTP to it.
+# ----------------------------------------------------------------------
+import http.client
+import threading
+from http.server import HTTPServer
+
+import pytest
+
+import accounts_auth
+
+
+@pytest.fixture
+def live_server(tmp_path, monkeypatch):
+    # control_plane_db._db_path() is Settings().db_path, so the only way to
+    # isolate this is the environment -- an attribute patch on accounts_auth
+    # silently does nothing (there is no such attribute) and the test then
+    # writes a real account into the developer's own control-plane database.
+    # It did exactly that before this line existed.
+    import control_plane_db as cpdb
+
+    monkeypatch.setenv("MIGRATION_DB", str(tmp_path / "cp.db"))
+    cpdb.apply_migrations(str(tmp_path / "cp.db"))
+    srv = HTTPServer(("127.0.0.1", 0), webui.Handler)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    yield srv
+    srv.shutdown()
+
+
+def _get(srv, path, cookie=None):
+    c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=10)
+    c.request("GET", path, headers={"Cookie": cookie} if cookie else {})
+    r = c.getresponse()
+    r.read()
+    c.close()
+    return r.status
+
+
+class TestTheGateOnTheRealServer:
+    def test_anonymous_is_refused(self, live_server):
+        assert _get(live_server, "/api/actions") == 401
+
+    def test_a_page_shell_still_serves_anonymously(self, live_server):
+        """If this 401s, the login page itself is unreachable and nobody can
+        ever sign in to satisfy the gate."""
+        assert _get(live_server, "/console") in (200, 404)
+
+    def test_a_real_session_cookie_gets_through(self, live_server):
+        """The half that matters most: a mistake here locks out every
+        customer, and no amount of testing the predicate alone would show
+        it -- this goes through routing and cookie parsing as deployed."""
+        aid = accounts_auth.create_account("gate@test.local", "pw-CorrectHorse-9", "Gate")
+        token = accounts_auth.create_session(aid)
+        assert _get(live_server, "/api/actions", f"bp_session={token}") == 200
+
+    def test_a_garbage_cookie_is_refused(self, live_server):
+        assert _get(live_server, "/api/actions", "bp_session=not-a-real-token") == 401

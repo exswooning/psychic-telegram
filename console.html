@@ -350,7 +350,15 @@ async function loadProgress(){
     const t=$('#usertable tbody'); t.innerHTML='';
     window._users=rows; renderUsers();
     pill($('#usercount'), rows.length?'ok':'idle', rows.length+' tracked');
-  }catch(e){banner(e.message);}
+  }catch(e){
+    banner(e.message);
+    // The banner alone left the table and the summary tiles sitting on
+    // "loading…" forever, which reads as still-working next to an error
+    // message that says otherwise.
+    panelFail('#usertable tbody','#usercount',4,e);
+    $('#progress').innerHTML='<p class="err">Progress unavailable: '+(e.message||e)+'</p>';
+    $('#user-more').innerHTML='';
+  }
 }
 // Both long tables dump their whole result set inline, which made the page
 // 11,847px tall -- thirteen screens, with the actions and the summary the
