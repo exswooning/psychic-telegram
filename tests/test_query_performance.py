@@ -99,3 +99,44 @@ class TestUserProgressIsOnePassNotOnePerUser:
         # rollup must still be counted, or a finished user reads as having
         # migrated nothing
         assert by["b@x"]["itemsDone"] == 10
+
+
+class TestTheDashboardRollupHasACoveringIndex:
+    """tui.collect_snapshot() is called by every SPA payload and polled every
+    few seconds by the console. It groups audit_log by
+    (source_user, item_type, status) and sums bytes_moved.
+
+    ix_audit_status leads on (source_user, status) and carries neither
+    item_type nor bytes_moved, so that grouping sorted the whole table in a
+    temp B-tree. On a real 1.27M-row ledger: 8.17s, and every dashboard page
+    waited on it.
+    """
+
+    def _ledger(self, tmp_path):
+        import db as dbmod
+        p = tmp_path / "m.db"
+        dbmod.MigrationDB(str(p)).close()
+        return str(p)
+
+    def test_the_index_exists_with_the_grouping_columns_in_order(self, tmp_path):
+        import sqlite3
+        conn = sqlite3.connect(self._ledger(tmp_path))
+        sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' "
+            "AND name='ix_audit_rollup_cover'").fetchone()
+        assert sql, "the dashboard rollup index is missing"
+        cols = sql[0].split("(", 1)[1].rstrip(") ").replace(" ", "")
+        # order matters: it is what removes the sort. bytes_moved is what
+        # keeps it covering, so the table is never touched.
+        assert cols == "source_user,item_type,status,bytes_moved", cols
+
+    def test_the_rollup_query_uses_it_and_does_not_sort(self, tmp_path):
+        import sqlite3
+        conn = sqlite3.connect(self._ledger(tmp_path))
+        plan = " | ".join(r[3] for r in conn.execute(
+            "EXPLAIN QUERY PLAN "
+            "SELECT source_user, item_type, status, COUNT(*) n, "
+            "COALESCE(SUM(bytes_moved),0) b FROM audit_log "
+            "GROUP BY source_user, item_type, status")).upper()
+        assert "COVERING INDEX" in plan, plan
+        assert "TEMP B-TREE" not in plan, f"still sorting the whole table: {plan}"

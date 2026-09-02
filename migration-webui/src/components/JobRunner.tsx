@@ -86,6 +86,9 @@ const JobRunner: React.FC<{ name: string; spec: ActionSpec; onDone?: () => void 
           size="small"
           startIcon={running ? <StopIcon /> : <RunIcon />}
           onClick={running ? () => stopJob() : handleClick}
+          // Keyed by action name so a harness can address any action without
+          // matching on button TEXT, which is a label people reword.
+          data-testid={`action-${name}`}
         >
           {running ? 'Stop' : spec.label}
         </Button>
@@ -94,6 +97,7 @@ const JobRunner: React.FC<{ name: string; spec: ActionSpec; onDone?: () => void 
             size="small"
             label={rc === 0 ? 'exit 0' : `exit ${rc}`}
             color={rc === 0 ? 'success' : 'error'}
+            data-testid={`action-exit-${name}`}
           />
         )}
       </Box>
@@ -130,6 +134,7 @@ const JobRunner: React.FC<{ name: string; spec: ActionSpec; onDone?: () => void 
             fullWidth size="small" autoFocus value={typed}
             onChange={(e) => setTyped(e.target.value)}
             placeholder={spec.confirm}
+            inputProps={{ 'data-testid': `action-confirm-input-${name}` }}
           />
         </DialogContent>
         <DialogActions>
@@ -138,6 +143,7 @@ const JobRunner: React.FC<{ name: string; spec: ActionSpec; onDone?: () => void 
             color="error" variant="contained"
             disabled={typed !== spec.confirm}
             onClick={handleConfirm}
+            data-testid={`action-confirm-${name}`}
           >
             Run
           </Button>

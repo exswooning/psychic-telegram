@@ -94,6 +94,28 @@ CREATE INDEX IF NOT EXISTS ix_audit_item   ON audit_log(item_id);
 -- of a migration that does millions of them.
 CREATE INDEX IF NOT EXISTS ix_audit_status_type ON audit_log(status, item_type);
 
+-- The dashboard's own shape. tui.collect_snapshot() -- which every SPA
+-- payload calls, and which the console polls every few seconds -- runs
+--
+--   SELECT source_user, item_type, status, COUNT(*), SUM(bytes_moved)
+--     FROM audit_log GROUP BY source_user, item_type, status
+--
+-- ix_audit_status leads on (source_user, status) and carries neither
+-- item_type nor bytes_moved, so that grouping fell back to sorting the
+-- whole table in a temp B-tree. Measured on a real 1.27M-row ledger,
+-- identical 4,125 groups out:
+--
+--   without: 8.170s   SCAN audit_log USING INDEX ix_audit_status
+--                     + USE TEMP B-TREE FOR GROUP BY
+--   with:    0.318s   SCAN audit_log USING COVERING INDEX
+--
+-- Listing the columns in GROUP BY order is what removes the sort; carrying
+-- bytes_moved is what keeps it covering, so the table itself is never
+-- touched. Costs about 11% of the ledger's size (82MB on 755MB), which is
+-- a good trade for 26x on every dashboard read.
+CREATE INDEX IF NOT EXISTS ix_audit_rollup_cover
+    ON audit_log(source_user, item_type, status, bytes_moved);
+
 -- Counts for rows that have been pruned out of audit_log.
 --
 -- audit_log records every attempt and nothing ever removed one. On a single
