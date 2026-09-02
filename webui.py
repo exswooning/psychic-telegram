@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import hmac
 import json
 import logging
 import os
@@ -3651,6 +3652,47 @@ class Handler(BaseHTTPRequestHandler):
             return aid, False
         return aid, bool(account and account.get("is_superadmin"))
 
+    # The page shells and Google's OAuth redirect. Everything else this
+    # server exposes reads or writes one tenant's data.
+    _PUBLIC_PATHS = frozenset({"/", "/app", "/app/", "/console", "/console/",
+                               "/oauth/callback"})
+
+    def _is_public(self, path: str) -> bool:
+        return path in self._PUBLIC_PATHS or path.startswith("/app/")
+
+    def _authorised(self) -> bool:
+        """The same rule api_server.require_reader applies, on this server.
+
+        That fix closed exactly this hole on port 8090 -- with no cookie and
+        no header, /api/v2/failures was returning user email addresses and
+        Drive file ids to the public internet -- and it never reached the
+        stdlib server on 8080, which serves the same class of data through
+        /api/spa/*, /api/config and /api/status. Confirmed live before this
+        change: an unauthenticated GET of /api/spa/users returned a real
+        customer's user list, and /api/run would start an action for anyone
+        who asked, destructive ones included.
+
+        _account_id() returning None was being read as "the legacy
+        single-operator path" and handed the box's own default tenant. That
+        was a safe default when one operator ran one box; with client
+        accounts on a public host it means every visitor is that operator.
+
+        The X-Operator claim is honoured on the same terms api_server sets:
+        only alongside a matching BITPORT_OPERATOR_TOKEN, and never when
+        that is unset, so a host that has not configured it cannot be talked
+        into trusting a header.
+        """
+        if self._account_id() is not None:
+            return True
+        name = (self.headers.get("X-Operator") or "").strip()
+        token = self.headers.get("X-Operator-Token") or ""
+        expected = os.getenv("BITPORT_OPERATOR_TOKEN", "")
+        return bool(name and expected
+                    and hmac.compare_digest(token, expected))
+
+    def _deny(self) -> None:
+        self._json({"ok": False, "error": "sign in required"}, 401)
+
     def _account_id(self) -> int | None:
         """None for the legacy path (no cookie, or one that doesn't resolve
         -- same handling api_server.py's operator() dependency gives an
@@ -3724,6 +3766,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path = self.path.split("?")[0]
         query = urllib.parse.parse_qs(self.path.partition("?")[2])
+        if not self._is_public(path) and not self._authorised():
+            self._deny()
+            return
         if path == "/":
             # Bitport (the SPA at /app) is the only UI now. This used to
             # 302 here and also serve an inline dashboard at /legacy from
@@ -3868,6 +3913,12 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "not found"}, 404)
 
     def do_POST(self) -> None:
+        # No POST on this server is part of signing in -- login and signup
+        # live on api_server (/api/v2/auth/*) -- so every one of them needs
+        # a credential, /api/run above all.
+        if not self._authorised():
+            self._deny()
+            return
         length = int(self.headers.get("Content-Length") or 0)
         if length > 2 * MAX_UPLOAD:
             self._json({"ok": False, "error": "request body too large"}, 413)
