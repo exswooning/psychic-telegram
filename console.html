@@ -158,6 +158,10 @@ dialog{
 dialog::backdrop{background:rgba(0,0,0,.5)}
 dialog .body{padding:18px}
 dialog .foot{display:flex; gap:8px; justify-content:flex-end; padding:14px 18px; border-top:1px solid var(--line)}
+.more{display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+  margin-top:10px; padding-top:10px; border-top:1px solid var(--line);
+  font-size:.8125rem; color:var(--ink-3)}
+.more button{min-height:36px; padding:0 12px; font-size:.8125rem}
 .err{color:var(--bad); font-size:.8125rem}
 .muted{color:var(--ink-3)}
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
@@ -235,6 +239,7 @@ dialog .foot{display:flex; gap:8px; justify-content:flex-end; padding:14px 18px;
           <tbody><tr><td colspan="4" class="muted">loading…</td></tr></tbody>
         </table>
       </div>
+      <div class="more" id="fail-more"></div>
     </section>
 
     <section class="card" aria-labelledby="h-users">
@@ -249,6 +254,7 @@ dialog .foot{display:flex; gap:8px; justify-content:flex-end; padding:14px 18px;
           <tbody><tr><td colspan="4" class="muted">loading…</td></tr></tbody>
         </table>
       </div>
+      <div class="more" id="user-more"></div>
     </section>
   </div>
 
@@ -345,13 +351,29 @@ async function loadProgress(){
     pill($('#usercount'), rows.length?'ok':'idle', rows.length+' tracked');
   }catch(e){banner(e.message);}
 }
+// Both long tables dump their whole result set inline, which made the page
+// 11,847px tall -- thirteen screens, with the actions and the summary the
+// operator actually needs pushed far above the fold. Cap them, say plainly
+// how much is hidden, and let it be unfolded rather than lost.
+const CAP=15, _showAll={};
+function capNote(host, shown, total, key, redraw){
+  host.innerHTML='';
+  if(total<=CAP) return;
+  host.appendChild(el('span',null,'Showing '+num(shown)+' of '+num(total)));
+  const b=el('button',null,_showAll[key]?'Show fewer':'Show all '+num(total));
+  b.type='button';
+  b.onclick=()=>{_showAll[key]=!_showAll[key]; redraw();};
+  host.appendChild(b);
+}
 function renderUsers(){
   const q=($('#ufilter').value||'').toLowerCase();
   const rows=(window._users||[]).filter(r=>!q||
     (r.source_email||'').toLowerCase().includes(q)||(r.status||'').toLowerCase().includes(q));
   const t=$('#usertable tbody'); t.innerHTML='';
   if(!rows.length){t.appendChild(el('tr')).appendChild(Object.assign(el('td','muted','No matching users'),{colSpan:4}));return;}
-  rows.slice(0,300).forEach(r=>{
+  const shown=_showAll.users?rows:rows.slice(0,CAP);
+  capNote($('#user-more'), shown.length, rows.length, 'users', renderUsers);
+  shown.forEach(r=>{
     const tr=el('tr');
     tr.appendChild(el('td','wrap',r.email||'—'));
     const st=el('td'); const p=el('span');
@@ -381,22 +403,28 @@ async function loadVolume(){
 }
 async function loadFailures(){
   try{
-    const f=await get('/api/v2/failures');
+    window._fails=await get('/api/v2/failures'); renderFailures();
+  }catch(e){/* panel-local */}
+}
+function renderFailures(){
+    const f=window._fails||[];
     const t=$('#failtable tbody'); t.innerHTML='';
     if(!f.length){
       const tr=el('tr'); const td=el('td','muted','No failures recorded.'); td.colSpan=4;
-      tr.appendChild(td); t.appendChild(tr); pill($('#failcount'),'ok','none'); return;
+      tr.appendChild(td); t.appendChild(tr); pill($('#failcount'),'ok','none');
+      $('#fail-more').innerHTML=''; return;
     }
     pill($('#failcount'),'bad',f.length+' total');
-    f.slice(0,100).forEach(r=>{
+    const shown=_showAll.fails?f:f.slice(0,CAP);
+    capNote($('#fail-more'), shown.length, f.length, 'fails', renderFailures);
+    shown.forEach(r=>{
       const tr=el('tr');
       tr.appendChild(el('td','wrap',(r.source_user||'—')));
       tr.appendChild(el('td',null,r.item_type||'—'));
       const s=el('td'); const p=el('span'); pill(p,'bad',r.status||'FAILED'); s.appendChild(p); tr.appendChild(s);
       tr.appendChild(el('td','wrap',(r.error_message||'').slice(0,180)));
       t.appendChild(tr);
-    });
-  }catch(e){/* panel-local */}
+  });
 }
 async function loadShared(){
   try{
