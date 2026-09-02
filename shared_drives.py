@@ -65,6 +65,7 @@ import argparse
 import logging
 import os
 import sys
+import threading
 import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -90,11 +91,40 @@ class SharedDriveMigrator:
         self.settings = settings
         self.admin_user = admin_user
         self.target_admin = target_admin
-        self.src = auth.source_drive(admin_user)
-        self.tgt = auth.target_drive(target_admin)
         self.stats = {"drives": 0, "members": 0, "files": 0, "folders": 0,
                       "skipped": 0, "failed": 0, "unmapped_members": 0,
                       "unreadable": 0, "external_members": 0}
+        # Mutated from every worker thread once drives migrate concurrently.
+        # `stats[k] += 1` is read-modify-write, so without this two drives
+        # finishing together silently lose a count -- and a number that
+        # undercounts is worse than no number, because it looks like data.
+        self._stats_lock = threading.Lock()
+
+    # Resolved per access, never cached on the instance.
+    #
+    # These were built once in __init__, on whichever thread constructed the
+    # migrator. Each holds an httplib2.Http, which is NOT thread-safe (it is
+    # the first thing requirements.txt says about it), so once drives began
+    # migrating concurrently every worker was hammering one shared object.
+    # That is not a race that produces a wrong answer -- it aborts the
+    # process at the C level:
+    #
+    #     rc=-6   corrupted size vs. prev_size
+    #
+    # AuthManager already caches services in threading.local() for exactly
+    # this reason, so asking it each time is both correct and cheap.
+    # DriveMigrator has always done it this way; this class had drifted.
+    @property
+    def src(self):
+        return self.auth.source_drive(self.admin_user)
+
+    @property
+    def tgt(self):
+        return self.auth.target_drive(self.target_admin)
+
+    def _bump(self, key: str, n: int = 1) -> None:
+        with self._stats_lock:
+            self.stats[key] += n
 
     # -- reading -------------------------------------------------------------
     def list_source_drives(self, all_drives: bool) -> list[dict]:
@@ -252,7 +282,7 @@ class SharedDriveMigrator:
             self.db.log_audit(self.admin_user, drive.get("id") or "?",
                               "shared_drive", "FAILED",
                               f"{type(exc).__name__}: {exc}")
-            self.stats["failed"] += 1
+            self._bump("failed", 1)
 
     def _migrate_one(self, drive: dict) -> None:
         src_id, name = drive["id"], drive.get("name") or "Shared drive"
@@ -262,16 +292,16 @@ class SharedDriveMigrator:
         # teamDriveMembershipRequired for the ones it isn't.
         reader = self.reader_for(src_id, name)
         if reader is None:
-            self.stats["unreadable"] += 1
+            self._bump("unreadable", 1)
             return
 
         existing = self.db.get_target_id(self.admin_user, src_id, "shared_drive")
         if existing:
             tgt_id = existing
-            self.stats["skipped"] += 1
+            self._bump("skipped", 1)
         elif self.settings.dry_run:
             log.info("[DRY RUN] would create shared drive %r", name)
-            self.stats["drives"] += 1
+            self._bump("drives", 1)
             return
         else:
             try:
@@ -280,12 +310,12 @@ class SharedDriveMigrator:
             except Exception as exc:  # noqa: BLE001
                 self.db.log_audit(self.admin_user, src_id, "shared_drive",
                                   "FAILED", str(exc))
-                self.stats["failed"] += 1
+                self._bump("failed", 1)
                 return
             tgt_id = created["id"]
             self.db.record_mapping(self.admin_user, src_id, tgt_id,
                                    "shared_drive", source_name=name)
-            self.stats["drives"] += 1
+            self._bump("drives", 1)
 
         # Members before files: an interrupted run must not leave a drive that
         # nobody on the target can administer.
@@ -298,7 +328,7 @@ class SharedDriveMigrator:
         except Exception as exc:  # noqa: BLE001
             self.db.log_audit(self.admin_user, src_id, "shared_drive_member",
                               "FAILED", f"could not list members: {exc}")
-            self.stats["failed"] += 1
+            self._bump("failed", 1)
             return
 
         members.sort(key=lambda p: ROLE_ORDER.index(p.get("role"))
@@ -311,7 +341,7 @@ class SharedDriveMigrator:
                     self.admin_user, f"{src_id}:{p.get('type')}",
                     "shared_drive_member", "SKIPPED_NOT_A_USER",
                     f"type={p.get('type')} role={p.get('role')}")
-                self.stats["skipped"] += 1
+                self._bump("skipped", 1)
                 continue
             email = (p.get("emailAddress") or "").lower()
             mapped = self.db.resolve_identity(email)
@@ -324,7 +354,7 @@ class SharedDriveMigrator:
                     self.admin_user, p.get("emailAddress") or "?",
                     "shared_drive_member", "SKIPPED_UNMAPPED_IDENTITY",
                     f"no target account; role={p.get('role')} lost on {name}")
-                self.stats["unmapped_members"] += 1
+                self._bump("unmapped_members", 1)
                 continue
             else:
                 # An EXTERNAL member -- a partner, a contractor, a personal
@@ -338,9 +368,9 @@ class SharedDriveMigrator:
                 # shared drive and silently lost their membership OF it --
                 # the access that actually cascades.
                 grantee = email
-                self.stats["external_members"] += 1
+                self._bump("external_members", 1)
             if self.settings.dry_run:
-                self.stats["members"] += 1
+                self._bump("members", 1)
                 continue
             try:
                 self.tgt.permissions().create(
@@ -353,7 +383,7 @@ class SharedDriveMigrator:
                     continue
                 self.db.log_audit(self.admin_user, grantee,
                                   "shared_drive_member", "FAILED", str(exc))
-                self.stats["failed"] += 1
+                self._bump("failed", 1)
                 continue
             # Audited, not just counted. Only failures and skips were recorded
             # before, so a restored drive-level role left no trace at all --
@@ -362,7 +392,7 @@ class SharedDriveMigrator:
             # that had just restored eleven of them.
             self.db.log_audit(self.admin_user, grantee, "shared_drive_member",
                               "SUCCESS", f"{p.get('role', 'reader')} on {name}")
-            self.stats["members"] += 1
+            self._bump("members", 1)
 
     def _copy_contents(self, src_id: str, tgt_id: str, name: str,
                        reader: str | None = None) -> None:
@@ -392,11 +422,11 @@ class SharedDriveMigrator:
             log.exception("[%s] shared drive %r contents failed", name, src_id)
             self.db.log_audit(self.admin_user, src_id, "shared_drive",
                               "FAILED", f"contents: {type(exc).__name__}: {exc}")
-            self.stats["failed"] += 1
+            self._bump("failed", 1)
             return
-        self.stats["files"] += result.get("files", 0)
-        self.stats["folders"] += result.get("folders", 0)
-        self.stats["failed"] += result.get("failed", 0)
+        self._bump("files", result.get("files", 0))
+        self._bump("folders", result.get("folders", 0))
+        self._bump("failed", result.get("failed", 0))
         self.db.log_audit(self.admin_user, src_id, "shared_drive", "SUCCESS",
                           f"{result.get('files', 0)} file(s) in {name}")
 

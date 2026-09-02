@@ -700,3 +700,44 @@ class TestDrivesMigrateConcurrently:
         sd._migrate_one = lambda d: order.append(d["id"])
         sd.migrate_all(True, workers=1)
         assert order == ["d0", "d1"]
+
+
+class TestConcurrencyIsActuallyThreadSafe:
+    """The first parallel version aborted the process at the C level:
+
+        rc=-6   corrupted size vs. prev_size
+
+    __init__ built self.src/self.tgt once, on whichever thread constructed
+    the migrator, and each holds an httplib2.Http -- which is not
+    thread-safe, and is the first thing requirements.txt says about it. Every
+    worker then hammered that one shared object. AuthManager already caches
+    services in threading.local() for exactly this reason; this class had
+    cached them on the instance instead and defeated it.
+    """
+
+    def test_clients_are_resolved_per_access_not_cached_on_the_instance(self, sd):
+        calls = []
+        real = sd.auth.source_drive
+        sd.auth.source_drive = lambda u: (calls.append(u), real(u))[1]
+
+        sd.src; sd.src; sd.src
+
+        # three accesses, three asks -- so a worker thread gets its own
+        assert len(calls) == 3, "src was cached instead of re-resolved"
+        assert "src" not in sd.__dict__ and "tgt" not in sd.__dict__
+
+    def test_stats_do_not_lose_counts_under_concurrency(self, sd):
+        """stats[k] += 1 is read-modify-write. Two drives finishing together
+        silently dropped a count, and a number that undercounts is worse than
+        no number because it looks like data."""
+        import threading
+
+        def hammer():
+            for _ in range(400):
+                sd._bump("members")
+
+        threads = [threading.Thread(target=hammer) for _ in range(4)]
+        for t in threads: t.start()
+        for t in threads: t.join()
+
+        assert sd.stats["members"] == 1600, sd.stats["members"]
