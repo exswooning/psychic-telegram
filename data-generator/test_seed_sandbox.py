@@ -1275,3 +1275,62 @@ class TestSeedTasks:
         assert len(tasks.lists) == 1
         assert tasks.lists[other]["title"] == "A real list"
         assert len(tasks.task_store[other]) == 1   # untouched
+
+
+# ======================================================================
+# Drive links in mail
+#
+# The corpus had none, so the failure mode that outlives every tenant move
+# -- a migrated email whose Drive link points at a file about to be deleted
+# -- could not be reproduced against a live tenant, and neither could the
+# code that fixes it. These pin the two shapes that actually break a naive
+# implementation, using the seeder's own builders.
+# ======================================================================
+class TestSeededMailCarriesRealDriveLinks:
+    FID = "1W9LfPnBbe_UMxq-Dt6-TItuD7_LKRAnd"      # real id shape, 33 chars
+
+    def test_every_link_shape_drive_hands_out_is_seeded(self):
+        import seed_sandbox as ss
+        shapes = {ss._drive_link(self.FID, i) for i in range(4)}
+        assert len(shapes) == 4, "the four shapes must be distinct"
+        assert all(self.FID in u for u in shapes)
+
+    def test_the_html_message_is_quoted_printable(self):
+        """Real HTML mail arrives QP-encoded, and that is what defeats a
+        rewriter that regexes the raw MIME."""
+        import seed_sandbox as ss
+        raw = ss._rfc822("s", "a@x.test", "b@x.test", 1,
+                         html=ss._linked_html(self.FID))
+        assert b"quoted-printable" in raw
+
+    def test_the_seeded_html_defeats_a_raw_mime_regex(self):
+        """The reason this message is in the corpus at all.
+
+        Against the raw bytes the pattern finds one match and it is wrong --
+        it swallows the `=3D` quoted-printable escape, yielding an id that
+        does not exist -- and misses the second link entirely, because the
+        76-column fold lands inside its id. Decoding first finds both.
+        """
+        import seed_sandbox as ss
+        from link_rewrite import DRIVE_ID, rewrite_raw
+
+        raw = ss._rfc822("s", "a@x.test", "b@x.test", 1,
+                         html=ss._linked_html(self.FID))
+        naive = DRIVE_ID.findall(raw)
+        assert self.FID.encode() not in naive, (
+            "if the raw bytes ever yield the real id, this message has "
+            "stopped exercising the case it exists for")
+
+        _, n = rewrite_raw(base64.urlsafe_b64encode(raw).decode(),
+                           {self.FID: "TGT" + "z" * 30}.get)
+        assert n == 2, f"both links should rewrite after decoding, got {n}"
+
+    def test_a_plain_text_link_message_rewrites(self):
+        import seed_sandbox as ss
+        from link_rewrite import rewrite_raw
+
+        raw = ss._rfc822("s", "a@x.test", "b@x.test", 1,
+                         body=ss._linked_body(self.FID, 0))
+        _, n = rewrite_raw(base64.urlsafe_b64encode(raw).decode(),
+                           {self.FID: "TGT" + "z" * 30}.get)
+        assert n == 1

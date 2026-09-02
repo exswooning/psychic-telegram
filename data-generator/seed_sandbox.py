@@ -65,6 +65,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import quopri
 import concurrent.futures as futures
 import io
 import json
@@ -400,7 +401,7 @@ def _iso(days_ago: int) -> str:
 # ======================================================================
 def _rfc822(subject: str, sender: str, to: str, days_ago: int,
             body: str = "", msg_id: str = "", in_reply_to: str = "",
-            cc: str = "", attachment_kb: int = 0) -> bytes:
+            cc: str = "", attachment_kb: int = 0, html: str = "") -> bytes:
     date = (datetime.now(timezone.utc) - timedelta(days=days_ago)).strftime(
         "%a, %d %b %Y %H:%M:%S +0000"
     )
@@ -426,8 +427,47 @@ def _rfc822(subject: str, sender: str, to: str, days_ago: int,
                  "Content-Transfer-Encoding: base64", "", blob, f"--{b}--", ""]
         return ("\r\n".join(headers + [""] + parts)).encode()
 
+    if html:
+        # Quoted-printable on purpose. It is how real HTML mail arrives, and
+        # it is the shape that breaks a naive link rewriter: QP folds at 76
+        # characters, which lands mid-id on a Drive URL, so a regex run over
+        # the raw MIME sees two fragments and matches neither. Seeding it
+        # means any regression in link_rewrite.py fails against live mail
+        # rather than only in unit tests.
+        headers += ["Content-Type: text/html; charset=UTF-8",
+                    "Content-Transfer-Encoding: quoted-printable"]
+        payload = quopri.encodestring(html.encode()).decode("ascii")
+        return ("\r\n".join(headers + ["", payload, ""])).encode()
+
     headers.append("Content-Type: text/plain; charset=UTF-8")
     return ("\r\n".join(headers + ["", body, ""])).encode()
+
+
+# Every URL shape Drive hands out. A migrated message keeps these verbatim,
+# and they name the *source* file by id -- so after the source tenant is
+# deleted every one of them 404s unless REWRITE_DRIVE_LINKS repointed it.
+# The corpus had none at all, which meant that whole failure mode, and the
+# code that fixes it, could not be exercised against a live tenant.
+def _drive_link(file_id: str, shape: int = 0) -> str:
+    return [f"https://docs.google.com/document/d/{file_id}/edit",
+            f"https://drive.google.com/open?id={file_id}",
+            f"https://drive.google.com/file/d/{file_id}/view",
+            f"https://drive.google.com/drive/folders/{file_id}"][shape % 4]
+
+
+def _linked_body(file_id: str, shape: int) -> str:
+    return ("Recorded for audit. See the linked document for detail:\r\n\r\n"
+            f"    {_drive_link(file_id, shape)}\r\n\r\nThanks.")
+
+
+def _linked_html(file_id: str) -> str:
+    # &amp; because that is how a query separator arrives inside an href --
+    # a rewriter matching only on a bare & misses every HTML mail.
+    return ("<html><body><p>Latest numbers are in "
+            f'<a href="https://drive.google.com/uc?export=view&amp;id={file_id}">'
+            "this sheet</a>, and the folder is "
+            f'<a href="https://drive.google.com/drive/folders/{file_id}">here</a>.'
+            "</p></body></html>")
 
 
 SUBJECTS = [
@@ -439,12 +479,17 @@ SUBJECTS = [
 
 
 def seed_gmail(gmail, settings: Settings, user: str, peers: list[str],
-               external: str, count: int) -> dict:
+               external: str, count: int, drive_items: dict | None = None) -> dict:
     """Seed a mailbox with mail from the other four users, in every state."""
     retry = _retry_factory(settings)
     rng = random.Random(hash(user) & 0xFFFF)
     m = {"messages": 0, "unread": 0, "starred": 0, "in_spam": 0, "in_trash": 0,
-         "with_attachment": 0, "labels": [], "thread_size": 3}
+         "with_attachment": 0, "labels": [], "thread_size": 3,
+         "with_drive_link": 0}
+    # Real ids from this user's own Drive corpus, seeded moments ago by the
+    # CorpusBuilder -- so the links resolve to files the migration will
+    # actually copy, and the rewrite can be checked end to end.
+    linkable = [v for v in (drive_items or {}).values() if isinstance(v, str)]
 
     def make_label(name):
         return retry(lambda: gmail.users().labels().create(
@@ -523,15 +568,21 @@ def seed_gmail(gmail, settings: Settings, user: str, peers: list[str],
             labels = ["SENT"]
 
         att = 2048 if rng.random() < 0.05 else 0
+        # A fifth of the corpus links to a real file in this user's Drive --
+        # the everyday case ("see the doc") that made link rot the most
+        # common complaint after a tenant move.
+        linked = linkable and not att and rng.random() < 0.2
+        body = _linked_body(rng.choice(linkable), rng.randint(0, 3)) if linked else ""
         raw = _rfc822(subj, sender, user, rng.randint(1, 2000),
+                      body=body,
                       cc=rng.choice(peers) if rng.random() < 0.3 else "",
                       attachment_kb=att)
-        plans.append((raw, labels, att))
+        plans.append((raw, labels, att, bool(linked)))
 
     mlock = threading.Lock()
 
     def _insert_one(pl) -> None:
-        raw, labels, att = pl
+        raw, labels, att, linked = pl
         try:
             insert(raw, labels)
         except Exception as exc:  # noqa: BLE001
@@ -544,8 +595,28 @@ def seed_gmail(gmail, settings: Settings, user: str, peers: list[str],
             m["in_spam"] += "SPAM" in labels
             m["in_trash"] += "TRASH" in labels
             m["with_attachment"] += bool(att)
+            m["with_drive_link"] += linked
 
     _run_parallel(plans, _insert_one, MAIL_CAL_WORKERS)
+
+    # Two deterministic link-bearing messages, so verifying the rewrite never
+    # depends on the rng having fired. The HTML one carries both hard cases
+    # at once: an entity-encoded &amp;id= separator, and a quoted-printable
+    # body whose soft line break lands inside the file id.
+    if linkable:
+        for i, (subj, html) in enumerate([
+                ("Linked doc for review", ""),
+                ("Latest numbers (html)", _linked_html(linkable[0]))]):
+            raw = _rfc822(subj, peers[0], user, 30 - i,
+                          body=_linked_body(linkable[0], 0) if not html else "",
+                          msg_id=f"drivelink-{i}-{user.split('@')[0]}",
+                          html=html)
+            try:
+                insert(raw, ["INBOX"])
+                m["messages"] += 1
+                m["with_drive_link"] += 1
+            except Exception as exc:  # noqa: BLE001
+                print(f"  ! drive-link message {i}: {exc}")
 
     # A deterministic three-message thread, so threading can be checked by hand.
     root_id = f"thread-root-{user.split('@')[0]}"
@@ -1598,7 +1669,8 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
     builder = CorpusBuilder(drive, settings, user, peers, external, scale,
                             _media, retry)
     drive_m = builder.build(entry["dept"], entry["project"], edge_cases)
-    gmail_m = seed_gmail(gmail, settings, user, peers, external, mail_count)
+    gmail_m = seed_gmail(gmail, settings, user, peers, external, mail_count,
+                         drive_items=drive_m.get("items"))
     gmail_m.update(seed_drafts(gmail, settings, user, peers))
     cal_m = seed_calendar(cal, settings, user, peers, external, event_count)
     cal_m.update(seed_secondary_calendars(cal, settings, user, peers))
