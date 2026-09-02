@@ -152,6 +152,13 @@ def main(argv: list[str] | None = None) -> int:
 
     settings = Settings()
     db = MigrationDB(settings.db_path)
+    # Which ledger, always, before any number. Run from the UI button this is
+    # the signed-in account's; run bare from a shell it is the box's default
+    # placeholder, where every query is valid, fast, and about nothing -- and
+    # the report reads "0 external collaborators", which is the most
+    # dangerous possible answer to the question this tool asks.
+    print(f"ledger  : {settings.db_path}")
+    print(f"tenants : {settings.source_domain} -> {settings.target_domain}")
     report = collect(db, settings)
     if args.json:
         with open(args.json, "w") as fh:
