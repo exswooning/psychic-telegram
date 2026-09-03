@@ -343,6 +343,16 @@ ACTIONS: dict[str, dict] = {
         "argv": [PY, "acl_audit.py", "--json", "acl_audit.json"],
     },
 
+    "ui_check": {
+        "label": "Check the UI tells the truth",
+        "blurb": "Signs in and drives every page in the router, reconciles "
+                 "the two servers' counts against the ledger, and confirms no "
+                 "migrated message still links to a source file. Read-only. "
+                 "Every one of these was found by hand first.",
+        "argv": [PY, "ui_check.py", "--json", "ui_check.json"],
+        "parallel": True,
+    },
+
     "external_shares": {
         "label": "External collaborators",
         "blurb": "Who outside both tenants still holds access, and the new "
@@ -1213,7 +1223,8 @@ STEP_ACTIONS: dict[int, list[str]] = {
     6: ["provision_dry", "provision"],
     7: ["check_seed_accounts", "check_seed_scopes"],
     8: ["discover", "migrate_dry", "migrate"],
-    9: ["verify", "report", "acl_audit", "resolve", "external_shares"],
+    9: ["verify", "report", "acl_audit", "resolve", "external_shares",
+        "ui_check"],
 }
 
 
