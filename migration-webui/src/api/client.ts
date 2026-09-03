@@ -190,7 +190,11 @@ export async function fetchJobHistory(name: string): Promise<JobResult | null> {
 
 export interface TogglesPayload {
   ok: boolean
-  toggles: { dry_run: boolean; services: Record<string, boolean> }
+  toggles: {
+    dry_run: boolean
+    services: Record<string, boolean>
+    rewrite_drive_links?: boolean
+  }
 }
 
 /** The launch toggles the phased actions read. GET, so the switches can be
@@ -201,12 +205,20 @@ export async function fetchToggles(): Promise<TogglesPayload> {
 
 export async function setToggles(
   services: Record<string, boolean>,
-  dryRun?: boolean
+  dryRun?: boolean,
+  rewriteDriveLinks?: boolean
 ): Promise<TogglesPayload> {
   const res = await fetch('/api/toggles', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ services, dry_run: dryRun }),
+    // Omitted means unchanged, not off -- the server reads a missing key
+    // that way, and a partial body from one switch must not silently
+    // reset another.
+    body: JSON.stringify({
+      services,
+      dry_run: dryRun,
+      rewrite_drive_links: rewriteDriveLinks,
+    }),
   })
   return res.json()
 }

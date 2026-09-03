@@ -2829,6 +2829,15 @@ _RUN_STATE: dict = {
     "dry_run": False,
     "services": {"drive": True, "gmail": True, "calendar": True,
                 "chat": False, "contacts": False, "tasks": False},
+    # Repoint Drive links inside migrated mail at the copies on the target.
+    # A launch toggle rather than an env-only setting because it is a
+    # per-run decision with a real trade -- it rewrites message bodies,
+    # which invalidates their DKIM signatures -- and because a feature that
+    # cannot be switched on from the product cannot be checked from it
+    # either. Off by default: the engine refuses to start a mail pass with
+    # this on before Drive has run, so leaving it on by accident would turn
+    # a mail-only migration into a hard failure.
+    "rewrite_drive_links": False,
 }
 
 # Actions whose argv follow the launch toggles (everything else uses its
@@ -3500,6 +3509,9 @@ def set_toggles(body: dict) -> dict:
     dry = body.get("dry_run")
     if dry is not None:
         _RUN_STATE["dry_run"] = bool(dry)
+    rewrite = body.get("rewrite_drive_links")
+    if rewrite is not None:
+        _RUN_STATE["rewrite_drive_links"] = bool(rewrite)
     svcs = body.get("services")
     if isinstance(svcs, dict):
         for k in _RUN_STATE["services"]:
@@ -3619,6 +3631,20 @@ def _action_argv(name: str) -> list:
     if _RUN_STATE["dry_run"]:
         argv.insert(2, "--dry-run")
     return argv
+
+
+def _launch_env(base: dict) -> dict:
+    """Toggles that travel as environment rather than argv.
+
+    main.py has no --rewrite-drive-links flag; the engine reads the setting
+    off Settings(), which reads the environment. Threading it through here
+    keeps the toggle a per-run choice instead of something that has to be
+    edited into env.sh by hand and then remembered about.
+    """
+    env = dict(base)
+    env["REWRITE_DRIVE_LINKS"] = (
+        "true" if _RUN_STATE.get("rewrite_drive_links") else "false")
+    return env
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -4417,6 +4443,11 @@ class Handler(BaseHTTPRequestHandler):
                                             from_ledger=(name == "phased_count_only")))
         else:
             env = _account_env(account_id, gcloud_env())
+
+        # Only the launch actions honour the toggles; every other action has
+        # a fixed argv and no business inheriting a per-run choice.
+        if name in _LAUNCH_KEYS:
+            env = _launch_env(env)
 
         if spec.get("parallel"):
             # A dedicated Job instance so it does not collide with the

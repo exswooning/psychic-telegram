@@ -159,6 +159,12 @@ dialog{
 dialog::backdrop{background:rgba(0,0,0,.5)}
 dialog .body{padding:18px}
 dialog .foot{display:flex; gap:8px; justify-content:flex-end; padding:14px 18px; border-top:1px solid var(--line)}
+.toggles{border:1px solid var(--line); border-radius:10px; padding:12px 14px;
+  margin-bottom:12px; background:var(--surface-2)}
+.tg{display:flex; align-items:center; gap:9px; min-height:34px;
+  font-weight:600; cursor:pointer}
+.tg input{width:17px; height:17px; cursor:pointer}
+.tg-note{margin:6px 0 0; font-size:.8125rem; max-width:70ch}
 .more{display:flex; align-items:center; gap:10px; flex-wrap:wrap;
   margin-top:10px; padding-top:10px; border-top:1px solid var(--line);
   font-size:.8125rem; color:var(--ink-3)}
@@ -271,6 +277,17 @@ dialog .foot{display:flex; gap:8px; justify-content:flex-end; padding:14px 18px;
     <div class="row" style="margin-bottom:10px">
       <label for="afilter" class="sr">Filter actions</label>
       <input type="search" id="afilter" placeholder="Filter actions…" style="max-width:280px" autocomplete="off">
+    </div>
+    <div class="toggles" id="toggles">
+      <label class="tg">
+        <input type="checkbox" id="tg-rewrite">
+        <span>Rewrite Drive links in mail</span>
+      </label>
+      <p class="muted tg-note">A Drive link names a file by id, and copying mints a
+        new one — so every link in migrated mail points at the source file and
+        dies with the source tenant. This repoints the ones in mail we migrate.
+        Drive must run before Gmail or the migration refuses to start, because a
+        message already inserted is never re-examined.</p>
     </div>
     <div class="actions" id="actions"><p class="muted">loading…</p></div>
   </section>
@@ -481,6 +498,25 @@ async function loadStatus(){
       pill($('#logpill'),s.job.rc===0?'ok':'bad', s.job.rc===0?'exit 0':'exit '+s.job.rc);}
   }catch(e){pill($('#jobpill'),'bad','status unavailable');}
 }
+async function loadToggles(){
+  try{
+    const t=(await get('/api/toggles')).toggles||{};
+    $('#tg-rewrite').checked=!!t.rewrite_drive_links;
+  }catch(e){
+    // Drawn from the server, never from what this page assumed -- a switch
+    // showing "off" while the run has it on is worse than no switch.
+    $('#toggles').innerHTML='<p class="err">Toggles unavailable: '+(e.message||e)+'</p>';
+  }
+}
+async function flipRewrite(on){
+  try{
+    const r=await fetch('/api/toggles',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({rewrite_drive_links:on})});
+    const j=await r.json();
+    $('#tg-rewrite').checked=!!(j.toggles&&j.toggles.rewrite_drive_links);
+  }catch(e){banner('Could not change the toggle: '+(e.message||e));}
+}
 async function loadActions(){
   try{
     const a=await get('/api/actions');
@@ -491,6 +527,7 @@ async function loadActions(){
 }
 function renderActions(){
   const q=($('#afilter').value||'').toLowerCase();
+$('#tg-rewrite').addEventListener('change', e => flipRewrite(e.target.checked));
   const a=window._actions||{}; const box=$('#actions'); box.innerHTML='';
   const keys=Object.keys(a).sort().filter(k=>!q||k.includes(q)||(a[k].label||'').toLowerCase().includes(q));
   if(!keys.length){box.appendChild(el('p','muted','No actions match that filter.')); return;}
@@ -562,7 +599,7 @@ try{const t=localStorage.getItem('bp-theme'); if(t)document.documentElement.setA
 
 function refreshAll(manual){
   loadStatus(); loadProgress(); loadVolume(); loadFailures(); loadShared(); loadHost();
-  if(manual){loadTenant(); loadActions();}
+  if(manual){loadTenant(); loadActions(); loadToggles();}
 }
 loadTenant(); loadActions(); refreshAll(false);
 setInterval(loadStatus,3000);
