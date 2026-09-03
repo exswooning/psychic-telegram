@@ -2829,6 +2829,14 @@ _RUN_STATE: dict = {
     "dry_run": False,
     "services": {"drive": True, "gmail": True, "calendar": True,
                 "chat": False, "contacts": False, "tasks": False},
+    # How far back a delta pass looks, in days. Two was hardcoded, and two
+    # is wrong for anything but a same-day catch-up: Gmail's newer_than
+    # filters on the message's own date, not when it arrived, so backdated
+    # mail is invisible to it. Seeded mail is backdated up to 2000 days, so
+    # a delta saw 4 of 113 new messages and reported success -- and `migrate`
+    # refuses a user already marked DONE, which left no way at all to migrate
+    # new content into an existing user from the UI.
+    "delta_days": 2,
     # Limit a run to named source users. Empty means every mapped user,
     # which is the right default for a real migration and the wrong one for
     # checking a change: on this tenant that is 200 users and roughly six
@@ -3521,6 +3529,12 @@ def set_toggles(body: dict) -> dict:
     users = body.get("users")
     if users is not None:
         _RUN_STATE["users"] = str(users).strip()
+    days = body.get("delta_days")
+    if days is not None:
+        try:
+            _RUN_STATE["delta_days"] = max(1, int(days))
+        except (TypeError, ValueError):
+            pass
     svcs = body.get("services")
     if isinstance(svcs, dict):
         for k in _RUN_STATE["services"]:
@@ -3636,7 +3650,7 @@ def _action_argv(name: str) -> list:
     if chosen:
         argv += ["--services", ",".join(chosen)]
     if name == "delta":
-        argv += ["--days", "2"]
+        argv += ["--days", str(_RUN_STATE.get("delta_days") or 2)]
     for u in [x.strip() for x in (_RUN_STATE.get("users") or "").split(",")]:
         if u:
             argv += ["--user", u]

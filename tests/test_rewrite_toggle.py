@@ -134,3 +134,56 @@ class TestScopingARunToNamedUsers:
         webui.set_toggles({"users": "a@x.test"})
         webui.set_toggles({"users": ""})
         assert "--user" not in webui._action_argv("migrate")
+
+
+class TestTheDeltaWindowIsSettable:
+    """--days was hardcoded to 2, and 2 is wrong for anything but a same-day
+    catch-up.
+
+    Gmail's newer_than filters on the message's own Date header, not on when
+    it arrived, so backdated mail is invisible to a short window. Seeded mail
+    is backdated up to 2000 days: live, a delta matched 4 of 113 new messages
+    and reported success. And `migrate` refuses a user already marked DONE,
+    so between them there was no way to migrate new content into an existing
+    user from the UI at all.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean(self):
+        before = webui._RUN_STATE.get("delta_days")
+        webui._RUN_STATE["delta_days"] = 2
+        yield
+        webui._RUN_STATE["delta_days"] = before
+
+    def test_the_default_is_unchanged(self):
+        argv = webui._action_argv("delta")
+        assert argv[argv.index("--days") + 1] == "2"
+
+    def test_a_wider_window_reaches_the_command(self):
+        webui.set_toggles({"delta_days": 3000})
+        argv = webui._action_argv("delta")
+        assert argv[argv.index("--days") + 1] == "3000"
+
+    def test_a_string_from_a_form_field_is_accepted(self):
+        """Every value from an HTML input arrives as a string."""
+        webui.set_toggles({"delta_days": "45"})
+        assert webui._RUN_STATE["delta_days"] == 45
+
+    def test_nonsense_keeps_the_last_good_value(self):
+        """Silently falling back to 2 would quietly narrow a window the
+        operator had deliberately widened."""
+        webui.set_toggles({"delta_days": 500})
+        webui.set_toggles({"delta_days": "not a number"})
+        assert webui._RUN_STATE["delta_days"] == 500
+
+    def test_zero_and_negative_are_floored_to_one(self):
+        """--days 0 matches nothing, which looks exactly like a clean run."""
+        webui.set_toggles({"delta_days": 0})
+        assert webui._RUN_STATE["delta_days"] == 1
+        webui.set_toggles({"delta_days": -5})
+        assert webui._RUN_STATE["delta_days"] == 1
+
+    def test_migrate_never_gets_a_days_flag(self):
+        """A full pass has no window; passing one would be a silent filter."""
+        webui.set_toggles({"delta_days": 900})
+        assert "--days" not in webui._action_argv("migrate")
