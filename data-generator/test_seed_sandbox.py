@@ -16,6 +16,7 @@ union exactly once, not once per recipient.
 from __future__ import annotations
 
 import base64
+import os
 import re
 
 import pytest
@@ -1409,3 +1410,64 @@ class TestASmallOrgStillSeeds:
         b = _builder(drive, settings, "alice@tenanta.com", ["bob@tenanta.com"])
         m = b.build("Engineering", "PRJ-001-Apollo", edge_cases=True)
         assert m["total_files"] > 0
+
+
+class TestEverySeederSurvivesASoloOrg:
+    """Not just the corpus builder -- seed_gmail, seed_drafts and the
+    calendar seeders each reached into peers directly too.
+
+    These surfaced one at a time, eight minutes apart, because the first
+    crash hid the next: corpus.py:448 died before seed_gmail:579 could,
+    and fixing 448 only bought a longer run to the same message. Hence a
+    test per site rather than one end-to-end run.
+    """
+
+    def test_a_peer_falls_back_instead_of_raising(self):
+        import random
+        from seed_sandbox import _a_peer
+        rng = random.Random(1)
+        assert _a_peer(rng, [], "ext@partner.test") == "ext@partner.test"
+        assert _a_peer(rng, []) == ""
+        assert _a_peer(rng, ["bob@x.test"]) == "bob@x.test"
+
+    @pytest.mark.parametrize("peers", [[], ["bob@tenanta.com"]])
+    def test_no_seeder_indexes_peers_unguarded(self, peers):
+        """A source-level check, because the live cost of finding these one
+        run at a time was ~25 minutes for three of them."""
+        import re
+        src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "seed_sandbox.py"), encoding="utf-8").read()
+        # rng.choice(peers) with no guard, and bare peers[0] not followed by
+        # an `if peers` ternary.
+        bad = re.findall(r"rng\.choice\(peers\)(?!\s*if\s+peers)", src)
+        bad += [m for m in re.findall(r"peers\[0\](?!\s+if\s+peers)", src)]
+        assert not bad, f"unguarded peer access: {bad}"
+
+    def test_every_a_peer_fallback_resolves_in_its_own_scope(self):
+        """The regex check above passes for code that then dies with
+        NameError. Guarding seed_drafts with `external` looked right and is
+        not -- that function has no such parameter, and the failure only
+        appears once a solo seed actually reaches the drafts pass, seven
+        minutes into a live run.
+        """
+        import ast
+        src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "seed_sandbox.py"), encoding="utf-8").read()
+        bad = []
+        for fn in [n for n in ast.walk(ast.parse(src))
+                   if isinstance(n, ast.FunctionDef)]:
+            local = {a.arg for a in fn.args.args} | \
+                    {a.arg for a in fn.args.kwonlyargs} | \
+                    {t.id for n in ast.walk(fn) if isinstance(n, ast.Assign)
+                     for t in n.targets if isinstance(t, ast.Name)}
+            for call in [n for n in ast.walk(fn) if isinstance(n, ast.Call)
+                         and getattr(n.func, "id", "") == "_a_peer"]:
+                for arg in call.args[2:]:
+                    if isinstance(arg, ast.Name) and arg.id not in local:
+                        bad.append(f"{fn.name}(): {arg.id!r} not in scope")
+        assert not bad, bad
+
+    def test_the_corpus_builder_exposes_the_same_guarantee(self, settings):
+        drive = FakeDrive("alice@tenanta.com", "source")
+        b = _builder(drive, settings, "alice@tenanta.com", [])
+        assert b._peer(0) is None and b._peer(5) is None

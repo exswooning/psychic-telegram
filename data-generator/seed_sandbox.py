@@ -449,6 +449,18 @@ def _rfc822(subject: str, sender: str, to: str, days_ago: int,
 # deleted every one of them 404s unless REWRITE_DRIVE_LINKS repointed it.
 # The corpus had none at all, which meant that whole failure mode, and the
 # code that fixes it, could not be exercised against a live tenant.
+def _a_peer(rng, peers: list[str], fallback: str = "") -> str:
+    """A random colleague, or `fallback` when the user has none.
+
+    Every seeder here assumed a five-user org and reached into `peers`
+    directly. Seeding a named subset -- one or two users, which is how you
+    check a change -- leaves it empty, and each of those becomes an
+    IndexError inside a worker thread. They surface one run at a time, eight
+    minutes apart, because the first crash hides the next.
+    """
+    return rng.choice(peers) if peers else fallback
+
+
 def _drive_link(file_id: str, shape: int = 0) -> str:
     return [f"https://docs.google.com/document/d/{file_id}/edit",
             f"https://drive.google.com/open?id={file_id}",
@@ -576,7 +588,7 @@ def seed_gmail(gmail, settings: Settings, user: str, peers: list[str],
         body = _linked_body(rng.choice(linkable), rng.randint(0, 3)) if linked else ""
         raw = _rfc822(subj, sender, user, rng.randint(1, 2000),
                       body=body,
-                      cc=rng.choice(peers) if rng.random() < 0.3 else "",
+                      cc=(_a_peer(rng, peers) if rng.random() < 0.3 else ""),
                       attachment_kb=att)
         plans.append((raw, labels, att, bool(linked)))
 
@@ -608,7 +620,7 @@ def seed_gmail(gmail, settings: Settings, user: str, peers: list[str],
         for i, (subj, html) in enumerate([
                 ("Linked doc for review", ""),
                 ("Latest numbers (html)", _linked_html(linkable[0]))]):
-            raw = _rfc822(subj, peers[0], user, 30 - i,
+            raw = _rfc822(subj, _a_peer(rng, peers, external), user, 30 - i,
                           body=_linked_body(linkable[0], 0) if not html else "",
                           msg_id=f"drivelink-{i}-{user.split('@')[0]}",
                           html=html)
@@ -622,9 +634,9 @@ def seed_gmail(gmail, settings: Settings, user: str, peers: list[str],
     # A deterministic three-message thread, so threading can be checked by hand.
     root_id = f"thread-root-{user.split('@')[0]}"
     for i, (subj, sender, reply_to) in enumerate([
-        ("Q2 numbers", peers[0], ""),
+        ("Q2 numbers", peers[0] if peers else external, ""),
         ("Re: Q2 numbers", user, root_id),
-        ("Re: Q2 numbers", peers[0], root_id),
+        ("Re: Q2 numbers", peers[0] if peers else external, root_id),
     ]):
         raw = _rfc822(subj, sender, user, 60 - i,
                       msg_id=root_id if i == 0 else f"{root_id}-{i}",
@@ -657,7 +669,7 @@ def seed_drafts(gmail, settings: Settings, user: str, peers: list[str],
                 "Notes for Monday", "Reply to vendor — needs review",
                 "Half-finished handover doc"]
     for i in range(count):
-        raw = _rfc822(rng.choice(subjects), user, rng.choice(peers),
+        raw = _rfc822(rng.choice(subjects), user, _a_peer(rng, peers, user),
                       rng.randint(1, 400),
                       body="Still drafting this. Not sent yet.\n")
         try:
@@ -976,7 +988,8 @@ def seed_calendar(cal, settings: Settings, user: str, peers: list[str],
         start, end = window(days, rng.randint(8, 17))
         attendees = [{"email": p, "responseStatus": rng.choice(
             ["accepted", "tentative", "declined", "needsAction"])}
-            for p in rng.sample(peers, rng.randint(1, min(3, len(peers))))]
+            for p in (rng.sample(peers, rng.randint(1, min(3, len(peers))))
+                      if peers else [external])]
         has_ext = rng.random() < 0.15
         if has_ext:
             attendees.append({"email": external, "responseStatus": "tentative"})
@@ -1083,7 +1096,8 @@ def seed_secondary_calendars(cal, settings: Settings, user: str,
         try:
             retry(lambda c=cal_id: cal.acl().insert(
                 calendarId=c, sendNotifications=False,
-                body={"scope": {"type": "user", "value": rng.choice(peers)},
+                body={"scope": {"type": "user",
+                                "value": _a_peer(rng, peers, user)},
                       "role": "reader"},
             ).execute())()
         except Exception:  # noqa: BLE001
