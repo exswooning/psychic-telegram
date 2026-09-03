@@ -258,3 +258,71 @@ class TestBothFindingsAreActionableNotJustCounted:
         text = external_shares.render(external_shares.collect(ledger, settings))
         assert "ORPHAN1" in text
         assert "no address to notify" in text
+
+
+# ----------------------------------------------------------------------
+# audit_log outlives id_mapping, on purpose.
+#
+# wipe_target and clear_user_mappings drop the mappings and deliberately keep
+# the history -- "a tool that erases its own history cannot explain afterwards
+# what it did". So a grant with no mapping is two different things, and this
+# report called both a problem: on the live tenant it told the operator that
+# 323 grants "need a re-run" when every one of them described a run whose
+# target had since been wiped. That is the failure this codebase treats as
+# worse than no number at all, because it sends someone to repair something
+# that already worked. db.mapping_bounds documents the identical trap biting
+# ledger_verify.
+# ----------------------------------------------------------------------
+class TestWipedHistoryIsNotOutstandingWork:
+    @pytest.fixture
+    def settings(self):
+        class S:
+            source_domain = "old.test"
+            target_domain = "new.test"
+        return S()
+
+    @pytest.fixture
+    def ledger(self, tmp_path):
+        db = MigrationDB(str(tmp_path / "m.db"))
+        db.init_schema()
+        return db
+
+    def _grant(self, db, item, ts):
+        db.conn.execute(
+            "INSERT INTO audit_log (source_user, item_id, item_type, status, "
+            "timestamp) VALUES (?,?,?,?,?)",
+            ("u@old.test", item, "acl", "SUCCESS", ts))
+        db.conn.commit()
+
+    def _mapping_at(self, db, src, tgt, ts):
+        db.conn.execute(
+            "INSERT INTO id_mapping (source_user, source_id, target_id, type, "
+            "source_name, created_at) VALUES (?,?,?,?,?,?)",
+            ("u@old.test", src, tgt, "file", "F", ts))
+        db.conn.commit()
+
+    def test_a_grant_older_than_the_mappings_is_history_not_a_gap(self, ledger, settings):
+        self._mapping_at(ledger, SRC, TGT, "2026-03-01T00:00:00Z")
+        self._grant(ledger, "GONE:ext@partner.test", "2026-01-01T00:00:00Z")
+        c = external_shares.collect(ledger, settings)["collaborators"][0]
+        assert c["superseded"] == 1
+        assert c["unresolved"] == 0, "a wiped run must not read as outstanding work"
+
+    def test_a_grant_contemporary_with_the_mappings_is_a_real_gap(self, ledger, settings):
+        self._mapping_at(ledger, SRC, TGT, "2026-03-01T00:00:00Z")
+        self._grant(ledger, "GONE:ext@partner.test", "2026-03-02T00:00:00Z")
+        c = external_shares.collect(ledger, settings)["collaborators"][0]
+        assert c["unresolved"] == 1 and c["superseded"] == 0
+        assert c["unresolved_source_ids"] == ["GONE"]
+
+    def test_a_user_whose_mappings_are_all_gone_reads_as_history(self, ledger, settings):
+        """The whole-tenant wipe: audit rows survive, not one mapping does."""
+        self._grant(ledger, "GONE:ext@partner.test", "2026-01-01T00:00:00Z")
+        c = external_shares.collect(ledger, settings)["collaborators"][0]
+        assert c["superseded"] == 1 and c["unresolved"] == 0
+
+    def test_the_report_does_not_tell_them_to_re_run_wiped_history(self, ledger, settings):
+        self._grant(ledger, "GONE:ext@partner.test", "2026-01-01T00:00:00Z")
+        text = external_shares.render(external_shares.collect(ledger, settings))
+        assert "nothing to chase" in text
+        assert "re-run before the source is deleted" not in text

@@ -48,11 +48,28 @@ def collect(db: MigrationDB, settings: Settings) -> dict:
     files: dict[str, list] = defaultdict(list)
     stranded: dict[str, int] = defaultdict(int)
     orphans: dict[str, list] = defaultdict(list)
+    superseded: dict[str, int] = defaultdict(int)
     public: list = []
+
+    # audit_log OUTLIVES id_mapping, by design: wipe_target and
+    # db.clear_user_mappings drop the mappings and deliberately keep the
+    # history, because a tool that erases its own record cannot explain
+    # afterwards what it did. So a grant with no mapping is two very
+    # different things, and calling both of them a problem is how a report
+    # sends someone to repair a migration that is entirely correct -- which
+    # is exactly what this comparison already had to fix once in
+    # ledger_verify (see db.mapping_bounds).
+    #
+    # The discriminator is the mapping generation: a grant recorded before
+    # this user's current mappings were written belongs to a run whose
+    # target has since been wiped. It is history, not outstanding work.
+    generation = dict(db.conn.execute(
+        "SELECT source_user, MIN(created_at) FROM id_mapping GROUP BY source_user"))
 
     # ix_map_source makes the join indexed; without it this is a nested scan.
     rows = db.conn.execute("""
-        SELECT a.item_id AS item, m.target_id AS tgt, m.source_name AS name
+        SELECT a.item_id AS item, a.source_user AS owner, a.timestamp AS ts,
+               m.target_id AS tgt, m.source_name AS name
           FROM audit_log a
           LEFT JOIN id_mapping m
                  ON m.source_id = substr(a.item_id, 1, instr(a.item_id, ':') - 1)
@@ -77,14 +94,16 @@ def collect(db: MigrationDB, settings: Settings) -> dict:
         if not is_external(grantee):
             continue
         if not r["tgt"]:
-            # Granted, but the file it was granted on has no mapping -- so we
-            # cannot tell them where it went. Never guessed at, and now named
-            # rather than merely counted: a bare number is not something an
-            # operator can chase, and this divergence (audit_log says the
-            # copy succeeded, id_mapping cannot say where it landed) is a
-            # ledger problem in its own right, not just a gap in this report.
-            stranded[grantee] += 1
-            orphans[grantee].append(src_id)
+            born = generation.get(r["owner"])
+            if born is None or (r["ts"] or "") < born:
+                # Predates this user's current mappings, so it describes a
+                # run whose target was wiped. Nothing to chase.
+                superseded[grantee] += 1
+            else:
+                # Contemporary with the mappings that do exist, and still
+                # missing one -- the only case that is actually a gap.
+                stranded[grantee] += 1
+                orphans[grantee].append(src_id)
             continue
         files[grantee].append({"name": r["name"] or "(unnamed)",
                                "url": LINK.format(r["tgt"])})
@@ -98,7 +117,9 @@ def collect(db: MigrationDB, settings: Settings) -> dict:
         if is_external(r["grantee"] or ""):
             drives[r["grantee"]].append(r["detail"] or "")
 
-    people = sorted(set(files) | set(drives) | {k for k in stranded if "@" in k})
+    people = sorted(set(files) | set(drives)
+                    | {k for k in stranded if "@" in k}
+                    | {k for k in superseded if "@" in k})
     return {
         "source_domain": settings.source_domain,
         "target_domain": settings.target_domain,
@@ -112,6 +133,7 @@ def collect(db: MigrationDB, settings: Settings) -> dict:
                 "shared_drives": sorted(drives.get(who, [])),
                 "unresolved": stranded.get(who, 0),
                 "unresolved_source_ids": orphans.get(who, [])[:200],
+                "superseded": superseded.get(who, 0),
             }
             for who in people
         ],
@@ -138,11 +160,15 @@ def render(report: dict, only: str | None = None) -> str:
         if not only and c["file_count"] > 10:
             out.append(f"    ... and {c['file_count'] - 10} more "
                        f"(--email {c['email']} for the full list)")
+        if c["superseded"]:
+            out.append(f"    {c['superseded']} older grant(s) from a run whose "
+                       f"target was later wiped -- history, not outstanding "
+                       f"work, and nothing to chase.")
         if c["unresolved"]:
             out.append(f"    !! {c['unresolved']} grant(s) on files with no "
-                       f"mapping -- new location unknown. audit_log says the "
-                       f"copy succeeded; id_mapping cannot say where it went, "
-                       f"so these need a re-run before the source is deleted.")
+                       f"mapping, recorded alongside mappings that do exist. "
+                       f"Unlike the superseded ones above these are a real "
+                       f"gap: re-run before the source is deleted.")
             for sid in c["unresolved_source_ids"][:5 if not only else 200]:
                 out.append(f"       source id {sid}")
             if not only and c["unresolved"] > 5:
