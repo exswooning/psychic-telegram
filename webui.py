@@ -3550,13 +3550,36 @@ def set_toggles(body: dict) -> dict:
         _RUN_STATE["dry_run"] = bool(dry)
     rewrite = body.get("rewrite_drive_links")
     if rewrite is not None:
-        _RUN_STATE["rewrite_drive_links"] = bool(rewrite)
+        if rewrite and _RUN_STATE.get("mail_transport") == "dms":
+            # Refused rather than accepted-and-ignored: under DMS this
+            # setting has no code path to run in.
+            _RUN_STATE["rewrite_drive_links"] = False
+            _RUN_STATE["last_note"] = (
+                "Drive-link rewriting needs the engine to carry the mail. "
+                "Switch 'Mail carried by' to This engine first.")
+        else:
+            _RUN_STATE["rewrite_drive_links"] = bool(rewrite)
+            _RUN_STATE.pop("last_note", None)
     users = body.get("users")
     if users is not None:
         _RUN_STATE["users"] = str(users).strip()
     transport = body.get("mail_transport")
     if transport in ("engine", "dms"):
         _RUN_STATE["mail_transport"] = transport
+        if transport == "dms" and _RUN_STATE.get("rewrite_drive_links"):
+            # DMS never passes a message through gmail_engine -- Google
+            # copies the bytes and we never hold them -- so link rewriting
+            # cannot run at all under it. Leaving the switch on would be a
+            # flag that silently does nothing, which is the failure the
+            # ordering guard exists to prevent; making it off and saying so
+            # is the honest version of the same rule.
+            _RUN_STATE["rewrite_drive_links"] = False
+            _RUN_STATE["last_note"] = (
+                "Drive-link rewriting was turned off: DMS hands the mail to "
+                "Google, so nothing here ever holds a message to rewrite. "
+                "Links in DMS-imported mail keep pointing at the source.")
+        else:
+            _RUN_STATE.pop("last_note", None)
     days = body.get("delta_days")
     if days is not None:
         try:

@@ -85,11 +85,34 @@ class TestTheScopeIsAvailableButNotForced:
         from config import CHAT_DELETE_SCOPE, CHAT_SCOPES
         assert CHAT_DELETE_SCOPE not in CHAT_SCOPES
 
-    def test_reset_target_does_not_force_it_on(self):
-        # It did, briefly, and that would fail every target call on any
-        # tenant without the grant.
+    def test_reset_target_never_enables_it_without_proving_the_grant(self):
+        """It once set the flag unconditionally, and that fails every target
+        call on a tenant without the grant -- an ungranted scope takes down
+        the whole token exchange, Drive and Gmail with it.
+
+        The rule is "never without the grant", not "never". Requiring a human
+        to remember a second switch has its own failure, and it is the quiet
+        one: the grant was made months ago, the flag never followed, and the
+        reset silently left every Chat space standing. So enabling it is
+        allowed only where a token mint has just proved the scope is real.
+
+        Asserted structurally rather than as a string match, because the
+        previous check could not tell a blind force from a verified one.
+        """
         src = open(os.path.join(ROOT, "reset_target.py"), encoding="utf-8").read()
-        assert "settings.chat_allow_delete = True" not in src
+        if "chat_allow_delete = True" not in src:
+            return                      # not enabling it at all is still fine
+        # Everything from the probe to the assignment must sit in the `else`
+        # of a try that refreshes real credentials.
+        head = src.split("chat_allow_delete = True")[0]
+        assert "creds.refresh(" in head, \
+            "the flag is set without minting a token to prove the scope"
+        assert "CHAT_DELETE_SCOPE" in head, \
+            "the token minted must be for chat.delete specifically"
+        tail = head.rsplit("creds.refresh(", 1)[1]
+        assert "else:" in tail, \
+            "the flag must be set in the else of the probe, not after it -- " \
+            "an exception path that still enables it is the original bug"
 
 
 class TestAFailedDeleteIsNoLongerSilent:

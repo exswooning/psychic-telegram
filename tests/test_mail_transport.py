@@ -34,13 +34,15 @@ SERVICES = {"drive": True, "gmail": True, "calendar": True,
 def _clean():
     before = (dict(webui._RUN_STATE["services"]),
               webui._RUN_STATE.get("mail_transport"),
-              webui._RUN_STATE.get("users"))
+              webui._RUN_STATE.get("users"),
+              webui._RUN_STATE.get("rewrite_drive_links"))
     webui._RUN_STATE["services"] = dict(SERVICES)
     webui._RUN_STATE["mail_transport"] = "engine"
     webui._RUN_STATE["users"] = ""
     yield
     (webui._RUN_STATE["services"], webui._RUN_STATE["mail_transport"],
-     webui._RUN_STATE["users"]) = before
+     webui._RUN_STATE["users"], webui._RUN_STATE["rewrite_drive_links"]) = before
+    webui._RUN_STATE.pop("last_note", None)
 
 
 def _services(action="migrate"):
@@ -94,3 +96,56 @@ class TestGmailOffWithoutDmsIsStillPossible:
         rehearsal is a normal thing to want."""
         webui.set_toggles({"services": {**SERVICES, "gmail": False}})
         assert "gmail" not in _services()
+
+
+class TestDmsAndLinkRewritingCannotBothBeOn:
+    """DMS never passes a message through gmail_engine -- Google copies the
+    bytes and nothing here ever holds one -- so REWRITE_DRIVE_LINKS has no
+    code path to run in under it.
+
+    Leaving the switch on would be a flag that silently does nothing, which
+    is precisely the failure the mail-before-Drive guard exists to prevent.
+    Adding the transport choice created a second instance of it; this closes
+    that one the same way, by making the impossible state unreachable and
+    saying why rather than failing quietly.
+    """
+
+    def test_choosing_dms_turns_rewriting_off(self):
+        webui.set_toggles({"mail_transport": "engine",
+                           "rewrite_drive_links": True})
+        t = webui.set_toggles({"mail_transport": "dms"})["toggles"]
+        assert t["rewrite_drive_links"] is False
+
+    def test_it_says_why_rather_than_just_doing_it(self):
+        webui.set_toggles({"mail_transport": "engine",
+                           "rewrite_drive_links": True})
+        webui.set_toggles({"mail_transport": "dms"})
+        note = webui._RUN_STATE.get("last_note", "")
+        assert "DMS" in note and "source" in note
+
+    def test_turning_rewriting_on_under_dms_is_refused(self):
+        webui.set_toggles({"mail_transport": "dms"})
+        t = webui.set_toggles({"rewrite_drive_links": True})["toggles"]
+        assert t["rewrite_drive_links"] is False
+        assert "This engine" in webui._RUN_STATE.get("last_note", "")
+
+    def test_switching_back_to_the_engine_allows_it_again(self):
+        webui.set_toggles({"mail_transport": "dms"})
+        webui.set_toggles({"mail_transport": "engine"})
+        t = webui.set_toggles({"rewrite_drive_links": True})["toggles"]
+        assert t["rewrite_drive_links"] is True
+
+    def test_the_note_clears_once_the_state_is_valid(self):
+        """A stale explanation beside a valid setting is its own confusion."""
+        webui.set_toggles({"mail_transport": "dms"})
+        webui.set_toggles({"mail_transport": "engine"})
+        webui.set_toggles({"rewrite_drive_links": True})
+        assert "last_note" not in webui._RUN_STATE
+
+    def test_the_scope_manifest_records_the_trade(self):
+        """A customer deciding on DMS needs to know what it costs, and the
+        manifest is the document that goes in front of them."""
+        import scope
+        rows = [i for i in scope.GMAIL_SCOPE if "DMS carries the mail" in i.item]
+        assert rows, "the manifest does not mention the DMS trade"
+        assert rows[0].status == scope.NONE

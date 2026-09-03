@@ -165,6 +165,38 @@ def main(argv: list[str] | None = None) -> int:
 
     settings = Settings()
     assert_sandbox(settings, args.confirm_domain)
+
+    # Deleting a Chat space needs two switches in two places: the chat.delete
+    # scope in the Admin console, and CHAT_ALLOW_DELETE here. They do not know
+    # about each other, and the quiet half is a grant that was made months ago
+    # while the flag never followed -- the reset then reports every space it
+    # could not delete, nothing is broken so nothing says so, and the next
+    # seed stacks on top of spaces this was meant to remove.
+    #
+    # So: ask. If the grant is there, use it, rather than requiring someone to
+    # remember a second setting whose absence is invisible.
+    if "chat" in services and not getattr(settings, "chat_allow_delete", False):
+        try:
+            from google.oauth2 import service_account
+            from google.auth.transport.requests import Request
+            from seed_sandbox import CHAT_DELETE_SCOPE
+
+            admin = (settings.source_admin if args.side == "source"
+                     else settings.target_admin)
+            key = (settings.source_sa_key if args.side == "source"
+                   else settings.target_sa_key)
+            creds = service_account.Credentials.from_service_account_file(
+                key, scopes=[CHAT_DELETE_SCOPE], subject=admin)
+            creds.refresh(Request())
+        except Exception:                              # noqa: BLE001
+            print("  chat.delete is not granted on this tenant -- Chat spaces "
+                  "will survive this reset. Grant it in the Admin console if "
+                  "they should go.")
+        else:
+            settings.chat_allow_delete = True
+            os.environ["CHAT_ALLOW_DELETE"] = "true"
+            print("  chat.delete is granted; enabling CHAT_ALLOW_DELETE for "
+                  "this reset so Chat spaces actually go.")
     # CHAT_ALLOW_DELETE is deliberately NOT forced on here. chat.spaces does
     # not cover delete, so the Chat half of this reset cannot work until
     # chat.delete is granted to the service account in the Admin Console --

@@ -151,6 +151,13 @@ DRIVE_SCOPE = [
 # GMAIL
 # ======================================================================
 GMAIL_SCOPE = [
+    ScopeItem("gmail", "Drive links, when DMS carries the mail", NONE,
+              "DMS hands the whole mailbox to Google, so no message ever "
+              "passes through this engine and REWRITE_DRIVE_LINKS has no code "
+              "path to run in. Links in DMS-imported mail keep pointing at the "
+              "source and die with it. Mail via the engine can rewrite them; "
+              "that is the trade DMS asks for in exchange for not being rate "
+              "limited by us"),
     ScopeItem("gmail", "All messages including Spam and Trash", FULL,
               "Raw RFC-822 blob copied untouched; narrow via GMAIL_QUERY if "
               "policy requires excluding Trash"),
