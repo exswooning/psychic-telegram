@@ -36,7 +36,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 from config import Settings  # noqa: E402
 from seed_sandbox import (  # noqa: E402
-    SEED_SCOPES, _resolve_key_path, discover_tenant_entries,
+    CHAT_DELETE_SCOPE, SEED_SCOPES, _resolve_key_path, discover_tenant_entries,
 )
 
 DIRECTORY_WRITE_SCOPE = "https://www.googleapis.com/auth/admin.directory.user"
@@ -139,9 +139,59 @@ def check_scopes(settings: Settings) -> bool:
               "accounts already exist you can ignore this.")
         ok = False
 
+    ok = _report_chat_delete(settings) and ok
+
     if ok:
         print("\nAll scopes authorised. Seeding can write to the source tenant.")
     return ok
+
+
+def _report_chat_delete(settings: Settings) -> bool:
+    """Whether Chat spaces can actually be deleted, and whether they will be.
+
+    Two independent switches, and only one of them is in the Admin Console.
+    chat.spaces does not cover delete, so a reset needs chat.delete granted
+    AND chat_allow_delete set -- and a mismatch between them fails quietly in
+    both directions:
+
+      granted, flag off   a wipe reports every space it could not delete and
+                          leaves them standing. Nothing is broken, so nothing
+                          says so, and the next seed stacks on top of spaces
+                          the wipe was supposed to remove. Observed live: the
+                          grant had been made and the flag never followed.
+
+      not granted, flag on  worse, and not obviously about Chat at all.
+                          Requesting an ungranted scope fails the WHOLE token
+                          exchange, so Drive, Gmail and Calendar stop working
+                          too -- the reset dies with unauthorized_client and
+                          nothing points at Chat.
+    """
+    enabled = bool(getattr(settings, "chat_allow_delete", False))
+    try:
+        _build("chat", "v1", [CHAT_DELETE_SCOPE], settings.source_admin)
+        granted = True
+    except Exception:  # noqa: BLE001
+        granted = False
+
+    if granted and enabled:
+        print("  OK   chat.delete -- a reset can remove Chat spaces")
+        return True
+    if granted and not enabled:
+        print("  WARN chat.delete is GRANTED but CHAT_ALLOW_DELETE is off, so a "
+              "reset\n       leaves every Chat space standing and the next seed "
+              "stacks on top.\n       Set CHAT_ALLOW_DELETE=true -- no Admin "
+              "Console change needed.")
+        return True          # a warning, not a failure: seeding still works
+    if not granted and enabled:
+        print("  FAIL CHAT_ALLOW_DELETE is on but chat.delete is NOT granted. "
+              "Requesting an\n       ungranted scope fails the whole token "
+              "exchange, so this breaks Drive,\n       Gmail and Calendar too, "
+              "with an error that never mentions Chat.")
+        return False
+    print("  note chat.delete not granted and not enabled -- a reset leaves "
+          "Chat spaces\n       alone. Grant it and set CHAT_ALLOW_DELETE=true "
+          "if they should go.")
+    return True
 
 
 def _short(exc: Exception) -> str:
