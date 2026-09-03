@@ -149,3 +149,69 @@ class TestDmsAndLinkRewritingCannotBothBeOn:
         rows = [i for i in scope.GMAIL_SCOPE if "DMS carries the mail" in i.item]
         assert rows, "the manifest does not mention the DMS trade"
         assert rows[0].status == scope.NONE
+
+
+class TestTheChoiceSurvivesARestart:
+    """_RUN_STATE was memory-only. That was survivable when it meant "dry
+    run" and "which services"; it stopped being once it decides who carries
+    the mail. A deploy restarts the service, and the migration silently went
+    back to the engine path with nothing on the page saying so -- observed
+    exactly that way, mid-session, right after a deploy.
+    """
+
+    @pytest.fixture
+    def statefile(self, tmp_path, monkeypatch):
+        f = tmp_path / "run_state.json"
+        monkeypatch.setattr(webui, "_RUN_STATE_PATH", str(f))
+        return f
+
+    def test_a_choice_is_written_to_disk(self, statefile):
+        webui.set_toggles({"mail_transport": "dms"})
+        assert statefile.exists()
+        import json
+        assert json.loads(statefile.read_text())["mail_transport"] == "dms"
+
+    def test_it_is_restored_over_the_defaults(self, statefile):
+        webui.set_toggles({"mail_transport": "dms", "delta_days": 900})
+        webui._RUN_STATE["mail_transport"] = "engine"      # simulate a restart
+        webui._RUN_STATE["delta_days"] = 2
+        webui._load_run_state()
+        assert webui._RUN_STATE["mail_transport"] == "dms"
+        assert webui._RUN_STATE["delta_days"] == 900
+
+    def test_a_missing_file_is_not_an_error(self, tmp_path, monkeypatch):
+        """First run on a fresh box has no file, and that is the normal case."""
+        monkeypatch.setattr(webui, "_RUN_STATE_PATH", str(tmp_path / "nope.json"))
+        webui._load_run_state()          # must not raise
+
+    def test_a_corrupt_file_falls_back_to_defaults(self, statefile):
+        """A truncated write must not stop the server booting."""
+        statefile.write_text("{not json")
+        webui._load_run_state()          # must not raise
+
+    def test_an_unknown_key_is_ignored(self, statefile):
+        """A file from an older version must not resurrect a dropped setting."""
+        statefile.write_text('{"mail_transport": "dms", "gone_setting": 1}')
+        webui._load_run_state()
+        assert "gone_setting" not in webui._RUN_STATE
+
+    def test_a_wrong_type_is_ignored(self, statefile):
+        """Hand-edited or corrupted values must not poison the run state."""
+        statefile.write_text('{"delta_days": "not a number"}')
+        before = webui._RUN_STATE["delta_days"]
+        webui._load_run_state()
+        assert webui._RUN_STATE["delta_days"] == before
+
+    def test_services_merge_rather_than_replace(self, statefile):
+        """A saved services dict from an older build lacks newer keys; those
+        must keep their defaults instead of vanishing."""
+        statefile.write_text('{"services": {"drive": false}}')
+        webui._load_run_state()
+        assert webui._RUN_STATE["services"]["drive"] is False
+        assert "gmail" in webui._RUN_STATE["services"]
+
+    def test_the_write_is_atomic(self):
+        """A crash mid-write must not leave a half file the next boot reads."""
+        import inspect
+        src = inspect.getsource(webui._save_run_state)
+        assert "os.replace" in src

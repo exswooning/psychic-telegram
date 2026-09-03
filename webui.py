@@ -3543,6 +3543,50 @@ def _groq_run_summary() -> str:
 
 
 
+# Where the launch toggles live between restarts. They were in memory only,
+# which was fine when they meant "dry run" and "which services" and a restart
+# losing them was survivable. It stopped being fine once they decide who
+# carries the mail: a deploy silently moved the migration back to the engine
+# path, and nothing on the page said the choice had been undone.
+_RUN_STATE_PATH = os.path.join(os.path.dirname(ENV_PATH), "run_state.json")
+
+
+def _save_run_state() -> None:
+    try:
+        tmp = _RUN_STATE_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(_RUN_STATE, fh)
+        os.replace(tmp, _RUN_STATE_PATH)          # atomic; never a half file
+    except OSError as exc:                        # noqa: BLE001
+        # A read-only or full disk must not take the endpoint down with it --
+        # the toggle still applies to this process, it just will not survive.
+        log.warning("could not persist run state: %r", exc)
+
+
+def _load_run_state() -> None:
+    """Merge the saved choices over the defaults.
+
+    Merged rather than replaced, so a key added in a later version gets its
+    default instead of being absent, and a file written by an older one does
+    not resurrect a setting that no longer exists.
+    """
+    try:
+        with open(_RUN_STATE_PATH, encoding="utf-8") as fh:
+            saved = json.load(fh)
+    except (OSError, ValueError):
+        return
+    if not isinstance(saved, dict):
+        return
+    for k, v in saved.items():
+        if k not in _RUN_STATE:
+            continue                              # dropped setting; ignore it
+        if isinstance(_RUN_STATE[k], dict) and isinstance(v, dict):
+            _RUN_STATE[k].update(
+                {sk: sv for sk, sv in v.items() if sk in _RUN_STATE[k]})
+        elif type(v) is type(_RUN_STATE[k]):
+            _RUN_STATE[k] = v
+
+
 def set_toggles(body: dict) -> dict:
     """Apply the launch toggles sent by the toolbar."""
     dry = body.get("dry_run")
@@ -3591,6 +3635,7 @@ def set_toggles(body: dict) -> dict:
         for k in _RUN_STATE["services"]:
             if k in svcs:
                 _RUN_STATE["services"][k] = bool(svcs[k])
+    _save_run_state()
     return {"ok": True, "toggles": dict(_RUN_STATE)}
 
 
@@ -4558,6 +4603,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--host", default="127.0.0.1",
                     help="leave this alone unless you know exactly why")
     args = ap.parse_args(argv)
+
+    # Before serving anything: a restart must not silently undo a choice.
+    _load_run_state()
 
     # Load env.sh before serving anything.
     #
