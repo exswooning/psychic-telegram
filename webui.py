@@ -2829,6 +2829,12 @@ _RUN_STATE: dict = {
     "dry_run": False,
     "services": {"drive": True, "gmail": True, "calendar": True,
                 "chat": False, "contacts": False, "tasks": False},
+    # Limit a run to named source users. Empty means every mapped user,
+    # which is the right default for a real migration and the wrong one for
+    # checking a change: on this tenant that is 200 users and roughly six
+    # days, so without this the UI cannot exercise a migration at all --
+    # exactly the gap the seed form had.
+    "users": "",
     # Repoint Drive links inside migrated mail at the copies on the target.
     # A launch toggle rather than an env-only setting because it is a
     # per-run decision with a real trade -- it rewrites message bodies,
@@ -3512,6 +3518,9 @@ def set_toggles(body: dict) -> dict:
     rewrite = body.get("rewrite_drive_links")
     if rewrite is not None:
         _RUN_STATE["rewrite_drive_links"] = bool(rewrite)
+    users = body.get("users")
+    if users is not None:
+        _RUN_STATE["users"] = str(users).strip()
     svcs = body.get("services")
     if isinstance(svcs, dict):
         for k in _RUN_STATE["services"]:
@@ -3628,6 +3637,9 @@ def _action_argv(name: str) -> list:
         argv += ["--services", ",".join(chosen)]
     if name == "delta":
         argv += ["--days", "2"]
+    for u in [x.strip() for x in (_RUN_STATE.get("users") or "").split(",")]:
+        if u:
+            argv += ["--user", u]
     if _RUN_STATE["dry_run"]:
         argv.insert(2, "--dry-run")
     return argv

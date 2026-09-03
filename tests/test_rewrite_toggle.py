@@ -84,3 +84,53 @@ class TestItReachesTheEngine:
         src = open("webui.py", encoding="utf-8").read()
         seg = src.split("if name in _LAUNCH_KEYS:", 1)[1][:120]
         assert "_launch_env(env)" in seg
+
+
+class TestScopingARunToNamedUsers:
+    """Without this the UI could only ever launch a whole-tenant migration --
+    200 users and roughly six days on the live account -- which means the one
+    thing the UI exists for, checking a change, could not be done from it.
+    Same gap the seed form had, same fix."""
+
+    @pytest.fixture(autouse=True)
+    def _clean(self):
+        before = webui._RUN_STATE.get("users")
+        webui._RUN_STATE["users"] = ""
+        yield
+        webui._RUN_STATE["users"] = before
+
+    def test_empty_still_means_every_mapped_user(self):
+        assert "--user" not in webui._action_argv("migrate")
+
+    def test_named_users_each_get_their_own_flag(self):
+        """main.py takes --user repeatedly, not a comma list."""
+        webui.set_toggles({"users": "a@x.test, b@x.test"})
+        argv = webui._action_argv("migrate")
+        assert argv.count("--user") == 2
+        assert "a@x.test" in argv and "b@x.test" in argv
+
+    def test_surrounding_whitespace_is_not_part_of_the_address(self):
+        webui.set_toggles({"users": "  a@x.test ,  b@x.test  "})
+        argv = webui._action_argv("migrate")
+        assert "a@x.test" in argv and " a@x.test " not in argv
+
+    def test_a_trailing_comma_does_not_add_an_empty_user(self):
+        """--user '' would match nothing and migrate nobody, silently."""
+        webui.set_toggles({"users": "a@x.test,"})
+        argv = webui._action_argv("migrate")
+        assert argv.count("--user") == 1
+
+    def test_delta_is_scoped_too(self):
+        webui.set_toggles({"users": "a@x.test"})
+        assert "--user" in webui._action_argv("delta")
+
+    def test_a_fixed_argv_action_is_untouched(self):
+        """Only migrate/delta follow the toggles; verify, report and the rest
+        have fixed argv and must not inherit a per-run choice."""
+        webui.set_toggles({"users": "a@x.test"})
+        assert "--user" not in webui._action_argv("verify")
+
+    def test_clearing_it_restores_the_whole_tenant(self):
+        webui.set_toggles({"users": "a@x.test"})
+        webui.set_toggles({"users": ""})
+        assert "--user" not in webui._action_argv("migrate")
