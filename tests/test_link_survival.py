@@ -326,3 +326,70 @@ class TestWipedHistoryIsNotOutstandingWork:
         text = external_shares.render(external_shares.collect(ledger, settings))
         assert "nothing to chase" in text
         assert "re-run before the source is deleted" not in text
+
+
+# ----------------------------------------------------------------------
+# Telling the external collaborator, once.
+#
+# Grants are created with sendNotificationEmail=False on purpose: a
+# collaborator on 336 files would otherwise get 336 emails. The consequence
+# is that nobody ever tells them anything -- they hold valid access to URLs
+# they have never seen while the URLs they do have die with the source. This
+# is the missing message, and it mails people OUTSIDE both tenants, so the
+# tests that matter are the ones about not sending it by accident.
+# ----------------------------------------------------------------------
+class TestNotifyingExternalCollaborators:
+    @pytest.fixture
+    def settings(self):
+        class S:
+            source_domain = "old.test"
+            target_domain = "new.test"
+            target_admin = "admin@new.test"
+        return S()
+
+    @pytest.fixture
+    def collab(self):
+        return {"email": "ext@partner.test", "file_count": 2,
+                "files": [{"name": "Budget", "url": "https://drive.google.com/open?id=T1"},
+                          {"name": "Plan", "url": "https://drive.google.com/open?id=T2"}],
+                "shared_drives": ["fileOrganizer on Finance"],
+                "unresolved": 0, "unresolved_source_ids": [], "superseded": 0}
+
+    def test_the_message_carries_every_new_url(self, collab, settings):
+        _, body = external_shares.compose(collab, settings)
+        assert "https://drive.google.com/open?id=T1" in body
+        assert "https://drive.google.com/open?id=T2" in body
+
+    def test_it_says_where_a_shared_drive_actually_appears(self, collab, settings):
+        """The specific confusion this exists to prevent: a shared drive shows
+        under 'Shared drives', never under 'Shared with me', so a recipient
+        looking in the obvious place finds nothing and assumes it is lost."""
+        _, body = external_shares.compose(collab, settings)
+        assert "Shared drives" in body and "Shared with me" in body
+
+    def test_a_dry_run_sends_nothing_and_needs_no_credentials(self, collab, settings, capsys):
+        """It must be safe to look at the messages before mailing anyone --
+        including on a host with no target credentials at all."""
+        report = {"collaborators": [collab]}
+        assert external_shares.notify(report, settings, send=False) == 0
+        assert "would send to ext@partner.test" in capsys.readouterr().out
+
+    def test_nobody_with_nothing_to_say_is_mailed(self, settings, capsys):
+        empty = {"email": "x@partner.test", "file_count": 0, "files": [],
+                 "shared_drives": [], "unresolved": 3,
+                 "unresolved_source_ids": [], "superseded": 0}
+        external_shares.notify({"collaborators": [empty]}, settings, send=False)
+        assert "anything to be told about" in capsys.readouterr().out
+
+    def test_sending_requires_an_explicit_environment_confirmation(self, monkeypatch):
+        """--send alone is not enough. This reaches people outside both
+        tenants, and an accidental run cannot be recalled."""
+        monkeypatch.delenv("EXTERNAL_NOTIFY_CONFIRM", raising=False)
+        src = open("external_shares.py", encoding="utf-8").read()
+        assert 'if args.send and not os.getenv("EXTERNAL_NOTIFY_CONFIRM")' in src
+        assert "REFUSING to send" in src
+
+    def test_send_is_never_the_default(self):
+        src = open("external_shares.py", encoding="utf-8").read()
+        seg = src.split('"--send"', 1)[1][:200]
+        assert 'action="store_true"' in seg

@@ -149,31 +149,50 @@ def one_mode(mode: str, settings: Settings, auth: AuthManager,
     env["MIGRATE_COMMENTS"] = "true"
     env["MIGRATE_SECONDARY_CALENDARS"] = "true"
 
-    print(f"\n=== {mode}: emptying the target ===", flush=True)
-    run([PY, "reset_target.py", "--confirm-domain", settings.target_domain,
-         "--yes"], env)
+    scoped = [a for u in users_src for a in ("--user", u)]
 
-    print(f"=== {mode}: clearing the ledger ===", flush=True)
+    print(f"\n=== {mode}: emptying the target ({len(users_src)} user(s)) ===",
+          flush=True)
+    run([PY, "reset_target.py", "--confirm-domain", settings.target_domain,
+         "--yes", *scoped], env)
+
+    # Scoped to the users under test, never the whole table. On a live tenant
+    # the unscoped DELETE threw away 1.27M audit rows -- the record of every
+    # migration ever run here, which wipe_target itself deliberately preserves
+    # precisely because it is the only evidence of what happened. An
+    # experiment on three mailboxes has no business destroying that.
+    print(f"=== {mode}: clearing the ledger for those users ===", flush=True)
     db = MigrationDB(settings.db_path)
+    ph = ",".join("?" * len(users_src))
     with db.write() as c:
-        for t in ("id_mapping", "audit_log", "label_map", "upload_ledger"):
+        for t, col in (("id_mapping", "source_user"), ("audit_log", "source_user"),
+                       ("label_map", "source_user")):
             try:
-                c.execute(f"DELETE FROM {t}")
+                c.execute(f"DELETE FROM {t} WHERE {col} IN ({ph})", users_src)
             except Exception:  # noqa: BLE001
                 pass
-        c.execute("UPDATE identity_map SET status='PENDING', notes=NULL")
+        try:
+            c.execute(f"DELETE FROM upload_ledger WHERE target_user IN ({ph})",
+                      users_tgt)
+        except Exception:  # noqa: BLE001
+            pass
+        c.execute(f"UPDATE identity_map SET status='PENDING', notes=NULL "
+                  f"WHERE source_email IN ({ph})", users_src)
+    db._mapping_cache.clear()
+    db._mapping_cached_users.clear()
 
     print(f"=== {mode}: migrating drive ===", flush=True)
     net0, scratch0 = net_bytes(), scratch_peak(settings)
-    rc, secs = run([PY, "main.py", "migrate", "--services", "drive"], env)
+    rc, secs = run([PY, "main.py", "migrate", "--services", "drive", *scoped], env)
     net1 = net_bytes()
 
     db = MigrationDB(settings.db_path)
     counts = {t: n for t, n in db.conn.execute(
-        "SELECT item_type, COUNT(*) FROM audit_log WHERE status='SUCCESS' "
-        "GROUP BY item_type")}
+        f"SELECT item_type, COUNT(*) FROM audit_log WHERE status='SUCCESS' "
+        f"AND source_user IN ({ph}) GROUP BY item_type", users_src)}
     failed = db.conn.execute(
-        "SELECT COUNT(*) FROM audit_log WHERE status LIKE 'FAILED%'").fetchone()[0]
+        f"SELECT COUNT(*) FROM audit_log WHERE status LIKE 'FAILED%' "
+        f"AND source_user IN ({ph})", users_src).fetchone()[0]
 
     print(f"=== {mode}: snapshotting the target ===", flush=True)
     tgt_snap = snapshot_drive(auth, users_tgt, "target")
@@ -193,6 +212,10 @@ def one_mode(mode: str, settings: Settings, auth: AuthManager,
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="A/B the two Drive transfer modes.")
     ap.add_argument("--report", default="ab_results.md")
+    ap.add_argument("--user", action="append", metavar="SOURCE_EMAIL",
+                    help="run the experiment on these users only. Strongly "
+                         "advised on a real tenant: the full corpus here is "
+                         "489k files, which extrapolates to ~6 days PER ARM.")
     ap.add_argument("--mode", action="append",
                     choices=["server_side", "download_upload"],
                     help="default: both, server_side first")
@@ -202,6 +225,13 @@ def main(argv: list[str] | None = None) -> int:
     auth = AuthManager(settings)
     db = MigrationDB(settings.db_path)
     rows = [r for r in db.all_identities() if r["entity_type"] == "user"]
+    if args.user:
+        wanted = {u.lower() for u in args.user}
+        rows = [r for r in rows if r["source_email"].lower() in wanted]
+        missing = wanted - {r["source_email"].lower() for r in rows}
+        if missing:
+            print(f"not in identity_map: {sorted(missing)}")
+            return 1
     users_src = [r["source_email"] for r in rows]
     users_tgt = [r["target_email"] for r in rows]
     if not users_src:

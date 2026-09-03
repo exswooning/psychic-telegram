@@ -147,6 +147,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--yes", action="store_true",
                     help="skip the prompt; --confirm-domain is already a typed match")
     ap.add_argument("--workers", type=int, default=0)
+    ap.add_argument("--user", action="append", metavar="SOURCE_EMAIL",
+                    help="limit the reset to specific source user(s). Without "
+                         "this the whole tenant is emptied, which is right for "
+                         "a rehearsal and wrong for a controlled experiment "
+                         "that only needs a few mailboxes reset.")
     ap.add_argument("--services", default=",".join(ALL_SERVICES),
                     help="comma-separated subset of drive,gmail,calendar,chat -- "
                          "e.g. --services drive to reset only Drive and leave "
@@ -181,8 +186,14 @@ def main(argv: list[str] | None = None) -> int:
 
     db = MigrationDB(settings.db_path)
     auth = AuthManager(settings)
-    users = [r["target_email"] for r in db.all_identities()
-             if r["entity_type"] == "user"]
+    rows = [r for r in db.all_identities() if r["entity_type"] == "user"]
+    if args.user:
+        wanted = {u.lower() for u in args.user}
+        rows = [r for r in rows if r["source_email"].lower() in wanted]
+        missing = wanted - {r["source_email"].lower() for r in rows}
+        if missing:
+            sys.exit(f"REFUSING: not in identity_map: {sorted(missing)}")
+    users = [r["target_email"] for r in rows]
     if not users:
         print("identity_map is empty — nothing to reset.")
         return 1

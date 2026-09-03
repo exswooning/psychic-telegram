@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections import defaultdict
 
@@ -198,10 +199,100 @@ def render(report: dict, only: str | None = None) -> str:
     return "\n".join(out)
 
 
+def compose(collab: dict, settings: Settings) -> tuple[str, str]:
+    """The one message that replaces Drive sending this person one per file.
+
+    Grants are created with sendNotificationEmail=False on purpose -- an
+    external collaborator on 336 files would otherwise receive 336 emails --
+    but the consequence is that nobody ever tells them the files moved. They
+    end up holding valid access to URLs they have never seen, while the URLs
+    they do have die with the source tenant. This is that missing message.
+    """
+    n = collab["file_count"]
+    subject = (f"Your shared files have moved to {settings.target_domain}")
+    lines = [
+        f"Hello,",
+        "",
+        f"{settings.source_domain} has migrated to {settings.target_domain}.",
+        "",
+        "You still have access to everything that was shared with you, but the",
+        "links have changed -- the old ones stop working once the previous",
+        "system is switched off. Here are the new ones.",
+        "",
+    ]
+    if collab["shared_drives"]:
+        lines.append("Shared drives (find these under 'Shared drives' in Google")
+        lines.append("Drive, not 'Shared with me'):")
+        for d in collab["shared_drives"]:
+            lines.append(f"  - {d}")
+        lines.append("")
+    if n:
+        lines.append(f"Files ({n}):")
+        for f in collab["files"]:
+            lines.append(f"  {f['name']}")
+            lines.append(f"    {f['url']}")
+        lines.append("")
+    lines += ["Nothing is required from you -- these links work now.",
+              "", "-- sent once by the migration, not per file."]
+    return subject, "\n".join(lines)
+
+
+def notify(report: dict, settings: Settings, send: bool) -> int:
+    """Print, or actually send, one message per external collaborator."""
+    people = [c for c in report["collaborators"]
+              if c["file_count"] or c["shared_drives"]]
+    if not people:
+        print("no external collaborator has anything to be told about")
+        return 0
+
+    svc = None
+    if send:
+        # Imported here so a dry run needs no credentials at all.
+        from auth import AuthManager
+        svc = AuthManager(settings).target_gmail(settings.target_admin)
+
+    sent = 0
+    for c in people:
+        subject, body = compose(c, settings)
+        if not send:
+            print(f"\n--- would send to {c['email']} "
+                  f"({c['file_count']} file(s)) ---")
+            print(f"Subject: {subject}")
+            print(body[:700] + ("\n  ...\n" if len(body) > 700 else ""))
+            continue
+        import base64
+        from email.message import EmailMessage
+
+        msg = EmailMessage()
+        msg["To"] = c["email"]
+        msg["From"] = settings.target_admin
+        msg["Subject"] = subject
+        msg.set_content(body)
+        try:
+            svc.users().messages().send(
+                userId="me",
+                body={"raw": base64.urlsafe_b64encode(msg.as_bytes()).decode()}
+            ).execute()
+            print(f"sent to {c['email']}")
+            sent += 1
+        except Exception as exc:      # noqa: BLE001 -- one failure is not fatal
+            print(f"FAILED for {c['email']}: {str(exc)[:140]}")
+    if not send:
+        print(f"\n{len(people)} message(s) would be sent. "
+              f"Add --send to actually send them.")
+    return sent
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--json", metavar="PATH", help="write the full report here")
     ap.add_argument("--email", help="print one collaborator's complete file list")
+    ap.add_argument("--notify", action="store_true",
+                    help="compose the one 'your files moved' message per "
+                         "external collaborator. Prints them; sends nothing.")
+    ap.add_argument("--send", action="store_true",
+                    help="with --notify, actually send. This mails people "
+                         "OUTSIDE both tenants, so it is never the default.")
     args = ap.parse_args(argv)
 
     settings = Settings()
@@ -218,6 +309,13 @@ def main(argv: list[str] | None = None) -> int:
         with open(args.json, "w") as fh:
             json.dump(report, fh, indent=2)
         print(f"wrote {args.json}")
+    if args.notify:
+        if args.send and not os.getenv("EXTERNAL_NOTIFY_CONFIRM"):
+            print("REFUSING to send: this mails people outside both tenants. "
+                  "Re-run with EXTERNAL_NOTIFY_CONFIRM=1 to confirm.")
+            return 1
+        notify(report, settings, send=args.send)
+        return 0
     print(render(report, args.email))
     return 0
 
