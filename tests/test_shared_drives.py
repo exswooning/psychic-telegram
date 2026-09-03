@@ -633,7 +633,12 @@ class TestTheSeedUIOffersSharedDrives:
         assert "sharedDrives" in src
 
     def test_it_reaches_runSeed(self):
-        assert "sharedDrives)" in self._page()
+        """Asserts sharedDrives is passed, not that it is the LAST argument --
+        pinning the closing paren made this fail the moment runSeed grew a
+        further parameter, for a change that kept the behaviour intact."""
+        src = self._page()
+        call = src.split("runSeed(", 1)[1].split(")", 1)[0]
+        assert "sharedDrives" in call
 
     def test_the_client_sends_it_to_the_server(self):
         import os

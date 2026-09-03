@@ -352,6 +352,7 @@ const SeedStep: React.FC = () => {
   const [allUsers, setAllUsers] = useState(false)
   const [reset, setReset] = useState(false)
   const [sharedDrives, setSharedDrives] = useState('')
+  const [users, setUsers] = useState('')
   const [err, setErr] = useState<string | null>(null)
   const [jobActive, setJobActive] = useState(false)
   const [jobRunning, setJobRunning] = useState(false)
@@ -361,7 +362,7 @@ const SeedStep: React.FC = () => {
     setJobActive(false)
     const r = await runSeed(confirmDomain, scale, createUsers, reset,
                             allUsers, createUntilFull, workers, prefix,
-                            sharedDrives)
+                            sharedDrives, users)
     if (r.ok) setJobActive(true)
     else setErr(r.error || 'could not start')
   }
@@ -476,6 +477,15 @@ const SeedStep: React.FC = () => {
             value={sharedDrives} inputProps={{ 'data-testid': 'shared-drives' }}
             onChange={(e) => setSharedDrives(e.target.value.replace(/[^0-9]/g, ''))}
             helperText="A shared drive belongs to no user, so the per-user seed cannot make one — and the shared-drive migration then has nothing to move. Blank or 0 = none."
+          />
+        </Grid>
+        <Grid item xs={12} sm={8}>
+          <TextField
+            fullWidth size="small" label="Only these users"
+            placeholder="george, ivan"
+            value={users} inputProps={{ 'data-testid': 'seed-users' }}
+            onChange={(e) => setUsers(e.target.value)}
+            helperText="Comma-separated localparts, no @domain. Blank seeds every user the tenant has — on a real tenant that is days, not hours, so name a few when you are checking a change rather than rehearsing a migration."
           />
         </Grid>
       </Grid>

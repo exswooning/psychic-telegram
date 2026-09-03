@@ -1943,6 +1943,20 @@ def seed_argv(body: dict, account_id: int | None = None) -> tuple[list[str], dic
         # tenant can go days without current data). seed_sandbox.py itself
         # refuses to combine this with --all-users/--fit-to-licenses.
         argv.append("--create-until-full")
+    # Limit the seed to named users. The seeder has always supported this;
+    # the endpoint did not, so the only seed reachable from the UI was the
+    # whole tenant -- 200 users here, days rather than hours, which makes
+    # "seed, then check the change I just made" impossible to do from the
+    # product. A bounded seed is the common case, not the exotic one.
+    users = (body.get("users") or "").strip()
+    if users:
+        # Localparts only: an address would silently seed nothing, and the
+        # seeder's own error for that is deep inside a Directory lookup.
+        bad = [u for u in (x.strip() for x in users.split(",")) if "@" in u]
+        if bad:
+            return [], {}, ("users must be localparts, not addresses: "
+                            + ", ".join(bad))
+        argv += ["--users", users]
     if body.get("all_users"):
         # Seeds every account that already exists in the tenant -- the real
         # headcount via the Directory API, not a fixed 5. seed_sandbox.py

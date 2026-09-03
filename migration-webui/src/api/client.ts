@@ -501,7 +501,8 @@ export async function runSeed(
   createUntilFull?: boolean,
   workers?: string,
   localpartPrefix?: string,
-  sharedDrives?: string
+  sharedDrives?: string,
+  users?: string
 ): Promise<SeedResult> {
   const res = await fetch('/api/seed', {
     method: 'POST',
@@ -524,6 +525,10 @@ export async function runSeed(
       // one and shared_drives.py has nothing to migrate. Opt-in: they cost
       // real tenant objects and most seeds do not need them.
       shared_drives: sharedDrives || undefined,
+      // Comma-separated localparts. Blank seeds every user the tenant has,
+      // which on a real tenant is days -- so a bounded seed has to be
+      // reachable from here, or checking a change means not using the UI.
+      users: users || undefined,
     }),
   })
   return res.json()
