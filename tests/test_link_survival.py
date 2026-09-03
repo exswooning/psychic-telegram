@@ -393,3 +393,65 @@ class TestNotifyingExternalCollaborators:
         src = open("external_shares.py", encoding="utf-8").read()
         seg = src.split('"--send"', 1)[1][:200]
         assert 'action="store_true"' in seg
+
+
+# ----------------------------------------------------------------------
+# A rewrite that nobody can see is indistinguishable from one that did not
+# happen. links_rewritten was an in-memory counter that reached no payload
+# and no page, and the rewrite is invisible by design -- the mail looks the
+# same either way -- so confirming 17 repaired links on the live tenant
+# meant querying the target Gmail API by hand.
+# ----------------------------------------------------------------------
+class TestARewriteLeavesEvidence:
+    LINKED = (b"From: a@tenanta.com\r\nTo: b@tenanta.com\r\n"
+              b"Subject: doc\r\nMIME-Version: 1.0\r\n"
+              b"Content-Type: text/plain; charset=UTF-8\r\n\r\n"
+              b"see https://docs.google.com/document/d/" + SRC.encode() + b"/edit\r\n")
+    PLAIN = (b"From: a@tenanta.com\r\nTo: b@tenanta.com\r\n"
+             b"Subject: none\r\nMIME-Version: 1.0\r\n"
+             b"Content-Type: text/plain; charset=UTF-8\r\n\r\nno links here\r\n")
+
+    @pytest.fixture
+    def wired(self, gmail_migrator, auth, settings, db):
+        settings.rewrite_drive_links = True
+        db.record_mapping("alice@tenanta.com", SRC, TGT, "file")
+        src = auth.source_gmail("alice@tenanta.com")
+        gmail_migrator.src = src
+        gmail_migrator.tgt = auth.target_gmail("alice@tenantb.com")
+        return gmail_migrator, src, db
+
+    @staticmethod
+    def _rows(db):
+        return db.conn.execute(
+            "SELECT item_id, status, error_message FROM audit_log "
+            "WHERE item_type='link_rewrite'").fetchall()
+
+    def test_a_rewritten_message_writes_a_ledger_row(self, wired):
+        mig, src, db = wired
+        mid = src.add_message(self.LINKED, ["INBOX"])
+        mig._migrate_one_message({"id": mid})
+        assert self._rows(db), "the rewrite left no trace in the ledger"
+
+    def test_the_row_says_how_many_links_moved(self, wired):
+        mig, src, db = wired
+        mid = src.add_message(self.LINKED, ["INBOX"])
+        mig._migrate_one_message({"id": mid})
+        assert "link(s) repointed" in (self._rows(db)[0]["error_message"] or "")
+
+    def test_a_message_with_no_links_writes_nothing(self, wired):
+        """Otherwise every message gains a row and the count means nothing."""
+        mig, src, db = wired
+        mid = src.add_message(self.PLAIN, ["INBOX"])
+        mig._migrate_one_message({"id": mid})
+        assert self._rows(db) == []
+
+    def test_nothing_is_recorded_when_the_feature_is_off(
+            self, gmail_migrator, auth, settings, db):
+        settings.rewrite_drive_links = False
+        db.record_mapping("alice@tenanta.com", SRC, TGT, "file")
+        src = auth.source_gmail("alice@tenanta.com")
+        gmail_migrator.src = src
+        gmail_migrator.tgt = auth.target_gmail("alice@tenantb.com")
+        mid = src.add_message(self.LINKED, ["INBOX"])
+        gmail_migrator._migrate_one_message({"id": mid})
+        assert self._rows(db) == []

@@ -71,7 +71,10 @@ DRIVE_TYPES = ("folder", "file", "shortcut", "acl", "comment")
 # tests/test_reset_drive_ledger.py asserts this table against the engines.
 SERVICE_TYPES: dict[str, tuple[str, ...]] = {
     "drive": DRIVE_TYPES,
-    "gmail": ("message", "draft", "filter", "signature"),
+    # link_rewrite rows are gmail's: one per message whose Drive links were
+    # repointed. They must clear with the messages they describe, or a reset
+    # leaves evidence of a rewrite for mail that is no longer there.
+    "gmail": ("message", "draft", "filter", "signature", "link_rewrite"),
     "calendar": ("event", "calendar", "calendar_acl"),
     "chat": ("chat_space", "chat_message", "chat_member"),
     "contacts": ("contact", "contact_group"),

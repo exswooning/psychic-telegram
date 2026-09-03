@@ -546,6 +546,13 @@ def report_payload(conn: sqlite3.Connection, settings, job_started: float,
     failed_users = t.get("users_failed", 0)
 
     return {
+        # Every count below is scoped to the users in identity_map -- this
+        # migration -- because collect_snapshot drops audit rows whose user
+        # is not mapped. /api/v2/metrics counts the whole ledger instead, and
+        # a target wipe keeps history while clearing mappings, so the two
+        # surfaces reported 8,360 and 353,041 messages for the same tenant.
+        # Neither was wrong; neither said what it was counting.
+        "scope": "users currently in identity_map (this migration)",
         "totalUsers": total_users,
         "successfulUsers": t.get("users_done", 0),
         "failedUsers": failed_users,

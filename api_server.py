@@ -3273,6 +3273,30 @@ async def migration_metrics(account_id: int, history: int = 60,
                         "  UNION ALL"
                         "  SELECT item_type, status, n FROM audit_rollup"
                         ") GROUP BY item_type, status ORDER BY n DESC")]
+                # audit_log OUTLIVES id_mapping: wipe_target clears the
+                # mappings and deliberately keeps the history, so this table
+                # accumulates every generation this ledger has ever seen
+                # while id_mapping holds only the current one. Live that is
+                # 400 distinct source_users against 200 in identity_map, and
+                # the two numbers for "messages migrated" came out 42x apart
+                # -- 353,041 here beside 8,360 on the Final Report, which
+                # counts only mapped users. Both were right and neither said
+                # which question it was answering, so the pair read as
+                # corruption.
+                #
+                # Counted here rather than explained in a tooltip: a UI can
+                # only label the difference if the payload states it.
+                orphan = conn.execute(
+                    "SELECT COUNT(*) n FROM audit_log a WHERE NOT EXISTS ("
+                    "  SELECT 1 FROM identity_map m"
+                    "   WHERE m.source_email = a.source_user)").fetchone()
+                out["volumeScope"] = {
+                    "counts": "every generation recorded in this ledger",
+                    "unmappedRows": orphan["n"] if orphan else 0,
+                    "note": ("rows whose source user is no longer in "
+                             "identity_map -- earlier tenant generations kept "
+                             "on purpose by a target wipe"),
+                }
                 out["mappings"] = [
                     {"type": r["type"], "count": r["n"]}
                     for r in conn.execute(

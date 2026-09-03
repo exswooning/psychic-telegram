@@ -159,6 +159,10 @@ dialog{
 dialog::backdrop{background:rgba(0,0,0,.5)}
 dialog .body{padding:18px}
 dialog .foot{display:flex; gap:8px; justify-content:flex-end; padding:14px 18px; border-top:1px solid var(--line)}
+.scope-note{margin-top:10px; padding-top:10px; border-top:1px solid var(--line);
+  font-size:.8125rem; color:var(--ink-3); display:flex; flex-direction:column;
+  gap:4px; max-width:78ch}
+.scope-note .warn-txt{color:var(--warn)}
 .toggles{border:1px solid var(--line); border-radius:10px; padding:12px 14px;
   margin-bottom:12px; background:var(--surface-2)}
 .tg{display:flex; align-items:center; gap:9px; min-height:34px;
@@ -235,6 +239,7 @@ dialog .foot{display:flex; gap:8px; justify-content:flex-end; padding:14px 18px;
         <tbody><tr><td colspan="3" class="muted">loading…</td></tr></tbody>
       </table>
     </div>
+    <div class="scope-note" id="vol-scope"></div>
   </section>
 
   <div class="grid" style="margin-bottom:16px">
@@ -435,6 +440,29 @@ async function loadVolume(){
       tr.appendChild(el('td','num',num(r.count))); t.appendChild(tr);
     });
     pill($('#volcount'),'idle',v.length+' kinds');
+    // The same fact has three honest answers and they differ by 42x.
+    // audit_log records every generation this ledger has seen; a target wipe
+    // keeps that history while clearing id_mapping. Say which is which,
+    // rather than showing one number here and a smaller one on the Report.
+    const sc=m.volumeScope||{}, mp=m.mappings||[];
+    const note=$('#vol-scope');
+    if(note){
+      const onTarget=mp.reduce((a,r)=>a+(r.count||0),0);
+      note.innerHTML='';
+      note.appendChild(el('div',null,'Counts '+(sc.counts||'every row in this ledger')+'.'));
+      if(sc.unmappedRows){
+        note.appendChild(el('div','warn-txt',
+          num(sc.unmappedRows)+' of these belong to users no longer in the '
+          +'identity map \u2014 earlier tenant generations a wipe kept on purpose. '
+          +'The Final Report excludes them, which is why its totals are smaller.'));
+      }
+      if(onTarget){
+        note.appendChild(el('div',null,
+          'Present on the target right now: '+num(onTarget)
+          +' item(s), from id_mapping \u2014 the only count describing what a '
+          +'user would actually find.'));
+      }
+    }
   }catch(e){panelFail('#voltable tbody','#volcount',3,e);}
 }
 async function loadFailures(){

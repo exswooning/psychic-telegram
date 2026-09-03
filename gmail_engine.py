@@ -380,6 +380,23 @@ class GmailMigrator:
             raw, rewritten = rewrite_raw(raw, self._drive_link_target)
             if rewritten:
                 self._bump("links_rewritten", rewritten)
+                # Recorded, not only counted. links_rewritten was an
+                # in-memory counter that reached no report and no UI, so a
+                # feature whose entire job is invisible by design -- the mail
+                # looks identical either way -- produced no evidence it had
+                # run. Confirming 17 rewritten links on the live tenant meant
+                # querying the target Gmail API by hand; an operator had
+                # nothing to look at, and a silent no-op is indistinguishable
+                # from a silent success.
+                #
+                # One row per message, keyed like every other item, so it
+                # lands in the volume table with no UI work: the count is
+                # messages repaired, and the detail carries how many links
+                # inside that message moved.
+                self.db.log_audit(self.source_user, mid, "link_rewrite",
+                                  "SUCCESS",
+                                  f"{rewritten} Drive link(s) repointed at "
+                                  f"the target copy")
         approx_bytes = (len(raw) * 3) // 4
         mapped_labels = self._map_label_ids(label_ids)
 
