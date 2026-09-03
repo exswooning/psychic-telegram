@@ -188,6 +188,21 @@ class CorpusBuilder:
             "comments": 0,
         }
 
+    def _peer(self, n: int = 0):
+        """The nth peer, or None when the org is too small to have one.
+
+        This class was written against a fixed five-user org, so it indexed
+        and rng.choice'd self.peers freely. Seeding a named subset -- one or
+        two users, which is the normal way to check a change -- leaves peers
+        empty or short, and each of those becomes an IndexError inside a
+        worker thread: "list index out of range", no frame, nothing seeded.
+
+        Returning None lets each caller fall back to an ACL shape a small org
+        can still build, so a small seed yields a smaller corpus rather than
+        no corpus.
+        """
+        return self.peers[n] if len(self.peers) > n else None
+
     # -- thread-safe metric writes ---------------------------------------
     def _bump(self, key: str, n: int = 1) -> None:
         with self._mlock:
@@ -444,9 +459,14 @@ class CorpusBuilder:
         # ~18% of individual files carry their own grant on top of whatever
         # they inherit — the messy reality that inherited-ACL logic must handle.
         r2 = self.rng.random()
-        if r2 < 0.13:
+        if r2 < 0.13 and self.peers:
             plan["share"] = ("users", self.rng.choice(self.peers),
                              self.rng.choice(["writer", "commenter"]))
+        elif r2 < 0.13:
+            # No colleague to share with. An external grant is still a real
+            # ACL shape and still exercises the translation path, so the file
+            # keeps a grant rather than silently becoming unshared.
+            plan["share"] = ("external", None, None)
         elif r2 < 0.16:
             plan["share"] = ("external", None, None)
         elif r2 < 0.18:
@@ -689,7 +709,8 @@ class CorpusBuilder:
         # Every ACL shape on one file
         acl_file = self.binary("shared-every-way.pdf", edge, b"%PDF-1.4 acl\n")
         self.m["items"]["acl_file"] = acl_file
-        self.share_users(acl_file, [self.peers[0]], "writer")
+        if self._peer(0):
+            self.share_users(acl_file, [self._peer(0)], "writer")
         self.share_external(acl_file, "commenter")
         self.share_domain(acl_file, "reader")
         self.share_anyone(acl_file)
@@ -697,7 +718,11 @@ class CorpusBuilder:
         # Inherited-permission folder: grants live on the folder, not the files
         inh = self.folder("inherited-acl", edge)
         self.m["items"]["inherited_folder"] = inh
-        self.share_users(inh, [self.peers[1]], "reader")
+        # peer 1, or peer 0 on a two-user org -- the point of this folder is
+        # that the grant lives on the folder, not which colleague holds it.
+        inh_grantee = self._peer(1) or self._peer(0)
+        if inh_grantee:
+            self.share_users(inh, [inh_grantee], "reader")
         for i in range(3):
             self.binary(f"inherits-{i}.pdf", inh, b"%PDF-1.4 inh\n")
 
@@ -721,7 +746,8 @@ class CorpusBuilder:
         self.binary("zero-byte.dat", edge, b"", "application/octet-stream")
         acl_file = self.binary("shared-every-way.pdf", edge, b"%PDF-1.4 acl\n")
         self.m["items"]["acl_file"] = acl_file
-        self.share_users(acl_file, [self.peers[0]], "writer")
+        if self._peer(0):
+            self.share_users(acl_file, [self._peer(0)], "writer")
         self.share_external(acl_file, "commenter")
         self.share_domain(acl_file, "reader")
         self._delta_targets(edge)

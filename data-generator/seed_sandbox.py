@@ -73,6 +73,7 @@ import os
 import random
 import sys
 import threading
+import traceback
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -2182,7 +2183,16 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 results.append(fut.result())
             except Exception as exc:  # noqa: BLE001
+                # The traceback, not just the message. A worker that dies
+                # inside a pool loses its stack unless it is printed here,
+                # and "list index out of range" with no frame is not
+                # something anyone can act on -- it cost a whole live seed
+                # run to learn only that much.
                 print(f"  ! {jobs[fut]} FAILED: {exc}")
+                for line in traceback.format_exception(
+                        type(exc), exc, exc.__traceback__)[-6:]:
+                    for sub in line.rstrip().splitlines():
+                        print(f"      {sub}")
                 results.append({"user": jobs[fut], "error": str(exc)})
 
     ok = [r for r in results if "error" not in r]

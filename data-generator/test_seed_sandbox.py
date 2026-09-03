@@ -1334,3 +1334,78 @@ class TestSeededMailCarriesRealDriveLinks:
         _, n = rewrite_raw(base64.urlsafe_b64encode(raw).decode(),
                            {self.FID: "TGT" + "z" * 30}.get)
         assert n == 1
+
+
+# ======================================================================
+# A one- or two-user seed builds a corpus instead of crashing.
+#
+# corpus.py was written against a fixed five-user org and indexed
+# self.peers freely -- peers[0], peers[1], rng.choice(peers). That held
+# until the Seed Wizard grew "Only these users", which makes a one-user
+# seed the normal way to check a change. Then peers is empty and every one
+# of those is an IndexError thrown inside a worker whose handler printed
+# only the message:
+#
+#     ! r2-george@source.rohitrokaya.com.np FAILED: list index out of range
+#
+# No frame, no file, nothing seeded. It took a live run, a traceback fix,
+# and a second live run to learn it was corpus.py:448.
+#
+# The guards do not drop the sharing -- they fall back to a shape a small
+# org can still build, so a small seed yields a smaller corpus rather than
+# an unshared one, which is the whole point of seeding.
+# ======================================================================
+class TestASmallOrgStillSeeds:
+    @pytest.mark.parametrize("peers,n,expected", [
+        ([], 0, None),
+        ([], 1, None),
+        (["a@tenanta.com"], 0, "a@tenanta.com"),
+        (["a@tenanta.com"], 1, None),
+        (["a@tenanta.com", "b@tenanta.com"], 1, "b@tenanta.com"),
+    ])
+    def test_the_peer_helper_returns_none_instead_of_raising(
+            self, settings, peers, n, expected):
+        drive = FakeDrive("alice@tenanta.com", "source")
+        b = _builder(drive, settings, "alice@tenanta.com", peers)
+        assert b._peer(n) == expected
+
+    def test_planning_a_leaf_never_raises_with_no_peers(self, settings):
+        """corpus.py:448 -- the exact line that killed the live run."""
+        drive = FakeDrive("alice@tenanta.com", "source")
+        b = _builder(drive, settings, "alice@tenanta.com", [])
+        for i in range(300):        # enough draws to hit the 13% branch
+            b._plan_leaf("parent", "Engineering", "sub", i)
+
+    def test_a_solo_corpus_still_carries_grants(self, settings):
+        """Dropping the share instead of falling back would leave a corpus
+        with no ACLs to migrate -- removing the thing it exists to test."""
+        drive = FakeDrive("alice@tenanta.com", "source")
+        b = _builder(drive, settings, "alice@tenanta.com", [])
+        shares = [p["share"][0]
+                  for p in (b._plan_leaf("p", "Engineering", "s", i)
+                            for i in range(300)) if p.get("share")]
+        assert shares, "no file carried any grant at all"
+        assert "users" not in shares, "cannot user-share with no peers"
+        assert "external" in shares
+
+    def test_a_real_peer_is_still_preferred(self, settings):
+        drive = FakeDrive("alice@tenanta.com", "source")
+        b = _builder(drive, settings, "alice@tenanta.com", ["bob@tenanta.com"])
+        shares = [p["share"][0]
+                  for p in (b._plan_leaf("p", "Engineering", "s", i)
+                            for i in range(300)) if p.get("share")]
+        assert "users" in shares
+
+    def test_a_solo_build_completes_end_to_end(self, settings):
+        """The live failure was inside build(), not _plan_leaf directly."""
+        drive = FakeDrive("alice@tenanta.com", "source")
+        b = _builder(drive, settings, "alice@tenanta.com", [])
+        m = b.build("Engineering", "PRJ-001-Apollo", edge_cases=True)
+        assert m["total_files"] > 0 and m["folders"] > 0
+
+    def test_a_two_user_build_completes_end_to_end(self, settings):
+        """peers[1] in the inherited-ACL folder is out of range here."""
+        drive = FakeDrive("alice@tenanta.com", "source")
+        b = _builder(drive, settings, "alice@tenanta.com", ["bob@tenanta.com"])
+        m = b.build("Engineering", "PRJ-001-Apollo", edge_cases=True)
+        assert m["total_files"] > 0
