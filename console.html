@@ -165,6 +165,11 @@ dialog .foot{display:flex; gap:8px; justify-content:flex-end; padding:14px 18px;
 .scope-note .warn-txt{color:var(--warn)}
 .toggles{border:1px solid var(--line); border-radius:10px; padding:12px 14px;
   margin-bottom:12px; background:var(--surface-2)}
+.tg-row{display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+  min-height:34px; margin-bottom:2px}
+.tg-label{font-weight:600}
+.rd{display:flex; align-items:center; gap:7px; cursor:pointer}
+.rd input{width:17px; height:17px; cursor:pointer}
 .tg{display:flex; align-items:center; gap:9px; min-height:34px;
   font-weight:600; cursor:pointer}
 .tg input{width:17px; height:17px; cursor:pointer}
@@ -284,6 +289,19 @@ dialog .foot{display:flex; gap:8px; justify-content:flex-end; padding:14px 18px;
       <input type="search" id="afilter" placeholder="Filter actions…" style="max-width:280px" autocomplete="off">
     </div>
     <div class="toggles" id="toggles">
+      <div class="tg-row">
+        <span class="tg-label">Mail carried by</span>
+        <label class="rd"><input type="radio" name="mt" value="engine" id="mt-engine">
+          <span>This engine</span></label>
+        <label class="rd"><input type="radio" name="mt" value="dms" id="mt-dms">
+          <span>Google DMS</span></label>
+      </div>
+      <p class="muted tg-note">Mail is the biggest slice of a migration and the
+        only one behind a write ceiling Google will not raise (3/sec/account).
+        DMS hands the job to Google instead. One choice, not two switches:
+        both would copy every message twice, neither would migrate mail at all.
+        Choosing DMS takes Gmail out of the engine run automatically — then use
+        the “Start Google DMS mail import” action below.</p>
       <label class="tg">
         <input type="checkbox" id="tg-rewrite">
         <span>Rewrite Drive links in mail</span>
@@ -530,11 +548,23 @@ async function loadToggles(){
   try{
     const t=(await get('/api/toggles')).toggles||{};
     $('#tg-rewrite').checked=!!t.rewrite_drive_links;
+    const mt=t.mail_transport==='dms'?'#mt-dms':'#mt-engine';
+    if($(mt)) $(mt).checked=true;
   }catch(e){
     // Drawn from the server, never from what this page assumed -- a switch
     // showing "off" while the run has it on is worse than no switch.
     $('#toggles').innerHTML='<p class="err">Toggles unavailable: '+(e.message||e)+'</p>';
   }
+}
+async function setTransport(which){
+  try{
+    const r=await fetch('/api/toggles',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({mail_transport:which})});
+    const j=await r.json();
+    const got=(j.toggles||{}).mail_transport;
+    const n=$(got==='dms'?'#mt-dms':'#mt-engine'); if(n) n.checked=true;
+  }catch(e){banner('Could not change the mail transport: '+(e.message||e));}
 }
 async function flipRewrite(on){
   try{
@@ -556,6 +586,8 @@ async function loadActions(){
 function renderActions(){
   const q=($('#afilter').value||'').toLowerCase();
 $('#tg-rewrite').addEventListener('change', e => flipRewrite(e.target.checked));
+['mt-engine','mt-dms'].forEach(id => { const n=$('#'+id); if(n)
+  n.addEventListener('change', e => e.target.checked && setTransport(e.target.value)); });
   const a=window._actions||{}; const box=$('#actions'); box.innerHTML='';
   const keys=Object.keys(a).sort().filter(k=>!q||k.includes(q)||(a[k].label||'').toLowerCase().includes(q));
   if(!keys.length){box.appendChild(el('p','muted','No actions match that filter.')); return;}
@@ -629,7 +661,7 @@ function refreshAll(manual){
   loadStatus(); loadProgress(); loadVolume(); loadFailures(); loadShared(); loadHost();
   if(manual){loadTenant(); loadActions(); loadToggles();}
 }
-loadTenant(); loadActions(); refreshAll(false);
+loadTenant(); loadActions(); loadToggles(); refreshAll(false);
 setInterval(loadStatus,3000);
 setInterval(()=>{loadProgress();loadVolume();loadFailures();loadShared();loadHost();},8000);
 </script>

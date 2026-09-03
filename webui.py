@@ -2829,6 +2829,20 @@ _RUN_STATE: dict = {
     "dry_run": False,
     "services": {"drive": True, "gmail": True, "calendar": True,
                 "chat": False, "contacts": False, "tasks": False},
+    # Who carries the mail: this engine, or Google's Data Migration Service.
+    #
+    # One setting rather than two toggles, because the two independent ones
+    # had two wrong states and no way to see you were in either. Both on
+    # copies every message twice; both off migrates no mail while reporting
+    # a clean run. And mail is the slice that matters -- 349,560 of 593,816
+    # items on the last full run, behind a 3/sec/account write ceiling
+    # Google states is not adjustable, so the engine is the slow path by
+    # construction.
+    #
+    # Live evidence of the footgun: DMS ran after the engine had already
+    # inserted the mail, discovered 288,219 messages, and skipped 270,264 of
+    # them as already present. Correct behaviour, and a wasted pass.
+    "mail_transport": "engine",          # "engine" | "dms"
     # How far back a delta pass looks, in days. Two was hardcoded, and two
     # is wrong for anything but a same-day catch-up: Gmail's newer_than
     # filters on the message's own date, not when it arrived, so backdated
@@ -3529,6 +3543,9 @@ def set_toggles(body: dict) -> dict:
     users = body.get("users")
     if users is not None:
         _RUN_STATE["users"] = str(users).strip()
+    transport = body.get("mail_transport")
+    if transport in ("engine", "dms"):
+        _RUN_STATE["mail_transport"] = transport
     days = body.get("delta_days")
     if days is not None:
         try:
@@ -3646,6 +3663,11 @@ def _action_argv(name: str) -> list:
     if name not in _LAUNCH_KEYS:
         return list(spec["argv"])
     chosen = [k for k, v in _RUN_STATE["services"].items() if v]
+    if _RUN_STATE.get("mail_transport") == "dms" and "gmail" in chosen:
+        # DMS owns the mail, so the engine must not also copy it. Enforced
+        # here rather than trusted to whoever set the service switches: the
+        # duplicate this prevents is one a user sees in their own inbox.
+        chosen = [c for c in chosen if c != "gmail"]
     argv = [PY, "main.py", "migrate" if name == "migrate" else "delta"]
     if chosen:
         argv += ["--services", ",".join(chosen)]
