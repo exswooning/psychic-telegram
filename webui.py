@@ -343,6 +343,47 @@ ACTIONS: dict[str, dict] = {
         "argv": [PY, "acl_audit.py", "--json", "acl_audit.json"],
     },
 
+    "verify_scopes_source": {
+        "label": "Which scopes are actually authorised (source)",
+        "blurb": "Mints a token per scope, one at a time, and says which the "
+                 "Admin console really grants. A scope that is granted but "
+                 "disabled by config, or requested but never authorised, is "
+                 "invisible until something fails hours into a run.",
+        "argv": [PY, "verify_scopes.py", "--tenant", "source"],
+        "parallel": True,
+    },
+    "verify_scopes_target": {
+        "label": "Which scopes are actually authorised (target)",
+        "blurb": "The same probe against the target tenant. Requesting an "
+                 "ungranted scope fails the whole token exchange, so one "
+                 "missing grant takes down every service at once.",
+        "argv": [PY, "verify_scopes.py", "--tenant", "target"],
+        "parallel": True,
+    },
+    "inventory": {
+        "label": "Count the source, per user",
+        "blurb": "Everything each user holds before a byte moves. This is "
+                 "what gives progress a real denominator -- without it "
+                 "Verification shows Drive and Gmail as 0 of 0.",
+        "argv": [PY, "inventory.py", "--json", "inventory.json"],
+    },
+    "verify_ledger": {
+        "label": "Does the ledger still describe reality?",
+        "blurb": "Internal consistency, not a tenant comparison: mappings "
+                 "written before the target account existed, rows for users "
+                 "no longer in the identity map, counts that disagree with "
+                 "each other. Read-only.",
+        "argv": [PY, "main.py", "verify-ledger"],
+    },
+    "external_shares_notify": {
+        "label": "Draft the 'your files moved' emails",
+        "blurb": "Composes one message per external collaborator listing "
+                 "their new URLs, and prints them. Sends nothing -- these "
+                 "reach people outside both tenants, so sending needs "
+                 "--send and an explicit environment confirmation.",
+        "argv": [PY, "external_shares.py", "--notify"],
+    },
+
     "ui_check": {
         "label": "Check the UI tells the truth",
         "blurb": "Signs in and drives every page in the router, reconciles "
@@ -1219,12 +1260,12 @@ def oauth_finish(tenant: str, full_url: str) -> dict:
 # source domain typed back before it will build a command.
 STEP_ACTIONS: dict[int, list[str]] = {
     4: ["init_db", "init_db_auto"],
-    5: ["preflight"],
+    5: ["preflight", "verify_scopes_source", "verify_scopes_target"],
     6: ["provision_dry", "provision"],
     7: ["check_seed_accounts", "check_seed_scopes"],
-    8: ["discover", "migrate_dry", "migrate"],
+    8: ["discover", "inventory", "migrate_dry", "migrate"],
     9: ["verify", "report", "acl_audit", "resolve", "external_shares",
-        "ui_check"],
+        "external_shares_notify", "ui_check", "verify_ledger"],
 }
 
 
