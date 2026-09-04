@@ -3102,6 +3102,28 @@ def identities_payload(account_id: int | None = None) -> dict:
             "merges": {t: n for t, n in counts.items() if n > 1}}
 
 
+def next_actions_payload(account_id: int | None = None) -> dict:
+    """What to do now, from the ledger. Read-only.
+
+    Its own error channel: a panel that answers "what should I do?" with
+    silence reads as "nothing", which is the one answer it must never give
+    by accident.
+    """
+    from config import Settings as _S
+    import next_actions
+
+    try:
+        st = _S(account_id=account_id) if account_id else _S()
+        conn = _db_conn(account_id)
+        if conn is None:
+            return {"error": "no ledger yet -- run init-db", "items": []}
+        conn.close()
+        from db import MigrationDB
+        return {"error": "", "items": next_actions.assess(MigrationDB(st.db_path), st)}
+    except Exception as exc:      # noqa: BLE001
+        return {"error": str(exc)[:200], "items": []}
+
+
 def licences_payload(side: str = "target",
                      account_id: int | None = None) -> dict:
     """Who holds which licence, and what this tenant has to give.
@@ -4086,6 +4108,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(oauth_status())
         elif path == "/api/dwd":
             self._json(dwd_payload())
+        elif path == "/api/next":
+            self._json(next_actions_payload(self._on_screen()))
         elif path == "/api/licences":
             self._json(licences_payload(
                 (query.get("side", ["target"])[0] or "target"), self._on_screen()))

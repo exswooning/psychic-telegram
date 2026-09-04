@@ -23,6 +23,7 @@ import ProvisionUsers from '@/components/ProvisionUsers'
 import AiDiagnostics from '@/components/AiDiagnostics'
 import DwdSetup from '@/components/DwdSetup'
 import CoverageAudit from '@/components/CoverageAudit'
+import NextActions from '@/components/NextActions'
 
 /**
  * Mission Control — one screen instead of six tabs.
@@ -185,6 +186,8 @@ const MissionControl: React.FC = () => {
             </Typography>
           </Stack>
         </Box>
+
+      <NextActions />
       </Box>
 
       <Alert severity="info" action={
