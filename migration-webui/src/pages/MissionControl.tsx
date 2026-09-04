@@ -155,8 +155,18 @@ const MissionControl: React.FC = () => {
   const { users, verification, activities, metrics } = useMigrationStore()
   const [userFilter, setUserFilter] = useState('')
 
-  const overallProgress = users.length > 0
-    ? Math.round(users.reduce((sum, u) => sum + u.progress, 0) / users.length) : 0
+  // Floored, and never 100 unless every user actually is. Math.round turned
+  // a mean of 99.99 into "overall 100%" while the Drive card beside it read
+  // "501,661 / 501,662 in progress" and Permissions "69,520 / 69,549" -- a
+  // header claiming done, thirty items short, next to two panels saying
+  // otherwise. Rounding up to a completion figure is the one direction this
+  // number must never be wrong in.
+  const overallProgress = users.length === 0
+    ? 0
+    : users.every((u) => u.progress >= 100)
+      ? 100
+      : Math.min(99, Math.floor(
+          users.reduce((sum, u) => sum + u.progress, 0) / users.length))
   const filteredUsers = useMemo(
     () => users.filter((u) => u.email.toLowerCase().includes(userFilter.toLowerCase())),
     [users, userFilter],

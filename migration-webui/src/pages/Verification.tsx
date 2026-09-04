@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Box,
@@ -60,12 +60,21 @@ const VerifiedDomains: React.FC = () => {
   const [seedEnabled, setSeedEnabled] = useState(false)
   const [menuFor, setMenuFor] = useState<{ side: 'source' | 'target'; anchor: HTMLElement } | null>(null)
 
+  // Skipped while one is already in flight. This endpoint mints a live token
+  // per delegated scope to prove delegation still works -- 25 of them on this
+  // tenant -- and takes about six seconds to answer. Polled every five, each
+  // call overlapped the last and never stopped, so an open tab was issuing
+  // roughly five token mints a second against Google for as long as it stayed
+  // open. The poll is cheap to skip and expensive to double up.
+  const inFlight = useRef(false)
   const refresh = useCallback(() => {
+    if (inFlight.current) return
+    inFlight.current = true
     setLoading(true); setError(null)
     fetchVerifiedDomains()
-      .then((r) => setDomains(r.domains))
+      .then((r) => setDomains(r.domains ?? []))
       .catch((e) => setError(e instanceof Error ? e.message : String(e)))
-      .finally(() => setLoading(false))
+      .finally(() => { inFlight.current = false; setLoading(false) })
   }, [])
 
   // Auto-poll, not fetch-once -- DWD status (verified/pending/error) is
@@ -74,7 +83,9 @@ const VerifiedDomains: React.FC = () => {
   // it showing whatever was true at page load until a manual re-check.
   useEffect(() => {
     refresh()
-    const id = setInterval(refresh, 5000)
+    // 30s, not 5s: delegation propagating is a minutes-scale event, and the
+    // check is not free -- see refresh above.
+    const id = setInterval(refresh, 30000)
     return () => clearInterval(id)
   }, [refresh])
   useEffect(() => { fetchMe().then((a) => setSeedEnabled(a.seed_enabled)).catch(() => {}) }, [])

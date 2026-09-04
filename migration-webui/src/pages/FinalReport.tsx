@@ -76,7 +76,15 @@ const FinalReport: React.FC = () => {
 
       <Alert severity={clean ? 'success' : 'warning'} sx={{ mb: 3 }}>
         <AlertTitle>{clean ? 'Migration Complete' : 'Migration finished with failures'}</AlertTitle>
-        {report.successfulUsers} of {report.totalUsers} users migrated successfully in {report.totalDuration}.
+        {report.successfulUsers} of {report.totalUsers} users migrated
+        successfully{report.totalDuration && report.totalDuration !== '\u2014'
+          ? ` in ${report.totalDuration}`
+          : ''}.
+        {/* The duration comes from the job object, which a service restart
+            clears -- so it is "\u2014" on any report read after one. An em
+            dash is the honest unknown, but "migrated successfully in \u2014."
+            reads as a broken sentence rather than a missing fact, so the
+            clause is dropped instead of rendered empty. */}
         {report.failedUsers > 0 && ` ${report.failedUsers} failed.`}
       </Alert>
 
@@ -99,6 +107,14 @@ const FinalReport: React.FC = () => {
       <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 3 }}>
         <CardContent sx={{ p: 3 }}>
           <Typography variant="h6" sx={{ fontWeight: 600, mb: 2 }}>Performance Summary</Typography>
+          {report.totalDuration === '\u2014' && (
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              Timing is measured from the running job, which a service restart
+              clears — so it is unavailable for a run that finished before the
+              last restart. The item counts above come from the ledger and are
+              unaffected.
+            </Typography>
+          )}
           <Grid container spacing={3}>
             <Grid item xs={12} sm={4}>
               <Typography variant="caption" color="text.secondary">Total Duration</Typography>

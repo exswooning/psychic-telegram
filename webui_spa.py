@@ -83,7 +83,12 @@ def _service_progress(done: int, failed: int, total: int | None) -> dict:
         pct = 100
     else:
         status = "in_progress"
-        pct = round(min(done, exp) / exp * 100)
+        # Floored and capped at 99. This branch is only reached when
+        # done < exp, so rounding could report 100% for something explicitly
+        # not finished: Drive read "501,661 / 501,662" beside a bar claiming
+        # complete. In a completion figure, up is the one direction the error
+        # must never go.
+        pct = min(99, int(min(done, exp) / exp * 100))
     return {"status": status, "progress": pct, "itemsCompleted": done,
            "itemsTotal": exp}
 
@@ -155,8 +160,17 @@ def users_payload(conn: sqlite3.Connection, cap_bytes: int) -> list[dict]:
         overall_done = u.done + c_done + t_done + ch_done + p_done
         overall_failed = u.failed + c_fail + t_fail + ch_fail + p_fail
         status = _STATUS_TO_MIGRATION_STATUS.get(u.status, "waiting")
-        progress = round(u.fraction * 100) if u.fraction is not None else (
-            100 if status == "completed" else 0)
+        # Same flooring as _service_progress, and for the same reason: with
+        # round(), 200 users each at 99.99% all reported 100, and Mission
+        # Control's header averaged them into "overall 100%" while the panels
+        # beside it showed thirty items outstanding. Only a genuinely
+        # completed user reports 100.
+        if status == "completed":
+            progress = 100
+        elif u.fraction is None:
+            progress = 0
+        else:
+            progress = min(99, int(u.fraction * 100))
 
         out.append({
             "id": u.source,
