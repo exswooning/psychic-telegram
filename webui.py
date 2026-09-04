@@ -3044,7 +3044,56 @@ def identities_payload(account_id: int | None = None) -> dict:
         return {"error": f"db read error: {exc}", "rows": []}
     finally:
         conn.close()
-    return {"error": "", "rows": [dict(r) for r in rows]}
+    out = [dict(r) for r in rows]
+    # Several sources sharing one target is consolidation -- leavers into an
+    # archive, duplicate accounts merged. The schema has always allowed it
+    # (source_email is the key, target_email is not unique) and the engine
+    # nests each source's tree under a folder named for them, but nothing
+    # ever showed that it was happening, so a typo in a target address and a
+    # deliberate merge looked identical.
+    counts: dict[str, int] = {}
+    for r in out:
+        t = (r.get("target_email") or "").lower()
+        counts[t] = counts.get(t, 0) + 1
+    for r in out:
+        r["mergedInto"] = counts.get((r.get("target_email") or "").lower(), 0) > 1
+    return {"error": "", "rows": out,
+            "merges": {t: n for t, n in counts.items() if n > 1}}
+
+
+def licences_payload(side: str = "target",
+                     account_id: int | None = None) -> dict:
+    """Who holds which licence, and what this tenant has to give.
+
+    An unlicensed target account accepts almost nothing, and the migration
+    then fails per user with errors that never say "licensing" -- so the
+    answer belongs on screen next to the identity map, before a run, rather
+    than in the failures afterwards.
+
+    `assignable` is what the tenant is actually using: SKUs are listed from
+    the live assignments rather than from the full catalogue, because
+    offering an operator a SKU this customer has no seats for produces a
+    confident 412 at the worst moment.
+    """
+    from config import Settings as _S
+    import tenant_inventory
+
+    st = _S(account_id=account_id) if account_id else _S()
+    by_email, err = tenant_inventory.licenses(st, side)
+    seen: dict[str, int] = {}
+    for sku in by_email.values():
+        seen[sku] = seen.get(sku, 0) + 1
+    return {
+        "side": side,
+        "error": err,
+        "byEmail": by_email,
+        "assignable": [
+            {"skuId": sku, "name": tenant_inventory.SKU_NAMES.get(sku, sku),
+             "inUse": n}
+            for sku, n in sorted(seen.items(), key=lambda kv: -kv[1])
+        ],
+        "unlicensed": sorted(e for e, v in by_email.items() if not v),
+    }
 
 
 def save_identity_pair(source_email: str, target_email: str) -> dict:
@@ -3996,8 +4045,16 @@ class Handler(BaseHTTPRequestHandler):
             self._json(oauth_status())
         elif path == "/api/dwd":
             self._json(dwd_payload())
+        elif path == "/api/licences":
+            self._json(licences_payload(
+                (query.get("side", ["target"])[0] or "target"), self._on_screen()))
         elif path == "/api/identities":
-            self._json(identities_payload())
+            # Scoped, like every other read on this page. Unscoped it opened
+            # the box's default ledger, so a signed-in tenant was shown some
+            # other account's identity map -- the same failure _account_env
+            # documents for the action buttons, in the one place where the
+            # rows ARE addresses belonging to someone else.
+            self._json(identities_payload(self._on_screen()))
         elif path == "/api/config":
             from config import Settings as _S
             self._json({"config": read_config(self._on_screen()),
@@ -4230,6 +4287,21 @@ class Handler(BaseHTTPRequestHandler):
             if not ok:
                 job_admission.release(account_id, "wipe target")
             self._json({"ok": ok, "error": "" if ok else msg})
+            return
+
+        if self.path == "/api/licences/assign":
+            from config import Settings as _S
+            import tenant_inventory
+
+            side = body.get("side", "target")
+            if side not in ("source", "target"):
+                self._json({"ok": False, "error": "side must be source or target"}, 400)
+                return
+            aid = self._on_screen()
+            ok, msg = tenant_inventory.assign_license(
+                _S(account_id=aid) if aid else _S(), side,
+                body.get("email", ""), body.get("sku_id", ""))
+            self._json({"ok": ok, "error": "" if ok else msg, "msg": msg})
             return
 
         if self.path == "/api/identities/save":

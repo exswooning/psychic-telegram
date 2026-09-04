@@ -159,6 +159,13 @@ dialog{
 dialog::backdrop{background:rgba(0,0,0,.5)}
 dialog .body{padding:18px}
 dialog .foot{display:flex; gap:8px; justify-content:flex-end; padding:14px 18px; border-top:1px solid var(--line)}
+.ident-tools{display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr));
+  gap:14px; margin-top:14px; padding-top:14px; border-top:1px solid var(--line)}
+.tool h3{margin:0 0 4px; font-size:.9375rem}
+.tool .muted{margin:0 0 8px; font-size:.8125rem}
+tr.merged td{background:var(--warn-bg)}
+.mergetag{font-size:.7rem; font-weight:600; color:var(--warn);
+  text-transform:uppercase; letter-spacing:.05em; margin-left:6px}
 .scope-note{margin-top:10px; padding-top:10px; border-top:1px solid var(--line);
   font-size:.8125rem; color:var(--ink-3); display:flex; flex-direction:column;
   gap:4px; max-width:78ch}
@@ -274,6 +281,66 @@ dialog .foot{display:flex; gap:8px; justify-content:flex-end; padding:14px 18px;
       <div class="more" id="user-more"></div>
     </section>
   </div>
+
+  <section class="card" style="margin-bottom:16px" aria-labelledby="h-ident">
+    <header>
+      <h2 id="h-ident">Identities, merges and licences</h2>
+      <span class="pill idle" id="identcount">…</span>
+    </header>
+    <p class="muted">
+      Who becomes whom. Two sources pointing at one target is a merge — the
+      engine nests each source's tree under a folder named for them, so their
+      files stay separable. An unlicensed target accepts almost nothing and
+      fails per user with errors that never say &ldquo;licensing&rdquo;, so it
+      is shown here, before a run.
+    </p>
+    <div class="row" style="margin-bottom:10px">
+      <label for="ifilter" class="sr">Filter identities</label>
+      <input type="search" id="ifilter" placeholder="Filter by address…"
+             style="max-width:250px" autocomplete="off">
+      <button id="i-selall" type="button">Select all shown</button>
+      <button id="i-none" type="button">Clear</button>
+      <button id="i-scope" type="button">Migrate only checked</button>
+      <span class="muted" id="i-scope-now"></span>
+    </div>
+    <div class="scroll">
+      <table id="itable">
+        <caption class="sr">Source to target mapping, with licence and status</caption>
+        <thead><tr>
+          <th scope="col"><span class="sr">Select</span></th>
+          <th scope="col">Source</th><th scope="col">Target</th>
+          <th scope="col">Licence on target</th><th scope="col">Status</th>
+        </tr></thead>
+        <tbody><tr><td colspan="5" class="muted">loading…</td></tr></tbody>
+      </table>
+    </div>
+    <div class="more" id="ident-more"></div>
+
+    <div class="ident-tools">
+      <div class="tool">
+        <h3>Merge users</h3>
+        <p class="muted">Point a second source at a target that already has one.
+          Written to identities.csv; takes effect on the next
+          &ldquo;Create database + load identities&rdquo;.</p>
+        <div class="row">
+          <input id="m-src" placeholder="source@old-domain" autocomplete="off">
+          <input id="m-tgt" placeholder="target@new-domain" autocomplete="off">
+          <button id="m-add" type="button">Add mapping</button>
+        </div>
+      </div>
+      <div class="tool">
+        <h3>Assign a licence</h3>
+        <p class="muted">Applies to every checked target above. Only SKUs this
+          tenant already uses are offered — one it has no seats for fails at
+          the worst possible moment.</p>
+        <div class="row">
+          <label for="l-sku" class="sr">Licence</label>
+          <select id="l-sku"><option value="">loading…</option></select>
+          <button id="l-apply" type="button">Assign to checked</button>
+        </div>
+      </div>
+    </div>
+  </section>
 
   <section class="card" style="margin-bottom:16px" aria-labelledby="h-actions">
     <header>
@@ -544,6 +611,136 @@ async function loadStatus(){
       pill($('#logpill'),s.job.rc===0?'ok':'bad', s.job.rc===0?'exit 0':'exit '+s.job.rc);}
   }catch(e){pill($('#jobpill'),'bad','status unavailable');}
 }
+let _ident=[], _lic={byEmail:{},assignable:[]};
+// Selection lives here, not in the DOM. renderIdent() rebuilds the tbody on
+// every filter keystroke, so reading checked boxes off the table lost the
+// ticks the moment you typed -- and the whole point of the filter is to find
+// one user, tick them, then find the next. Keyed by source_email so a
+// selection also survives a poll refresh, and so a user ticked before
+// filtering still counts once they are hidden.
+const _sel = new Set();
+
+function identChecked(){ return Array.from(_sel); }
+function renderIdent(){
+  const q=($('#ifilter').value||'').toLowerCase();
+  const rows=_ident.filter(r=>!q
+    || (r.source_email||'').toLowerCase().includes(q)
+    || (r.target_email||'').toLowerCase().includes(q));
+  const t=$('#itable tbody'); t.innerHTML='';
+  const show=_showAll.ident?rows:rows.slice(0,CAP);
+  if(!rows.length){
+    const tr=el('tr'); const td=el('td','muted','Nothing loaded — run “Create database + load identities”.');
+    td.colSpan=5; tr.appendChild(td); t.appendChild(tr);
+  }
+  show.forEach(r=>{
+    const tr=el('tr'); if(r.mergedInto) tr.className='merged';
+    const c=el('td'); const b=el('input'); b.type='checkbox';
+    b.dataset.src=r.source_email; b.dataset.tgt=r.target_email;
+    b.checked=_sel.has(r.source_email);
+    b.setAttribute('aria-label','select '+r.source_email);
+    b.addEventListener('change', e =>
+      e.target.checked ? _sel.add(r.source_email) : _sel.delete(r.source_email));
+    c.appendChild(b); tr.appendChild(c);
+    tr.appendChild(el('td','wrap',r.source_email));
+    const tg=el('td','wrap'); tg.appendChild(document.createTextNode(r.target_email||''));
+    if(r.mergedInto) tg.appendChild(el('span','mergetag','merged'));
+    tr.appendChild(tg);
+    const lic=_lic.byEmail[(r.target_email||'').toLowerCase()];
+    const lc=el('td'); const lp=el('span');
+    pill(lp, lic?'ok':'bad', lic? (skuName(lic)) : 'none');
+    lc.appendChild(lp); tr.appendChild(lc);
+    const st=el('td'); const sp=el('span'); const v=(r.status||'PENDING');
+    pill(sp, v==='DONE'?'ok':v==='FAILED'?'bad':v==='RUNNING'?'warn':'idle', v.toLowerCase());
+    st.appendChild(sp); tr.appendChild(st);
+    t.appendChild(tr);
+  });
+  capNote($('#ident-more'), show.length, rows.length, 'ident', renderIdent);
+  const merges=Object.keys(_ident.length?(window._merges||{}):{}).length;
+  pill($('#identcount'),'idle',rows.length+' mapped'
+       +(merges?' · '+merges+' merge(s)':'')
+       +(_sel.size?' · '+_sel.size+' selected':''));
+}
+function skuName(id){
+  const hit=(_lic.assignable||[]).find(a=>a.skuId===id);
+  return hit?hit.name:id;
+}
+async function loadIdentities(){
+  try{
+    const d=await get('/api/identities');
+    _ident=d.rows||[]; window._merges=d.merges||{};
+    renderIdent();
+  }catch(e){panelFail('#itable tbody','#identcount',5,e);}
+}
+async function loadLicences(){
+  try{
+    const d=await get('/api/licences?side=target');
+    _lic=d||{byEmail:{},assignable:[]};
+    const sel=$('#l-sku'); sel.innerHTML='';
+    if(d.error){
+      sel.appendChild(Object.assign(el('option',null,'unavailable: '+d.error.slice(0,60)),{value:''}));
+    }else if(!(d.assignable||[]).length){
+      sel.appendChild(Object.assign(el('option',null,'no licences in use on this tenant'),{value:''}));
+    }else{
+      (d.assignable||[]).forEach(a=>{
+        sel.appendChild(Object.assign(
+          el('option',null,a.name+'  ('+a.inUse+' in use)'),{value:a.skuId}));
+      });
+    }
+    renderIdent();
+  }catch(e){
+    $('#l-sku').innerHTML='<option value="">could not load licences</option>';
+  }
+}
+async function assignLicence(){
+  const sku=$('#l-sku').value, who=identChecked();
+  if(!sku){banner('Pick a licence first.','warn');return;}
+  const rows=_ident.filter(r=>who.includes(r.source_email));
+  const targets=Array.from(new Set(rows.map(r=>r.target_email).filter(Boolean)));
+  if(!targets.length){banner('Check at least one row first.','warn');return;}
+  let ok=0, bad=[];
+  for(const email of targets){
+    try{
+      const r=await fetch('/api/licences/assign',{method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({side:'target',email:email,sku_id:sku})});
+      const j=await r.json();
+      j.ok?ok++:bad.push(email+': '+(j.error||'failed'));
+    }catch(e){bad.push(email+': '+(e.message||e));}
+  }
+  banner('Licensed '+ok+' of '+targets.length+' target(s).'
+         +(bad.length?' First failure — '+bad[0]:''), bad.length?'warn':'ok');
+  loadLicences();
+}
+async function addMapping(){
+  const src=$('#m-src').value.trim(), tgt=$('#m-tgt').value.trim();
+  if(!src||!tgt){banner('Both addresses are required.','warn');return;}
+  try{
+    const r=await fetch('/api/identities/save',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({source_email:src,target_email:tgt})});
+    const j=await r.json();
+    if(j.ok){
+      $('#m-src').value=''; $('#m-tgt').value='';
+      banner('Added. It loads into identity_map on the next '
+             +'“Create database + load identities”.','ok');
+    }else banner(j.error||'could not add','warn');
+  }catch(e){banner('Could not add: '+(e.message||e),'warn');}
+}
+function scopeToChecked(){
+  const rows=_ident.filter(r=>identChecked().includes(r.source_email));
+  const list=rows.map(r=>r.source_email).join(', ');
+  fetch('/api/toggles',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({users:list})})
+    .then(r=>r.json()).then(j=>{
+      const now=(j.toggles||{}).users||'';
+      $('#i-scope-now').textContent = now
+        ? 'runs will cover '+now.split(',').length+' user(s)'
+        : 'runs cover every mapped user';
+      banner(now?'Migrations are now scoped to '+now.split(',').length+' user(s).'
+                :'Scope cleared — runs cover every mapped user.','ok');
+    }).catch(e=>banner('Could not set the scope: '+(e.message||e),'warn'));
+}
+
 async function loadToggles(){
   try{
     const t=(await get('/api/toggles')).toggles||{};
@@ -586,6 +783,15 @@ async function loadActions(){
 function renderActions(){
   const q=($('#afilter').value||'').toLowerCase();
 $('#tg-rewrite').addEventListener('change', e => flipRewrite(e.target.checked));
+$('#ifilter').addEventListener('input', renderIdent);
+$('#i-selall').addEventListener('click', () => {
+  document.querySelectorAll('#itable tbody input[type=checkbox]')
+          .forEach(n=>{ n.checked=true; _sel.add(n.dataset.src); });
+  renderIdent(); });
+$('#i-none').addEventListener('click', () => { _sel.clear(); renderIdent(); });
+$('#i-scope').addEventListener('click', scopeToChecked);
+$('#m-add').addEventListener('click', addMapping);
+$('#l-apply').addEventListener('click', assignLicence);
 ['mt-engine','mt-dms'].forEach(id => { const n=$('#'+id); if(n)
   n.addEventListener('change', e => e.target.checked && setTransport(e.target.value)); });
   const a=window._actions||{}; const box=$('#actions'); box.innerHTML='';
@@ -661,7 +867,7 @@ function refreshAll(manual){
   loadStatus(); loadProgress(); loadVolume(); loadFailures(); loadShared(); loadHost();
   if(manual){loadTenant(); loadActions(); loadToggles();}
 }
-loadTenant(); loadActions(); loadToggles(); refreshAll(false);
+loadTenant(); loadActions(); loadToggles(); loadIdentities(); loadLicences(); refreshAll(false);
 setInterval(loadStatus,3000);
 setInterval(()=>{loadProgress();loadVolume();loadFailures();loadShared();loadHost();},8000);
 </script>

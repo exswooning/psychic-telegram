@@ -84,6 +84,88 @@ SKU_NAMES = {
 }
 
 
+def current_sku(svc, email: str) -> str:
+    """The SKU this account holds now, or "" if it holds none.
+
+    Needed because a licence *move* is not addressed by the SKU you want --
+    licenseAssignments.patch takes the CURRENT skuId in the path and the new
+    one in the body. Passing the target SKU in both looks right, is accepted
+    by the client, and comes back as a 500 from Google.
+    """
+    for sku in SKU_NAMES:
+        try:
+            svc.licenseAssignments().get(
+                productId="Google-Apps", skuId=sku, userId=email).execute()
+            return sku
+        except Exception:                              # noqa: BLE001
+            continue
+    return ""
+
+
+def assign_license(settings: Settings, side: str, email: str,
+                   sku_id: str) -> tuple[bool, str]:
+    """Give one account a licence, or move it to a different SKU.
+
+    Provisioning creates accounts; it does not license them, and an
+    unlicensed target accepts almost nothing -- the migration then fails per
+    user with errors that never mention licensing. Reading the SKUs was
+    already possible here; this is the other half.
+
+    Two things this has to get right, both learned from Google returning
+    something other than what the situation is:
+
+      * An account that already holds the requested SKU is *done*, not
+        failed. insert() answers 409, and patching it to the SKU it already
+        has answers 500 "Internal error encountered" -- so a no-op looked
+        like a server fault.
+      * A move must address the CURRENT SKU in the path, with the new one in
+        the body. Putting the target SKU in both is the same 500.
+    """
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+
+    key = settings.source_sa_key if side == "source" else settings.target_sa_key
+    admin = settings.source_admin if side == "source" else settings.target_admin
+    if not (key and admin):
+        return False, "tenant not configured"
+    if "@" not in (email or ""):
+        return False, "email must be a real address"
+    if not sku_id:
+        return False, "no SKU given"
+    try:
+        creds = service_account.Credentials.from_service_account_file(
+            key, scopes=[LICENSING_SCOPE]).with_subject(admin)
+        svc = build("licensing", "v1", credentials=creds, cache_discovery=False)
+    except Exception as exc:      # noqa: BLE001
+        return False, str(exc)[:200]
+
+    want = SKU_NAMES.get(sku_id, sku_id)
+    try:
+        svc.licenseAssignments().insert(
+            productId="Google-Apps", skuId=sku_id, body={"userId": email}).execute()
+        return True, f"assigned {want}"
+    except Exception as exc:      # noqa: BLE001
+        msg = str(exc)
+        if "already" not in msg.lower() and "409" not in msg:
+            return False, msg[:200]
+
+    held = current_sku(svc, email)
+    if held == sku_id:
+        return True, f"already had {want}"
+    if not held:
+        # insert said "already", nothing is readable: report the original
+        # rather than inventing a move from a SKU we could not find.
+        return False, "already assigned, but the current SKU could not be read"
+    try:
+        svc.licenseAssignments().patch(
+            productId="Google-Apps", skuId=held, userId=email,
+            body={"productId": "Google-Apps", "skuId": sku_id,
+                  "userId": email}).execute()
+        return True, f"moved {SKU_NAMES.get(held, held)} -> {want}"
+    except Exception as exc:      # noqa: BLE001
+        return False, str(exc)[:200]
+
+
 def licenses(settings: Settings, side: str) -> tuple[dict[str, str], str]:
     """Every account's licence SKU, domain-wide. (by_email, error).
 
@@ -131,7 +213,12 @@ def licenses(settings: Settings, side: str) -> tuple[dict[str, str], str]:
             for it in resp.get("items", []):
                 email = (it.get("userId") or "").lower()
                 sku = it.get("skuId") or ""
-                out[email] = SKU_NAMES.get(sku, it.get("skuName") or sku or "unknown")
+                # The raw id, not the display name. A friendly name is for
+                # reading; every write API addresses a SKU by id, and the two
+                # were the same field here -- so the licence picker posted
+                # "Business Starter" as a skuId and Google answered 400. Name
+                # it at the edge that renders it, never in the data.
+                out[email] = sku or "unknown"
             token = resp.get("nextPageToken")
             if not token:
                 break
@@ -311,7 +398,10 @@ def snapshot(settings: Settings, side: str, limit: int | None = None,
     out["licenseError"] = lic_err
     counts: dict[str, int] = {}
     for sku in by_email.values():
-        counts[sku] = counts.get(sku, 0) + 1
+        # Named here, at the edge that renders it -- licenses() carries raw
+        # ids so the write path can address a SKU, and this is the only
+        # place the friendly name was ever wanted.
+        counts[SKU_NAMES.get(sku, sku)] = counts.get(SKU_NAMES.get(sku, sku), 0) + 1
     out["licenseCounts"] = dict(sorted(counts.items(), key=lambda kv: -kv[1]))
     if limit is not None and len(emails) > limit:
         emails = emails[:limit]
