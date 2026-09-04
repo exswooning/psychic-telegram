@@ -15,6 +15,7 @@ import {
   useTheme,
   CssBaseline,
   Divider,
+  ListSubheader,
   List,
   ListItemButton,
   ListItemIcon,
@@ -65,29 +66,39 @@ import Logout from '@mui/icons-material/Logout'
 // with a Seed/Migrate choice (see Wizard.tsx) -- one nav entry, not two.
 // Role-aware entries (operator/superadmin-only pages) are appended in
 // Layout below, not listed here.
+// Grouped by what an operator is doing, not alphabetically or by when the
+// page was built. Twenty-two flat entries gave equal weight to "Mission
+// Control" and "GCP Teardown", so finding anything meant reading the whole
+// list every time. The five groups follow the actual sequence of a
+// migration: set it up, run it, check it, keep the box healthy, admin.
+//
+// Paths, labels and icons are untouched -- this is ordering and headings
+// only, so every existing link, bookmark and test still resolves.
+const NAV_GROUP_ORDER = ['Set up', 'Migrate', 'Check', 'Operate', 'Admin'] as const
+
 const NAV_ITEMS = [
-  { path: '/wizard', label: 'Setup Wizard', icon: <WizardIconNav /> },
+  { path: '/wizard', label: 'Setup Wizard', icon: <WizardIconNav /> , group: 'Set up' },
   // Every account has a tenant pair, so this is not gated -- a client
   // sees only its own, which the endpoint enforces rather than the nav.
-  { path: '/migrations', label: 'Migrations', icon: <MigrationsIconNav /> },
+  { path: '/migrations', label: 'Migrations', icon: <MigrationsIconNav /> , group: 'Migrate' },
   // Not gated, and not nested under a migration: throughput, latency,
   // volume, transfer against the daily cap and host capacity are what
   // people check while a run is in flight, and making them find the run
   // first is a step between them and the answer. The endpoint resolves
   // the account -- a client's own, an operator's running one.
-  { path: '/metrics', label: 'Metrics', icon: <MetricsIconNav /> },
-  { path: '/jobs', label: 'Jobs', icon: <JobsIconNav /> },
-  { path: '/running-now', label: 'Running Now', icon: <RunningNowIconNav /> },
-  { path: '/mission-control', label: 'Mission Control', icon: <MissionIcon /> },
+  { path: '/metrics', label: 'Metrics', icon: <MetricsIconNav /> , group: 'Check' },
+  { path: '/jobs', label: 'Jobs', icon: <JobsIconNav /> , group: 'Migrate' },
+  { path: '/running-now', label: 'Running Now', icon: <RunningNowIconNav /> , group: 'Migrate' },
+  { path: '/mission-control', label: 'Mission Control', icon: <MissionIcon /> , group: 'Migrate' },
   // Users lives inside a migration's report now -- per-user state only
   // means anything against the tenant pair it belongs to, and a
   // top-level page had to guess which migration you meant.
-  { path: '/activity', label: 'Activity', icon: <ActivityIcon /> },
-  { path: '/system-health', label: 'System Health', icon: <BarChartIcon /> },
-  { path: '/verification', label: 'Verification', icon: <VerifyIcon /> },
-  { path: '/errors', label: 'Failures', icon: <ErrorsIconNav /> },
-  { path: '/report', label: 'Final Report', icon: <ReportIcon /> },
-  { path: '/help', label: 'Help', icon: <HelpIconNav /> },
+  { path: '/activity', label: 'Activity', icon: <ActivityIcon /> , group: 'Check' },
+  { path: '/system-health', label: 'System Health', icon: <BarChartIcon /> , group: 'Operate' },
+  { path: '/verification', label: 'Verification', icon: <VerifyIcon /> , group: 'Check' },
+  { path: '/errors', label: 'Failures', icon: <ErrorsIconNav /> , group: 'Check' },
+  { path: '/report', label: 'Final Report', icon: <ReportIcon /> , group: 'Check' },
+  { path: '/help', label: 'Help', icon: <HelpIconNav /> , group: 'Admin' },
 ]
 
 // Operator/superadmin-only -- the deeper ops surface a SaaS client
@@ -96,21 +107,21 @@ const NAV_ITEMS = [
 // GCP project). Appended only for account?.is_superadmin, same gate
 // /admin/accounts already uses below.
 const OPERATOR_NAV_ITEMS = [
-  { path: '/deploy', label: 'Deploy', icon: <DeployIcon /> },
+  { path: '/deploy', label: 'Deploy', icon: <DeployIcon /> , group: 'Set up' },
   // The suite is the only evidence the tool behaves as described, and it
   // used to live entirely in whoever's terminal last ran it.
-  { path: '/tests', label: 'Test suite', icon: <TestsIconNav /> },
-  { path: '/identities', label: 'Identities', icon: <IdentitiesIconNav /> },
-  { path: '/maintenance', label: 'Maintenance', icon: <MaintenanceIconNav /> },
-  { path: '/services', label: 'Other services', icon: <ScopeIconNav /> },
-  { path: '/scope', label: 'Scope', icon: <ScopeIconNav /> },
-  { path: '/logs', label: 'Logs', icon: <LogsIconNav /> },
-  { path: '/gcp-teardown', label: 'GCP Teardown', icon: <TeardownIconNav /> },
+  { path: '/tests', label: 'Test suite', icon: <TestsIconNav /> , group: 'Operate' },
+  { path: '/identities', label: 'Identities', icon: <IdentitiesIconNav /> , group: 'Set up' },
+  { path: '/maintenance', label: 'Maintenance', icon: <MaintenanceIconNav /> , group: 'Operate' },
+  { path: '/services', label: 'Other services', icon: <ScopeIconNav /> , group: 'Migrate' },
+  { path: '/scope', label: 'Scope', icon: <ScopeIconNav /> , group: 'Check' },
+  { path: '/logs', label: 'Logs', icon: <LogsIconNav /> , group: 'Operate' },
+  { path: '/gcp-teardown', label: 'GCP Teardown', icon: <TeardownIconNav /> , group: 'Operate' },
   // Superadmin, matching the join endpoint it reads: the node token is one
   // shared secret for the whole control plane today, so anything holding it
   // can claim users for any account. Until that token is per-account, the
   // page that shows it belongs behind the role that already spans accounts.
-  { path: '/nodes', label: 'Nodes', icon: <NodesIconNav /> },
+  { path: '/nodes', label: 'Nodes', icon: <NodesIconNav /> , group: 'Operate' },
 ]
 
 const formatEta = (seconds: number): string => {
@@ -143,7 +154,8 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   // advertise pages that will just 403.
   const navItems = account?.is_superadmin
     ? [...NAV_ITEMS, ...OPERATOR_NAV_ITEMS,
-       { path: '/admin/accounts', label: 'Accounts (admin)', icon: <AdminIconNav /> }]
+       { path: '/admin/accounts', label: 'Accounts (admin)',
+         icon: <AdminIconNav />, group: 'Admin' }]
     : NAV_ITEMS
   const [notifAnchor, setNotifAnchor] = useState<null | HTMLElement>(null)
   const [profileAnchor, setProfileAnchor] = useState<null | HTMLElement>(null)
@@ -247,7 +259,29 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
       </Box>
       <Divider />
       <List sx={{ pt: 1, px: 1, flex: 1, overflowY: 'auto' }}>
-        {navItems.map((item) => {
+        {NAV_GROUP_ORDER.flatMap((group) => {
+          const inGroup = navItems.filter((i) => i.group === group)
+          if (inGroup.length === 0) return []
+          return [
+            // Hidden when the rail is collapsed to icons: a heading with no
+            // room to read is just a gap between two icons.
+            sidebarOpen ? (
+              <ListSubheader
+                key={`h-${group}`}
+                disableSticky
+                sx={{
+                  bgcolor: 'transparent', lineHeight: '28px', px: 1.5,
+                  fontSize: 11, fontWeight: 700, letterSpacing: '0.08em',
+                  textTransform: 'uppercase', color: 'text.disabled',
+                  mt: group === NAV_GROUP_ORDER[0] ? 0 : 1.5,
+                }}
+              >
+                {group}
+              </ListSubheader>
+            ) : (
+              <Divider key={`h-${group}`} sx={{ my: 1 }} />
+            ),
+            ...inGroup.map((item) => {
           const isActive = location.pathname === item.path
           return (
             <ListItemButton
@@ -276,6 +310,8 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
               )}
             </ListItemButton>
           )
+            }),
+          ]
         })}
       </List>
       <Box sx={{ p: 1, borderTop: '1px solid', borderColor: 'divider' }}>
