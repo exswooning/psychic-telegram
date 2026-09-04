@@ -149,3 +149,44 @@ class TestTheAllClearIsEarned:
     def test_it_is_withheld_while_anything_is_outstanding(self, db):
         _user(db, "a@old.test", "PENDING")
         assert "Nothing outstanding" not in titles(db)
+
+
+class TestFailureTriage:
+    """"32 failures" and "one worth retrying, thirty-one that cannot move"
+    are different instructions, and only the second is actionable. On the
+    live tenant 29 of 32 are organizer-role grants that can never succeed on
+    a My Drive file -- re-running them forever changes nothing."""
+
+    def test_known_permanent_failures_offer_no_retry(self, db):
+        _user(db, "a@old.test")
+        for i in range(3):
+            db.log_audit("a@old.test", f"f{i}:x@y.test", "acl", "FAILED",
+                         "HTTP 403 (organizerOnNonTeamDriveNotSupported): "
+                         "Organizer role is only valid for shared drives.")
+        item = [i for i in assess(db, _S()) if "on current users" in i["title"]][0]
+        assert item["action"] is None
+        assert "cannot move" in item["detail"]
+        assert item["level"] == OK
+
+    def test_an_unclassified_failure_still_offers_the_retry(self, db):
+        """Unclassified means nobody has looked, not that it is hopeless --
+        withholding the retry would assert something unchecked."""
+        _user(db, "a@old.test")
+        db.log_audit("a@old.test", "f1:x@y.test", "acl", "FAILED", "something new")
+        item = [i for i in assess(db, _S()) if "on current users" in i["title"]][0]
+        assert item["action"] == "resolve_dry" and item["level"] == WARN
+
+    def test_the_family_is_named(self, db):
+        _user(db, "a@old.test")
+        db.log_audit("a@old.test", "f1:x@y.test", "acl", "FAILED",
+                     "organizerOnNonTeamDriveNotSupported")
+        item = [i for i in assess(db, _S()) if "on current users" in i["title"]][0]
+        assert "acl organizer role" in item["detail"]
+
+    def test_a_retryable_family_is_counted_as_such(self, db):
+        _user(db, "a@old.test")
+        db.log_audit("a@old.test", "f1:x@y.test", "acl", "FAILED",
+                     "Quota exceeded for quota metric")
+        item = [i for i in assess(db, _S()) if "on current users" in i["title"]][0]
+        assert "1 worth retrying" in item["detail"]
+        assert item["action"] == "resolve_dry"

@@ -83,10 +83,41 @@ def assess(db, settings) -> list[dict]:
                         "Left by an earlier tenant generation. Nothing to do -- "
                         "they are already hidden from the Failures page.", None))
     if actionable:
-        out.append(_one(WARN, f"{actionable} failure(s) on current users",
-                        "Retry what is retryable; the rest are recorded with a "
-                        "reason. Check the type breakdown before a bulk retry.",
-                        "resolve_dry"))
+        # Split by whether a retry could change anything. "32 failures" and
+        # "one worth retrying, thirty-one that cannot move" are very
+        # different instructions, and only the second is actionable -- on
+        # this tenant 29 are organizer-role grants that can never succeed on
+        # a My Drive file, and re-running them forever changes nothing.
+        try:
+            import repair
+            t = repair.triage(db)
+        except Exception:                              # noqa: BLE001
+            t = None
+        if t and t["total"]:
+            parts = []
+            if t["retryable"]:
+                parts.append(f"{t['retryable']} worth retrying")
+            if t["permanent"]:
+                parts.append(f"{t['permanent']} that cannot move")
+            if t["unclassified"]:
+                parts.append(f"{t['unclassified']} not yet classified")
+            named = ", ".join(f"{k.replace('_', ' ')} x{v}"
+                              for k, v in t["families"].items())
+            out.append(_one(
+                WARN if t["retryable"] or t["unclassified"] else OK,
+                f"{actionable} failure(s) on current users",
+                f"{'; '.join(parts)}." + (f" Largest family: {named}." if named else "")
+                + (" Nothing here is retryable -- these are recorded, not outstanding."
+                   if not t["retryable"] and not t["unclassified"] else ""),
+                # Offered whenever anything might move. An unclassified
+                # failure is one nobody has looked at, not one known to be
+                # hopeless -- withholding the retry there would be asserting
+                # something we have not checked.
+                "resolve_dry" if (t["retryable"] or t["unclassified"]) else None))
+        else:
+            out.append(_one(WARN, f"{actionable} failure(s) on current users",
+                            "Retry what is retryable; the rest are recorded with "
+                            "a reason.", "resolve_dry"))
 
     # 5. Link rot. Cheap and honest: the ledger knows whether anything ever
     #    rewrote a link, and the setting knows whether anything would.

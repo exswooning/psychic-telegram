@@ -45,6 +45,22 @@ INVALID_LABEL = "Invalid label"
 SCOPE_403 = "insufficient authentication scopes"
 # "Active session is invalid" -- the impersonation session, not the item.
 SESSION_INVALID = "Active session is invalid"
+# Drive-level roles applied as a per-file ACL. Permanent and structural, not
+# a stumble: organizer/fileOrganizer only exist on shared drives, so the
+# grant can never succeed on a My Drive file. drive_engine skips these now,
+# which means every surviving row is history from before that guard. They
+# were the whole of this tenant's failure list and matched no family, so 32
+# failures read as 32 unknown problems.
+ORGANIZER_ROLE = "organizerOnNonTeamDriveNotSupported"
+# Google's own backend, briefly. "Authentication backend unavailable" behind
+# a 503 is the one thing in this list a retry actually fixes.
+BACKEND_5XX = "backendError"
+
+# Whether re-running could change the outcome. The point of the split is
+# that "32 failures" and "1 worth retrying, 31 that cannot move" are very
+# different instructions, and only the second one is actionable.
+RETRYABLE_FAMILIES = {"acl_quota", "drive_scope_403", "auth_session_invalid",
+                      "gmail_invalid_label", "transient_backend"}
 
 
 def survey(db) -> dict:
@@ -88,6 +104,33 @@ def survey(db) -> dict:
                              (f"%{SCOPE_403}%",)),
         "auth_session_invalid": n("error_message LIKE ?",
                                   (f"%{SESSION_INVALID}%",)),
+        "acl_organizer_role": n("error_message LIKE ?", (f"%{ORGANIZER_ROLE}%",)),
+        "transient_backend": n("error_message LIKE ?", (f"%{BACKEND_5XX}%",)),
+    }
+
+
+def triage(db) -> dict:
+    """The survey split into what a retry could fix and what it could not.
+
+    A failures page listing 32 rows of equal weight is how the one that
+    matters hides behind thirty-one that cannot move. On this tenant that is
+    literally the shape: 29 organizer-role grants that can never succeed, and
+    a single 503 from Google's auth backend that a retry clears.
+    """
+    s = survey(db)
+    counts = {k: v for k, v in s.items()
+              if k not in ("total", "false_done", "user_stale")}
+    retryable = sum(v for k, v in counts.items() if k in RETRYABLE_FAMILIES)
+    permanent = sum(v for k, v in counts.items() if k not in RETRYABLE_FAMILIES)
+    return {
+        "total": s["total"],
+        "retryable": retryable,
+        "permanent": permanent,
+        # Named rather than folded into "other": an unclassified failure is a
+        # family nobody has looked at yet, which is a different thing from a
+        # known-permanent one and must not be counted as either.
+        "unclassified": max(0, s["total"] - retryable - permanent),
+        "families": {k: v for k, v in counts.items() if v},
     }
 
 
