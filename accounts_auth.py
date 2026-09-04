@@ -40,6 +40,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PBKDF2_ITERATIONS = 200_000
 SESSION_LIFETIME_S = 30 * 24 * 60 * 60  # 30 days
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+# Deliberately narrow. Validating email by regex is a losing game, so this
+# only rejects the local-part shapes RFC 5321 forbids outright when unquoted
+# -- a leading dot, a trailing dot, or two in a row. The accounts table has
+# ".rohitrokaya08@gmail.com" in it, which the pattern above happily accepted;
+# it can never receive mail, and it sits in the admin list looking like a
+# typo nobody can explain.
+_BAD_LOCALPART = re.compile(r"^\.|\.$|\.\.")
 
 
 class AccountError(ValueError):
@@ -81,7 +88,7 @@ def create_account(email: str, password: str, name: str, plan: str = "trial") ->
     """
     email = email.strip().lower()
     name = name.strip()
-    if not _EMAIL_RE.match(email):
+    if not _EMAIL_RE.match(email) or _BAD_LOCALPART.search(email.split("@")[0]):
         raise AccountError("that doesn't look like a valid email address")
     if len(password) < 8:
         raise AccountError("password must be at least 8 characters")

@@ -136,7 +136,14 @@ export const Nodes: React.FC = () => {
             <Stat testid="stat-done" label="done" value={summary.done} />
             <Stat testid="stat-failed" label="failed" value={summary.failed} />
             <Stat testid="stat-stale" label="lease expired" value={summary.stale} />
-            <Stat testid="stat-nodes" label="nodes" value={summary.nodes.length} />
+            {/* "nodes claiming", not "nodes". This counter comes from the claims
+                summary -- machines that have taken users -- while Mission
+                Control's fleet strip counts machines heartbeating. On a
+                single-machine run those are 1 and 0, so the two pages read
+                "FLEET (1 NODE)" and "0 nodes" about the same box. Both were
+                right; only the word was shared. */}
+            <Stat testid="stat-nodes" label="nodes claiming"
+                  value={summary.nodes.length} />
           </Stack>
         </Paper>
       )}
