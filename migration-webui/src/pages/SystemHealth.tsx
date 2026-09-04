@@ -58,7 +58,7 @@ const SystemHealth: React.FC = () => {
 
   const metricCards = [
     { title: 'CPU Usage', value: `${cpu}%`, icon: <SpeedIcon />, color: cpu > 80 ? 'error' : cpu > 60 ? 'warning' : 'success', progress: cpu },
-    { title: 'RAM Usage', value: `${ramPct}%`, icon: <MemoryIcon />, color: ramPct > 85 ? 'error' : ramPct > 70 ? 'warning' : 'success', progress: ramPct, subtitle: `${m.ram.used} MB / ${m.ram.total} MB` },
+    { title: 'RAM Usage', value: `${ramPct}%`, icon: <MemoryIcon />, color: ramPct > 85 ? 'error' : ramPct > 70 ? 'warning' : 'success', progress: ramPct, subtitle: `${m.ram.used} GB / ${m.ram.total} GB` },
     { title: 'Disk Usage', value: `${diskPct}%`, icon: <StorageIcon />, color: diskPct > 85 ? 'error' : diskPct > 70 ? 'warning' : 'success', progress: diskPct, subtitle: `${m.disk.used} GB / ${m.disk.total} GB` },
     { title: 'Network', value: `${m.network.down} MB/s`, icon: <NetworkIcon />, color: 'primary', progress: Math.min((m.network.down / 50) * 100, 100), subtitle: `↑ ${m.network.up} MB/s` },
     { title: 'API Health', value: m.apiHealth, icon: m.apiHealth === 'healthy' ? <HealthyIcon /> : <ErrorIcon />, color: m.apiHealth === 'healthy' ? 'success' : 'error', subtitle: 'Google API status' },
@@ -123,24 +123,26 @@ const SystemHealth: React.FC = () => {
                 <TableRow>
                   <TableCell sx={{ fontWeight: 600 }}>Queue</TableCell>
                   <TableCell sx={{ fontWeight: 600 }}>Pending</TableCell>
-                  <TableCell sx={{ fontWeight: 600 }}>Processing</TableCell>
-                  <TableCell sx={{ fontWeight: 600 }}>Completed</TableCell>
                   <TableCell sx={{ fontWeight: 600 }}>Status</TableCell>
                 </TableRow>
               </TableHead>
               <TableBody>
+                {/* Pending is the only figure either queue actually
+                    reports. "Processing" was the literal 4, "Completed" was
+                    that same literal added to pending, and the upload row's
+                    chip said "Active" unconditionally -- so an idle box
+                    rendered a queue processing four items and finishing
+                    four, on a page titled Real-time infrastructure
+                    monitoring. Columns that had no source are gone rather
+                    than filled in. */}
                 <TableRow>
                   <TableCell>Upload Queue</TableCell>
                   <TableCell>{m.uploadQueue}</TableCell>
-                  <TableCell>4</TableCell>
-                  <TableCell>{m.uploadQueue + 4}</TableCell>
-                  <TableCell><Chip label="Active" size="small" color="primary" /></TableCell>
+                  <TableCell><Chip label={m.uploadQueue > 0 ? 'Active' : 'Idle'} size="small" color={m.uploadQueue > 0 ? 'primary' : 'default'} /></TableCell>
                 </TableRow>
                 <TableRow>
                   <TableCell>Retry Queue</TableCell>
                   <TableCell>{m.retryQueue}</TableCell>
-                  <TableCell>0</TableCell>
-                  <TableCell>0</TableCell>
                   <TableCell><Chip label={m.retryQueue > 0 ? 'Needs Attention' : 'Idle'} size="small" color={m.retryQueue > 0 ? 'warning' : 'default'} /></TableCell>
                 </TableRow>
               </TableBody>
