@@ -186,11 +186,18 @@ def collect_snapshot(conn: sqlite3.Connection, cap_bytes: int,
         failed = st.startswith("FAILED")
         skipped = st.startswith("SKIPPED") or st.startswith("DEFERRED")
 
-        if t in ("file", "folder"):
+        # shortcut belongs with drive and draft with mail. Both migrate at
+        # FULL fidelity per scope.py, both write their own audit rows, and
+        # neither was bucketed anywhere -- so they were counted by nothing.
+        # Live, one user had 3 shortcuts and 8 drafts copied successfully
+        # while the per-user page showed "Drive 3277/3277" and "Mailbox
+        # 1575/1575", numbers that omitted them entirely. Self-consistent,
+        # and eleven items short of what actually moved.
+        if t in ("file", "folder", "shortcut"):
             u.drive_done += n if ok else 0
             u.drive_failed += n if failed else 0
             u.drive_skipped += n if skipped else 0
-        elif t == "message":
+        elif t in ("message", "draft"):
             u.mail_done += n if ok else 0
             u.mail_failed += n if failed else 0
             u.mail_skipped += n if skipped else 0
