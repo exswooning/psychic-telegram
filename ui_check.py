@@ -165,13 +165,17 @@ def check_pages(pg, host: str, errs: list) -> dict:
                 pg.reload(wait_until="domcontentloaded", timeout=30000)
                 body = settle(pg)
                 if len(body) > NAV_ONLY:
-                    # Reported, not failed. Measured server-side the API is
-                    # p50 1.04s and never stalls, the transport is HTTP/2 so
-                    # there is no connection limit to starve, and this
-                    # recovers on reload: a real event, cause not yet found,
-                    # browser-side. Failing the run on it would make this
-                    # check cry wolf ~40% of the time, and a check people
-                    # learn to ignore is worse than no check.
+                    # Reported, not failed. Every observed instance was in a
+                    # session that was deploying repeatedly, and sync_vps
+                    # restarts both services: a request in flight across a
+                    # restart hangs at Caddy with no error to report, which
+                    # is exactly the shape seen here, and one run caught the
+                    # 502 outright. Two consecutive runs on a settled server
+                    # produced none. Kept as a note because that is an
+                    # explanation, not a proof, and because failing the run
+                    # on it would make this check cry wolf about 40% of the
+                    # time -- a check people learn to ignore is worse than
+                    # no check.
                     flaky = f"empty on first load ({first}), fine after reload"
             status = resp.status if resp else 0
             broken = [m for m in ("Something went wrong", "Unexpected Application Error",
