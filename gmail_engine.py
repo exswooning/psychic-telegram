@@ -29,7 +29,7 @@ from google.auth.exceptions import RefreshError
 from googleapiclient.http import MediaFileUpload  # noqa: F401
 
 from config import Settings
-from link_rewrite import rewrite_raw
+from link_rewrite import DRIVE_ID, rewrite_raw
 from resilience import (PermanentAPIError, RateLimiter, TransportExhausted,
                         retry_on_google_error)
 
@@ -374,6 +374,19 @@ class GmailMigrator:
         # instead: base64 is 4 chars per 3 bytes, and `raw` is unpadded
         # urlsafe, so this is exact to within two bytes -- far tighter than
         # a threshold whose job is only to choose an upload strategy.
+        # Split mode: only mail that actually carries a Drive link is inserted
+        # here; DMS moves the rest and dedupes on Message-ID, so nothing is
+        # copied twice. Checked on the decoded bytes for the same reason the
+        # rewrite decodes first -- a quoted-printable fold lands inside the id
+        # and a base64 part contains no readable URL at all.
+        if self.settings.mail_only_with_links:
+            if not DRIVE_ID.search(base64.urlsafe_b64decode(raw + "===")):
+                self.db.log_audit(self.source_user, mid, "message",
+                                  "SKIPPED_NO_DRIVE_LINK",
+                                  "no Drive link; left for the DMS pass")
+                self._bump("skipped")
+                return
+
         if self.settings.rewrite_drive_links:
             # Before approx_bytes, which sizes the upload strategy off the
             # encoded length -- a rewrite can change it.

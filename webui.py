@@ -2894,7 +2894,12 @@ _RUN_STATE: dict = {
     # Live evidence of the footgun: DMS ran after the engine had already
     # inserted the mail, discovered 288,219 messages, and skipped 270,264 of
     # them as already present. Correct behaviour, and a wasted pass.
-    "mail_transport": "engine",          # "engine" | "dms"
+    # "engine"  this engine carries all mail (rewrites links, 3/sec ceiling)
+    # "dms"     Google carries all mail (fast, no link rewriting possible)
+    # "split"   engine inserts only link-bearing mail, DMS moves the rest and
+    #           dedupes on Message-ID. Keeps the rewrite on the messages that
+    #           need it while paying the insert ceiling on ~8% of the corpus.
+    "mail_transport": "engine",          # "engine" | "dms" | "split"
     # How far back a delta pass looks, in days. Two was hardcoded, and two
     # is wrong for anything but a same-day catch-up: Gmail's newer_than
     # filters on the message's own date, not when it arrived, so backdated
@@ -3720,9 +3725,19 @@ def set_toggles(body: dict) -> dict:
     if users is not None:
         _RUN_STATE["users"] = str(users).strip()
     transport = body.get("mail_transport")
-    if transport in ("engine", "dms"):
+    if transport in ("engine", "dms", "split"):
         _RUN_STATE["mail_transport"] = transport
-        if transport == "dms" and _RUN_STATE.get("rewrite_drive_links"):
+        if transport == "split":
+            # Split exists to rewrite links, so it turns rewriting on rather
+            # than leaving the operator to discover the combination that
+            # makes it worth doing.
+            _RUN_STATE["rewrite_drive_links"] = True
+            _RUN_STATE["last_note"] = (
+                "Drive-link rewriting turned on: split mode migrates only the "
+                "mail that carries a link, which is the mail worth rewriting. "
+                "Run the engine pass first, then the DMS import -- DMS dedupes "
+                "on Message-ID, so it will skip what the engine already moved.")
+        elif transport == "dms" and _RUN_STATE.get("rewrite_drive_links"):
             # DMS never passes a message through gmail_engine -- Google
             # copies the bytes and we never hold them -- so link rewriting
             # cannot run at all under it. Leaving the switch on would be a
@@ -3854,6 +3869,8 @@ def _action_argv(name: str) -> list:
     if name not in _LAUNCH_KEYS:
         return list(spec["argv"])
     chosen = [k for k, v in _RUN_STATE["services"].items() if v]
+    # Only full DMS takes gmail off the engine. Split needs the engine to run
+    # gmail -- that is the half doing the rewriting.
     if _RUN_STATE.get("mail_transport") == "dms" and "gmail" in chosen:
         # DMS owns the mail, so the engine must not also copy it. Enforced
         # here rather than trusted to whoever set the service switches: the
@@ -3883,6 +3900,8 @@ def _launch_env(base: dict) -> dict:
     env = dict(base)
     env["REWRITE_DRIVE_LINKS"] = (
         "true" if _RUN_STATE.get("rewrite_drive_links") else "false")
+    env["MAIL_ONLY_WITH_LINKS"] = (
+        "true" if _RUN_STATE.get("mail_transport") == "split" else "false")
     return env
 
 

@@ -215,3 +215,46 @@ class TestTheChoiceSurvivesARestart:
         import inspect
         src = inspect.getsource(webui._save_run_state)
         assert "os.replace" in src
+
+
+class TestSplitMode:
+    """Engine takes the mail that carries a Drive link; DMS takes the rest.
+
+    The point is the split of costs. Google caps inserts at 3/sec/account and
+    will not raise it, so a full engine pass is bounded by its writes.
+    Link-bearing mail measured at 8% of this corpus, so inserting only those
+    keeps the one thing DMS cannot do -- rewriting links, because Google moves
+    the bytes and this engine never holds them -- while paying the ceiling on
+    a fraction of the mail. DMS dedupes on Message-ID, so it skips whatever
+    the engine already moved.
+    """
+
+    def test_gmail_stays_with_the_engine(self):
+        """Unlike full DMS. Split needs the engine to run gmail -- that half
+        is what does the rewriting."""
+        webui.set_toggles({"mail_transport": "split"})
+        assert "gmail" in _services()
+
+    def test_it_turns_rewriting_on(self):
+        """Split exists to rewrite links; leaving the operator to find the
+        combination that makes it worth doing would be a trap."""
+        webui.set_toggles({"mail_transport": "engine",
+                           "rewrite_drive_links": False})
+        t = webui.set_toggles({"mail_transport": "split"})["toggles"]
+        assert t["rewrite_drive_links"] is True
+
+    def test_the_engine_is_told_to_filter(self):
+        webui.set_toggles({"mail_transport": "split"})
+        assert webui._launch_env({})["MAIL_ONLY_WITH_LINKS"] == "true"
+
+    def test_the_other_modes_do_not_filter(self):
+        for mode in ("engine", "dms"):
+            webui.set_toggles({"mail_transport": mode})
+            assert webui._launch_env({})["MAIL_ONLY_WITH_LINKS"] == "false"
+
+    def test_it_explains_the_ordering(self):
+        """Engine first, then DMS -- the other way round and DMS moves the
+        link-bearing mail unrewritten before the engine ever sees it."""
+        webui.set_toggles({"mail_transport": "split"})
+        note = webui._RUN_STATE.get("last_note", "")
+        assert "engine pass first" in note and "dedupes" in note

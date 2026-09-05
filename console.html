@@ -362,13 +362,21 @@ tr.merged td{background:var(--warn-bg)}
           <span>This engine</span></label>
         <label class="rd"><input type="radio" name="mt" value="dms" id="mt-dms">
           <span>Google DMS</span></label>
+        <label class="rd"><input type="radio" name="mt" value="split" id="mt-split">
+          <span>Split &mdash; engine for linked mail, DMS for the rest</span></label>
       </div>
       <p class="muted tg-note">Mail is the biggest slice of a migration and the
         only one behind a write ceiling Google will not raise (3/sec/account).
         DMS hands the job to Google instead. One choice, not two switches:
         both would copy every message twice, neither would migrate mail at all.
         Choosing DMS takes Gmail out of the engine run automatically — then use
-        the “Start Google DMS mail import” action below.</p>
+        the “Start Google DMS mail import” action below.
+        <br><br><strong>Split</strong> migrates only the mail that carries a
+        Drive link through the engine, so those links get repointed at the
+        target copies, and hands the rest to DMS — which dedupes on Message-ID
+        and skips what the engine already moved. Measured at 8% of this corpus,
+        so the 3/sec insert ceiling is paid on a twelfth of the mail. Run the
+        engine pass first, then the DMS import.</p>
       <label class="tg">
         <input type="checkbox" id="tg-rewrite">
         <span>Rewrite Drive links in mail</span>
@@ -745,7 +753,8 @@ async function loadToggles(){
   try{
     const t=(await get('/api/toggles')).toggles||{};
     $('#tg-rewrite').checked=!!t.rewrite_drive_links;
-    const mt=t.mail_transport==='dms'?'#mt-dms':'#mt-engine';
+    const mt=t.mail_transport==='dms'?'#mt-dms'
+              :t.mail_transport==='split'?'#mt-split':'#mt-engine';
     if($(mt)) $(mt).checked=true;
   }catch(e){
     // Drawn from the server, never from what this page assumed -- a switch
@@ -760,7 +769,8 @@ async function setTransport(which){
       body:JSON.stringify({mail_transport:which})});
     const j=await r.json();
     const got=(j.toggles||{}).mail_transport;
-    const n=$(got==='dms'?'#mt-dms':'#mt-engine'); if(n) n.checked=true;
+    const n=$(got==='dms'?'#mt-dms':got==='split'?'#mt-split':'#mt-engine');
+    if(n) n.checked=true;
   }catch(e){banner('Could not change the mail transport: '+(e.message||e));}
 }
 async function flipRewrite(on){
@@ -792,7 +802,7 @@ $('#i-none').addEventListener('click', () => { _sel.clear(); renderIdent(); });
 $('#i-scope').addEventListener('click', scopeToChecked);
 $('#m-add').addEventListener('click', addMapping);
 $('#l-apply').addEventListener('click', assignLicence);
-['mt-engine','mt-dms'].forEach(id => { const n=$('#'+id); if(n)
+['mt-engine','mt-dms','mt-split'].forEach(id => { const n=$('#'+id); if(n)
   n.addEventListener('change', e => e.target.checked && setTransport(e.target.value)); });
   const a=window._actions||{}; const box=$('#actions'); box.innerHTML='';
   const keys=Object.keys(a).sort().filter(k=>!q||k.includes(q)||(a[k].label||'').toLowerCase().includes(q));

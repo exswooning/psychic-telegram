@@ -585,6 +585,27 @@ class Settings:
     # rewrites message bodies, which invalidates their DKIM signatures:
     # harmless in normal use, disqualifying under a legal hold. Requires
     # Drive to have been migrated first, or there is no mapping to resolve.
+    # Migrate only the messages that actually contain a Drive link, and leave
+    # the rest to DMS.
+    #
+    # The point is the split of costs. Google caps sustained inserts at
+    # 3/sec/account and will not raise it, so a full engine mail pass is
+    # bounded by its writes. Link-bearing mail is a small slice -- measured
+    # at 8% on this corpus -- so inserting only those and handing the other
+    # 92% to DMS keeps the one thing DMS cannot do (rewriting links, because
+    # Google moves the bytes and this engine never holds them) while paying
+    # the 3/sec ceiling on a fraction of the mail.
+    #
+    # The filter runs AFTER the fetch, not as a Gmail query, and that is not
+    # an implementation shortcut. Measured against a byte-level scan of the
+    # same mailboxes, `q='"docs.google.com" OR "drive.google.com"'` missed 14
+    # of 20 and 13 of 19 -- roughly seventy per cent. Filtering server-side
+    # would have sent most link-bearing mail to DMS unrewritten, and said
+    # nothing. So every message is fetched and inspected; only the insert is
+    # skipped, which is the expensive half anyway.
+    mail_only_with_links: bool = field(
+        default_factory=lambda: _env_bool("MAIL_ONLY_WITH_LINKS", False)
+    )
     rewrite_drive_links: bool = field(
         default_factory=lambda: _env_bool("REWRITE_DRIVE_LINKS", False)
     )
