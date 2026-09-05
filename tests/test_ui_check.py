@@ -44,12 +44,27 @@ class TestRoutesAreParsedNotListed:
     def test_a_missing_router_yields_nothing_rather_than_raising(self, tmp_path):
         assert ui_check.routes_from_router(str(tmp_path / "nope.tsx")) == []
 
-    def test_the_list_is_not_hardcoded_anywhere(self):
+    def test_the_coverage_lists_are_not_hardcoded(self):
         """A hardcoded list silently stops covering new pages. The whole
-        point of parsing is that adding a route adds coverage."""
-        src = open(os.path.join(os.path.dirname(os.path.dirname(
-            os.path.abspath(__file__))), "ui_check.py"), encoding="utf-8").read()
-        assert '"/mission-control"' not in src
+        point of parsing is that adding a route adds coverage.
+
+        Scoped to the two checks that sweep pages, rather than to the whole
+        file. SETTING_HOMES names the page each run setting is controlled
+        from, which is not a coverage list and cannot go stale quietly: a
+        wrong route there means the control is not found and the check
+        fails, loudly, on that setting."""
+        import inspect
+        for fn in (ui_check.check_pages, ui_check.check_actions):
+            src = inspect.getsource(fn)
+            assert "routes_from_router()" in src, f"{fn.__name__} stopped deriving its routes"
+            assert '"/mission-control"' not in src, f"{fn.__name__} hardcodes a route"
+
+    def test_every_run_setting_has_a_declared_home(self):
+        """The check reads _RUN_STATE live, so this is really asserting the
+        registry has not fallen behind the server."""
+        import webui
+        missing = set(webui._RUN_STATE) - set(ui_check.SETTING_HOMES)
+        assert not missing, f"settings with no control declared: {sorted(missing)}"
 
 
 class TestTheCredentialNeverLeaks:

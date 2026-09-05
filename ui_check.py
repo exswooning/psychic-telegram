@@ -228,6 +228,51 @@ def check_actions(pg, session, host: str) -> dict:
     }
 
 
+# Where each server-side run setting is controlled from. The point is not
+# the mapping, it is that _RUN_STATE is read live below and any key missing
+# from here is a finding: a setting the server acts on that the app can
+# neither show nor change. That is how dry_run got in -- it silently
+# governed every one of the 43 actions and had no control anywhere.
+SETTING_HOMES = {
+    "dry_run":             ("/mission-control", "dry-run"),
+    "mail_transport":      ("/mission-control", "transport-split"),
+    "rewrite_drive_links": ("/mission-control", "rewrite-drive-links"),
+    "delta_days":          ("/mission-control", "delta-days"),
+    "users":               ("/mission-control", "scope-user"),
+    "services":            ("/services", "toggle-drive"),
+}
+
+
+def check_settings(pg, host: str) -> dict:
+    """Every setting the server acts on can be seen and set in the app."""
+    import webui
+
+    problems = []
+    unhomed = sorted(set(webui._RUN_STATE) - set(SETTING_HOMES))
+    for k in unhomed:
+        problems.append(f"{k} is in the server's run state with no control anywhere")
+
+    by_route: dict[str, list] = {}
+    for key, (route, testid) in SETTING_HOMES.items():
+        if key in webui._RUN_STATE:
+            by_route.setdefault(route, []).append((key, testid))
+
+    found = 0
+    for route, wanted in by_route.items():
+        pg.goto(f"{host}/app{route}", wait_until="domcontentloaded", timeout=30000)
+        for _ in range(14):
+            pg.wait_for_timeout(700)
+            if all(pg.locator(f'[data-testid="{t}"]').count() for _, t in wanted):
+                break
+        for key, testid in wanted:
+            if pg.locator(f'[data-testid="{testid}"]').count():
+                found += 1
+            else:
+                problems.append(f"{key}: nothing on {route} matches [data-testid={testid}]")
+
+    return {"covered": found, "offered": len(webui._RUN_STATE), "failures": problems}
+
+
 def check_metrics(session, host: str) -> dict:
     """Both servers, same question, and whether each says what it counts."""
     m = session.get(f"{host}/api/v2/metrics", timeout=90).json()
@@ -312,12 +357,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--host", default=os.getenv("BITPORT_PUBLIC_ORIGIN",
                                                 "http://127.0.0.1:8080"))
     ap.add_argument("--only", action="append",
-                    choices=["pages", "actions", "metrics", "links"],
-                    help="default: all four")
+                    choices=["pages", "actions", "settings", "metrics", "links"],
+                    help="default: all five")
     ap.add_argument("--account-id", type=int)
     ap.add_argument("--json", metavar="PATH")
     args = ap.parse_args(argv)
-    wanted = set(args.only or ["pages", "actions", "metrics", "links"])
+    wanted = set(args.only or ["pages", "actions", "settings", "metrics", "links"])
 
     import requests
     from playwright.sync_api import sync_playwright
@@ -350,7 +395,7 @@ def main(argv: list[str] | None = None) -> int:
         version_fails.append(f"cannot tell what is deployed ({commit})")
 
     out: dict = {"version": {"commit": commit, "failures": version_fails}}
-    if "pages" in wanted or "actions" in wanted:
+    if wanted & {"pages", "actions", "settings"}:
         with sync_playwright() as p:
             b = p.chromium.launch()
             ctx = b.new_context(viewport={"width": 1500, "height": 1000})
@@ -364,6 +409,8 @@ def main(argv: list[str] | None = None) -> int:
                 out["pages"] = check_pages(pg, args.host, errs)
             if "actions" in wanted:
                 out["actions"] = check_actions(pg, session, args.host)
+            if "settings" in wanted:
+                out["settings"] = check_settings(pg, args.host)
             ctx.close(); b.close()
     if "metrics" in wanted:
         out["metrics"] = check_metrics(session, args.host)
@@ -381,6 +428,8 @@ def main(argv: list[str] | None = None) -> int:
             detail = f"{res['checked']} route(s)"
         elif name == "actions":
             detail = f"{res['visible']} of {res['offered']} have a control"
+        elif name == "settings":
+            detail = f"{res['covered']} of {res['offered']} have a control"
         elif name == "metrics":
             detail = (f"ledger {res['ledgerWide']['messages']:,} / "
                       f"migration {res['thisMigration']['messages']} / "

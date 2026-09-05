@@ -104,6 +104,22 @@ export const RunOptions: React.FC = () => {
         </Box>
 
         <Stack direction="row" spacing={3} flexWrap="wrap" alignItems="center">
+          {/* Not a duplicate of Job control's "Dry run" button, which starts
+              one run dry. This is the standing flag every action launched
+              from this app reads, and until now the app could neither show
+              nor change it -- so a flag set once on the console made every
+              later Migrate silently do nothing while reporting success. */}
+          <FormControlLabel
+            control={
+              <Switch
+                size="small" disabled={busy} checked={!!t.dry_run}
+                onChange={(e) => send({ dry_run: e.target.checked })}
+                inputProps={{ 'data-testid': 'dry-run' } as never}
+              />
+            }
+            label="Dry run everything"
+          />
+
           <Tooltip title={rewriteBlocked
             ? "DMS never hands the message to this engine, so there is nothing to rewrite"
             : ''}>

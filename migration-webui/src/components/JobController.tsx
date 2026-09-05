@@ -182,7 +182,8 @@ const JobController: React.FC<Props> = ({ users, nodes, onChanged }) => {
             {shown.map((u) => (
               <TableRow key={u.source_email} hover selected={selected.has(u.source_email)}>
                 <TableCell padding="checkbox">
-                  <Checkbox size="small" checked={selected.has(u.source_email)}
+                  <Checkbox size="small" data-testid="scope-user"
+                            checked={selected.has(u.source_email)}
                             onChange={() => toggle(u.source_email)} />
                 </TableCell>
                 <TableCell>
