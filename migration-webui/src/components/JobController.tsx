@@ -166,7 +166,11 @@ const JobController: React.FC<Props> = ({ users, nodes, onChanged }) => {
         </Tooltip>
       </Box>
 
-      <TableContainer sx={{ maxHeight: 480 }}>
+      {/* The surface a run is scoped on: ticking rows here is how
+          _RUN_STATE["users"] gets set. Marked on the container, not on a
+          row -- rows exist only when users are loaded, so a row testid
+          reports "no control" for what is really an empty list. */}
+      <TableContainer sx={{ maxHeight: 480 }} data-testid="scope-users">
         <Table size="small" stickyHeader>
           <TableHead>
             <TableRow>

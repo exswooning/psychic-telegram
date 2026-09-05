@@ -264,7 +264,7 @@ SETTING_HOMES = {
     "mail_transport":      ("/mission-control", "transport-split"),
     "rewrite_drive_links": ("/mission-control", "rewrite-drive-links"),
     "delta_days":          ("/mission-control", "delta-days"),
-    "users":               ("/mission-control", "scope-user"),
+    "users":               ("/mission-control", "scope-users"),
     "services":            ("/services", "toggle-drive"),
 }
 
