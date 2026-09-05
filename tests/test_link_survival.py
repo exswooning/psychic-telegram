@@ -455,3 +455,65 @@ class TestARewriteLeavesEvidence:
         mid = src.add_message(self.LINKED, ["INBOX"])
         gmail_migrator._migrate_one_message({"id": mid})
         assert self._rows(db) == []
+
+
+class TestTheDetectorDoesNotInventLinks:
+    """The pattern matched a bare "/d/", and base64's alphabet contains "/".
+
+    A 2.8 MB attachment therefore produced "/d/" followed by twenty-plus
+    base64 characters as a matter of course, and the detector read that as a
+    Drive id. Measured on a real mailbox: 13 of 21 "link-bearing" messages
+    had no link at all, every one of them an attachment blob.
+
+    That inflated every link count taken, and in split mode would have routed
+    precisely the heaviest messages through the engine -- the opposite of a
+    mode whose whole purpose is to insert as little as possible.
+    """
+
+    BASE64_NOISE = (b"9gKgrdLX5vUTEAotYbl444kktmGCFk3A29tNk095V4NKd/d/"
+                    b"z5IaFHB1KwLG3nwTSleqoiZT6hE2ITotbo3gGwNxMWaOivgx")
+
+    def test_base64_noise_is_not_a_drive_link(self):
+        from link_rewrite import DRIVE_ID
+        assert DRIVE_ID.findall(self.BASE64_NOISE) == []
+
+    def test_a_bare_folders_path_is_not_one_either(self):
+        from link_rewrite import DRIVE_ID
+        assert DRIVE_ID.findall(b"blob /folders/" + b"A" * 30) == []
+
+    @pytest.mark.parametrize("url", [
+        b"https://docs.google.com/document/d/1AAAAAAAAAAAAAAAAAAAAAAA/edit",
+        b"https://docs.google.com/d/1BBBBBBBBBBBBBBBBBBBBBBB/edit",
+        b"https://drive.google.com/open?id=1CCCCCCCCCCCCCCCCCCCCCCC",
+        b"https://drive.google.com/drive/folders/1DDDDDDDDDDDDDDDDDDDDDDD",
+        b"https://drive.google.com/file/d/1EEEEEEEEEEEEEEEEEEEEEEE/view",
+    ])
+    def test_every_real_shape_still_matches(self, url):
+        from link_rewrite import DRIVE_ID
+        assert len(DRIVE_ID.findall(url)) == 1
+
+    def test_an_attachment_heavy_message_is_left_to_dms(self):
+        """Split mode's whole economy depends on this: the big messages are
+        the expensive inserts, and they are exactly what the false positive
+        would have claimed."""
+        from link_rewrite import has_drive_link
+        raw = (b"From: a@x.test\r\nSubject: s\r\nMIME-Version: 1.0\r\n"
+               b"Content-Type: multipart/mixed; boundary=b\r\n\r\n"
+               b"--b\r\nContent-Type: text/plain\r\n\r\nno links here\r\n"
+               b"--b\r\nContent-Type: application/octet-stream\r\n"
+               b"Content-Transfer-Encoding: base64\r\n\r\n"
+               + self.BASE64_NOISE + b"\r\n--b--\r\n")
+        assert has_drive_link(base64.urlsafe_b64encode(raw).decode()) is False
+
+    def test_a_quoted_printable_html_link_is_still_caught(self):
+        """The raw bytes cannot be scanned for this: a 76-column fold lands
+        between the host and the id, so nothing that forbids whitespace can
+        span it. has_drive_link decodes each part first."""
+        from link_rewrite import has_drive_link, DRIVE_ID
+        raw = (b"From: a@x.test\r\nSubject: s\r\nMIME-Version: 1.0\r\n"
+               b"Content-Type: text/html; charset=UTF-8\r\n"
+               b"Content-Transfer-Encoding: quoted-printable\r\n\r\n"
+               b"<a href=3D\"https://drive.google.com/uc=\r\n"
+               b"?export=3Dview&amp;id=3D1FFFFFFFFFFFFFFFFFFFFFFF\">x</a>\r\n")
+        assert DRIVE_ID.search(raw) is None, "raw scan cannot span the fold"
+        assert has_drive_link(base64.urlsafe_b64encode(raw).decode()) is True

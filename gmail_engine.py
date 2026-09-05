@@ -29,7 +29,7 @@ from google.auth.exceptions import RefreshError
 from googleapiclient.http import MediaFileUpload  # noqa: F401
 
 from config import Settings
-from link_rewrite import DRIVE_ID, rewrite_raw
+from link_rewrite import has_drive_link, rewrite_raw
 from resilience import (PermanentAPIError, RateLimiter, TransportExhausted,
                         retry_on_google_error)
 
@@ -380,7 +380,7 @@ class GmailMigrator:
         # rewrite decodes first -- a quoted-printable fold lands inside the id
         # and a base64 part contains no readable URL at all.
         if self.settings.mail_only_with_links:
-            if not DRIVE_ID.search(base64.urlsafe_b64decode(raw + "===")):
+            if not has_drive_link(raw):
                 self.db.log_audit(self.source_user, mid, "message",
                                   "SKIPPED_NO_DRIVE_LINK",
                                   "no Drive link; left for the DMS pass")

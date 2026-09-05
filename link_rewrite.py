@@ -42,7 +42,17 @@ log = logging.getLogger(__name__)
 # Drive id -- because the lookup, not the regex, decides what gets replaced.
 # A false match on some other long token simply finds no mapping and is
 # left alone, which is the safe direction to be wrong in.
-DRIVE_ID = re.compile(rb"(?:/d/|/folders/|[?&](?:amp;)?id=)([A-Za-z0-9_-]{20,})")
+# The host is required, not optional context. Matching a bare "/d/" made
+# base64 a minefield: its alphabet contains "/", so a 2.8 MB attachment
+# reliably produces "/d/" followed by twenty-plus base64 characters, and the
+# pattern read that as a Drive id. Measured on a real mailbox, 13 of 21
+# "link-bearing" messages had no Drive link at all -- every one an
+# attachment blob. That inflated every link count taken here and would have
+# routed exactly the heaviest messages through the engine in split mode,
+# which is the opposite of the point.
+DRIVE_ID = re.compile(
+    rb"(?:docs|drive)\.google\.com[^\s\"'<>]*?"
+    rb"(?:/d/|/folders/|[?&](?:amp;)?id=)([A-Za-z0-9_-]{20,})")
 
 
 def rewrite_bytes(body: bytes, lookup: Callable[[str], str | None]) -> tuple[bytes, int]:
@@ -60,6 +70,35 @@ def rewrite_bytes(body: bytes, lookup: Callable[[str], str | None]) -> tuple[byt
         return m.group(0)[: m.start(1) - m.start(0)] + target.encode("ascii")
 
     return DRIVE_ID.sub(repl, body), hits
+
+
+def has_drive_link(raw_b64: str) -> bool:
+    """Whether a message really contains a Drive link.
+
+    Decodes each text part first, for the same reason rewrite_raw does: a
+    quoted-printable fold at 76 columns lands between the host and the id, so
+    the raw bytes show "drive.google.com/uc=\r\n?export=..." and no pattern
+    that forbids whitespace can span it. Checking raw bytes therefore misses
+    exactly the HTML mail most likely to carry links.
+
+    Used by the split transport to decide whether a message is worth an
+    insert, so a false negative here sends a link-bearing message to DMS
+    unrewritten -- the failure the whole mode exists to prevent.
+    """
+    try:
+        msg = email.message_from_bytes(base64.urlsafe_b64decode(raw_b64 + "==="))
+    except Exception:                                  # noqa: BLE001
+        return False
+    for part in msg.walk():
+        if part.get_content_maintype() != "text" or part.is_multipart():
+            continue
+        try:
+            payload = part.get_payload(decode=True)
+        except Exception:                              # noqa: BLE001
+            continue
+        if payload and DRIVE_ID.search(payload):
+            return True
+    return False
 
 
 def rewrite_raw(raw_b64: str, lookup: Callable[[str], str | None]) -> tuple[str, int]:
@@ -164,7 +203,8 @@ if __name__ == "__main__":
     # other link shapes, and the entity-encoded separator inside HTML
     for shape in (b"https://drive.google.com/open?id=SRC_" + b"a" * 24,
                   b"https://drive.google.com/drive/folders/SRC_" + b"a" * 24,
-                  b"<a href=3D'/uc?export=3Dview&amp;id=SRC_" + b"a" * 24 + b"'>x</a>"):
+                  b"<a href=3D'https://drive.google.com/uc?export=3Dview&amp;id=SRC_"
+                  + b"a" * 24 + b"'>x</a>"):
         _, n = rewrite_raw(_wrap(shape, "7bit", "text/html"), look)
         assert n == 1, f"missed {shape!r}"
 

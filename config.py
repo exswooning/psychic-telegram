@@ -596,30 +596,24 @@ class Settings:
     # Google moves the bytes and this engine never holds them) while paying
     # the 3/sec ceiling on a fraction of the mail.
     #
-    # The filter runs AFTER the fetch, not as a Gmail query, and that is not
-    # an implementation shortcut -- Gmail search cannot answer this question.
+    # The filter runs AFTER the fetch and decodes each part, not as a Gmail
+    # query and not over raw bytes. Both alternatives were measured and both
+    # are wrong.
     #
-    # Measured against a byte-level scan of the same mailboxes, seven query
-    # forms were tried and all of them missed most of the mail:
+    # A Gmail query misses the quoted-printable HTML mail: seven forms were
+    # tried, the best found 6 of 8 and has:link found 0 of 8. Those two are
+    # exactly the messages worth rewriting.
     #
-    #     "docs.google.com" OR "drive.google.com"   found  6 of 21
-    #     docs.google.com OR drive.google.com       found  6 of 21
-    #     google.com                                found  8 of 21
-    #     has:link                                  found  0 of 21
+    # Scanning raw bytes fails the other way, and worse. A 76-column QP fold
+    # lands between the host and the id, so the raw bytes read
+    # "drive.google.com/uc=\r\n?export=..." and no pattern that forbids
+    # whitespace can span it -- the same two messages missed again.
     #
-    # has:link finding nothing at all, on messages that demonstrably contain
-    # links, is the tell. It is not the query, and it is not the encoding --
-    # 13 of the missed are text/plain 7bit, the same shape as every message
-    # found. It is size:
-    #
-    #     found   median   534 bytes
-    #     missed  median   2,796,911 bytes
-    #
-    # Gmail's index does not cover the body of multi-megabyte messages, and a
-    # Drive link can sit anywhere in one. So a server-side filter would have
-    # handed most link-bearing mail to DMS unrewritten and said nothing about
-    # it. Every message is fetched and inspected on its decoded bytes; only
-    # the insert is skipped, which is the expensive half anyway.
+    # Decoded, on a real mailbox: 8 of 300 messages carry a link, 2.7%. So
+    # inserting only those and handing the rest to DMS pays Google's
+    # 3/sec/account ceiling on a fortieth of the mail, while keeping the one
+    # thing DMS cannot do -- rewriting links, because Google moves the bytes
+    # and this engine never holds them.
     mail_only_with_links: bool = field(
         default_factory=lambda: _env_bool("MAIL_ONLY_WITH_LINKS", False)
     )
