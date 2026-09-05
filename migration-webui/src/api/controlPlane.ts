@@ -953,6 +953,16 @@ export interface MetricsSnapshot {
     grantsPerFile: number
     grants: number
     files: number
+    /** Rate over the last recorded work, not the last hour of wall clock --
+     *  a run paused overnight would otherwise report zero. */
+    itemsPerMin: number
+    expectedItems: number
+    remainingItems: number
+    /** null whenever it cannot be computed honestly; etaReason says why.
+     *  This is the number people plan a cutover around, so a fabricated one
+     *  is worse than a blank. */
+    etaSeconds: number | null
+    etaReason: string
   }
   host?: HostMetrics
   volumeError?: string

@@ -53,6 +53,7 @@ import asyncio
 import hmac
 from contextlib import asynccontextmanager
 import json
+from datetime import datetime
 import datetime as _dt
 import logging
 import os
@@ -2803,6 +2804,55 @@ def _throughput(conn) -> dict:
         "SELECT COUNT(*) c FROM audit_log WHERE item_type='acl' "
         "AND status='SUCCESS'").fetchone()["c"]
     busiest = max((d["items"] for d in by_day), default=0)
+
+    # Rate over the last hour of *recorded work*, not the last hour of wall
+    # clock: a migration that paused overnight would otherwise report a rate
+    # of zero and an infinite ETA, when the right answer is "nothing is
+    # running", which the caller can see from `running` anyway.
+    recent = conn.execute(
+        "SELECT COUNT(*) n, MIN(timestamp) lo, MAX(timestamp) hi FROM ("
+        "  SELECT timestamp FROM audit_log WHERE status='SUCCESS' "
+        "   ORDER BY id DESC LIMIT 5000)").fetchone()
+    per_min = 0.0
+    if recent and recent["n"] and recent["lo"] and recent["hi"]:
+        try:
+            lo = datetime.fromisoformat(recent["lo"].replace("Z", "+00:00"))
+            hi = datetime.fromisoformat(recent["hi"].replace("Z", "+00:00"))
+            span = (hi - lo).total_seconds()
+            if span > 0:
+                per_min = round(recent["n"] / (span / 60.0), 1)
+        except (ValueError, TypeError):
+            per_min = 0.0
+
+    # The denominator ETA needs. discovery is written by `main.py discover`
+    # and by inventory.py; with neither ever run there is no expected total,
+    # and the only honest ETA is none. A fabricated one is worse than a
+    # blank, because it is the number people plan a cutover around.
+    exp = conn.execute(
+        "SELECT COALESCE(SUM(file_count),0) f, COALESCE(SUM(folder_count),0) d, "
+        "       COALESCE(SUM(messages_total),0) m FROM ("
+        "  SELECT d.* FROM discovery d JOIN ("
+        "    SELECT source_user, MAX(scanned_at) ts FROM discovery "
+        "     GROUP BY source_user) x"
+        "   ON d.source_user=x.source_user AND d.scanned_at=x.ts)").fetchone()
+    expected = (exp["f"] + exp["d"] + exp["m"]) if exp else 0
+    done = conn.execute(
+        "SELECT COUNT(*) c FROM id_mapping "
+        " WHERE type IN ('file','folder','message')").fetchone()["c"]
+    remaining = max(0, expected - done) if expected else 0
+    eta_seconds = None
+    eta_reason = ""
+    if not expected:
+        eta_reason = ("no baseline -- discovery has never run, so there is no "
+                      "expected total to subtract from. Run 'Count the source, "
+                      "per user'.")
+    elif not per_min:
+        eta_reason = "nothing has been recorded recently, so there is no rate"
+    elif not remaining:
+        eta_reason = "everything discovered has migrated"
+    else:
+        eta_seconds = int(remaining / per_min * 60)
+
     return {
         # Oldest first, so a chart reads left to right without reversing.
         "byDay": list(reversed(by_day)),
@@ -2814,6 +2864,11 @@ def _throughput(conn) -> dict:
         "grantsPerFile": round(grants / files, 3) if files else 0.0,
         "grants": grants,
         "files": files,
+        "itemsPerMin": per_min,
+        "expectedItems": expected,
+        "remainingItems": remaining,
+        "etaSeconds": eta_seconds,
+        "etaReason": eta_reason,
     }
 
 

@@ -378,6 +378,19 @@ export const Metrics: React.FC = () => {
               <Stack direction="row" spacing={4} sx={{ flexWrap: 'wrap', gap: 2, mb: 2 }}>
                 <Stat id="bytes-total" label="moved in total"
                       value={bytes(m.throughput.bytesMovedTotal)} />
+                <Stat id="rate" label="items per minute"
+                      value={m.throughput.itemsPerMin.toLocaleString()}
+                      hint="Measured across the last recorded work, not the last hour of clock time — a run paused overnight would otherwise read as zero." />
+                <Stat id="eta" label="time remaining"
+                      value={m.throughput.etaSeconds === null
+                        ? '—'
+                        : m.throughput.etaSeconds < 3600
+                          ? `${Math.max(1, Math.round(m.throughput.etaSeconds / 60))} min`
+                          : `${(m.throughput.etaSeconds / 3600).toFixed(1)} h`}
+                      hint={m.throughput.etaReason
+                        || `${m.throughput.remainingItems.toLocaleString()} of `
+                           + `${m.throughput.expectedItems.toLocaleString()} discovered `
+                           + `items left at the current rate.`} />
                 <Stat id="grants-per-file" label="grants per file"
                       value={m.throughput.grantsPerFile.toFixed(2)}
                       hint={`${m.throughput.grants.toLocaleString()} grants across `
