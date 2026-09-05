@@ -36,7 +36,7 @@ const UserDetail: React.FC = () => {
   if (!user) {
     return (
       <Box>
-        <Button startIcon={<ArrowBackIcon />} onClick={() => navigate('/users')} sx={{ mb: 2 }} variant="outlined" size="small">Back to Users</Button>
+        <Button startIcon={<ArrowBackIcon />} onClick={() => navigate(-1)} sx={{ mb: 2 }} variant="outlined" size="small">Back</Button>
         <Alert severity="error"><AlertTitle>User Not Found</AlertTitle>No user found for {email}</Alert>
       </Box>
     )
@@ -49,8 +49,8 @@ const UserDetail: React.FC = () => {
   return (
     <Box>
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 3 }}>
-        <Button startIcon={<ArrowBackIcon />} onClick={() => navigate('/users')} variant="outlined" size="small">
-          Back to Users
+        <Button startIcon={<ArrowBackIcon />} onClick={() => navigate(-1)} variant="outlined" size="small">
+          Back
         </Button>
       </Box>
 

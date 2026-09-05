@@ -458,8 +458,17 @@ export const MigrationDetail: React.FC = () => {
                   </TableRow>
                 </TableHead>
                 <TableBody>
+                  {/* Clickable. UserDetail -- the per-service breakdown with
+                      real item counts -- had no entry point at all: /users is
+                      deliberately out of the nav (per-user state only means
+                      something against a tenant pair, so a top-level page had
+                      to guess which migration you meant), and nothing here
+                      linked to it. The richest per-user view in the app was
+                      reachable only by typing the URL. */}
                   {d.users.map((u) => (
-                    <TableRow key={u.sourceUser}
+                    <TableRow key={u.sourceUser} hover
+                              onClick={() => navigate(`/users/${u.sourceUser}`)}
+                              sx={{ cursor: 'pointer' }}
                               data-testid={`user-${u.sourceUser}`}>
                       <TableCell sx={{ fontSize: 12 }}>{u.sourceUser}</TableCell>
                       <TableCell sx={{ fontSize: 12 }}>{u.targetUser}</TableCell>
