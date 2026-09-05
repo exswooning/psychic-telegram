@@ -597,12 +597,29 @@ class Settings:
     # the 3/sec ceiling on a fraction of the mail.
     #
     # The filter runs AFTER the fetch, not as a Gmail query, and that is not
-    # an implementation shortcut. Measured against a byte-level scan of the
-    # same mailboxes, `q='"docs.google.com" OR "drive.google.com"'` missed 14
-    # of 20 and 13 of 19 -- roughly seventy per cent. Filtering server-side
-    # would have sent most link-bearing mail to DMS unrewritten, and said
-    # nothing. So every message is fetched and inspected; only the insert is
-    # skipped, which is the expensive half anyway.
+    # an implementation shortcut -- Gmail search cannot answer this question.
+    #
+    # Measured against a byte-level scan of the same mailboxes, seven query
+    # forms were tried and all of them missed most of the mail:
+    #
+    #     "docs.google.com" OR "drive.google.com"   found  6 of 21
+    #     docs.google.com OR drive.google.com       found  6 of 21
+    #     google.com                                found  8 of 21
+    #     has:link                                  found  0 of 21
+    #
+    # has:link finding nothing at all, on messages that demonstrably contain
+    # links, is the tell. It is not the query, and it is not the encoding --
+    # 13 of the missed are text/plain 7bit, the same shape as every message
+    # found. It is size:
+    #
+    #     found   median   534 bytes
+    #     missed  median   2,796,911 bytes
+    #
+    # Gmail's index does not cover the body of multi-megabyte messages, and a
+    # Drive link can sit anywhere in one. So a server-side filter would have
+    # handed most link-bearing mail to DMS unrewritten and said nothing about
+    # it. Every message is fetched and inspected on its decoded bytes; only
+    # the insert is skipped, which is the expensive half anyway.
     mail_only_with_links: bool = field(
         default_factory=lambda: _env_bool("MAIL_ONLY_WITH_LINKS", False)
     )
