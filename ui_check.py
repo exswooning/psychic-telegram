@@ -94,6 +94,36 @@ def routes_from_router(app_tsx: str | None = None) -> list[str]:
 SPINNER = '[role="progressbar"]'
 
 
+def settle(pg) -> str:
+    """Wait for content, not a fixed sleep, and believe a page that says it
+    is still working.
+
+    A page mid-render has a body of nav text only. Waiting a fixed 2.6s
+    called that "renders nothing but the nav" -- the description of a broken
+    page rather than a slow one -- and, in the actions check, made the answer
+    depend on timing: three consecutive runs reported 41, 41 and 42 of 43,
+    naming a different missing action each time.
+
+    So: wait up to 8.4s for content, then keep waiting only while a progress
+    indicator is on screen. A page with no spinner and no content has nothing
+    left to say.
+
+    Do not read a page's stall here as an endpoint's cost. Measured
+    server-side, /api/v2/metrics is p50 1.04s over 80 sequential fresh
+    requests and never once exceeded 8s; the multi-second figures only ever
+    appeared in a browser holding several requests at once.
+    """
+    body = ""
+    for i in range(24):
+        pg.wait_for_timeout(700)
+        body = pg.inner_text("body")
+        if len(body) > NAV_ONLY:
+            return body
+        if i >= 11 and not pg.locator(SPINNER).count():
+            break
+    return body
+
+
 def check_pages(pg, host: str, errs: list) -> dict:
     bad, seen, notes = [], [], []
     # Without these, an empty page is reported as "renders nothing" with no
@@ -114,31 +144,6 @@ def check_pages(pg, host: str, errs: list) -> dict:
     for _ev in ("requestfinished", "requestfailed"):
         pg.on(_ev, lambda r: pending.pop(r, None))
 
-    def _settle():
-        """Wait for content, not a fixed sleep, and believe a page that says
-        it is still working.
-
-        The Metrics page renders its header and a spinner while it waits --
-        an honest loading state, and only ~366 characters of text. A fixed
-        wait called that "renders nothing but the nav", which describes a
-        broken page rather than a slow one. So: wait the normal 8.4s, then
-        keep waiting only while a progress indicator is on screen. A page
-        with no spinner and no content has nothing left to say.
-
-        Do not read a page's stall here as the endpoint's cost. Measured
-        server-side, /api/v2/metrics is p50 1.04s over 80 sequential fresh
-        requests and never once exceeded 8s; the multi-second figures only
-        ever appeared in a browser holding several requests at once."""
-        body = ""
-        for i in range(24):
-            pg.wait_for_timeout(700)
-            body = pg.inner_text("body")
-            if len(body) > NAV_ONLY:
-                return body
-            if i >= 11 and not pg.locator(SPINNER).count():
-                break
-        return body
-
     for route in routes_from_router():
         errs.clear()
         net.clear()
@@ -146,7 +151,7 @@ def check_pages(pg, host: str, errs: list) -> dict:
         try:
             resp = pg.goto(f"{host}/app{route}", wait_until="domcontentloaded",
                            timeout=30000)
-            body = _settle()
+            body = settle(pg)
             # One reload before calling a page broken. An empty page that
             # comes back on reload is a different defect from one that never
             # renders, and reporting them as the same thing sent me looking
@@ -158,7 +163,7 @@ def check_pages(pg, host: str, errs: list) -> dict:
                          f"pending: {'; '.join(list(pending.values())[:3]) or 'none'}")
                 errs.clear(); net.clear()
                 pg.reload(wait_until="domcontentloaded", timeout=30000)
-                body = _settle()
+                body = settle(pg)
                 if len(body) > NAV_ONLY:
                     # Reported, not failed. Measured server-side the API is
                     # p50 1.04s and never stalls, the transport is HTTP/2 so
@@ -219,10 +224,20 @@ def check_actions(pg, session, host: str) -> dict:
     for route in routes_from_router():
         try:
             pg.goto(f"{host}/app{route}", wait_until="domcontentloaded", timeout=30000)
-            pg.wait_for_timeout(2600)
-            for tid in pg.eval_on_selector_all(
-                    "[data-testid^='action-']",
-                    "n=>n.map(e=>e.dataset.testid)"):
+            settle(pg)
+            # Then wait for the set to stop growing. Controls that depend on
+            # loaded data (Job control's Migrate needs its user list) appear
+            # after the first paint, so scanning once at any fixed moment
+            # answers a different question each run.
+            found: set = set()
+            for _ in range(8):
+                now = set(pg.eval_on_selector_all(
+                    "[data-testid^='action-']", "n=>n.map(e=>e.dataset.testid)"))
+                if now and now == found:
+                    break
+                found |= now
+                pg.wait_for_timeout(800)
+            for tid in found:
                 key = tid[len("action-"):]
                 # JobRunner also emits action-exit-/action-confirm-* on the
                 # same card; only the trigger names the action itself.
@@ -271,10 +286,11 @@ def check_settings(pg, host: str) -> dict:
     found = 0
     for route, wanted in by_route.items():
         pg.goto(f"{host}/app{route}", wait_until="domcontentloaded", timeout=30000)
-        for _ in range(14):
-            pg.wait_for_timeout(700)
+        settle(pg)
+        for _ in range(8):
             if all(pg.locator(f'[data-testid="{t}"]').count() for _, t in wanted):
                 break
+            pg.wait_for_timeout(800)
         for key, testid in wanted:
             if pg.locator(f'[data-testid="{testid}"]').count():
                 found += 1
