@@ -275,7 +275,26 @@ def main(argv: list[str] | None = None) -> int:
     if r.status_code != 200:
         raise SystemExit(f"login failed: HTTP {r.status_code}")
 
-    out: dict = {}
+    # Always, and never skippable with --only: a result is worthless if you
+    # cannot say which code produced it. This reads the commit from the
+    # running process, not from disk, so a deploy that copied files but did
+    # not restart reports the OLD commit and the mismatch is visible.
+    commit = "unknown"
+    try:
+        commit = (session.get(f"{args.host}/api/version", timeout=30)
+                  .json().get("commit", "unknown"))
+    except Exception as exc:                       # noqa: BLE001
+        commit = f"unreadable ({exc.__class__.__name__})"
+    print(f"checking deployed commit {commit}")
+    version_fails = []
+    if commit.endswith("-dirty"):
+        version_fails.append(
+            f"deployed commit {commit} is dirty -- the box is running code "
+            f"that matches no commit, so nothing found here is reproducible")
+    elif commit in ("unknown", "") or commit.startswith("unreadable"):
+        version_fails.append(f"cannot tell what is deployed ({commit})")
+
+    out: dict = {"version": {"commit": commit, "failures": version_fails}}
     if "pages" in wanted or "actions" in wanted:
         with sync_playwright() as p:
             b = p.chromium.launch()
@@ -301,7 +320,9 @@ def main(argv: list[str] | None = None) -> int:
         fails = res.get("failures") or []
         mark = "FAIL" if fails else "ok  "
         detail = ""
-        if name == "pages":
+        if name == "version":
+            detail = commit
+        elif name == "pages":
             detail = f"{res['checked']} route(s)"
         elif name == "actions":
             detail = f"{res['visible']} of {res['offered']} have a control"

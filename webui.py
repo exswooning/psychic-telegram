@@ -80,6 +80,24 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # The complete set of things the browser may ask for. Anything not here
 # cannot be run, however the request is crafted.
 # ----------------------------------------------------------------------
+# Read once at import, and that is the point. The file says what was copied to
+# the box; reading it at import means this value can only change when the
+# process restarts, so it reports what the RUNNING process loaded rather than
+# what happens to be on disk. A deploy that copied but failed to restart is
+# exactly the case that once had me reporting a change as landed when the old
+# code was still answering requests.
+def _deployed_commit():
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "DEPLOYED_COMMIT")) as fh:
+            return fh.read().strip() or "unknown"
+    except OSError:
+        return "unknown"
+
+
+DEPLOYED_COMMIT = _deployed_commit()
+
+
 ACTIONS: dict[str, dict] = {
     "preflight": {
         "label": "Preflight",
@@ -4080,6 +4098,9 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
         elif path == "/api/status":
             self._json(status_payload(self._on_screen()))
+        elif path == "/api/version":
+            self._json({"commit": DEPLOYED_COMMIT})
+
         elif path == "/api/actions":
             self._json({k: {"label": v["label"], "blurb": v["blurb"],
                             "destructive": v.get("destructive", False),
