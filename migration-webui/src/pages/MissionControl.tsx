@@ -16,6 +16,7 @@ import {
 import { useMigrationStore } from '@/store'
 import { MigrationStatus, ServiceProgress } from '@/types'
 import JobController from '@/components/JobController'
+import RunOptions from '@/components/RunOptions'
 import EmergencyBrake from '@/components/EmergencyBrake'
 import ForensicModal from '@/components/ForensicModal'
 import BenchmarkRunner from '@/components/BenchmarkRunner'
@@ -293,6 +294,7 @@ const MissionControl: React.FC = () => {
 
       <ProvisionUsers />
 
+      <RunOptions />
       <JobController users={cpUsers} nodes={nodes} onChanged={refreshLists} />
 
       <BenchmarkRunner />

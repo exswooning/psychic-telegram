@@ -191,19 +191,48 @@ export async function fetchJobHistory(name: string): Promise<JobResult | null> {
   return result
 }
 
+export type MailTransport = 'engine' | 'dms' | 'split'
+
+export interface RunToggles {
+  dry_run: boolean
+  services: Record<string, boolean>
+  rewrite_drive_links?: boolean
+  /** Who actually carries the mail. Modelled here because the server has
+   *  always returned it -- GET /api/toggles returns the whole run state --
+   *  and only the console had a control for it, so the choice was
+   *  effectively invisible to anyone using this app. */
+  mail_transport?: MailTransport
+  delta_days?: number
+  users?: string
+  /** The server's own explanation when it refuses or adjusts a toggle, e.g.
+   *  link rewriting under DMS, which has no code path to run in. Rendering
+   *  it is the difference between a switch that springs back for no reason
+   *  and one that says why. */
+  last_note?: string
+}
+
 export interface TogglesPayload {
   ok: boolean
-  toggles: {
-    dry_run: boolean
-    services: Record<string, boolean>
-    rewrite_drive_links?: boolean
-  }
+  toggles: RunToggles
 }
 
 /** The launch toggles the phased actions read. GET, so the switches can be
  *  drawn from the server rather than from what the page assumes. */
 export async function fetchToggles(): Promise<TogglesPayload> {
   return getJSON<TogglesPayload>('/api/toggles')
+}
+
+/** Send only what changed. The server treats a missing key as "unchanged",
+ *  so a partial patch is the honest shape for a single control -- and it
+ *  cannot reset a toggle the caller never touched. */
+export async function patchToggles(patch: Partial<RunToggles>): Promise<TogglesPayload> {
+  const res = await fetch('/api/toggles', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  })
+  if (!res.ok) throw new Error(`/api/toggles: HTTP ${res.status}`)
+  return res.json() as Promise<TogglesPayload>
 }
 
 export async function setToggles(
