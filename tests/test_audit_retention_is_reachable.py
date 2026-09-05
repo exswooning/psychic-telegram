@@ -33,12 +33,12 @@ class TestItCanBeRun:
         assert "--apply" in argv and "--vacuum" in argv
 
     def test_it_is_on_the_maintenance_page(self):
-        page = open(os.path.join(ROOT, "migration-webui/src/pages/Maintenance.tsx"),
+        page = open(os.path.join(ROOT, "migration-webui/src/actionHomes.ts"),
                     encoding="utf-8").read()
         assert "audit_prune_dry" in page and "audit_prune" in page
 
     def test_the_dry_run_is_listed_first(self):
-        page = open(os.path.join(ROOT, "migration-webui/src/pages/Maintenance.tsx"),
+        page = open(os.path.join(ROOT, "migration-webui/src/actionHomes.ts"),
                     encoding="utf-8").read()
         assert page.index("'audit_prune_dry'") < page.index("'audit_prune'")
 

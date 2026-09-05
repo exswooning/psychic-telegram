@@ -245,6 +245,6 @@ class TestItIsActuallyScheduledAndReachable:
         import webui
         assert "backup_now" in webui.ACTIONS
         page = open(os.path.join(self._root(),
-                                 "migration-webui/src/pages/Maintenance.tsx"),
+                                 "migration-webui/src/actionHomes.ts"),
                     encoding="utf-8").read()
         assert "backup_now" in page
