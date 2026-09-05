@@ -91,6 +91,9 @@ def routes_from_router(app_tsx: str | None = None) -> list[str]:
 
 
 # --------------------------------------------------------------------- checks
+SPINNER = '[role="progressbar"]'
+
+
 def check_pages(pg, host: str, errs: list) -> dict:
     bad, seen = [], []
     # Without these, an empty page is reported as "renders nothing" with no
@@ -112,15 +115,23 @@ def check_pages(pg, host: str, errs: list) -> dict:
         pg.on(_ev, lambda r: pending.pop(r, None))
 
     def _settle():
-        """Wait for content, not a fixed sleep. /metrics runs a 3.16s cold
-        query behind its first paint, and a fixed 2.6s wait reported it as
-        empty -- a check that cries wolf on a slow page teaches you to
-        ignore it."""
+        """Wait for content, not a fixed sleep, and believe a page that says
+        it is still working.
+
+        /api/v2/metrics was measured at 8.4-13s cold, and the Metrics page
+        renders its header and a spinner while it waits -- an honest loading
+        state, and only ~366 characters of text. A fixed wait called that
+        "renders nothing but the nav", which is a description of a broken
+        page, not a slow one. So: wait the normal 8.4s, then keep waiting
+        only while a progress indicator is on screen. A page with no spinner
+        and no content has nothing left to say."""
         body = ""
-        for _ in range(12):
+        for i in range(24):
             pg.wait_for_timeout(700)
             body = pg.inner_text("body")
             if len(body) > NAV_ONLY:
+                return body
+            if i >= 11 and not pg.locator(SPINNER).count():
                 break
         return body
 
@@ -158,7 +169,9 @@ def check_pages(pg, host: str, errs: list) -> dict:
             elif broken:
                 why = broken[0]
             elif len(body) <= NAV_ONLY:
-                why = (f"renders nothing but the nav ({len(body)} chars) -- "
+                spinning = ", still spinning" if pg.locator(SPINNER).count() else ""
+                why = (f"renders nothing but the nav ({len(body)} chars"
+                       f"{spinning}) -- "
                        f"{'; '.join(net[:3]) or 'no failed requests'}, "
                        f"pending: {'; '.join(list(pending.values())[:3]) or 'none'}")
             elif flaky:
