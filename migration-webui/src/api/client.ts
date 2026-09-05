@@ -20,11 +20,14 @@ import {
   VerificationResult,
   FinalReport,
 } from '@/types'
+import { coalesce } from './inflight'
 
 async function getJSON<T>(path: string): Promise<T> {
-  const res = await fetch(path)
-  if (!res.ok) throw new Error(`${path}: HTTP ${res.status}`)
-  return res.json() as Promise<T>
+  return coalesce(path, async () => {
+    const res = await fetch(path)
+    if (!res.ok) throw new Error(`${path}: HTTP ${res.status}`)
+    return res.json() as Promise<T>
+  })
 }
 
 export async function fetchUsers(): Promise<User[]> {

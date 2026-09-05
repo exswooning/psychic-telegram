@@ -93,21 +93,59 @@ def routes_from_router(app_tsx: str | None = None) -> list[str]:
 # --------------------------------------------------------------------- checks
 def check_pages(pg, host: str, errs: list) -> dict:
     bad, seen = [], []
+    # Without these, an empty page is reported as "renders nothing" with no
+    # cause, and finding the cause costs a manual Playwright session -- which
+    # it did, twice. A page that renders nothing did so for a reason, and the
+    # reason is nearly always a request that never arrived.
+    net: list = []
+    pg.on("response", lambda r: net.append(f"http {r.status} {r.url.split('?')[0][-60:]}")
+          if r.status >= 400 else None)
+    pg.on("requestfailed", lambda r: net.append(
+        f"failed {(r.failure or '?')} {r.url.split('?')[0][-60:]}"))
+    # Pending is tracked separately because requestfailed does NOT fire for a
+    # request that simply never finishes, and "no failed requests" on a blank
+    # page is a misleading all-clear -- it was the thing that made the first
+    # blank page look causeless.
+    pending: dict = {}
+    pg.on("request", lambda r: pending.__setitem__(r, r.url.split("?")[0][-55:]))
+    for _ev in ("requestfinished", "requestfailed"):
+        pg.on(_ev, lambda r: pending.pop(r, None))
+
+    def _settle():
+        """Wait for content, not a fixed sleep. /metrics runs a 3.16s cold
+        query behind its first paint, and a fixed 2.6s wait reported it as
+        empty -- a check that cries wolf on a slow page teaches you to
+        ignore it."""
+        body = ""
+        for _ in range(12):
+            pg.wait_for_timeout(700)
+            body = pg.inner_text("body")
+            if len(body) > NAV_ONLY:
+                break
+        return body
+
     for route in routes_from_router():
         errs.clear()
+        net.clear()
+        pending.clear()
         try:
             resp = pg.goto(f"{host}/app{route}", wait_until="domcontentloaded",
                            timeout=30000)
-            # Wait for content rather than sleeping a fixed 2.6s. /metrics
-            # runs a 3.16s cold query behind its first paint, and a fixed
-            # wait reported it as "renders nothing but the nav" -- a check
-            # that cries wolf on a slow page teaches you to ignore it.
-            body = ""
-            for _ in range(12):
-                pg.wait_for_timeout(700)
-                body = pg.inner_text("body")
+            body = _settle()
+            # One reload before calling a page broken. An empty page that
+            # comes back on reload is a different defect from one that never
+            # renders, and reporting them as the same thing sent me looking
+            # for a bug in a page that was fine.
+            flaky = None
+            if len(body) <= NAV_ONLY:
+                first = (f"{len(body)} chars, "
+                         f"{'; '.join(net[:2]) or 'no failed requests'}, "
+                         f"pending: {'; '.join(list(pending.values())[:3]) or 'none'}")
+                errs.clear(); net.clear()
+                pg.reload(wait_until="domcontentloaded", timeout=30000)
+                body = _settle()
                 if len(body) > NAV_ONLY:
-                    break
+                    flaky = f"empty on first load ({first}), fine after reload"
             status = resp.status if resp else 0
             broken = [m for m in ("Something went wrong", "Unexpected Application Error",
                                   "Cannot read", "is not a function", "TypeError")
@@ -120,7 +158,11 @@ def check_pages(pg, host: str, errs: list) -> dict:
             elif broken:
                 why = broken[0]
             elif len(body) <= NAV_ONLY:
-                why = f"renders nothing but the nav ({len(body)} chars)"
+                why = (f"renders nothing but the nav ({len(body)} chars) -- "
+                       f"{'; '.join(net[:3]) or 'no failed requests'}, "
+                       f"pending: {'; '.join(list(pending.values())[:3]) or 'none'}")
+            elif flaky:
+                why = flaky
             seen.append({"route": route, "chars": len(body), "ok": why is None})
             if why:
                 bad.append({"route": route, "why": why})

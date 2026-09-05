@@ -14,6 +14,8 @@
 // dashboard already loaded in a browser can be pointed at a different
 // tunnel/port without a rebuild -- see the "VPS Connection" panel in
 // Settings, which is the only place this setter is called from.
+import { coalesce } from './inflight'
+
 const CP_BASE_DEFAULT = import.meta.env.VITE_CP_BASE ?? 'http://localhost:8090'
 let CP_BASE = localStorage.getItem('cp_base') || CP_BASE_DEFAULT
 
@@ -59,6 +61,13 @@ export async function checkConnection(base: string): Promise<{ ok: true; role: R
 }
 
 async function cpFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  // GET only. Coalescing a write would silently drop it.
+  const method = (init?.method ?? 'GET').toUpperCase()
+  if (method === 'GET') return coalesce(`${CP_BASE}${path}`, () => cpFetchRaw<T>(path, init))
+  return cpFetchRaw<T>(path, init)
+}
+
+async function cpFetchRaw<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${CP_BASE}${path}`, {
     ...init,
     // Carries the bp_session cookie an account signed in with -- it lives
