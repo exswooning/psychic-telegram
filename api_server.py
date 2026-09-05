@@ -2774,6 +2774,47 @@ class _SingleFlightCache:
 # part of this payload -- failures grouped by cause -- changes far more
 # slowly than that.
 _DETAIL_CACHE = _SingleFlightCache(ttl=15.0)
+# Longer than _DETAIL_CACHE: what it holds is bucketed by day, so it cannot
+# meaningfully change inside a minute.
+_THROUGHPUT_CACHE = _SingleFlightCache(ttl=60.0)
+
+
+def _throughput(conn) -> dict:
+    """Items and bytes actually recorded, by day, plus a couple of ratios.
+
+    Deliberately from audit_log rather than run_metrics: run_metrics is
+    written by the migrating process and stops the instant a run does, so a
+    finished migration reports its last sample indefinitely. These numbers
+    are the work itself, so an idle day reads as an idle day.
+    """
+    by_day = [
+        {"day": r["d"], "items": r["n"], "bytes": r["b"]}
+        for r in conn.execute(
+            "SELECT substr(timestamp,1,10) d, COUNT(*) n, "
+            "       COALESCE(SUM(bytes_moved),0) b "
+            "  FROM audit_log WHERE status='SUCCESS' "
+            " GROUP BY d ORDER BY d DESC LIMIT 14")
+    ]
+    total_bytes = conn.execute(
+        "SELECT COALESCE(SUM(bytes_moved),0) b FROM audit_log").fetchone()["b"]
+    files = conn.execute(
+        "SELECT COUNT(*) c FROM id_mapping WHERE type='file'").fetchone()["c"]
+    grants = conn.execute(
+        "SELECT COUNT(*) c FROM audit_log WHERE item_type='acl' "
+        "AND status='SUCCESS'").fetchone()["c"]
+    busiest = max((d["items"] for d in by_day), default=0)
+    return {
+        # Oldest first, so a chart reads left to right without reversing.
+        "byDay": list(reversed(by_day)),
+        "bytesMovedTotal": total_bytes,
+        "busiestDayItems": busiest,
+        # Sharing density. A corpus with grants on a quarter of its files
+        # exercises ACL translation heavily; one near zero has barely tested
+        # it, which is worth knowing before trusting a clean ACL audit.
+        "grantsPerFile": round(grants / files, 3) if files else 0.0,
+        "grants": grants,
+        "files": files,
+    }
 
 
 def _row_has(row, name: str) -> bool:
@@ -3297,6 +3338,19 @@ async def migration_metrics(account_id: int, history: int = 60,
                              "identity_map -- earlier tenant generations kept "
                              "on purpose by a target wipe"),
                 }
+                # Throughput the ledger can answer even when nothing is
+                # running. `history` above is API latency written by the
+                # migrating process, so it freezes the moment a run ends and
+                # a finished migration shows a snapshot forever. These come
+                # from the audit rows themselves, so they stay true.
+                #
+                # Cached: the by-day grouping is a full scan of audit_log
+                # (1.83s over 1.27M rows here) and this endpoint is polled.
+                # Daily buckets change slowly by definition, so a minute of
+                # staleness costs nothing and a scan per poll costs a lot.
+                out["throughput"] = _THROUGHPUT_CACHE.get(
+                    ("throughput", account_id),
+                    lambda: _throughput(conn))
                 out["mappings"] = [
                     {"type": r["type"], "count": r["n"]}
                     for r in conn.execute(

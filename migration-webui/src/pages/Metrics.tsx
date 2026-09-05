@@ -361,6 +361,63 @@ export const Metrics: React.FC = () => {
             </Paper>
           )}
 
+          {m.throughput && m.throughput.byDay.length > 0 && (
+            <Paper variant="outlined" sx={{ p: 2, mb: 3 }} data-testid="throughput">
+              <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 0.5 }}>
+                Work recorded, by day
+              </Typography>
+              {/* From the audit rows, not from run_metrics. The panels above
+                  are written by the migrating process and stop when it does,
+                  so a finished run shows its last sample indefinitely. These
+                  keep telling the truth on an idle day. */}
+              <Typography variant="caption" color="text.secondary"
+                          sx={{ display: 'block', mb: 1.5 }}>
+                Counted from the ledger, so an idle day reads as idle — unlike the
+                latency figures above, which freeze when a run ends.
+              </Typography>
+              <Stack direction="row" spacing={4} sx={{ flexWrap: 'wrap', gap: 2, mb: 2 }}>
+                <Stat id="bytes-total" label="moved in total"
+                      value={bytes(m.throughput.bytesMovedTotal)} />
+                <Stat id="grants-per-file" label="grants per file"
+                      value={m.throughput.grantsPerFile.toFixed(2)}
+                      hint={`${m.throughput.grants.toLocaleString()} grants across `
+                        + `${m.throughput.files.toLocaleString()} files. A corpus with `
+                        + `few grants has barely exercised ACL translation, which is `
+                        + `worth knowing before trusting a clean ACL audit.`} />
+              </Stack>
+              <Box component="table" sx={{ width: '100%', borderCollapse: 'collapse' }}>
+                <Box component="tbody">
+                  {m.throughput.byDay.map((d) => {
+                    const pct = m.throughput!.busiestDayItems > 0
+                      ? (d.items / m.throughput!.busiestDayItems) * 100 : 0
+                    return (
+                      <Box component="tr" key={d.day}>
+                        <Box component="td" sx={{ py: 0.5, pr: 2, whiteSpace: 'nowrap',
+                          fontVariantNumeric: 'tabular-nums', color: 'text.secondary',
+                          fontSize: 13 }}>{d.day}</Box>
+                        <Box component="td" sx={{ width: '100%', py: 0.5 }}>
+                          {/* Bar length is relative to the busiest day, so a
+                              quiet day is visibly quiet rather than scaled up
+                              to look like progress. */}
+                          <Box sx={{ height: 8, borderRadius: 1, bgcolor: 'action.hover' }}>
+                            <Box sx={{ height: 8, borderRadius: 1, width: `${pct}%`,
+                              bgcolor: pct > 0 ? 'primary.main' : 'transparent' }} />
+                          </Box>
+                        </Box>
+                        <Box component="td" sx={{ py: 0.5, pl: 2, textAlign: 'right',
+                          whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums',
+                          fontSize: 13 }}>{d.items.toLocaleString()}</Box>
+                        <Box component="td" sx={{ py: 0.5, pl: 2, textAlign: 'right',
+                          whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums',
+                          fontSize: 13, color: 'text.secondary' }}>{bytes(d.bytes)}</Box>
+                      </Box>
+                    )
+                  })}
+                </Box>
+              </Box>
+            </Paper>
+          )}
+
           {m.transfer && (
             <Paper variant="outlined" sx={{ p: 2, mb: 3 }} data-testid="transfer">
               <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1.5 }}>

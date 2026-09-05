@@ -942,6 +942,18 @@ export interface MetricsSnapshot {
   volume?: { itemType: string; status: string; count: number }[]
   mappings?: { type: string; count: number }[]
   transfer?: { bytesToday: number; dailyCapBytes: number }
+  /** Work the ledger itself records, by day. Distinct from `latest`/`history`,
+   *  which the migrating process writes and which therefore freeze the moment
+   *  a run ends -- a finished migration reports that snapshot forever. These
+   *  come from the audit rows, so an idle day reads as an idle day. */
+  throughput?: {
+    byDay: { day: string; items: number; bytes: number }[]
+    bytesMovedTotal: number
+    busiestDayItems: number
+    grantsPerFile: number
+    grants: number
+    files: number
+  }
   host?: HostMetrics
   volumeError?: string
   hostError?: string
