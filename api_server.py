@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import hmac
 from contextlib import asynccontextmanager
 import json
@@ -620,6 +621,24 @@ async def lifespan(_: FastAPI):
     cancelled on shutdown so a reload does not leave orphaned tasks
     broadcasting to sockets that are already gone.
     """
+    # asyncio's default executor is sized min(32, cpu_count + 4) -- six
+    # threads on this 2-core VPS -- and _off_loop hands it every blocking
+    # read in the process. That sizing assumes CPU-bound work. This work is
+    # not: it is sqlite reads, and _SingleFlightCache waiters that PARK a
+    # thread for the whole of someone else's query. So a couple of slow
+    # reads took the pool, and calls as cheap as /api/v2/auth/me queued
+    # behind them -- pages rendered nothing but the nav, intermittently,
+    # with a single pending request and nothing failing to explain it.
+    #
+    # Sized from what actually holds a thread, not from core count: a
+    # browser opens 6 connections per host, several operators or tabs may
+    # be watching one migration, and the tailer, job supervisor and
+    # lifespan work need headroom that is never starved by page load.
+    loop = asyncio.get_running_loop()
+    loop.set_default_executor(ThreadPoolExecutor(
+        max_workers=BROWSER_CONNS_PER_HOST * CONCURRENT_WATCHERS + BACKGROUND_THREADS,
+        thread_name_prefix="offloop"))
+
     await _off_loop(cpdb.apply_migrations)
     # Idempotent: only inserts account id=1 the very first time this ever
     # runs against a given migration.db. Must come after apply_migrations,
@@ -674,6 +693,12 @@ app.add_middleware(
 def _envelope(event_type: str, data: Any) -> dict:
     return {"type": event_type, "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                                     time.gmtime()), "data": data}
+
+
+# Derived, not picked: these are the things that hold an executor thread.
+BROWSER_CONNS_PER_HOST = 6      # what one tab can have in flight at once
+CONCURRENT_WATCHERS = 4         # tabs/operators watching one migration
+BACKGROUND_THREADS = 8          # tailer, supervisor, lifespan, headroom
 
 
 async def _off_loop(fn, *a, **kw):
