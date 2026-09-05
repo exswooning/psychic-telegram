@@ -230,12 +230,18 @@ def check_actions(pg, session, host: str) -> dict:
             # after the first paint, so scanning once at any fixed moment
             # answers a different question each run.
             found: set = set()
+            scanned = False
             for _ in range(8):
                 now = set(pg.eval_on_selector_all(
                     "[data-testid^='action-']", "n=>n.map(e=>e.dataset.testid)"))
-                if now and now == found:
+                # Two identical scans is settled, including two empty ones.
+                # Requiring a non-empty match made every action-less page --
+                # more than half of them -- burn the full 6.4s for nothing,
+                # which is most of why a run took a quarter of an hour.
+                if scanned and now == found:
                     break
                 found |= now
+                scanned = True
                 pg.wait_for_timeout(800)
             for tid in found:
                 key = tid[len("action-"):]
