@@ -15,13 +15,7 @@ import JobRunner from '@/components/JobRunner'
  * predates this page (built earlier this session); this is its first
  * real UI.
  */
-const MAINTENANCE_KEYS = [
-  'backup_now', 'backup_list',
-  'audit_prune_dry', 'audit_prune',
-  'resolve_dry', 'resolve',
-  'repair_modified_times_dry', 'repair_modified_times', 'backfill_drive',
-  'undo_dry', 'undo',
-]
+import { MAINTENANCE_KEYS, unclaimed } from '@/actionHomes'
 
 const Maintenance: React.FC = () => {
   const [actions, setActions] = useState<Record<string, ActionSpec>>({})
@@ -50,6 +44,29 @@ const Maintenance: React.FC = () => {
           </Stack>
         </CardContent>
       </Card>
+
+      {/* Anything the backend offers that no page has spoken for. Without
+          this, adding an action to ACTIONS put it on screen nowhere -- 16 of
+          43 were in that state when this was written. A slightly odd home
+          beats none. */}
+      {unclaimed(Object.keys(actions)).length > 0 && (
+        <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 3 }}>
+          <CardContent>
+            <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 0.5 }}>
+              Everything else
+            </Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              Actions with no dedicated page. They appear here automatically so
+              nothing the server can run is invisible.
+            </Typography>
+            <Stack spacing={3}>
+              {unclaimed(Object.keys(actions)).map((key) => (
+                <JobRunner key={key} name={key} spec={actions[key]} />
+              ))}
+            </Stack>
+          </CardContent>
+        </Card>
+      )}
 
       <ResetDriveLedgerCard />
       <WipeTargetCard />

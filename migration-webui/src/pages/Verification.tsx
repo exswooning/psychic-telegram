@@ -33,6 +33,9 @@ import {
 import { useMigrationStore } from '@/store'
 import { statusLabel, statusColor } from '@/utils/formatters'
 import { fetchVerifiedDomains, VerifiedDomain, fetchMe } from '@/api/controlPlane'
+import JobRunner from '@/components/JobRunner'
+import { fetchActions, ActionSpec } from '@/api/client'
+import { VERIFICATION_KEYS } from '@/actionHomes'
 
 /**
  * Which domain(s) this account has actually finished setting up (via the
@@ -165,6 +168,10 @@ const VerifiedDomains: React.FC = () => {
 }
 
 const Verification: React.FC = () => {
+  // Lives on the page, not in VerifiedDomains -- the card renders at the
+  // bottom of the page body, and the state has to be in the same component.
+  const [checks, setChecks] = useState<Record<string, ActionSpec>>({})
+  useEffect(() => { fetchActions().then(setChecks).catch(() => {}) }, [])
   const { verification } = useMigrationStore()
   const overallConfidence = verification.length > 0
     ? Math.round(verification.reduce((sum, v) => sum + v.confidence, 0) / verification.length)
@@ -276,7 +283,30 @@ const Verification: React.FC = () => {
           </TableContainer>
         </CardContent>
       </Card>
-    </Box>
+    
+      {/* The read-only "is this right?" family. Every one of these had an
+          ACTIONS entry and no button in this app -- verify, acl_audit,
+          verify_ledger, ui_check, the two scope probes and the external-share
+          report were reachable only from the legacy wizard. */}
+      {VERIFICATION_KEYS.some((k) => checks[k]) && (
+        <Card sx={{ mt: 3 }}>
+          <CardContent>
+            <Typography variant="h6" sx={{ fontWeight: 600, mb: 0.5 }}>
+              Checks you can run
+            </Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              All read-only. Each asks the tenants or the ledger a question and
+              reports what it found.
+            </Typography>
+            <Stack spacing={3}>
+              {VERIFICATION_KEYS.filter((k) => checks[k]).map((k) => (
+                <JobRunner key={k} name={k} spec={checks[k]} />
+              ))}
+            </Stack>
+          </CardContent>
+        </Card>
+      )}
+</Box>
   )
 }
 
