@@ -153,7 +153,8 @@ const JobController: React.FC<Props> = ({ users, nodes, onChanged }) => {
 
         <Button size="small" startIcon={<DryRunIcon />}
                 onClick={() => askStart(true)}>Dry run</Button>
-        <Button size="small" variant="contained" startIcon={<StartIcon />}
+        <Button
+            data-testid="action-migrate" size="small" variant="contained" startIcon={<StartIcon />}
                 onClick={() => askStart(false)}>
           {selected.size ? `Migrate ${selected.size}` : 'Migrate all'}
         </Button>

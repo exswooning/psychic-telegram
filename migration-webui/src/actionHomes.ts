@@ -40,10 +40,23 @@ export const CLAIMED_ELSEWHERE = [
   'shared_drives_inventory', 'shared_drives_migrate', 'staging_drives_cleanup',
   'sso_inventory', 'sso_migrate', 'reconcile', 'dms_import',
   // Mission Control / Wizard / Scope / Identities
-  'migrate', 'discover', 'report', 'scope', 'export_scope',
+  'migrate', 'scope', 'export_scope',
   'init_db', 'init_db_auto', 'phased_migrate', 'phased_count_only',
-  'reset_drive_ledger', 'inventory',
 ]
+
+// Audited live after this list was written, and three of its entries were
+// wrong in the way that matters most: claiming a key here removes it from
+// unclaimed(), so a mistake hides the action rather than duplicating it.
+//
+//   reconcile, reset_drive_ledger   not ACTIONS keys at all -- stale names
+//   inventory                       a real action, claimed by nobody, and
+//                                   therefore rendered nowhere
+//   report                          appeared "visible" only because the
+//                                   audit matched the label substring
+//                                   "Report" in unrelated page text
+//
+// Which is why the check that guards this now looks for JobRunner's own
+// data-testid rather than reading labels out of body text.
 
 /**
  * Every action with no home. Rendered by Maintenance under "Everything else",

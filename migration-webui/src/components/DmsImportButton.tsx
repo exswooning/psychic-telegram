@@ -72,7 +72,7 @@ const DmsImportButton: React.FC<{ spec: ActionSpec }> = ({ spec }) => {
         startIcon={<RunIcon />}
         disabled={running}
         onClick={() => setOpen(true)}
-        data-testid="dms-import-btn"
+        data-testid="action-dms_import"
       >
         {running ? 'DMS import running…' : spec.label}
       </Button>
