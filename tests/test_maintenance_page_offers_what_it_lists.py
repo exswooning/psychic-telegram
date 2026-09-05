@@ -20,9 +20,12 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _keys():
-    src = open(os.path.join(ROOT, "migration-webui/src/pages/Maintenance.tsx"),
+    # The list moved to actionHomes.ts when the pages stopped each keeping
+    # their own copy -- one of those copies going stale is what left 16 of 43
+    # actions with no button anywhere.
+    src = open(os.path.join(ROOT, "migration-webui/src/actionHomes.ts"),
                encoding="utf-8").read()
-    block = src.split("const MAINTENANCE_KEYS = [")[1].split("]")[0]
+    block = src.split("export const MAINTENANCE_KEYS = [")[1].split("]")[0]
     return re.findall(r"'([^']+)'", block)
 
 
