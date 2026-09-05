@@ -294,6 +294,12 @@ const QuickTenantSetup: React.FC<{
   const [seed, setSeed] = useState(false)
   const [seedScale, setSeedScale] = useState('small')
   const [createUsers, setCreateUsers] = useState(false)
+  // Comma-separated localparts. The Seed Wizard's Manual tab has had this
+  // since the field was added; the Automated tab -- the default, and the one
+  // most people use -- could only ever seed the whole tenant. On this tenant
+  // that is 200 users and days, which makes "seed, then check the change I
+  // just made" impossible from the path people actually take.
+  const [seedUsers, setSeedUsers] = useState('')
   const [provisionUsers, setProvisionUsers] = useState(false)
   const [status, setStatus] = useState<FullSetupStatus | null>(null)
   const [ask, setAsk] = useState(false)
@@ -674,7 +680,9 @@ const QuickTenantSetup: React.FC<{
     try {
       if (postAction === 'seed') {
         setJobActive(false)
-        const r = await runSeed(domain.trim(), seedScale, createUsers, false)
+        const r = await runSeed(domain.trim(), seedScale, createUsers, false,
+                                undefined, undefined, undefined, undefined,
+                                undefined, seedUsers.trim() || undefined)
         if (!r.ok) throw new Error(r.error || 'seed failed')
         setJobActive(true)
         setPostDone('seed started — live output below')
@@ -1041,6 +1049,13 @@ const QuickTenantSetup: React.FC<{
                                onChange={(e) => setCreateUsers(e.target.checked)} />}
               label={<Typography variant="body2">Create users</Typography>}
             />
+            <TextField
+              size="small" label="Only these users" placeholder="george, ivan"
+              value={seedUsers}
+              onChange={(e) => setSeedUsers(e.target.value)}
+              inputProps={{ 'data-testid': 'quick-seed-users' }}
+              sx={{ width: 220 }}
+            />
             <Button variant="contained" startIcon={<SeedIcon />}
                     disabled={postBusy || seedJobRunning || !domain.trim()}
                     onClick={() => setPostAction('seed')}>
@@ -1052,6 +1067,11 @@ const QuickTenantSetup: React.FC<{
               Add max users
             </Button>
           </Stack>
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+            "Only these users" takes localparts, not addresses — blank seeds
+            every user the tenant has, which on a real tenant is days rather
+            than minutes. Name a few when you are checking a change.
+          </Typography>
           <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
             "Add max users" creates generated accounts one at a time until
             Google itself refuses one (out of licences) — the reliable
