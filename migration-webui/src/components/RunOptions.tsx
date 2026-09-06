@@ -136,6 +136,25 @@ export const RunOptions: React.FC = () => {
             />
           </Tooltip>
 
+          {/* _RUN_STATE["users"] scopes anything webui launches -- the
+              phased actions and the delta pass. Job control's row ticks
+              are a DIFFERENT scope: they go to api_server's migrate/start
+              and never reach this. Two scoping mechanisms, and only one of
+              them had a control, which is how a settings audit pointed at
+              the wrong one and still passed. */}
+          <TextField
+            size="small" label="Only these users"
+            sx={{ width: 300 }} disabled={busy}
+            defaultValue={t.users ?? ''}
+            placeholder="blank = every user"
+            inputProps={{ 'data-testid': 'run-users' }}
+            onBlur={(e) => {
+              if (e.target.value.trim() !== (t.users ?? '').trim()) {
+                send({ users: e.target.value.trim() })
+              }
+            }}
+          />
+
           <TextField
             size="small" type="number" label="Delta window (days)"
             sx={{ width: 180 }} disabled={busy}

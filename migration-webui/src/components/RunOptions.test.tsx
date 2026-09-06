@@ -34,6 +34,20 @@ describe('RunOptions', () => {
     expect(screen.getByTestId('run-options-note')).toHaveTextContent('turned rewriting on')
   })
 
+  it('scopes a run to named users, which Job control ticks do not', async () => {
+    /* Job control's row ticks go to api_server's migrate/start. This field
+       is the only thing that sets _RUN_STATE["users"], which is what scopes
+       every action webui launches, including the delta pass. */
+    vi.spyOn(client, 'fetchToggles').mockResolvedValue({ ok: true, toggles: base })
+    const patch = vi.spyOn(client, 'patchToggles').mockResolvedValue({
+      ok: true, toggles: { ...base, users: 'a@x.test' } })
+    render(<RunOptions />)
+    const box = await screen.findByTestId('run-users')
+    fireEvent.change(box, { target: { value: ' a@x.test ' } })
+    fireEvent.blur(box)
+    await waitFor(() => expect(patch).toHaveBeenCalledWith({ users: 'a@x.test' }))
+  })
+
   it('will not offer link rewriting under DMS, which cannot do it', async () => {
     vi.spyOn(client, 'fetchToggles').mockResolvedValue({ ok: true, toggles: { ...base, mail_transport: 'dms' } })
     render(<RunOptions />)

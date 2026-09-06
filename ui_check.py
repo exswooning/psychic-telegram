@@ -274,7 +274,10 @@ SETTING_HOMES = {
     "mail_transport":      ("/mission-control", "transport-split"),
     "rewrite_drive_links": ("/mission-control", "rewrite-drive-links"),
     "delta_days":          ("/mission-control", "delta-days"),
-    "users":               ("/mission-control", "scope-users"),
+    # run-users, NOT Job control's row ticks. Those scope api_server's
+    # migrate/start and never touch _RUN_STATE, so pointing this at them
+    # made the check pass while the setting it names had no control at all.
+    "users":               ("/mission-control", "run-users"),
     "services":            ("/services", "toggle-drive"),
 }
 
