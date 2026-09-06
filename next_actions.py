@@ -122,14 +122,35 @@ def assess(db, settings) -> list[dict]:
     # 5. Link rot. Cheap and honest: the ledger knows whether anything ever
     #    rewrote a link, and the setting knows whether anything would.
     rewritten = q("SELECT COUNT(*) FROM audit_log WHERE item_type='link_rewrite'")
+    on = bool(getattr(settings, "rewrite_drive_links", False))
     if mail and not rewritten:
-        on = bool(getattr(settings, "rewrite_drive_links", False))
         out.append(_one(WARN, "Drive links in migrated mail point at the source",
                         f"{mail:,} message(s) migrated and nothing has rewritten a "
                         f"link in them. They break when the source tenant is "
                         f"deleted. Rewriting is currently "
                         f"{'on -- rerun mail to apply it' if on else 'off'}.",
                         "ui_check"))
+    elif rewritten:
+        # Rewriting on its own is not the all-clear. This used to be
+        # `if mail and not rewritten`, so the FIRST rewritten link silenced
+        # the warning for the whole tenant -- migrate 300,000 messages with
+        # rewriting off, switch it on, migrate one more, and the ledger
+        # reports nothing wrong while 300,000 messages still name source
+        # files. Mail migrated before rewriting first ran is the part still
+        # carrying dead links, and it is exactly what a staged rollout
+        # produces.
+        stale = q("SELECT COUNT(*) FROM audit_log WHERE item_type='message' "
+                  "AND status='SUCCESS' AND timestamp < "
+                  "(SELECT MIN(timestamp) FROM audit_log "
+                  " WHERE item_type='link_rewrite')")
+        if stale:
+            out.append(_one(
+                WARN, f"{stale:,} message(s) migrated before link rewriting was on",
+                f"{rewritten:,} link(s) have been rewritten since, but anything "
+                f"copied earlier still names a source file and dies with the "
+                f"source tenant. Re-running mail will not fix them: a migrated "
+                f"message is already inserted, so the engine skips it.",
+                "ui_check"))
 
     # 6. External collaborators nobody has told.
     ours = {(settings.source_domain or "").lower(),
