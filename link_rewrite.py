@@ -72,6 +72,20 @@ def rewrite_bytes(body: bytes, lookup: Callable[[str], str | None]) -> tuple[byt
     return DRIVE_ID.sub(repl, body), hits
 
 
+def rewrite_text(text: str, lookup: Callable[[str], str | None]) -> tuple[str, int]:
+    """Rewrite the Drive links in ordinary text.
+
+    Mail needs the decode-first dance because of transfer encodings. A
+    calendar description, a Chat message and a document body are already
+    plain text, and they rot exactly the same way -- so they get the same
+    pattern without the MIME machinery.
+    """
+    if not text:
+        return text, 0
+    out, n = rewrite_bytes(text.encode("utf-8", "surrogatepass"), lookup)
+    return out.decode("utf-8", "replace"), n
+
+
 def has_drive_link(raw_b64: str) -> bool:
     """Whether a message really contains a Drive link.
 

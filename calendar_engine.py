@@ -30,6 +30,8 @@ from resilience import PermanentAPIError, RateLimiter, retry_on_google_error
 # RefreshError, which the retry decorator never sees.
 OPTIONAL_PASS_ERRORS = (PermanentAPIError, RuntimeError, RefreshError)
 
+from link_rewrite import rewrite_text
+
 log = logging.getLogger(__name__)
 
 _COPY_KEYS = ("description", "location", "status", "recurrence", "reminders",
@@ -86,14 +88,44 @@ class CalendarMigrator:
             out.append(entry)
         return out
 
+    def _drive_link_target(self, source_id: str) -> str | None:
+        """Where a source Drive id ended up, whoever owned it.
+
+        Not get_target_id(self.source_user, ...): that only finds files this
+        user owns, so an event attaching or linking a colleague's document
+        looked unmapped and had the attachment dropped -- for a file that had
+        migrated perfectly well, under someone else's name.
+        """
+        return self.db.target_for_source_id(source_id)
+
     def _map_attachments(self, attachments: list[dict] | None) -> list[dict]:
         out = []
         for a in attachments or []:
-            mapped = self.db.get_target_id(self.source_user, a.get("fileId"), "file")
+            mapped = self._drive_link_target(a.get("fileId"))
             if not mapped:
                 continue  # a dead link is worse than none
             out.append({**a, "fileId": mapped})
         return out
+
+    def _rewrite_links(self, body: dict) -> int:
+        """Repoint Drive links in the text fields of an event.
+
+        Same rot as mail, different surface: "notes are in <drive link>" in a
+        meeting description dies with the source tenant exactly like the same
+        link in an email. Nothing rewrote these -- description and location
+        were copied verbatim.
+
+        Unlike mail, an event can be edited after the fact, so this needs no
+        trash-and-reinsert and carries none of that risk.
+        """
+        if not self.settings.rewrite_drive_links:
+            return 0
+        n = 0
+        for key in ("description", "location"):
+            if body.get(key):
+                body[key], hits = rewrite_text(body[key], self._drive_link_target)
+                n += hits
+        return n
 
     def _build_import_body(self, item: dict, tgt_cal_id: str = "primary") -> dict:
         body: dict = {
@@ -110,6 +142,7 @@ class CalendarMigrator:
         if organizer_email:
             body["organizer"] = {"email": self.db.resolve_identity(organizer_email) or organizer_email}
 
+        self._rewrite_links(body)
         attendees = self._map_attendees(item.get("attendees"))
 
         # Importing into a SECONDARY calendar is refused unless that calendar

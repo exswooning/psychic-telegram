@@ -199,6 +199,20 @@ ACTIONS: dict[str, dict] = {
         "blurb": "Show what a retry of FAILED items would do.",
         "argv": [PY, "resolve_failures.py", "--dry-run"],
     },
+    "calendar_links_dry": {
+        "label": "Repair calendar links (dry run)",
+        "blurb": "Count meeting descriptions still pointing at source Drive "
+                 "files. Calendar copied these verbatim, so they rot exactly "
+                 "like links in mail.",
+        "argv": [PY, "repair_calendar_links.py"],
+    },
+    "calendar_links": {
+        "label": "Repair calendar links",
+        "blurb": "Patch the events in place. An event can be edited, so "
+                 "nothing is created or destroyed -- unlike the mail repair.",
+        "argv": [PY, "repair_calendar_links.py", "--apply"],
+        "confirm": "REPAIR",
+    },
     "link_dupes_dry": {
         "label": "Duplicate repair copies (dry run)",
         "blurb": "Count the extra copies the old non-idempotent link repair "
