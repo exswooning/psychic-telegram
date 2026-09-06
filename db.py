@@ -591,6 +591,19 @@ class MigrationDB:
         ).fetchone()
         return row["target_id"] if row else None
 
+    def already_repaired(self, source_user: str, source_id: str) -> bool:
+        """Has this message's links already been repaired?
+
+        Without this the repair is not idempotent: it asks whether the
+        SOURCE message needs rewriting, and the source always does, so every
+        pass repaired every link-bearing message again -- trashing the
+        current target copy and inserting another each time.
+        """
+        return self.conn.execute(
+            "SELECT 1 FROM audit_log WHERE source_user=? AND item_id=? "
+            "AND item_type='link_repair' LIMIT 1",
+            (source_user, source_id)).fetchone() is not None
+
     def forget_mapping(self, source_user: str, source_id: str,
                        item_type: str) -> None:
         """Forget one item, so the next pass migrates it again.

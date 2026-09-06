@@ -46,6 +46,7 @@ class _Svc:
 class _DB:
     def __init__(self): self.forgot, self.audit = [], []
     def get_target_id(self, u, i, t): return "TGT1"
+    def already_repaired(self, u, i): return False
     def forget_mapping(self, u, i, t): self.forgot.append((u, i, t))
     def log_audit(self, *a, **k): self.audit.append(a)
     def target_for_source_id(self, sid):
@@ -223,3 +224,56 @@ def test_the_repair_row_is_not_overwritten_by_the_message_row():
     src = inspect.getsource(gmail_engine)
     assert '"link_repair"' in src
     assert '"REDONE_FOR_LINKS"' not in src
+
+
+class TestTheRepairRunsOnce:
+    """Not idempotent, the repair is a mail shredder.
+
+    The branch asks whether the SOURCE message needs rewriting. The source
+    still names source files and always will, so the answer is yes on every
+    pass -- and each pass trashed the current target copy and inserted
+    another. Measured live on r2-george: the same 38 messages repaired on
+    every run, copies accumulating.
+    """
+
+    def _prepared(self, settings, repaired):
+        settings.rewrite_drive_links = True
+        settings.redo_unrewritten_links = True
+        g = _m(settings, RAW)
+        g.db.already_repaired = lambda u, i: repaired
+        return g
+
+    def test_a_message_already_repaired_is_left_alone(self, settings):
+        g = self._prepared(settings, repaired=True)
+        g._migrate_one_message({"id": "m1"})
+        assert g._counts.get("skipped") == 1
+        assert g.tgt.users().messages().trashed == [], "trashed a second time"
+        assert g.db.forgot == []
+
+    def test_a_message_not_yet_repaired_is_still_repaired(self, settings):
+        g = self._prepared(settings, repaired=False)
+        with pytest.raises(Exception):        # falls through to the insert
+            g._migrate_one_message({"id": "m1"})
+        assert g.tgt.users().messages().trashed == ["TGT1"]
+
+    def test_the_check_runs_before_the_rewrite_probe(self, settings):
+        """Cheap first: a DB lookup, not a rewrite of the whole payload."""
+        import inspect, gmail_engine
+        src = inspect.getsource(gmail_engine.GmailMigrator._migrate_one_message)
+        assert src.index("already_repaired") < src.index("_, would = rewrite_raw")
+
+
+class TestTheLedgerAnswersIt:
+    def test_already_repaired_reads_the_repair_row(self, tmp_path):
+        import sqlite3
+        from db import MigrationDB
+        db = MigrationDB(str(tmp_path / "m.db"))
+        db.log_audit("u@x.test", "m1", "link_repair", "SUCCESS", "1 link")
+        assert db.already_repaired("u@x.test", "m1") is True
+        assert db.already_repaired("u@x.test", "m2") is False
+
+    def test_a_plain_message_row_does_not_count_as_a_repair(self, tmp_path):
+        from db import MigrationDB
+        db = MigrationDB(str(tmp_path / "m.db"))
+        db.log_audit("u@x.test", "m1", "message", "SUCCESS")
+        assert db.already_repaired("u@x.test", "m1") is False

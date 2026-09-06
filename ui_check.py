@@ -399,14 +399,18 @@ def check_duplicates(account_id: int | None) -> dict:
     This exists because a person asked the question and no test did. The
     repair trashes the copy it replaces, and that copy keeps the same
     Message-ID -- which the engine's own duplicate guard searches for with
-    includeSpamTrash on. Get it wrong and you have two emails of the same
-    thing carrying two different links, with the ledger naming one of them
-    arbitrarily. That is invisible in every count: the ledger has one row,
-    verify passes because a surplus is allowed, and only the person reading
-    their mail sees it.
+    includeSpamTrash on. Get it wrong and there are two emails of the same
+    thing carrying two different links, and nothing notices: the ledger has
+    one row, verify passes because a surplus is allowed, and only the person
+    reading their mail sees it.
 
-    So it asks the target directly, per repaired message: how many copies
-    carry this Message-ID, and how many of those are not in Trash?
+    The count is an EXCESS over the source, not a raw count. The first
+    version of this check reported 23 duplications and named the repair as
+    the cause; measured, the source mailbox itself held 190 duplicated
+    Message-IDs -- seeded twice, and the seeder reuses ids. A mailbox that
+    arrived with four copies is supposed to have four copies. Comparing
+    against the source is the difference between "the repair duplicated
+    this" and "this was always like that".
     """
     from config import Settings
     from db import MigrationDB
@@ -414,6 +418,9 @@ def check_duplicates(account_id: int | None) -> dict:
 
     s = Settings(account_id=account_id) if account_id else Settings()
     db = MigrationDB(s.db_path)
+    # item_type, not status: audit_log upserts on (source_user, item_id,
+    # item_type), so a repair filed under "message" was overwritten by the
+    # message's own SUCCESS row moments later.
     repaired = db.conn.execute(
         "SELECT source_user, item_id FROM audit_log "
         "WHERE item_type='link_repair' ORDER BY timestamp DESC LIMIT 60"
@@ -423,9 +430,25 @@ def check_duplicates(account_id: int | None) -> dict:
                 "failures": []}
 
     auth = AuthManager(s)
-    checked = live_dupes = orphaned = 0
+    checked = excess_total = orphaned = 0
     problems: list[str] = []
-    handles: dict = {}
+    src_h: dict = {}
+    tgt_h: dict = {}
+
+    def _count(svc, msgid, live_only):
+        found = svc.users().messages().list(
+            userId="me", q=f"rfc822msgid:{msgid}", maxResults=25,
+            includeSpamTrash=True).execute().get("messages", [])
+        if not live_only:
+            return len(found)
+        n = 0
+        for m in found:
+            labels = svc.users().messages().get(
+                userId="me", id=m["id"], format="minimal"
+            ).execute().get("labelIds") or []
+            n += "TRASH" not in labels
+        return n
+
     for source_user, src_id in repaired:
         row = db.conn.execute(
             "SELECT target_id FROM id_mapping WHERE source_user=? AND "
@@ -436,74 +459,33 @@ def check_duplicates(account_id: int | None) -> dict:
             # just as invisible.
             orphaned += 1
             continue
-        if source_user not in handles:
-            handles[source_user] = auth.target_gmail(
+        if source_user not in tgt_h:
+            tgt_h[source_user] = auth.target_gmail(
                 source_user.replace(s.source_domain, s.target_domain))
-        g = handles[source_user]
-        raw = g.users().messages().get(userId="me", id=row[0], format="raw"
-                                       ).execute().get("raw", "")
+            src_h[source_user] = auth.source_gmail(source_user)
+        tgt, src = tgt_h[source_user], src_h[source_user]
+        raw = tgt.users().messages().get(userId="me", id=row[0], format="raw"
+                                         ).execute().get("raw", "")
         parsed = email.message_from_bytes(base64.urlsafe_b64decode(raw + "==="))
-        msgid = parsed.get("Message-ID")
+        msgid = (parsed.get("Message-ID") or "").strip("<>")
         if not msgid:
             continue
-        found = g.users().messages().list(
-            userId="me", q=f"rfc822msgid:{msgid.strip('<>')}", maxResults=10,
-            includeSpamTrash=True).execute().get("messages", [])
         checked += 1
-        live = [m["id"] for m in found
-                if "TRASH" not in (g.users().messages().get(
-                    userId="me", id=m["id"], format="minimal"
-                ).execute().get("labelIds") or [])]
-        if len(live) > 1:
-            live_dupes += 1
-            # Says what it saw, not what caused it. A repaired message with
-            # several live copies is worth looking at, but the first real
-            # case was a seeder that gave distinct messages the same
-            # Message-ID -- so blaming the repair was wrong, and the kind of
-            # wrong that sends someone hunting in the wrong file.
+        live = _count(tgt, msgid, live_only=True)
+        at_source = _count(src, msgid, live_only=False)
+        if live > at_source:
+            excess_total += live - at_source
             problems.append(
-                f"{source_user}: {len(live)} live copies carry {msgid}, one "
-                f"of them repaired. Either the repair duplicated it or the "
-                f"mail already shared a Message-ID -- check which before "
-                f"treating it as a repair bug")
-    # Duplicates that have nothing to do with a repair. The first real one
-    # found on this tenant was ten live copies of the same seeded message,
-    # each with its own ledger row -- so every count agreed and only the
-    # mailbox disagreed. Sampling the live mailbox for repeated Message-IDs
-    # is the only view that catches it, and it costs one metadata call per
-    # message rather than a full fetch.
-    for source_user in list(handles) or [r[0] for r in repaired[:1]]:
-        if source_user not in handles:
-            handles[source_user] = auth.target_gmail(
-                source_user.replace(s.source_domain, s.target_domain))
-        g = handles[source_user]
-        seen: dict = {}
-        for ref in (g.users().messages().list(
-                userId="me", maxResults=200).execute().get("messages") or []):
-            md = g.users().messages().get(
-                userId="me", id=ref["id"], format="metadata",
-                metadataHeaders=["Message-ID"]).execute()
-            hdrs = {h["name"].lower(): h["value"]
-                    for h in (md.get("payload", {}).get("headers") or [])}
-            mid_hdr = hdrs.get("message-id")
-            if mid_hdr:
-                seen.setdefault(mid_hdr, []).append(ref["id"])
-        repeats = {k: v for k, v in seen.items() if len(v) > 1}
-        if repeats:
-            worst = max(repeats.values(), key=len)
-            problems.append(
-                f"{source_user}: {len(repeats)} Message-ID(s) have more than "
-                f"one live copy on the target (worst: {len(worst)} copies) -- "
-                f"the ledger counts each as a separate message, so only the "
-                f"mailbox shows it")
-
+                f"{source_user}: {live} live copies of <{msgid}> against "
+                f"{at_source} at source -- the repair added "
+                f"{live - at_source}")
     if orphaned:
         problems.append(
             f"{orphaned} repaired message(s) have no mapping: trashed and "
             f"forgotten but never reinserted")
     return {
         "repairsChecked": checked,
-        "liveDuplicates": live_dupes,
+        "excessCopies": excess_total,
         "orphaned": orphaned,
         "failures": problems,
     }
@@ -603,7 +585,7 @@ def main(argv: list[str] | None = None) -> int:
         elif name == "duplicates":
             detail = res.get("skipped") or (
                 f"{res.get('repairsChecked', 0)} repair(s), "
-                f"{res.get('liveDuplicates', 0)} duplicated, "
+                f"{res.get('excessCopies', 0)} excess copies, "
                 f"{res.get('orphaned', 0)} lost")
         print(f"  {mark} {name:8s} {detail}")
         for f in fails:

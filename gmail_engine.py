@@ -393,6 +393,25 @@ class GmailMigrator:
             # a rewrite would actually change -- everything else is left
             # exactly as it is, so a redo pass over a healthy mailbox moves
             # nothing.
+            # Has this one already been repaired? The question below is
+            # asked of the SOURCE message, which still names source files
+            # and always will -- so on its own it answers "yes, repair
+            # this" on every pass, forever. Each pass then trashed the
+            # current copy and inserted another. Measured live: the same 38
+            # messages repaired on every run.
+            #
+            # The ledger already records each repair, and audit_log upserts
+            # on (source_user, item_id, item_type), so the row is exactly
+            # one per message and is written only after the insert
+            # succeeded.
+            #
+            # ponytail: a partially-repaired message (links whose Drive
+            # files had not migrated yet) is not retried once its row
+            # exists. Re-check the TARGET copy for source ids if that
+            # becomes real; it costs one extra fetch per message.
+            if self.db.already_repaired(self.source_user, mid):
+                self._bump("skipped")
+                return
             _, would = rewrite_raw(raw, self._drive_link_target)
             if not would:
                 self._bump("skipped")
