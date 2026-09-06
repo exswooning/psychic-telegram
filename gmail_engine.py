@@ -411,7 +411,12 @@ class GmailMigrator:
                 self._bump("failed")
                 return
             self.db.forget_mapping(self.source_user, mid, "message")
-            self.db.log_audit(self.source_user, mid, "message", "REDONE_FOR_LINKS",
+            # Its own item_type, like link_rewrite. audit_log upserts on
+            # (source_user, item_id, item_type), so filing this under
+            # "message" let the message's own SUCCESS row overwrite it
+            # moments later -- the repair erased its own record, and the
+            # check that looks for repairs reported none while 38 had run.
+            self.db.log_audit(self.source_user, mid, "link_repair", "SUCCESS",
                               f"{would} link(s) needed repointing; old copy trashed")
         # `raw` is already base64url, and `body["raw"]` wants base64url --
         # decoding it only to re-encode the identical bytes doubled peak

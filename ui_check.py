@@ -416,7 +416,7 @@ def check_duplicates(account_id: int | None) -> dict:
     db = MigrationDB(s.db_path)
     repaired = db.conn.execute(
         "SELECT source_user, item_id FROM audit_log "
-        "WHERE status='REDONE_FOR_LINKS' ORDER BY timestamp DESC LIMIT 60"
+        "WHERE item_type='link_repair' ORDER BY timestamp DESC LIMIT 60"
     ).fetchall()
     if not repaired:
         return {"skipped": "no repairs recorded -- the redo pass has not run",
@@ -459,6 +459,37 @@ def check_duplicates(account_id: int | None) -> dict:
             problems.append(
                 f"{source_user} has {len(live)} live copies of {msgid} -- "
                 f"the repair duplicated the message instead of replacing it")
+    # Duplicates that have nothing to do with a repair. The first real one
+    # found on this tenant was ten live copies of the same seeded message,
+    # each with its own ledger row -- so every count agreed and only the
+    # mailbox disagreed. Sampling the live mailbox for repeated Message-IDs
+    # is the only view that catches it, and it costs one metadata call per
+    # message rather than a full fetch.
+    for source_user in list(handles) or [r[0] for r in repaired[:1]]:
+        if source_user not in handles:
+            handles[source_user] = auth.target_gmail(
+                source_user.replace(s.source_domain, s.target_domain))
+        g = handles[source_user]
+        seen: dict = {}
+        for ref in (g.users().messages().list(
+                userId="me", maxResults=200).execute().get("messages") or []):
+            md = g.users().messages().get(
+                userId="me", id=ref["id"], format="metadata",
+                metadataHeaders=["Message-ID"]).execute()
+            hdrs = {h["name"].lower(): h["value"]
+                    for h in (md.get("payload", {}).get("headers") or [])}
+            mid_hdr = hdrs.get("message-id")
+            if mid_hdr:
+                seen.setdefault(mid_hdr, []).append(ref["id"])
+        repeats = {k: v for k, v in seen.items() if len(v) > 1}
+        if repeats:
+            worst = max(repeats.values(), key=len)
+            problems.append(
+                f"{source_user}: {len(repeats)} Message-ID(s) have more than "
+                f"one live copy on the target (worst: {len(worst)} copies) -- "
+                f"the ledger counts each as a separate message, so only the "
+                f"mailbox shows it")
+
     if orphaned:
         problems.append(
             f"{orphaned} repaired message(s) have no mapping: trashed and "

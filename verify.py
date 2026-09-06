@@ -252,7 +252,7 @@ def verify_user(auth: AuthManager, db: MigrationDB, settings: Settings,
         # correct migration comes to look wrong.
         redone = db.conn.execute(
             """SELECT COUNT(*) c FROM audit_log
-               WHERE source_user=? AND status='REDONE_FOR_LINKS'""",
+               WHERE source_user=? AND item_type='link_repair'""",
             (source_user,),
         ).fetchone()["c"]
         rep.add("gmail.count", t_msgs >= migrated,

@@ -622,7 +622,15 @@ def seed_gmail(gmail, settings: Settings, user: str, peers: list[str],
                 ("Latest numbers (html)", _linked_html(linkable[0]))]):
             raw = _rfc822(subj, _a_peer(rng, peers, external), user, 30 - i,
                           body=_linked_body(linkable[0], 0) if not html else "",
-                          msg_id=f"drivelink-{i}-{user.split('@')[0]}",
+                          # The file id, not just the index. This was
+                          # deterministic per user, so every re-seed produced
+                          # another message claiming to be the same one --
+                          # and Message-ID is exactly what the engine's
+                          # duplicate guard and DMS both dedupe on. Ten live
+                          # copies of "Latest numbers (html)" were sitting on
+                          # the target, each with its own ledger row, before
+                          # anyone noticed. The file id changes every seed.
+                          msg_id=f"drivelink-{i}-{linkable[0]}",
                           html=html)
             try:
                 insert(raw, ["INBOX"])

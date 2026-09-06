@@ -517,3 +517,18 @@ class TestTheDetectorDoesNotInventLinks:
                b"?export=3Dview&amp;id=3D1FFFFFFFFFFFFFFFFFFFFFFF\">x</a>\r\n")
         assert DRIVE_ID.search(raw) is None, "raw scan cannot span the fold"
         assert has_drive_link(base64.urlsafe_b64encode(raw).decode()) is True
+
+
+class TestSeededLinkMailIsNotSelfDuplicating:
+    """The two link-bearing messages the seeder plants had a Message-ID of
+    drivelink-{0,1}-{localpart} -- fixed per user. Re-seeding a tenant then
+    produced messages that were duplicates by Message-ID, which is what the
+    engine's duplicate guard and DMS both dedupe on. Ten live copies of one
+    message accumulated on a real target, each with its own ledger row.
+    """
+
+    def test_the_message_id_varies_with_the_file(self):
+        import pathlib
+        src = pathlib.Path("data-generator/seed_sandbox.py").read_text()
+        assert 'msg_id=f"drivelink-{i}-{linkable[0]}"' in src
+        assert "drivelink-{i}-{user.split" not in src

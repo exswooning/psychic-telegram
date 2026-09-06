@@ -212,3 +212,14 @@ def test_a_normal_delta_still_uses_its_window(settings):
     settings.redo_unrewritten_links = False
     q = TestARepairIgnoresTheDeltaWindow()._query_for(settings, True, 2)
     assert q == "newer_than:2d"
+
+
+def test_the_repair_row_is_not_overwritten_by_the_message_row():
+    """audit_log upserts on (source_user, item_id, item_type). Filing the
+    repair under "message" let the message's own SUCCESS row replace it, so
+    38 repairs recorded none and the check that looks for them said the pass
+    had never run."""
+    import inspect
+    src = inspect.getsource(gmail_engine)
+    assert '"link_repair"' in src
+    assert '"REDONE_FOR_LINKS"' not in src
