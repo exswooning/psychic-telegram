@@ -199,6 +199,21 @@ ACTIONS: dict[str, dict] = {
         "blurb": "Show what a retry of FAILED items would do.",
         "argv": [PY, "resolve_failures.py", "--dry-run"],
     },
+    "link_dupes_dry": {
+        "label": "Duplicate repair copies (dry run)",
+        "blurb": "Count the extra copies the old non-idempotent link repair "
+                 "left behind. Counts excess over the source, because a "
+                 "source mailbox can legitimately hold duplicate Message-IDs.",
+        "argv": [PY, "cleanup_link_repair_duplicates.py"],
+    },
+    "link_dupes": {
+        "label": "Trash duplicate repair copies",
+        "blurb": "Trash the surplus copies, keeping the one the ledger points "
+                 "at. Trash, not delete -- recoverable for 30 days.",
+        "argv": [PY, "cleanup_link_repair_duplicates.py", "--apply"],
+        "destructive": True,
+        "confirm": "TRASH",
+    },
     "undo_dry": {
         "label": "Undo (dry run)",
         "blurb": "Count exactly what a targeted undo would delete.",

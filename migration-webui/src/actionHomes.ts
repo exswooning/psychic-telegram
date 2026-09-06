@@ -31,6 +31,7 @@ export const MAINTENANCE_KEYS = [
   'audit_prune_dry', 'audit_prune',
   'resolve_dry', 'resolve',
   'repair_modified_times_dry', 'repair_modified_times', 'backfill_drive',
+  'link_dupes_dry', 'link_dupes',
   'undo_dry', 'undo',
 ]
 
