@@ -224,7 +224,8 @@ class GmailMigrator:
         match = re.search(r"^message-id:\s*(<[^>]+>)", text, re.IGNORECASE | re.MULTILINE)
         return match.group(1) if match else None
 
-    def _find_by_message_id(self, msgid: str) -> str | None:
+    def _find_by_message_id(self, msgid: str,
+                            ignore: str | None = None) -> str | None:
         """
         Has this exact message already landed on the target?
 
@@ -240,20 +241,32 @@ class GmailMigrator:
         since. Without the flag that message is invisible, the guard concludes
         nothing arrived, and the retry restores mail the user threw away.
         """
+        # `ignore` is the copy a link repair just trashed. It still carries
+        # this exact Message-ID and includeSpamTrash finds it, so without
+        # this the adopt path would "resume" onto the broken message the
+        # repair was replacing -- reporting success, leaving the ledger
+        # pointing into Trash, and never inserting the corrected copy.
+        #
+        # maxResults rises with it: filtering a single result would turn the
+        # trashed copy into "nothing found" even when the corrected copy is
+        # sitting there too, and insert a second one. That is the duplicate
+        # this whole method exists to prevent.
         query = f"rfc822msgid:{msgid}"
         try:
             self.limiter.acquire()
             resp = self._retry(lambda: self.tgt.users().messages().list(
-                userId="me", q=query, maxResults=1,
+                userId="me", q=query, maxResults=1 if ignore is None else 10,
                 includeSpamTrash=True).execute())
         except (PermanentAPIError, RuntimeError):
             # Cannot tell -- fall through and let the caller insert. A possible
             # duplicate beats refusing to migrate the message at all.
             return None
-        found = resp.get("messages") or []
-        return found[0]["id"] if found else None
+        found = [m["id"] for m in (resp.get("messages") or [])
+                 if m["id"] != ignore]
+        return found[0] if found else None
 
-    def _insert_once(self, body: dict, media, raw: str) -> dict:
+    def _insert_once(self, body: dict, media, raw: str,
+                     replacing: str | None = None) -> dict:
         """
         Insert a message, tolerating a transport failure without duplicating it.
 
@@ -294,7 +307,7 @@ class GmailMigrator:
         def adopt_if_already_delivered():
             if not msgid:
                 return None
-            existing = self._find_by_message_id(msgid)
+            existing = self._find_by_message_id(msgid, ignore=replacing)
             if not existing:
                 return None
             log.info("[%s] a previous attempt had already delivered %s; "
@@ -464,7 +477,10 @@ class GmailMigrator:
             body["raw"] = raw
 
         try:
-            result = self._insert_once(body, media, raw)
+            # `already` is set only on a link repair, and by here its copy has
+            # been trashed. It keeps this exact Message-ID, so the adopt path
+            # must not resume onto it.
+            result = self._insert_once(body, media, raw, replacing=already)
         except (PermanentAPIError, RuntimeError) as exc:
             self.db.log_audit(self.source_user, mid, "message", "FAILED", str(exc))
             self._bump("failed")

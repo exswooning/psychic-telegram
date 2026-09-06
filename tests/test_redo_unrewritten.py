@@ -116,3 +116,56 @@ class TestTheToggleRefusesTheUselessCombination:
             assert "rewriting" in webui._RUN_STATE.get("last_note", "").lower()
         finally:
             webui._RUN_STATE.clear(); webui._RUN_STATE.update(before)
+
+
+class _ListSvc:
+    """Target whose message list answers rfc822msgid queries."""
+    def __init__(self, ids): self.ids, self.asked = ids, []
+    def users(self): return self
+    def messages(self): return self
+    def list(self, userId=None, q=None, maxResults=None, includeSpamTrash=None):
+        self.asked.append({"q": q, "maxResults": maxResults})
+        return _Exec({"messages": [{"id": i} for i in self.ids[:maxResults or 1]]})
+
+
+def _finder(ids):
+    g = object.__new__(gmail_engine.GmailMigrator)
+    g.tgt = _ListSvc(ids)
+    g.limiter = type("L", (), {"acquire": lambda self: None})()
+    g._retry = lambda fn, label=None: fn()
+    return g
+
+
+class TestTheRepairDoesNotResumeOntoTheCopyItReplaced:
+    """The adopt path exists to stop duplicate mail, and it searches with
+    includeSpamTrash on purpose. A link repair trashes the old copy, which
+    keeps the same Message-ID -- so without `ignore` the retry path adopts
+    the broken message it was replacing.
+    """
+
+    def test_without_the_repair_it_still_adopts_a_real_delivery(self):
+        g = _finder(["LIVE"])
+        assert g._find_by_message_id("m@x") == "LIVE"
+
+    def test_it_ignores_the_copy_just_trashed(self):
+        g = _finder(["TRASHED"])
+        assert g._find_by_message_id("m@x", ignore="TRASHED") is None, (
+            "adopting this points the ledger at the broken copy in Trash")
+
+    def test_it_still_finds_a_corrected_copy_alongside_the_trashed_one(self):
+        """The duplicate case: attempt 1 landed, the response was lost. Both
+        copies carry the Message-ID, and only one of them is the repair."""
+        g = _finder(["TRASHED", "CORRECTED"])
+        assert g._find_by_message_id("m@x", ignore="TRASHED") == "CORRECTED"
+
+    def test_it_widens_the_search_when_filtering(self):
+        """maxResults=1 plus a filter is how "found only the trashed one"
+        becomes "found nothing" and inserts a second corrected copy."""
+        g = _finder(["TRASHED", "CORRECTED"])
+        g._find_by_message_id("m@x", ignore="TRASHED")
+        assert g.tgt.asked[0]["maxResults"] > 1
+
+    def test_the_normal_path_is_unchanged(self):
+        g = _finder(["LIVE"])
+        g._find_by_message_id("m@x")
+        assert g.tgt.asked[0]["maxResults"] == 1

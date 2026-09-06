@@ -245,9 +245,22 @@ def verify_user(auth: AuthManager, db: MigrationDB, settings: Settings,
         # Target may legitimately hold more (mail that was already in the
         # account, e.g. Workspace's own welcome messages), never fewer than
         # what we recorded inserting.
+        # A link repair trashes the copy it replaces, and this count includes
+        # Trash -- so each one shows up as a surplus of exactly one until
+        # Gmail purges it, about 30 days. The check passes either way (target
+        # may hold more, never fewer), but an unexplained number is how a
+        # correct migration comes to look wrong.
+        redone = db.conn.execute(
+            """SELECT COUNT(*) c FROM audit_log
+               WHERE source_user=? AND status='REDONE_FOR_LINKS'""",
+            (source_user,),
+        ).fetchone()["c"]
         rep.add("gmail.count", t_msgs >= migrated,
                 f"source {s_msgs} (incl. spam/trash), inserted {migrated}, "
-                f"target {t_msgs}", s_msgs, t_msgs)
+                f"target {t_msgs}"
+                + (f" -- includes {redone} trashed copy/copies replaced by a "
+                   f"link repair, which purge in ~30 days" if redone else ""),
+                s_msgs, t_msgs)
 
         # Unread-state sample: a migration that marks everything unread is the
         # single most-complained-about failure mode.

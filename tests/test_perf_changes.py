@@ -316,8 +316,12 @@ class TestGmailInsertIsSafeToRetry:
                 raise ConnectionResetError("response lost")   # ...we never heard
             return {"id": f"tgt-duplicate-{state['inserts']}"}
 
-        monkeypatch.setattr(m, "_find_by_message_id",
-                            lambda msgid: "tgt-first" if state["delivered"] else None)
+        # `ignore` is the copy a link repair just trashed -- None on this
+        # path. The double accepts it so a signature change surfaces in the
+        # repair tests rather than as a silent duplicate here.
+        monkeypatch.setattr(
+            m, "_find_by_message_id",
+            lambda msgid, ignore=None: "tgt-first" if state["delivered"] else None)
         monkeypatch.setattr(m.settings, "base_backoff", 0.001)
         monkeypatch.setattr(m.settings, "max_backoff", 0.002)
         monkeypatch.setattr(
