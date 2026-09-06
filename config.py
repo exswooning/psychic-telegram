@@ -617,6 +617,19 @@ class Settings:
     mail_only_with_links: bool = field(
         default_factory=lambda: _env_bool("MAIL_ONLY_WITH_LINKS", False)
     )
+    # Redo mail that was migrated before rewriting was switched on.
+    #
+    # Off, and destructive, so it stays opt-in. A migrated message cannot be
+    # edited -- Gmail has no API for it -- so the only repair is to trash the
+    # target copy, forget the mapping and insert a corrected one. Trash, not
+    # delete: recoverable for 30 days if this turns out to be the wrong call.
+    #
+    # Only messages a rewrite would actually change are touched; the rest are
+    # left exactly as they are, so the cost is one source read per already-
+    # migrated message and nothing else moves.
+    redo_unrewritten_links: bool = field(
+        default_factory=lambda: _env_bool("REDO_UNREWRITTEN_LINKS", False)
+    )
     # On by default. Off was the wrong default in the one way that matters:
     # doing nothing produced the unrecoverable outcome. A migration run as
     # shipped rewrote no links, so every Drive URL in the migrated mail kept

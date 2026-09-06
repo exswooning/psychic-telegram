@@ -337,7 +337,16 @@ class GmailMigrator:
         several at once -- every branch that used to `continue` the
         loop now simply returns."""
         mid = ref["id"]
-        if self.db.get_target_id(self.source_user, mid, "message"):
+        already = self.db.get_target_id(self.source_user, mid, "message")
+        # The cheap skip, and the reason this lookup comes before any API
+        # call. Redo mode has to give it up: whether a migrated message needs
+        # repairing can only be answered by reading it.
+        # Both, not either: with rewriting off a redo would trash the target
+        # copy and insert a byte-identical one, which is destruction with no
+        # repair attached.
+        redo = (self.settings.redo_unrewritten_links
+                and self.settings.rewrite_drive_links)
+        if already and not redo:
             self._bump("skipped")
             return
         try:
@@ -366,6 +375,31 @@ class GmailMigrator:
         raw = full.get("raw", "")
         if not isinstance(raw, str):
             raw = raw.decode()
+        if already:   # implies redo; see above
+            # Repairing mail migrated before rewriting was on. Only touch what
+            # a rewrite would actually change -- everything else is left
+            # exactly as it is, so a redo pass over a healthy mailbox moves
+            # nothing.
+            _, would = rewrite_raw(raw, self._drive_link_target)
+            if not would:
+                self._bump("skipped")
+                return
+            try:
+                # Trash, not delete: recoverable for 30 days if this turns out
+                # to be the wrong call. The corrected copy is inserted below.
+                self._retry(lambda t=already: self.tgt.users().messages().trash(
+                    userId="me", id=t).execute(), label="gmail.messages.trash")
+            except (PermanentAPIError, RuntimeError) as exc:
+                # Leave the mapping alone. Forgetting it after a failed trash
+                # would insert a second copy and leave the broken one in the
+                # inbox beside it.
+                self.db.log_audit(self.source_user, mid, "message",
+                                  "FAILED", f"redo: could not trash target: {exc}")
+                self._bump("failed")
+                return
+            self.db.forget_mapping(self.source_user, mid, "message")
+            self.db.log_audit(self.source_user, mid, "message", "REDONE_FOR_LINKS",
+                              f"{would} link(s) needed repointing; old copy trashed")
         # `raw` is already base64url, and `body["raw"]` wants base64url --
         # decoding it only to re-encode the identical bytes doubled peak
         # memory per message and burned CPU on every one. The decode is now
@@ -447,7 +481,8 @@ class GmailMigrator:
                           bytes_moved=approx_bytes)
         self._bump("inserted")
 
-    def run(self, delta: bool = False, since_epoch_days: int = 0) -> dict:
+    def run(self, delta: bool = False, since_epoch_days: int = 0,
+            drive_in_scope: bool = True) -> dict:
         # Link rewriting resolves source file ids through id_mapping, so Drive
         # has to have run first. Checked here, before a single message is
         # inserted, because the damage is not recoverable by re-running: an
@@ -458,13 +493,28 @@ class GmailMigrator:
         # A flag that silently does nothing is worse than one that is off --
         # off is at least honest about it.
         if self.settings.rewrite_drive_links and not self.db.has_drive_mappings():
-            raise RuntimeError(
-                "REWRITE_DRIVE_LINKS is on but no Drive files have migrated "
-                "yet, so every link in this mail would stay pointed at the "
-                "source tenant -- permanently, because re-running skips "
-                "messages already inserted. Migrate Drive first (or unset "
-                "REWRITE_DRIVE_LINKS to accept dead links)."
-            )
+            # Only a problem when Drive is coming. Drive runs before Gmail in
+            # the same dispatch, so if it was in scope its mappings exist by
+            # now and this never fires. If it is NOT in this migration at all
+            # there is nothing to repoint links to and never will be, so
+            # refusing to start would block every mail-only migration over a
+            # rewrite that could not have happened either way.
+            if not drive_in_scope:
+                log.warning(
+                    "[%s] Drive links will not be rewritten: no Drive has "
+                    "migrated and Drive is not part of this run, so there is "
+                    "no target file to point them at. They will keep naming "
+                    "the source tenant.", self.source_user)
+                self.settings.rewrite_drive_links = False
+            else:
+                raise RuntimeError(
+                    "REWRITE_DRIVE_LINKS is on but no Drive files have "
+                    "migrated yet, so every link in this mail would stay "
+                    "pointed at the source tenant -- permanently, because "
+                    "re-running skips messages already inserted. Migrate "
+                    "Drive first (or unset REWRITE_DRIVE_LINKS to accept "
+                    "dead links)."
+                )
         # A mailbox is the largest item count in the system, and every message
         # costs a get_target_id before anything else happens.
         self.db.preload_mappings(self.source_user)

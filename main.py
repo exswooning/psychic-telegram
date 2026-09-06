@@ -384,7 +384,8 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
         if "gmail" in services and not SHUTDOWN.is_set():
             gm = GmailMigrator(auth, db, settings, source_user, target_user)
             result["services"]["gmail"] = gm.run(
-                delta=delta, since_epoch_days=delta_days
+                delta=delta, since_epoch_days=delta_days,
+                drive_in_scope="drive" in services,
             )
 
         if "calendar" in services and not SHUTDOWN.is_set():

@@ -591,6 +591,18 @@ class MigrationDB:
         ).fetchone()
         return row["target_id"] if row else None
 
+    def forget_mapping(self, source_user: str, source_id: str,
+                       item_type: str) -> None:
+        """Forget one item, so the next pass migrates it again.
+
+        forget_mappings() drops a whole user; repairing a handful of messages
+        whose links were never rewritten must not throw away the record of
+        the other 300,000."""
+        with self.write() as conn:
+            conn.execute(
+                "DELETE FROM id_mapping WHERE source_user=? AND source_id=? "
+                "AND type=?", (source_user, source_id, item_type))
+
     def forget_mappings(self, source_user: str) -> int:
         """Drop this user's mappings so the next run migrates them again.
 

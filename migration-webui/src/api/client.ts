@@ -202,6 +202,10 @@ export interface RunToggles {
    *  and only the console had a control for it, so the choice was
    *  effectively invisible to anyone using this app. */
   mail_transport?: MailTransport
+  /** Repair pass: redo mail migrated before rewriting was on. Destructive --
+   *  the old target copy is trashed and a corrected one inserted, because
+   *  Gmail cannot edit a delivered message. */
+  redo_unrewritten_links?: boolean
   delta_days?: number
   users?: string
   /** The server's own explanation when it refuses or adjusts a toggle, e.g.

@@ -142,6 +142,25 @@ export const RunOptions: React.FC = () => {
               and never reach this. Two scoping mechanisms, and only one of
               them had a control, which is how a settings audit pointed at
               the wrong one and still passed. */}
+          {/* Most useful on the delta pass: the bulk migration is where mail
+              gets copied before anyone turns rewriting on, and delta is what
+              you run afterwards. */}
+          <Tooltip title={t.rewrite_drive_links
+            ? 'Trashes the old copy on the target and inserts a corrected one. Only messages a rewrite would change are touched.'
+            : 'Needs Drive-link rewriting on -- otherwise it would replace each message with an identical copy'}>
+            <FormControlLabel
+              control={
+                <Switch
+                  size="small" disabled={busy || !t.rewrite_drive_links}
+                  checked={!!t.redo_unrewritten_links}
+                  onChange={(e) => send({ redo_unrewritten_links: e.target.checked })}
+                  inputProps={{ 'data-testid': 'redo-unrewritten' } as never}
+                />
+              }
+              label="Redo mail whose links were never rewritten"
+            />
+          </Tooltip>
+
           <TextField
             size="small" label="Only these users"
             sx={{ width: 300 }} disabled={busy}

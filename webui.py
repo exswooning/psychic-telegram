@@ -2943,6 +2943,10 @@ _RUN_STATE: dict = {
     # True, matching Settings.rewrite_drive_links -- see its comment. The
     # default that does nothing was the one that lost data.
     "rewrite_drive_links": True,
+    # Repair pass for mail migrated before rewriting was on. Destructive
+    # (trashes the old target copy) and needs rewriting on to do anything,
+    # so it stays off and per-run rather than becoming a default.
+    "redo_unrewritten_links": False,
 }
 
 # Actions whose argv follow the launch toggles (everything else uses its
@@ -3741,6 +3745,19 @@ def set_toggles(body: dict) -> dict:
         else:
             _RUN_STATE["rewrite_drive_links"] = bool(rewrite)
             _RUN_STATE.pop("last_note", None)
+    redo = body.get("redo_unrewritten_links")
+    if redo is not None:
+        if redo and not _RUN_STATE.get("rewrite_drive_links"):
+            # Refused rather than accepted-and-ignored: with rewriting off a
+            # redo trashes the target copy and inserts an identical one.
+            _RUN_STATE["redo_unrewritten_links"] = False
+            _RUN_STATE["last_note"] = (
+                "Redo needs Drive-link rewriting on -- otherwise it would "
+                "replace each message with an identical copy. Turn rewriting "
+                "on first.")
+        else:
+            _RUN_STATE["redo_unrewritten_links"] = bool(redo)
+            _RUN_STATE.pop("last_note", None)
     users = body.get("users")
     if users is not None:
         _RUN_STATE["users"] = str(users).strip()
@@ -3922,6 +3939,8 @@ def _launch_env(base: dict) -> dict:
         "true" if _RUN_STATE.get("rewrite_drive_links") else "false")
     env["MAIL_ONLY_WITH_LINKS"] = (
         "true" if _RUN_STATE.get("mail_transport") == "split" else "false")
+    env["REDO_UNREWRITTEN_LINKS"] = (
+        "true" if _RUN_STATE.get("redo_unrewritten_links") else "false")
     return env
 
 
