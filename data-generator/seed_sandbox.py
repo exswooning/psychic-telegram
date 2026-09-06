@@ -720,9 +720,15 @@ def _chat_names(local: str) -> list[str]:
 
 
 def seed_chat(chat, settings: Settings, user: str, peers: list[str],
-              external: str, local: str) -> dict:
+              external: str, local: str,
+              drive_items: dict | None = None) -> dict:
     retry = _retry_factory(settings)
-    m = {"spaces": 0, "messages": 0, "note": ""}
+    m = {"spaces": 0, "messages": 0, "with_drive_link": 0, "note": ""}
+    # "here's the doc" is most of what Chat is for, so a chat corpus with no
+    # Drive links does not resemble the thing being migrated -- and nothing
+    # rewrites Chat links yet, which is a finding this makes visible instead
+    # of theoretical.
+    linkable = [v for v in (drive_items or {}).values() if isinstance(v, str)]
     lines = [
         "Morning — where did that land?",
         "Shipped it. Track is on the keyclients note.",
@@ -732,6 +738,9 @@ def seed_chat(chat, settings: Settings, user: str, peers: list[str],
         f"Tagging {external} on the contract.",
         "Reviewed at standup — looks good to go.",
     ]
+    if linkable:
+        lines.insert(1, f"Doc is here: {_drive_link(linkable[0], 0)}")
+        lines.append(f"Folder for this: {_drive_link(linkable[-1], 3)}")
     try:
         for name in _chat_names(local):
             created = retry(lambda n=name: chat.spaces().create(
@@ -739,11 +748,14 @@ def seed_chat(chat, settings: Settings, user: str, peers: list[str],
             ).execute())()
             space = created["name"]
             m["spaces"] += 1
-            for text in lines[:5]:
+            # Five without links, six with -- so a corpus seeded before
+            # Drive existed keeps the count it always had.
+            for text in lines[:6 if linkable else 5]:
                 body = {"text": text}
                 retry(lambda s=space, b=body: chat.spaces().messages()
                       .create(parent=s, body=b).execute())()
                 m["messages"] += 1
+                m["with_drive_link"] += "google.com" in text
     except Exception as exc:  # noqa: BLE001
         m["note"] = f"chat failed (Chat switched on? scopes granted?): {exc}"
         print(f"  ! chat for {user}: {exc}")
@@ -976,11 +988,19 @@ def reset_tasks(tasks, settings: Settings) -> int:
 # Calendar — meetings across the org
 # ======================================================================
 def seed_calendar(cal, settings: Settings, user: str, peers: list[str],
-                  external: str, count: int) -> dict:
+                  external: str, count: int,
+                  drive_items: dict | None = None) -> dict:
     """Seed events using import (not insert), so seeding is itself silent."""
     retry = _retry_factory(settings)
     rng = random.Random(hash(user) & 0xFFFF)
-    m = {"events": 0, "recurring": 0, "with_external": 0, "all_day": 0}
+    m = {"events": 0, "recurring": 0, "with_external": 0, "all_day": 0,
+         "with_drive_link": 0, "with_attachment": 0}
+    # A meeting whose description says "agenda is in <drive link>" rots
+    # exactly like the same link in an email, and until recently nothing
+    # rewrote it. Without seeded examples the calendar repair had nothing to
+    # act on: 482 events checked, 0 needing repair, on a tenant riddled with
+    # link rot everywhere else.
+    linkable = [v for v in (drive_items or {}).values() if isinstance(v, str)]
 
     def imp(body):
         return retry(lambda: cal.events().import_(
@@ -1009,10 +1029,17 @@ def seed_calendar(cal, settings: Settings, user: str, peers: list[str],
         if has_ext:
             attendees.append({"email": external, "responseStatus": "tentative"})
 
+        # A fifth carry a Drive link in the description, matching the rate
+        # seed_gmail uses -- the everyday "agenda doc is here" invite.
+        linked = linkable and rng.random() < 0.2
+        desc = "Seeded by seed_sandbox.py"
+        if linked:
+            desc = (f"Agenda: {_drive_link(rng.choice(linkable), rng.randint(0, 3))}"
+                    f"\r\n\r\nSeeded by seed_sandbox.py")
         body = {
             "iCalUID": f"seed-{user.split('@')[0]}-{i}@seed.test",
             "summary": f"{rng.choice(titles)} #{i+1}",
-            "description": "Seeded by seed_sandbox.py",
+            "description": desc,
             "location": f"Room {rng.randint(1, 9)}{rng.choice('ABC')}",
             "start": {"dateTime": start, "timeZone": "UTC"},
             "end": {"dateTime": end, "timeZone": "UTC"},
@@ -1023,12 +1050,23 @@ def seed_calendar(cal, settings: Settings, user: str, peers: list[str],
         if rng.random() < 0.12:
             body["recurrence"] = ["RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=12"]
             m["recurring"] += 1
-        plans.append((i, body, has_ext))
+        # A real Drive attachment on some events. calendar_engine maps the
+        # fileId, and it was dropping any file the attendee did not own --
+        # a bug nothing could see without seeded attachments.
+        attached = linkable and rng.random() < 0.1
+        if attached:
+            fid = rng.choice(linkable)
+            body["attachments"] = [{
+                "fileId": fid,
+                "fileUrl": _drive_link(fid, 0),
+                "title": "Agenda",
+            }]
+        plans.append((i, body, has_ext, bool(linked), bool(attached)))
 
     mlock = threading.Lock()
 
     def _import_one(pl) -> None:
-        idx, body, ext_flag = pl
+        idx, body, ext_flag, link_flag, att_flag = pl
         try:
             imp(body)
         except Exception as exc:  # noqa: BLE001
@@ -1037,6 +1075,8 @@ def seed_calendar(cal, settings: Settings, user: str, peers: list[str],
         with mlock:
             m["events"] += 1
             m["with_external"] += ext_flag
+            m["with_drive_link"] += link_flag
+            m["with_attachment"] += att_flag
 
     _run_parallel(plans, _import_one, MAIL_CAL_WORKERS)
 
@@ -1702,10 +1742,11 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
     gmail_m = seed_gmail(gmail, settings, user, peers, external, mail_count,
                          drive_items=drive_m.get("items"))
     gmail_m.update(seed_drafts(gmail, settings, user, peers))
-    cal_m = seed_calendar(cal, settings, user, peers, external, event_count)
+    cal_m = seed_calendar(cal, settings, user, peers, external, event_count,
+                          drive_items=drive_m.get("items"))
     cal_m.update(seed_secondary_calendars(cal, settings, user, peers))
     chat_m = seed_chat(chat, settings, user, peers, external,
-                       user.split("@")[0])
+                       user.split("@")[0], drive_items=drive_m.get("items"))
 
     # Separate credential (build_people_tasks, not build_services): contacts
     # and tasks write scopes are commonly granted on a different schedule

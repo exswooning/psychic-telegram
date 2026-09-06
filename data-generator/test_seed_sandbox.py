@@ -1471,3 +1471,36 @@ class TestEverySeederSurvivesASoloOrg:
         drive = FakeDrive("alice@tenanta.com", "source")
         b = _builder(drive, settings, "alice@tenanta.com", [])
         assert b._peer(0) is None and b._peer(5) is None
+
+
+def test_chat_seed_carries_drive_links_when_drive_exists(seed, settings):
+    """Chat is mostly "here's the doc". A corpus with no Drive links in it
+    does not resemble the thing being migrated, and left the question of
+    whether Chat links get rewritten permanently untested."""
+    FakeChat.reset_shared()
+    chat = FakeChat("alice@tenuta.com", "source")
+    m = seed.seed_chat(chat, settings, "alice@tenuta.com", ["bob@tenuta.com"],
+                       "ext@example.com", local="alice",
+                       drive_items={"a": "1AAAAAAAAAAAAAAAAAAAAAAA",
+                                    "b": "1BBBBBBBBBBBBBBBBBBBBBBB"})
+    assert m["with_drive_link"] > 0, "seeded chat carries no Drive link"
+    texts = [kw["body"]["text"] for name, kw in chat.calls
+             if name == "chat.messages.create"]
+    assert any("drive.google.com" in t or "docs.google.com" in t for t in texts)
+
+
+def test_calendar_seed_carries_drive_links_and_attachments(seed, settings):
+    """482 events checked, 0 needing repair -- on a tenant riddled with link
+    rot everywhere else. The calendar repair had nothing to act on because
+    nothing ever seeded a linked event."""
+    from link_rewrite import DRIVE_ID
+    cal = FakeCalendar("alice@tenuta.com", "source")
+    m = seed.seed_calendar(cal, settings, "alice@tenuta.com",
+                           ["bob@tenuta.com"], "ext@example.com", count=60,
+                           drive_items={f"f{i}": f"1{'A' * 22}{i}" for i in range(5)})
+    assert m["with_drive_link"] > 0, "no seeded event carries a Drive link"
+    bodies = [kw["body"] for name, kw in cal.calls if "import" in name]
+    linked = [b for b in bodies
+              if DRIVE_ID.search((b.get("description") or "").encode())]
+    assert linked, "descriptions carry no Drive link"
+    assert any(b.get("attachments") for b in bodies), "no Drive attachment"
