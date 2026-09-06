@@ -58,3 +58,8 @@ env.sh
 # Claude Code local tool state (permission cache) -- machine-specific,
 # not project source.
 /.claude/
+
+# Operator run state, written by webui at runtime. Tracking it shipped a
+# developer machine every deploy: rsync overwrote the box, so a stale
+# dry_run:true silently turned every action into a no-op.
+/run_state.json

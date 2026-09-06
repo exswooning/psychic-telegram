@@ -30,6 +30,7 @@ rsync -az -e "${SSH[*]}" \
   `# "could not make way for new symlink: .venv", and the deploy aborts`\
   --exclude '*.log' --exclude 'sandbox_manifest*.json' --exclude 'identities*.csv' \
   --exclude 'keys/' --exclude 'oauth/' --exclude 'env.sh' \
+  --exclude 'run_state.json' \
   "$(cd "$(dirname "$0")" && pwd)/" "$TARGET:$DEST/" || exit 1
 echo "  synced to $TARGET:$DEST"
 
