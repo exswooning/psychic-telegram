@@ -431,6 +431,7 @@ def check_duplicates(account_id: int | None) -> dict:
 
     auth = AuthManager(s)
     checked = excess_total = orphaned = 0
+    seen_ids: set = set()
     problems: list[str] = []
     src_h: dict = {}
     tgt_h: dict = {}
@@ -471,6 +472,14 @@ def check_duplicates(account_id: int | None) -> dict:
         if not msgid:
             continue
         checked += 1
+        # Group by Message-ID. One Message-ID can cover several repaired
+        # source messages -- that is what a duplicated source looks like --
+        # and counting per repaired message reported the same surplus once
+        # per message: 24 where the cleanup, which groups, found 13. Two
+        # tools disagreeing about one fact is worse than either number.
+        if (source_user, msgid) in seen_ids:
+            continue
+        seen_ids.add((source_user, msgid))
         live = _count(tgt, msgid, live_only=True)
         at_source = _count(src, msgid, live_only=False)
         if live > at_source:
