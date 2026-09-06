@@ -586,13 +586,18 @@ export interface MigrationDetail {
  *  recent window, rather than copying what is not yet in the ledger. Run
  *  repeatedly between a bulk copy and a cutover, and once more after. */
 export const startDelta = (
-  reason: string, days = 2, accountId?: number, services = ['all']) =>
+  reason: string, days = 2, accountId?: number, services = ['all'],
+  // StartDelta has always carried `users`; this sent [] unconditionally, so
+  // the only delta reachable from the app was the whole batch -- 200 users
+  // here. "Re-check the one user I just changed" was a supported request
+  // with no way to make it.
+  users: string[] = []) =>
   cpFetch<ActionResult>('/api/v2/migrate/delta', {
     method: 'POST',
     // accountId is the migration on screen. Without it the server fell back
     // to the caller's own account, so a superadmin's press ran a delta
     // against an empty account of their own and reported success.
-    body: JSON.stringify({ reason, days, services, users: [],
+    body: JSON.stringify({ reason, days, services, users,
                            account_id: accountId ?? null }),
   })
 

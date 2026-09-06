@@ -211,6 +211,37 @@ describe('MigrationDetail — delta pass', () => {
     expect((screen.getByTestId('delta-days') as HTMLInputElement).value).toBe('7')
   })
 
+  it('scopes the pass to named users when asked', async () => {
+    /* StartDelta has always carried `users`; the client sent [] every time,
+       so the only delta reachable from the app was all 200 users. */
+    startDelta.mockResolvedValue({ ok: true, detail: 'started' })
+    show(detail({ running: false }))
+    await waitFor(() => expect(screen.getByTestId('delta-users')).toBeTruthy())
+    fireEvent.change(screen.getByTestId('delta-users'),
+                     { target: { value: ' a@x.test , b@x.test ' } })
+    fireEvent.click(screen.getByTestId('run-delta'))
+    await waitFor(() => expect(screen.getByText(/Run a delta pass/)).toBeTruthy())
+    const box = document.querySelector('[role="dialog"] input, [role="dialog"] textarea')
+    fireEvent.change(box!, { target: { value: 'why-not' } })
+    fireEvent.click(screen.getByRole('button', { name: /confirm/i }))
+    await waitFor(() => expect(startDelta).toHaveBeenCalled())
+    const args = startDelta.mock.calls[0]
+    expect(args[4]).toEqual(['a@x.test', 'b@x.test'])
+  })
+
+  it('treats a blank scope as the whole batch', async () => {
+    startDelta.mockResolvedValue({ ok: true, detail: 'started' })
+    show(detail({ running: false }))
+    await waitFor(() => expect(screen.getByTestId('run-delta')).toBeTruthy())
+    fireEvent.click(screen.getByTestId('run-delta'))
+    await waitFor(() => expect(screen.getByText(/Run a delta pass/)).toBeTruthy())
+    const box = document.querySelector('[role="dialog"] input, [role="dialog"] textarea')
+    fireEvent.change(box!, { target: { value: 'why-not' } })
+    fireEvent.click(screen.getByRole('button', { name: /confirm/i }))
+    await waitFor(() => expect(startDelta).toHaveBeenCalled())
+    expect(startDelta.mock.calls[0][4]).toEqual([])
+  })
+
   it('never lets the window fall below one day', async () => {
     /* A zero-day window asks the source what changed in no time at all --
        a pass that is guaranteed to copy nothing while consuming a slot. */

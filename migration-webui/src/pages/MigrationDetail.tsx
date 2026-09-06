@@ -61,6 +61,7 @@ export const MigrationDetail: React.FC = () => {
   const [fullError, setFullError] = useState<string | null>(null)
   const [deltaError, setDeltaError] = useState<string | null>(null)
   const [deltaDays, setDeltaDays] = useState(2)
+  const [deltaUsers, setDeltaUsers] = useState('')
   const [started, setStarted] = useState('')
   const [repair, setRepair] = useState<RepairSurvey | null>(null)
   const [askRepair, setAskRepair] = useState(false)
@@ -123,6 +124,11 @@ export const MigrationDetail: React.FC = () => {
                    value={deltaDays} sx={{ width: 90 }}
                    onChange={(e) => setDeltaDays(Math.max(1, Number(e.target.value) || 1))}
                    inputProps={{ 'data-testid': 'delta-days', min: 1, max: 90 }} />
+        <TextField size="small" label="only these users"
+                   value={deltaUsers} sx={{ width: 260 }}
+                   placeholder="blank = every user"
+                   onChange={(e) => setDeltaUsers(e.target.value)}
+                   inputProps={{ 'data-testid': 'delta-users' }} />
         <Button size="small" startIcon={<MetricsIcon />}
                 data-testid="open-metrics"
                 onClick={() => navigate(`/migrations/${id}/metrics`)}>
@@ -663,7 +669,9 @@ export const MigrationDetail: React.FC = () => {
         onConfirm={async (reason: string) => {
           setDeltaBusy(true); setDeltaError(null)
           try {
-            const r = await startDelta(reason, deltaDays, Number(accountId))
+            const scope = deltaUsers.split(',').map((u) => u.trim()).filter(Boolean)
+            const r = await startDelta(reason, deltaDays, Number(accountId),
+                                       ['all'], scope)
             if (!r.ok) throw new Error(r.detail || 'could not start')
             setAskDelta(false)
             setStarted(r.detail || 'delta pass started')
