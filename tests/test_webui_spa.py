@@ -418,3 +418,39 @@ class TestStagesPayload:
 
         stages = webui_spa.stages_payload(reader, Settings(), job_finished=12345.0)
         assert next(s for s in stages if s["id"] == "report")["status"] == "completed"
+
+
+class TestSkippedIsNotInProgress:
+    """The ledger records what already happened. Everything that was not
+    SUCCESS or FAILED fell into "in_progress", so all 2,541 SKIPPED_* rows
+    rendered as work still underway -- a message deliberately left for the
+    DMS pass looked like one still being copied."""
+
+    def _row(self, status):
+        import sqlite3
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("CREATE TABLE audit_log (id INTEGER PRIMARY KEY, "
+                     "source_user TEXT, item_type TEXT, item_id TEXT, "
+                     "status TEXT, error_message TEXT, timestamp TEXT)")
+        conn.execute("INSERT INTO audit_log (source_user, item_type, item_id, "
+                     "status, error_message, timestamp) VALUES (?,?,?,?,?,?)",
+                     ("u@x.test", "message", "m1", status, "", "2026-09-06T00:00:00Z"))
+        import webui_spa
+        return webui_spa.activity_payload(conn)[0]
+
+    def test_a_skip_reads_as_skipped(self):
+        assert self._row("SKIPPED_NO_DRIVE_LINK")["status"] == "skipped"
+
+    def test_every_skip_kind_the_ledger_actually_holds(self):
+        for s in ("SKIPPED_IS_DRAFT", "SKIPPED_UNMAPPED_IDENTITY",
+                  "SKIPPED_NOT_A_SPACE", "SKIPPED_NO_DRIVE_LINK"):
+            assert self._row(s)["status"] == "skipped", s
+
+    def test_success_and_failure_are_unchanged(self):
+        assert self._row("SUCCESS")["status"] == "completed"
+        assert self._row("FAILED")["status"] == "failed"
+
+    def test_nothing_in_the_ledger_is_in_progress(self):
+        for s in ("SUCCESS", "FAILED", "SKIPPED_IS_DRAFT", "WHATEVER"):
+            assert self._row(s)["status"] != "in_progress", s

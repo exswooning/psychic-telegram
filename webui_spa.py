@@ -230,9 +230,20 @@ def activity_payload(conn: sqlite3.Connection, limit: int = 100) -> list[dict]:
     for r in conn.execute(
         "SELECT source_user, item_type, item_id, status, error_message, "
         "timestamp FROM audit_log ORDER BY id DESC LIMIT ?", (limit,)):
-        ok = r["status"] == "SUCCESS"
-        failed = str(r["status"]).startswith("FAILED")
-        mstatus = "failed" if failed else "completed" if ok else "in_progress"
+        # The ledger records what already happened -- nothing in it is in
+        # progress. Everything that was not SUCCESS or FAILED used to fall
+        # into "in_progress", which meant all 2,541 SKIPPED_* rows rendered
+        # as work still underway: a message deliberately left for the DMS
+        # pass looked like one still being copied.
+        status = str(r["status"])
+        if status.startswith("FAILED"):
+            mstatus = "failed"
+        elif status == "SUCCESS":
+            mstatus = "completed"
+        elif status.startswith("SKIPPED"):
+            mstatus = "skipped"
+        else:
+            mstatus = "completed"
         out.append({
             "id": str(r["timestamp"]) + ":" + str(r["item_id"])[:12],
             "timestamp": r["timestamp"],

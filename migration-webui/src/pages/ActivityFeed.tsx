@@ -26,6 +26,7 @@ import {
   Warning as WarningIcon,
   Error as ErrorIcon,
   HourglassEmpty as WaitingIcon,
+  RemoveCircleOutline as SkippedIcon,
   Refresh as RetryingIcon,
   CloudDone as InProgressIcon,
   Refresh as RefreshIcon,
@@ -58,6 +59,7 @@ const ActivityFeed: React.FC = () => {
     switch (status) {
       case 'completed': return <CompletedIcon color="success" />
       case 'in_progress': return <InProgressIcon color="primary" />
+      case 'skipped': return <SkippedIcon color="disabled" />
       case 'waiting': return <WaitingIcon color="action" />
       case 'retrying': return <RetryingIcon color="warning" />
       case 'needs_attention': return <ErrorIcon color="error" />
@@ -98,6 +100,7 @@ const ActivityFeed: React.FC = () => {
           <option value="all">All Statuses</option>
           <option value="completed">Completed</option>
           <option value="in_progress">In Progress</option>
+          <option value="skipped">Skipped</option>
           <option value="waiting">Waiting</option>
           <option value="retrying">Retrying</option>
           <option value="needs_attention">Needs Attention</option>
