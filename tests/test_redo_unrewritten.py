@@ -169,3 +169,46 @@ class TestTheRepairDoesNotResumeOntoTheCopyItReplaced:
         g = _finder(["LIVE"])
         g._find_by_message_id("m@x")
         assert g.tgt.asked[0]["maxResults"] == 1
+
+
+class TestARepairIgnoresTheDeltaWindow:
+    """The mail needing repair is the OLD mail -- copied before rewriting was
+    on. A delta window would scan the days where nothing is broken and report
+    a clean run having repaired nothing. And delta is the only way in: migrate
+    filters out users who are already done, which is all of them.
+    """
+
+    def _query_for(self, settings, delta, days):
+        seen = {}
+        g = object.__new__(gmail_engine.GmailMigrator)
+        g.settings = settings
+        g.source_user = "u@src.test"
+        g.db = type("D", (), {"has_drive_mappings": lambda s: True,
+                              "preload_mappings": lambda s, u: None})()
+        g.sync_labels = lambda: None
+        def _iter(q):
+            seen["q"] = q
+            raise _Stop2()
+        g._iter_messages = _iter
+        try:
+            g.run(delta=delta, since_epoch_days=days)
+        except _Stop2:
+            pass
+        return seen.get("q")
+
+
+class _Stop2(Exception):
+    pass
+
+
+def test_the_window_is_dropped_when_repairing(settings):
+    settings.rewrite_drive_links = True
+    settings.redo_unrewritten_links = True
+    assert TestARepairIgnoresTheDeltaWindow()._query_for(settings, True, 2) == ""
+
+
+def test_a_normal_delta_still_uses_its_window(settings):
+    settings.rewrite_drive_links = True
+    settings.redo_unrewritten_links = False
+    q = TestARepairIgnoresTheDeltaWindow()._query_for(settings, True, 2)
+    assert q == "newer_than:2d"

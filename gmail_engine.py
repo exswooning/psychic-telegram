@@ -535,7 +535,21 @@ class GmailMigrator:
         # costs a get_target_id before anything else happens.
         self.db.preload_mappings(self.source_user)
         self.sync_labels()
-        query = f"newer_than:{since_epoch_days}d" if delta and since_epoch_days else ""
+        # A repair is a full-history operation. The mail that needs it is
+        # precisely the OLD mail -- copied before rewriting was switched on --
+        # so a delta window would scan the days where nothing is broken and
+        # report a clean run having repaired nothing. And the repair pass can
+        # only reach an already-migrated user through delta, because migrate
+        # filters out anyone already done.
+        redo = (self.settings.redo_unrewritten_links
+                and self.settings.rewrite_drive_links)
+        if redo and delta and since_epoch_days:
+            log.info("[%s] repairing links: ignoring the %d-day delta window, "
+                     "because the mail that needs repair is the old mail",
+                     self.source_user, since_epoch_days)
+        query = ("" if redo else
+                 f"newer_than:{since_epoch_days}d"
+                 if delta and since_epoch_days else "")
 
         # Messages are the largest item count in the system and each one is
         # two round trips (get + insert) that spend nearly all their time
