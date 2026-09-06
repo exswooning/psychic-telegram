@@ -40,7 +40,14 @@ export const CLAIMED_ELSEWHERE = [
   'shared_drives_inventory', 'shared_drives_migrate', 'staging_drives_cleanup',
   'sso_inventory', 'sso_migrate', 'reconcile', 'dms_import',
   // Mission Control / Wizard / Scope / Identities
-  'migrate', 'scope', 'export_scope',
+  //
+  // NOT 'migrate'. Mission Control's button launches through api_server,
+  // which never reads _RUN_STATE -- so it cannot honour the mail transport,
+  // and a split-mode run started from it silently migrates all mail with no
+  // rewriting. webui's own `migrate` action is the one that reads those
+  // toggles, and claiming the key here left it with no control at all: the
+  // product could run a split DELTA and not a split MIGRATION.
+  'scope', 'export_scope',
   'init_db', 'init_db_auto', 'phased_migrate', 'phased_count_only',
 ]
 

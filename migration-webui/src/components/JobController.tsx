@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Box, Button, Checkbox, Chip, LinearProgress, Paper, Stack, Table,
   TableBody, TableCell, TableContainer, TableHead, TableRow, ToggleButton,
@@ -11,6 +11,8 @@ import {
 import {
   UserProgress, FleetNode, startMigration, stopJob,
 } from '@/api/controlPlane'
+import { fetchToggles } from '@/api/client'
+import type { MailTransport } from '@/api/client'
 import ReasonCodeDialog from './ReasonCodeDialog'
 
 /**
@@ -62,6 +64,31 @@ const JobController: React.FC<Props> = ({ users, nodes, onChanged }) => {
 
   const runningJob = nodes.find((n) => n.active_job && n.job_pid)
 
+  // What this button will actually migrate. It used to send ['drive'],
+  // hardcoded, so the service switches on the Services page governed every
+  // launcher except the one labelled "Migrate" -- turning Gmail on and
+  // pressing it copied no mail at all, and said nothing about that.
+  const [services, setServices] = useState<string[] | null>(null)
+  const [transport, setTransport] = useState<MailTransport>('engine')
+  const loadToggles = useCallback(() => {
+    fetchToggles()
+      .then((t) => {
+        setTransport(t.toggles.mail_transport ?? 'engine')
+        setServices(Object.entries(t.toggles.services || {})
+          .filter(([, on]) => on).map(([k]) => k))
+      })
+      .catch(() => setServices([]))
+  }, [])
+  useEffect(loadToggles, [loadToggles])
+
+  // Same rule webui applies when it launches: under full DMS Google owns the
+  // mail, so the engine must not copy it too. The duplicate that prevents is
+  // one a person sees in their own inbox.
+  const effective = useMemo(
+    () => (transport === 'dms' ? (services ?? []).filter((x) => x !== 'gmail')
+                               : (services ?? [])),
+    [services, transport])
+
   const toggle = (email: string) => setSelected((prev) => {
     const next = new Set(prev)
     next.has(email) ? next.delete(email) : next.add(email)
@@ -91,6 +118,10 @@ const JobController: React.FC<Props> = ({ users, nodes, onChanged }) => {
             ? 'Logs every intended write and performs none. '
             : 'Copies real data into the target tenant. '}
           Scope: <strong>{targets.length ? `${targets.length} selected user(s)` : 'the whole batch'}</strong>.
+          {' '}Services: <strong>{effective.length ? effective.join(', ') : 'none'}</strong>.
+          {transport === 'dms' && (services ?? []).includes('gmail') && (
+            <> Gmail is excluded because DMS is carrying the mail.</>
+          )}
           {!targets.length && (
             <> Users already marked DONE are skipped by the engine, so this
             resumes rather than restarts.</>
@@ -103,7 +134,7 @@ const JobController: React.FC<Props> = ({ users, nodes, onChanged }) => {
         // job_admission.py comes back as ok:false on an HTTP 200 -- the
         // same "ran, but didn't succeed" shape _gated() uses for any
         // other execution-time failure. Has to be checked explicitly here.
-        const r = await startMigration(reason, ['drive'], targets, dryRun)
+        const r = await startMigration(reason, effective, targets, dryRun)
         if (!r.ok) throw new Error(r.detail || 'could not start')
       },
     })
@@ -151,13 +182,28 @@ const JobController: React.FC<Props> = ({ users, nodes, onChanged }) => {
 
         <Box sx={{ flexGrow: 1 }} />
 
-        <Button size="small" startIcon={<DryRunIcon />}
-                onClick={() => askStart(true)}>Dry run</Button>
-        <Button
-            data-testid="action-migrate" size="small" variant="contained" startIcon={<StartIcon />}
+        {/* Nothing on means nothing to copy. Launching anyway sent the
+            engine an empty --services and burned a capacity slot to do
+            nothing, reporting a clean run. */}
+        <Tooltip title={effective.length ? '' : 'Every service is switched off in Services'}>
+          <span>
+            <Button size="small" startIcon={<DryRunIcon />}
+                    disabled={!effective.length}
+                    onClick={() => askStart(true)}>Dry run</Button>
+          </span>
+        </Tooltip>
+        <Tooltip title={effective.length
+          ? `Migrates: ${effective.join(', ')}`
+          : 'Every service is switched off in Services'}>
+          <span>
+            <Button
+                data-testid="migrate-selected" size="small" variant="contained"
+                startIcon={<StartIcon />} disabled={!effective.length}
                 onClick={() => askStart(false)}>
-          {selected.size ? `Migrate ${selected.size}` : 'Migrate all'}
-        </Button>
+              {selected.size ? `Migrate ${selected.size}` : 'Migrate all'}
+            </Button>
+          </span>
+        </Tooltip>
         <Tooltip title={runningJob ? '' : 'Nothing running'}>
           <span>
             <Button size="small" color="error" variant="outlined" startIcon={<StopIcon />}
