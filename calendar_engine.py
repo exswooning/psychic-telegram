@@ -49,7 +49,8 @@ class CalendarMigrator:
         self.src = auth.source_calendar(source_user)
         self.tgt = auth.target_calendar(target_user)
         self.limiter = RateLimiter(settings.per_user_qps)
-        self.stats = {"events": 0, "exceptions": 0, "failed": 0, "skipped": 0}
+        self.stats = {"events": 0, "exceptions": 0, "failed": 0,
+                      "skipped": 0, "updated": 0}
 
     def _retry(self, fn, label=None):
         return retry_on_google_error(
@@ -106,6 +107,37 @@ class CalendarMigrator:
                 continue  # a dead link is worse than none
             out.append({**a, "fileId": mapped})
         return out
+
+    def _is_stale(self, eid: str, item: dict) -> bool:
+        """Has the source event changed since we copied it?
+
+        Compares against the stamp recorded at copy time. No stamp means the
+        event predates this bookkeeping, and re-patching every such event on
+        every pass would be a rewrite of the whole calendar -- so those are
+        left alone and only events copied from here on are kept in step.
+        """
+        seen = self.db.last_synced_modified_time(self.source_user, eid, "event")
+        now = item.get("updated")
+        return bool(seen and now and now > seen)
+
+    def _patch_existing(self, eid: str, target_id: str, item: dict,
+                        tgt_cal_id: str) -> None:
+        """Carry a source-side edit onto the copy we already made."""
+        body = {k: item[k] for k in _PATCH_KEYS if k in item}
+        self._rewrite_links(body)
+        if item.get("attachments") is not None:
+            body["attachments"] = self._map_attachments(item.get("attachments"))
+        try:
+            self._retry(lambda: self.tgt.events().patch(
+                calendarId=tgt_cal_id, eventId=target_id, body=body,
+                supportsAttachments=True, sendUpdates="none").execute())
+        except (PermanentAPIError, RuntimeError) as exc:
+            self.db.log_audit(self.source_user, eid, "event", "FAILED", str(exc))
+            self.stats["failed"] += 1
+            return
+        self.db.log_audit(self.source_user, eid, "event", "SUCCESS",
+                          modified_time=item.get("updated"))
+        self.stats["updated"] += 1
 
     def _rewrite_links(self, body: dict) -> int:
         """Repoint Drive links in the text fields of an event.
@@ -337,9 +369,18 @@ class CalendarMigrator:
             self.stats["skipped"] += 1
             return
 
-        if self.db.get_target_id(self.source_user,
-                                 self._event_key(src_cal_id, eid), "event"):
-            self.stats["skipped"] += 1
+        existing = self.db.get_target_id(
+            self.source_user, self._event_key(src_cal_id, eid), "event")
+        if existing:
+            # An event already migrated used to be skipped outright, so an
+            # edit made at the source after it was copied never reached the
+            # target -- and the ledger went on calling it DONE. A migration
+            # runs for days and people keep using their calendars throughout,
+            # so this is the common case, not an edge one.
+            if self._is_stale(eid, item):
+                self._patch_existing(eid, existing, item, tgt_cal_id)
+            else:
+                self.stats["skipped"] += 1
             return
 
         body = self._build_import_body(item, tgt_cal_id)
@@ -361,7 +402,12 @@ class CalendarMigrator:
         self.db.record_mapping(self.source_user,
                                self._event_key(src_cal_id, eid),
                                result["id"], "event")
-        self.db.log_audit(self.source_user, eid, "event", "SUCCESS")
+        # The source 'updated' stamp, so a later pass can tell an event
+        # that has changed from one that has not. Drive has always recorded
+        # this; calendar logged SUCCESS with no stamp, which is why an event
+        # edited after migration could never be recognised as stale.
+        self.db.log_audit(self.source_user, eid, "event", "SUCCESS",
+                          modified_time=item.get("updated"))
         self.stats["events"] += 1
 
     def fetch_event(self, eid: str, src_cal_id: str = "primary") -> dict | None:
@@ -428,5 +474,10 @@ class CalendarMigrator:
         self.db.record_mapping(self.source_user,
                                self._event_key(src_cal_id, eid),
                                target_instance_id, "event")
-        self.db.log_audit(self.source_user, eid, "event", "SUCCESS")
+        # The source 'updated' stamp, so a later pass can tell an event
+        # that has changed from one that has not. Drive has always recorded
+        # this; calendar logged SUCCESS with no stamp, which is why an event
+        # edited after migration could never be recognised as stale.
+        self.db.log_audit(self.source_user, eid, "event", "SUCCESS",
+                          modified_time=item.get("updated"))
         self.stats["exceptions"] += 1

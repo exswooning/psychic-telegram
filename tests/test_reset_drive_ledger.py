@@ -154,7 +154,11 @@ class TestServiceTypeTable:
         # values, not item types. Kept explicit so a genuinely new type is
         # never quietly absorbed by a broad filter.
         return found - {"id", "name", "type", "status", "error_message",
-                        "summary", "description", "location", "start", "end"}
+                        "summary", "description", "location", "start", "end",
+                        # calendar passes item.get("updated") as the source
+                        # stamp for modified_time. A value, like the rest of
+                        # these, not a row type.
+                        "updated"}
 
     def test_every_type_an_engine_writes_is_resettable(self):
         """A row type no reset knows about can never be cleared, so the user
