@@ -7,7 +7,7 @@
  * most consequential decision in a migration -- who carries the mail -- was
  * invisible, and its default silently won every time.
  */
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Alert, Box, FormControlLabel, Paper, Stack, Switch, TextField,
   ToggleButton, ToggleButtonGroup, Tooltip, Typography,
@@ -44,7 +44,6 @@ const TRANSPORTS: { value: MailTransport; label: string; blurb: string }[] = [
 
 export const RunOptions: React.FC = () => {
   const [t, setT] = useState<RunToggles | null>(null)
-  const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
 
   const load = useCallback(() => {
@@ -52,19 +51,31 @@ export const RunOptions: React.FC = () => {
   }, [])
   useEffect(load, [load])
 
+  // Responses can land out of order, and each one replaces the whole toggle
+  // state. Typing a user list and then flipping a switch 2s later had the
+  // slower first response arrive last and silently undo the switch -- the
+  // control snapped back and the run went out with the old setting.
+  //
+  // It also used to disable every control while any request was in flight.
+  // The user list is debounced, so its request fires a second or two after
+  // typing stops -- landing on whatever switch you reached for next, which
+  // then ignored the click in silence. Nothing said why, and the run went
+  // out with the old setting. Ordering is handled here instead, so no
+  // control has to be dead while another one saves.
+  const seq = useRef(0)
+
   const send = async (patch: Partial<RunToggles>) => {
-    setBusy(true); setErr('')
+    const mine = ++seq.current
+    setErr('')
     try {
       // Render what the server came back with, never what was asked for. It
       // refuses some combinations outright (rewriting under DMS) and turns
       // others on for you (rewriting under split), and a control that shows
       // the request rather than the result would be lying in both cases.
       const r = await patchToggles(patch)
-      setT(r.toggles)
+      if (mine === seq.current) setT(r.toggles)
     } catch (e) {
-      setErr(String(e))
-    } finally {
-      setBusy(false)
+      if (mine === seq.current) setErr(String(e))
     }
   }
 
@@ -83,7 +94,7 @@ export const RunOptions: React.FC = () => {
             Mail carried by
           </Typography>
           <ToggleButtonGroup
-            size="small" exclusive value={transport} disabled={busy}
+            size="small" exclusive value={transport}
             onChange={(_, v: MailTransport | null) => v && send({ mail_transport: v })}
             data-testid="mail-transport"
           >
@@ -112,7 +123,7 @@ export const RunOptions: React.FC = () => {
           <FormControlLabel
             control={
               <Switch
-                size="small" disabled={busy} checked={!!t.dry_run}
+                size="small" checked={!!t.dry_run}
                 onChange={(e) => send({ dry_run: e.target.checked })}
                 inputProps={{ 'data-testid': 'dry-run' } as never}
               />
@@ -126,7 +137,7 @@ export const RunOptions: React.FC = () => {
             <FormControlLabel
               control={
                 <Switch
-                  size="small" disabled={busy || rewriteBlocked}
+                  size="small" disabled={rewriteBlocked}
                   checked={!!t.rewrite_drive_links}
                   onChange={(e) => send({ rewrite_drive_links: e.target.checked })}
                   inputProps={{ 'data-testid': 'rewrite-drive-links' } as never}
@@ -136,12 +147,6 @@ export const RunOptions: React.FC = () => {
             />
           </Tooltip>
 
-          {/* _RUN_STATE["users"] scopes anything webui launches -- the
-              phased actions and the delta pass. Job control's row ticks
-              are a DIFFERENT scope: they go to api_server's migrate/start
-              and never reach this. Two scoping mechanisms, and only one of
-              them had a control, which is how a settings audit pointed at
-              the wrong one and still passed. */}
           {/* Most useful on the delta pass: the bulk migration is where mail
               gets copied before anyone turns rewriting on, and delta is what
               you run afterwards. */}
@@ -151,7 +156,7 @@ export const RunOptions: React.FC = () => {
             <FormControlLabel
               control={
                 <Switch
-                  size="small" disabled={busy || !t.rewrite_drive_links}
+                  size="small" disabled={!t.rewrite_drive_links}
                   checked={!!t.redo_unrewritten_links}
                   onChange={(e) => send({ redo_unrewritten_links: e.target.checked })}
                   inputProps={{ 'data-testid': 'redo-unrewritten' } as never}
@@ -161,9 +166,15 @@ export const RunOptions: React.FC = () => {
             />
           </Tooltip>
 
+          {/* _RUN_STATE["users"] scopes anything webui launches -- the
+              phased actions and the delta pass. Job control's row ticks
+              are a DIFFERENT scope: they go to api_server's migrate/start
+              and never reach this. Two scoping mechanisms, and only one of
+              them had a control, which is how a settings audit pointed at
+              the wrong one and still passed. */}
           <TextField
             size="small" label="Only these users"
-            sx={{ width: 300 }} disabled={busy}
+            sx={{ width: 300 }}
             defaultValue={t.users ?? ''}
             placeholder="blank = every user"
             inputProps={{ 'data-testid': 'run-users' }}
@@ -176,7 +187,7 @@ export const RunOptions: React.FC = () => {
 
           <TextField
             size="small" type="number" label="Delta window (days)"
-            sx={{ width: 180 }} disabled={busy}
+            sx={{ width: 180 }}
             defaultValue={t.delta_days ?? 2}
             inputProps={{ min: 1, 'data-testid': 'delta-days' }}
             onBlur={(e) => {

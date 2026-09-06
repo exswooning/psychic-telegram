@@ -392,18 +392,99 @@ def check_links(account_id: int | None) -> dict:
     }
 
 
+
+def check_duplicates(account_id: int | None) -> dict:
+    """A link repair must leave one live message, not two.
+
+    This exists because a person asked the question and no test did. The
+    repair trashes the copy it replaces, and that copy keeps the same
+    Message-ID -- which the engine's own duplicate guard searches for with
+    includeSpamTrash on. Get it wrong and you have two emails of the same
+    thing carrying two different links, with the ledger naming one of them
+    arbitrarily. That is invisible in every count: the ledger has one row,
+    verify passes because a surplus is allowed, and only the person reading
+    their mail sees it.
+
+    So it asks the target directly, per repaired message: how many copies
+    carry this Message-ID, and how many of those are not in Trash?
+    """
+    from config import Settings
+    from db import MigrationDB
+    from auth import AuthManager
+
+    s = Settings(account_id=account_id) if account_id else Settings()
+    db = MigrationDB(s.db_path)
+    repaired = db.conn.execute(
+        "SELECT source_user, item_id FROM audit_log "
+        "WHERE status='REDONE_FOR_LINKS' ORDER BY timestamp DESC LIMIT 60"
+    ).fetchall()
+    if not repaired:
+        return {"skipped": "no repairs recorded -- the redo pass has not run",
+                "failures": []}
+
+    auth = AuthManager(s)
+    checked = live_dupes = orphaned = 0
+    problems: list[str] = []
+    handles: dict = {}
+    for source_user, src_id in repaired:
+        row = db.conn.execute(
+            "SELECT target_id FROM id_mapping WHERE source_user=? AND "
+            "source_id=? AND type='message'", (source_user, src_id)).fetchone()
+        if not row:
+            # Trashed and forgotten but never reinserted: the repair lost the
+            # message rather than duplicating it. The opposite failure, and
+            # just as invisible.
+            orphaned += 1
+            continue
+        if source_user not in handles:
+            handles[source_user] = auth.target_gmail(
+                source_user.replace(s.source_domain, s.target_domain))
+        g = handles[source_user]
+        raw = g.users().messages().get(userId="me", id=row[0], format="raw"
+                                       ).execute().get("raw", "")
+        parsed = email.message_from_bytes(base64.urlsafe_b64decode(raw + "==="))
+        msgid = parsed.get("Message-ID")
+        if not msgid:
+            continue
+        found = g.users().messages().list(
+            userId="me", q=f"rfc822msgid:{msgid.strip('<>')}", maxResults=10,
+            includeSpamTrash=True).execute().get("messages", [])
+        checked += 1
+        live = [m["id"] for m in found
+                if "TRASH" not in (g.users().messages().get(
+                    userId="me", id=m["id"], format="minimal"
+                ).execute().get("labelIds") or [])]
+        if len(live) > 1:
+            live_dupes += 1
+            problems.append(
+                f"{source_user} has {len(live)} live copies of {msgid} -- "
+                f"the repair duplicated the message instead of replacing it")
+    if orphaned:
+        problems.append(
+            f"{orphaned} repaired message(s) have no mapping: trashed and "
+            f"forgotten but never reinserted")
+    return {
+        "repairsChecked": checked,
+        "liveDuplicates": live_dupes,
+        "orphaned": orphaned,
+        "failures": problems,
+    }
+
+
 # ----------------------------------------------------------------------- main
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--host", default=os.getenv("BITPORT_PUBLIC_ORIGIN",
                                                 "http://127.0.0.1:8080"))
     ap.add_argument("--only", action="append",
-                    choices=["pages", "actions", "settings", "metrics", "links"],
-                    help="default: all five")
+                    choices=["pages", "actions", "settings", "metrics", "links",
+                             "duplicates"],
+                    help="default: all six")
     ap.add_argument("--account-id", type=int)
     ap.add_argument("--json", metavar="PATH")
     args = ap.parse_args(argv)
-    wanted = set(args.only or ["pages", "actions", "settings", "metrics", "links"])
+    wanted = set(args.only or ["pages", "actions", "settings", "metrics",
+                               "links", "duplicates"])
 
     import requests
     from playwright.sync_api import sync_playwright
@@ -457,6 +538,8 @@ def main(argv: list[str] | None = None) -> int:
         out["metrics"] = check_metrics(session, args.host)
     if "links" in wanted:
         out["links"] = check_links(args.account_id)
+    if "duplicates" in wanted:
+        out["duplicates"] = check_duplicates(args.account_id)
 
     failures = []
     for name, res in out.items():
@@ -479,6 +562,11 @@ def main(argv: list[str] | None = None) -> int:
             detail = res.get("skipped") or (
                 f"{res.get('linksAtTarget', 0)} at target, "
                 f"{res.get('linksStillAtSource', 0)} still at source")
+        elif name == "duplicates":
+            detail = res.get("skipped") or (
+                f"{res.get('repairsChecked', 0)} repair(s), "
+                f"{res.get('liveDuplicates', 0)} duplicated, "
+                f"{res.get('orphaned', 0)} lost")
         print(f"  {mark} {name:8s} {detail}")
         for f in fails:
             print(f"        - {f if isinstance(f, str) else f['route'] + ': ' + f['why']}")
