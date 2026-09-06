@@ -44,6 +44,12 @@ def settings(tmp_path) -> Settings:
     s.drive_write_qps = 10_000.0
     s.dry_run = False
     s.owned_only = True
+    # Off here, on in production. gmail_engine refuses to start when this is
+    # on and no Drive has migrated -- correct for a real run, and it would
+    # otherwise fail every mail test that never asked about rewriting. Tests
+    # that DO ask set it True and seed a Drive mapping; the production
+    # default is pinned in test_rewrite_toggle.py, not here.
+    s.rewrite_drive_links = False
     os.makedirs(s.scratch_dir, exist_ok=True)
     return s
 

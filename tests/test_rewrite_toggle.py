@@ -31,8 +31,19 @@ def _restore():
 
 
 class TestTheToggle:
-    def test_it_is_off_by_default(self):
-        assert webui._RUN_STATE["rewrite_drive_links"] is False
+    def test_it_is_on_by_default(self):
+        """Off meant that doing nothing produced the unrecoverable outcome:
+        links in migrated mail kept naming source files, and died with the
+        source tenant. On can only fail loudly -- gmail_engine refuses to
+        start if Drive has not migrated yet."""
+        assert webui._RUN_STATE["rewrite_drive_links"] is True
+
+    def test_the_engine_default_agrees_with_the_toolbar(self):
+        """Two defaults for one setting is how a toggle appears on and
+        behaves off."""
+        from config import Settings
+        assert (Settings().rewrite_drive_links
+                is webui._RUN_STATE["rewrite_drive_links"])
 
     def test_it_can_be_switched_on(self):
         out = webui.set_toggles({"rewrite_drive_links": True})

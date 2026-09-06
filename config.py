@@ -617,8 +617,19 @@ class Settings:
     mail_only_with_links: bool = field(
         default_factory=lambda: _env_bool("MAIL_ONLY_WITH_LINKS", False)
     )
+    # On by default. Off was the wrong default in the one way that matters:
+    # doing nothing produced the unrecoverable outcome. A migration run as
+    # shipped rewrote no links, so every Drive URL in the migrated mail kept
+    # naming a source file, and when the source tenant was deleted they all
+    # died at once -- with no way back, because the source file is gone and
+    # the target copy has a different id.
+    #
+    # Turning it on can only fail loudly: gmail_engine refuses to start when
+    # Drive has not migrated yet, and says to migrate Drive first. A loud
+    # refusal before the run beats a clean-looking run that quietly cost the
+    # customer every link in their mail.
     rewrite_drive_links: bool = field(
-        default_factory=lambda: _env_bool("REWRITE_DRIVE_LINKS", False)
+        default_factory=lambda: _env_bool("REWRITE_DRIVE_LINKS", True)
     )
     # Drive comments need no extra scope, but they cost an extra API call per
     # file and cannot preserve the original author, so they are opt-in too.

@@ -2940,7 +2940,9 @@ _RUN_STATE: dict = {
     # either. Off by default: the engine refuses to start a mail pass with
     # this on before Drive has run, so leaving it on by accident would turn
     # a mail-only migration into a hard failure.
-    "rewrite_drive_links": False,
+    # True, matching Settings.rewrite_drive_links -- see its comment. The
+    # default that does nothing was the one that lost data.
+    "rewrite_drive_links": True,
 }
 
 # Actions whose argv follow the launch toggles (everything else uses its
