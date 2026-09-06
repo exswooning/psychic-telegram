@@ -532,3 +532,15 @@ class TestSeededLinkMailIsNotSelfDuplicating:
         src = pathlib.Path("data-generator/seed_sandbox.py").read_text()
         assert 'msg_id=f"drivelink-{i}-{linkable[0]}"' in src
         assert "drivelink-{i}-{user.split" not in src
+
+
+def test_seeded_message_ids_are_unique_per_message():
+    """hash(subject + sender) over small subject and sender pools collided
+    constantly, so distinct messages shipped with the same Message-ID --
+    which is what the engine's duplicate guard and DMS both dedupe on. On a
+    real target that read as 72 duplicated messages for one user, worst case
+    7 copies, all of them different mail wearing the same name."""
+    import pathlib
+    src = pathlib.Path("data-generator/seed_sandbox.py").read_text()
+    assert "uuid.uuid4().hex}@seed.test" in src
+    assert "abs(hash(subject + sender))" not in src

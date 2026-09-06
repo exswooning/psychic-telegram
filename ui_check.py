@@ -456,9 +456,16 @@ def check_duplicates(account_id: int | None) -> dict:
                 ).execute().get("labelIds") or [])]
         if len(live) > 1:
             live_dupes += 1
+            # Says what it saw, not what caused it. A repaired message with
+            # several live copies is worth looking at, but the first real
+            # case was a seeder that gave distinct messages the same
+            # Message-ID -- so blaming the repair was wrong, and the kind of
+            # wrong that sends someone hunting in the wrong file.
             problems.append(
-                f"{source_user} has {len(live)} live copies of {msgid} -- "
-                f"the repair duplicated the message instead of replacing it")
+                f"{source_user}: {len(live)} live copies carry {msgid}, one "
+                f"of them repaired. Either the repair duplicated it or the "
+                f"mail already shared a Message-ID -- check which before "
+                f"treating it as a repair bug")
     # Duplicates that have nothing to do with a repair. The first real one
     # found on this tenant was ten live copies of the same seeded message,
     # each with its own ledger row -- so every count agreed and only the

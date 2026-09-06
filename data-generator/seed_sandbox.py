@@ -69,6 +69,7 @@ import quopri
 import concurrent.futures as futures
 import io
 import json
+import uuid
 import os
 import random
 import sys
@@ -407,7 +408,13 @@ def _rfc822(subject: str, sender: str, to: str, days_ago: int,
         "%a, %d %b %Y %H:%M:%S +0000"
     )
     headers = [
-        f"Message-ID: <{msg_id or abs(hash(subject + sender))}@seed.test>",
+        # uuid4, not hash(subject + sender). Subjects and senders come from
+        # small pools, so that hash collided constantly: distinct messages
+        # shipped with the same Message-ID, which is what the engine's
+        # duplicate guard and DMS both dedupe on. On a real target it looked
+        # like 72 duplicated messages for one user, worst case 7 copies --
+        # all of them different mail wearing the same name.
+        f"Message-ID: <{msg_id or uuid.uuid4().hex}@seed.test>",
         f"From: {sender}", f"To: {to}", f"Date: {date}",
         f"Subject: {subject}", "MIME-Version: 1.0",
     ]
