@@ -548,11 +548,40 @@ def revoke(client_id: str, timeout: int, headful: bool) -> int:
         # as "still there" even though a reload moments later showed it
         # correctly gone. A reload here is what makes this check trust
         # the console's actual state instead of its stale in-memory list.
-        page.reload(wait_until="domcontentloaded")
-        page.wait_for_timeout(1500)
-        still_there = page.locator("tr", has_text=client_id).count()
+        # A plain reload() aborts when the console navigates itself after
+        # the delete -- "net::ERR_ABORTED; maybe frame was detached?", seen
+        # live. The exception then escaped revoke() entirely and the caller
+        # reported FAIL for a delete that had already gone through: the
+        # dangerous direction, because the operator is told a delegation
+        # still exists when it does not, and goes looking for it by hand.
+        #
+        # goto() rather than reload(), because a detached frame is recovered
+        # by navigating afresh and not by re-issuing the navigation that
+        # detached it. Two attempts, then admit the verification failed
+        # without claiming the delete did.
+        verified = None
+        for attempt in (1, 2):
+            try:
+                page.goto(DWD_URL, wait_until="domcontentloaded",
+                          timeout=timeout * 1000)
+                page.wait_for_timeout(1500)
+                verified = page.locator("tr", has_text=client_id).count()
+                break
+            except Exception as exc:  # noqa: BLE001
+                log(f"  could not re-read the list (attempt {attempt}): "
+                    f"{str(exc).splitlines()[0][:110]}")
+                page.wait_for_timeout(2000)
         browser.close()
-        if still_there:
+        if verified is None:
+            # Deliberately not 0 and not 3. The delete was clicked and
+            # confirmed; only the re-read failed. Saying "revoked" would be
+            # unverified, and saying "failed" would send someone hunting for
+            # a row that is probably gone -- so say exactly that.
+            log("Delete was confirmed, but the list could not be re-read to "
+                "verify it. Re-run this to check: revoking an already-gone "
+                "grant reports success and changes nothing.")
+            return 4
+        if verified:
             log("Delete was clicked but the row is still listed after a "
                 "reload -- check the console by hand.")
             return 3

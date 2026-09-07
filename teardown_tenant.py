@@ -42,7 +42,10 @@ import provision_gcp        # noqa: E402
 class Phase:
     def __init__(self, name: str):
         self.name = name
-        self.status = "pending"     # pending | ok | failed | skipped
+        # unverified: the action was performed and confirmed, but the
+        # check that it landed could not run. Distinct from failed,
+        # which sends an operator looking for something to fix.
+        self.status = "pending"   # pending|ok|failed|skipped|unverified
         self.detail = ""
 
     def as_dict(self) -> dict:
@@ -86,6 +89,16 @@ def run_teardown(
             p.detail = p.detail or "dwd_helper.revoke() crashed unexpectedly"
         elif rc == 0:
             p.status, p.detail = "ok", "revoked (or already gone)"
+        elif rc == 4:
+            # The delete was clicked and confirmed; only the re-read of the
+            # list failed. Reporting this as "failed" sends someone hunting
+            # in the Admin Console for a row that is probably already gone,
+            # and reporting it as "ok" would claim a verification that did
+            # not happen. Neither, and say which.
+            p.status = "unverified"
+            p.detail = ("delete confirmed, list could not be re-read -- "
+                        "re-run to check; revoking an already-gone grant "
+                        "reports success and changes nothing")
         else:
             p.status, p.detail = "failed", f"revoke exited {rc}"
         _progress(50, "delegation step done")
