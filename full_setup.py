@@ -230,6 +230,16 @@ def no_browser_detail(crash_detail: str) -> str:
             "yourself, or install a browser on the host and retry.")
 
 
+# The seeder's group-creation scope, so a setup can tell whether the grant
+# it just wrote permits seeding groups at all.
+try:                                    # noqa: SIM105
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "data-generator"))
+    from seed_sandbox import GROUP_WRITE_SCOPE
+except Exception:                       # noqa: BLE001
+    GROUP_WRITE_SCOPE = "https://www.googleapis.com/auth/admin.directory.group"
+
+
 def run_full_setup(
     side: str, domain: str, admin_email: str, admin_password: str,
     org_id: str = "", keys_dir: str = "keys", dry_run: bool = False,
@@ -793,7 +803,33 @@ def run_full_setup(
                 "--confirm-domain", domain, "--scale", seed_scale, "--yes"]
         if create_users:
             argv.append("--create-users")
+        # Seed everything the grant actually permits. Group creation is its
+        # own scope and its own opt-in flag, so a tenant that has it stays
+        # unexercised unless asked -- and groups are what every group-typed
+        # Drive ACL needs to exist first.
+        if GROUP_WRITE_SCOPE in set(granted):
+            argv.append("--groups")
         env = dict(os.environ, SANDBOX_MODE="true")
+        # Point the child at the key THIS run just created.
+        #
+        # For a per-account setup the key path is saved to tenant_configs,
+        # not to env.sh -- and the seeder resolves its key from the
+        # environment. So it authenticated with whatever keys/source-sa.json
+        # happened to hold, which here was a service account from an
+        # unrelated project (wsmig-src-30428) whose client ID was never
+        # delegated for this tenant. Every scope set it tried came back
+        # `unauthorized_client`, and the phase reported that as the seed
+        # failing -- moments after "verify delegation: 23/23 scopes
+        # confirmed live", which had checked the NEW key.
+        #
+        # Two credentials, one of them stale, and the only symptom was an
+        # error naming no file.
+        env.update({
+            "SEED_SA_KEY": key_path,
+            f"{side.upper()}_SA_KEY": key_path,
+            f"{side.upper()}_DOMAIN": domain,
+            f"{side.upper()}_ADMIN": admin_email,
+        })
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=7200,
                               env=env)
         if proc.returncode != 0:

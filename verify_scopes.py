@@ -123,6 +123,17 @@ OPTIONAL_SCOPES = {
     # Frontline) in the tenant inventory panel. See
     # tenant_inventory.LICENSING_SCOPE.
     "https://www.googleapis.com/auth/apps.licensing",
+    # Creating groups: the migration writes them on the TARGET, and the
+    # seeder writes them on the SOURCE so a rehearsal tenant has the
+    # group-typed Drive ACLs a real tenant's permissions are mostly made of.
+    #
+    # Optional in the sense this set means: absent, group seeding and group
+    # migration are skipped and everything else still runs. It has to be on
+    # the console LINE regardless, or nobody can turn it on later without a
+    # second hand-pasted grant -- which is how the group migration came to
+    # be unrunnable by construction, requesting a scope at runtime that was
+    # advertised nowhere.
+    "https://www.googleapis.com/auth/admin.directory.group",
 }
 
 
