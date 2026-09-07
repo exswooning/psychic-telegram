@@ -75,3 +75,45 @@ class TestTheEndpointPassesItThrough:
         i = src.index('path == "/api/job"')
         assert 'query.get("name"' in src[i:i + 1400], (
             "the name is still decorative")
+
+
+class TestAFreshlyRestartedProcess:
+    """The case the first version of this fix got wrong, and these tests
+    missed: JOBS starts empty after a restart, so the in-memory Job has no
+    name at all. The comparison short-circuited on the empty string, and the
+    ps scan supplied the real name a few lines later -- so the caller still
+    got another job's output under the name it asked for.
+    """
+
+    def _empty_job_then_scan(self, monkeypatch, scanned, saved=None):
+        monkeypatch.setattr(webui, "get_job", lambda a: _Job("", False))
+        monkeypatch.setattr(webui, "_external_job_snapshot",
+                            lambda since: dict(scanned) if scanned else None)
+        monkeypatch.setattr(webui, "load_job_result",
+                            lambda a, n: dict(saved) if saved else None)
+
+    def test_a_scanned_job_does_not_answer_for_another_name(self, monkeypatch):
+        self._empty_job_then_scan(
+            monkeypatch,
+            scanned={"name": "seed", "running": True, "rc": None,
+                     "lines": ["seed output"]},
+            saved={"name": "reset target", "rc": 0,
+                   "lines": ["Removed: 240 drive root(s)"]})
+        snap = webui._job_snapshot(66, 0, want="reset target")
+        assert snap["name"] == "reset target"
+        assert snap["lines"] == ["Removed: 240 drive root(s)"]
+        assert snap["now_running"] == "seed"
+
+    def test_an_empty_job_with_nothing_scanned_still_answers_honestly(
+            self, monkeypatch):
+        self._empty_job_then_scan(monkeypatch, scanned=None, saved=None)
+        snap = webui._job_snapshot(66, 0, want="reset target")
+        assert snap["unknown"] is True and snap["now_running"] is None
+
+    def test_asking_for_the_scanned_job_by_name_works(self, monkeypatch):
+        self._empty_job_then_scan(
+            monkeypatch,
+            scanned={"name": "seed", "running": True, "rc": None,
+                     "lines": ["seed output"]})
+        snap = webui._job_snapshot(66, 0, want="seed")
+        assert snap["running"] is True and snap["lines"] == ["seed output"]

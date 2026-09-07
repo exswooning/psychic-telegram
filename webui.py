@@ -1237,34 +1237,6 @@ def _job_snapshot(account_id: int | None, since: int,
     safety (Stop must not offer to kill a job this account never started).
     """
     snap = get_job(account_id).snapshot(since)
-    # `want` is the job the caller asked about. There is one Job per account
-    # and it is reused, so once a run finishes and the next one starts, this
-    # object carries the NEW job's name, lines and elapsed -- and answered
-    # for whatever was asked. A poller watching "reset target" was handed a
-    # freshly-started "seed" and could not tell: same shape, plausible
-    # numbers, wrong job.
-    #
-    # Live, that reported a completed 298,185-item deletion as a job that had
-    # been destroyed, because the only two signals available -- a name that
-    # matched nothing and an absent process -- both pointed the wrong way.
-    #
-    # The finished run is not lost: Job.start writes its transcript to a file
-    # and saves a result JSON on completion, precisely so it survives the
-    # object being reused. So answer from there rather than from whatever is
-    # running now.
-    if want and snap.get("name") and snap["name"] != want:
-        saved = load_job_result(account_id, want)
-        if saved:
-            saved = dict(saved)
-            saved["live"] = False
-            saved["running"] = False
-            saved["requested"] = want
-            saved["now_running"] = snap["name"] if snap["running"] else None
-            return saved
-        return {"name": want, "requested": want, "live": False,
-                "running": False, "rc": None, "lines": [], "unknown": True,
-                "now_running": snap["name"] if snap["running"] else None,
-                "error": f"no job named {want!r} has run for this account"}
     external = False
     if not snap["running"]:
         ext = _external_job_snapshot(since)
@@ -1272,6 +1244,35 @@ def _job_snapshot(account_id: int | None, since: int,
             snap = ext
             external = True
     snap["external"] = external
+    # AFTER the external scan, not before it. In a freshly restarted process
+    # JOBS starts empty, so the in-memory Job has no name and this comparison
+    # short-circuited on the empty string -- the ps scan then supplied the
+    # real name a few lines later, and the caller got it under whatever name
+    # it had asked for. Which is the same wrong answer, arrived at through
+    # the fix meant to prevent it.
+    #
+    # `want` is the job the caller asked about. There is one Job per account
+    # and it is reused, so once a run finishes and the next one starts, this
+    # object carries the NEW job's name, lines and elapsed. A poller watching
+    # "reset target" was handed a freshly-started "seed": same shape,
+    # plausible numbers, wrong job. Live, that reported a completed
+    # 298,185-item deletion as a job that had been destroyed.
+    #
+    # The finished run is not lost: Job.start writes its transcript to a file
+    # and saves a result JSON on completion, precisely so it survives the
+    # object being reused. So answer from there.
+    if want and (snap.get("name") or "") != want:
+        running_now = snap["name"] if snap.get("running") else None
+        saved = load_job_result(account_id, want)
+        if saved:
+            saved = dict(saved)
+            saved.update({"live": False, "running": False,
+                          "requested": want, "now_running": running_now})
+            return saved
+        return {"name": want, "requested": want, "live": False,
+                "running": False, "rc": None, "lines": [], "unknown": True,
+                "now_running": running_now,
+                "error": f"no job named {want!r} has run for this account"}
     return snap
 
 
