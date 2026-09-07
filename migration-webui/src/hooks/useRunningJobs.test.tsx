@@ -1,9 +1,29 @@
+import React from 'react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
-import RunningNow from './RunningNow'
+import { useRunningJobs } from '@/hooks/useRunningJobs'
+import RunningJobCard from '@/components/RunningJobCard'
+
+/** Stands in for the page these assertions were written against. The card
+ *  is the thing under test now -- it renders the domain (falling back to the
+ *  job name), the detail line and the elapsed duration, which is exactly
+ *  what these assertions look for. Rendering the raw fields alongside it
+ *  would match everything twice. */
+const RunningNow: React.FC = () => {
+  const { jobs } = useRunningJobs()
+  return (
+    <div>
+      {jobs.map((j) => (
+        <RunningJobCard key={j.key} job={j} />
+      ))}
+    </div>
+  )
+}
 
 /**
- * Two things this page got wrong at once, both seen live.
+ * Two things this got wrong at once, both seen live. The page is gone --
+ * Running Now is a label on the Jobs cards now -- but the aggregation moved
+ * to useRunningJobs() intact, and so did these.
  *
  * It showed a migration that had finished 26 hours earlier -- the fleet
  * node had stopped heartbeating and kept its last active_job forever, so

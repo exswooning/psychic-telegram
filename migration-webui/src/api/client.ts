@@ -786,3 +786,19 @@ export async function fetchSharedDrives(): Promise<SharedDriveStats | null> {
     ? data.sharedDrives
     : null
 }
+
+
+/** What the seeder will and will not be able to do, by capability.
+ *  The seeder builds a separate credential per capability -- one missing
+ *  scope disables that feature rather than the whole seed -- so "will this
+ *  seed groups?" is a different question from "is delegation working". */
+export interface SeedCapability {
+  name: string
+  flag: string
+  scopes: string[]
+  granted: boolean
+}
+
+export const fetchSeedScopes = () =>
+  fetch('/api/seed-scopes', { credentials: 'include' })
+    .then((r) => r.json() as Promise<{ domain: string; capabilities: SeedCapability[] }>)

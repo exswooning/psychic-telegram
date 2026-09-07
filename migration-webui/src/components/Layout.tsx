@@ -88,7 +88,6 @@ const NAV_ITEMS = [
   // the account -- a client's own, an operator's running one.
   { path: '/metrics', label: 'Metrics', icon: <MetricsIconNav /> , group: 'Check' },
   { path: '/jobs', label: 'Jobs', icon: <JobsIconNav /> , group: 'Migrate' },
-  { path: '/running-now', label: 'Running Now', icon: <RunningNowIconNav /> , group: 'Migrate' },
   { path: '/mission-control', label: 'Mission Control', icon: <MissionIcon /> , group: 'Migrate' },
   // Users lives inside a migration's report now -- per-user state only
   // means anything against the tenant pair it belongs to, and a

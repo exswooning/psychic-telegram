@@ -21,6 +21,9 @@ import {
   stopJob as stopSeedJob,
 } from '@/api/client'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
+import RunningJobCard from '@/components/RunningJobCard'
+import { useRunningJobs } from '@/hooks/useRunningJobs'
+import type { RunningJob } from '@/hooks/useRunningJobs'
 import SeedRunDashboard from '@/components/SeedRunDashboard'
 
 const SEED_SCALES = ['tiny', 'small', 'medium', 'large', 'huge']
@@ -91,6 +94,11 @@ function deriveHealth(cfg: TenantConfigStatus | null, dwd: VerifiedDomain | null
  * just one place that composes them.
  */
 const Jobs: React.FC = () => {
+  // Every running job, from every source -- webui's own Job, the fleet,
+  // job_admission rows, full-setup and provisioning. One hook, so this page
+  // and nothing else has to know where a job can come from.
+  const { jobs: running } = useRunningJobs()
+  const [stopping, setStopping] = useState<RunningJob | null>(null)
   const [rawSides, setSides] = useState<RawSide[] | null>(null)
   const [seedJob, setSeedJob] = useState<JobStatus | null>(null)
   const [seedHistory, setSeedHistory] = useState<JobResult | null>(null)
@@ -228,14 +236,58 @@ const Jobs: React.FC = () => {
         </Tooltip>
       </Stack>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-        Every tenant setup and seed job, in one place. Click a row for the full breakdown.
+        Every job in one place — seeds, migrations, setups and resets.
+        Anything currently running is at the top; click a row below for the
+        full breakdown of a tenant.
       </Typography>
+
+      {/* Running Now used to be a separate page, so a job started here was
+          watched somewhere else. It is a label on these cards now. */}
+      {running.length > 0 && (
+        <Box sx={{ mb: 3 }} data-testid="running-jobs">
+          <Typography variant="overline" color="text.secondary">
+            Running now
+          </Typography>
+          <Stack direction="row" flexWrap="wrap" gap={1.5} sx={{ mt: 0.5 }}>
+            {running.map((j) => (
+              <RunningJobCard
+                key={j.key} job={j}
+                action={j.stop ? (
+                  <Tooltip title="Stop this job">
+                    <span>
+                      <IconButton size="small" color="error"
+                                  data-testid={`stop-${j.key}`}
+                                  onClick={() => setStopping(j)}>
+                        <StopIcon fontSize="small" />
+                      </IconButton>
+                    </span>
+                  </Tooltip>
+                ) : undefined}
+              />
+            ))}
+          </Stack>
+        </Box>
+      )}
 
       {sides === null && (
         <Box sx={{ display: 'flex', justifyContent: 'center', py: 6 }}>
           <CircularProgress size={28} />
         </Box>
       )}
+
+      <ReasonCodeDialog
+        open={!!stopping}
+        title={stopping ? `Stop ${stopping.label}` : ''}
+        description={<>This ends the running job. Work already done is kept —
+          seeds and migrations are resumable — but anything in flight stops
+          where it is.</>}
+        onCancel={() => setStopping(null)}
+        onConfirm={async (reason) => {
+          const j = stopping
+          setStopping(null)
+          if (j?.stop) await j.stop(reason)
+        }}
+      />
 
       <Stack spacing={1.5}>
         {sides?.map((j) => (

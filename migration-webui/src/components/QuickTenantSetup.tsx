@@ -1,3 +1,4 @@
+import { useNavigate } from 'react-router-dom'
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Alert, Avatar, Box, Button, Checkbox, Chip, CircularProgress, Collapse,
@@ -17,7 +18,8 @@ import {
   startTenantScan, fetchTenantScan,
   buildIdentityMap, fetchIdentityMapStatus, IdentityMapStatus,
 } from '@/api/controlPlane'
-import { runSeed } from '@/api/client'
+import { runSeed, fetchSeedScopes } from '@/api/client'
+import type { SeedCapability } from '@/api/client'
 import ReasonCodeDialog from './ReasonCodeDialog'
 import JobProgress from './JobProgress'
 import TenantInventoryPanel from './TenantInventoryPanel'
@@ -291,7 +293,16 @@ const QuickTenantSetup: React.FC<{
   const [orgId, setOrgId] = useState('')
   const [dryRun, setDryRun] = useState(true)
   const [authDialogOpen, setAuthDialogOpen] = useState(false)
+  const navigate = useNavigate()
   const [seed, setSeed] = useState(false)
+  // Fetched once: it describes the grant, which does not change while this
+  // panel is open, and it costs a scope computation on the server.
+  const [seedCaps, setSeedCaps] = useState<SeedCapability[]>([])
+  useEffect(() => {
+    if (side !== 'source') return
+    fetchSeedScopes().then((r) => setSeedCaps(r.capabilities || []))
+      .catch(() => setSeedCaps([]))
+  }, [side])
   const [seedScale, setSeedScale] = useState('small')
   const [createUsers, setCreateUsers] = useState(false)
   // Comma-separated localparts. The Seed Wizard's Manual tab has had this
@@ -929,6 +940,37 @@ const QuickTenantSetup: React.FC<{
             control={<Switch checked={seed} onChange={(e) => setSeed(e.target.checked)} />}
             label={<Typography variant="body2">Also seed this tenant</Typography>}
           />
+          {/* What the seed will actually be able to do. The seeder builds a
+              separate credential per capability, so a missing scope silently
+              disables one feature rather than failing the run -- which is
+              how a seed came to create four groups and no members without
+              anyone being told the scope was the reason. */}
+          {seed && seedCaps.length > 0 && (
+            <Box sx={{ ml: 4, mb: 1 }} data-testid="seed-capabilities">
+              <Typography variant="caption" color="text.secondary">
+                This seed will run with:
+              </Typography>
+              <Stack spacing={0.25} sx={{ mt: 0.5 }}>
+                {seedCaps.map((c) => (
+                  <Stack key={c.name} direction="row" spacing={0.75}
+                         alignItems="center">
+                    <Chip size="small" variant="outlined"
+                          color={c.granted ? 'success' : 'default'}
+                          label={c.granted ? 'granted' : 'not granted'} />
+                    <Typography variant="caption"
+                                color={c.granted ? 'text.primary' : 'text.disabled'}>
+                      {c.name}
+                    </Typography>
+                    <Typography variant="caption" color="text.disabled">
+                      {c.flag === 'always' ? '' : c.flag}
+                    </Typography>
+                  </Stack>
+                ))}
+              </Stack>
+            </Box>
+          )}
+          <Box sx={{ display: 'none' }}
+          />
           <Collapse in={seed} orientation="horizontal">
             <Stack direction="row" spacing={2} sx={{ flexWrap: 'wrap', gap: 1 }}>
               <TextField select size="small" label="Seed scale" value={seedScale}
@@ -1004,6 +1046,26 @@ const QuickTenantSetup: React.FC<{
               the Manual tab instead (from running provision_gcp.py on your
               own machine) — after that, signing in only needs to grant
               delegation, not create the project.
+            </Alert>
+          )}
+
+          {setUpOk && (
+            /* Where the work actually is once setup finishes. Without this
+               a completed wizard leaves you on the wizard, and a seed
+               started from here is watched on a page you have to know
+               exists. */
+            <Alert severity="success" sx={{ mb: 2 }}
+                   action={
+                     <Button size="small" variant="contained"
+                             data-testid="go-to-jobs"
+                             onClick={() => navigate('/jobs')}>
+                       View jobs
+                     </Button>
+                   }>
+              {domain} is set up.{' '}
+              {seed
+                ? 'The seed is running — follow it on the Jobs page.'
+                : 'Start a seed or a migration from the Jobs page.'}
             </Alert>
           )}
 

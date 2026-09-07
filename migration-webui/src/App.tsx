@@ -6,7 +6,6 @@ import Signup from '@/pages/Signup'
 import Pricing from '@/pages/Pricing'
 import Wizard from '@/pages/Wizard'
 import Jobs from '@/pages/Jobs'
-import RunningNow from '@/pages/RunningNow'
 import Nodes from '@/pages/Nodes'
 import Migrations from '@/pages/Migrations'
 import MigrationDetail from '@/pages/MigrationDetail'
@@ -85,7 +84,10 @@ const App: React.FC = () => {
             <Route path="/" element={<Navigate to="/mission-control" replace />} />
             <Route path="/mission-control" element={<MissionControl />} />
             <Route path="/jobs" element={<Jobs />} />
-            <Route path="/running-now" element={<RunningNow />} />
+            {/* Running Now is a label on the Jobs cards now, not a
+                destination. Redirected rather than removed so an old link,
+                a bookmark or a stale tab still lands somewhere useful. */}
+            <Route path="/running-now" element={<Navigate to="/jobs" replace />} />
             <Route path="/nodes" element={<Nodes />} />
             <Route path="/migrations" element={<Migrations />} />
             <Route path="/migrations/:accountId" element={<MigrationDetail />} />

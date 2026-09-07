@@ -1,22 +1,33 @@
-import React, { useCallback, useEffect, useState } from 'react'
-import {
-  Box, Typography, Card, CardContent, Stack, Chip, IconButton, Tooltip,
-  LinearProgress, CircularProgress, Button,
-} from '@mui/material'
-import {
-  Refresh as RefreshIcon, Bolt as RunningNowIcon, Stop as StopIcon,
-} from '@mui/icons-material'
+import { useCallback, useEffect, useState } from 'react'
 import {
   fetchTenantConfigStatus, fetchFullSetupStatus, fetchFleet, FleetNode,
   fetchActiveJobs, fetchMe, stopJob as stopFleetJob,
   fetchProvisionStatus, ProvisionStatus,
 } from '@/api/controlPlane'
 import { fetchJob, stopJob as stopSeedJob } from '@/api/client'
-import ReasonCodeDialog from '@/components/ReasonCodeDialog'
-import SeedRunDashboard from '@/components/SeedRunDashboard'
 
-interface RunningJob {
+/** What the job IS, so a card can say so rather than showing a bare name.
+ *  Derived from the job's own name because that is the only thing every
+ *  source here agrees on -- webui Jobs, the fleet, job_admission rows and
+ *  full-setup all name themselves differently otherwise. */
+export type JobKind = 'seed' | 'migrate' | 'setup' | 'reset' | 'provision' | 'other'
+
+export function jobKind(name: string): JobKind {
+  const n = (name || '').toLowerCase()
+  if (n.includes('seed')) return 'seed'
+  if (n.includes('reset') || n.includes('wipe')) return 'reset'
+  if (n.includes('provision')) return 'provision'
+  if (n.includes('setup')) return 'setup'
+  if (n.includes('migrate') || n.includes('delta')) return 'migrate'
+  return 'other'
+}
+
+export interface RunningJob {
   key: string; label: string; detail: string; pct: number | null
+  /** seed | migrate | ... -- what the rectangle announces. */
+  kind: JobKind
+  /** The tenant this is happening to, when the source knows it. */
+  domain?: string
   // Only ever populated for the webui.py Job entry (seed/reset target/
   // reset drive ledger) -- that's the one source here with real printed
   // output. full-setup's own progress file only ever carries a
@@ -34,7 +45,7 @@ interface RunningJob {
 }
 
 /** "32m 08s", because "1928s elapsed" makes a reader do arithmetic. */
-const describeElapsed = (sec: number): string => {
+export const describeElapsed = (sec: number): string => {
   if (!sec || sec < 0) return '0s'
   const h = Math.floor(sec / 3600)
   const m = Math.floor((sec % 3600) / 60)
@@ -79,7 +90,7 @@ const ACCOUNT_SCOPED_JOB_NAMES = new Set([
  * Activity, since capacity refusals can happen from anywhere in the app,
  * not just while looking at that one page.
  */
-function useRunningNow() {
+export function useRunningJobs() {
   const [jobs, setJobs] = useState<RunningJob[]>([])
   const [loading, setLoading] = useState(false)
 
@@ -104,7 +115,8 @@ function useRunningNow() {
       const found: RunningJob[] = []
       if (srcSetup?.running) {
         found.push({
-          key: 'setup-source', label: srcCfg?.domain || 'source',
+          key: 'setup-source', kind: 'setup', domain: srcCfg?.domain,
+          label: srcCfg?.domain || 'source',
           detail: srcSetup.progressLabel || 'setting up…', pct: srcSetup.progressPct ?? null,
           stop: async (reason) => {
             if (!srcSetup.pid) throw new Error('no pid recorded for this run yet -- try again shortly')
@@ -115,7 +127,8 @@ function useRunningNow() {
       }
       if (tgtSetup?.running) {
         found.push({
-          key: 'setup-target', label: tgtCfg?.domain || 'target',
+          key: 'setup-target', kind: 'setup', domain: tgtCfg?.domain,
+          label: tgtCfg?.domain || 'target',
           detail: tgtSetup.progressLabel || 'setting up…', pct: tgtSetup.progressPct ?? null,
           stop: async (reason) => {
             if (!tgtSetup.pid) throw new Error('no pid recorded for this run yet -- try again shortly')
@@ -146,6 +159,13 @@ function useRunningNow() {
       if (jobIsMine && job) {
         found.push({
           key: `webui-${job.name}`,
+          kind: jobKind(job.name),
+          // A seed and a reset both act on the SOURCE tenant; the target
+          // side is only touched by reset target. Naming the tenant is the
+          // difference between "a job is running" and "something is
+          // happening to this domain".
+          domain: (jobKind(job.name) === 'reset' && job.name.includes('target'))
+            ? tgtCfg?.domain : srcCfg?.domain,
           label: job.name,
           // "1928s elapsed" was the whole description of a 32-minute run.
           // The job's own newest line says what it is doing right now --
@@ -170,7 +190,8 @@ function useRunningNow() {
       const fleet = nodes.find((n) => n.active_job && n.job_pid && n.healthy)
       if (fleet) {
         found.push({
-          key: `fleet-${fleet.job_pid}`, label: fleet.active_job!,
+          key: `fleet-${fleet.job_pid}`, kind: jobKind(fleet.active_job!),
+          domain: srcCfg?.domain, label: fleet.active_job!,
           detail: `pid ${fleet.job_pid} on ${fleet.hostname || fleet.node_id}`, pct: null,
           stop: async (reason) => {
             const r = await stopFleetJob(fleet.job_pid!, reason)
@@ -193,6 +214,7 @@ function useRunningNow() {
         if (row.account_id === myAccountId && jobIsMine && row.job_name === job!.name) continue
         found.push({
           key: `admission-${row.account_id}-${row.job_name}`,
+          kind: jobKind(row.job_name),
           label: row.job_name,
           detail: `account #${row.account_id ?? 'legacy'} -- started ${new Date(row.started_at).toLocaleTimeString()}`,
           pct: null,
@@ -213,6 +235,8 @@ function useRunningNow() {
         if (!st?.running) continue
         found.push({
           key: `provision-${tenant}`,
+          kind: 'provision',
+          domain: tenant === 'target' ? tgtCfg?.domain : srcCfg?.domain,
           label: `provision users — ${tenant}`,
           detail: `${st.created} of ${st.total} created`
             + (st.existing ? `, ${st.existing} already existed` : '')
@@ -240,117 +264,3 @@ function useRunningNow() {
 
   return { jobs, loading, refresh }
 }
-
-const RunningNow: React.FC = () => {
-  const { jobs, loading, refresh } = useRunningNow()
-  const [stopTarget, setStopTarget] = useState<RunningJob | null>(null)
-  const [stopBusy, setStopBusy] = useState(false)
-  const [stopError, setStopError] = useState<string | null>(null)
-
-  const runStop = async (reason: string) => {
-    if (!stopTarget?.stop) return
-    setStopBusy(true); setStopError(null)
-    try {
-      await stopTarget.stop(reason)
-      setStopTarget(null)
-      refresh()
-    } catch (e: any) {
-      setStopError(e.message)
-    } finally {
-      setStopBusy(false)
-    }
-  }
-
-  return (
-    <Box>
-      <Stack direction="row" alignItems="center" sx={{ mb: 0.5 }}>
-        <Typography variant="h4" sx={{ fontWeight: 700, flexGrow: 1 }}>Running Now</Typography>
-        <Tooltip title="Refresh">
-          <span>
-            <IconButton size="small" onClick={refresh} disabled={loading}>
-              <RefreshIcon fontSize="small" />
-            </IconButton>
-          </span>
-        </Tooltip>
-      </Stack>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-        Only one heavy job (seed, migrate, delta, full-setup) runs at a time
-        across this box -- if starting something new says "capacity is full,
-        try again shortly", it's because of whatever's listed here.
-      </Typography>
-
-      {loading && jobs.length === 0 && (
-        <Box sx={{ display: 'flex', justifyContent: 'center', py: 6 }}>
-          <CircularProgress size={28} />
-        </Box>
-      )}
-
-      {!loading && jobs.length === 0 && (
-        <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>
-          <CardContent sx={{ textAlign: 'center', py: 5 }}>
-            <RunningNowIcon color="disabled" sx={{ fontSize: 32, mb: 1 }} />
-            <Typography variant="body2" color="text.secondary">
-              Nothing is running right now -- the capacity slot is free.
-            </Typography>
-          </CardContent>
-        </Card>
-      )}
-
-      <Stack spacing={1.5}>
-        {jobs.map((j) => (
-          <Card key={j.key} elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, p: 2, flexWrap: 'wrap' }}>
-              <CircularProgress size={16} />
-              <Box sx={{ flexGrow: 1, minWidth: 160 }}>
-                <Stack direction="row" spacing={1} alignItems="center">
-                  <Typography variant="body1" sx={{ fontWeight: 600 }}>{j.label}</Typography>
-                  <Chip size="small" label="running" color="info" variant="outlined" />
-                </Stack>
-                <Typography variant="caption" color="text.secondary">
-                  {j.detail}{typeof j.pct === 'number' && ` — ${j.pct}%`}
-                </Typography>
-              </Box>
-              {j.stop && (
-                <Button size="small" color="error" startIcon={<StopIcon />}
-                        onClick={() => setStopTarget(j)}>
-                  Stop
-                </Button>
-              )}
-            </Box>
-            {typeof j.pct === 'number' && (
-              <Box sx={{ px: 2, pb: j.lines?.length ? 1 : 2 }}>
-                <LinearProgress variant="determinate" value={j.pct} sx={{ height: 6, borderRadius: 3 }} />
-              </Box>
-            )}
-            {j.lines && j.lines.length > 0 && (
-              <Box sx={{ px: 2, pb: 2 }}>
-                {/* Running Now only ever lists live jobs. */}
-                <SeedRunDashboard lines={j.lines} elapsedSec={j.elapsedSec} running />
-                <Box component="pre" sx={{
-                  fontSize: 11, p: 1.5, bgcolor: 'action.hover', borderRadius: 1,
-                  overflowX: 'auto', maxHeight: 260, whiteSpace: 'pre-wrap', m: 0, mt: 1.5,
-                }}>
-                  {j.lines.join('\n')}
-                </Box>
-              </Box>
-            )}
-          </Card>
-        ))}
-      </Stack>
-
-      <ReasonCodeDialog
-        open={!!stopTarget} busy={stopBusy} error={stopError} destructive
-        title={`Stop ${stopTarget?.label ?? ''}`}
-        description={
-          <>Sends <strong>SIGINT</strong> to the running process. It finishes the item
-          in flight and commits, so nothing already done is lost -- this is a pause,
-          not a rollback.</>
-        }
-        onCancel={() => { setStopTarget(null); setStopError(null) }}
-        onConfirm={runStop}
-      />
-    </Box>
-  )
-}
-
-export default RunningNow

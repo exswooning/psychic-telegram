@@ -2455,6 +2455,45 @@ def gcloud_env() -> dict:
     return env
 
 
+def seed_scopes_payload() -> dict:
+    """What the seeder will and will not be able to do, by capability.
+
+    The seeder does not authenticate once. It builds a separate credential
+    per capability, each isolated to its own scopes, because a token request
+    fails WHOLE if any requested scope is ungranted -- so one missing scope
+    would otherwise take the entire seed down rather than the one feature.
+
+    That isolation is also why "the seed failed with unauthorized_client"
+    never said which capability was refused. This lists them, with the
+    scopes each needs and whether the line this tool writes carries them.
+    """
+    import verify_scopes
+    from config import Settings
+
+    sys.path.insert(0, os.path.join(HERE, "data-generator"))
+    from seed_sandbox import (SEED_SCOPES, GROUP_WRITE_SCOPE, REPORTS_SCOPE,
+                              DIRECTORY_READONLY_SCOPE)
+    from provision import DIRECTORY_WRITE_SCOPE
+
+    st = Settings()
+    granted = set(verify_scopes.grant_scopes(st, "source"))
+    caps = [
+        ("Drive, Gmail, Calendar, Chat", "always", list(SEED_SCOPES)),
+        ("Contacts and Tasks", "always",
+         [x for x in SEED_SCOPES if "contacts" in x or "tasks" in x]),
+        ("Create the test accounts", "--create-users", [DIRECTORY_WRITE_SCOPE]),
+        ("Read the tenant's real headcount", "--all-users",
+         [DIRECTORY_READONLY_SCOPE]),
+        ("Groups, members and group-typed Drive ACLs", "--groups",
+         [GROUP_WRITE_SCOPE]),
+        ("Fit the seed to free licences", "--fit-to-licenses", [REPORTS_SCOPE]),
+    ]
+    return {"domain": st.source_domain, "capabilities": [
+        {"name": n, "flag": f, "scopes": sc,
+         "granted": all(x in granted for x in sc)}
+        for n, f, sc in caps]}
+
+
 def dwd_payload() -> dict:
     """
     The exact Client ID and scope line to paste into each Admin Console.
@@ -4291,6 +4330,8 @@ class Handler(BaseHTTPRequestHandler):
             })
         elif path == "/api/oauth/status":
             self._json(oauth_status())
+        elif path == "/api/seed-scopes":
+            self._json(seed_scopes_payload())
         elif path == "/api/dwd":
             self._json(dwd_payload())
         elif path == "/api/next":
