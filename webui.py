@@ -455,6 +455,20 @@ ACTIONS: dict[str, dict] = {
     # MIGRATE_SSO must already be set in env.sh; this button does not set it,
     # unlike the per-user services above, because writing an SSO profile
     # changes how everyone signs in, including whoever is running this. --
+    "reconnect_sheet": {
+        "label": "App reconnect sheet",
+        "blurb": "Who has to reconnect which apps after the move. Sign-in-"
+                 "with-Google grants cannot be migrated -- no API creates "
+                 "one -- so this is the checklist that replaces them.",
+        "argv": [PY, "reconnect_pack.py"],
+    },
+    "reconnect_notices": {
+        "label": "User notices to send",
+        "blurb": "The message for each user: their apps, and the one thing "
+                 "to do BEFORE the move -- be able to sign in without "
+                 "Google, so a paid subscription stays reachable.",
+        "argv": [PY, "reconnect_pack.py", "--notices"],
+    },
     "cutover_readiness": {
         "label": "Cloud Identity cutover readiness",
         "blurb": "What survives downgrading the source to Cloud Identity and "

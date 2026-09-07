@@ -114,6 +114,34 @@ class SSOMigrator:
             if not token:
                 return out
 
+    def read_grants_by_user(self, users: list[str]) -> dict[str, list[dict]]:
+        """Which third-party apps each user has authorised, keyed by user.
+
+        Grouping by app answers the operator's question ("what do we warn
+        people about"). Grouping by user answers the user's ("what do I have
+        to reconnect"), and that is the one that turns a migration notice
+        from advice into a checklist. Both come off the same scan.
+        """
+        directory = self.auth.source_directory()
+        by_user: dict[str, list[dict]] = {}
+        for user in users:
+            try:
+                resp = directory.tokens().list(userKey=user).execute()
+            except Exception as exc:  # noqa: BLE001 - one user must not stop the scan
+                log.debug("tokens unavailable for %s: %s", user, exc)
+                continue
+            apps = []
+            for t in resp.get("items", []):
+                apps.append({
+                    "name": t.get("displayText") or t.get("clientId") or "unknown",
+                    "client_id": t.get("clientId"),
+                    "scopes": sorted(t.get("scopes") or []),
+                })
+                self.stats["grants_seen"] += 1
+            if apps:
+                by_user[user] = sorted(apps, key=lambda a: a["name"].lower())
+        return by_user
+
     def read_oauth_grants(self, users: list[str]) -> dict:
         """
         Which third-party apps each user has authorised.
@@ -122,21 +150,13 @@ class SSOMigrator:
         by user because the actionable output is a list of apps to warn people
         about, not 141 individual lists.
         """
-        directory = self.auth.source_directory()
         by_app: dict[str, dict] = {}
-        for user in users:
-            try:
-                resp = directory.tokens().list(userKey=user).execute()
-            except Exception as exc:  # noqa: BLE001 - one user must not stop the scan
-                log.debug("tokens unavailable for %s: %s", user, exc)
-                continue
-            for t in resp.get("items", []):
-                name = t.get("displayText") or t.get("clientId") or "unknown"
+        for user, apps in self.read_grants_by_user(users).items():
+            for a in apps:
                 entry = by_app.setdefault(
-                    name, {"users": 0, "client_id": t.get("clientId"),
-                           "scopes": sorted(t.get("scopes") or [])})
+                    a["name"], {"users": 0, "client_id": a["client_id"],
+                                "scopes": a["scopes"]})
                 entry["users"] += 1
-                self.stats["grants_seen"] += 1
         return by_app
 
     # -- writing -------------------------------------------------------------

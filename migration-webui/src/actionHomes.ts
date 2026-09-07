@@ -19,7 +19,7 @@
 
 /** Actions Verification renders: the read-only "is this right?" family. */
 export const VERIFICATION_KEYS = [
-  'cutover_readiness',
+  'cutover_readiness', 'reconnect_sheet', 'reconnect_notices',
   'verify', 'acl_audit', 'verify_ledger', 'ui_check',
   'verify_scopes_source', 'verify_scopes_target',
   'external_shares', 'external_shares_notify',
