@@ -36,11 +36,19 @@ export const RunningJobCard: React.FC<{
   job: RunningJob
   /** Rendered by the parent so this stays presentational. */
   action?: React.ReactNode
-}> = ({ job, action }) => {
+  /** Opens the full measurement view. The card is a glance; everything it
+   *  cannot fit -- ETA, observed throughput, per-user detail -- lives one
+   *  click away rather than nowhere. */
+  onOpen?: () => void
+}> = ({ job, action, onOpen }) => {
   const k = KIND[job.kind] ?? KIND.other
   const elapsed = job.elapsedSec ? describeElapsed(job.elapsedSec) : ''
   return (
-    <Card variant="outlined" sx={{ borderRadius: 2, minWidth: 300, flex: '1 1 340px' }}
+    <Card variant="outlined"
+          onClick={onOpen}
+          sx={{ borderRadius: 2, minWidth: 300, flex: '1 1 340px',
+                cursor: onOpen ? 'pointer' : 'default',
+                '&:hover': onOpen ? { borderColor: 'primary.main' } : {} }}
           data-testid={`running-job-${job.kind}`}>
       <CardContent sx={{ pb: 1.5, '&:last-child': { pb: 1.5 } }}>
         <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.5 }}>
@@ -50,7 +58,9 @@ export const RunningJobCard: React.FC<{
           <Chip size="small" icon={<RunningIcon fontSize="small" />}
                 label="Running now" color="info" />
           <Box sx={{ flexGrow: 1 }} />
-          {action}
+          {/* Stop lives inside a clickable card, so its click must not
+              also open the detail view. */}
+          <Box onClick={(e) => e.stopPropagation()}>{action}</Box>
         </Stack>
 
         <Stack direction="row" alignItems="center" spacing={0.5} sx={{ mb: 0.5 }}>

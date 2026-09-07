@@ -22,6 +22,7 @@ import {
 } from '@/api/client'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
 import RunningJobCard from '@/components/RunningJobCard'
+import RunningJobDetail from '@/components/RunningJobDetail'
 import { useRunningJobs } from '@/hooks/useRunningJobs'
 import type { RunningJob } from '@/hooks/useRunningJobs'
 import SeedRunDashboard from '@/components/SeedRunDashboard'
@@ -99,6 +100,7 @@ const Jobs: React.FC = () => {
   // and nothing else has to know where a job can come from.
   const { jobs: running } = useRunningJobs()
   const [stopping, setStopping] = useState<RunningJob | null>(null)
+  const [detail, setDetail] = useState<RunningJob | null>(null)
   const [rawSides, setSides] = useState<RawSide[] | null>(null)
   const [seedJob, setSeedJob] = useState<JobStatus | null>(null)
   const [seedHistory, setSeedHistory] = useState<JobResult | null>(null)
@@ -252,6 +254,7 @@ const Jobs: React.FC = () => {
             {running.map((j) => (
               <RunningJobCard
                 key={j.key} job={j}
+                onOpen={() => setDetail(j)}
                 action={j.stop ? (
                   <Tooltip title="Stop this job">
                     <span>
@@ -274,6 +277,12 @@ const Jobs: React.FC = () => {
           <CircularProgress size={28} />
         </Box>
       )}
+
+      {/* Kept fresh while open: the hook repolls every 5s, and a detail
+          view frozen at the moment it was opened is worse than none. */}
+      <RunningJobDetail
+        job={detail ? (running.find((r) => r.key === detail.key) ?? detail) : null}
+        onClose={() => setDetail(null)} />
 
       <ReasonCodeDialog
         open={!!stopping}

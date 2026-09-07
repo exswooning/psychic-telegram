@@ -20,7 +20,10 @@ def _seed_block() -> str:
     provision_users below still uses capture_output legitimately -- it is a
     short run whose output nobody watches."""
     src = inspect.getsource(full_setup.run_full_setup)
-    i = src.index('"seed source tenant"')
+    # From the phase's own guard, not its name: the progress floor is set
+    # before the Phase is constructed, and anchoring on the name put it
+    # outside the block being asserted about.
+    i = src.index('if seed and side == "source":')
     j = src.index("if provision_users", i)
     return src[i:j]
 
@@ -58,6 +61,16 @@ class TestTheChildIsStreamed:
 
 
 class TestProgressActuallyMoves:
+    def test_the_phase_does_not_open_at_99(self):
+        """It used to pin 99% before the seed started -- the longest phase
+        of the run, hours at scale `huge`, with a bar that had nothing left
+        to travel and read as almost-done the whole time. Worse after the
+        streaming fix: the first per-user line would have moved it BACKWARDS
+        from 99 to 90."""
+        blk = _seed_code()
+        assert "_progress(99" not in blk
+        assert '_progress(90, "starting the seed")' in blk
+
     def test_it_parses_the_per_user_line(self):
         blk = _seed_block()
         assert r"\[(\d+)/(\d+)\]" in blk

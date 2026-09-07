@@ -795,7 +795,14 @@ def run_full_setup(
 
     # -- 4. Optional: seed (source) or provision users (target) ------------
     if seed and side == "source":
-        _progress(99, "seeding test data")
+        # 90, not 99. The seed is the longest phase of the run by a wide
+        # margin -- hours at scale `huge` -- and pinning it at 99 before it
+        # starts left a bar that had nothing left to travel and no way to
+        # move. It also read as "almost done" for the entire time.
+        #
+        # The per-user lines below drive 90..99 from here, so this is the
+        # floor of the seed's own share rather than the end of the run.
+        _progress(90, "starting the seed")
         p = Phase("seed source tenant")
         phases.append(p)
         import subprocess
