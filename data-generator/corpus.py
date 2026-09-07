@@ -165,12 +165,18 @@ class CorpusBuilder:
 
     def __init__(self, drive, settings, user: str, peers: list[str],
                  external: str, scale: str, media_factory, retry,
-                 rng_seed: int = 0):
+                 rng_seed: int = 0, groups: list[str] | None = None):
         self.drive = drive
         self.settings = settings
         self.user = user
         self.peers = peers                # the other four, same source domain
         self.external = external
+        # Group addresses this tenant has, for group-typed ACLs. Empty when
+        # the seed did not create groups, and every group share is then
+        # simply not attempted -- rather than granting to an address that
+        # does not exist, which Drive rejects and which would look like a
+        # sharing bug rather than a missing prerequisite.
+        self.groups = list(groups or [])
         self.cfg = SCALES[scale]
         self._media = media_factory
         self._retry = retry
@@ -183,7 +189,7 @@ class CorpusBuilder:
         self.m = {
             "folders": 0, "docs": 0, "sheets": 0, "slides": 0, "binaries": 0,
             "shortcuts": 0, "grants": {"user": 0, "domain": 0, "anyone": 0,
-                                       "external": 0},
+                                       "external": 0, "group": 0},
             "grants_rejected": [], "oversized_native": 0, "items": {},
             "comments": 0,
         }
@@ -345,6 +351,24 @@ class CorpusBuilder:
         self._grant(file_id, {"type": "user", "role": role,
                               "emailAddress": email}, "external")
 
+    def share_group(self, file_id: str, group_email: str,
+                    role: str = "writer") -> None:
+        """Share with a GROUP rather than a person.
+
+        The kind of grant a real tenant's permissions are mostly made of,
+        and the one this corpus could not produce: nothing seeded a group,
+        so nothing could grant to one. Consequences that had no test data:
+
+          * acl_audit reports a group grant as a share to an address the
+            target does not have, until groups_engine has run
+          * the identity map holds people, so a group grant is remapped by
+            localpart -- a different code path from every other ACL
+          * "migrate groups BEFORE auditing ACLs" was advice nothing could
+            demonstrate
+        """
+        self._grant(file_id, {"type": "group", "role": role,
+                              "emailAddress": group_email}, "group")
+
     def share_anyone(self, file_id: str) -> None:
         self._grant(file_id, {"type": "anyone", "role": "reader",
                               "allowFileDiscovery": False}, "anyone")
@@ -360,6 +384,7 @@ class CorpusBuilder:
             self._build_project(root, project)
             self._build_archive(root, dept)
             self._build_personal(root)
+            self._build_cross_references(root)
             if edge_cases:
                 self._build_edge_cases(root)
             else:
@@ -471,6 +496,13 @@ class CorpusBuilder:
             plan["share"] = ("external", None, None)
         elif r2 < 0.18:
             plan["share"] = ("anyone", None, None)
+        elif r2 < 0.22 and self.groups:
+            # Group-typed, and only when the tenant actually has groups.
+            # Granting to an address that does not exist is rejected by
+            # Drive and reads like a sharing bug rather than the missing
+            # prerequisite it is.
+            plan["share"] = ("group", None,
+                             self.rng.choice(["writer", "reader"]))
         return plan
 
     def _exec_leaf(self, plan: dict) -> None:
@@ -495,6 +527,8 @@ class CorpusBuilder:
                 self.share_users(fid, [who], role)
             elif how == "external":
                 self.share_external(fid)
+            elif how == "group" and self.groups:
+                self.share_group(fid, self.rng.choice(self.groups), role)
             else:
                 self.share_anyone(fid)
 
@@ -607,6 +641,12 @@ class CorpusBuilder:
         if len(self.peers) > 4:
             self.share_users(proj_root, self.peers[4:], "reader")
         self.share_specific_external(proj_root, EXTRA_EXTERNAL_SHARE)
+        # A group grant on the folder the whole project hangs off. This is
+        # how permissions are actually written in a real tenant -- name the
+        # team, not its current members -- and until something seeded a
+        # group, this corpus could not express it at all.
+        for g in self.groups[:2]:
+            self.share_group(proj_root, g, "writer")
 
         for sub in PROJECT_SUBFOLDERS:
             sub_id = self.folder(sub, proj_root,
@@ -637,6 +677,36 @@ class CorpusBuilder:
                                 days_ago=(this_year - y) * 365 - q * 60)
 
     # -- personal (deliberately unshared) ---------------------------------
+    def _build_cross_references(self, root: str) -> None:
+        """Documents that link to OTHER Drive files.
+
+        The surface nothing rewrites. link_rewrite is wired into mail and,
+        as of today, calendar -- a Doc whose text says "the numbers are in
+        <link to the Sheet>" rots exactly the same way and no pass touches
+        it. Until this existed the corpus could not show that, so the gap
+        was an argument rather than a finding.
+
+        Deliberately a real link to a real file created moments earlier, so
+        the id resolves through id_mapping after a migration and a checker
+        can tell a rewritten link from an unrewritten one -- rather than a
+        plausible-looking string that resolves to nothing either way.
+        """
+        folder = self.folder("Cross-references", root, days_ago=40)
+        self.m["items"]["xref_root"] = folder
+        target = self.sheet("Q3 numbers (linked to)", folder)
+        self.m["items"]["xref_target"] = target
+        link = f"https://docs.google.com/spreadsheets/d/{target}/edit"
+        body = (f"Summary\n\nThe numbers are in {link}\n\n"
+                f"See also https://drive.google.com/drive/folders/{folder}\n")
+        doc = self._create(
+            {"name": "Q3 summary (links out)", "parents": [folder],
+             "mimeType": DOC_MIME},
+            media=self._media(body, "text/plain"))["id"]
+        self._bump("docs")
+        self.m["items"]["xref_doc"] = doc
+        self.m.setdefault("xrefs", 0)
+        self.m["xrefs"] = 2
+
     def _build_personal(self, root: str) -> None:
         p = self.folder("Personal", root, days_ago=100)
         self.m["items"]["personal_root"] = p

@@ -183,6 +183,17 @@ def seed_scopes(settings=None) -> list[str]:
     return scopes
 
 
+# Same isolation reasoning as REPORTS_SCOPE below: creating groups is opt-in
+# (--groups), and a scope the Admin Console has not authorised makes EVERY
+# delegated call fail with unauthorized_client -- so this is used to build a
+# directory client of its own rather than folded into SEED_SCOPES.
+#
+# Groups are the gap that mattered most in this corpus. Without them nothing
+# seeded a group-typed Drive ACL, so the whole group-sharing path -- the one
+# a real tenant's permission model is actually built on -- had no test data
+# at all, and groups_engine.py could not be exercised end to end.
+GROUP_WRITE_SCOPE = "https://www.googleapis.com/auth/admin.directory.group"
+
 # Not part of SEED_SCOPES on purpose. `--fit-to-licenses` is opt-in, and
 # adding a scope the Admin Console has not authorised makes *every* delegated
 # call fail with `unauthorized_client` (see config.py's scope comments). So
@@ -827,6 +838,82 @@ _CONTACT_GROUP_NAMES = ("Clients", "Vendors")
 # follow via a name match, done here through a custom People field since
 # contacts have no free-text "owner" concept to match on.
 _SEED_MARKER = {"key": "seed_sandbox", "value": "true"}
+
+
+def seed_groups(directory, settings: Settings, users: list[str],
+                external: str, prefix: str = "") -> dict:
+    """Create the tenant's groups, their members, and one nested group.
+
+    Tenant-level, not per-user: a group belongs to the domain, so this runs
+    once per seed rather than inside seed_one_user().
+
+    Why the corpus needs these at all
+    ---------------------------------
+    A tenant's groups ARE its permission model. Every Drive share that names
+    a group rather than a person, every SSO assignment targeting one, every
+    distribution list. Without them the corpus could not produce a single
+    group-typed ACL, so the whole group-sharing path had no test data --
+    and groups_engine.py could not be exercised end to end at all. The
+    scope bug that made it unrunnable (write scope requested at runtime,
+    advertised in no DWD line) survived precisely because nothing here ever
+    tried to create one.
+
+    The nested group is deliberate: groups_engine remaps a member that is
+    itself a group by localpart rather than through the identity map, which
+    holds people. That branch had no data either.
+    """
+    m = {"groups": 0, "members": 0, "nested": 0, "note": ""}
+    if not users:
+        return m
+    dom = settings.source_domain
+    # Shapes worth having, not just count: a wide all-hands, a small team
+    # with an owner and a manager, one carrying an external member, and one
+    # that contains another group.
+    plan = [
+        (f"{prefix}all-staff", "All Staff", users, "MEMBER"),
+        (f"{prefix}engineering", "Engineering", users[:max(1, len(users) // 3)], "MEMBER"),
+        (f"{prefix}leads", "Leads", users[:2], "OWNER"),
+        (f"{prefix}partners", "Partners", users[:1] + [external], "MEMBER"),
+    ]
+    made: dict[str, str] = {}
+    for local, name, members, role in plan:
+        email = f"{local}@{dom}"
+        try:
+            directory.groups().insert(body={
+                "email": email, "name": name,
+                "description": f"Seeded by seed_sandbox.py -- {name}",
+            }).execute()
+            made[local] = email
+            m["groups"] += 1
+        except Exception as exc:  # noqa: BLE001
+            if "duplicate" in str(exc).lower() or "409" in str(exc):
+                made[local] = email          # already there; still fill it
+            else:
+                m["note"] = f"group {email}: {str(exc)[:110]}"
+                continue
+        for i, member in enumerate(members):
+            try:
+                directory.members().insert(groupKey=email, body={
+                    "email": member,
+                    # A mix, so a migration that flattens roles is visible.
+                    "role": role if i == 0 else "MEMBER",
+                }).execute()
+                m["members"] += 1
+            except Exception:  # noqa: BLE001 - already a member, or external
+                pass                                  # not fatal to the seed
+
+    # One group inside another. groups_engine remaps a GROUP member by
+    # localpart, because the identity map holds people -- untested until
+    # something seeded one.
+    if f"{prefix}leads" in made and f"{prefix}all-staff" in made:
+        try:
+            directory.members().insert(
+                groupKey=made[f"{prefix}all-staff"],
+                body={"email": made[f"{prefix}leads"], "role": "MEMBER"}).execute()
+            m["nested"] += 1
+        except Exception:  # noqa: BLE001
+            pass
+    return m
 
 
 def seed_contacts(people, settings: Settings, user: str, peers: list[str],
@@ -1520,6 +1607,28 @@ def build_directory_readonly(settings: Settings, user: str):
     return build("admin", "directory_v1", http=http, cache_discovery=False)
 
 
+def build_directory_groups(settings: Settings, user: str):
+    """A delegated Directory client that can create GROUPS.
+
+    Isolated to GROUP_WRITE_SCOPE alone, like every other opt-in scope here:
+    a tenant that has not authorised group creation still lets the rest of
+    the seed succeed, instead of failing every delegated call with
+    unauthorized_client.
+    """
+    import google_auth_httplib2
+    import httplib2
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+
+    creds = service_account.Credentials.from_service_account_file(
+        _resolve_key_path(settings), scopes=[GROUP_WRITE_SCOPE]
+    ).with_subject(user)
+    http = google_auth_httplib2.AuthorizedHttp(
+        creds, http=httplib2.Http(timeout=120)
+    )
+    return build("admin", "directory_v1", http=http, cache_discovery=False)
+
+
 def _build_directory_readwrite(settings: Settings, user: str):
     """A delegated Directory client that can create accounts -- for
     --create-users and --create-until-full. Needs
@@ -1726,7 +1835,8 @@ def fit_entries(entries: list[dict], available: int,
 def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
                   external: str, scale: str, mail_count: int,
                   event_count: int, edge_cases: bool,
-                  target_gb_per_user: float | None = None) -> dict:
+                  target_gb_per_user: float | None = None,
+                  groups: list[str] | None = None) -> dict:
     user = entry["email"]
     peers = [u for u in all_users if u != user]
     t0 = time.time()
@@ -1737,7 +1847,7 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
     retry = _retry_factory(settings)
 
     builder = CorpusBuilder(drive, settings, user, peers, external, scale,
-                            _media, retry)
+                            _media, retry, groups=groups)
     drive_m = builder.build(entry["dept"], entry["project"], edge_cases)
     gmail_m = seed_gmail(gmail, settings, user, peers, external, mail_count,
                          drive_items=drive_m.get("items"))
@@ -1895,6 +2005,12 @@ def main(argv: list[str] | None = None) -> int:
                          "'how many licences are actually free' when "
                          "--fit-to-licenses's Reports API is lagging. "
                          "Requires --create-users.")
+    ap.add_argument("--groups", action="store_true",
+                    help="also create Google Groups, their members, one "
+                         "nested group, and group-typed Drive ACLs. Needs "
+                         "admin.directory.group granted. Off by default "
+                         "because it is a tenant-level write that the other "
+                         "seeding scopes do not cover.")
     ap.add_argument("--shared-drives", type=int, default=0, metavar="N",
                     help="also create N Shared Drives (SEEDED-SD-*) once the "
                          "per-user seed finishes. Shared drives belong to no "
@@ -2237,6 +2353,30 @@ def main(argv: list[str] | None = None) -> int:
             print("Aborted.")
             return 1
 
+    # Groups first, and once for the tenant. Every group-typed Drive ACL
+    # below needs the address to already exist -- Drive rejects a grant to
+    # an address it cannot resolve, which would read as a sharing failure
+    # rather than the ordering requirement it is. The same ordering the
+    # migration itself needs: groups before ACLs.
+    group_emails: list[str] = []
+    if args.groups:
+        admin = os.getenv("SOURCE_ADMIN") or settings.source_admin
+        if not admin:
+            print("  ! --groups needs SOURCE_ADMIN (a super admin) -- skipping")
+        else:
+            try:
+                gm = seed_groups(build_directory_groups(settings, admin),
+                                 settings, all_users, args.external_email,
+                                 prefix=GENERATED_PREFIX)
+                group_emails = [f"{GENERATED_PREFIX}{n}@{settings.source_domain}"
+                                for n in ("all-staff", "engineering",
+                                          "leads", "partners")]
+                print(f"  groups: {gm['groups']} created, {gm['members']} "
+                      f"member(s), {gm['nested']} nested"
+                      + (f" -- {gm['note']}" if gm["note"] else ""))
+            except Exception as exc:  # noqa: BLE001 - never fatal to a seed
+                print(f"  ! groups: {str(exc)[:140]}")
+
     t0 = time.time()
     results = []
     with futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
@@ -2246,6 +2386,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.scale, mail_count, event_count,
                 args.edge_cases == "all" or (args.edge_cases == "first" and i == 0),
                 args.target_gb_per_user,
+                group_emails,
             ): e["email"]
             for i, e in enumerate(entries)
         }
