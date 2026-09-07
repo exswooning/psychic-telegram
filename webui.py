@@ -455,6 +455,13 @@ ACTIONS: dict[str, dict] = {
     # MIGRATE_SSO must already be set in env.sh; this button does not set it,
     # unlike the per-user services above, because writing an SSO profile
     # changes how everyone signs in, including whoever is running this. --
+    "cutover_readiness": {
+        "label": "Cloud Identity cutover readiness",
+        "blurb": "What survives downgrading the source to Cloud Identity and "
+                 "what dies with the licences, counted against this tenant. "
+                 "Reads only.",
+        "argv": [PY, "cutover_readiness.py"],
+    },
     "groups_inventory": {
         "label": "Group inventory",
         "blurb": "Source groups, member counts, and the target address each "
