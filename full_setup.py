@@ -60,6 +60,7 @@ import argparse
 import getpass
 import json
 import os
+import re
 import random
 import sys
 import time
@@ -830,12 +831,46 @@ def run_full_setup(
             f"{side.upper()}_DOMAIN": domain,
             f"{side.upper()}_ADMIN": admin_email,
         })
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=7200,
-                              env=env)
-        if proc.returncode != 0:
-            p.status, p.detail = "failed", (proc.stderr or proc.stdout)[-300:]
+        # Streamed, not captured.
+        #
+        # capture_output=True buffers the child's entire stdout in this
+        # process until it exits, so a seed that runs for hours showed the
+        # bar frozen at the 99% set before it started, with no line of
+        # output anywhere. At scale `huge` across 200 users that is
+        # indistinguishable from a hang -- and was reported as one, while
+        # the child sat at 19% CPU across 151 threads doing exactly what it
+        # was asked.
+        #
+        # The seeder already prints "[N/200] user@domain: ..." per user and
+        # its own heartbeat; reading them as they arrive turns the static
+        # 99% into real progress, and keeps the tail for the failure path.
+        tail: list[str] = []
+        seen_users, total_users = 0, 0
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True,
+                                bufsize=1, env=env)
+        for line in proc.stdout:                      # type: ignore[union-attr]
+            line = line.rstrip("\n")
+            tail.append(line)
+            del tail[:-40]
+            mt = re.search(r"Seeding (\d+) users", line)
+            if mt:
+                total_users = int(mt.group(1))
+            mu = re.match(r"\s*\[(\d+)/(\d+)\]", line)
+            if mu:
+                seen_users, total_users = int(mu.group(1)), int(mu.group(2))
+            if total_users:
+                # 90..99: the seed is the last phase, and its own share of
+                # the bar should still move.
+                _progress(90 + min(9, (seen_users * 9) // max(1, total_users)),
+                          f"seeding {seen_users}/{total_users} users")
+        rc = proc.wait(timeout=7200)
+        if rc != 0:
+            p.status, p.detail = "failed", "\n".join(tail)[-300:]
         else:
-            p.status, p.detail = "ok", "seed complete -- see identities.csv"
+            p.status, p.detail = "ok", (
+                f"seed complete ({seen_users or '?'} users) -- see "
+                f"identities.csv")
 
     if provision_users and side == "target":
         _progress(99, "provisioning target accounts")

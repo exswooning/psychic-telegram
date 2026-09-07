@@ -862,7 +862,8 @@ def seed_groups(directory, settings: Settings, users: list[str],
     itself a group by localpart rather than through the identity map, which
     holds people. That branch had no data either.
     """
-    m = {"groups": 0, "members": 0, "nested": 0, "note": ""}
+    m = {"groups": 0, "members": 0, "nested": 0, "member_failures": 0,
+         "member_notes": [], "note": ""}
     if not users:
         return m
     dom = settings.source_domain
@@ -892,15 +893,38 @@ def seed_groups(directory, settings: Settings, users: list[str],
                 m["note"] = f"group {email}: {str(exc)[:110]}"
                 continue
         for i, member in enumerate(members):
-            try:
-                directory.members().insert(groupKey=email, body={
-                    "email": member,
+            body = {"email": member,
                     # A mix, so a migration that flattens roles is visible.
-                    "role": role if i == 0 else "MEMBER",
-                }).execute()
-                m["members"] += 1
-            except Exception:  # noqa: BLE001 - already a member, or external
-                pass                                  # not fatal to the seed
+                    "role": role if i == 0 else "MEMBER"}
+            # A group is not immediately usable after groups().insert:
+            # members().insert against a just-created group returns 404
+            # until it propagates. Live, that left `leads` and `partners`
+            # -- the third and fourth created, with no work between
+            # creation and their first member -- with zero members each,
+            # while all-staff and engineering filled normally.
+            #
+            # The first version swallowed every exception, so four silent
+            # failures in engineering and two empty groups looked like a
+            # clean seed. Failures are counted and the reasons kept now:
+            # a member that does not arrive is a permission that will not
+            # migrate, which is the whole point of seeding these.
+            for attempt in range(4):
+                try:
+                    directory.members().insert(groupKey=email,
+                                               body=body).execute()
+                    m["members"] += 1
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    text = str(exc)
+                    if "duplicate" in text.lower() or "409" in text:
+                        break                    # already a member
+                    if attempt == 3:
+                        m["member_failures"] += 1
+                        if len(m["member_notes"]) < 5:
+                            m["member_notes"].append(
+                                f"{member} -> {email}: {text[:90]}")
+                    else:
+                        time.sleep(2 * (attempt + 1))
 
     # One group inside another. groups_engine remaps a GROUP member by
     # localpart, because the identity map holds people -- untested until
@@ -911,8 +935,8 @@ def seed_groups(directory, settings: Settings, users: list[str],
                 groupKey=made[f"{prefix}all-staff"],
                 body={"email": made[f"{prefix}leads"], "role": "MEMBER"}).execute()
             m["nested"] += 1
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            m["member_notes"].append(f"nested leads -> all-staff: {str(exc)[:90]}")
     return m
 
 
@@ -2373,7 +2397,11 @@ def main(argv: list[str] | None = None) -> int:
                                           "leads", "partners")]
                 print(f"  groups: {gm['groups']} created, {gm['members']} "
                       f"member(s), {gm['nested']} nested"
+                      + (f", {gm['member_failures']} member(s) FAILED"
+                         if gm["member_failures"] else "")
                       + (f" -- {gm['note']}" if gm["note"] else ""))
+                for note in gm["member_notes"]:
+                    print(f"    ! {note}")
             except Exception as exc:  # noqa: BLE001 - never fatal to a seed
                 print(f"  ! groups: {str(exc)[:140]}")
 
