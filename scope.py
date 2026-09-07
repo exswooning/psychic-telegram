@@ -81,12 +81,16 @@ DRIVE_SCOPE = [
               "window is dropped with a warning rather than failing the grant"),
     ScopeItem("drive", "Drive links inside migrated mail", PARTIAL,
               "A Drive URL names a file by id, and files.copy mints a new one, "
-              "so every link in a migrated message still points at the source "
-              "file and dies with the source tenant. REWRITE_DRIVE_LINKS=true "
-              "repoints the ones in mail we migrate (Drive must run first). "
-              "Links held by external parties -- their mailbox, their "
-              "bookmarks -- cannot be reached; external_shares.py reports who "
-              "to tell and what their new URLs are"),
+              "so a copied link still points at the source file and dies with "
+              "the source tenant. REWRITE_DRIVE_LINKS is ON by default and "
+              "repoints them as the mail passes through -- Drive must migrate "
+              "first, and the engine refuses to start otherwise rather than "
+              "quietly copying dead links. Mail migrated BEFORE rewriting was "
+              "switched on cannot be fixed in place (Gmail cannot edit a "
+              "delivered message); REDO_UNREWRITTEN_LINKS replaces those "
+              "copies instead, which is destructive and opt-in. Links held by "
+              "external parties -- their mailbox, their bookmarks -- cannot be "
+              "reached; external_shares.py reports who to tell"),
     ScopeItem("drive", "Domain-wide ACLs", FULL,
               "@tenantA.com rewritten to @tenantB.com; other domains pass through"),
     ScopeItem("drive", "'Anyone with the link' ACLs", FULL,
@@ -240,6 +244,14 @@ CALENDAR_SCOPE = [
     ScopeItem("calendar", "Start/end times, time zones, all-day events", FULL, ""),
     ScopeItem("calendar", "Reminders, visibility, transparency, colour", FULL, ""),
     ScopeItem("calendar", "extendedProperties (third-party app metadata)", FULL, ""),
+    ScopeItem("calendar", "Drive links in event descriptions", PARTIAL,
+              "Same rot as mail: 'agenda is in <drive link>' names a file that "
+              "dies with the source tenant. Rewritten on copy under "
+              "REWRITE_DRIVE_LINKS. Unlike mail an event can be edited, so "
+              "repair_calendar_links.py fixes already-migrated events in "
+              "place -- no delete-and-recreate, and idempotent by "
+              "construction. Chat messages and links inside Drive documents "
+              "are still NOT rewritten"),
     ScopeItem("calendar", "Drive attachments on events", PARTIAL,
               "Remapped through id_mapping. Dropped if the underlying file has "
               "not migrated — a dead link is worse than none. Migrate Drive first"),
@@ -282,9 +294,14 @@ IDENTITY_SCOPE = [
               "run. Use GCDS, the Directory API, or your IdP"),
     ScopeItem("identity", "Passwords and 2FA enrolment", NONE,
               "Never transferable. Plan a credential-reset communication"),
-    ScopeItem("identity", "Groups and group membership", NONE,
-              "Provision separately. Group ACLs still translate correctly once "
-              "the group exists in the target"),
+    ScopeItem("identity", "Groups and group membership", PARTIAL,
+              "groups_engine.py recreates groups on the target domain with "
+              "their members and roles, each member identity-mapped; an "
+              "unmapped member is skipped rather than invented. Group "
+              "SETTINGS -- who can post, who reads the archive, moderation -- "
+              "are not copied: they need the Groups Settings API, so the "
+              "target's defaults apply, which are more restrictive rather "
+              "than less. Needs admin.directory.group granted on the target"),
     ScopeItem("identity", "Org units, aliases, admin roles, licences", NONE,
               "Directory provisioning concern, not a data-migration concern"),
 ]
