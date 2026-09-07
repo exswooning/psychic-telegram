@@ -15,6 +15,14 @@ import ReasonCodeDialog from '@/components/ReasonCodeDialog'
  * and dwd_helper.revoke(), both new this pass). Either field can be left
  * blank to do only the other half.
  */
+/** How each phase status prints in the transcript block. */
+const PHASE_MARK: Record<string, string> = {
+  ok: 'ok  ',
+  failed: 'FAIL',
+  unverified: '????',   // done, but nothing confirmed it
+  skipped: 'skip',
+}
+
 const GcpTeardown: React.FC = () => {
   const [project, setProject] = useState('')
   const [clientId, setClientId] = useState('')
@@ -66,6 +74,10 @@ const GcpTeardown: React.FC = () => {
   }
 
   const result = status?.result
+  // "not ok" covers both a real failure and a check that could not run, and
+  // they need different words: one sends someone to fix something, the other
+  // to re-run a verification.
+  const anyFailed = !!result?.phases.some((p) => p.status === 'failed')
 
   return (
     <Box>
@@ -181,16 +193,33 @@ const GcpTeardown: React.FC = () => {
             <Box sx={{ mt: 3 }}>
               <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 0.5 }}>
                 <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>Result</Typography>
-                <Chip size="small" label={result.ok ? 'ok' : 'failed'}
-                      color={result.ok ? 'success' : 'error'}
+                {/* Three outcomes, not two. A phase whose ACTION succeeded
+                    and whose CHECK could not run is not a failure: the DWD
+                    revoke reported FAIL for a delegation it had already
+                    deleted, and an operator went looking in Admin Console
+                    for a row that was not there. Nor is it "ok" -- nothing
+                    confirmed it. */}
+                <Chip size="small"
+                      label={result.ok ? 'ok'
+                        : anyFailed ? 'failed' : 'unverified'}
+                      color={result.ok ? 'success'
+                        : anyFailed ? 'error' : 'warning'}
                       variant={result.ok ? 'outlined' : 'filled'} />
               </Stack>
+              {!result.ok && !anyFailed && (
+                <Alert severity="warning" sx={{ mb: 1 }}>
+                  Every action was performed and confirmed; one of the checks
+                  that it landed could not run. Re-running is the check —
+                  revoking a grant that is already gone reports success and
+                  changes nothing.
+                </Alert>
+              )}
               <Box component="pre" sx={{
                 fontSize: 11, p: 1.5, bgcolor: 'action.hover', borderRadius: 1,
                 overflowX: 'auto', maxHeight: 260, whiteSpace: 'pre-wrap', m: 0,
               }}>
                 {result.phases.map((p) =>
-                  `${p.status === 'ok' ? 'ok  ' : p.status === 'failed' ? 'FAIL' : '..  '} `
+                  `${PHASE_MARK[p.status] ?? '..  '} `
                   + `${p.name}${p.detail ? '  ' + p.detail : ''}`
                 ).join('\n')}
               </Box>
