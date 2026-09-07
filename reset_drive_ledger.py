@@ -80,6 +80,10 @@ SERVICE_TYPES: dict[str, tuple[str, ...]] = {
     "chat": ("chat_space", "chat_message", "chat_member"),
     "contacts": ("contact", "contact_group"),
     "tasks": ("task", "task_list"),
+    # Groups are tenant-level, not per-user, so they are recorded against a
+    # synthetic "groups" user -- but they still have to be resettable, or a
+    # re-run finds every group already mapped and creates none.
+    "groups": ("group", "group_member"),
 }
 
 # Per-service state that lives outside id_mapping/audit_log entirely.

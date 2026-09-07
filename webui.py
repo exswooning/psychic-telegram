@@ -455,6 +455,27 @@ ACTIONS: dict[str, dict] = {
     # MIGRATE_SSO must already be set in env.sh; this button does not set it,
     # unlike the per-user services above, because writing an SSO profile
     # changes how everyone signs in, including whoever is running this. --
+    "groups_inventory": {
+        "label": "Group inventory",
+        "blurb": "Source groups, member counts, and the target address each "
+                 "would get. Reads only.",
+        "argv": [PY, "groups_engine.py", "--inventory"],
+    },
+    "groups_migrate_dry": {
+        "label": "Migrate groups (dry run)",
+        "blurb": "What would be created, without writing. Groups are the "
+                 "permission model -- every ACL naming a group needs it to "
+                 "exist on the target.",
+        "argv": [PY, "groups_engine.py", "--dry-run"],
+    },
+    "groups_migrate": {
+        "label": "Migrate groups",
+        "blurb": "Create the groups and their members on the target. Group "
+                 "settings (who can post) are not copied -- target defaults "
+                 "apply, which are more restrictive rather than less.",
+        "argv": [PY, "groups_engine.py"],
+        "confirm": "GROUPS",
+    },
     "sso_inventory": {
         "label": "SSO: inventory",
         "blurb": "What's migratable (inbound SAML), what can only be listed "

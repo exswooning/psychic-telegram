@@ -144,9 +144,17 @@ class SSOMigrator:
         """
         Recreate each source profile on the target, unassigned.
 
-        The IdP's signing certificate is copied with it -- that is a public
-        certificate, so it moves. The IdP's own configuration does not, which
-        is why nothing is assigned here.
+        The IdP's *configuration* is copied -- entityId and the sign-in URI,
+        which describe the IdP and have not moved. Its signing certificate is
+        NOT: credentials are a separate sub-resource
+        (inboundSamlSsoProfiles.idpCredentials), and create() has nowhere to
+        put one. This docstring used to claim the certificate came with it,
+        which is the sort of thing you find out by assigning the profile.
+
+        A profile with no credential cannot validate a SAML assertion, so it
+        is not a working sign-in path -- it is a shell with the right name.
+        That is why nothing is assigned here, and why assign_is_safe() below
+        refuses to assign one.
         """
         mapping: dict[str, str] = {}
         existing = {p.get("displayName"): p.get("name")
@@ -188,6 +196,41 @@ class SSOMigrator:
             self.stats["profiles"] += 1
         return mapping
 
+    def profile_is_live(self, profile_name: str) -> tuple[bool, str]:
+        """Is this target profile a working sign-in path, or a shell?
+
+        Assigning a profile the IdP cannot complete is the lockout this
+        module exists to avoid, and "it exists on the target" is not the same
+        question. A profile needs both halves:
+
+          idpConfig       who the IdP is -- copied by migrate_profiles
+          idpCredentials  the signing certificate -- NOT copied, because it
+                          is a separate sub-resource with no place in
+                          create(); somebody has to upload it
+
+        The certificate is the half that is missing by construction after a
+        migration, so it is the half worth checking before anyone is sent
+        through it.
+        """
+        svc = self.auth.cloud_identity("target")
+        try:
+            prof = svc.inboundSamlSsoProfiles().get(name=profile_name).execute()
+        except Exception as exc:  # noqa: BLE001
+            return False, f"cannot read target profile: {exc}"
+        idp = prof.get("idpConfig") or {}
+        if not idp.get("entityId") or not idp.get("singleSignOnServiceUri"):
+            return False, "profile has no IdP entityId/sign-in URI"
+        try:
+            creds = svc.inboundSamlSsoProfiles().idpCredentials().list(
+                parent=profile_name).execute().get("idpCredentials", [])
+        except Exception as exc:  # noqa: BLE001
+            return False, f"cannot read IdP credentials: {exc}"
+        if not creds:
+            return False, ("no IdP signing certificate uploaded -- migration "
+                           "cannot copy one, so SAML would fail for everyone "
+                           "assigned")
+        return True, f"{len(creds)} credential(s), IdP {idp['entityId']}"
+
     def migrate_assignments(self, profile_map: dict, force_tenant_wide: bool
                             ) -> None:
         """
@@ -222,6 +265,20 @@ class SSOMigrator:
             if scope is None:
                 self.db.log_audit("sso", label, "sso_assignment",
                                   "SKIPPED_UNMAPPED", resolved)
+                self.stats["skipped"] += 1
+                continue
+
+            # Last, and deliberately so: the checks above are local and
+            # this one is two API calls. An assignment already refused for
+            # being tenant-wide or unmappable should say that, not "the
+            # profile is not live" -- and should not pay for the lookup.
+            live, why = self.profile_is_live(target_profile)
+            if not live:
+                # Refused, not warned. Everyone this assignment covers loses
+                # sign-in the moment it lands, and the admin fixing it may be
+                # one of them.
+                self.db.log_audit("sso", label, "sso_assignment",
+                                  "SKIPPED_PROFILE_NOT_LIVE", why)
                 self.stats["skipped"] += 1
                 continue
 

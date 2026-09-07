@@ -114,6 +114,11 @@ CALENDAR_READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.readonly"
 # Creating accounts. Never added by a migration flag -- only by the explicit
 # provision-users command, because this is the one scope that can cost money.
 DIRECTORY_WRITE_SCOPE = "https://www.googleapis.com/auth/admin.directory.user"
+# Groups are a separate scope from users. A tenant's groups ARE its
+# permission model -- distribution lists, shared mailboxes, and every ACL
+# that names a group rather than a person -- so migrating files without them
+# lands sharing that points at addresses the target does not have.
+GROUP_WRITE_SCOPE = "https://www.googleapis.com/auth/admin.directory.group"
 CHAT_SCOPES = [
     "https://www.googleapis.com/auth/chat.spaces",
     "https://www.googleapis.com/auth/chat.messages",

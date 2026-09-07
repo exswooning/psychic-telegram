@@ -136,6 +136,33 @@ const Services: React.FC = () => {
         </Card>
       )}
 
+      {(has('groups_inventory') || has('groups_migrate')) && (
+        <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 3 }}>
+          <CardContent>
+            <Typography variant="h6" sx={{ fontWeight: 600, mb: 1 }}>
+              Groups
+            </Typography>
+            <Alert severity="info" sx={{ mb: 2 }}>
+              A tenant&apos;s groups are its permission model — distribution
+              lists, shared mailboxes, and every Drive share that names a
+              group rather than a person. Migrate these <strong>before</strong>
+              {' '}auditing ACLs, or every group-based grant looks like a share
+              to an address the target does not have. Group settings (who can
+              post, who reads the archive) are not copied: the target&apos;s
+              defaults apply, which are more restrictive rather than less.
+            </Alert>
+            <Stack spacing={2}>
+              {has('groups_inventory') &&
+                <JobRunner name="groups_inventory" spec={actions.groups_inventory} />}
+              {has('groups_migrate_dry') &&
+                <JobRunner name="groups_migrate_dry" spec={actions.groups_migrate_dry} />}
+              {has('groups_migrate') &&
+                <JobRunner name="groups_migrate" spec={actions.groups_migrate} />}
+            </Stack>
+          </CardContent>
+        </Card>
+      )}
+
       {(has('sso_inventory') || has('sso_migrate')) && (
         <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 3 }}>
           <CardContent>

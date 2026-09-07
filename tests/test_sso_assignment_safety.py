@@ -108,3 +108,72 @@ class TestTheBodyCarriesExactlyOneTarget:
         assert 'body.pop("targetOrgUnit"' not in src, (
             "back to build-then-pop for a lockout-grade field")
         assert 'if scope == "orgUnit":' in src
+
+
+class _Creds:
+    def __init__(self, items): self.items = items
+    def list(self, parent=None):
+        return type("R", (), {"execute": lambda s=None: {"idpCredentials": self.items}})()
+
+
+class _Profiles:
+    def __init__(self, prof, creds): self.prof, self.creds = prof, creds
+    def get(self, name=None):
+        if self.prof is None:
+            raise RuntimeError("404")
+        return type("R", (), {"execute": lambda s=None: self.prof})()
+    def idpCredentials(self): return _Creds(self.creds)
+
+
+def _live_mig(prof, creds):
+    m = object.__new__(sso.SSOMigrator)
+    svc = type("S", (), {"inboundSamlSsoProfiles": lambda s=None: _Profiles(prof, creds)})()
+    m.auth = type("A", (), {"cloud_identity": lambda s=None, t=None: svc})()
+    return m
+
+
+GOOD_IDP = {"idpConfig": {"entityId": "https://idp.test/x",
+                          "singleSignOnServiceUri": "https://idp.test/sso"}}
+
+
+class TestAProfileIsNotAssignedUntilItCanActuallySignPeopleIn:
+    """migrate_profiles copies idpConfig but NOT the signing certificate --
+    credentials are a separate sub-resource with no place in create(). So a
+    freshly migrated profile is a shell with the right name, and assigning
+    one takes sign-in away from everybody it covers."""
+
+    def test_a_profile_with_no_certificate_is_refused(self):
+        m = _live_mig(GOOD_IDP, creds=[])
+        ok, why = m.profile_is_live("inboundSamlSsoProfiles/1")
+        assert ok is False
+        assert "certificate" in why
+
+    def test_a_fully_configured_profile_is_allowed(self):
+        m = _live_mig(GOOD_IDP, creds=[{"name": "c1"}])
+        ok, why = m.profile_is_live("inboundSamlSsoProfiles/1")
+        assert ok is True and "1 credential" in why
+
+    def test_a_profile_with_no_idp_config_is_refused(self):
+        m = _live_mig({"idpConfig": {}}, creds=[{"name": "c1"}])
+        ok, why = m.profile_is_live("inboundSamlSsoProfiles/1")
+        assert ok is False and "entityId" in why
+
+    def test_an_unreadable_profile_is_refused_not_assumed_good(self):
+        m = _live_mig(None, creds=[])
+        ok, why = m.profile_is_live("inboundSamlSsoProfiles/1")
+        assert ok is False and "cannot read" in why
+
+    def test_the_assignment_loop_consults_it_before_creating(self):
+        import inspect
+        src = inspect.getsource(sso.SSOMigrator.migrate_assignments)
+        # After the local checks (cheap, and they give the precise reason)
+        # and before anything is created.
+        assert src.index("_remap_target") < src.index("profile_is_live")
+        assert src.index("profile_is_live") < src.index("inboundSsoAssignments")
+        assert "SKIPPED_PROFILE_NOT_LIVE" in src
+
+
+class TestTheDocstringNoLongerClaimsTheCertificateMoves:
+    def test_it_says_credentials_are_not_copied(self):
+        doc = sso.SSOMigrator.migrate_profiles.__doc__
+        assert "NOT" in doc and "idpCredentials" in doc

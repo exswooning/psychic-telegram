@@ -223,15 +223,20 @@ class AuthManager:
     def target_chat(self, user: str):
         return self._service("target", "chat", user)
 
-    def directory(self, tenant: str, writable: bool = False):
+    def directory(self, tenant: str, writable: bool = False,
+                  groups: bool = False):
         """
         Directory API for either tenant.
 
         `writable` swaps in admin.directory.user (create) in place of the
         read-only scope. Only the provision-users command passes it; nothing
         in the migration path can reach this with writable=True.
+
+        `groups` adds admin.directory.group, for the group migration. Kept
+        separate from `writable` so a run that creates groups cannot also
+        create users by accident.
         """
-        from config import DIRECTORY_WRITE_SCOPE
+        from config import DIRECTORY_WRITE_SCOPE, GROUP_WRITE_SCOPE
 
         admin = (self.settings.source_admin if tenant == "source"
                  else self.settings.target_admin)
@@ -243,6 +248,8 @@ class AuthManager:
         scopes = list(self._scopes(tenant))
         if writable:
             scopes.append(DIRECTORY_WRITE_SCOPE)
+        if groups:
+            scopes.append(GROUP_WRITE_SCOPE)
         creds = service_account.Credentials.from_service_account_file(
             self._key_path(tenant), scopes=scopes
         ).with_subject(admin)
