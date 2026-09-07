@@ -916,7 +916,28 @@ def load_job_result(account_id: int | None, name: str) -> dict | None:
         with open(path, encoding="utf-8") as fh:
             return json.load(fh)
     except (OSError, json.JSONDecodeError):
+        pass
+    # The .json is written by the in-memory Job when the run finishes. The
+    # .log is written by the child itself, line by line, the whole time --
+    # which is why it survives things the .json does not: a restart, a Job
+    # object reused by the next run, a save that never happened.
+    #
+    # Live, a reset that removed 240 drive roots and 298,185 mail items left
+    # a complete transcript and an empty .json, so "has this job ever run"
+    # answered no about a run whose own output was sitting on disk. Reading
+    # the transcript is the difference between "no record" and "no record in
+    # the place I looked first".
+    log = job_log_path(account_id, name)
+    try:
+        with open(log, encoding="utf-8") as fh:
+            lines = [ln.rstrip("\n") for ln in fh]
+    except OSError:
         return None
+    if not lines:
+        return None
+    return {"name": name, "rc": None, "running": False,
+            "lines": lines[-400:], "from_transcript": True,
+            "line_count": len(lines)}
 
 
 JOBS: dict[int | None, Job] = {}
