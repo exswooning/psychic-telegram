@@ -216,6 +216,11 @@ def source_scopes(settings: "Settings") -> list[str]:
 def target_scopes(settings: "Settings") -> list[str]:
     """Scopes the target service account actually needs for this run."""
     scopes = list(TARGET_SCOPES)
+    if settings.migrate_groups:
+        # Write only. Reading is covered by the readonly scope already in
+        # TARGET_SCOPES, and the migration needs to create groups and add
+        # members on this side only.
+        scopes.append(GROUP_WRITE_SCOPE)
     if settings.migrate_gmail_settings:
         scopes.append(GMAIL_SETTINGS_SCOPE)
     if settings.migrate_chat:
@@ -709,6 +714,17 @@ class Settings:
     # admin running the migration, and a mistake locks the tenant out.
     migrate_sso: bool = field(
         default_factory=lambda: _env_bool("MIGRATE_SSO", False)
+    )
+    # Creating groups on the target. Reading them needs nothing extra --
+    # admin.directory.group.readonly is already in the base scopes, which is
+    # why the inventory worked while the migration could not: the write scope
+    # was added inside auth.directory() and never reached source_scopes /
+    # target_scopes, so it never appeared in the line an admin pastes into
+    # Admin Console. A scope nobody can grant is a feature nobody can run,
+    # and it failed at token-mint with unauthorized_client rather than
+    # anywhere that named the missing scope.
+    migrate_groups: bool = field(
+        default_factory=lambda: _env_bool("MIGRATE_GROUPS", False)
     )
     # Secondary calendars: everything beyond 'primary'. Works with the
     # read-only baseline grant.

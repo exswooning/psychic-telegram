@@ -148,3 +148,37 @@ class TestTheLedgerCanBeReset:
         import reset_drive_ledger as r
         assert "group" in r.SERVICE_TYPES["groups"]
         assert "group_member" in r.SERVICE_TYPES["groups"]
+
+
+class TestTheScopeReachesTheGrant:
+    """A scope nobody can grant is a feature nobody can run.
+
+    GROUP_WRITE_SCOPE was added inside auth.directory() and never reached
+    source_scopes/target_scopes, so it never appeared in the line an admin
+    pastes into Admin Console. Reading groups worked -- group.readonly is in
+    the base source scopes -- so the inventory looked healthy while every
+    write failed at token-mint with `unauthorized_client`, an error that
+    names no scope and points at no file.
+    """
+
+    def test_target_scopes_ask_for_it_when_groups_are_on(self):
+        from config import GROUP_WRITE_SCOPE, Settings, target_scopes
+        s = Settings()
+        s.migrate_groups = True
+        assert GROUP_WRITE_SCOPE in target_scopes(s)
+
+    def test_and_not_when_they_are_off(self):
+        """The source credential stays read-only by construction; the target
+        should not carry a write scope it is not using either."""
+        from config import GROUP_WRITE_SCOPE, Settings, target_scopes
+        s = Settings()
+        s.migrate_groups = False
+        assert GROUP_WRITE_SCOPE not in target_scopes(s)
+
+    def test_the_dwd_line_an_admin_pastes_includes_it(self):
+        """The union is the whole point: one line pasted once, covering
+        features turned on later. A scope missing from it is a scope that
+        gets granted only after somebody debugs a token-mint failure."""
+        import webui
+        from config import GROUP_WRITE_SCOPE
+        assert GROUP_WRITE_SCOPE in webui.dwd_payload()["migrate_target_full"]

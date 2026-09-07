@@ -2435,17 +2435,19 @@ def dwd_payload() -> dict:
                             for tasks in (False, True):
                                 for sso in (False, True):
                                     for cal_acls in (False, True):
-                                        s = dataclasses.replace(
-                                            base, transfer_mode=mode,
-                                            migrate_gmail_settings=gmail,
-                                            migrate_chat=chat,
-                                            chat_space_mode=chat_mode,
-                                            migrate_contacts=contacts,
-                                            migrate_tasks=tasks,
-                                            migrate_sso=sso,
-                                            migrate_calendar_acls=cal_acls,
-                                        )
-                                        scopes.update(fn(s))
+                                        for grp in (False, True):
+                                            s = dataclasses.replace(
+                                                base, transfer_mode=mode,
+                                                migrate_gmail_settings=gmail,
+                                                migrate_chat=chat,
+                                                chat_space_mode=chat_mode,
+                                                migrate_contacts=contacts,
+                                                migrate_tasks=tasks,
+                                                migrate_sso=sso,
+                                                migrate_calendar_acls=cal_acls,
+                                                migrate_groups=grp,
+                                            )
+                                            scopes.update(fn(s))
         return sorted(scopes)
 
     st = Settings()
