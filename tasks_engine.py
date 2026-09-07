@@ -45,7 +45,8 @@ class TasksMigrator:
         self.src = auth.source_tasks(source_user)
         self.tgt = auth.target_tasks(target_user)
         self.limiter = RateLimiter(settings.per_user_qps)
-        self.stats = {"lists": 0, "tasks": 0, "skipped": 0, "failed": 0}
+        self.stats = {"lists": 0, "tasks": 0, "skipped": 0,
+                      "updated": 0, "failed": 0}
 
     def _retry(self, fn, label=None):
         return retry_on_google_error(
@@ -182,12 +183,52 @@ class TasksMigrator:
 
         emit("", None)
 
+    def _is_stale(self, src_id: str, task: dict) -> bool:
+        """Has the source task changed since it was copied?
+
+        No recorded stamp means the task predates this bookkeeping. Treating
+        that as stale would rewrite every task on every pass, so those are
+        left alone and only tasks copied from here on stay in step.
+        """
+        seen = self.db.last_synced_modified_time(self.source_user, src_id, "task")
+        now = task.get("updated")
+        return bool(seen and now and now > seen)
+
+    def _patch_existing(self, src_id: str, target_id: str, task: dict,
+                        tgt_list: str) -> None:
+        """Carry a source-side edit onto the copy already made."""
+        body = {f: task[f] for f in TASK_FIELDS if task.get(f)}
+        if not body:
+            self.stats["skipped"] += 1
+            return
+        try:
+            self.limiter.acquire()
+            self._retry(lambda: self.tgt.tasks().patch(
+                tasklist=tgt_list, task=target_id, body=body).execute())
+        except (PermanentAPIError, RuntimeError) as exc:
+            self.db.log_audit(self.source_user, src_id, "task", "FAILED",
+                              f"update: {exc}")
+            self.stats["failed"] += 1
+            return
+        self.db.log_audit(self.source_user, src_id, "task", "SUCCESS",
+                          modified_time=task.get("updated"))
+        self.stats["updated"] += 1
+
     def _create_task(self, task: dict, tgt_list: str,
                      parent: str | None) -> str | None:
         src_id = task["id"]
         existing = self.db.get_target_id(self.source_user, src_id, "task")
         if existing:
-            self.stats["skipped"] += 1
+            # A task already copied used to be skipped outright, so anything
+            # done to it afterwards -- renamed, re-dated, and above all
+            # COMPLETED -- never reached the target. A migration runs for
+            # days and people keep working their lists throughout, so the
+            # target ended up holding a to-do list frozen at the moment each
+            # task was first copied.
+            if self._is_stale(src_id, task):
+                self._patch_existing(src_id, existing, task, tgt_list)
+            else:
+                self.stats["skipped"] += 1
             return existing
         if self.settings.dry_run:
             self.stats["tasks"] += 1
@@ -211,6 +252,10 @@ class TasksMigrator:
             return None
 
         self.db.record_mapping(self.source_user, src_id, created["id"], "task")
-        self.db.log_audit(self.source_user, src_id, "task", "SUCCESS")
+        # The source stamp, so a later pass can tell a changed task from an
+        # unchanged one. Drive has always recorded this; tasks recorded
+        # nothing, so there was never anything to compare.
+        self.db.log_audit(self.source_user, src_id, "task", "SUCCESS",
+                          modified_time=task.get("updated"))
         self.stats["tasks"] += 1
         return created["id"]

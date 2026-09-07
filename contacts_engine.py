@@ -40,7 +40,11 @@ log = logging.getLogger(__name__)
 # returns almost nothing by default.
 PERSON_FIELDS = (
     "names,emailAddresses,phoneNumbers,organizations,addresses,biographies,"
-    "birthdays,urls,memberships,nicknames,occupations,relations,userDefined"
+    "birthdays,urls,memberships,nicknames,occupations,relations,userDefined,"
+    # metadata carries sources[].updateTime, which is the only way to tell a
+    # contact that has changed since it was copied from one that has not.
+    # Without it every already-migrated contact looks identical forever.
+    "metadata"
 )
 
 # Fields accepted on create. `memberships` is deliberately absent: group
@@ -79,6 +83,18 @@ def _strip_source_metadata(value):
     return value
 
 
+def _update_time(person: dict) -> str | None:
+    """When People last changed this contact.
+
+    It lives on metadata.sources[], one entry per source (CONTACT, PROFILE,
+    ...), so the newest of them is the contact's own modification time.
+    """
+    stamps = [src.get("updateTime")
+              for src in ((person.get("metadata") or {}).get("sources") or [])
+              if src.get("updateTime")]
+    return max(stamps) if stamps else None
+
+
 class ContactsMigrator:
     def __init__(self, auth, db, settings, source_user: str, target_user: str):
         self.auth = auth
@@ -89,7 +105,8 @@ class ContactsMigrator:
         self.src = auth.source_people(source_user)
         self.tgt = auth.target_people(target_user)
         self.limiter = RateLimiter(settings.per_user_qps)
-        self.stats = {"contacts": 0, "groups": 0, "skipped": 0, "failed": 0}
+        self.stats = {"contacts": 0, "groups": 0, "skipped": 0,
+                      "updated": 0, "failed": 0}
 
     def _retry(self, fn, label=None):
         return retry_on_google_error(
@@ -221,10 +238,61 @@ class ContactsMigrator:
             return None
 
 
+    def _is_stale(self, rid: str, person: dict) -> bool:
+        """Has the source contact changed since it was copied?
+
+        A missing stamp means the contact predates this bookkeeping. Treating
+        that as stale would rewrite the whole address book on every pass.
+        """
+        seen = self.db.last_synced_modified_time(self.source_user, rid, "contact")
+        now = _update_time(person)
+        return bool(seen and now and now > seen)
+
+    def _patch_existing(self, rid: str, target_rid: str, person: dict) -> None:
+        """Carry a source-side edit onto the copy already made.
+
+        updateContact needs the TARGET contact's etag, not the source's --
+        People uses it for optimistic concurrency, and the source etag
+        describes a different object entirely. So the target is read first;
+        that is one extra call, paid only for contacts that actually changed.
+        """
+        body = {f: _strip_source_metadata(person[f])
+                for f in WRITE_FIELDS if person.get(f)}
+        if not body:
+            self.stats["skipped"] += 1
+            return
+        try:
+            self.limiter.acquire()
+            current = self._retry(lambda: self.tgt.people().get(
+                resourceName=target_rid,
+                personFields=",".join(WRITE_FIELDS)).execute())
+            body["etag"] = current.get("etag")
+            self.limiter.acquire()
+            self._retry(lambda b=body: self.tgt.people().updateContact(
+                resourceName=target_rid, body=b,
+                updatePersonFields=",".join(WRITE_FIELDS)).execute())
+        except (PermanentAPIError, RuntimeError) as exc:
+            self.db.log_audit(self.source_user, rid, "contact", "FAILED",
+                              f"update: {exc}")
+            self.stats["failed"] += 1
+            return
+        self.db.log_audit(self.source_user, rid, "contact", "SUCCESS",
+                          modified_time=_update_time(person))
+        self.stats["updated"] += 1
+
     def _migrate_contact(self, person: dict, group_map: dict) -> None:
         rid = person.get("resourceName")
-        if self.db.get_target_id(self.source_user, rid, "contact"):
-            self.stats["skipped"] += 1
+        existing = self.db.get_target_id(self.source_user, rid, "contact")
+        if existing:
+            # A contact already copied used to be skipped outright, so a
+            # number changed or an address corrected during the migration
+            # never reached the target -- and the ledger went on calling the
+            # contact DONE. A migration runs for days; address books do not
+            # hold still for them.
+            if self._is_stale(rid, person):
+                self._patch_existing(rid, existing, person)
+            else:
+                self.stats["skipped"] += 1
             return
         if self.settings.dry_run:
             self.stats["contacts"] += 1
@@ -252,7 +320,8 @@ class ContactsMigrator:
 
         self.db.record_mapping(self.source_user, rid, created["resourceName"],
                                "contact")
-        self.db.log_audit(self.source_user, rid, "contact", "SUCCESS")
+        self.db.log_audit(self.source_user, rid, "contact", "SUCCESS",
+                          modified_time=_update_time(person))
         self.stats["contacts"] += 1
         self._apply_memberships(person, created, group_map)
 
