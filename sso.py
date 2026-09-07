@@ -225,15 +225,21 @@ class SSOMigrator:
                 self.stats["skipped"] += 1
                 continue
 
+            # Built explicitly. The previous version set targetGroup for
+            # anything that was not an org unit and popped it again when the
+            # scope turned out to be tenant-wide -- so the correctness of a
+            # lockout-grade field depended on a later pop still being there.
             body = {
-                "targetOrgUnit" if scope == "orgUnit" else "targetGroup": resolved,
                 "rank": a.get("rank", 0),
                 "samlSsoInfo": {"inboundSamlSsoProfile": target_profile},
                 "ssoMode": a.get("ssoMode", "SAML_SSO"),
             }
-            if scope == TENANT_WIDE:
-                body.pop("targetOrgUnit", None)
-                body.pop("targetGroup", None)
+            if scope == "orgUnit":
+                body["targetOrgUnit"] = resolved
+            elif scope == "group":
+                body["targetGroup"] = resolved
+            # TENANT_WIDE carries no target at all: that is what makes it
+            # apply to everyone.
             if self.settings.dry_run:
                 log.info("[DRY RUN] would assign %s to %s", target_profile, resolved)
                 self.stats["assignments"] += 1
@@ -267,6 +273,18 @@ class SSOMigrator:
             path = self._org_unit_path("source", org)
             if not path:
                 return None, f"could not read source org unit {org}"
+            # The root org unit IS everyone. Assigning SSO at "/" is how an
+            # admin applies it tenant-wide in practice, and its scope here is
+            # "orgUnit", so it walked straight past the guard that exists to
+            # stop exactly this -- a staged profile applied to every account,
+            # the admin running the migration included.
+            #
+            # It happened to fail rather than lock anyone out, because
+            # "/".lstrip("/") is "" and the target lookup then 404s. Failing
+            # safe by accident, reported as "target has no org unit at /",
+            # which reads like a missing org unit rather than a refusal.
+            if path == "/":
+                return TENANT_WIDE, "the root org unit, which is every account"
             found = self._org_unit_by_path("target", path)
             if not found:
                 return None, f"target has no org unit at {path}"
@@ -282,12 +300,28 @@ class SSOMigrator:
 
     # -- directory lookups ---------------------------------------------------
     def _org_unit_path(self, tenant: str, resource: str) -> str | None:
+        """The human path of an org unit named by a Cloud Identity resource.
+
+        `resource` looks like "orgUnits/03ph8a2z1abcdef". orgunits.get takes
+        either a real path ("/Engineering") or the unit's id, and the id form
+        must be prefixed "id:" -- the bare id was being sent, which the API
+        reads as a path, does not find, and returns 404 for. Every org-unit
+        assignment then reported "could not read source org unit" and was
+        skipped, so the remap that exists to keep ids from crossing tenants
+        never ran for org units at all.
+
+        The sibling below strips exactly this prefix off orgUnitId, which is
+        how the shape was known here and not used.
+        """
         directory = (self.auth.source_directory() if tenant == "source"
                      else self.auth.target_directory())
+        unit_id = resource.split("/")[-1]
+        if not unit_id:
+            return None
+        key = unit_id if unit_id.startswith("id:") else f"id:{unit_id}"
         try:
             ou = directory.orgunits().get(
-                customerId="my_customer",
-                orgUnitPath=resource.split("/")[-1]).execute()
+                customerId="my_customer", orgUnitPath=key).execute()
             return ou.get("orgUnitPath")
         except Exception:  # noqa: BLE001
             return None
