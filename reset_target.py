@@ -189,9 +189,20 @@ def main(argv: list[str] | None = None) -> int:
                 key, scopes=[CHAT_DELETE_SCOPE], subject=admin)
             creds.refresh(Request())
         except Exception:                              # noqa: BLE001
-            print("  chat.delete is not granted on this tenant -- Chat spaces "
-                  "will survive this reset. Grant it in the Admin console if "
-                  "they should go.")
+            # Drop it, do not merely announce it. The check has just proved
+            # the work cannot succeed, and leaving "chat" in the list makes
+            # every user attempt spaces.list, get 403, and burn the
+            # SCOPE_RETRY_BUDGET of 11 attempts before moving on -- a budget
+            # that exists for a 403 that IS transient and cannot tell this
+            # one apart.
+            #
+            # Measured on a 200-user reset: ~1.45 of those blocks a minute,
+            # about 138 minutes of the run spent retrying a scope nobody had
+            # granted, for a phase whose own pre-check already knew.
+            services = tuple(x for x in services if x != "chat")
+            print("  chat.delete is not granted on this tenant -- skipping "
+                  "Chat entirely. Chat spaces will survive this reset; grant "
+                  "the scope in the Admin console if they should go.")
         else:
             settings.chat_allow_delete = True
             os.environ["CHAT_ALLOW_DELETE"] = "true"

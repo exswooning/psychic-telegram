@@ -1,0 +1,78 @@
+{
+  "captured_at": "2026-09-07T11:20:30Z",
+  "source": "source.rohitrokaya.com.np",
+  "target": "target.rohitrokaya.com.np",
+  "id_mapping": {
+    "file": 490620,
+    "event": 96051,
+    "folder": 11515,
+    "contact": 5125,
+    "task": 4100,
+    "message": 3548,
+    "draft": 816,
+    "task_list": 405,
+    "contact_group": 400,
+    "shortcut": 6,
+    "shared_drive": 4
+  },
+  "audit_status": {
+    "file/SUCCESS": 631631,
+    "message/SUCCESS": 353108,
+    "event/SUCCESS": 128123,
+    "acl/SUCCESS": 120985,
+    "folder/SUCCESS": 20571,
+    "contact/SUCCESS": 10075,
+    "task/SUCCESS": 8060,
+    "message/SKIPPED_IS_DRAFT": 1608,
+    "draft/SUCCESS": 1608,
+    "acl/SKIPPED_UNMAPPED_IDENTITY": 481,
+    "chat_space/SKIPPED_NOT_A_SPACE": 398,
+    "link_repair/SUCCESS": 38,
+    "link_rewrite/SUCCESS": 38,
+    "acl/FAILED": 30,
+    "shared_drive/SUCCESS": 9,
+    "shortcut/SUCCESS": 7,
+    "shared_drive_member/SUCCESS": 5,
+    "user/FAILED": 2,
+    "contact_group/SUCCESS": 2,
+    "file/FAILED": 1,
+    "shared_drive_access/FAILED": 1,
+    "shared_drive_member/FAILED": 1
+  },
+  "identity_map": {
+    "users": 200,
+    "done": 200
+  },
+  "link_state": {
+    "rewritten": 38,
+    "repaired": 38,
+    "messages_predating_rewrite": 353070
+  },
+  "readiness": [
+    {
+      "level": "ok",
+      "title": "Workspace data is already copied",
+      "detail": "502,135 Drive items, 3,548 messages, 96,051 events are on the target. The source copies go when the licences do."
+    },
+    {
+      "level": "stop",
+      "title": "353,070 message(s) predate link rewriting",
+      "detail": "38 link(s) rewritten and 38 repaired since, but mail copied before that still names source files. Those links die at the downgrade."
+    },
+    {
+      "level": "warn",
+      "title": "No groups have been migrated",
+      "detail": "Groups survive on the source as Cloud Identity, but the target needs its own: every ACL naming a group, and every SSO assignment targeting one, resolves by address on the target."
+    },
+    {
+      "level": "warn",
+      "title": "No SSO profile has been created on the target",
+      "detail": "The domain moves to the target, so users sign in there. The source keeping its profile does not sign anybody in."
+    },
+    {
+      "level": "warn",
+      "title": "Sign-in-with-Google grants have to be re-consented",
+      "detail": "No API creates an OAuth grant. Because the domain moves with the users, apps that key on email address will recognise them after one consent screen; apps keyed on the Google account id will not. Run the SSO inventory for the list."
+    }
+  ]
+}
