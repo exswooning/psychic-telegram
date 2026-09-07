@@ -1219,7 +1219,8 @@ def _external_job_snapshot(since: int = 0) -> dict | None:
     }
 
 
-def _job_snapshot(account_id: int | None, since: int) -> dict:
+def _job_snapshot(account_id: int | None, since: int,
+                  want: str | None = None) -> dict:
     """/api/job's own logic, pulled out so it's callable without an HTTP
     request -- see the `external` field's own purpose below.
 
@@ -1236,6 +1237,34 @@ def _job_snapshot(account_id: int | None, since: int) -> dict:
     safety (Stop must not offer to kill a job this account never started).
     """
     snap = get_job(account_id).snapshot(since)
+    # `want` is the job the caller asked about. There is one Job per account
+    # and it is reused, so once a run finishes and the next one starts, this
+    # object carries the NEW job's name, lines and elapsed -- and answered
+    # for whatever was asked. A poller watching "reset target" was handed a
+    # freshly-started "seed" and could not tell: same shape, plausible
+    # numbers, wrong job.
+    #
+    # Live, that reported a completed 298,185-item deletion as a job that had
+    # been destroyed, because the only two signals available -- a name that
+    # matched nothing and an absent process -- both pointed the wrong way.
+    #
+    # The finished run is not lost: Job.start writes its transcript to a file
+    # and saves a result JSON on completion, precisely so it survives the
+    # object being reused. So answer from there rather than from whatever is
+    # running now.
+    if want and snap.get("name") and snap["name"] != want:
+        saved = load_job_result(account_id, want)
+        if saved:
+            saved = dict(saved)
+            saved["live"] = False
+            saved["running"] = False
+            saved["requested"] = want
+            saved["now_running"] = snap["name"] if snap["running"] else None
+            return saved
+        return {"name": want, "requested": want, "live": False,
+                "running": False, "rc": None, "lines": [], "unknown": True,
+                "now_running": snap["name"] if snap["running"] else None,
+                "error": f"no job named {want!r} has run for this account"}
     external = False
     if not snap["running"]:
         ext = _external_job_snapshot(since)
@@ -4293,7 +4322,9 @@ class Handler(BaseHTTPRequestHandler):
             if scope_err:
                 self._json({"error": scope_err}, 403)
                 return
-            self._json(_job_snapshot(watching, since))
+            # The name is honoured, not decorative: see _job_snapshot.
+            self._json(_job_snapshot(watching, since,
+                                     query.get("name", [""])[0] or None))
         elif path == "/api/dms_status":
             # The DMS import runs on its own Job (parallel to the migration),
             # so it has its own status feed rather than /api/job's.
