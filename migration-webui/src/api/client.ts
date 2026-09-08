@@ -199,6 +199,25 @@ export async function fetchJobHistory(
   return result
 }
 
+export interface LicencePreflight {
+  pairs: number
+  sourceLicensed: number
+  targetLicensed: number
+  /** Pairs whose TARGET address holds no licence -- the ones that will
+   *  migrate nothing, with an error that never says "licence". */
+  shortfall: number
+  unlicensedTargets: string[]
+  mergedTargets: { target: string; sources: number }[]
+  sourceDomain: string
+  targetDomain: string
+  sourceError: string
+  targetError: string
+  error?: string
+}
+
+export const fetchLicencePreflight = () =>
+  getJSON<LicencePreflight>('/api/licence_preflight')
+
 export type MailTransport = 'engine' | 'dms' | 'split'
 
 export interface RunToggles {

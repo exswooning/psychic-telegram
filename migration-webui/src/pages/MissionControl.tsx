@@ -17,6 +17,7 @@ import { useMigrationStore } from '@/store'
 import { MigrationStatus, ServiceProgress } from '@/types'
 import JobController from '@/components/JobController'
 import RunOptions from '@/components/RunOptions'
+import LicenceReadiness from '@/components/LicenceReadiness'
 import EmergencyBrake from '@/components/EmergencyBrake'
 import WorkingDomains from '@/components/WorkingDomains'
 import type { ConfiguredTenant } from '@/components/WorkingDomains'
@@ -327,6 +328,7 @@ const MissionControl: React.FC = () => {
 
       <ProvisionUsers />
 
+      <LicenceReadiness />
       <RunOptions />
       <JobController users={cpUsers} nodes={nodes} onChanged={refreshLists} />
 

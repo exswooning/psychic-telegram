@@ -3515,6 +3515,76 @@ def licences_payload(side: str = "target",
     }
 
 
+def licence_preflight(account_id: int | None = None) -> dict:
+    """Will the target run out of licences before the migration finishes?
+
+    Asked BEFORE a run, because afterwards it is unrecognisable. An
+    unlicensed account has no Drive and no Gmail, and Google says so with
+    401 "Active session is invalid. Error code: 4" and 400 "Mail service
+    not enabled" -- neither of which contains the word licence. Live, a
+    tenant holding 201 accounts against 200 seats produced exactly that,
+    twice, and was read as an outage both times.
+
+    The comparison is per PAIR, not per tenant: what matters is whether the
+    specific target address a source user is mapped to holds a licence, not
+    whether the tenant has seats somewhere. Seats-in-total is not readable
+    at all without the Reseller API, which a directly-managed customer does
+    not have -- so this counts what IS knowable and never guesses at the
+    rest.
+    """
+    import tenant_inventory
+    from config import Settings as _S
+
+    st = _S(account_id=account_id) if account_id else _S()
+    src_by_email, src_err = tenant_inventory.licenses(st, "source")
+    tgt_by_email, tgt_err = tenant_inventory.licenses(st, "target")
+
+    pairs: list[tuple[str, str]] = []
+    try:
+        from db import MigrationDB
+        # Plain read, no `with`: sqlite3's connection context manager opens a
+        # transaction, and this must not take a write lock on a ledger a
+        # migration may be running against.
+        pairs = [(r["source_email"], r["target_email"])
+                 for r in MigrationDB(st.db_path).conn.execute(
+                     "SELECT source_email, target_email FROM identity_map "
+                     "WHERE entity_type='user'")]
+    except Exception as exc:      # noqa: BLE001 - advisory, never blocking
+        return {"error": f"could not read the identity map: {str(exc)[:160]}",
+                "pairs": 0}
+
+    # Lower-cased on both sides: the Licensing API answers with whatever
+    # case the account was created in, the ledger with whatever was typed.
+    tgt_licensed = {e.lower() for e, sku in tgt_by_email.items() if sku}
+    src_licensed = {e.lower() for e, sku in src_by_email.items() if sku}
+
+    unlicensed_targets = sorted(
+        {t for _, t in pairs if t and t.lower() not in tgt_licensed})
+    # Several source users already pointed at one target: the merge is not a
+    # hypothetical remedy, it is a thing this ledger may already be doing.
+    per_target: dict[str, int] = {}
+    for _, t in pairs:
+        per_target[t.lower()] = per_target.get(t.lower(), 0) + 1
+    merged = {t: n for t, n in per_target.items() if n > 1}
+
+    return {
+        "pairs": len(pairs),
+        "sourceLicensed": len(src_licensed),
+        "targetLicensed": len(tgt_licensed),
+        # The number that decides the warning: pairs whose TARGET cannot
+        # receive anything today.
+        "shortfall": len(unlicensed_targets),
+        "unlicensedTargets": unlicensed_targets[:200],
+        "mergedTargets": [{"target": t, "sources": n}
+                          for t, n in sorted(merged.items(), key=lambda kv: -kv[1])[:50]],
+        "sourceDomain": st.source_domain, "targetDomain": st.target_domain,
+        # Reported, not raised: this needs a scope most tenants have never
+        # granted, and a panel that cannot read licences must say so rather
+        # than render a confident zero.
+        "sourceError": src_err, "targetError": tgt_err,
+    }
+
+
 def save_identity_pair(source_email: str, target_email: str) -> dict:
     """Append one hand-entered source->target pair to identities.csv.
 
@@ -4536,6 +4606,8 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/licences":
             self._json(licences_payload(
                 (query.get("side", ["target"])[0] or "target"), self._on_screen()))
+        elif path == "/api/licence_preflight":
+            self._json(licence_preflight(self._on_screen()))
         elif path == "/api/identities":
             # Scoped, like every other read on this page. Unscoped it opened
             # the box's default ledger, so a signed-in tenant was shown some
