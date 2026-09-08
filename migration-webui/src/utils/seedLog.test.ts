@@ -181,3 +181,28 @@ describe('robustness', () => {
     expect(r.totals).toEqual({})
   })
 })
+
+describe('the run’s own up-front estimate', () => {
+  /* The seeder pretty-prints the duration -- "45 minute(s)" under an hour,
+     "12h 15m" over one -- and only the minutes branch was matched. So the
+     estimate was dropped by exactly the runs long enough to need it: live,
+     a 200-user seed printed "roughly 12h 15m" at minute zero and the
+     dashboard read "Est. at start: --" for the next twelve hours, while no
+     observed rate existed either (the first user takes an hour). */
+  it('reads an estimate given in hours and minutes', () => {
+    const run = parseSeedRun([
+      '  estimated ~2,648,000 API writes, roughly 12h 15m at 30 parallel'
+      + ' users (2 writes/sec/user)',
+    ])
+    expect(run.estimatedWrites).toBe(2648000)
+    expect(run.estimatedMinutes).toBe(12 * 60 + 15)
+  })
+
+  it('still reads one given in plain minutes', () => {
+    const run = parseSeedRun([
+      '  estimated ~4,000 API writes, roughly 45 minute(s) at 8 parallel'
+      + ' users (2 writes/sec/user)',
+    ])
+    expect(run.estimatedMinutes).toBe(45)
+  })
+})

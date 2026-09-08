@@ -361,67 +361,122 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
         db.set_identity_status(source_user, "RUNNING")
     quota = DailyQuotaGuard(db, target_user, settings.effective_upload_cap())
 
+    def _drive():
+        dm = DriveMigrator(auth, db, settings, source_user, target_user, quota)
+        # Consolidation: several source users into one target. Nest each
+        # one's tree under a folder named for them, or they all mirror into
+        # the same My Drive root and interleave with nothing saying which
+        # file came from whom.
+        if db.sources_for_target(target_user) > 1:
+            dm.consolidate_under = source_user
+        return dm.run(delta=delta)
+
+    def _gmail():
+        return GmailMigrator(auth, db, settings, source_user, target_user).run(
+            delta=delta, since_epoch_days=delta_days,
+            drive_in_scope="drive" in services)
+
+    def _calendar():
+        updated_min = None
+        if delta:
+            updated_min = (
+                datetime.now(timezone.utc) - timedelta(days=delta_days)
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return CalendarMigrator(auth, db, settings, source_user,
+                                target_user).run(delta=delta,
+                                                 updated_min=updated_min)
+
+    # Order matters twice over. Drive first, because Gmail rewrites Drive
+    # links through the mappings Drive creates. Chat last, because it is the
+    # only pass that can leave a half-built artefact (a space stuck in
+    # import mode), so it runs after everything that cannot.
+    plan = [
+        ("drive", "drive" in services, _drive),
+        ("gmail", "gmail" in services, _gmail),
+        ("calendar", "calendar" in services, _calendar),
+        ("chat", "chat" in services and settings.migrate_chat,
+         lambda: ChatMigrator(auth, db, settings, source_user, target_user).run()),
+        ("contacts", "contacts" in services and settings.migrate_contacts,
+         lambda: ContactsMigrator(auth, db, settings, source_user, target_user).run()),
+        ("tasks", "tasks" in services and settings.migrate_tasks,
+         lambda: TasksMigrator(auth, db, settings, source_user, target_user).run()),
+    ]
+
+    # What the account does not have, and what is actually broken. Kept
+    # apart because they need opposite responses, and kept OUT of
+    # result["services"] because _services_that_succeeded reads that to
+    # decide what may be marked done -- a dict with no counts in it looks
+    # like a clean run to that function.
+    no_access: dict[str, str] = {}
+    failures: dict[str, str] = {}
+
     try:
-        if "drive" in services and not SHUTDOWN.is_set():
+        # One service failing must not take the others with it. A user whose
+        # Drive is switched off used to lose their mail as well: Drive
+        # raised, the single try block around every service caught it, and
+        # gmail, calendar, contacts and tasks were never reached. The user
+        # came back FAILED having migrated nothing, though five of the six
+        # services were available to them. Migrate what the account has.
+        for name, wanted, run_service in plan:
+            if not wanted or SHUTDOWN.is_set():
+                continue
             try:
-                dm = DriveMigrator(auth, db, settings, source_user,
-                                   target_user, quota)
-                # Consolidation: several source users into one target. Nest
-                # each one's tree under a folder named for them, or they all
-                # mirror into the same My Drive root and interleave with
-                # nothing saying which file came from whom.
-                if db.sources_for_target(target_user) > 1:
-                    dm.consolidate_under = source_user
-                result["services"]["drive"] = dm.run(delta=delta)
+                result["services"][name] = run_service()
             except QuotaExhausted as exc:
+                # Still the whole user's problem, not this service's. The cap
+                # is a daily byte budget for the TARGET account, so it is
+                # already spent for everything that follows, and the run is
+                # meant to resume tomorrow rather than grind through five
+                # more services against a budget of zero.
                 log.warning("[%s] %s", source_user, exc)
-                result["services"]["drive"] = {"status": "PAUSED_QUOTA",
-                                               "detail": str(exc)}
+                result["services"][name] = {"status": "PAUSED_QUOTA",
+                                            "detail": str(exc)}
                 if track_status:
                     db.set_identity_status(source_user, "PAUSED_QUOTA", str(exc))
+                result["status"] = "PAUSED_QUOTA"
+                result["elapsed_sec"] = round(time.time() - started, 1)
                 return result
-
-        if "gmail" in services and not SHUTDOWN.is_set():
-            gm = GmailMigrator(auth, db, settings, source_user, target_user)
-            result["services"]["gmail"] = gm.run(
-                delta=delta, since_epoch_days=delta_days,
-                drive_in_scope="drive" in services,
-            )
-
-        if "calendar" in services and not SHUTDOWN.is_set():
-            updated_min = None
-            if delta:
-                updated_min = (
-                    datetime.now(timezone.utc) - timedelta(days=delta_days)
-                ).strftime("%Y-%m-%dT%H:%M:%SZ")
-            cm = CalendarMigrator(auth, db, settings, source_user, target_user)
-            result["services"]["calendar"] = cm.run(delta=delta,
-                                                    updated_min=updated_min)
-
-        # Chat last: it is the only pass that can leave a half-built artefact
-        # (a space stuck in import mode), so it runs after everything that
-        # cannot.
-        if "chat" in services and settings.migrate_chat and not SHUTDOWN.is_set():
-            cm = ChatMigrator(auth, db, settings, source_user, target_user)
-            result["services"]["chat"] = cm.run()
-
-        if ("contacts" in services and settings.migrate_contacts
-                and not SHUTDOWN.is_set()):
-            com = ContactsMigrator(auth, db, settings, source_user, target_user)
-            result["services"]["contacts"] = com.run()
-
-        if "tasks" in services and settings.migrate_tasks and not SHUTDOWN.is_set():
-            tm = TasksMigrator(auth, db, settings, source_user, target_user)
-            result["services"]["tasks"] = tm.run()
+            except Exception as exc:      # noqa: BLE001 - next service still runs
+                detail = explain_user_failure(exc, source_user, target_user,
+                                              settings)
+                if is_blocked_externally(exc):
+                    # No licence, no mailbox: the account genuinely does not
+                    # have this service. Not an error, and not something a
+                    # re-run fixes -- recorded, skipped, and deliberately
+                    # never added to services_done, so the moment a licence
+                    # is assigned the next run picks this service back up.
+                    no_access[name] = detail
+                    log.warning("[%s] no %s on this account — skipping it and "
+                                "continuing with the rest", source_user, name)
+                    db.log_audit(source_user, source_user, name,
+                                 "SKIPPED_NO_ACCESS", detail)
+                else:
+                    failures[name] = detail
+                    log.exception("[%s] %s failed", source_user, name)
+                    db.log_audit(source_user, source_user, name, "FAILED", detail)
 
         status = "INTERRUPTED" if SHUTDOWN.is_set() else "DONE"
+        if failures:
+            status = "FAILED"
+        elif no_access and not result["services"]:
+            # Nothing this account has was in scope. BLOCKED, not FAILED:
+            # waiting on a licence, not on a fix here.
+            status = "BLOCKED"
+        note = "; ".join(
+            [f"{n}: no access" for n in sorted(no_access)]
+            + [f"{n}: failed" for n in sorted(failures)])
+
         # A pass that ran nothing says nothing about whether this user is
         # finished. Promoting them anyway is how two users whose audit rows
         # still read "exhausted 6 retries on HTTP 401" came to be reported as
         # DONE by a delta that touched neither of them -- the headline went
         # from "2 users failed" to "0 users failed" on the strength of no work
         # at all. Leave the previous status standing and say so.
-        if track_status and not result["services"]:
+        #
+        # Only when nothing was ATTEMPTED, though. A user whose every service
+        # was refused has an answer, and restoring PENDING over it would
+        # throw that answer away.
+        if track_status and not (result["services"] or no_access or failures):
             # RUNNING is already on the row by this point, so put the prior
             # status back rather than stranding the user mid-flight.
             log.warning("[%s] every selected service was disabled; restoring "
@@ -430,13 +485,20 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
             db.set_identity_status(source_user, prior_status or "PENDING")
             result["status"] = "NOOP"
         elif track_status:
-            db.set_identity_status(source_user, status)
+            db.set_identity_status(source_user, status, note)
             if status == "DONE":
+                # Only what actually ran. The skipped services stay absent,
+                # which is what makes _already_done return False and bring
+                # this user back once the licence is there.
                 db.mark_services_done(source_user,
                                       _services_that_succeeded(result["services"]))
             result["status"] = status
         else:
             result["status"] = status
+        if no_access:
+            result["no_access"] = no_access
+        if failures:
+            result["failed_services"] = failures
 
     except Exception as exc:  # noqa: BLE001 - worker must not propagate
         log.exception("[%s] user migration failed", source_user)

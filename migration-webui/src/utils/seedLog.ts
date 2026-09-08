@@ -144,8 +144,15 @@ export function parseSeedRun(lines: string[]): SeedRun {
       run.totalUsers = num(m[1]); run.domain = m[2]; run.scale = m[3]
     } else if ((m = line.match(/^\s*Workers:\s*(\d+)\s*(?:\(([^)]*)\))?/))) {
       run.workers = num(m[1]); run.workerReason = m[2] || undefined
-    } else if ((m = line.match(/estimated\s+~?([\d,]+)\s+API writes,\s+roughly\s+([\d,]+)\s+minute/))) {
-      run.estimatedWrites = num(m[1]); run.estimatedMinutes = num(m[2])
+    } else if ((m = line.match(
+      // The seeder pretty-prints this duration: "45 minute(s)" under an
+      // hour, "12h 15m" over one. Matching only the minutes branch meant the
+      // estimate was dropped by exactly the runs long enough to need it --
+      // live, a 200-user seed printed "roughly 12h 15m" at minute zero and
+      // the dashboard showed "Est. at start: --" for the next twelve hours.
+      /estimated\s+~?([\d,]+)\s+API writes,\s+roughly\s+(?:([\d,]+)\s*h\s*)?([\d,]+)\s*(?:m\b|minute)/))) {
+      run.estimatedWrites = num(m[1])
+      run.estimatedMinutes = (m[2] ? num(m[2]) * 60 : 0) + num(m[3])
     } else if ((m = line.match(/external collaborator:\s*(\S+)/))) {
       run.externalCollaborator = m[1]
     } else if ((m = line.match(/^\s*(~\d+\s+messages\s+and\s+~\d+\s+events\s+per\s+user)/))) {
