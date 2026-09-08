@@ -538,8 +538,18 @@ ACTIONS: dict[str, dict] = {
 # 100%, and a straggler mid-run never overstates itself.
 # ----------------------------------------------------------------------
 _SEED_TOTAL_RE = re.compile(r"^Seeding (\d+) users? in\b")
-_SEED_DONE_RE = re.compile(r"^\s*\[.+?\]\s+done in\b")
-_SEED_FAILED_RE = re.compile(r"^\s*!\s+\S+\s+FAILED:")
+
+# Deliberately NOT anchored at ^. print() is not atomic, so a seeder running
+# 30 threads splices records onto each other's lines:
+#
+#   [seeduser115@...] starting (Engineering)  ! seeduser104@... FAILED: ...
+#
+# Live, 75 failures reached the transcript and an anchored pattern saw 17 of
+# them; the bar read 8% on a run where nothing had succeeded. The seeder
+# serializes its output now, but every transcript written before that still
+# looks like this, and they are what the history reads back.
+_SEED_DONE_RE = re.compile(r"\[[^\]]+\]\s+done in\b")
+_SEED_FAILED_RE = re.compile(r"!\s+\S+\s+FAILED:")
 
 
 # "[7/201] someone@example.com: 4292 messages deleted" -- any job that
@@ -547,7 +557,7 @@ _SEED_FAILED_RE = re.compile(r"^\s*!\s+\S+\s+FAILED:")
 # seeder's reset, which prints nothing else a percentage could come from:
 # _SEED_TOTAL_RE only matches the "Seeding N users" banner a seeding run
 # prints, so a reset-only run sat at no progress at all for its whole life.
-_COUNTER_RE = re.compile(r"^\s*\[(\d+)\s*/\s*(\d+)\]")
+_COUNTER_RE = re.compile(r"\[(\d+)\s*/\s*(\d+)\]")
 
 
 def _counter_progress_pct(lines: list[str]) -> int | None:
@@ -558,17 +568,25 @@ def _counter_progress_pct(lines: list[str]) -> int | None:
     """
     best = None
     for ln in lines:
-        m = _COUNTER_RE.match(ln)
-        if not m:
-            continue
-        done, total = int(m.group(1)), int(m.group(2))
-        if total > 0:
+        for m in _COUNTER_RE.finditer(ln):
+            done, total = int(m.group(1)), int(m.group(2))
+            if total <= 0:
+                continue
             pct = round(min(done, total) / total * 100)
             best = pct if best is None else max(best, pct)
     return best
 
 
 def _seed_progress_pct(lines: list[str]) -> int | None:
+    """How far through the user list this seed has got, as a percentage.
+
+    ATTEMPTED, not succeeded -- a failed user is still a user the run will
+    not come back to, so it is progress through the list and it is what an
+    ETA has to be built from. It is emphatically not a success rate: live, a
+    run sat at 38% having finished nothing at all, every one of its 76
+    attempts a failure. The callers that show this number show the finished
+    and failed counts beside it for exactly that reason.
+    """
     total = None
     for ln in lines:
         m = _SEED_TOTAL_RE.match(ln)
@@ -577,8 +595,10 @@ def _seed_progress_pct(lines: list[str]) -> int | None:
             break
     if not total:
         return None
-    attempted = sum(1 for ln in lines
-                    if _SEED_DONE_RE.match(ln) or _SEED_FAILED_RE.match(ln))
+    # Occurrences, not lines: an interleaved line can carry two records, and
+    # counting it once loses the other.
+    attempted = sum(len(_SEED_DONE_RE.findall(ln)) + len(_SEED_FAILED_RE.findall(ln))
+                    for ln in lines)
     return round(min(attempted, total) / total * 100)
 
 

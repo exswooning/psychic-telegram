@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { parseSeedRun } from './seedLog'
+import { parseSeedRun, splitRecords } from './seedLog'
 
 /**
  * seed_sandbox.py is a CLI script, not an API -- its printed output IS the
@@ -204,5 +204,40 @@ describe('the run’s own up-front estimate', () => {
       + ' users (2 writes/sec/user)',
     ])
     expect(run.estimatedMinutes).toBe(45)
+  })
+})
+
+describe('records spliced onto one line', () => {
+  /* print() is not atomic and the seeder ran 30 threads through it, so a
+     "starting" line can carry another user's FAILED record. Live, 75
+     failures were written and this parser reported 17: 58 were glued on,
+     where every ^-anchored pattern is blind to them. */
+  const SPLICED = '  [b@x.test] starting (Sales, PRJ-003)  ! a@x.test FAILED:'
+    + " a bytes-like object is required, not 'str'"
+
+  it('finds both records in one line', () => {
+    expect(splitRecords(SPLICED)).toHaveLength(2)
+  })
+
+  it('counts the failure the anchored pattern missed', () => {
+    const run = parseSeedRun([
+      "Seeding 200 users in x.test at scale 'huge'", SPLICED,
+    ])
+    expect(run.warnings.map((w) => w.kind)).toContain('a@x.test')
+  })
+
+  it('still starts the user whose line it was', () => {
+    const run = parseSeedRun([SPLICED])
+    expect(run.users.map((u) => u.email)).toContain('b@x.test')
+  })
+
+  it('leaves an ordinary line exactly as it was', () => {
+    const plain = '  estimated ~2,648,000 API writes, roughly 12h 15m at 30'
+    expect(splitRecords(plain)).toEqual([plain])
+  })
+
+  it('does not split the heartbeat, which carries no record', () => {
+    const beat = '  ... still seeding: 0/200 users done after 31m00s (30 in flight)'
+    expect(splitRecords(beat)).toEqual([beat])
   })
 })

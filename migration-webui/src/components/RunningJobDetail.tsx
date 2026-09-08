@@ -71,9 +71,13 @@ export const RunningJobDetail: React.FC<{
         <Stack direction="row" flexWrap="wrap" gap={3} sx={{ mb: 2 }}>
           <Stat label="Elapsed"
                 value={job.elapsedSec ? describeElapsed(job.elapsedSec) : '--'} />
+          {/* "attempted" is not a hedge: a seed reporting 38% had finished
+              nothing at all, every one of its 76 attempts a failure. A bar
+              that reads as a success rate is the misreading to prevent. */}
           <Stat label="Progress"
                 value={typeof job.pct === 'number' ? `${job.pct}%` : '--'}
-                hint={typeof job.pct === 'number' ? undefined : 'not reported'} />
+                hint={typeof job.pct === 'number' ? 'of the work attempted'
+                  : 'not reported'} />
           <Stat label="ETA (projected)"
                 value={eta != null ? describeElapsed(Math.round(eta)) : '--'}
                 hint={eta != null ? 'at the current rate' : 'needs a percentage'} />

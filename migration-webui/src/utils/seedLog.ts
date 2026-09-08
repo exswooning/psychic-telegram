@@ -66,6 +66,31 @@ const USER_LINE = /^\s*\[([^\]]+)\]\s+(starting|done|top-up)\b\s*(.*)$/
 const WARNING_LINE = /^\s*!\s+(\S+)\b(.*)$/
 const HTTP_CODE = /HTTP\s+(\d{3})\s*(?:\(([^)]+)\))?/
 
+// Where a record starts, so one physical line can be split back into the
+// records spliced into it.
+//
+// print() is not atomic, and the seeder ran 30 threads through it, so
+// transcripts contain lines like:
+//
+//   [seeduser115@x] starting (Engineering)  ! seeduser104@x FAILED: ...
+//
+// Live, 75 failures were written and this parser -- every pattern anchored
+// at ^ -- reported 17, because 58 of them were glued onto a "starting"
+// line. The seeder serializes its output now; every transcript written
+// before that still looks like this, and those are what the job history
+// reads back.
+const RECORD_START = /(?=\[[^\]]+\]\s+(?:starting|done|top-up)\b)|(?=!\s+\S+\s)/g
+
+/** One physical line -> the records actually in it. */
+export function splitRecords(line: string): string[] {
+  const parts = line.split(RECORD_START)
+  // Untouched unless there was actually something to split. Headers, the
+  // estimate and the heartbeat all arrive as one piece, and other patterns
+  // here match on their leading whitespace.
+  if (parts.length < 2) return [line]
+  return parts.map((p) => p.trim()).filter(Boolean)
+}
+
 // Longest-first: "chat messages" and "secondary calendars" must be tried
 // before "messages"/"calendars", or the shorter alternative matches inside
 // them and mis-labels the count.
@@ -104,7 +129,8 @@ export function parseSeedRun(lines: string[]): SeedRun {
     users: [], totals: {}, warnings: [], runningCount: 0, doneCount: 0,
   }
 
-  for (const line of lines) {
+  for (const physical of lines) {
+   for (const line of splitRecords(physical)) {
     const user = line.match(USER_LINE)
     if (user) {
       const [, email, verb, rest] = user
@@ -163,6 +189,7 @@ export function parseSeedRun(lines: string[]): SeedRun {
       // (it reflects --users/--all-users filtering; this one does not).
       run.totalUsers = num(m[1])
     }
+   }
   }
 
   run.users = [...byUser.values()]

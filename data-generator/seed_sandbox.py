@@ -66,6 +66,7 @@ from __future__ import annotations
 import argparse
 import base64
 import quopri
+import builtins
 import concurrent.futures as futures
 import io
 import json
@@ -250,6 +251,27 @@ def assert_sandbox(settings: Settings, confirm_domain: str) -> None:
 # ======================================================================
 # Media + retry helpers (module level so tests can substitute them)
 # ======================================================================
+# print() is not atomic. It writes the text and the newline as separate
+# calls, so 30 seeding threads splice records onto each other's lines:
+#
+#   [seeduser115@...] starting (Engineering)  ! seeduser104@... FAILED: ...
+#
+# Live, 75 failures reached the transcript as 17 that any ^-anchored parser
+# could see -- 58 were glued onto a "starting" line -- and the progress bar
+# read 8% off the 17, on a run where nothing had succeeded at all.
+#
+# Shadowing print for this module rather than editing 94 call sites: the
+# lock has to hold at every one of them, and one that is missed stays
+# invisible until a transcript is unreadable again.
+_PRINT_LOCK = threading.Lock()
+_unlocked_print = builtins.print
+
+
+def print(*args, **kwargs):      # noqa: A001 - deliberate module-level shadow
+    with _PRINT_LOCK:
+        _unlocked_print(*args, **kwargs)
+
+
 def _media(data: bytes, mimetype: str):
     from googleapiclient.http import MediaIoBaseUpload
 
