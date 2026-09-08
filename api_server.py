@@ -2312,12 +2312,19 @@ async def full_setup_status(side: str, account: int | None = None,
         out = _full_setup_state_path(side, watching)
         partial = out + ".partial"
         result = None
+        # When it was written, so a stale failure cannot read as a current
+        # one. A TimeoutExpired from a run that died the previous evening
+        # sat under "Last setup run: failed" with nothing to date it, on a
+        # page beside a healthy tenant -- and the timeout it named had
+        # already been removed from the code by then.
+        result_at = None
         for path in (partial, out):
             try:
                 with open(path, encoding="utf-8") as fh:
                     data = json.load(fh)
                 if isinstance(data, dict) and "phases" in data:
                     result = data
+                    result_at = os.path.getmtime(path)
             except (OSError, ValueError):
                 continue
 
@@ -2390,7 +2397,8 @@ async def full_setup_status(side: str, account: int | None = None,
                     "detail": why[:300],
                 }]}
         return {"running": running, "pid": pid, "result": result,
-                "progressPct": progress_pct, "progressLabel": progress_label}
+                "progressPct": progress_pct, "progressLabel": progress_label,
+                "resultAt": result_at}
     return await _off_loop(_read)
 
 

@@ -560,6 +560,29 @@ _SEED_FAILED_RE = re.compile(r"!\s+\S+\s+FAILED:")
 _COUNTER_RE = re.compile(r"\[(\d+)\s*/\s*(\d+)\]")
 
 
+# Where a phase of work begins. A single job can run more than one --
+# `reset && seed` is one process writing one transcript -- and a finished
+# phase leaves its counters behind in it.
+_PHASE_START_RE = re.compile(r"^\s*(?:Seeding \d+ users? in\b"
+                             r"|About to DELETE all\b)")
+
+
+def _current_phase(lines: list[str]) -> list[str]:
+    """Only the newest phase's output.
+
+    _counter_progress_pct takes the highest [done/total] it can see. Across
+    a two-phase transcript that is the FINISHED phase's own [200/200]: live,
+    a chained reset-then-seed job showed 100% and "ETA 0s" while the seed
+    underneath it had finished nobody at all, 16 minutes in. Progress means
+    progress through the phase that is actually running.
+    """
+    start = 0
+    for i, ln in enumerate(lines):
+        if _PHASE_START_RE.match(ln):
+            start = i
+    return lines[start:] if start else lines
+
+
 def _counter_progress_pct(lines: list[str]) -> int | None:
     """Highest [done/total] seen, as a percentage. None if nothing counts.
 
@@ -3710,7 +3733,9 @@ def _job_progress(name: str, lines: list[str], elapsed: float
     grows -- which is exactly when an operator starts actually watching it.
     """
     # A job that counts itself wins over every heuristic below: it is the
-    # job's own statement of where it is, not an inference about it.
+    # job's own statement of where it is, not an inference about it -- but
+    # only about the phase it is in now, not one it finished an hour ago.
+    lines = _current_phase(lines)
     pct = _counter_progress_pct(lines)
     if pct is not None:
         pass

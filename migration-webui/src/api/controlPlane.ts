@@ -451,6 +451,9 @@ export interface FullSetupStatus {
    * this anywhere queryable later, so it's what makes Stop possible via
    * the generic /api/v2/jobs/{pid}/stop (SIGINT-by-pid). */
   pid?: number | null
+  /** Epoch seconds the result on disk was written. A failure from an
+   *  earlier day looked exactly like one from a minute ago without it. */
+  resultAt?: number | null
 }
 
 /**

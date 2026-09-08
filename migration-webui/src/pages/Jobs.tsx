@@ -571,6 +571,14 @@ const SideJobCard: React.FC<{
                     <Chip size="small" sx={{ ml: 1 }} label={setup.result.ok ? 'ok' : 'failed'}
                          color={setup.result.ok ? 'success' : 'error'}
                          variant={setup.result.ok ? 'outlined' : 'filled'} />
+                    {/* Undated, a failure from the previous evening reads
+                        as one from a minute ago. */}
+                    {setup.resultAt && (
+                      <Typography component="span" variant="caption"
+                                  color="text.secondary" sx={{ ml: 1 }}>
+                        {new Date(setup.resultAt * 1000).toLocaleString()}
+                      </Typography>
+                    )}
                   </Typography>
                   <Box component="pre" sx={{
                     fontSize: 11, p: 1.5, bgcolor: 'action.hover', borderRadius: 1,
