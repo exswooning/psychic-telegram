@@ -17,7 +17,8 @@ import {
   fetchMe, startMigration, stopJob as stopFleetJob,
 } from '@/api/controlPlane'
 import {
-  fetchJob, fetchJobHistory, fetchCompletedJobs, runSeed, JobStatus, JobResult,
+  fetchJob, fetchJobHistory, fetchCompletedJobs, runSeed, fetchSeedScopes,
+  JobStatus, JobResult,
   stopJob as stopSeedJob,
 } from '@/api/client'
 import type { CompletedJob } from '@/api/client'
@@ -609,15 +610,27 @@ const SideJobCard: React.FC<{
 const SeedPanel: React.FC<{ domain: string; onStarted: () => void }> = ({ domain, onStarted }) => {
   const [scale, setScale] = useState('small')
   const [createUsers, setCreateUsers] = useState(false)
+  const [groups, setGroups] = useState(false)
   const [ask, setAsk] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [done, setDone] = useState<string | null>(null)
+  // Whether the group scope is actually delegated. seed_scopes_payload has
+  // advertised this capability all along; the checkbox says plainly when
+  // the grant behind it is missing, rather than letting someone tick it and
+  // find out from a line in the transcript.
+  const [groupScope, setGroupScope] = useState<boolean | null>(null)
+  useEffect(() => {
+    fetchSeedScopes()
+      .then((r) => setGroupScope(
+        r.capabilities.find((c) => c.flag === '--groups')?.granted ?? null))
+      .catch(() => setGroupScope(null))
+  }, [])
 
   const launch = async () => {
     setBusy(true); setError(null)
     try {
-      const r = await runSeed(domain, scale, createUsers, false)
+      const r = await runSeed(domain, scale, createUsers, false, { groups })
       if (!r.ok) throw new Error(r.error || 'seed failed')
       setDone('Seed started -- see "Seed source tenant" below for live output.')
       setAsk(false)
@@ -644,6 +657,21 @@ const SeedPanel: React.FC<{ domain: string; onStarted: () => void }> = ({ domain
           control={<Switch checked={createUsers} onChange={(e) => setCreateUsers(e.target.checked)} />}
           label={<Typography variant="body2">Create users</Typography>}
         />
+        <Tooltip title={groupScope === false
+          ? 'admin.directory.group is not delegated — the seed will say so and '
+            + 'carry on without groups'
+          : 'Creates Google Groups, their members, one nested group, and the '
+            + 'group-typed Drive ACLs that need them to exist first'}>
+          <FormControlLabel
+            control={<Switch checked={groups} data-testid="seed-groups"
+                             onChange={(e) => setGroups(e.target.checked)} />}
+            label={
+              <Typography variant="body2"
+                          color={groupScope === false ? 'text.disabled' : undefined}>
+                Groups{groupScope === false ? ' (scope not granted)' : ''}
+              </Typography>}
+          />
+        </Tooltip>
         <Button size="small" variant="contained" startIcon={<SeedIcon />} onClick={() => setAsk(true)}>
           Seed now
         </Button>
@@ -654,7 +682,8 @@ const SeedPanel: React.FC<{ domain: string; onStarted: () => void }> = ({ domain
         open={ask} busy={busy} error={error} destructive confirmPhrase="SEED"
         title={`Seed ${domain}`}
         description={
-          <>Writes test data into <strong>{domain}</strong> at the <strong>{scale}</strong> scale.
+          <>Writes test data into <strong>{domain}</strong> at the <strong>{scale}</strong> scale
+          {groups ? ', including groups and group-typed Drive shares' : ''}.
           No password needed -- uses the service account key already on file.</>
         }
         onCancel={() => { setAsk(false); setError(null) }}

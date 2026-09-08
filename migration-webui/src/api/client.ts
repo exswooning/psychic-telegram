@@ -567,18 +567,44 @@ export interface SeedResult {
   error?: string
 }
 
+/** Everything optional about a seed run.
+ *
+ *  Named rather than positional. This was ten positional parameters, and
+ *  adding an eleventh meant writing six `undefined`s at the one call site
+ *  that needed it -- which is also how `--groups` came to be advertised by
+ *  seed_scopes_payload and reachable from nowhere. */
+export interface SeedOptions {
+  allUsers?: boolean
+  createUntilFull?: boolean
+  /** Blank = size to the machine. The server refuses anything past twice
+   *  its own recommendation; a seed the kernel kills hours in costs more
+   *  than a slow one. */
+  workers?: string
+  /** A deleted Workspace address stays taken for 20 days, so a
+   *  wipe-and-recreate that reuses names fails until they age out. */
+  localpartPrefix?: string
+  /** Shared drives belong to no user, so the per-user seed never makes one
+   *  and shared_drives.py has nothing to migrate. Opt-in: they cost real
+   *  tenant objects and most seeds do not need them. */
+  sharedDrives?: string
+  /** Comma-separated localparts. Blank seeds every user the tenant has,
+   *  which on a real tenant is days. */
+  users?: string
+  /** Google Groups, their members, one nested group, and the group-typed
+   *  Drive ACLs that need them to exist first. Needs
+   *  admin.directory.group; the seeder says so and carries on without it. */
+  groups?: boolean
+}
+
 export async function runSeed(
   confirmDomain: string,
   scale: string,
   createUsers: boolean,
   reset: boolean,
-  allUsers?: boolean,
-  createUntilFull?: boolean,
-  workers?: string,
-  localpartPrefix?: string,
-  sharedDrives?: string,
-  users?: string
+  opts: SeedOptions = {},
 ): Promise<SeedResult> {
+  const { allUsers, createUntilFull, workers, localpartPrefix,
+          sharedDrives, users, groups } = opts
   const res = await fetch('/api/seed', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -589,21 +615,11 @@ export async function runSeed(
       reset,
       all_users: allUsers,
       create_until_full: createUntilFull,
-      // Blank = size to the machine. The server refuses anything past twice
-      // its own recommendation; a seed the kernel kills hours in costs more
-      // than a slow one.
       workers: workers || undefined,
-      // A deleted Workspace address stays taken for 20 days, so a
-      // wipe-and-recreate that reuses names fails until they age out.
       localpart_prefix: localpartPrefix || undefined,
-      // Shared drives belong to no user, so the per-user seed never makes
-      // one and shared_drives.py has nothing to migrate. Opt-in: they cost
-      // real tenant objects and most seeds do not need them.
       shared_drives: sharedDrives || undefined,
-      // Comma-separated localparts. Blank seeds every user the tenant has,
-      // which on a real tenant is days -- so a bounded seed has to be
-      // reachable from here, or checking a change means not using the UI.
       users: users || undefined,
+      groups: groups || undefined,
     }),
   })
   return res.json()

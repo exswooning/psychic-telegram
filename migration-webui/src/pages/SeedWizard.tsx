@@ -360,9 +360,10 @@ const SeedStep: React.FC = () => {
   const start = async () => {
     setErr(null)
     setJobActive(false)
-    const r = await runSeed(confirmDomain, scale, createUsers, reset,
-                            allUsers, createUntilFull, workers, prefix,
-                            sharedDrives, users)
+    const r = await runSeed(confirmDomain, scale, createUsers, reset, {
+      allUsers, createUntilFull, workers, localpartPrefix: prefix,
+      sharedDrives, users,
+    })
     if (r.ok) setJobActive(true)
     else setErr(r.error || 'could not start')
   }

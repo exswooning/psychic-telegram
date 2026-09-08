@@ -105,7 +105,8 @@ SEED_CLIENT_SET_MB = 22     # one drive+gmail+calendar client set, measured
 SEED_THREAD_CLIENT_MB = 7   # each extra worker resolves its own, measured
 
 
-def mb_per_seed_worker(mail_workers: int | None = None) -> int:
+def mb_per_seed_worker(mail_workers: int | None = None,
+                       leaf_workers: int | None = None) -> int:
     """Peak resident memory one seeded USER needs, in MB.
 
     The comment above states the arithmetic -- 22 + 7*(4+4) = 78 -- and then
@@ -115,15 +116,189 @@ def mb_per_seed_worker(mail_workers: int | None = None) -> int:
     sizing keeps charging for 4, and the box quietly over-commits. That is
     the same failure MB_PER_WORKER had, in a smaller form.
 
-    Both pools are sized by this one knob (leaf and mail alike), hence 2x.
+    The two pools are counted SEPARATELY now. They were both charged off
+    SEED_MAIL_WORKERS -- "both pools are sized by this one knob, hence 2x"
+    -- which was true only while the leaf pool had no knob of its own. It
+    has one (SEED_LEAF_WORKERS), so raising it bought threads the budget
+    never charged for: exactly the over-commit this function exists to
+    prevent, reintroduced through the other pool. On a box with no swap
+    that is an OOM kill, not a stall.
+
     The 1.3 margin is the headroom the frozen 128 carried over its own 78
-    and is kept deliberately: under-estimating this is the swap stall the
-    module exists to prevent.
+    and is kept deliberately.
     """
     if mail_workers is None:
         mail_workers = max(1, int(os.getenv("SEED_MAIL_WORKERS", "4")))
-    per_user = SEED_CLIENT_SET_MB + SEED_THREAD_CLIENT_MB * 2 * mail_workers
+    if leaf_workers is None:
+        # The SATURATING count, not the budget-aware one. This runs at module
+        # level (MB_PER_SEED_WORKER below) and seed_shape() probes the
+        # machine -- which would re-enter this module before cached_probe
+        # exists and hand out fallback sizing, the circular shape this file
+        # already documents twice. Callers that want the real per-user cost
+        # of a chosen shape pass leaf_workers in; best_shape always does.
+        leaf_workers = max(1, int(os.getenv("SEED_LEAF_WORKERS", "0"))
+                           or saturating_leaf_workers())
+    per_user = (SEED_CLIENT_SET_MB
+                + SEED_THREAD_CLIENT_MB * (mail_workers + leaf_workers))
     return max(64, int(per_user * 1.3))
+
+
+# Drive's sustained per-account write ceiling. Not ours to raise; the only
+# question is how much of it we use.
+DRIVE_WRITES_PER_SEC = 3.0
+
+# How long one leaf file actually takes, end to end.
+#
+# The leaf pool was frozen at 4 threads, derived in corpus.py from a round
+# trip "measured ~1.18s" -- 4 x 1/1.18 = 3.4/sec, which fed the ceiling
+# exactly. Measured again on a live `huge` seed: 5.4s, because most leaves
+# are Docs and Sheets created from uploaded text, and Drive CONVERTS those.
+# At 5.4s the same 4 threads deliver 0.74 writes/sec -- a quarter of the
+# ceiling the number was chosen to saturate.
+#
+# Overridable because it is a property of the corpus and the day, not of
+# this code: a corpus of plain binaries converts nothing and is far faster.
+SEED_LEAF_SECONDS = float(os.getenv("SEED_LEAF_SECONDS", "5.4"))
+
+# The same question on the migration side, and the honest answer is that
+# nobody has measured it. drive_file_workers has been 4 since "~3
+# target-account writes per file against 3/sec needs about that many in
+# flight" -- which implies about 1.33s of latency per file. That implied
+# value is the default here, so sizing behaviour does not change on the
+# strength of a number nobody took: it only becomes derived rather than
+# frozen. Measure a real migration and set this, and the pools resize
+# themselves the way the seeder's just did.
+MIGRATE_FILE_SECONDS = float(os.getenv("MIGRATE_FILE_SECONDS", "1.33"))
+
+# What one migrated user costs beyond the file pool: the mailbox, metered
+# per account whatever the pool asks for. Keeps the solver from answering
+# "one enormous user" -- with no fixed cost, threads would always win.
+# Seed figures are measured (1,445 messages + 482 events at ~3/sec);
+# migration's are a stand-in until a real run is profiled.
+SEED_FIXED_SECONDS = float(os.getenv("SEED_FIXED_SECONDS", "642"))
+MIGRATE_FIXED_SECONDS = float(os.getenv("MIGRATE_FIXED_SECONDS", "600"))
+
+# Files paced by the per-user pool, per user. The absolute number matters
+# far less than its ratio to the fixed cost above -- that ratio is what
+# decides where threads stop paying for themselves.
+SEED_PACED_ITEMS = int(os.getenv("SEED_PACED_ITEMS", "2273"))
+MIGRATE_PACED_ITEMS = int(os.getenv("MIGRATE_PACED_ITEMS", "2000"))
+
+
+def best_shape(budget_mb: float, *, mb_fixed: int, mb_per_thread: int,
+               latency_sec: float, ceiling_per_sec: float,
+               paced_items: int, fixed_seconds: float,
+               worker_cap: int, thread_cap: int = 16,
+               margin: float = 1.3, min_workers: int = 1) -> dict:
+    """The (workers, threads-per-user) pair that finishes soonest.
+
+    Both numbers come out of the same RAM, and that is the whole problem:
+    every thread added to a user is memory taken from running another user,
+    and only the PRODUCT finishes a job. Sizing them separately -- users
+    from a memory budget, threads from a frozen constant -- can never find
+    the best pair, and did not: the seeder ran 30 users x 4 threads for 7.2
+    hours where 17 x 12 finishes in 5.7.
+
+    Modelled per user as
+
+        paced_items / min(ceiling, threads / latency)  +  fixed_seconds
+
+    `ceiling_per_sec` is Google's per-account limit; threads past
+    ceiling x latency buy nothing and cost memory. `fixed_seconds` is the
+    work this pool does not pace (a mailbox metered per account however
+    many threads ask), which is what stops the answer running away to one
+    enormous user.
+
+    CPU is deliberately absent, for the reason recommend() gives at length:
+    these pools wait on the network, and a core multiplier was twice
+    measured to bind long before RAM did.
+    """
+    best = None
+    for threads in range(1, max(1, thread_cap) + 1):
+        per_user_mb = max(1, int((mb_fixed + mb_per_thread * threads) * margin))
+        workers = min(worker_cap, int(budget_mb // per_user_mb))
+        if workers < min_workers:
+            # Past the point where even one more thread costs a whole user.
+            break
+        rate = min(ceiling_per_sec, threads / latency_sec) if latency_sec else ceiling_per_sec
+        per_user_sec = (paced_items / rate if rate else float("inf")) + fixed_seconds
+        if per_user_sec <= 0:
+            continue
+        throughput = workers / per_user_sec
+        if best is None or throughput > best["throughput"]:
+            best = {"workers": workers, "threads": threads,
+                    "per_user_mb": per_user_mb,
+                    "per_user_sec": per_user_sec, "throughput": throughput}
+    if best is None:
+        # A budget too small for even one single-threaded user. Give it one
+        # anyway and let the caller's floor apply -- refusing to run is not
+        # this function's call to make.
+        best = {"workers": min_workers, "threads": 1,
+                "per_user_mb": max(1, int((mb_fixed + mb_per_thread) * margin)),
+                "per_user_sec": paced_items / max(ceiling_per_sec, 1e-9) + fixed_seconds,
+                "throughput": 0.0}
+    return best
+
+
+def migrate_file_workers() -> int:
+    """Concurrent file copies inside one migrated user.
+
+    The same division as seed_leaf_workers, against the migration's own
+    latency. It lands on 4, which is what this has always been -- but as an
+    answer rather than a constant, so a measured MIGRATE_FILE_SECONDS moves
+    it instead of contradicting the comment beside it.
+    """
+    return max(1, min(12, round(DRIVE_WRITES_PER_SEC * MIGRATE_FILE_SECONDS)))
+
+
+def saturating_leaf_workers() -> int:
+    """Threads that keep Drive's per-account ceiling fed at the observed
+    latency. Pure arithmetic -- no probe, so it is safe at import time."""
+    return max(1, round(DRIVE_WRITES_PER_SEC * SEED_LEAF_SECONDS))
+
+
+def seed_shape(budget_mb: float | None = None) -> dict:
+    """The seeder's (users, leaf threads) for this machine.
+
+    One source of truth, because there were briefly two: recommend() solved
+    the pair against the memory budget while corpus.py asked a standalone
+    division, and on the live box they answered 14 and 12. Both callers go
+    through here now, so a box cannot be sized for one shape and run
+    another.
+
+    Threads are capped at what saturates Drive's per-account ceiling at the
+    observed latency -- past that the limiter binds and every extra thread
+    is memory not spent on another user.
+    """
+    if budget_mb is None:
+        budget_mb = cached_probe().ram_usable_gb * 1024
+    return best_shape(
+        budget_mb,
+        mb_fixed=SEED_CLIENT_SET_MB + SEED_THREAD_CLIENT_MB * _seed_mail_workers(),
+        mb_per_thread=SEED_THREAD_CLIENT_MB,
+        latency_sec=SEED_LEAF_SECONDS,
+        ceiling_per_sec=DRIVE_WRITES_PER_SEC,
+        paced_items=SEED_PACED_ITEMS,
+        fixed_seconds=SEED_FIXED_SECONDS,
+        worker_cap=SEED_HARD_CAP, thread_cap=saturating_leaf_workers(),
+        min_workers=MIN_WORKERS)
+
+
+def _seed_mail_workers() -> int:
+    return max(1, int(os.getenv("SEED_MAIL_WORKERS", "4")))
+
+
+def seed_leaf_workers() -> int:
+    """Threads per user for leaf files, derived rather than frozen.
+
+    Was 4, from a round trip "measured ~1.18s" against Drive's 3/sec. The
+    arithmetic was right and the latency went stale: 5.4s on a live `huge`
+    seed, because most leaves are Docs and Sheets created from uploaded text
+    and Drive CONVERTS those. Those 4 threads delivered 0.74 writes/sec, a
+    quarter of the ceiling the number existed to saturate, and users took 76
+    minutes each.
+    """
+    return seed_shape()["threads"]
 
 
 # Kept as a module-level name because callers and tests import it directly.
@@ -624,6 +799,12 @@ def recommend(r: SystemResources | None = None,
     jobs = max(1, int(concurrent_jobs))
     budget_mb = (r.ram_usable_gb * 1024) / jobs
 
+    # Users and threads-per-user solved TOGETHER, because they come out of
+    # the same RAM and only their product finishes a job. Sizing them
+    # separately -- users from the budget, threads from a frozen 4 -- could
+    # never find the best pair, and did not: 30 users x 4 threads took 7.2
+    # hours where the solver's 18 x 11 finishes in 5.4.
+    seed = seed_shape(budget_mb)
     by_ram = int(budget_mb // MB_PER_WORKER)
     workers = max(MIN_WORKERS, min(by_ram, HARD_CAP))
 
@@ -670,10 +851,12 @@ def recommend(r: SystemResources | None = None,
         # a swapping box is slower at any concurrency, whatever the job.
         "seed_workers": (
             MIN_WORKERS if r.under_memory_pressure
-            else max(MIN_WORKERS, min(
-                int(budget_mb // MB_PER_SEED_WORKER),
-                SEED_HARD_CAP))
+            else max(MIN_WORKERS, min(seed["workers"], SEED_HARD_CAP))
         ),
+        # Threads inside one seeded user, chosen with the user count above
+        # rather than frozen beside it.
+        "seed_leaf_workers": (2 if r.under_memory_pressure
+                              else seed["threads"]),
         # Requests/sec per user. Was 8.0/4.0 -- Google's own Drive migration
         # guidance recommends sustained writes around 3 requests/sec/account;
         # 8 ran hotter than that, spending Drive's per-user write quota on
@@ -694,7 +877,24 @@ def recommend(r: SystemResources | None = None,
         # one that turns extra buffers into the socket timeouts this module
         # exists to prevent. server_side streams no bytes through the host
         # and does not care, but the budget has to hold for the worse mode.
-        "drive_file_workers": 4 if not r.under_memory_pressure else 2,
+        # Derived from the same division as the seeder's, against the
+        # migration's own latency: enough in flight to keep Drive's
+        # per-account ceiling fed while each request waits on its round
+        # trip. It still comes out 4 -- 3/sec x ~1.33s -- because 4 was
+        # correctly derived HERE, unlike the seeder's, whose latency had
+        # gone stale by 4.6x. What changes is that it is a division now, so
+        # a measured MIGRATE_FILE_SECONDS moves it instead of contradicting
+        # the comment beside it.
+        #
+        # Not run through best_shape, deliberately: that solver trades
+        # threads against users, which is only honest where threads cost
+        # memory. Here they largely do not. MB_PER_WORKER is measured (50 MB
+        # a worker on a live 9-worker run at 4 threads) and server_side
+        # transfer streams no bytes through the host at all, so charging
+        # each thread a chunk buffer would halve migration concurrency on
+        # arithmetic that contradicts the measurement.
+        "drive_file_workers": (migrate_file_workers()
+                               if not r.under_memory_pressure else 2),
         # Same shape as drive_file_workers: concurrency inside one user,
         # halved when the box is already trading memory for disk.
         "mail_workers": 4 if not r.under_memory_pressure else 2,
@@ -703,15 +903,20 @@ def recommend(r: SystemResources | None = None,
         # SEED_HARD_CAP), so it needs its own sentence. Reusing `reason`
         # printed the self-contradicting "Workers: 32 (memory-bound: ... = 9)"
         # -- the count from one model, the explanation from the other.
+        # Describes the shape actually chosen, not a division nobody
+        # performed. It quoted MB_PER_SEED_WORKER -- the cost at the
+        # SATURATING thread count -- while the pool was sized on the cost of
+        # the count best_shape picked, so it printed "16 workers ... = 14".
+        # That is the same self-contradiction the comment above this warns
+        # about, reintroduced from the other side.
         "seed_reason": (
             why[0] if r.under_memory_pressure else
-            (f"memory-bound: {budget_mb / 1024:.1f} GB budget"
+            (f"{seed['workers']} users x {seed['threads']} threads: the "
+             f"fastest pair that fits {budget_mb / 1024:.1f} GB"
              + (f" ({r.ram_usable_gb:.1f} GB usable / {jobs} concurrent jobs)"
                 if jobs > 1 else " usable")
-             + " / "
-             f"{MB_PER_SEED_WORKER} MB per seed worker = "
-             f"{int((r.ram_usable_gb * 1024) // MB_PER_SEED_WORKER)}"
-             if int((r.ram_usable_gb * 1024) // MB_PER_SEED_WORKER) < SEED_HARD_CAP
+             + f" at {seed['per_user_mb']} MB per user"
+             if seed["workers"] < SEED_HARD_CAP
              else f"capped at {SEED_HARD_CAP}; each seeded user is a separate "
                   f"account with its own write ceiling, so the per-project "
                   f"quota binds before the per-user one")),

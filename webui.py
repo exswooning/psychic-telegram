@@ -2322,6 +2322,21 @@ def seed_argv(body: dict, account_id: int | None = None) -> tuple[list[str], dic
     argv.append("--yes")
     if body.get("create_users"):
         argv.append("--create-users")
+    if body.get("groups"):
+        # Advertised by seed_scopes_payload as a capability of this seeder,
+        # with its scope, since before this endpoint could pass it -- so the
+        # page said groups were possible and no seed started from it could
+        # ever create one. A tenant seeded here had no groups, and therefore
+        # no group-typed Drive ACLs either: the corpus skips group shares
+        # when the list is empty rather than granting to an address that
+        # does not exist.
+        #
+        # Not gated on the scope here. seed_sandbox already prints why it
+        # skipped and carries on with the rest of the seed, which is a
+        # better answer than an endpoint refusing a run for one optional
+        # feature -- and seed_scopes_payload already shows whether the
+        # grant is live, next to the checkbox.
+        argv.append("--groups")
     if body.get("create_until_full"):
         # Generates and creates accounts one at a time until the Directory
         # API itself refuses one -- the empirical stand-in for

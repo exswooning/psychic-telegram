@@ -112,13 +112,26 @@ class TestSizing:
 
         The durable property is that each pool divides usable RAM by its own
         measured per-worker cost and stops at its own cap -- not that either
-        one wins."""
+        one wins.
+
+        Stated against the cost of the shape actually CHOSEN, not against
+        MB_PER_SEED_WORKER. That module-level figure assumes the saturating
+        thread count; the seed pool is solved jointly now (best_shape), so
+        the per-user cost is whatever the chosen thread count costs. The
+        property is unchanged -- it divides RAM by its own real cost -- only
+        the divisor is no longer a single frozen number."""
+        budget = 3.0 * 1024
         rec = resources.recommend(make(ram_usable=3.0, cores=2, swap_used=0.0))
-        assert rec["seed_workers"] == min(
-            int(3.0 * 1024 // resources.MB_PER_SEED_WORKER),
-            resources.SEED_HARD_CAP)
+        seed_mb = resources.mb_per_seed_worker(
+            leaf_workers=rec["seed_leaf_workers"])
+        assert rec["seed_workers"] * seed_mb <= budget
+        assert rec["seed_workers"] <= resources.SEED_HARD_CAP
+        # And it spends the budget rather than leaving a whole worker on the
+        # table -- "sized from its own cost" cuts both ways.
+        assert (rec["seed_workers"] + 1) * seed_mb > budget or \
+            rec["seed_workers"] == resources.SEED_HARD_CAP
         assert rec["user_workers"] == min(
-            int(3.0 * 1024 // resources.MB_PER_WORKER), resources.HARD_CAP)
+            int(budget // resources.MB_PER_WORKER), resources.HARD_CAP)
 
     def test_a_seed_worker_is_budgeted_more_than_a_migrate_worker(self):
         """The seeder resolves its own API client per leaf and mail thread;
@@ -130,9 +143,11 @@ class TestSizing:
         """SEED_HARD_CAP is a ceiling, not a floor -- a genuinely small
         machine must still come out below it rather than being handed 32
         workers it cannot hold."""
+        budget = 1.0 * 1024
         rec = resources.recommend(make(ram_usable=1.0, cores=2, swap_used=0.0))
-        assert rec["seed_workers"] == int(
-            1.0 * 1024 // resources.MB_PER_SEED_WORKER)
+        seed_mb = resources.mb_per_seed_worker(
+            leaf_workers=rec["seed_leaf_workers"])
+        assert rec["seed_workers"] * seed_mb <= budget, "does not fit"
         assert rec["seed_workers"] < resources.SEED_HARD_CAP
 
     def test_memory_pressure_still_collapses_the_seed_pool(self):

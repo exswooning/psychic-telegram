@@ -539,13 +539,29 @@ class CorpusBuilder:
         seed_sandbox): each worker resolves its own client rather than
         sharing one httplib2.Http, which previously corrupted glibc's heap.
 
-        4 is where the arithmetic lands: Drive allows 3 sustained
+        Derived, not frozen. This was 4, from "Drive allows 3 sustained
         writes/sec/account and a round trip measured ~1.18s, so ~4 requests
-        in flight keeps that ceiling fed without queueing behind it. Past
-        that the limiter binds and the extra threads only cost memory --
-        each one builds its own Drive client, ~7 MB.
+        in flight keeps that ceiling fed". The arithmetic was right and the
+        latency went stale: measured again on a live `huge` seed, a leaf
+        takes 5.4s, because most of them are Docs and Sheets created from
+        uploaded text and Drive CONVERTS those. At 5.4s the same 4 threads
+        delivered 0.74 writes/sec -- a quarter of the ceiling the number was
+        chosen to saturate, and the run took 76 minutes per user.
+
+        resources.seed_leaf_workers() redoes that division against the
+        measured latency and charges the result to the memory budget, so
+        raising it cannot quietly over-commit the box. SEED_LEAF_WORKERS
+        still wins outright when set.
         """
-        return max(1, int(os.getenv("SEED_LEAF_WORKERS", "4")))
+        override = int(os.getenv("SEED_LEAF_WORKERS", "0"))
+        if override > 0:
+            return override
+        try:
+            import resources
+
+            return resources.seed_leaf_workers()
+        except Exception:      # noqa: BLE001 - sizing must never break a seed
+            return 4
 
     def _pool(self):
         """One pool for this builder's whole lifetime.

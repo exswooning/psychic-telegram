@@ -692,8 +692,7 @@ const QuickTenantSetup: React.FC<{
       if (postAction === 'seed') {
         setJobActive(false)
         const r = await runSeed(domain.trim(), seedScale, createUsers, false,
-                                undefined, undefined, undefined, undefined,
-                                undefined, seedUsers.trim() || undefined)
+                                { users: seedUsers.trim() || undefined })
         if (!r.ok) throw new Error(r.error || 'seed failed')
         setJobActive(true)
         setPostDone('seed started — live output below')
@@ -702,7 +701,8 @@ const QuickTenantSetup: React.FC<{
         // requires --create-users alongside --create-until-full and refuses
         // it combined with --all-users/--users/--fit-to-licenses.
         setJobActive(false)
-        const r = await runSeed(domain.trim(), seedScale, true, false, undefined, true)
+        const r = await runSeed(domain.trim(), seedScale, true, false,
+                                { createUntilFull: true })
         if (!r.ok) throw new Error(r.error || 'could not add users')
         setJobActive(true)
         setPostDone('adding users until full — live output below')
