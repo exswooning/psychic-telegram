@@ -86,17 +86,43 @@ describe('what the dialog has to say', () => {
 
   it('says nothing was recorded once the run is over', () => {
     render(<RunningJobDetail onClose={() => {}} job={job({
-      lines: [], finishedAt: 1_700_000_000, rc: 0,
+      lines: [], done: true, finishedAt: 1_700_000_000, rc: 0,
     })} />)
     expect(screen.getByText(/No output recorded/)).toBeInTheDocument()
   })
 
   it('reports a finished run as finished, not as running', () => {
     render(<RunningJobDetail onClose={() => {}} job={job({
-      finishedAt: 1_700_000_000, rc: 2, lines: ['boom'],
+      done: true, finishedAt: 1_700_000_000, rc: 2, lines: ['boom'],
     })} />)
     expect(screen.getByText('exit 2')).toBeInTheDocument()
     expect(screen.queryByText('running')).not.toBeInTheDocument()
+  })
+
+  /* A card marked "completed" sat next to a dialog saying "running", under
+     a bar that never stopped moving. The run was over; the dialog was
+     inferring that from a finish TIME, which a run recovered from a
+     transcript does not have. */
+  it('still says finished when no finish time was ever recorded', () => {
+    render(<RunningJobDetail onClose={() => {}} job={job({
+      done: true, rc: null, lines: ['from the transcript'],
+    })} />)
+    expect(screen.getByText('finished')).toBeInTheDocument()
+    expect(screen.queryByText('running')).not.toBeInTheDocument()
+    expect(screen.getByText(/no finish time recorded/)).toBeInTheDocument()
+  })
+
+  it('leaves the moving bar to jobs that are actually moving', () => {
+    // A Dialog renders through a portal, so the bar is in document.body,
+    // not in the render container.
+    const bar = () => document.body.querySelector('.MuiLinearProgress-root')
+    const live = render(
+      <RunningJobDetail onClose={() => {}} job={job({ pct: null })} />)
+    expect(bar()).toBeTruthy()
+    live.unmount()
+    render(<RunningJobDetail onClose={() => {}}
+                             job={job({ pct: null, done: true })} />)
+    expect(bar()).toBeNull()
   })
 })
 

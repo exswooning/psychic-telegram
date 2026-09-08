@@ -1078,6 +1078,13 @@ def load_job_result(account_id: int | None, name: str) -> dict | None:
     if not lines:
         return None
     return {"name": name, "rc": None, "running": False,
+            # The transcript records no finish time -- nothing wrote one.
+            # The file's own mtime is the last moment the run printed
+            # anything, which is the closest true answer available and puts
+            # the row in the right place in a list sorted by when things
+            # ended. Rows with no time at all all sorted to the bottom
+            # together, oldest-looking first.
+            "finished": os.path.getmtime(log),
             "lines": lines[-400:], "from_transcript": True,
             # "at least this many" once the file was truncated -- the count
             # must not claim to have seen a 77MB file it only read the end of.

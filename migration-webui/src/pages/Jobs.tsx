@@ -351,7 +351,7 @@ const Jobs: React.FC = () => {
                       key: `done-${key}`, kind: jobKind(d.name), label: d.name,
                       detail: `exit ${d.rc ?? '?'} — ${d.lineCount.toLocaleString()} line(s)`,
                       pct: null, elapsedSec: d.elapsed,
-                      finishedAt: d.finished, rc: d.rc,
+                      done: true, finishedAt: d.finished, rc: d.rc,
                       lines: full?.lines ?? [],
                     })
                   }}

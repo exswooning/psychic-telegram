@@ -78,10 +78,14 @@ export const RunningJobDetail: React.FC<{
                 value={eta != null ? describeElapsed(Math.round(eta)) : '--'}
                 hint={eta != null ? 'at the current rate' : 'needs a percentage'} />
           <Stat label="State"
-                value={job.finishedAt == null ? 'running'
-                  : job.rc === 0 ? 'finished' : `exit ${job.rc ?? '?'}`}
-                hint={job.finishedAt == null ? undefined
-                  : new Date(job.finishedAt * 1000).toLocaleString()} />
+                value={!job.done ? 'running'
+                  : job.rc === 0 ? 'finished'
+                  : job.rc == null ? 'finished'
+                  : `exit ${job.rc}`}
+                hint={!job.done ? undefined
+                  : job.finishedAt
+                    ? new Date(job.finishedAt * 1000).toLocaleString()
+                    : 'no finish time recorded'} />
         </Stack>
 
         {/* An indeterminate bar means "working, can't say how far". On a
@@ -89,7 +93,7 @@ export const RunningJobDetail: React.FC<{
             job with no percentage gets no bar rather than a perpetual one. */}
         {typeof job.pct === 'number'
           ? <LinearProgress variant="determinate" value={job.pct} />
-          : job.finishedAt == null ? <LinearProgress /> : null}
+          : !job.done ? <LinearProgress /> : null}
 
         <Divider sx={{ my: 2 }} />
         {/* A seed measures itself far better than a percentage can: observed
@@ -103,7 +107,7 @@ export const RunningJobDetail: React.FC<{
             {job.kind === 'seed' && (
               <SeedRunDashboard lines={job.lines}
                                 elapsedSec={job.elapsedSec ?? 0}
-                                running={job.finishedAt == null} />
+                                running={!job.done} />
             )}
             <Box component="pre" sx={{
               fontSize: 11, p: 1.5, bgcolor: 'action.hover', borderRadius: 1,
@@ -119,7 +123,7 @@ export const RunningJobDetail: React.FC<{
              printed nothing means the transcript is gone, and a reader
              deserves to be told which of those they are looking at. */
           <Typography variant="body2" color="text.secondary">
-            {job.finishedAt != null
+            {job.done
               ? 'No output recorded for this run.'
               : 'No output yet — this job has not printed anything since it started.'}
           </Typography>
