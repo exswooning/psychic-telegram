@@ -93,3 +93,42 @@ class TestTheIntervalIsTunable:
 
     def test_the_default_is_not_so_long_it_defeats_the_point(self):
         assert 0 < seed_sandbox.HEARTBEAT_EVERY_SEC <= 60
+
+
+class TestTheHeartbeatSaysWhoIsSayingNo:
+    """Per-user wall time grew 68 -> 100 minutes on a live run while CPU sat
+    at a third of one core, memory never swapped and the per-user Drive rate
+    barely moved. Everything the box could say said "not me", and the one
+    thing that could answer -- how many calls Google was making us retry --
+    was being collected by resilience and thrown away.
+    """
+
+    def _snap(self, calls, retries):
+        import metrics
+
+        metrics.METRICS.reset()
+        for i in range(calls):
+            metrics.METRICS.record("drive.files.create", 0.01,
+                                   retried=(i < retries))
+        return metrics.METRICS.snapshot()
+
+    def test_retries_are_counted_where_the_heartbeat_can_reach_them(self):
+        snap = self._snap(100, 20)
+        assert snap["calls"] == 100
+        assert snap["retries"] == 20
+
+    def test_a_clean_run_reports_no_throttling(self):
+        snap = self._snap(50, 0)
+        assert snap["retries"] == 0
+
+    def test_the_seeder_asks_for_it(self):
+        """The counts existed all along; nothing printed them."""
+        import ast
+        import os
+
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "seed_sandbox.py")
+        tree = ast.parse(open(path, encoding="utf-8").read())
+        names = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+        assert "snapshot" in names or "report" in names, (
+            "the seeder collects retry counts and still never reads them")
