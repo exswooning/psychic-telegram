@@ -18,6 +18,9 @@ import { MigrationStatus, ServiceProgress } from '@/types'
 import JobController from '@/components/JobController'
 import RunOptions from '@/components/RunOptions'
 import EmergencyBrake from '@/components/EmergencyBrake'
+import RemoveTenantSetup from '@/components/RemoveTenantSetup'
+import type { ConfiguredTenant } from '@/components/RemoveTenantSetup'
+import { removeTenantSetup } from '@/api/client'
 import ForensicModal from '@/components/ForensicModal'
 import BenchmarkRunner from '@/components/BenchmarkRunner'
 import ProvisionUsers from '@/components/ProvisionUsers'
@@ -122,6 +125,26 @@ const MissionControl: React.FC = () => {
   const [nodes, setNodes] = useState<FleetNode[]>([])
   const [cpUsers, setCpUsers] = useState<UserProgress[]>([])
   const [shares, setShares] = useState<PublicShare[]>([])
+  // Which tenants are actually set up. An unconfigured side has no domain,
+  // and the control renders nothing for it rather than offering to remove
+  // something that does not exist.
+  const [configuredTenants, setConfiguredTenants] = useState<ConfiguredTenant[]>([])
+  useEffect(() => {
+    // /api/dwd already carries exactly this per side -- domain, admin and
+    // the OAuth client id -- built from the same config functions the
+    // engine authenticates with, so it cannot drift from what is really
+    // configured. No second endpoint for the same facts.
+    fetch('/api/dwd', { credentials: 'include' })
+      .then((r) => r.json())
+      .then((d) => setConfiguredTenants(
+        (d.tenants || []).map((t: Record<string, string>) => ({
+          side: t.side as 'source' | 'target',
+          domain: t.domain || '',
+          adminEmail: t.admin,
+          clientId: t.client_id,
+        }))))
+      .catch(() => setConfiguredTenants([]))
+  }, [])
   const [shareCount, setShareCount] = useState(0)
   const [failures, setFailures] = useState<FailureRow[]>([])
   const [connected, setConnected] = useState(false)
@@ -212,6 +235,16 @@ const MissionControl: React.FC = () => {
       <DwdSetup />
 
       <EmergencyBrake shares={shares} liveCount={shareCount} onReverted={refreshLists} />
+
+      {/* Below the brake, deliberately: this is the one control that ends a
+          tenant rather than pausing it. */}
+      <RemoveTenantSetup
+        tenants={configuredTenants}
+        onRemove={async (t, password) => {
+          const r = await removeTenantSetup(t.side, t.domain, password)
+          if (!r.ok) throw new Error(r.error || 'could not remove the setup')
+          await refreshLists()
+        }} />
 
       {/* Fleet */}
       <Box>

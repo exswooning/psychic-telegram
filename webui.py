@@ -469,6 +469,14 @@ ACTIONS: dict[str, dict] = {
                  "Google, so a paid subscription stays reachable.",
         "argv": [PY, "reconnect_pack.py", "--notices"],
     },
+    "remove_tenant_setup_dry": {
+        "label": "Remove tenant setup (dry run)",
+        "blurb": "What removing a tenant setup would destroy: its seeded "
+                 "data, its Cloud project, its delegation grant and its "
+                 "saved configuration. Writes nothing.",
+        "argv": [PY, "remove_tenant_setup.py", "--side", "source",
+                 "--keep-data", "--keep-setup"],
+    },
     "cutover_readiness": {
         "label": "Cloud Identity cutover readiness",
         "blurb": "What survives downgrading the source to Cloud Identity and "
@@ -908,6 +916,42 @@ def job_log_path(account_id: int | None, name: str) -> str:
     freshly restarted server that never held this job in memory.
     """
     return job_result_path(account_id, name)[: -len(".json")] + ".log"
+
+
+def completed_jobs(account_id: int | None) -> list[dict]:
+    """Every completed run this account has a record of, newest first.
+
+    Read off disk rather than from memory: a Job lives in this process only,
+    so a restart -- i.e. every deploy -- loses the lot, and there have been
+    several tonight. The transcripts survive precisely so the page does not
+    have to.
+
+    Summaries only. The lines are the large part and are fetched per job by
+    the existing ?name= route when someone opens one.
+    """
+    out: list[dict] = []
+    try:
+        d = os.path.dirname(job_result_path(account_id, "x"))
+        names = [f[:-5] for f in os.listdir(d) if f.endswith(".json")]
+    except OSError:
+        return out
+    for stem in names:
+        res = load_job_result(account_id, stem.replace("_", " "))
+        if not res:
+            res = load_job_result(account_id, stem)
+        if not res:
+            continue
+        out.append({
+            "name": res.get("name") or stem.replace("_", " "),
+            "rc": res.get("rc"),
+            "started": res.get("started"),
+            "finished": res.get("finished"),
+            "elapsed": res.get("elapsed"),
+            "lineCount": res.get("line_count") or len(res.get("lines") or []),
+            "fromTranscript": bool(res.get("from_transcript")),
+        })
+    out.sort(key=lambda j: j.get("finished") or 0, reverse=True)
+    return out
 
 
 def load_job_result(account_id: int | None, name: str) -> dict | None:
@@ -4413,8 +4457,15 @@ class Handler(BaseHTTPRequestHandler):
             name = ""
             if "name=" in self.path:
                 name = urllib.parse.unquote(self.path.split("name=")[1].split("&")[0])
-            result = load_job_result(self._account_id(), name) if name else None
-            self._json({"result": result})
+            if name:
+                self._json({"result": load_job_result(self._account_id(), name)})
+            else:
+                # No name: every completed run this account has a record of.
+                # Jobs used to show only what was running, so a seed that
+                # finished -- or died -- left nothing on the page at all,
+                # and the operator's only evidence was a transcript on the
+                # box they could not reach from the UI.
+                self._json({"jobs": completed_jobs(self._account_id())})
         elif path == "/api/deploy_history":
             self._json({"history": load_deploy_history()})
         elif path == "/console" or path == "/console/":
@@ -4497,6 +4548,48 @@ class Handler(BaseHTTPRequestHandler):
                 # spawning a process -- _drain() (and so on_finish) never
                 # runs, so nothing else will free the slot just reserved.
                 job_admission.release(account_id, "seed")
+            self._json({"ok": ok, "error": "" if ok else msg})
+            return
+
+        if self.path == "/api/remove_tenant_setup":
+            # The most destructive endpoint here: it ends a tenant setup
+            # rather than pausing or resetting it -- the data, the Cloud
+            # project, the delegation grant and the saved configuration.
+            #
+            # The domain must be typed back, and is compared against
+            # Settings(), never against anything in the body. A generic
+            # confirm word proves someone read a dialog; the domain proves
+            # they know which of two configured tenants they are pointed at,
+            # which is the mistake worth catching when both are one click
+            # apart on the same page.
+            account_id, scope_err = resolve_target_account(
+                self._account_id(), body.get("account_id"))
+            if scope_err:
+                self._json({"ok": False, "error": scope_err}, 403)
+                return
+            side = (body.get("side") or "").strip()
+            if side not in ("source", "target"):
+                self._json({"ok": False, "error": "side must be source or target"})
+                return
+            st = Settings(account_id=account_id) if account_id else Settings()
+            configured = (st.source_domain if side == "source"
+                          else st.target_domain) or ""
+            typed = (body.get("confirm_domain") or "").strip()
+            if not configured or typed.lower() != configured.lower():
+                self._json({"ok": False, "error":
+                            f"{typed!r} is not the configured {side} domain "
+                            f"({configured!r})"})
+                return
+            env = _account_env(account_id, dict(os.environ))
+            # Never logged and never stored: it reaches the child as
+            # environment and nothing writes it anywhere.
+            env["DWD_PASSWORD"] = body.get("admin_password") or ""
+            argv = [PY, "remove_tenant_setup.py", "--side", side,
+                    "--confirm-domain", configured]
+            if account_id is not None:
+                argv += ["--account-id", str(account_id)]
+            ok, msg = get_job(account_id).start("remove tenant setup", argv,
+                                                env=env)
             self._json({"ok": ok, "error": "" if ok else msg})
             return
 

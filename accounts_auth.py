@@ -250,6 +250,30 @@ def update_tenant_config(account_id: int, side: str, *, domain: str | None = Non
         )
 
 
+def forget_tenant_config(account_id: int, side: str) -> None:
+    """Blank one (account, side) row: the tenant is no longer set up.
+
+    Deliberately not update_tenant_config(domain=""), which is a merge that
+    ignores empty values by design -- a caller that only just learned one
+    field must not blank the others. Removing a setup is the opposite
+    intent, so it gets its own function rather than a flag that makes the
+    merge sometimes-not-a-merge.
+
+    The row stays. create_account() inserts both sides up front, and None
+    from get_tenant_config means "unknown account", not "unconfigured" --
+    deleting the row would make an existing account start reporting as one
+    that does not exist.
+    """
+    if side not in ("source", "target"):
+        raise ValueError(f"side must be 'source' or 'target', got {side!r}")
+    with cpdb.rw() as conn:
+        conn.execute(
+            "UPDATE tenant_configs SET domain='', admin_email='', "
+            "sa_key_path='', "
+            "updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+            "WHERE account_id=? AND side=?", (account_id, side))
+
+
 def get_tenant_config(account_id: int, side: str) -> dict | None:
     """The read half of update_tenant_config -- None if the account/side
     combination doesn't exist (an unknown account id, not just an

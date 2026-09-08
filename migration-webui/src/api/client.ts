@@ -802,3 +802,35 @@ export interface SeedCapability {
 export const fetchSeedScopes = () =>
   fetch('/api/seed-scopes', { credentials: 'include' })
     .then((r) => r.json() as Promise<{ domain: string; capabilities: SeedCapability[] }>)
+
+
+/** A completed run, summarised. Lines are fetched per job by name when one
+ *  is opened -- they are the large part and most are never looked at. */
+export interface CompletedJob {
+  name: string
+  rc: number | null
+  started?: number
+  finished?: number
+  elapsed?: number
+  lineCount: number
+  fromTranscript: boolean
+}
+
+export const fetchCompletedJobs = () =>
+  getJSON<{ jobs: CompletedJob[] }>('/api/job_history').then((r) => r.jobs || [])
+
+
+/** Wipe a configured tenant's data and remove the setup itself.
+ *  Destructive and one-way: see remove_tenant_setup.py for the order and
+ *  why it is not adjustable. */
+export async function removeTenantSetup(
+  side: 'source' | 'target', domain: string, password: string
+): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetch('/api/remove_tenant_setup', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ side, confirm_domain: domain,
+                           admin_password: password }),
+  })
+  return res.json()
+}

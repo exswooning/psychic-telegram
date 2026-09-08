@@ -17,13 +17,14 @@ import {
   fetchMe, startMigration, stopJob as stopFleetJob,
 } from '@/api/controlPlane'
 import {
-  fetchJob, fetchJobHistory, runSeed, JobStatus, JobResult,
+  fetchJob, fetchJobHistory, fetchCompletedJobs, runSeed, JobStatus, JobResult,
   stopJob as stopSeedJob,
 } from '@/api/client'
+import type { CompletedJob } from '@/api/client'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
 import RunningJobCard from '@/components/RunningJobCard'
 import RunningJobDetail from '@/components/RunningJobDetail'
-import { useRunningJobs } from '@/hooks/useRunningJobs'
+import { useRunningJobs, jobKind } from '@/hooks/useRunningJobs'
 import type { RunningJob } from '@/hooks/useRunningJobs'
 import SeedRunDashboard from '@/components/SeedRunDashboard'
 
@@ -101,6 +102,14 @@ const Jobs: React.FC = () => {
   const { jobs: running } = useRunningJobs()
   const [stopping, setStopping] = useState<RunningJob | null>(null)
   const [detail, setDetail] = useState<RunningJob | null>(null)
+  // Completed runs, read off disk. A Job lives in this process's memory
+  // only, so every deploy loses it -- the transcripts survive precisely so
+  // this page does not have to.
+  const [done, setDone] = useState<CompletedJob[]>([])
+  useEffect(() => {
+    fetchCompletedJobs().then(setDone).catch(() => setDone([]))
+  }, [running.length])
+  const [openDone, setOpenDone] = useState<RunningJob | null>(null)
   const [rawSides, setSides] = useState<RawSide[] | null>(null)
   const [seedJob, setSeedJob] = useState<JobStatus | null>(null)
   const [seedHistory, setSeedHistory] = useState<JobResult | null>(null)
@@ -284,6 +293,10 @@ const Jobs: React.FC = () => {
         job={detail ? (running.find((r) => r.key === detail.key) ?? detail) : null}
         onClose={() => setDetail(null)} />
 
+      {/* A finished run's detail is fixed, so it is not re-read from the
+          live list the way a running one is. */}
+      <RunningJobDetail job={openDone} onClose={() => setOpenDone(null)} />
+
       <ReasonCodeDialog
         open={!!stopping}
         title={stopping ? `Stop ${stopping.label}` : ''}
@@ -297,6 +310,39 @@ const Jobs: React.FC = () => {
           if (j?.stop) await j.stop(reason)
         }}
       />
+
+      {done.length > 0 && (
+        <Box sx={{ mb: 3 }} data-testid="completed-jobs">
+          <Typography variant="overline" color="text.secondary">
+            Recently finished
+          </Typography>
+          <Stack direction="row" flexWrap="wrap" gap={1.5} sx={{ mt: 0.5 }}>
+            {done.map((d) => (
+              <RunningJobCard
+                key={d.name}
+                job={{
+                  key: `done-${d.name}`, kind: jobKind(d.name), label: d.name,
+                  detail: `${d.lineCount.toLocaleString()} line(s) of output`
+                    + (d.fromTranscript ? ' — read from the transcript' : ''),
+                  pct: null, elapsedSec: d.elapsed,
+                }}
+                finished={{ rc: d.rc, when: d.finished }}
+                onOpen={async () => {
+                  // The lines are fetched only when one is opened: most
+                  // never are, and a finished seed carries thousands.
+                  const full = await fetchJobHistory(d.name).catch(() => null)
+                  setOpenDone({
+                    key: `done-${d.name}`, kind: jobKind(d.name), label: d.name,
+                    detail: `exit ${d.rc ?? '?'} — ${d.lineCount.toLocaleString()} line(s)`,
+                    pct: null, elapsedSec: d.elapsed,
+                    lines: full?.lines ?? [],
+                  })
+                }}
+              />
+            ))}
+          </Stack>
+        </Box>
+      )}
 
       <Stack spacing={1.5}>
         {sides?.map((j) => (

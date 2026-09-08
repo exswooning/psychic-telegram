@@ -40,7 +40,11 @@ export const RunningJobCard: React.FC<{
    *  cannot fit -- ETA, observed throughput, per-user detail -- lives one
    *  click away rather than nowhere. */
   onOpen?: () => void
-}> = ({ job, action, onOpen }) => {
+  /** A finished run. Same card, because "what was this and how did it go"
+   *  is the same question after the fact -- with an outcome in place of a
+   *  progress bar, and no claim that anything is still happening. */
+  finished?: { rc: number | null; when?: number }
+}> = ({ job, action, onOpen, finished }) => {
   const k = KIND[job.kind] ?? KIND.other
   const elapsed = job.elapsedSec ? describeElapsed(job.elapsedSec) : ''
   return (
@@ -54,9 +58,14 @@ export const RunningJobCard: React.FC<{
         <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.5 }}>
           <Chip size="small" icon={k.icon} label={k.label} color={k.color}
                 variant="outlined" />
-          {/* The label, not a page. Same icon Running Now used. */}
-          <Chip size="small" icon={<RunningIcon fontSize="small" />}
-                label="Running now" color="info" />
+          {finished
+            ? <Chip size="small"
+                    label={finished.rc === 0 ? 'completed'
+                      : finished.rc == null ? 'ended' : `exit ${finished.rc}`}
+                    color={finished.rc === 0 ? 'success' : 'error'} />
+            /* The label, not a page. Same icon Running Now used. */
+            : <Chip size="small" icon={<RunningIcon fontSize="small" />}
+                    label="Running now" color="info" />}
           <Box sx={{ flexGrow: 1 }} />
           {/* Stop lives inside a clickable card, so its click must not
               also open the detail view. */}
@@ -79,10 +88,11 @@ export const RunningJobCard: React.FC<{
 
         {/* A determinate bar when the job reports a percentage, an
             indeterminate one when it does not -- rather than a 0% that
-            reads as "stuck". */}
-        {typeof job.pct === 'number'
+            reads as "stuck". A finished job gets neither: there is nothing
+            in flight to represent. */}
+        {!finished && (typeof job.pct === 'number'
           ? <LinearProgress variant="determinate" value={job.pct} />
-          : <LinearProgress />}
+          : <LinearProgress />)}
 
         <Stack direction="row" justifyContent="space-between" sx={{ mt: 0.5 }}>
           {/* Only when the detail line does not already lead with it. The
