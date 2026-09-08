@@ -4586,10 +4586,23 @@ class Handler(BaseHTTPRequestHandler):
             env["DWD_PASSWORD"] = body.get("admin_password") or ""
             argv = [PY, "remove_tenant_setup.py", "--side", side,
                     "--confirm-domain", configured]
+            # "wipe" empties the tenant and leaves it usable; "remove" also
+            # takes the project, the grant and the configuration. Two very
+            # different intentions behind one confirmation dialog, so the
+            # caller has to say which -- an unrecognised value is refused
+            # rather than defaulting to the destructive one.
+            mode = (body.get("mode") or "remove").strip()
+            if mode not in ("wipe", "remove"):
+                self._json({"ok": False, "error":
+                            f"mode must be 'wipe' or 'remove', got {mode!r}"})
+                return
+            if mode == "wipe":
+                argv.append("--keep-setup")
             if account_id is not None:
                 argv += ["--account-id", str(account_id)]
-            ok, msg = get_job(account_id).start("remove tenant setup", argv,
-                                                env=env)
+            label = ("wipe tenant data" if mode == "wipe"
+                     else "remove tenant setup")
+            ok, msg = get_job(account_id).start(label, argv, env=env)
             self._json({"ok": ok, "error": "" if ok else msg})
             return
 

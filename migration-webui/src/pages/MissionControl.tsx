@@ -18,8 +18,8 @@ import { MigrationStatus, ServiceProgress } from '@/types'
 import JobController from '@/components/JobController'
 import RunOptions from '@/components/RunOptions'
 import EmergencyBrake from '@/components/EmergencyBrake'
-import RemoveTenantSetup from '@/components/RemoveTenantSetup'
-import type { ConfiguredTenant } from '@/components/RemoveTenantSetup'
+import WorkingDomains from '@/components/WorkingDomains'
+import type { ConfiguredTenant } from '@/components/WorkingDomains'
 import { removeTenantSetup } from '@/api/client'
 import ForensicModal from '@/components/ForensicModal'
 import BenchmarkRunner from '@/components/BenchmarkRunner'
@@ -238,11 +238,11 @@ const MissionControl: React.FC = () => {
 
       {/* Below the brake, deliberately: this is the one control that ends a
           tenant rather than pausing it. */}
-      <RemoveTenantSetup
+      <WorkingDomains
         tenants={configuredTenants}
-        onRemove={async (t, password) => {
-          const r = await removeTenantSetup(t.side, t.domain, password)
-          if (!r.ok) throw new Error(r.error || 'could not remove the setup')
+        onAct={async (t, mode, password) => {
+          const r = await removeTenantSetup(t.side, t.domain, password, mode)
+          if (!r.ok) throw new Error(r.error || `could not ${mode} the tenant`)
           await refreshLists()
         }} />
 

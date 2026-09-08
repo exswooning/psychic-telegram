@@ -824,12 +824,16 @@ export const fetchCompletedJobs = () =>
  *  Destructive and one-way: see remove_tenant_setup.py for the order and
  *  why it is not adjustable. */
 export async function removeTenantSetup(
-  side: 'source' | 'target', domain: string, password: string
+  side: 'source' | 'target', domain: string, password: string,
+  // "wipe" empties the tenant and leaves it usable; "remove" also takes the
+  // project, the grant and the configuration. Sent explicitly rather than
+  // defaulted, so the destructive one is never the fallback.
+  mode: 'wipe' | 'remove',
 ): Promise<{ ok: boolean; error?: string }> {
   const res = await fetch('/api/remove_tenant_setup', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ side, confirm_domain: domain,
+    body: JSON.stringify({ side, mode, confirm_domain: domain,
                            admin_password: password }),
   })
   return res.json()

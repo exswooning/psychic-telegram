@@ -56,3 +56,23 @@ class TestItRunsTheRightThing:
         the child re-checks against the same source of truth."""
         blk = _block()
         assert '"--confirm-domain", configured' in blk
+
+
+class TestTheModeIsExplicit:
+    def test_an_unrecognised_mode_is_refused(self):
+        """Two very different intentions behind one dialog. Defaulting an
+        unknown value would make the destructive one the fallback."""
+        blk = _block()
+        assert 'mode not in ("wipe", "remove")' in blk
+
+    def test_a_wipe_keeps_the_setup(self):
+        blk = _block()
+        assert '"--keep-setup"' in blk
+        i = blk.index('if mode == "wipe"')
+        assert "--keep-setup" in blk[i:i + 200]
+
+    def test_the_job_is_named_for_what_it_does(self):
+        """"remove tenant setup" against a run that only wiped data would
+        misreport it on the Jobs page forever after."""
+        blk = _block()
+        assert '"wipe tenant data"' in blk and '"remove tenant setup"' in blk
