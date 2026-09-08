@@ -158,6 +158,20 @@ SEED_SCOPES = [
     "https://www.googleapis.com/auth/tasks",
 ]
 
+# Permanent deletion, which gmail.modify cannot do -- it can only trash.
+#
+# Kept OUT of SEED_SCOPES and requested on its own credential, exactly like
+# GROUP_WRITE_SCOPE: a token request fails whole if any scope in it is
+# ungranted, so folding this into the main list would take the entire seed
+# down on every tenant that has not granted it. Asked for separately, an
+# ungranted grant costs only the purge.
+#
+# It is also the broadest scope here by a distance -- full mailbox access,
+# where everything else is insert/labels/modify. That is the honest price of
+# emptying Trash and the reason it stays opt-in rather than being folded in
+# quietly.
+GMAIL_PURGE_SCOPE = "https://mail.google.com/"
+
 # chat.spaces covers create/list/patch but NOT delete, so reset_chat's
 # spaces().delete() returns 403 under SEED_SCOPES alone -- which is why a
 # reset reported "0 chat spaces" for 201 users while all 200 stayed up.
@@ -1390,7 +1404,7 @@ def reset_drive(drive, settings: Settings) -> int:
     return deleted
 
 
-def reset_gmail(gmail, settings: Settings) -> int:
+def reset_gmail(gmail, settings: Settings, _purge_client=None) -> int:
     """
     Trash only the mail this seeder inserted.
 
@@ -1399,11 +1413,24 @@ def reset_gmail(gmail, settings: Settings) -> int:
     left alone -- the previous behaviour (batchDelete over the entire
     mailbox) would empty an account that happened to have any.
 
-    trash(), not delete(): permanent deletion needs the full
-    https://mail.google.com/ scope, while the seeder only asks for
-    gmail.modify. Gmail purges Trash after 30 days.
+    Purges when GMAIL_PURGE_SCOPE is granted, and trashes when it is not.
+
+    trash() alone was the old behaviour, because permanent deletion needs
+    the full https://mail.google.com/ scope while the seeder asks only for
+    gmail.modify. Gmail purges Trash after 30 days -- but a "wiped" tenant
+    keeps every message for those 30 days, and the migrator lists with
+    includeSpamTrash=True and preserves the TRASH label deliberately. So a
+    migration run against a freshly reset tenant would faithfully copy the
+    corpus the reset was meant to remove.
+
+    Measured on this tenant: users the reset had emptied and the reseed had
+    not yet reached held INBOX=2, TRASH=1444. getProfile reported 2, because
+    messagesTotal excludes Trash -- which is how the reset was verified as
+    working in the first place.
     """
     retry = _retry_factory(settings)
+    purge = _purge_client
+    seeded_ids: list[str] = []
     deleted = 0
     token = None
     while True:
@@ -1431,14 +1458,39 @@ def reset_gmail(gmail, settings: Settings) -> int:
                           for h in (meta.get("payload") or {}).get("headers", [])}
                 if "@seed.test" not in headers.get("message-id", ""):
                     continue
-                retry(lambda mid=m["id"]: gmail.users().messages().trash(
-                    userId="me", id=mid).execute())()
+                if purge is not None:
+                    seeded_ids.append(m["id"])
+                else:
+                    retry(lambda mid=m["id"]: gmail.users().messages().trash(
+                        userId="me", id=mid).execute())()
                 deleted += 1
             except Exception:  # noqa: BLE001
                 pass
         token = resp.get("nextPageToken")
         if not token:
             break
+
+    # One batchDelete per 1,000 rather than a call per message: a full
+    # corpus is ~1,450 messages a user and 200 users, so per-message
+    # deletion would be 290,000 round trips where this is 400.
+    #
+    # Still only the ids collected above, every one of which carried an
+    # @seed.test Message-ID. batchDelete is irreversible and unfiltered --
+    # it deletes exactly what it is handed -- so what it is handed has to be
+    # the identified set, never a query.
+    if purge is not None and seeded_ids:
+        for i in range(0, len(seeded_ids), 1000):
+            chunk = seeded_ids[i:i + 1000]
+            try:
+                retry(lambda c=chunk: purge.users().messages().batchDelete(
+                    userId="me", body={"ids": c}).execute())()
+            except Exception:  # noqa: BLE001 - fall back rather than fail
+                for mid in chunk:
+                    try:
+                        retry(lambda m=mid: gmail.users().messages().trash(
+                            userId="me", id=m).execute())()
+                    except Exception:  # noqa: BLE001
+                        pass
 
     # Drafts are separate objects. Trashing a draft's underlying message does
     # not remove the draft, so without this they survive every reset and
@@ -1708,6 +1760,30 @@ def build_directory_groups(settings: Settings, user: str):
         creds, http=httplib2.Http(timeout=120)
     )
     return build("admin", "directory_v1", http=http, cache_discovery=False)
+
+
+def build_gmail_purge(settings: Settings, user: str):
+    """A delegated Gmail client that can PERMANENTLY delete.
+
+    Isolated to GMAIL_PURGE_SCOPE alone, like every other opt-in scope here.
+    Returns None when the grant is missing, so the caller falls back to
+    trash() instead of failing the reset -- an ungranted scope costs the
+    purge, not the run.
+    """
+    import google_auth_httplib2
+    import httplib2
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+
+    try:
+        creds = service_account.Credentials.from_service_account_file(
+            _resolve_key_path(settings), scopes=[GMAIL_PURGE_SCOPE]
+        ).with_subject(user)
+        http = google_auth_httplib2.AuthorizedHttp(
+            creds, http=httplib2.Http(timeout=120))
+        return build("gmail", "v1", http=http, cache_discovery=False)
+    except Exception:      # noqa: BLE001 - absence is an answer, not an error
+        return None
 
 
 def _build_directory_readwrite(settings: Settings, user: str):
@@ -2014,7 +2090,8 @@ def reset_one_user(settings: Settings, user: str) -> dict:
     return {
         "user": user,
         "drive": reset_drive(drive, settings),
-        "gmail": reset_gmail(gmail, settings),
+        "gmail": reset_gmail(gmail, settings,
+                             build_gmail_purge(settings, user)),
         "calendar": reset_calendar(cal, settings),
         "chat": reset_chat(chat, settings, user.split("@")[0]),
         "contacts": reset_contacts(people, settings),

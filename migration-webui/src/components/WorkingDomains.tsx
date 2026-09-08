@@ -23,6 +23,7 @@ import {
 } from '@mui/material'
 import {
   DeleteForever as RemoveIcon, DeleteSweep as WipeIcon,
+  PersonRemove as UsersIcon,
   Language as DomainIcon,
 } from '@mui/icons-material'
 
@@ -34,7 +35,7 @@ export interface ConfiguredTenant {
   clientId?: string
 }
 
-type Mode = 'wipe' | 'remove'
+type Mode = 'wipe' | 'remove' | 'delete_users'
 
 const COPY: Record<Mode, { title: string; verb: string; warn: string }> = {
   wipe: {
@@ -44,6 +45,14 @@ const COPY: Record<Mode, { title: string; verb: string; warn: string }> = {
         + 'and tasks. The Cloud project, the delegation grant and the saved '
         + 'configuration are kept, so the tenant stays ready to seed or '
         + 'migrate again.',
+  },
+  delete_users: {
+    title: 'Delete all users',
+    verb: 'Delete users',
+    warn: 'Deletes every migrated account in this tenant, not just its '
+        + 'data, and invalidates the ledger that described them. A deleted '
+        + 'Workspace address stays reserved for 20 days, so recreating one '
+        + 'under the same name fails until it ages out.',
   },
   remove: {
     title: 'Remove tenant setup',
@@ -111,6 +120,12 @@ export const WorkingDomains: React.FC<{
                         data-testid={`wipe-${t.side}`}
                         onClick={() => ask(t, 'wipe')}>
                   Wipe data
+                </Button>
+                <Button size="small" color="error" variant="outlined"
+                        startIcon={<UsersIcon />}
+                        data-testid={`delete-users-${t.side}`}
+                        onClick={() => ask(t, 'delete_users')}>
+                  Delete users
                 </Button>
                 <Button size="small" color="error" variant="outlined"
                         startIcon={<RemoveIcon />}

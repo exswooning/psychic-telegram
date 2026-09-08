@@ -62,10 +62,10 @@ class TestItRunsTheRightThing:
 
 class TestTheModeIsExplicit:
     def test_an_unrecognised_mode_is_refused(self):
-        """Two very different intentions behind one dialog. Defaulting an
-        unknown value would make the destructive one the fallback."""
+        """Three very different intentions behind one dialog. Defaulting an
+        unknown value would make a destructive one the fallback."""
         blk = _block()
-        assert 'mode not in ("wipe", "remove")' in blk
+        assert 'mode not in ("wipe", "remove", "delete_users")' in blk
 
     def test_a_wipe_keeps_the_setup(self):
         blk = _block()
@@ -77,7 +77,27 @@ class TestTheModeIsExplicit:
         """"remove tenant setup" against a run that only wiped data would
         misreport it on the Jobs page forever after."""
         blk = _block()
-        assert '"wipe tenant data"' in blk and '"remove tenant setup"' in blk
+        for name in ('"wipe tenant data"', '"remove tenant setup"',
+                     '"delete all users"'):
+            assert name in blk, name
+
+    def test_deleting_users_runs_the_script_that_owns_that(self):
+        """wipe and remove empty a tenant's DATA and leave the accounts.
+        Deleting the accounts is wipe_target.py, which has its own
+        assert_sandbox and invalidates the ledger afterwards."""
+        blk = _block()
+        i = blk.index('if mode == "delete_users"')
+        tail = blk[i:i + 1600]
+        assert '"wipe_target.py"' in tail
+        assert '"--apply"' in tail, "would report only, and delete nothing"
+        assert '"--confirm-domain", configured' in tail
+
+    def test_deleting_users_does_not_keep_the_ledger(self):
+        """--keep-ledger would leave every user marked migrated, so the next
+        run skips them all and reports success against an empty tenant."""
+        blk = _block()
+        i = blk.index('if mode == "delete_users"')
+        assert "--keep-ledger" not in blk[i:i + 1600]
 
 
 class TestTheChildIsNotToldToResolveAnAccount:

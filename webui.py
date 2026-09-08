@@ -2681,6 +2681,7 @@ def seed_scopes_payload() -> dict:
 
     sys.path.insert(0, os.path.join(HERE, "data-generator"))
     from seed_sandbox import (SEED_SCOPES, GROUP_WRITE_SCOPE, REPORTS_SCOPE,
+                              GMAIL_PURGE_SCOPE,
                               DIRECTORY_READONLY_SCOPE)
     from provision import DIRECTORY_WRITE_SCOPE
 
@@ -2696,6 +2697,12 @@ def seed_scopes_payload() -> dict:
         ("Groups, members and group-typed Drive ACLs", "--groups",
          [GROUP_WRITE_SCOPE]),
         ("Fit the seed to free licences", "--fit-to-licenses", [REPORTS_SCOPE]),
+        # Without it a reset only trashes, and Gmail keeps trashed mail for
+        # 30 days -- during which the migrator, which lists with
+        # includeSpamTrash and preserves the TRASH label, would copy the
+        # corpus the reset was meant to remove.
+        ("Empty the trash on reset (not just trash it)", "--reset",
+         [GMAIL_PURGE_SCOPE]),
     ]
     return {"domain": st.source_domain, "capabilities": [
         {"name": n, "flag": f, "scopes": sc,
@@ -4842,6 +4849,59 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": ok, "error": "" if ok else msg})
             return
 
+        if self.path == "/api/configure_chat_app":
+            # Chat needs an app configured in the Cloud console before a
+            # single chat.spaces() call stops returning 404 "Google Chat app
+            # not found", and there is no API and no gcloud command for it.
+            # full_setup does this once per tenant -- but a tenant whose
+            # setup died before that phase's result was written had no route
+            # back to it except re-running the whole setup against a project
+            # that already exists. Live, that left 46 finished users with 46
+            # chat 404s and no chat data at all.
+            account_id, scope_err = resolve_target_account(
+                self._account_id(), body.get("account_id"))
+            if scope_err:
+                self._json({"ok": False, "error": scope_err}, 403)
+                return
+            side = (body.get("side") or "source").strip()
+            if side not in ("source", "target"):
+                self._json({"ok": False, "error": "side must be source or target"})
+                return
+            from config import Settings as _Settings
+
+            st = (_Settings(account_id=account_id) if account_id
+                  else _Settings())
+            key = st.source_sa_key if side == "source" else st.target_sa_key
+            admin = st.source_admin if side == "source" else st.target_admin
+            try:
+                import ensure_apis
+
+                project = ensure_apis.project_of(key)
+            except Exception as exc:      # noqa: BLE001
+                self._json({"ok": False, "error":
+                            f"could not read the project from {key}: "
+                            f"{str(exc)[:120]}"})
+                return
+            if not project or not admin:
+                self._json({"ok": False, "error":
+                            "this tenant has no project or no admin on file"})
+                return
+            env = _account_env(account_id, dict(os.environ))
+            # Environment, never argv: a command line is readable by every
+            # process on the box through ps.
+            env["DWD_PASSWORD"] = body.get("admin_password") or ""
+            if not env["DWD_PASSWORD"]:
+                self._json({"ok": False, "error":
+                            "the admin password is needed to sign in to the "
+                            "Cloud console"})
+                return
+            argv = [PY, "gcloud_browser_auth.py", "--configure-chat",
+                    "--project", project, "--admin", admin]
+            ok, msg = get_job(account_id).start("configure chat app", argv,
+                                                env=env)
+            self._json({"ok": ok, "error": "" if ok else msg})
+            return
+
         if self.path == "/api/remove_tenant_setup":
             # The most destructive endpoint here: it ends a tenant setup
             # rather than pausing or resetting it -- the data, the Cloud
@@ -4897,11 +4957,28 @@ class Handler(BaseHTTPRequestHandler):
             # caller has to say which -- an unrecognised value is refused
             # rather than defaulting to the destructive one.
             mode = (body.get("mode") or "remove").strip()
-            if mode not in ("wipe", "remove"):
+            if mode not in ("wipe", "remove", "delete_users"):
                 self._json({"ok": False, "error":
-                            f"mode must be 'wipe' or 'remove', got {mode!r}"})
+                            f"mode must be 'wipe', 'remove' or "
+                            f"'delete_users', got {mode!r}"})
                 return
-            if mode == "wipe":
+            if mode == "delete_users":
+                # A different script entirely: wipe and remove empty a
+                # tenant's DATA and leave the accounts, this deletes the
+                # accounts themselves. wipe_target.py already owns that --
+                # same typed-domain gate, its own assert_sandbox, and it
+                # invalidates the ledger afterwards, without which the next
+                # run skips every user it believes is migrated and reports
+                # success against an empty tenant.
+                #
+                # Still no --account-id, for the reason the comment above
+                # gives: _account_env has already pointed MIGRATION_DB at
+                # this account's ledger, and a child told to resolve an
+                # account follows it there looking for tenant_configs, a
+                # control-plane-only table.
+                argv = [PY, "wipe_target.py", "--side", side,
+                        "--confirm-domain", configured, "--apply"]
+            elif mode == "wipe":
                 argv.append("--keep-setup")
             # Deliberately NOT --account-id, exactly as wipe_target_argv
             # explains: _account_env has already set MIGRATION_DB to this
@@ -4914,8 +4991,9 @@ class Handler(BaseHTTPRequestHandler):
             # Reproduced here on the first real call, in a file that already
             # carried the warning. The env above carries this account's
             # domain, admin and key, which is everything the child needs.
-            label = ("wipe tenant data" if mode == "wipe"
-                     else "remove tenant setup")
+            label = {"wipe": "wipe tenant data",
+                     "delete_users": "delete all users",
+                     "remove": "remove tenant setup"}[mode]
             ok, msg = get_job(account_id).start(label, argv, env=env)
             self._json({"ok": ok, "error": "" if ok else msg})
             return

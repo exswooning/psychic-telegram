@@ -35,7 +35,7 @@ describe('working domains', () => {
     expect(screen.getByText(/No tenant is set up yet/)).toBeInTheDocument()
   })
 
-  it('offers both actions per domain', () => {
+  it('offers all three actions per domain', () => {
     render(<WorkingDomains tenants={tenants} onAct={vi.fn()} />)
     expect(screen.getByTestId('wipe-source')).toBeInTheDocument()
     expect(screen.getByTestId('remove-source')).toBeInTheDocument()
@@ -95,5 +95,27 @@ describe('working domains', () => {
   it('says the ledger is never touched', () => {
     render(<WorkingDomains tenants={tenants} onAct={vi.fn()} />)
     expect(screen.getByText(/ledger is never touched/i)).toBeInTheDocument()
+  })
+
+  it('offers deleting the accounts, not just their data', () => {
+    render(<WorkingDomains tenants={tenants} onAct={vi.fn()} />)
+    expect(screen.getByTestId('delete-users-source')).toBeInTheDocument()
+    expect(screen.getByTestId('delete-users-target')).toBeInTheDocument()
+  })
+
+  it('says plainly that it takes the accounts themselves', async () => {
+    /* The distinction that matters: wipe empties a tenant and leaves it
+       usable, this removes the users it was emptying. */
+    render(<WorkingDomains tenants={tenants} onAct={vi.fn()} />)
+    fireEvent.click(screen.getByTestId('delete-users-source'))
+    expect(await screen.findByText(/every migrated account/i)).toBeInTheDocument()
+    expect(screen.getByText(/reserved for 20 days/i)).toBeInTheDocument()
+  })
+
+  it('still demands the domain typed back before deleting accounts', () => {
+    render(<WorkingDomains tenants={tenants} onAct={vi.fn()} />)
+    fireEvent.click(screen.getByTestId('delete-users-source'))
+    const confirm = screen.getByRole('button', { name: /delete users/i })
+    expect(confirm).toBeDisabled()
   })
 })

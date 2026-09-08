@@ -665,3 +665,46 @@ def _fill_chat_app_form(page, project: str, timeout: int) -> tuple[bool, str]:
     if not saved:
         return False, "filled the form but could not find/click Save"
     return True, f"configured a Chat app for {project}"
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run one console step on its own, for a tenant already set up.
+
+    configure_chat_app has only ever been reachable from full_setup.py's
+    own phase, which runs once per tenant. So a tenant whose Chat phase was
+    skipped -- or whose setup died before the result was written, which is
+    what happened here -- had no route back to it short of re-running the
+    entire setup against a project that already exists.
+
+    Measured on the live tenant: 46 finished users, 46 chat 404s, one per
+    user, and 0 chat spaces across the whole corpus.
+    """
+    import argparse
+
+    ap = argparse.ArgumentParser(description=main.__doc__)
+    ap.add_argument("--configure-chat", action="store_true", required=True,
+                    help="configure the Chat app for --project")
+    ap.add_argument("--project", required=True)
+    ap.add_argument("--admin", required=True, help="a super admin who can "
+                    "SEE this project -- a console step run as an account "
+                    "with no role on it fails as a selector error")
+    ap.add_argument("--timeout", type=int, default=180)
+    a = ap.parse_args(argv)
+
+    # Never on the command line: argv is visible to every process on the box
+    # via ps. full_setup passes it the same way.
+    password = os.getenv("DWD_PASSWORD", "")
+    if not password:
+        print("set DWD_PASSWORD in the environment (never as an argument)")
+        return 2
+
+    ok, detail = configure_chat_app(a.admin, password, a.project,
+                                    timeout=a.timeout)
+    print(("ok: " if ok else "not configured: ") + detail)
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(main())

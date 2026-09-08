@@ -144,6 +144,13 @@ TRANSIENT_403_MESSAGES = ("insufficient authentication scopes",)
 # patience against the one transient here that outlives a normal backoff.
 SCOPE_RETRY_BUDGET = 11
 
+# Attempts for a rate-limit 403, which is the server asking for time rather
+# than refusing. Nine lands at roughly three minutes with the ladder capped
+# at max_delay -- long enough to outlast a per-project quota window, short
+# enough that a genuinely stuck call still fails the item rather than the
+# run. Retry-After is honoured ahead of the ladder whenever Google sends it.
+RATE_LIMIT_RETRY_BUDGET = 9
+
 # A freshly created Workspace account is not always immediately ready to be
 # impersonated over domain-wide delegation -- confirmed live on
 # seeduser382@source.rohitrokaya.com.np, created by create_until_full
@@ -364,6 +371,22 @@ def retry_on_google_error(
                     budget = max_retries
                     if _is_transient_403(exc):
                         budget = max(max_retries, SCOPE_RETRY_BUDGET)
+                    elif reason in TRANSIENT_403_REASONS:
+                        # A rate limit is transient BY DEFINITION -- it is
+                        # the server saying "later", not "no". The standard
+                        # ladder gives it about a minute, which is short
+                        # against a per-project quota window: live, one
+                        # calendar event exhausted all six attempts and was
+                        # lost, on a run whose own profile showed zero
+                        # threads in backoff, so nothing was queued behind
+                        # it either.
+                        #
+                        # Narrower than the scope budget deliberately. This
+                        # applies only to the three reasons Google uses for
+                        # "slow down" -- the widening the comment above
+                        # warns against is spending minutes on errors that
+                        # will never clear, and these always clear.
+                        budget = max(max_retries, RATE_LIMIT_RETRY_BUDGET)
                     if attempt > budget:
                         raise RuntimeError(
                             f"exhausted {budget} retries on HTTP {status} "

@@ -874,7 +874,7 @@ export async function removeTenantSetup(
   // "wipe" empties the tenant and leaves it usable; "remove" also takes the
   // project, the grant and the configuration. Sent explicitly rather than
   // defaulted, so the destructive one is never the fallback.
-  mode: 'wipe' | 'remove',
+  mode: 'wipe' | 'remove' | 'delete_users',
 ): Promise<{ ok: boolean; error?: string }> {
   const res = await fetch('/api/remove_tenant_setup', {
     method: 'POST',

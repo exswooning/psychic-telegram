@@ -134,6 +134,19 @@ OPTIONAL_SCOPES = {
     # be unrunnable by construction, requesting a scope at runtime that was
     # advertised nowhere.
     "https://www.googleapis.com/auth/admin.directory.group",
+    # Emptying the trash on a seeder reset. gmail.modify can only trash, and
+    # Gmail keeps trashed mail for 30 days -- during which a "wiped" tenant
+    # still holds the whole corpus, and the migrator (which lists with
+    # includeSpamTrash and preserves the TRASH label deliberately) would
+    # copy it. Measured: users the reset had emptied held INBOX=2,
+    # TRASH=1444, and getProfile said 2 because messagesTotal excludes
+    # Trash, which is how the reset was verified as working.
+    #
+    # The broadest scope in this file by a distance -- full mailbox access.
+    # It rides the console line like the rest so it can be switched on
+    # without a second hand-pasted grant, and the reset degrades to trash()
+    # by name when it is absent rather than failing.
+    "https://mail.google.com/",
 }
 
 
