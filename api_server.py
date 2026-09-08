@@ -2333,6 +2333,62 @@ async def full_setup_status(side: str, account: int | None = None,
                 progress_label = prog.get("label")
             except (OSError, ValueError):
                 pass
+        # `{"running": true}` in the state file, specifically -- not merely
+        # that the file exists. The launcher writes that marker the moment
+        # it starts a child and nothing else ever does, so it means "a run
+        # began here and never wrote a result". A file that exists for any
+        # other reason, or a tenant that has simply never been set up, is
+        # not a crash and must not be reported as one. (Caught by
+        # test_status_reports_not_running_with_no_result_by_default, which
+        # is exactly the case the first version of this got wrong.)
+        launched_and_gone = False
+        if not running and result is None:
+            try:
+                with open(out, encoding="utf-8") as fh:
+                    launched_and_gone = json.load(fh).get("running") is True
+            except (OSError, ValueError):
+                launched_and_gone = False
+        if launched_and_gone:
+            # Started, gone, and left nothing behind. The child writes its
+            # result as JSON on stdout (-> .partial); a traceback goes to
+            # stderr instead, so a crash leaves an empty .partial and a
+            # state file still reading {"running": true}. `running` is a ps
+            # scan so it correctly says no -- and the run then simply
+            # vanished from the UI with no failure and no reason, while the
+            # traceback sat unread in the .err beside it.
+            #
+            # Live: a `huge` seed passed full_setup's 2-hour subprocess
+            # timeout while still working, subprocess killed it, and the
+            # TimeoutExpired escaped run_full_setup. The operator saw a card
+            # at 99% and then nothing at all.
+            err = os.path.join(os.path.dirname(out), f"full-setup-{side}.err")
+            why = ""
+            try:
+                with open(err, encoding="utf-8", errors="replace") as fh:
+                    lines = [x.rstrip() for x in fh if x.strip()]
+                # The exception line is the useful one; the frames above it
+                # are this file's own plumbing.
+                # An exception line, or nothing. The last line of a log is
+                # not a reason -- for a run that was killed cleanly it is
+                # just the last thing it happened to print.
+                why = next((x for x in reversed(lines)
+                            if "Error" in x or "Exception" in x
+                            or "Timeout" in x), "")
+            except OSError:
+                pass
+            # Only when the reason can actually be shown. A state file
+            # saying {"running": true} survives forever after a crash, so
+            # synthesising on that alone would report the same days-old
+            # failure on every later call -- and would invent one for a
+            # launch that left no trace at all. An exception line in the
+            # .err is the evidence that something died AND the thing worth
+            # telling the operator; without it there is nothing useful to
+            # say and the honest answer stays "no result".
+            if why:
+                result = {"ok": False, "crashed": True, "phases": [{
+                    "name": f"setup ({side})", "status": "failed",
+                    "detail": why[:300],
+                }]}
         return {"running": running, "pid": pid, "result": result,
                 "progressPct": progress_pct, "progressLabel": progress_label}
     return await _off_loop(_read)

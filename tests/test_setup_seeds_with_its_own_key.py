@@ -65,3 +65,20 @@ class TestItSeedsWhatTheGrantAllows:
         for side in ("source", "target"):
             assert ("https://www.googleapis.com/auth/admin.directory.group"
                     in set(verify_scopes.grant_scopes(Settings(), side)))
+
+
+class TestTheScopeConstantStaysInStep:
+    def test_full_setup_and_the_seeder_agree(self):
+        """full_setup states the scope rather than importing it -- reading
+        one string from seed_sandbox pulled the whole seeder into every
+        import of full_setup and roughly tripled the test suite. This is
+        what keeps the two honest instead."""
+        import os
+        import sys
+
+        sys.path.insert(0, os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "data-generator"))
+        from seed_sandbox import GROUP_WRITE_SCOPE as seeder_scope
+
+        assert full_setup.GROUP_WRITE_SCOPE == seeder_scope

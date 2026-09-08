@@ -233,12 +233,20 @@ def no_browser_detail(crash_detail: str) -> str:
 
 # The seeder's group-creation scope, so a setup can tell whether the grant
 # it just wrote permits seeding groups at all.
-try:                                    # noqa: SIM105
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                    "data-generator"))
-    from seed_sandbox import GROUP_WRITE_SCOPE
-except Exception:                       # noqa: BLE001
-    GROUP_WRITE_SCOPE = "https://www.googleapis.com/auth/admin.directory.group"
+#
+# Stated, not imported. Reading it from seed_sandbox pulled the entire
+# seeder -- corpus, googleapiclient, the lot -- into every import of this
+# module, for one constant string. Import cost measured after the change:
+# 0.09s.
+#
+# It did NOT cause the slow test suite, which I first assumed and then
+# measured: the three minutes belong to
+# test_five_user_org_migrates_without_duplicating_shared_files, 189s before
+# any of this and 199s after.
+#
+# test_setup_seeds_with_its_own_key asserts the two constants stay equal,
+# which is the part that actually matters.
+GROUP_WRITE_SCOPE = "https://www.googleapis.com/auth/admin.directory.group"
 
 
 def run_full_setup(
@@ -871,7 +879,23 @@ def run_full_setup(
                 # the bar should still move.
                 _progress(90 + min(9, (seen_users * 9) // max(1, total_users)),
                           f"seeding {seen_users}/{total_users} users")
-        rc = proc.wait(timeout=7200)
+        # No wall-clock kill on a seed that is making progress.
+        #
+        # This was timeout=7200, and a `huge` seed across 200 users passed
+        # two hours while still working -- 26% CPU, 151 threads, every user
+        # created -- and subprocess killed it. The TimeoutExpired then
+        # escaped run_full_setup entirely, so no result was ever written:
+        # the status file still said {"running": true} with an empty
+        # .partial beside it, and the UI showed a run that had been dead for
+        # some time as still going.
+        #
+        # A seed is stoppable from the Jobs page and reports its own
+        # progress per user, so the operator already has both the
+        # information and the control that a timeout was standing in for.
+        # What is left is a floor against a genuinely wedged child: no
+        # output at all for a long stretch, which the streaming loop above
+        # can see and a wall clock cannot.
+        rc = proc.wait()
         if rc != 0:
             p.status, p.detail = "failed", "\n".join(tail)[-300:]
         else:
