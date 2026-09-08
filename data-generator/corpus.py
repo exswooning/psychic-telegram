@@ -696,8 +696,14 @@ class CorpusBuilder:
         target = self.sheet("Q3 numbers (linked to)", folder)
         self.m["items"]["xref_target"] = target
         link = f"https://docs.google.com/spreadsheets/d/{target}/edit"
+        # Bytes, like every other _media caller. The real factory wraps this
+        # in io.BytesIO, which rejects a str -- and this runs for every user,
+        # inside build(), so a str here failed the whole seed: live, 11 of
+        # the first 37 users died on "a bytes-like object is required, not
+        # 'str'" and the remaining 189 were going to follow.
         body = (f"Summary\n\nThe numbers are in {link}\n\n"
-                f"See also https://drive.google.com/drive/folders/{folder}\n")
+                f"See also https://drive.google.com/drive/folders/{folder}\n"
+                ).encode("utf-8")
         doc = self._create(
             {"name": "Q3 summary (links out)", "parents": [folder],
              "mimeType": DOC_MIME},

@@ -1848,6 +1848,11 @@ def discover_tenant_entries(settings: Settings) -> tuple[list[dict], str]:
 # from the second reseed, which the ledger alone cannot tell you.
 GENERATED_PREFIX = os.getenv("SEED_LOCALPART_PREFIX", "")
 
+# How often a long fan-out says it is still alive. Module level so both
+# heartbeats share it and a test can run one without waiting half a
+# minute for a single line.
+HEARTBEAT_EVERY_SEC = 30.0
+
 
 def _generated_localpart(i: int, taken: set[str]) -> str:
     base = GENERATED_LOCALPARTS[i] if i < len(GENERATED_LOCALPARTS) \
@@ -2334,11 +2339,11 @@ def main(argv: list[str] | None = None) -> int:
         stop_beat = threading.Event()
 
         def _heartbeat() -> None:
-            waited = 0
-            while not stop_beat.wait(30):
-                waited += 30
+            waited = 0.0
+            while not stop_beat.wait(HEARTBEAT_EVERY_SEC):
+                waited += HEARTBEAT_EVERY_SEC
                 print(f"  ... still deleting: {done}/{len(all_users)} users "
-                      f"done after {waited // 60}m{waited % 60:02d}s "
+                      f"done after {int(waited) // 60}m{int(waited) % 60:02d}s "
                       f"({args.workers} in parallel)", flush=True)
 
         threading.Thread(target=_heartbeat, daemon=True).start()
@@ -2455,6 +2460,31 @@ def main(argv: list[str] | None = None) -> int:
 
     t0 = time.time()
     results = []
+    # The same silence the reset path already fixed, in the half that runs
+    # far longer. Seeding one user at scale 'huge' takes about an hour
+    # (measured: 3573.9s, 3834.1s), so with 30 workers NOTHING is printed
+    # between the last "starting" line and the first "done in" -- for an
+    # hour. Live, an operator watched 31 minutes of 0% with no ETA and no
+    # output, and asked whether it was stuck. Busy and wedged look identical
+    # from the page; only a heartbeat tells them apart.
+    #
+    # Deliberately not a percentage: a user is not partly seeded as far as
+    # anything downstream can measure, and inventing a fraction from elapsed
+    # time would be a guess wearing a progress bar. It says what is true --
+    # how many are finished, how many are in flight, how long it has been.
+    stop_beat = threading.Event()
+    beat_done = 0
+
+    def _heartbeat() -> None:
+        waited = 0.0
+        while not stop_beat.wait(HEARTBEAT_EVERY_SEC):
+            waited += HEARTBEAT_EVERY_SEC
+            print(f"  ... still seeding: {beat_done}/{len(entries)} users "
+                  f"done after {int(waited) // 60}m{int(waited) % 60:02d}s "
+                  f"({min(args.workers, len(entries) - beat_done)} in flight)",
+                  flush=True)
+
+    threading.Thread(target=_heartbeat, daemon=True).start()
     with futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
         jobs = {
             pool.submit(
@@ -2467,6 +2497,7 @@ def main(argv: list[str] | None = None) -> int:
             for i, e in enumerate(entries)
         }
         for fut in futures.as_completed(jobs):
+            beat_done += 1
             try:
                 results.append(fut.result())
             except Exception as exc:  # noqa: BLE001
@@ -2481,6 +2512,7 @@ def main(argv: list[str] | None = None) -> int:
                     for sub in line.rstrip().splitlines():
                         print(f"      {sub}")
                 results.append({"user": jobs[fut], "error": str(exc)})
+    stop_beat.set()
 
     ok = [r for r in results if "error" not in r]
     totals = {

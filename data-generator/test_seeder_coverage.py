@@ -128,23 +128,45 @@ class TestGroupTypedAcls:
 
 
 class TestCrossReferences:
+    """These used to read the source with inspect.getsource and assert that
+    the right strings appeared in it. They passed for a version that raised
+    TypeError on every user it ran for: the body was built as a str and
+    handed to a media factory that does io.BytesIO(). Live, 11 of the first
+    37 users died on "a bytes-like object is required, not 'str'" and the
+    other 189 were going to follow.
+
+    A test that reads code cannot see a type error. These run it.
+    """
+
+    def _built(self, scale="tiny"):
+        from corpus import CorpusBuilder
+        from test_seed_sandbox import FakeDrive, _media, _retry
+        from config import Settings
+
+        drive = FakeDrive("alice@tenanta.com", "source")
+        b = CorpusBuilder(drive, Settings(), "alice@tenanta.com",
+                          ["bob@tenanta.com"], "ext@example.com", scale,
+                          _media, _retry, rng_seed=1234)
+        return b, b.build("Engineering", "PRJ-001", edge_cases=False), drive
+
     def test_the_corpus_builds_documents_that_link_to_other_files(self):
-        import inspect
-        from corpus import CorpusBuilder as CB
-        src = inspect.getsource(CB)
-        assert "_build_cross_references" in src
-        body = inspect.getsource(CB._build_cross_references)
-        assert "spreadsheets/d/" in body, "the link must name a real file id"
-        assert "drive/folders/" in body, "and a folder, a second URL shape"
+        _, m, drive = self._built()
+        doc_id = m["items"]["xref_doc"]
+        # A Google-native mime lands in exports, not content -- Drive stores
+        # a converted doc, which has no downloadable binary.
+        body = drive.exports[doc_id].decode("utf-8")
+        # Real ids, not plausible-looking strings: the whole point is that a
+        # checker can tell a rewritten link from an unrewritten one.
+        assert f"spreadsheets/d/{m['items']['xref_target']}" in body
+        assert f"drive/folders/{m['items']['xref_root']}" in body
 
     def test_it_runs_on_every_user_not_only_edge_case_ones(self):
         """Edge cases are seeded for the first user only by default; link
-        rot is not an edge case."""
-        import inspect
-        from corpus import CorpusBuilder as CB
-        build = inspect.getsource(CB.build)
-        assert build.index("self._build_cross_references") < build.index(
-            "if edge_cases:")
+        rot is not an edge case. Asserted by building WITHOUT edge cases and
+        finding the cross-references anyway."""
+        _, m, _ = self._built()
+        assert m["items"].get("xref_doc"), "no cross-references without edge cases"
+        assert m.get("xrefs") == 2
 
 
 class TestMemberFailuresAreNotSwallowed:

@@ -33,6 +33,16 @@ SHEET_MIME = "application/vnd.google-apps.spreadsheet"
 
 class _FakeMedia:
     def __init__(self, data: bytes, mimetype: str):
+        # The real _media() does io.BytesIO(data), which rejects a str. This
+        # double accepted one happily, so a str body passed every test here
+        # and then failed live for every user it was built for -- 11 of the
+        # first 37 dead on "a bytes-like object is required, not 'str'"
+        # before anyone saw it. A double that is more permissive than the
+        # thing it stands in for cannot catch the bug it exists to catch.
+        if not isinstance(data, (bytes, bytearray)):
+            raise TypeError(
+                f"a bytes-like object is required, not {type(data).__name__} "
+                f"-- real _media() wraps this in io.BytesIO")
         self._data, self.mimetype = data, mimetype
 
     def read_all(self) -> bytes:
