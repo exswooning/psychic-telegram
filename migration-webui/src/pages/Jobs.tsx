@@ -28,6 +28,10 @@ import { useRunningJobs, jobKind } from '@/hooks/useRunningJobs'
 import type { RunningJob } from '@/hooks/useRunningJobs'
 import SeedRunDashboard from '@/components/SeedRunDashboard'
 
+// Enough to see what happened today without turning the top of the page
+// into a wall; the rest is one click away.
+const DONE_PREVIEW = 12
+
 const SEED_SCALES = ['tiny', 'small', 'medium', 'large', 'huge']
 // main.py migrate --services help text is the source of truth: "drive,
 // gmail,calendar,chat,contacts,tasks -- or 'all' for every per-user
@@ -110,6 +114,7 @@ const Jobs: React.FC = () => {
     fetchCompletedJobs().then(setDone).catch(() => setDone([]))
   }, [running.length])
   const [openDone, setOpenDone] = useState<RunningJob | null>(null)
+  const [allDone, setAllDone] = useState(false)
   const [rawSides, setSides] = useState<RawSide[] | null>(null)
   const [seedJob, setSeedJob] = useState<JobStatus | null>(null)
   const [seedHistory, setSeedHistory] = useState<JobResult | null>(null)
@@ -313,34 +318,54 @@ const Jobs: React.FC = () => {
 
       {done.length > 0 && (
         <Box sx={{ mb: 3 }} data-testid="completed-jobs">
-          <Typography variant="overline" color="text.secondary">
-            Recently finished
-          </Typography>
-          <Stack direction="row" flexWrap="wrap" gap={1.5} sx={{ mt: 0.5 }}>
-            {done.map((d) => (
-              <RunningJobCard
-                key={d.name}
-                job={{
-                  key: `done-${d.name}`, kind: jobKind(d.name), label: d.name,
-                  detail: `${d.lineCount.toLocaleString()} line(s) of output`
-                    + (d.fromTranscript ? ' — read from the transcript' : ''),
-                  pct: null, elapsedSec: d.elapsed,
-                }}
-                finished={{ rc: d.rc, when: d.finished }}
-                onOpen={async () => {
-                  // The lines are fetched only when one is opened: most
-                  // never are, and a finished seed carries thousands.
-                  const full = await fetchJobHistory(d.name).catch(() => null)
-                  setOpenDone({
-                    key: `done-${d.name}`, kind: jobKind(d.name), label: d.name,
-                    detail: `exit ${d.rc ?? '?'} — ${d.lineCount.toLocaleString()} line(s)`,
-                    pct: null, elapsedSec: d.elapsed,
-                    lines: full?.lines ?? [],
-                  })
-                }}
-              />
-            ))}
+          <Stack direction="row" alignItems="baseline" gap={1}>
+            <Typography variant="overline" color="text.secondary">
+              Finished runs
+            </Typography>
+            <Typography variant="caption" color="text.disabled">
+              {done.length.toLocaleString()} recorded, newest first
+            </Typography>
           </Stack>
+          <Stack direction="row" flexWrap="wrap" gap={1.5} sx={{ mt: 0.5 }}>
+            {(allDone ? done : done.slice(0, DONE_PREVIEW)).map((d) => {
+              // The id, when there is one: two wipes of the same tenant are
+              // two runs, and keying on the name alone made React render
+              // one of them and silently drop the other.
+              const key = d.runId || `name-${d.name}`
+              return (
+                <RunningJobCard
+                  key={key}
+                  job={{
+                    key: `done-${key}`, kind: jobKind(d.name), label: d.name,
+                    detail: `${d.lineCount.toLocaleString()} line(s) of output`
+                      + (d.fromTranscript ? ' — read from the transcript' : ''),
+                    pct: null, elapsedSec: d.elapsed,
+                  }}
+                  finished={{ rc: d.rc, when: d.finished }}
+                  onOpen={async () => {
+                    // The lines are fetched only when one is opened: most
+                    // never are, and a finished seed carries thousands.
+                    const full = await fetchJobHistory(d.name, d.runId)
+                      .catch(() => null)
+                    setOpenDone({
+                      key: `done-${key}`, kind: jobKind(d.name), label: d.name,
+                      detail: `exit ${d.rc ?? '?'} — ${d.lineCount.toLocaleString()} line(s)`,
+                      pct: null, elapsedSec: d.elapsed,
+                      finishedAt: d.finished, rc: d.rc,
+                      lines: full?.lines ?? [],
+                    })
+                  }}
+                />
+              )
+            })}
+          </Stack>
+          {done.length > DONE_PREVIEW && (
+            <Button size="small" sx={{ mt: 1 }}
+                    onClick={() => setAllDone((v) => !v)}>
+              {allDone ? 'Show fewer'
+                : `Show all ${done.length.toLocaleString()} runs`}
+            </Button>
+          )}
         </Box>
       )}
 

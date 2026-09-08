@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 
@@ -58,16 +59,38 @@ def _run(argv: list[str], env: dict | None = None) -> tuple[bool, str]:
     """
     tail: list[str] = []
     try:
+        # Binary, and read through os.read: iterating a text pipe waits for
+        # a newline, and the progress this exists to surface never sends
+        # one. Live, a two-minute wipe of 200 users reached the transcript
+        # as a single line, at the end -- one carriage-returned progress
+        # line, rewritten in place 200 times and only broken at the very
+        # end. Streaming it changed nothing on its own.
         proc = subprocess.Popen(argv, cwd=HERE, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, text=True,
-                                bufsize=1, env=env or os.environ)
+                                stderr=subprocess.STDOUT,
+                                env=env or os.environ)
     except Exception as exc:                    # noqa: BLE001
         return False, str(exc)[:200]
-    for line in proc.stdout:                    # type: ignore[union-attr]
-        line = line.rstrip("\n")
+
+    def emit(raw: bytes) -> None:
+        line = raw.decode("utf-8", "replace").rstrip()
+        if not line:
+            return
         print(line, flush=True)                 # -> this job's own transcript
         tail.append(line)
         del tail[:-40]
+
+    buf = b""
+    fd = proc.stdout.fileno()                   # type: ignore[union-attr]
+    while True:
+        chunk = os.read(fd, 4096)
+        if not chunk:
+            break
+        buf += chunk
+        parts = re.split(rb"[\r\n]", buf)
+        buf = parts.pop()                       # keep the unterminated tail
+        for raw in parts:
+            emit(raw)
+    emit(buf)
     rc = proc.wait()
     return rc == 0, (tail[-1][:200] if tail else "")
 

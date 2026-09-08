@@ -892,6 +892,16 @@ class Job:
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(payload, fh)
             os.replace(tmp, path)
+            # ...and a second copy under a name no later run reuses. The
+            # file above is keyed on the job NAME alone, so every seed
+            # overwrote the previous seed: the page could show "the last
+            # run of each thing" and nothing else. Wiping a tenant twice
+            # left one row. Archives are what make it a history.
+            stamp = int(payload["finished"] or time.time())
+            arch = f"{path[:-len('.json')]}.{stamp}.json"
+            with open(arch, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh)
+            prune_job_archives(os.path.dirname(path))
         except Exception:  # noqa: BLE001
             pass
 
@@ -919,6 +929,39 @@ def job_log_path(account_id: int | None, name: str) -> str:
     return job_result_path(account_id, name)[: -len(".json")] + ".log"
 
 
+# <stem>.<epoch seconds>.json -- one finished run. The stem itself never
+# contains a dot (job_result_path collapses everything but [a-z0-9] to "_"),
+# so this cannot mistake a job name for a timestamp.
+ARCHIVE_RE = re.compile(r"^(?P<stem>[^.]+)\.(?P<ts>\d{9,})\.json$")
+
+# Roughly a year of daily runs, bounded so a box that seeds every hour does
+# not fill a disk with 2000-line transcripts nobody will read.
+ARCHIVE_KEEP = 200
+
+
+def prune_job_archives(d: str, keep: int | None = None) -> None:
+    """Drop the oldest archived runs past `keep`. Best-effort by design:
+    losing history is not worth failing a job save over.
+
+    The default is read here rather than bound to the signature, so
+    changing ARCHIVE_KEEP actually changes what this keeps."""
+    keep = ARCHIVE_KEEP if keep is None else keep
+    try:
+        arch = [f for f in os.listdir(d) if ARCHIVE_RE.match(f)]
+    except OSError:
+        return
+    if len(arch) <= keep:
+        return
+    # By the timestamp in the name, not mtime -- a redeploy's rsync rewrites
+    # mtimes and would otherwise make the whole history look equally new.
+    arch.sort(key=lambda f: int(ARCHIVE_RE.match(f).group("ts")), reverse=True)
+    for f in arch[keep:]:
+        try:
+            os.unlink(os.path.join(d, f))
+        except OSError:
+            pass
+
+
 def completed_jobs(account_id: int | None) -> list[dict]:
     """Every completed run this account has a record of, newest first.
 
@@ -933,16 +976,17 @@ def completed_jobs(account_id: int | None) -> list[dict]:
     out: list[dict] = []
     try:
         d = os.path.dirname(job_result_path(account_id, "x"))
-        names = [f[:-5] for f in os.listdir(d) if f.endswith(".json")]
+        files = os.listdir(d)
     except OSError:
         return out
-    for stem in names:
-        res = load_job_result(account_id, stem.replace("_", " "))
-        if not res:
-            res = load_job_result(account_id, stem)
-        if not res:
-            continue
-        out.append({
+
+    def row(res: dict, stem: str, run_id: str | None) -> dict:
+        return {
+            # runId addresses ONE run; name addresses "the latest run called
+            # this". Both are here because the archives only start at the
+            # first save after this shipped -- everything older can still
+            # only be fetched by name.
+            "runId": run_id,
             "name": res.get("name") or stem.replace("_", " "),
             "rc": res.get("rc"),
             "started": res.get("started"),
@@ -950,9 +994,52 @@ def completed_jobs(account_id: int | None) -> list[dict]:
             "elapsed": res.get("elapsed"),
             "lineCount": res.get("line_count") or len(res.get("lines") or []),
             "fromTranscript": bool(res.get("from_transcript")),
-        })
+        }
+
+    archived: set[str] = set()
+    for f in files:
+        m = ARCHIVE_RE.match(f)
+        if not m:
+            continue
+        try:
+            with open(os.path.join(d, f), encoding="utf-8") as fh:
+                res = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            continue
+        archived.add(m.group("stem"))
+        out.append(row(res, m.group("stem"), f[: -len(".json")]))
+
+    # Runs that finished before archives existed, and transcripts whose save
+    # never happened at all -- one row each, because one run is all they can
+    # prove. Skipped where the same job has archives: its newest archive IS
+    # this file, and listing both showed every job twice.
+    for f in files:
+        if not f.endswith(".json") or ARCHIVE_RE.match(f):
+            continue
+        stem = f[: -len(".json")]
+        if stem in archived:
+            continue
+        res = (load_job_result(account_id, stem.replace("_", " "))
+               or load_job_result(account_id, stem))
+        if res:
+            out.append(row(res, stem, None))
     out.sort(key=lambda j: j.get("finished") or 0, reverse=True)
     return out
+
+
+def load_job_archive(account_id: int | None, run_id: str) -> dict | None:
+    """One archived run by id. The id comes from completed_jobs and is
+    checked against ARCHIVE_RE before it touches a path -- it arrives from a
+    query string, and `../../etc/passwd` is a job name as far as this
+    function knows."""
+    if not ARCHIVE_RE.match(f"{run_id}.json"):
+        return None
+    d = os.path.dirname(job_result_path(account_id, "x"))
+    try:
+        with open(os.path.join(d, f"{run_id}.json"), encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 def load_job_result(account_id: int | None, name: str) -> dict | None:
@@ -973,8 +1060,18 @@ def load_job_result(account_id: int | None, name: str) -> dict | None:
     # the transcript is the difference between "no record" and "no record in
     # the place I looked first".
     log = job_log_path(account_id, name)
+    # Only the tail is read. A migrate transcript on the live box is 77MB,
+    # and every byte before the last few hundred lines is thrown away here
+    # anyway -- reading the whole file to discard it stalls the request and
+    # holds the lot in memory. The first line of the window is dropped
+    # because seeking lands mid-line.
+    tail = 256 * 1024
     try:
-        with open(log, encoding="utf-8") as fh:
+        size = os.path.getsize(log)
+        with open(log, encoding="utf-8", errors="replace") as fh:
+            if size > tail:
+                fh.seek(size - tail)
+                fh.readline()
             lines = [ln.rstrip("\n") for ln in fh]
     except OSError:
         return None
@@ -982,7 +1079,9 @@ def load_job_result(account_id: int | None, name: str) -> dict | None:
         return None
     return {"name": name, "rc": None, "running": False,
             "lines": lines[-400:], "from_transcript": True,
-            "line_count": len(lines)}
+            # "at least this many" once the file was truncated -- the count
+            # must not claim to have seen a 77MB file it only read the end of.
+            "line_count": len(lines), "truncated": size > tail}
 
 
 JOBS: dict[int | None, Job] = {}
@@ -4504,7 +4603,13 @@ class Handler(BaseHTTPRequestHandler):
             name = ""
             if "name=" in self.path:
                 name = urllib.parse.unquote(self.path.split("name=")[1].split("&")[0])
-            if name:
+            # One specific past run, by id. Without this, "history" could
+            # only ever mean the newest run of each name -- opening the
+            # third-oldest seed handed back the newest seed's transcript.
+            run = query.get("run", [""])[0]
+            if run:
+                self._json({"result": load_job_archive(self._account_id(), run)})
+            elif name:
                 self._json({"result": load_job_result(self._account_id(), name)})
             else:
                 # No name: every completed run this account has a record of.

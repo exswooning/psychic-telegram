@@ -77,23 +77,52 @@ export const RunningJobDetail: React.FC<{
           <Stat label="ETA (projected)"
                 value={eta != null ? describeElapsed(Math.round(eta)) : '--'}
                 hint={eta != null ? 'at the current rate' : 'needs a percentage'} />
-          <Stat label="State" value="running" />
+          <Stat label="State"
+                value={job.finishedAt == null ? 'running'
+                  : job.rc === 0 ? 'finished' : `exit ${job.rc ?? '?'}`}
+                hint={job.finishedAt == null ? undefined
+                  : new Date(job.finishedAt * 1000).toLocaleString()} />
         </Stack>
 
+        {/* An indeterminate bar means "working, can't say how far". On a
+            run that already ended it means nothing at all, so a finished
+            job with no percentage gets no bar rather than a perpetual one. */}
         {typeof job.pct === 'number'
           ? <LinearProgress variant="determinate" value={job.pct} />
-          : <LinearProgress />}
+          : job.finishedAt == null ? <LinearProgress /> : null}
 
+        <Divider sx={{ my: 2 }} />
         {/* A seed measures itself far better than a percentage can: observed
             writes per minute, per-user results, and an ETA from the run
-            rather than from arithmetic. */}
-        {job.lines && job.lines.length > 0 && (
+            rather than from arithmetic. Every other kind of job prints
+            nothing that dashboard can read, so showing only that dashboard
+            meant a wipe with a full transcript rendered an empty panel --
+            the transcript below is what those jobs actually have to say. */}
+        {job.lines && job.lines.length > 0 ? (
           <>
-            <Divider sx={{ my: 2 }} />
-            <SeedRunDashboard lines={job.lines}
-                              elapsedSec={job.elapsedSec ?? 0}
-                              running />
+            {job.kind === 'seed' && (
+              <SeedRunDashboard lines={job.lines}
+                                elapsedSec={job.elapsedSec ?? 0}
+                                running={job.finishedAt == null} />
+            )}
+            <Box component="pre" sx={{
+              fontSize: 11, p: 1.5, bgcolor: 'action.hover', borderRadius: 1,
+              overflowX: 'auto', maxHeight: 320, whiteSpace: 'pre-wrap',
+              m: 0, mt: job.kind === 'seed' ? 1.5 : 0,
+            }}>
+              {job.lines.join('\n')}
+            </Box>
           </>
+        ) : (
+          /* Distinguish "nothing yet" from "nothing ever". A running job
+             that has printed nothing so far is normal; a finished one that
+             printed nothing means the transcript is gone, and a reader
+             deserves to be told which of those they are looking at. */
+          <Typography variant="body2" color="text.secondary">
+            {job.finishedAt != null
+              ? 'No output recorded for this run.'
+              : 'No output yet — this job has not printed anything since it started.'}
+          </Typography>
         )}
       </DialogContent>
     </Dialog>

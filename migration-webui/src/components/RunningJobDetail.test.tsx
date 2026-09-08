@@ -67,6 +67,39 @@ describe('detail view', () => {
   })
 })
 
+describe('what the dialog has to say', () => {
+  /* A wipe printed a full transcript and the dialog rendered an empty
+     panel: it only ever showed SeedRunDashboard, which reads seed output
+     and nothing else. Every other kind of job had its output dropped. */
+  it('shows the transcript for a job that is not a seed', () => {
+    render(<RunningJobDetail onClose={() => {}} job={job({
+      kind: 'reset', label: 'wipe tenant data', pct: null,
+      lines: ['[137/200] r2-seeduser96: 3 files, 812 messages deleted'],
+    })} />)
+    expect(screen.getByText(/812 messages deleted/)).toBeInTheDocument()
+  })
+
+  it('says nothing has been printed YET while it is still running', () => {
+    render(<RunningJobDetail onClose={() => {}} job={job({ lines: [] })} />)
+    expect(screen.getByText(/No output yet/)).toBeInTheDocument()
+  })
+
+  it('says nothing was recorded once the run is over', () => {
+    render(<RunningJobDetail onClose={() => {}} job={job({
+      lines: [], finishedAt: 1_700_000_000, rc: 0,
+    })} />)
+    expect(screen.getByText(/No output recorded/)).toBeInTheDocument()
+  })
+
+  it('reports a finished run as finished, not as running', () => {
+    render(<RunningJobDetail onClose={() => {}} job={job({
+      finishedAt: 1_700_000_000, rc: 2, lines: ['boom'],
+    })} />)
+    expect(screen.getByText('exit 2')).toBeInTheDocument()
+    expect(screen.queryByText('running')).not.toBeInTheDocument()
+  })
+})
+
 describe('card', () => {
   it('opens the detail view when clicked', () => {
     const onOpen = vi.fn()

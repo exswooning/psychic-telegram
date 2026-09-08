@@ -37,6 +37,12 @@ export interface RunningJob {
   /** Wall-clock seconds so far, for the observed-throughput figures the
    *  seed dashboard derives. Same source as `detail`, kept numeric. */
   elapsedSec?: number
+  /** Epoch seconds this run ended, and its exit code. Only ever set for a
+   *  finished run opened out of the history list -- the shape is shared so
+   *  one detail dialog can show either, and the absence of these is what
+   *  says "still going". */
+  finishedAt?: number
+  rc?: number | null
   // Absent for a job admitted under a DIFFERENT account -- job_admission.py
   // never records a stoppable pid for seed/reset-target/full-setup (only
   // this account's own rich sources below know that), and stopping

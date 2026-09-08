@@ -348,10 +348,30 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
              inline UI's header dot shows, so both surfaces read the same
              live state at a glance. */}
           {jobRunning && (
-            <Box sx={{
+            /* Clickable, and it goes to Jobs. This pill is the only thing on
+               screen that says work is happening, and it appears on every
+               page -- so a reader who notices it has to be able to act on
+               it. Before this, finding the run meant knowing which page it
+               lived on. */
+            <Box
+              onClick={() => navigate('/jobs')}
+              role="button" tabIndex={0}
+              data-testid="running-job-pill"
+              aria-label={`${job!.name} running — open Jobs`}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault()
+                  navigate('/jobs')
+                }
+              }}
+              sx={{
               display: { xs: 'none', md: 'flex' }, alignItems: 'center', gap: 1.25,
               bgcolor: 'primary.light', border: '1px solid', borderColor: 'primary.main',
               borderRadius: 999, px: 2, py: 0.75,
+              cursor: 'pointer',
+              '&:hover': { bgcolor: 'primary.main', '& *': { color: 'common.white' } },
+              '&:focus-visible': { outline: '2px solid', outlineColor: 'primary.dark',
+                                   outlineOffset: 2 },
             }}>
               <Box sx={{ position: 'relative', width: 10, height: 10 }}>
                 <Box sx={{

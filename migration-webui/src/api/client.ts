@@ -185,9 +185,17 @@ export interface JobResult {
 // /api/job can't: a tab opened (or refreshed) after the server itself
 // restarted, where nothing is running and nothing is left in memory.
 // null when that job has never completed at all (or never run).
-export async function fetchJobHistory(name: string): Promise<JobResult | null> {
+/** One past run. `runId` names a specific run; `name` only ever means "the
+ *  newest run called this", which is all that existed before the server
+ *  archived each run separately -- so history rows older than that still
+ *  come back by name. */
+export async function fetchJobHistory(
+  name: string, runId?: string | null,
+): Promise<JobResult | null> {
+  const q = runId ? `run=${encodeURIComponent(runId)}`
+    : `name=${encodeURIComponent(name)}`
   const { result } = await getJSON<{ result: JobResult | null }>(
-    `/api/job_history?name=${encodeURIComponent(name)}`)
+    `/api/job_history?${q}`)
   return result
 }
 
@@ -807,6 +815,9 @@ export const fetchSeedScopes = () =>
 /** A completed run, summarised. Lines are fetched per job by name when one
  *  is opened -- they are the large part and most are never looked at. */
 export interface CompletedJob {
+  /** null for a run recorded before per-run archives existed -- fetch those
+   *  by name and accept that only the newest of that name survives. */
+  runId: string | null
   name: string
   rc: number | null
   started?: number
