@@ -4659,8 +4659,17 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if mode == "wipe":
                 argv.append("--keep-setup")
-            if account_id is not None:
-                argv += ["--account-id", str(account_id)]
+            # Deliberately NOT --account-id, exactly as wipe_target_argv
+            # explains: _account_env has already set MIGRATION_DB to this
+            # account's ledger, and a child told to resolve an account
+            # follows MIGRATION_DB there looking for tenant_configs, a table
+            # that only lives in the control-plane database.
+            #
+            #     sqlite3.OperationalError: no such table: tenant_configs
+            #
+            # Reproduced here on the first real call, in a file that already
+            # carried the warning. The env above carries this account's
+            # domain, admin and key, which is everything the child needs.
             label = ("wipe tenant data" if mode == "wipe"
                      else "remove tenant setup")
             ok, msg = get_job(account_id).start(label, argv, env=env)

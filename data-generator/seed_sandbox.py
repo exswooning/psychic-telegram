@@ -1301,6 +1301,41 @@ def _cal_window(days_ago: int, hour: int):
 # ======================================================================
 # Reset
 # ======================================================================
+def reset_groups(directory, settings: Settings, prefix: str = "") -> int:
+    """Delete the groups this seeder created.
+
+    A wipe that leaves them behind is not a wipe. They are the newest thing
+    the corpus makes and were simply not here when reset was written -- so
+    the first --reset after --groups left four groups and their entire
+    membership standing on a tenant reported as emptied, and the next seed
+    stacked its members on top of them.
+
+    Only the ones this seeder makes, matched by name against the same plan
+    seed_groups uses. A tenant's own distribution lists are not this tool's
+    to delete, and "delete every group in the domain" is a command nobody
+    should be one typo away from.
+    """
+    made = {f"{prefix}{n}@{settings.source_domain}"
+            for n in ("all-staff", "engineering", "leads", "partners")}
+    gone = 0
+    try:
+        resp = directory.groups().list(customer="my_customer",
+                                       maxResults=200).execute()
+    except Exception as exc:  # noqa: BLE001
+        print(f"  ! groups: could not list ({str(exc)[:90]})")
+        return 0
+    for g in resp.get("groups", []):
+        email = (g.get("email") or "").lower()
+        if email not in made:
+            continue
+        try:
+            directory.groups().delete(groupKey=email).execute()
+            gone += 1
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ! group {email}: {str(exc)[:90]}")
+    return gone
+
+
 def reset_drive(drive, settings: Settings) -> int:
     """
     Delete the seeded corpus -- and only that.
@@ -2326,6 +2361,19 @@ def main(argv: list[str] | None = None) -> int:
                       f"{r['contacts']} contacts, "
                       f"{r['tasks']} task list(s) deleted")
         stop_beat.set()
+        # Groups last: they are tenant-level, so one call rather than one
+        # per user, and deleting them before the members' own accounts are
+        # cleared would only make the per-user work noisier.
+        admin = os.getenv("SOURCE_ADMIN") or settings.source_admin
+        if admin:
+            try:
+                gone = reset_groups(build_directory_groups(settings, admin),
+                                    settings, prefix=GENERATED_PREFIX)
+                print(f"  groups deleted: {gone}")
+            except Exception as exc:  # noqa: BLE001 - never fail a wipe here
+                print(f"  ! groups: {str(exc)[:120]}")
+        else:
+            print("  ! groups: SOURCE_ADMIN not set, groups left in place")
         for f in (args.manifest,):
             if os.path.exists(f):
                 os.remove(f)

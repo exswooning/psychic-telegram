@@ -65,3 +65,73 @@ class TestForgettingIsNotAMergeUpdate:
         import accounts_auth
         src = inspect.getsource(accounts_auth.forget_tenant_config)
         assert "DELETE" not in src.upper()
+
+
+class TestItStreamsSoProgressCanBeSeen:
+    def test_the_child_is_not_captured(self):
+        """capture_output buffers until exit, so a 200-user wipe showed an
+        elapsed clock and nothing else for its whole run -- while the seeder
+        underneath printed "[137/200] user: ... deleted" throughout.
+
+        Asserted against the parsed code rather than the text: the docstring
+        explaining why capture_output was wrong contains the words, and a
+        test that greps prose passes on a file that says the right thing and
+        does the opposite. That exact mistake was made twice today.
+        """
+        import ast
+
+        tree = ast.parse(inspect.getsource(rts._run).lstrip())
+        calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)]
+        captured = [c for c in calls
+                    if any(k.arg == "capture_output" for k in c.keywords)]
+        assert not captured, "the child is still buffered until it exits"
+        names = {ast.unparse(c.func) for c in calls}
+        assert "subprocess.Popen" in names
+
+    def test_the_lines_are_passed_through(self):
+        """webui's _counter_progress_pct already reads [n/total]; the lines
+        just never arrived."""
+        src = inspect.getsource(rts._run)
+        assert "print(line" in src
+
+    def test_a_tail_is_kept_for_the_failure_message(self):
+        src = inspect.getsource(rts._run)
+        assert "tail" in src and "del tail[:-40]" in src
+
+
+class TestAWipeIncludesTheGroups:
+    def test_the_reset_deletes_them(self):
+        """A wipe that leaves them behind is not a wipe. They were simply
+        not here when reset was written."""
+        import os
+        import sys
+        sys.path.insert(0, os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "data-generator"))
+        import seed_sandbox as seed
+
+        assert hasattr(seed, "reset_groups")
+        src = inspect.getsource(seed.main)
+        assert "reset_groups(" in src
+
+    def test_it_only_deletes_the_ones_this_seeder_makes(self):
+        """A tenant's own distribution lists are not this tool's to delete,
+        and "every group in the domain" is not a thing to be one typo from."""
+        import sys, os
+        sys.path.insert(0, os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "data-generator"))
+        import seed_sandbox as seed
+
+        src = inspect.getsource(seed.reset_groups)
+        assert '"all-staff", "engineering", "leads", "partners"' in src
+        assert "email not in made" in src
+
+    def test_a_group_failure_does_not_fail_the_wipe(self):
+        import sys, os
+        sys.path.insert(0, os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "data-generator"))
+        import seed_sandbox as seed
+
+        assert "except Exception" in inspect.getsource(seed.reset_groups)

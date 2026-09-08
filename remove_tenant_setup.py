@@ -45,13 +45,31 @@ PY_EXE = sys.executable
 
 
 def _run(argv: list[str], env: dict | None = None) -> tuple[bool, str]:
+    """Run a child and pass its output straight through.
+
+    Streamed, not captured. capture_output=True buffers everything until the
+    child exits, so a wipe of 200 users showed a job with an elapsed clock
+    and no output and no percentage for its entire run -- while the seeder
+    underneath was printing "[137/200] user: ... deleted" the whole time.
+
+    webui's own _counter_progress_pct already reads exactly those lines and
+    turns them into the progress bar. Nothing needed teaching; the lines
+    simply never arrived.
+    """
+    tail: list[str] = []
     try:
-        p = subprocess.run(argv, cwd=HERE, capture_output=True, text=True,
-                           env=env or os.environ)
+        proc = subprocess.Popen(argv, cwd=HERE, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True,
+                                bufsize=1, env=env or os.environ)
     except Exception as exc:                    # noqa: BLE001
         return False, str(exc)[:200]
-    tail = (p.stdout or p.stderr or "").strip().splitlines()
-    return p.returncode == 0, (tail[-1][:200] if tail else "")
+    for line in proc.stdout:                    # type: ignore[union-attr]
+        line = line.rstrip("\n")
+        print(line, flush=True)                 # -> this job's own transcript
+        tail.append(line)
+        del tail[:-40]
+    rc = proc.wait()
+    return rc == 0, (tail[-1][:200] if tail else "")
 
 
 def remove(side: str, domain: str, admin_email: str, admin_password: str,

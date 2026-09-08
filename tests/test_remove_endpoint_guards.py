@@ -78,3 +78,21 @@ class TestTheModeIsExplicit:
         misreport it on the Jobs page forever after."""
         blk = _block()
         assert '"wipe tenant data"' in blk and '"remove tenant setup"' in blk
+
+
+class TestTheChildIsNotToldToResolveAnAccount:
+    def test_account_id_is_not_passed(self):
+        """_account_env sets MIGRATION_DB, and its own docstring says a
+        child pointed there must not also get --account-id: it follows
+        MIGRATION_DB into the per-account ledger looking for tenant_configs,
+        a table that only exists in the control-plane database.
+
+        Live, on the first real call:
+            sqlite3.OperationalError: no such table: tenant_configs
+        """
+        blk = _block()
+        assert '"--account-id"' not in blk
+
+    def test_the_environment_carries_the_tenant_instead(self):
+        blk = _block()
+        assert "_account_env(account_id" in blk
