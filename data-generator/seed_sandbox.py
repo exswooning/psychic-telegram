@@ -2438,9 +2438,29 @@ def main(argv: list[str] | None = None) -> int:
     # it, and a number baked in here goes stale next to the comment that
     # explains it.
     writes_per_sec = float(os.getenv("SEED_WRITES_PER_SEC_PER_USER", "2.0"))
-    est_files = cfg["per_leaf"] * 60 + cfg["wide"] + cfg["archive_years"] * 4 * (
+    est_files = cfg["per_leaf"] * 60 + cfg["archive_years"] * 4 * (
         cfg["per_leaf"] // 3 or 1)
-    est_calls = (est_files + mail_count + event_count) * len(entries)
+    # `wide` is 3,000 files at this scale and it is built in
+    # _build_edge_cases, which by default runs for the FIRST user only. It
+    # was inside the per-user term, so the estimate charged 199 people for
+    # files they never receive -- 597,000 phantom writes, a third of the
+    # whole figure. Added once, where it is actually created.
+    est_calls = ((est_files + mail_count + event_count) * len(entries)
+                 + cfg["wide"])
+    # This is still a rough number, and knowingly so. Measured live on a
+    # 200-user `huge` run: a user finished in 3,980-4,579s having written
+    # 2,273 files, 55 folders, 116 comments, 1,445 messages, 4 drafts and
+    # 482 events -- about 4,400 items at 1.0 write/sec, against the 8,320
+    # files and 2.0 writes/sec assumed here. The two errors point in
+    # opposite directions and largely cancel (9.5h estimated against 8.1h
+    # observed), which is why correcting only one of them makes this
+    # WORSE, not better: dropping the rate to the measured 1.0 without
+    # also fixing the file count gives 19h.
+    #
+    # Getting it exactly right means deriving the file count from the same
+    # branches CorpusBuilder walks, which is how this drifted in the first
+    # place. The run supersedes it anyway -- the dashboard's observed ETA
+    # is measured from real completions and replaces this within the hour.
     est_min = est_calls / (min(args.workers, len(entries)) * writes_per_sec) / 60
     est_h, est_m = divmod(int(est_min), 60)
     pretty = f"{est_h}h {est_m}m" if est_h else f"{est_m} minute(s)"
