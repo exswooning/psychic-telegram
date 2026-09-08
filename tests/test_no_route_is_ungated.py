@@ -120,7 +120,10 @@ class TestTheStdlibServer:
         """Ordering matters: a check placed after the body is read, or after
         a route dispatches, is not a gate."""
         src = open(os.path.join(ROOT, "webui.py"), encoding="utf-8").read()
-        post = src.split("def do_POST", 1)[1][:900]
+        # _do_POST: do_POST is now the crash-guard wrapper that delegates
+        # to it. The gate still has to be the first thing the real handler
+        # does -- wrapping it changed where to look, not what must hold.
+        post = src.split("def _do_POST", 1)[1][:900]
         assert post.index("_authorised()") < post.index("Content-Length"), \
             "do_POST reads the request body before checking the credential"
 

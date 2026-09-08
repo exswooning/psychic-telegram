@@ -26,7 +26,7 @@ import webui
 
 class TestTheRouteIsScoped:
     def test_it_passes_the_account_on_screen(self):
-        src = inspect.getsource(webui.Handler.do_GET)
+        src = inspect.getsource(webui.Handler._do_GET)
         # Generous window: a comment above the call must not push it out of
         # view and turn a passing check into a failing one.
         seg = src.split('path == "/api/identities"', 1)[1][:900]
@@ -42,7 +42,7 @@ class TestTheRouteIsScoped:
         """A read that opens a ledger without an account shows one tenant's
         data to another. Named individually so a new one has to be added
         here deliberately."""
-        src = inspect.getsource(webui.Handler.do_GET)
+        src = inspect.getsource(webui.Handler._do_GET)
         for route in ("/api/identities", "/api/licences", "/api/snapshot",
                       "/api/spa/users", "/api/spa/report"):
             seg = src.split(f'path == "{route}"', 1)

@@ -49,6 +49,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import traceback
 import time
 import urllib.error
 import urllib.parse
@@ -4320,7 +4321,40 @@ class Handler(BaseHTTPRequestHandler):
         with open(target, "rb") as f:
             self._send(200, f.read(), ctype)
 
+    # -- crash containment ---------------------------------------------------
+    #
+    # An unhandled exception in a handler used to escape into
+    # socketserver, which closes the connection without writing anything.
+    # Caddy then returns a bare 502 with no body, and the browser reports
+    # "Unexpected end of JSON input" -- a message that names the symptom
+    # and nothing else. That is what a live UnboundLocalError in the wipe
+    # handler looked like from the UI: a dialog with a parse error in it
+    # and no way to tell what had actually gone wrong.
+    #
+    # The traceback still goes to the log, unchanged. What is added is that
+    # the caller is told, in the shape every other response here uses.
+    def _guard(self, fn, label: str) -> None:
+        try:
+            fn()
+        except (BrokenPipeError, ConnectionResetError):
+            # The client went away mid-response. Nothing to report to.
+            raise
+        except Exception as exc:                       # noqa: BLE001
+            traceback.print_exc()
+            try:
+                self._json({"ok": False,
+                            "error": f"{type(exc).__name__}: {exc}"[:300],
+                            "where": label}, 500)
+            except Exception:                          # noqa: BLE001
+                pass                                   # response already begun
+
     def do_GET(self) -> None:
+        self._guard(self._do_GET, "GET " + self.path.split("?")[0])
+
+    def do_POST(self) -> None:
+        self._guard(self._do_POST, "POST " + self.path.split("?")[0])
+
+    def _do_GET(self) -> None:
         path = self.path.split("?")[0]
         query = urllib.parse.parse_qs(self.path.partition("?")[2])
         if not self._is_public(path) and not self._authorised():
@@ -4493,7 +4527,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._json({"error": "not found"}, 404)
 
-    def do_POST(self) -> None:
+    def _do_POST(self) -> None:
         # No POST on this server is part of signing in -- login and signup
         # live on api_server (/api/v2/auth/*) -- so every one of them needs
         # a credential, /api/run above all.
@@ -4584,7 +4618,21 @@ class Handler(BaseHTTPRequestHandler):
             if side not in ("source", "target"):
                 self._json({"ok": False, "error": "side must be source or target"})
                 return
-            st = Settings(account_id=account_id) if account_id else Settings()
+            # Imported here, not relied on from the enclosing scope. Another
+            # branch of this same method does `from config import Settings`
+            # inside its own `if`, which makes Settings a LOCAL of do_POST
+            # for every path through it -- so reaching it from a branch that
+            # did not run raises UnboundLocalError, not NameError, and the
+            # server returns a bare 502 with no body at all. The dialog
+            # showed "Unexpected end of JSON input", which names the
+            # symptom and nothing else.
+            #
+            # webui.py's own module docstring warns about exactly this
+            # shape at line 70. It is easier to hit than it reads.
+            from config import Settings as _Settings
+
+            st = (_Settings(account_id=account_id) if account_id
+                  else _Settings())
             configured = (st.source_domain if side == "source"
                           else st.target_domain) or ""
             typed = (body.get("confirm_domain") or "").strip()

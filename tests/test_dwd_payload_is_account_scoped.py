@@ -26,7 +26,7 @@ class TestItReadsTheAccountsTenant:
         assert "Settings(account_id=account_id) if account_id else Settings()" in src
 
     def test_the_route_passes_the_on_screen_account(self):
-        src = inspect.getsource(webui.Handler.do_GET)
+        src = inspect.getsource(webui.Handler._do_GET)
         i = src.index('path == "/api/dwd"')
         assert "dwd_payload(self._on_screen())" in src[i:i + 200]
 

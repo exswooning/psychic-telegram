@@ -71,7 +71,7 @@ class TestAskingForOneJobDoesNotAnswerWithAnother:
 class TestTheEndpointPassesItThrough:
     def test_the_handler_reads_the_query_parameter(self):
         import inspect
-        src = inspect.getsource(webui.Handler.do_GET)
+        src = inspect.getsource(webui.Handler._do_GET)
         i = src.index('path == "/api/job"')
         assert 'query.get("name"' in src[i:i + 1400], (
             "the name is still decorative")
