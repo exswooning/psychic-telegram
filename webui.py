@@ -2538,7 +2538,7 @@ def seed_scopes_payload() -> dict:
         for n, f, sc in caps]}
 
 
-def dwd_payload() -> dict:
+def dwd_payload(account_id: int | None = None) -> dict:
     """
     The exact Client ID and scope line to paste into each Admin Console.
 
@@ -2584,7 +2584,20 @@ def dwd_payload() -> dict:
                                             scopes.update(fn(s))
         return sorted(scopes)
 
-    st = Settings()
+    # The signed-in account's tenants, not this process's environment.
+    #
+    # env.sh is sourced by systemd into the server process, and on a
+    # long-lived deployment it holds whatever the first setup put there --
+    # here, c.example.com and a.example.com, placeholders from August. So
+    # this reported one tenant while tenant_configs held another, and the
+    # Working domains card offered to wipe a domain that was not the one the
+    # operator had set up. Three answers on one box: the process
+    # environment, config.py's own defaults, and the account's real row.
+    #
+    # Settings(account_id=...) reads tenant_configs and falls back to the
+    # environment only when the account has no row -- which is the right
+    # order, and the one every other account-scoped path here already uses.
+    st = Settings(account_id=account_id) if account_id else Settings()
     out = {"tenants": []}
     for side, key_path, scopes, admin, domain in (
         ("source", st.source_sa_key, source_scopes(st), st.source_admin, st.source_domain),
@@ -4377,7 +4390,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/seed-scopes":
             self._json(seed_scopes_payload())
         elif path == "/api/dwd":
-            self._json(dwd_payload())
+            self._json(dwd_payload(self._on_screen()))
         elif path == "/api/next":
             self._json(next_actions_payload(self._on_screen()))
         elif path == "/api/licences":
