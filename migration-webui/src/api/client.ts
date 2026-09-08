@@ -215,6 +215,24 @@ export interface LicencePreflight {
   error?: string
 }
 
+/** Redo the two console steps that have no API: the DWD grant and the Chat
+ *  app. full_setup does both once when a tenant is first configured; this
+ *  is the way back for one already set up. */
+export async function repairConsoleSetup(
+  side: 'source' | 'target', adminPassword: string,
+  opts: { grant?: boolean; chat?: boolean } = {},
+): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetch('/api/repair_console_setup', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      side, admin_password: adminPassword,
+      grant: opts.grant ?? true, chat: opts.chat ?? true,
+    }),
+  })
+  return res.json()
+}
+
 export const fetchLicencePreflight = () =>
   getJSON<LicencePreflight>('/api/licence_preflight')
 

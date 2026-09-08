@@ -4849,6 +4849,48 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": ok, "error": "" if ok else msg})
             return
 
+        if self.path == "/api/repair_console_setup":
+            # The two steps with no API and no gcloud command -- the DWD
+            # grant and the Chat app -- redone for a tenant already set up.
+            # full_setup does both once; neither was reachable afterwards,
+            # so a tenant whose setup died before those phases, or one set
+            # up before a scope was added, had no route back except
+            # re-running the whole setup against a project that exists.
+            #
+            # It runs HERE, on the box. /api/dwd/automate hands back a
+            # command to run elsewhere because "this server is headless",
+            # which stopped being true when dwd_helper._ensure_display()
+            # learned to start Xvfb -- full_setup's own Chat phase has
+            # relied on that for a while. Confirmed on this VPS:
+            # _ensure_display() returns :100 and Chromium is installed.
+            account_id, scope_err = resolve_target_account(
+                self._account_id(), body.get("account_id"))
+            if scope_err:
+                self._json({"ok": False, "error": scope_err}, 403)
+                return
+            side = (body.get("side") or "source").strip()
+            if side not in ("source", "target"):
+                self._json({"ok": False, "error": "side must be source or target"})
+                return
+            env = _account_env(account_id, dict(os.environ))
+            # Environment, never argv -- a command line is readable by every
+            # process on the box through ps.
+            env["DWD_PASSWORD"] = body.get("admin_password") or ""
+            if not env["DWD_PASSWORD"]:
+                self._json({"ok": False, "error":
+                            "the admin password is needed: both steps sign "
+                            "in to a Google console and neither can prompt"})
+                return
+            argv = [PY, "repair_console_setup.py", "--side", side]
+            if not body.get("grant", True):
+                argv.append("--skip-grant")
+            if not body.get("chat", True):
+                argv.append("--skip-chat")
+            ok, msg = get_job(account_id).start("repair console setup", argv,
+                                                env=env)
+            self._json({"ok": ok, "error": "" if ok else msg})
+            return
+
         if self.path == "/api/configure_chat_app":
             # Chat needs an app configured in the Cloud console before a
             # single chat.spaces() call stops returning 404 "Google Chat app

@@ -23,7 +23,7 @@ import {
 } from '@mui/material'
 import {
   DeleteForever as RemoveIcon, DeleteSweep as WipeIcon,
-  PersonRemove as UsersIcon,
+  PersonRemove as UsersIcon, Build as RepairIcon,
   Language as DomainIcon,
 } from '@mui/icons-material'
 
@@ -35,7 +35,7 @@ export interface ConfiguredTenant {
   clientId?: string
 }
 
-type Mode = 'wipe' | 'remove' | 'delete_users'
+type Mode = 'wipe' | 'remove' | 'delete_users' | 'repair'
 
 const COPY: Record<Mode, { title: string; verb: string; warn: string }> = {
   wipe: {
@@ -45,6 +45,17 @@ const COPY: Record<Mode, { title: string; verb: string; warn: string }> = {
         + 'and tasks. The Cloud project, the delegation grant and the saved '
         + 'configuration are kept, so the tenant stays ready to seed or '
         + 'migrate again.',
+  },
+  // The one action here that adds rather than removes. It sits with these
+  // because it is per-tenant and needs the same admin password, not because
+  // it is dangerous -- hence the plain colour on its button.
+  repair: {
+    title: 'Repair console setup',
+    verb: 'Repair',
+    warn: 'Re-pastes the delegation grant (picking up any scope added since '
+        + 'this tenant was set up) and configures the Chat app. Both are '
+        + 'console steps with no API, done once during setup and unreachable '
+        + 'afterwards. Adds nothing and deletes nothing.',
   },
   delete_users: {
     title: 'Delete all users',
@@ -83,6 +94,7 @@ export const WorkingDomains: React.FC<{
   // account that is already on file, so demanding a password for it would
   // be asking for a credential nothing is going to use.
   const needsPassword = target?.mode === 'remove'
+                     || target?.mode === 'repair'
   const copy = target ? COPY[target.mode] : null
 
   return (
@@ -120,6 +132,12 @@ export const WorkingDomains: React.FC<{
                         data-testid={`wipe-${t.side}`}
                         onClick={() => ask(t, 'wipe')}>
                   Wipe data
+                </Button>
+                <Button size="small" variant="outlined"
+                        startIcon={<RepairIcon />}
+                        data-testid={`repair-${t.side}`}
+                        onClick={() => ask(t, 'repair')}>
+                  Repair console
                 </Button>
                 <Button size="small" color="error" variant="outlined"
                         startIcon={<UsersIcon />}

@@ -21,7 +21,7 @@ import LicenceReadiness from '@/components/LicenceReadiness'
 import EmergencyBrake from '@/components/EmergencyBrake'
 import WorkingDomains from '@/components/WorkingDomains'
 import type { ConfiguredTenant } from '@/components/WorkingDomains'
-import { removeTenantSetup } from '@/api/client'
+import { removeTenantSetup, repairConsoleSetup } from '@/api/client'
 import ForensicModal from '@/components/ForensicModal'
 import BenchmarkRunner from '@/components/BenchmarkRunner'
 import ProvisionUsers from '@/components/ProvisionUsers'
@@ -242,7 +242,12 @@ const MissionControl: React.FC = () => {
       <WorkingDomains
         tenants={configuredTenants}
         onAct={async (t, mode, password) => {
-          const r = await removeTenantSetup(t.side, t.domain, password, mode)
+          // Repair is the one action here that adds rather than removes, so
+          // it goes to its own endpoint -- removeTenantSetup's whole
+          // contract is the typed-domain gate on destruction.
+          const r = mode === 'repair'
+            ? await repairConsoleSetup(t.side, password)
+            : await removeTenantSetup(t.side, t.domain, password, mode)
           if (!r.ok) throw new Error(r.error || `could not ${mode} the tenant`)
           await refreshLists()
         }} />

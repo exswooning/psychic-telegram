@@ -118,4 +118,25 @@ describe('working domains', () => {
     const confirm = screen.getByRole('button', { name: /delete users/i })
     expect(confirm).toBeDisabled()
   })
+
+  it('offers the console repair, and does not dress it as destruction', () => {
+    /* It re-pastes a grant and configures a Chat app. Adds nothing and
+       deletes nothing -- the only action on this card that does not. */
+    render(<WorkingDomains tenants={tenants} onAct={vi.fn()} />)
+    fireEvent.click(screen.getByTestId('repair-source'))
+    expect(screen.getByText(/Adds nothing and deletes nothing/i)).toBeInTheDocument()
+  })
+
+  it('says what the repair is for, since both steps have no API', async () => {
+    render(<WorkingDomains tenants={tenants} onAct={vi.fn()} />)
+    fireEvent.click(screen.getByTestId('repair-source'))
+    expect(await screen.findByText(/scope added since/i)).toBeInTheDocument()
+    expect(screen.getByText(/Chat app/i)).toBeInTheDocument()
+  })
+
+  it('asks for the admin password, because both steps sign in', () => {
+    render(<WorkingDomains tenants={tenants} onAct={vi.fn()} />)
+    fireEvent.click(screen.getByTestId('repair-source'))
+    expect(screen.getByLabelText(/password/i)).toBeInTheDocument()
+  })
 })
