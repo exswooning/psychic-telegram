@@ -101,7 +101,9 @@ class TestTheFormFillerUsesIt:
         import inspect
         src = inspect.getsource(g._fill_chat_app_form)
         assert "_open_chat_configuration_tab" in src
-        assert src.index("_open_chat_configuration_tab") < src.index("name_box = None")
+        # The field lookup is _chat_field now (label-first, for a Material
+        # form); the ordering it guards is unchanged.
+        assert src.index("_open_chat_configuration_tab") < src.index("name_box =")
 
     def test_the_failure_names_what_was_not_found(self):
         """It used to blame a missing Configuration tab. A saved page from a
@@ -116,14 +118,21 @@ class TestTheFormFillerUsesIt:
         assert "app name field" in src
         assert "/tmp" in src, "must point at the saved screenshot and page text"
 
-    def test_the_add_on_checkbox_is_cleared_before_looking(self):
-        """The console ships that checkbox SET, and the classic Chat app
-        fields do not render while it is. Probing for the field first is
-        what produced a whole run of "no Configuration tab"."""
+    def test_the_add_on_checkbox_is_a_fallback_not_a_step(self):
+        """It used to be cleared unconditionally, on the theory that the
+        fields do not render while it is set. A live run disproved that: it
+        logged "the add-on checkbox is still set" and then found and filled
+        every field anyway. What the click DID do was raise an overlay that
+        never cleared, and every later click -- Save included -- timed out
+        against its backdrop.
+
+        Clearing it is also irreversible, so doing it when it is not in the
+        way is the worse half of the bargain regardless."""
         import inspect
         src = inspect.getsource(g._open_chat_configuration_tab)
-        assert "_clear_workspace_addon_checkbox" in src
-        assert src.index("_clear_workspace_addon_checkbox") < src.index("_CHAT_NAME_SEL")
+        first_look = src.index('_chat_field(page, "App name")')
+        clear = src.index("_clear_workspace_addon_checkbox")
+        assert first_look < clear, "the form is probed before anything is changed"
 
     def test_clearing_it_is_announced_as_irreversible(self):
         """The console says the checkbox cannot be re-ticked. Automation

@@ -491,7 +491,11 @@ class _FakeClickable:
     def is_enabled(self):
         return self.enabled
 
-    def click(self):
+    def click(self, **kwargs):
+        # Playwright's click takes timeout= and force=, and the real caller
+        # passes both -- force is how it gets past a leftover CDK backdrop.
+        # A fake that rejects them fails the product code for the fake's own
+        # reasons, which is what happened here.
         self.clicked = True
 
 
@@ -508,6 +512,11 @@ class _FakeLocatorResult:
     @property
     def first(self):
         return self._target
+
+    def all_inner_texts(self):
+        """Only used on the failure path, to name the buttons that ARE on
+        the page. Empty is a fine answer for a fake."""
+        return []
 
 
 class _FakeChatFormPage:

@@ -502,6 +502,109 @@ _CHAT_NAME_SEL = ('input[aria-label*="app name" i]',
 _CHAT_ADDON_LABEL = "Build this Chat app as a Workspace add-on"
 
 
+# The console confirms the irreversible add-on change in a modal, and while
+# that modal is open an Angular CDK backdrop covers the page -- every later
+# click retries until it times out against
+# <div class="cdk-overlay-dark-backdrop">. Confirmed live: the form was
+# found and then nothing on it could be clicked.
+_CHAT_CONFIRM_LABELS = ("Clear", "Confirm", "Continue", "OK", "Ok",
+                        "Got it", "Remove", "Yes")
+
+
+def _confirm_open_dialog(page, wait_ms: int = 8000) -> bool:
+    """Clear whatever overlay is covering the page. True if one was there.
+
+    An Angular CDK backdrop blocks every click beneath it, and the console
+    puts one up for menus, spinners and modals alike. The first version of
+    this assumed a confirmation dialog and hunted for affirmative buttons;
+    the saved page proved there was no dialog text on screen at all, so it
+    was answering a modal that did not exist and then reporting failure.
+
+    Order matters. Waiting first is what handles the common case -- a
+    transient spinner that clears on its own -- without clicking anything.
+    Only if it outlasts that do we look for a real button, and Escape is the
+    last resort.
+
+    Whatever it is, its text is logged: six rounds of guessing at this step
+    cost more than one line of output ever will.
+    """
+    try:
+        backdrop = page.locator(".cdk-overlay-backdrop-showing")
+        if backdrop.count() == 0:
+            return False
+    except Exception:      # noqa: BLE001
+        return False
+
+    # 1. Let it finish. Most of these are spinners.
+    waited = 0
+    while waited < wait_ms:
+        page.wait_for_timeout(500)
+        waited += 500
+        try:
+            if page.locator(".cdk-overlay-backdrop-showing").count() == 0:
+                return True
+        except Exception:      # noqa: BLE001
+            return True
+
+    # 2. Still there. Say what it is, then try to answer it.
+    try:
+        text = page.locator(".cdk-overlay-container").inner_text()[:300]
+        log(f"  an overlay is still covering the page: {text!r}")
+    except Exception:      # noqa: BLE001
+        log("  an overlay is covering the page and its text could not be read")
+
+    for label in _CHAT_CONFIRM_LABELS:
+        try:
+            btn = page.locator(".cdk-overlay-container").get_by_role(
+                "button", name=label, exact=False)
+            if btn.count() > 0 and btn.first.is_visible():
+                log(f"  answering it ({label})")
+                btn.first.click(timeout=5000)
+                page.wait_for_timeout(1500)
+                return True
+        except Exception:      # noqa: BLE001
+            continue
+
+    # 3. Escape closes a menu or a dismissible dialog.
+    try:
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(1000)
+    except Exception:      # noqa: BLE001
+        pass
+    return True
+
+
+def _chat_field(page, label: str):
+    """The input under a given console label, or None.
+
+    The saved page for wsmig-src-20736 shows "App name", "Avatar URL" and
+    "Description" as Angular Material <mat-label> text -- not aria-label,
+    not placeholder. Selectors matching those attributes found nothing and
+    the step reported the form missing while looking straight at it.
+
+    get_by_label first, because that is the accessible relationship and it
+    survives a restyle; the structural selectors are fallbacks for a
+    rollout where the label is not wired to the input.
+    """
+    try:
+        loc = page.get_by_label(label, exact=False)
+        if loc.count() > 0 and loc.first.is_visible():
+            return loc.first
+    except Exception:      # noqa: BLE001 - older console shapes
+        pass
+    for sel in (f'mat-form-field:has-text("{label}") input',
+                f'mat-form-field:has-text("{label}") textarea',
+                f'input[aria-label*="{label}" i]',
+                f'input[placeholder*="{label}" i]'):
+        try:
+            loc = page.locator(sel)
+            if loc.count() > 0 and loc.first.is_visible():
+                return loc.first
+        except Exception:      # noqa: BLE001
+            continue
+    return None
+
+
 def _clear_workspace_addon_checkbox(page) -> bool:
     """Uncheck the add-on option so the classic Chat app fields render.
 
@@ -533,6 +636,10 @@ def _clear_workspace_addon_checkbox(page) -> bool:
             page.locator(f'label:has-text("{_CHAT_ADDON_LABEL}")').first.click(
                 timeout=5000)
         page.wait_for_timeout(2500)
+        # Clearing it raises a "this cannot be undone" modal, and its
+        # backdrop blocks everything until it is answered.
+        _confirm_open_dialog(page)
+        page.wait_for_timeout(1500)
         # Report what actually happened, not what was attempted.
         try:
             still = box.first.is_checked()
@@ -547,6 +654,11 @@ def _clear_workspace_addon_checkbox(page) -> bool:
         log(f"  (add-on checkbox: {str(exc)[:90]})")
         return False
 _CHAT_STATUS_LABELS = ("LIVE", "Live", "ON", "On")
+# Google's own default Chat app avatar. The form requires an HTTPS URL to a
+# square PNG and rejects the save without one; hosting our own to satisfy a
+# field nobody looks at would be a deployment problem for no gain.
+CHAT_AVATAR_URL = ("https://developers.google.com/chat/images/"
+                   "quickstart-app-avatar.png")
 _CHAT_SAVE_LABELS = ("SAVE", "Save")
 
 
@@ -651,8 +763,24 @@ def _open_chat_configuration_tab(page, attempts: int = 3) -> bool:
         # Before probing for the field: it does not exist while the add-on
         # checkbox is set, and this step spent a live run reporting the tab
         # missing when the tab was there and the field was not.
+        # Look FIRST, clear only if the field is genuinely absent.
+        #
+        # This cleared the add-on checkbox unconditionally, on the theory
+        # that the fields do not render while it is set. The evidence says
+        # otherwise: a run logged "the add-on checkbox is still set" and
+        # then found and filled App name, Avatar URL and Description
+        # anyway. What the click DID do was raise an overlay that never
+        # cleared, and every later click -- including Save -- timed out
+        # against its backdrop.
+        #
+        # So the checkbox is a fallback for a page that really does hide
+        # the form, not a step. Touching a one-way setting that was not in
+        # the way was the worse half of the bargain regardless.
+        if _chat_field(page, "App name") is not None:
+            return True
         _clear_workspace_addon_checkbox(page)
-        # Already there? The name field is the only proof that matters.
+        if _chat_field(page, "App name") is not None:
+            return True
         for sel in _CHAT_NAME_SEL:
             loc = page.locator(sel)
             if loc.count() > 0 and loc.first.is_visible():
@@ -671,6 +799,8 @@ def _open_chat_configuration_tab(page, attempts: int = 3) -> bool:
                 break
         else:
             page.wait_for_timeout(1500)
+    if _chat_field(page, "App name") is not None:
+        return True
     for sel in _CHAT_NAME_SEL:
         loc = page.locator(sel)
         if loc.count() > 0 and loc.first.is_visible():
@@ -715,12 +845,14 @@ def _fill_chat_app_form(page, project: str, timeout: int) -> tuple[bool, str]:
                        "project (see the saved screenshot and page text in "
                        "/tmp)")
 
-    name_box = None
-    for sel in _CHAT_NAME_SEL:
-        loc = page.locator(sel)
-        if loc.count() > 0 and loc.first.is_visible():
-            name_box = loc.first
-            break
+    _confirm_open_dialog(page)
+    name_box = _chat_field(page, "App name")
+    if name_box is None:
+        for sel in _CHAT_NAME_SEL:
+            loc = page.locator(sel)
+            if loc.count() > 0 and loc.first.is_visible():
+                name_box = loc.first
+                break
 
     if name_box is None:
         _save_chat_diagnostics(page, project, "no-name-field")
@@ -735,6 +867,23 @@ def _fill_chat_app_form(page, project: str, timeout: int) -> tuple[bool, str]:
         _save_chat_diagnostics(page, project, "name-fill-failed")
         return False, f"could not set the app name: {exc}"
 
+    # Avatar URL and Description are required alongside the name -- the
+    # console refuses to save without them, so filling only the name gets a
+    # disabled Save button and a step that reports "could not find Save".
+    # Description is capped at 40 characters by the form itself.
+    for label, value in (("Avatar URL", CHAT_AVATAR_URL),
+                         ("Description", "Bitport migration sandbox")):
+        box = _chat_field(page, label)
+        if box is None:
+            log(f"  (no {label} field found -- continuing)")
+            continue
+        try:
+            if not (box.input_value() or "").strip():
+                box.click()
+                box.type(value, delay=20)
+        except Exception as exc:      # noqa: BLE001 - not worth failing over
+            log(f"  (could not set {label}: {str(exc)[:70]})")
+
     for label in _CHAT_STATUS_LABELS:
         control = page.get_by_text(label, exact=True)
         if control.count() > 0 and control.first.is_visible():
@@ -747,15 +896,55 @@ def _fill_chat_app_form(page, project: str, timeout: int) -> tuple[bool, str]:
     saved = False
     for label in _CHAT_SAVE_LABELS:
         btn = page.get_by_role("button", name=label)
-        if btn.count() > 0 and btn.first.is_visible() and btn.first.is_enabled():
+        if btn.count() == 0:
+            continue
+        # Say WHY it was not clicked. "could not find/click Save" was
+        # reported while a Save button was plainly on the page -- it is
+        # disabled until the form validates, and that is a different
+        # problem with a different fix.
+        try:
+            vis, en = btn.first.is_visible(), btn.first.is_enabled()
+        except Exception:      # noqa: BLE001
+            vis, en = False, False
+        if not (vis and en):
+            log(f"  {label} is present but visible={vis} enabled={en}")
             try:
-                btn.first.click()
+                errs = page.locator("mat-error, .mat-mdc-form-field-error"
+                                    ).all_inner_texts()
+                errs = [e.strip() for e in errs if e.strip()]
+                if errs:
+                    log(f"  the form is rejecting: {errs[:6]}")
+            except Exception:      # noqa: BLE001
+                pass
+            continue
+        try:
+            btn.first.click(timeout=8000)
+            page.wait_for_timeout(2500)
+            saved = True
+        except Exception as exc:      # noqa: BLE001
+            log(f"  clicking {label} was blocked ({str(exc)[:70]}) -- "
+                f"retrying through whatever is covering it")
+            try:
+                # force skips the actionability wait, which is what a
+                # leftover backdrop defeats. The button is already known to
+                # be visible and enabled at this point.
+                btn.first.click(force=True, timeout=8000)
                 page.wait_for_timeout(2500)
                 saved = True
-            except Exception:      # noqa: BLE001 - try the next label
+            except Exception as exc2:      # noqa: BLE001 - try the next label
+                log(f"  forced click also failed: {str(exc2)[:70]}")
                 continue
-            break
+        break
 
+    if not saved:
+        # Name the buttons that ARE there. Guessing at Save's wording has
+        # cost several rounds; one line of output ends that for good.
+        try:
+            names = page.get_by_role("button").all_inner_texts()
+            visible = [n.strip() for n in names if n.strip()][:25]
+            log(f"  buttons on the page: {visible}")
+        except Exception as exc:      # noqa: BLE001
+            log(f"  (could not list buttons: {str(exc)[:80]})")
     _save_chat_diagnostics(page, project, "after-save" if saved else "no-save-button")
     if not saved:
         return False, "filled the form but could not find/click Save"
