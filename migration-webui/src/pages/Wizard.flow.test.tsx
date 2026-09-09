@@ -53,6 +53,13 @@ const enterDomain = async (d: string) => {
   fireEvent.click(screen.getByTestId('wizard-domain-next'))
 }
 
+/** Radio, then Continue -- the same two beats as Google Workspace signup's
+ *  "Number of employees" step, which this flow is modelled on. */
+const choose = async (purpose: 'seed' | 'migrate') => {
+  fireEvent.click(await screen.findByTestId(`purpose-${purpose}`))
+  fireEvent.click(screen.getByTestId('purpose-next'))
+}
+
 describe('the tenant is the first question', () => {
   it('opens asking for a domain, not for a mode', async () => {
     view()
@@ -115,14 +122,14 @@ describe('seeding goes straight to work', () => {
   it('does not ask for a second domain', async () => {
     view()
     await enterDomain('acme.com')
-    fireEvent.click(await screen.findByTestId('purpose-seed'))
+    await choose('seed')
     expect(await screen.findByTestId('seed-wizard')).toBeInTheDocument()
   })
 
   it('carries the domain into the setup panel', async () => {
     view()
     await enterDomain('acme.com')
-    fireEvent.click(await screen.findByTestId('purpose-seed'))
+    await choose('seed')
     expect(await screen.findByTestId('seed-wizard'))
       .toHaveTextContent('seeding acme.com')
   })
@@ -132,14 +139,23 @@ describe('migrating asks where it is going', () => {
   it('asks for a second domain', async () => {
     view()
     await enterDomain('acme.com')
-    fireEvent.click(await screen.findByTestId('purpose-migrate'))
-    expect(await screen.findByText(/Migrate acme\.com into/)).toBeInTheDocument()
+    await choose('migrate')
+    expect(await screen.findByRole('heading', { name: /where is it going/i }))
+      .toBeInTheDocument()
+    expect(screen.getByLabelText(/destination domain/i)).toBeInTheDocument()
+  })
+
+  it('still names the source it is migrating away from', async () => {
+    view()
+    await enterDomain('acme.com')
+    await choose('migrate')
+    expect(await screen.findByText(/acme\.com is the source/)).toBeInTheDocument()
   })
 
   it('refuses the same domain on both sides', async () => {
     view()
     await enterDomain('acme.com')
-    fireEvent.click(await screen.findByTestId('purpose-migrate'))
+    await choose('migrate')
     fireEvent.change(await screen.findByTestId('wizard-domain'),
                      { target: { value: 'acme.com' } })
     expect(screen.getByTestId('wizard-domain-next')).toBeDisabled()
@@ -149,14 +165,14 @@ describe('migrating asks where it is going', () => {
   it('says which side is read and which is written', async () => {
     view()
     await enterDomain('acme.com')
-    fireEvent.click(await screen.findByTestId('purpose-migrate'))
+    await choose('migrate')
     expect(await screen.findByText(/read, never written/)).toBeInTheDocument()
   })
 
   it('hands each domain to its own side', async () => {
     view()
     await enterDomain('acme.com')
-    fireEvent.click(await screen.findByTestId('purpose-migrate'))
+    await choose('migrate')
     await enterDomain('newco.com')
     await waitFor(() =>
       expect(screen.getByTestId('qts-source')).toHaveTextContent('acme.com'))
@@ -168,7 +184,7 @@ describe('going back', () => {
   it('can change the tenant after choosing a purpose', async () => {
     view()
     await enterDomain('acme.com')
-    fireEvent.click(await screen.findByTestId('purpose-seed'))
+    await choose('seed')
     fireEvent.click(await screen.findByTestId('wizard-change'))
     expect(await screen.findByTestId('wizard-domain')).toBeInTheDocument()
   })
@@ -176,7 +192,7 @@ describe('going back', () => {
   it('remembers what was typed rather than making it be retyped', async () => {
     view()
     await enterDomain('acme.com')
-    fireEvent.click(await screen.findByTestId('purpose-seed'))
+    await choose('seed')
     fireEvent.click(await screen.findByTestId('wizard-change'))
     expect(await screen.findByTestId('wizard-domain')).toHaveValue('acme.com')
   })
@@ -191,5 +207,80 @@ describe('looksLikeDomain', () => {
     for (const d of ['acme', 'admin@acme.com', 'acme.', '.acme.com',
                      'two words.com', 'https://acme.com', ''])
       expect(looksLikeDomain(d)).toBe(false)
+  })
+})
+
+
+describe('it reads like the Google Workspace signup it sits beside', () => {
+  it('leads with one large heading, not a section title', async () => {
+    /* The page used an h4 at 1.5rem, which reads as a settings pane rather
+       than the front door of a setup. */
+    view()
+    const h = await screen.findByRole('heading', { name: /let's get started/i })
+    expect(h.tagName).toBe('H1')
+  })
+
+  it('asks exactly one question at a time', async () => {
+    view()
+    await screen.findByTestId('wizard-domain')
+    expect(screen.getAllByRole('textbox')).toHaveLength(1)
+  })
+
+  it('offers the choice as radios, the way the signup does', async () => {
+    view()
+    await enterDomain('acme.com')
+    const radios = await screen.findAllByRole('radio')
+    expect(radios).toHaveLength(2)
+  })
+
+  it('will not continue until one is picked', async () => {
+    view()
+    await enterDomain('acme.com')
+    expect(await screen.findByTestId('purpose-next')).toBeDisabled()
+    fireEvent.click(screen.getByTestId('purpose-seed'))
+    expect(screen.getByTestId('purpose-next')).toBeEnabled()
+  })
+})
+
+describe('the panel beside the form says something true', () => {
+  /* Google puts marketing there. A decorative illustration would be the
+     filler the rest of this app avoids, so it carries what the wizard is
+     about to do -- and has to actually change with the answers, or it is
+     just a differently-shaped ornament. */
+  it('describes what setting up a domain will do', async () => {
+    view()
+    expect(await screen.findByText(/throwaway Google Cloud project/i))
+      .toBeInTheDocument()
+  })
+
+  it('promises nothing is created yet, because nothing is', async () => {
+    view()
+    expect(await screen.findByText(/Nothing is created until you confirm/i))
+      .toBeInTheDocument()
+  })
+
+  it('changes when the purpose is picked', async () => {
+    view()
+    await enterDomain('acme.com')
+    await screen.findByTestId('purpose-seed')
+    expect(screen.getByText(/The two paths/i)).toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('purpose-migrate'))
+    expect(await screen.findByText(/A real migration/i)).toBeInTheDocument()
+  })
+
+  it('names the tenant it is talking about', async () => {
+    view()
+    await enterDomain('acme.com')
+    fireEvent.click(await screen.findByTestId('purpose-seed'))
+    expect(await screen.findByText(/written into acme\.com/i)).toBeInTheDocument()
+  })
+
+  it('states the read-only guarantee on the migrate path', async () => {
+    /* The single most important fact about pointing this at a real tenant. */
+    view()
+    await enterDomain('acme.com')
+    fireEvent.click(await screen.findByTestId('purpose-migrate'))
+    expect(await screen.findByText(/credential for it is read-only/i))
+      .toBeInTheDocument()
   })
 })

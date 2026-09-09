@@ -55,16 +55,109 @@ export function looksLikeDomain(v: string): boolean {
   return /^[a-z0-9.-]+\.[a-z]{2,}$/.test(d) && !d.startsWith('.') && !d.endsWith('.')
 }
 
+/**
+ * The shell every setup step sits in.
+ *
+ * Modelled on Google Workspace's own signup ("Let's get started"), which is
+ * the flow this one stands next to in the operator's head: one large light
+ * heading, one question, a wide field, a pill button -- and a panel on the
+ * right. Google fills that panel with marketing. A decorative illustration
+ * here would be exactly the filler the rest of this app avoids, so it
+ * carries what the wizard is about to do to the tenant, and changes as the
+ * answers come in.
+ *
+ * Every token is the theme's own: Google Sans Flex, #1a73e8, the 999-radius
+ * button, the #dadce0 divider. What changes is scale and rhythm -- the page
+ * used an h4 at 1.5rem, which reads as a settings pane rather than the
+ * front door of a setup.
+ */
+const WizardShell: React.FC<{
+  heading: string
+  sub: string
+  onBack?: () => void
+  aside: React.ReactNode
+  children: React.ReactNode
+}> = ({ heading, sub, onBack, aside, children }) => (
+  <Box sx={{ maxWidth: 1080, mx: 'auto', pt: { xs: 2, md: 6 }, pb: 6 }}>
+    {onBack && (
+      <Button size="small" startIcon={<BackIcon />} onClick={onBack}
+              data-testid="wizard-back" sx={{ mb: 2, ml: -1 }}>
+        Back
+      </Button>
+    )}
+    <Grid container spacing={{ xs: 4, md: 8 }} alignItems="flex-start">
+      <Grid item xs={12} md={5}>
+        <Typography
+          component="h1"
+          sx={{
+            fontFamily: '"Google Sans Flex", "Roboto", sans-serif',
+            fontSize: { xs: '2rem', md: '2.75rem' },
+            fontWeight: 400, lineHeight: 1.15, letterSpacing: '-0.5px',
+            mb: 1.5, wordBreak: 'break-word',
+          }}>
+          {heading}
+        </Typography>
+        <Typography variant="body1" color="text.secondary" sx={{ mb: 4 }}>
+          {sub}
+        </Typography>
+        {children}
+      </Grid>
+      <Grid item xs={12} md={7}>
+        <Box sx={{
+          bgcolor: 'background.default',
+          border: '1px solid', borderColor: 'divider',
+          borderRadius: 4, p: { xs: 3, md: 4 },
+        }}>
+          {aside}
+        </Box>
+      </Grid>
+    </Grid>
+  </Box>
+)
+
+/** The right-hand panel's content: a real sequence, numbered because it IS
+ *  ordered, not because numbers look tidy. */
+const WhatHappens: React.FC<{ title: string; steps: string[]; note?: string }> =
+  ({ title, steps, note }) => (
+    <>
+      <Typography variant="subtitle2" color="text.secondary"
+                  sx={{ textTransform: 'uppercase', letterSpacing: '0.8px', mb: 2 }}>
+        {title}
+      </Typography>
+      <Stack spacing={2.5}>
+        {steps.map((t, i) => (
+          <Stack key={t} direction="row" spacing={2} alignItems="flex-start">
+            <Box sx={{
+              flexShrink: 0, width: 26, height: 26, borderRadius: 999,
+              bgcolor: 'primary.light', color: 'primary.dark',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 13, fontWeight: 500, mt: '1px',
+            }}>{i + 1}</Box>
+            <Typography variant="body2" sx={{ lineHeight: 1.6 }}>{t}</Typography>
+          </Stack>
+        ))}
+      </Stack>
+      {note && (
+        <Typography variant="caption" color="text.secondary"
+                    sx={{ display: 'block', mt: 3, pt: 2.5,
+                          borderTop: '1px solid', borderColor: 'divider' }}>
+          {note}
+        </Typography>
+      )}
+    </>
+  )
+
 const DomainStep: React.FC<{
-  title: string
-  help: string
+  heading: string
+  sub: string
   label: string
   initial?: string
   /** Rejected as the answer, because it is the other side of the pair. */
   taken?: string
+  aside: React.ReactNode
   onBack?: () => void
   onNext: (domain: string) => void
-}> = ({ title, help, label, initial = '', taken, onBack, onNext }) => {
+}> = ({ heading, sub, label, initial = '', taken, aside, onBack, onNext }) => {
   const [value, setValue] = useState(initial)
   const d = value.trim().toLowerCase()
   const same = !!taken && d === taken.trim().toLowerCase()
@@ -77,30 +170,22 @@ const DomainStep: React.FC<{
     : ''
 
   return (
-    <Box sx={{ maxWidth: 560 }}>
-      {onBack && (
-        <Button size="small" startIcon={<BackIcon />} onClick={onBack} sx={{ mb: 1 }}>
-          Back
-        </Button>
-      )}
-      <Typography variant="h4" sx={{ fontWeight: 700, mb: 0.5 }}>{title}</Typography>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-        {help}
-      </Typography>
+    <WizardShell heading={heading} sub={sub} onBack={onBack} aside={aside}>
       <TextField
-        fullWidth autoFocus size="small" label={label} value={value}
+        fullWidth autoFocus label={label} value={value}
         onChange={(e) => setValue(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' && shaped && !same) onNext(d)
-        }}
+        onKeyDown={(e) => { if (e.key === 'Enter' && shaped && !same) onNext(d) }}
         error={!!error} helperText={error || ' '}
-        inputProps={{ 'data-testid': 'wizard-domain' }}
+        inputProps={{ 'data-testid': 'wizard-domain', spellCheck: false,
+                      autoCapitalize: 'none', autoCorrect: 'off' }}
+        sx={{ '& .MuiOutlinedInput-root': { height: 56 } }}
       />
-      <Button variant="contained" sx={{ mt: 1 }} data-testid="wizard-domain-next"
+      <Button variant="contained" size="large" sx={{ mt: 2, px: 4 }}
+              data-testid="wizard-domain-next"
               disabled={!shaped || same} onClick={() => onNext(d)}>
         Continue
       </Button>
-    </Box>
+    </WizardShell>
   )
 }
 
@@ -113,6 +198,7 @@ const Wizard: React.FC = () => {
   const [domain, setDomain] = useState('')
   const [otherDomain, setOtherDomain] = useState('')
   const [purpose, setPurpose] = useState<Purpose | null>(null)
+  const [picked, setPicked] = useState<Purpose | ''>('')
   const [seedEnabled, setSeedEnabled] = useState(false)
 
   useEffect(() => {
@@ -129,10 +215,17 @@ const Wizard: React.FC = () => {
   if (step === 'domain') {
     return (
       <DomainStep
-        title="Setup Wizard"
-        help="Which domain are you setting up? Everything after this is
-              about this tenant."
+        heading="Let's get started"
+        sub="Which domain are you setting up? Everything after this is about this tenant."
         label="Domain" initial={domain}
+        aside={<WhatHappens
+          title="What this sets up"
+          steps={[
+            'A throwaway Google Cloud project for this tenant, with the APIs it needs enabled.',
+            'A service account, and the domain-wide delegation grant that lets it act for your users.',
+            'Either a rehearsal corpus of fabricated data, or a real migration into a second tenant.',
+          ]}
+          note="Nothing is created until you confirm on a later step." />}
         onNext={(d) => {
           setDomain(d)
           // A confirmed deep link skips straight past the question it
@@ -144,61 +237,86 @@ const Wizard: React.FC = () => {
   }
 
   if (step === 'purpose') {
+    const go = () => {
+      if (!picked) return
+      setPurpose(picked)
+      setStep(picked === 'migrate' ? 'counterpart' : 'run')
+    }
     return (
-      <Box>
-        <Button size="small" startIcon={<BackIcon />}
-                onClick={() => setStep('domain')} sx={{ mb: 1 }}>
-          Back
-        </Button>
-        <Typography variant="h4" sx={{ fontWeight: 700, mb: 0.5 }}>{domain}</Typography>
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-          What is this domain for?
-        </Typography>
-        <Grid container spacing={2}>
+      <WizardShell
+        heading={domain}
+        sub="What is this domain for?"
+        onBack={() => setStep('domain')}
+        aside={<WhatHappens
+          title={picked === 'migrate' ? 'A real migration'
+                 : picked === 'seed' ? 'A rehearsal' : 'The two paths'}
+          steps={picked === 'migrate' ? [
+            `${domain} is read, never written — the credential for it is read-only.`,
+            'You name a destination tenant next, and both get a Cloud project and a delegation grant.',
+            'Users are matched, then Drive, Gmail, Calendar, contacts and tasks are copied.',
+          ] : picked === 'seed' ? [
+            `Fabricated users, files, mail and events are written into ${domain}.`,
+            'Nothing real is touched — this is a sandbox corpus for rehearsing a migration.',
+            'You can wipe it and reseed as often as you like.',
+          ] : [
+            'Seed fills a sandbox tenant with fabricated data, so a migration can be rehearsed end to end.',
+            'Migrate moves a real tenant into another one, reading the source and writing only the target.',
+          ]}
+          note={picked === 'seed'
+            ? 'Seeding writes data. It is only offered on accounts opted in to it.'
+            : undefined} />}>
+        <RadioGroup value={picked} onChange={(e) => setPicked(e.target.value as Purpose)}>
           {seedEnabled && (
-            <Grid item xs={12} sm={6}>
-              <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>
-                <CardActionArea data-testid="purpose-seed" sx={{ p: 1 }}
-                                onClick={() => { setPurpose('seed'); setStep('run') }}>
-                  <CardContent>
-                    <SeedIcon color="action" sx={{ fontSize: 32, mb: 1 }} />
-                    <Typography variant="h6" sx={{ fontWeight: 600 }}>Seed it with test data</Typography>
-                    <Typography variant="body2" color="text.secondary">
-                      Fills {domain} with fabricated data for a rehearsal.
-                      Nothing here touches real data.
-                    </Typography>
-                  </CardContent>
-                </CardActionArea>
-              </Card>
-            </Grid>
-          )}
-          <Grid item xs={12} sm={6}>
-            <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>
-              <CardActionArea data-testid="purpose-migrate" sx={{ p: 1 }}
-                              onClick={() => { setPurpose('migrate'); setStep('counterpart') }}>
-                <CardContent>
-                  <MigrateIcon color="action" sx={{ fontSize: 32, mb: 1 }} />
-                  <Typography variant="h6" sx={{ fontWeight: 600 }}>Migrate it into another tenant</Typography>
-                  <Typography variant="body2" color="text.secondary">
-                    gcloud, projects, credentials, domain-wide delegation,
-                    and the real copy.
+            <FormControlLabel value="seed" sx={{ mb: 1, alignItems: 'flex-start' }}
+              control={<Radio inputProps={{ 'data-testid': 'purpose-seed' } as never}
+                              sx={{ pt: 0.5 }} />}
+              label={
+                <Box sx={{ py: 0.5 }}>
+                  <Typography variant="body1" sx={{ fontWeight: 500 }}>
+                    Seed it with test data
                   </Typography>
-                </CardContent>
-              </CardActionArea>
-            </Card>
-          </Grid>
-        </Grid>
-      </Box>
+                  <Typography variant="body2" color="text.secondary">
+                    A rehearsal corpus. None of this touches real data.
+                  </Typography>
+                </Box>
+              } />
+          )}
+          <FormControlLabel value="migrate" sx={{ alignItems: 'flex-start' }}
+            control={<Radio inputProps={{ 'data-testid': 'purpose-migrate' } as never}
+                            sx={{ pt: 0.5 }} />}
+            label={
+              <Box sx={{ py: 0.5 }}>
+                <Typography variant="body1" sx={{ fontWeight: 500 }}>
+                  Migrate it into another tenant
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  gcloud, projects, credentials, delegation, and the real copy.
+                </Typography>
+              </Box>
+            } />
+        </RadioGroup>
+        <Button variant="contained" size="large" sx={{ mt: 3, px: 4 }}
+                data-testid="purpose-next" disabled={!picked} onClick={go}>
+          Continue
+        </Button>
+      </WizardShell>
     )
   }
 
   if (step === 'counterpart') {
     return (
       <DomainStep
-        title={`Migrate ${domain} into…`}
-        help={`${domain} is the source — it is read, never written. Which
-               tenant should its data land in?`}
+        heading="Where is it going?"
+        sub={`${domain} is the source — it is read, never written. Which tenant should its data land in?`}
         label="Destination domain" initial={otherDomain} taken={domain}
+        aside={<WhatHappens
+          title="After this"
+          steps={[
+            `Both ${domain} and the destination get a Cloud project, a service account and a delegation grant.`,
+            'Users are matched between the two tenants, and you review the mapping before anything copies.',
+            'The copy runs per user, per service, and is resumable — it can be stopped and restarted.',
+          ]}
+          note="The source credential is read-only, so a migration cannot alter the tenant it reads." />}
         onBack={() => setStep('purpose')}
         onNext={(d) => { setOtherDomain(d); setStep('run') }} />
     )
