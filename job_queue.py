@@ -32,17 +32,30 @@ import control_plane_db as cpdb
 import job_admission
 
 
+# The two processes that launch heavy jobs. Constants, not string literals
+# at the call sites: a typo in one of four places would silently mean "a
+# runner nobody dispatches for", and the job would wait for ever with the
+# box idle -- the one failure mode a queue must not have.
+RUNNER_WEBUI = "webui"
+RUNNER_API = "api"
+
+
 class QueueFull(RuntimeError):
     """This account already has this job waiting."""
 
 
 def enqueue(account_id: int | None, job_name: str, payload: dict,
-            requested_by: str = "", reason: str = "") -> dict:
+            requested_by: str = "", reason: str = "",
+            runner: str = "") -> dict:
     """Put a job in line. Raises QueueFull if this one is already waiting.
 
     The uniqueness is enforced by the schema, not by a check here: a check
     would race two double-clicks through, which is how one tenant gets two
     concurrent five-hour seeds.
+
+    `runner` names the process that may start it -- see the migration. It
+    is matched exactly by dispatch_one, so the default pairs with the
+    default and a single-process caller never has to think about it.
     """
     import sqlite3
 
@@ -50,9 +63,9 @@ def enqueue(account_id: int | None, job_name: str, payload: dict,
         with cpdb.rw() as conn:
             cur = conn.execute(
                 "INSERT INTO job_queue (account_id, job_name, payload, "
-                "requested_by, reason) VALUES (?,?,?,?,?)",
+                "requested_by, reason, runner) VALUES (?,?,?,?,?,?)",
                 (account_id, job_name, json.dumps(payload), requested_by,
-                 reason))
+                 reason, runner))
             qid = int(cur.lastrowid)
     except sqlite3.IntegrityError as exc:
         raise QueueFull(f"{job_name} is already queued for this account") from exc
@@ -118,9 +131,11 @@ def _finish(queue_id: int, status: str, detail: str = "") -> None:
             (status, detail[:500], queue_id))
 
 
-def dispatch_one(starter: Callable[[int | None, str, dict], tuple[bool, str]]
-                 ) -> dict | None:
-    """Start the oldest waiting job if the box has room. Returns it, or None.
+def dispatch_one(starter: Callable[[int | None, str, dict], tuple[bool, str]],
+                 runner: str = "") -> dict | None:
+    """Start this runner's oldest waiting job if the box has room.
+
+    Returns it, or None.
 
     `starter(account_id, job_name, payload) -> (ok, detail)` is passed in
     rather than imported: the thing that knows how to start a job is
@@ -133,9 +148,13 @@ def dispatch_one(starter: Callable[[int | None, str, dict], tuple[bool, str]]
     """
     job_admission.reap_dead()
     with cpdb.ro() as conn:
+        # Only this process's own rows: the other launcher writes its
+        # child's output where a different UI reads it, so starting its job
+        # here would run the work correctly into a log nothing is watching.
         row = conn.execute(
             "SELECT id, account_id, job_name, payload FROM job_queue "
-            "WHERE status='queued' ORDER BY id LIMIT 1").fetchone()
+            "WHERE status='queued' AND runner=? ORDER BY id LIMIT 1",
+            (runner,)).fetchone()
     if row is None:
         return None
 

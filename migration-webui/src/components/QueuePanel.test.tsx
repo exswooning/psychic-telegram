@@ -26,7 +26,7 @@ beforeEach(() => {
   vi.mocked(client.fetchQueue).mockResolvedValue(snap())
   vi.mocked(client.cancelQueued).mockResolvedValue({ ok: true })
 })
-afterEach(() => vi.clearAllMocks())
+afterEach(() => { vi.clearAllMocks() })
 
 describe('what is on the box', () => {
   it('names the job filling the slot, even though it is not mine', async () => {

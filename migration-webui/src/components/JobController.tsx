@@ -130,10 +130,13 @@ const JobController: React.FC<Props> = ({ users, nodes, onChanged }) => {
       ),
       run: async (reason) => {
         // Unlike a real RBAC/subscription refusal (a non-2xx status,
-        // already thrown by cpFetch below), a capacity refusal from
-        // job_admission.py comes back as ok:false on an HTTP 200 -- the
-        // same "ran, but didn't succeed" shape _gated() uses for any
-        // other execution-time failure. Has to be checked explicitly here.
+        // already thrown by cpFetch below), an execution-time failure comes
+        // back as ok:false on an HTTP 200 -- the "ran, but didn't succeed"
+        // shape _gated() uses. Has to be checked explicitly here.
+        //
+        // A full box is no longer one of those: it queues and returns ok
+        // with a position, so the launch genuinely succeeded and the job
+        // queue on Jobs is where its progress shows up.
         const r = await startMigration(reason, effective, targets, dryRun)
         if (!r.ok) throw new Error(r.detail || 'could not start')
       },

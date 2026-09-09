@@ -769,7 +769,13 @@ const MigratePanel: React.FC<{ domain: string; targetReady: boolean; onStarted: 
       try {
         const r = await startMigration(reason, Array.from(services), [], ask === true)
         if (!r.ok) throw new Error(r.detail || 'could not start')
-        setDone(`${ask ? 'Dry run' : 'Migration'} started -- track live per-user progress on Mission Control.`)
+        // The server's own words, not a hardcoded "started": a full box
+        // queues now and answers "queued at position 2", and claiming it
+        // started would send the operator to Mission Control to watch
+        // nothing happen.
+        setDone(r.detail?.startsWith('the box is busy')
+          ? r.detail
+          : `${ask ? 'Dry run' : 'Migration'} started -- track live per-user progress on Mission Control.`)
         setAsk(null)
         onStarted()
       } catch (e: any) {

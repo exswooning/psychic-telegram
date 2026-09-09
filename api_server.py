@@ -80,6 +80,7 @@ except ImportError:  # pragma: no cover - import guard, not logic
 import accounts_auth
 import account_context
 import job_admission
+import job_queue
 import job_supervisor
 import ai_diagnostics
 import control_plane_db as cpdb
@@ -716,6 +717,20 @@ async def _tailer() -> None:
     global _last_snapshot
     while True:
         try:
+            # Poll-driven queue dispatch, on top of _start_admitted's own
+            # release hook. That hook only fires for jobs THIS process
+            # started, and a slot freed by webui.py's Job is freed in a
+            # different process with no in-process signal here -- so a
+            # queued migration would otherwise wait on an idle box until
+            # something else happened to finish here.
+            #
+            # Here rather than on /api/v2/active-jobs, the other thing that
+            # runs regularly: dispatch_one reaps dead admission rows, and
+            # list_active is deliberately a read that does not delete (see
+            # is_live). Reaping from inside a GET broke exactly the test
+            # that guards that.
+            await _off_loop(job_queue.dispatch_one, _queue_starter,
+                            job_queue.RUNNER_API)
             nodes = await _off_loop(cpdb.fleet)
             public = await _off_loop(cpdb.open_public_shares, "target")
 
@@ -1103,14 +1118,58 @@ def _run_admitted(argv: list[str], account_id: int | None, job_name: str,
     exits, so nothing would otherwise free the slot just reserved -- a
     background thread here waits on it and releases the moment it does.
 
-    Returns (False, reason) rather than raising on a refused admission: the
-    same (ok, detail) contract every other _gated() fn already returns, so
-    a capacity refusal logs and responds exactly like any other execution
-    failure, with no change needed to _gated() itself.
+    A full box no longer refuses -- it queues, and returns ok with a
+    position. The (ok, detail) contract every other _gated() fn returns is
+    unchanged, so this needed no change in _gated() itself; what changed is
+    that "capacity is full, try again shortly" is now something the system
+    does rather than something the client is asked to do.
     """
     admitted, msg = job_admission.try_admit(account_id, job_name)
     if not admitted:
-        return False, msg
+        # Queued, not refused. A client whose migration came back "capacity
+        # is full -- try again shortly" was being asked to poll a page that
+        # showed nothing running, because the job filling the box belonged
+        # to a different account. Returning ok here is honest: the request
+        # was accepted, it just has not begun.
+        try:
+            row = job_queue.enqueue(
+                account_id, job_name,
+                {"argv": list(argv), "env": _env_overlay(env), "cwd": HERE},
+                reason=msg, runner=job_queue.RUNNER_API)
+        except job_queue.QueueFull as exc:
+            return False, str(exc)
+        return True, (f"the box is busy -- queued at position "
+                      f"{row['position']}; it will start on its own")
+    return _start_admitted(argv, account_id, job_name, env)
+
+
+def _env_overlay(env: dict[str, str] | None) -> dict:
+    """Only what this env changes about our own.
+
+    Storing the full os.environ copy these callers build would put the
+    server's whole environment in the control-plane table AND pin the
+    queued job to the environment of the process that queued it -- one
+    deploy later, that is the stale one.
+    """
+    if not env:
+        return {}
+    return {k: v for k, v in env.items() if os.environ.get(k) != v}
+
+
+def _queue_starter(account_id: int | None, job_name: str,
+                   payload: dict) -> tuple[bool, str]:
+    """Start a job dispatch_one has already taken the slot for.
+
+    No release on failure: dispatch_one owns the slot it took and frees it
+    itself, and releasing here too would free the NEXT job's slot.
+    """
+    env = dict(os.environ, **payload.get("env", {})) or None
+    return _start_admitted(list(payload["argv"]), account_id, job_name, env)
+
+
+def _start_admitted(argv: list[str], account_id: int | None, job_name: str,
+                    env: dict[str, str] | None = None) -> tuple[bool, str]:
+    """Spawn into a slot admission has already granted."""
     out = _child_output(job_name, account_id)
     try:
         proc = subprocess.Popen(argv, cwd=HERE, stdout=out,
@@ -1132,6 +1191,12 @@ def _run_admitted(argv: list[str], account_id: int | None, job_name: str,
     def _wait_then_release() -> None:
         proc.wait()
         job_admission.release(account_id, job_name)
+        # The slot is free for exactly one instant that anything notices;
+        # hand it to whoever is waiting before something else takes it.
+        try:
+            job_queue.dispatch_one(_queue_starter, job_queue.RUNNER_API)
+        except Exception as exc:      # noqa: BLE001 - never wedge the waiter
+            print(f"queue dispatch after {job_name!r} failed: {exc}", flush=True)
     threading.Thread(target=_wait_then_release, daemon=True).start()
     return True, f"started pid {proc.pid}: {' '.join(argv[1:4])}"
 

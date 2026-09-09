@@ -1297,7 +1297,7 @@ def _job_finished(account_id: int | None, label: str) -> None:
     """
     job_admission.release(account_id, label)
     try:
-        job_queue.dispatch_one(_queue_starter)
+        job_queue.dispatch_one(_queue_starter, job_queue.RUNNER_WEBUI)
     except Exception as exc:  # noqa: BLE001 - a bad queue must not wedge Job
         print(f"queue dispatch after {label!r} failed: {exc}", flush=True)
 
@@ -1340,7 +1340,8 @@ def launch_or_queue(account_id: int | None, label: str, argv: list[str],
         row = job_queue.enqueue(
             account_id, label,
             {"argv": list(argv), "env": _env_overlay(env), "cwd": cwd or ""},
-            requested_by=requested_by, reason=why)
+            requested_by=requested_by, reason=why,
+            runner=job_queue.RUNNER_WEBUI)
     except job_queue.QueueFull as exc:
         return "error", str(exc)
     return "queued", (f"the box is busy -- queued at position "
@@ -4887,7 +4888,7 @@ class Handler(BaseHTTPRequestHandler):
             # without this the queue would sit full-looking until somebody
             # ran a webui job. Cheap: reap_dead + one indexed SELECT.
             try:
-                job_queue.dispatch_one(_queue_starter)
+                job_queue.dispatch_one(_queue_starter, job_queue.RUNNER_WEBUI)
             except Exception as exc:  # noqa: BLE001
                 print(f"queue dispatch on poll failed: {exc}", flush=True)
             self._json(queue_payload(self._account_id()))

@@ -26,6 +26,16 @@
 -- week. The queue does not interpret the payload; it hands it back to the
 -- same code that would have run it immediately.
 --
+-- Why a row names its runner
+-- --------------------------
+-- Two processes launch heavy jobs -- webui.py and api_server.py -- and they
+-- share this table, so either could pick up either's row. They must not.
+-- Each writes its child's output somewhere its own UI knows how to read: a
+-- seed queued by webui but started by api_server would run correctly and
+-- stream into a file nothing is watching, which is the "the transcript
+-- vanished" failure that made Job write to a real file in the first place.
+-- So the process that accepted the request is the one that starts it.
+--
 -- Status, and why finished rows stay
 -- ----------------------------------
 -- queued -> running -> done | failed | cancelled. Finished rows are kept so
@@ -36,6 +46,7 @@ CREATE TABLE IF NOT EXISTS job_queue (
     account_id   INTEGER,
     job_name     TEXT NOT NULL,
     payload      TEXT NOT NULL,          -- JSON: {argv, env, cwd, label}
+    runner       TEXT NOT NULL DEFAULT '',  -- which process may start it
     requested_by TEXT NOT NULL DEFAULT '',
     reason       TEXT NOT NULL DEFAULT '',
     status       TEXT NOT NULL DEFAULT 'queued',

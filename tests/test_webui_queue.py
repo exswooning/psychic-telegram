@@ -81,7 +81,7 @@ class TestTheQueuedJobRunsTheSameWayItWouldHave:
         webui.launch_or_queue(1, "seed", ["python", "seed.py", "--groups"],
                               cwd="/root/migration/data-generator")
         job_admission.release(99, "migrate")
-        Q.dispatch_one(webui._queue_starter)
+        Q.dispatch_one(webui._queue_starter, Q.RUNNER_WEBUI)
         assert job.calls[0]["argv"] == ["python", "seed.py", "--groups"]
         assert job.calls[0]["cwd"] == "/root/migration/data-generator"
 
@@ -95,7 +95,7 @@ class TestTheQueuedJobRunsTheSameWayItWouldHave:
                               env=dict(os.environ, SOURCE_DOMAIN="a.example"))
         monkeypatch.setenv("DEPLOY_STAMP", "new")
         job_admission.release(99, "migrate")
-        Q.dispatch_one(webui._queue_starter)
+        Q.dispatch_one(webui._queue_starter, Q.RUNNER_WEBUI)
         env = job.calls[0]["env"]
         assert env["SOURCE_DOMAIN"] == "a.example", "the override was lost"
         assert env["DEPLOY_STAMP"] == "new", "ran against a stale environment"
@@ -161,3 +161,33 @@ class TestThePayloadShownToTheUI:
         webui.launch_or_queue(1, "seed", ["x"])
         webui.launch_or_queue(2, "seed", ["x"])
         assert [w["position"] for w in webui.queue_payload()["waiting"]] == [1, 2]
+
+
+class TestTheTwoLaunchersDoNotStealEachOthersWork:
+    """webui and api_server share this table but write their children's
+    output to different places. A seed queued by webui and started by
+    api_server would run perfectly into a log nothing is watching -- the
+    same "the transcript vanished" failure that made Job write to a real
+    file instead of a pipe."""
+
+    def test_a_webui_row_is_invisible_to_the_api_dispatcher(self, full_box, job):
+        webui.launch_or_queue(1, "seed", ["x"])
+        job_admission.release(99, "migrate")
+        assert Q.dispatch_one(lambda *a: (True, ""), Q.RUNNER_API) is None
+        assert len(Q.waiting()) == 1, "the API process took a webui job"
+
+    def test_and_webui_still_starts_it(self, full_box, job):
+        webui.launch_or_queue(1, "seed", ["x"])
+        job_admission.release(99, "migrate")
+        out = Q.dispatch_one(webui._queue_starter, Q.RUNNER_WEBUI)
+        assert out and out["started"] is True
+
+    def test_the_runner_it_stamps_is_the_one_it_dispatches_for(self):
+        """These are four separate call sites; a typo in one means a job
+        that waits for ever with the box idle."""
+        import inspect
+
+        src = inspect.getsource(webui.launch_or_queue) \
+            + inspect.getsource(webui._job_finished)
+        assert src.count("job_queue.RUNNER_WEBUI") == 2
+        assert '"webui"' not in src, "hardcoded runner name"

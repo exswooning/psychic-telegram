@@ -1213,11 +1213,15 @@ class TestCrossAccountJobAdmission:
     """migrate_start's use of job_admission.py -- see
     tests/test_job_admission.py for the ledger's own unit tests. This is
     just proving the wiring: a slot occupied by ANY account (including the
-    operator's own account_id=None jobs) refuses a real request through
-    the real endpoint, and _gated() reports that refusal the same way it
-    reports any other execution-time failure (ok:false, HTTP 200 -- this
-    is a capacity refusal, not an RBAC one, so it does not get the
-    REFUSED/402 treatment those get)."""
+    operator's own account_id=None jobs) stops a real request through the
+    real endpoint from launching anything.
+
+    It no longer refuses. A full box queues the request and answers ok with
+    a position -- the work was accepted, it just has not begun. What must
+    still hold, and is what these check, is that nothing extra actually
+    started: the cap exists because two jobs sizing their worker pools to
+    the same physical memory is the swap stall resources.py was written to
+    prevent."""
 
     def test_a_slot_already_taken_by_another_account_blocks_migrate_start(self, cp):
         import job_admission
@@ -1231,12 +1235,21 @@ class TestCrossAccountJobAdmission:
             assert job_admission.try_admit(acct, "seed")[0]
         try:
             r = cp.post("/api/v2/migrate/start",
-                        json={"reason": "should be blocked", "services": ["drive"]},
+                        json={"reason": "should be queued", "services": ["drive"]},
                         headers=ADMIN)
             assert r.status_code == 200
             body = r.json()
-            assert body["ok"] is False
-            assert "capacity is full" in body["detail"]
+            # Accepted, not started, and not thrown away.
+            assert body["ok"] is True, body
+            assert "queued at position" in body["detail"]
+            # The thing the cap is actually for: no extra process.
+            with cpdb.ro() as conn:
+                assert conn.execute(
+                    "SELECT COUNT(*) n FROM active_jobs"
+                ).fetchone()["n"] == len(taken), "a job started over the cap"
+            import job_queue
+
+            assert [w["job_name"] for w in job_queue.waiting()] == ["migrate"]
         finally:
             for acct in taken:
                 job_admission.release(acct, "seed")
