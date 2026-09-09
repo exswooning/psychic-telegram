@@ -93,20 +93,72 @@ def _media(blob: bytes, mime: str):
     return MediaInMemoryUpload(blob, mimetype=mime, resumable=False)
 
 
+def existing_by_name(drive, retry) -> dict:
+    """Seeded drives that already exist, name -> id.
+
+    useDomainAdminAccess for the same reason reset() uses it: a plain list
+    only returns drives this admin is a MEMBER of, and a seeded drive need
+    not be one.
+
+    First occurrence wins. Drive permits two drives with the same name, and
+    this tenant has two called SEEDED-SD-1 -- which is what re-running the
+    seeder used to produce. Picking one of them consistently is the best
+    available answer; the duplicate is reported by seed() so it can be
+    cleaned up rather than silently worked around forever.
+    """
+    out: dict = {}
+    dupes: list = []
+    token = None
+    while True:
+        resp = retry(lambda t=token: drive.drives().list(
+            pageSize=100, pageToken=t, useDomainAdminAccess=True,
+            fields="nextPageToken,drives(id,name)").execute())()
+        for d in resp.get("drives", []):
+            name = d.get("name") or ""
+            if not name.startswith(PREFIX):
+                continue
+            if name in out:
+                dupes.append(name)
+                continue
+            out[name] = d["id"]
+        token = resp.get("nextPageToken")
+        if not token:
+            break
+    out["__dupes__"] = dupes      # type: ignore[assignment]
+    return out
+
+
 def seed(settings: Settings, admin: str, members: list[str],
          n_drives: int = 2, files_per_folder: int = 4) -> dict:
     drive = _drive_client(settings, admin)
     retry = _retry(settings)
-    made = {"drives": [], "files": 0, "folders": 0, "members": 0, "acls": 0}
+    made = {"drives": [], "files": 0, "folders": 0, "members": 0, "acls": 0,
+            "reused": 0}
+
+    # Idempotent by name. This used to create unconditionally, so every
+    # re-run added another SEEDED-SD-1 -- the tenant has two. Now that a
+    # default seed asks for shared drives, "run it again" has to mean
+    # "top it up", not "double it".
+    have = existing_by_name(drive, retry)
+    for dupe in have.pop("__dupes__", []):
+        print(f"  ! two shared drives are called {dupe} -- using the first. "
+              f"Drive allows it; a migration matching drives by name will "
+              f"see two candidates for one target.")
 
     for d in range(n_drives):
         name = f"{PREFIX}-{d + 1}"
-        created = retry(lambda: drive.drives().create(
-            requestId=uuid.uuid4().hex, body={"name": name},
-            fields="id,name").execute())()
-        did = created["id"]
-        made["drives"].append({"id": did, "name": name})
-        print(f"  created shared drive {name} ({did})")
+        if name in have:
+            did = have[name]
+            made["reused"] += 1
+            made["drives"].append({"id": did, "name": name, "reused": True})
+            print(f"  reusing shared drive {name} ({did})")
+        else:
+            created = retry(lambda n=name: drive.drives().create(
+                requestId=uuid.uuid4().hex, body={"name": n},
+                fields="id,name").execute())()
+            did = created["id"]
+            made["drives"].append({"id": did, "name": name})
+            print(f"  created shared drive {name} ({did})")
 
         # Members first, mirroring the order shared_drives.py restores them
         # in: a drive whose organizer never landed is unmanageable.

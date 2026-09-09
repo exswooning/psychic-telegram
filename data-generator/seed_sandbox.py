@@ -2034,6 +2034,21 @@ def fit_entries(entries: list[dict], available: int,
 # second copy of it that drifts.
 SEEDABLE = ("drive", "gmail", "calendar", "chat", "contacts", "tasks")
 
+# Shared drives on by default.
+#
+# It was 0, so a seed launched without thinking about it produced none --
+# and a corpus with no shared drive cannot exercise shared_drives.py at all.
+# A 200-user, thirteen-hour run finished with zero of them for exactly that
+# reason: the flag was simply not passed.
+#
+# Safe to default on only because seed_shared_drives.seed() is idempotent
+# now. It used to create unconditionally, so every re-run added another
+# SEEDED-SD-1 -- this tenant has two.
+#
+# Three, not more: they are tenant-wide objects, one per drive-level role is
+# what the migration path needs to exercise, and they are not free.
+DEFAULT_SHARED_DRIVES = 3
+
 
 def _existing_drive_items(drive, settings: Settings, limit: int = 6) -> dict:
     """A few already-seeded file ids, for a run that is not seeding Drive.
@@ -2290,13 +2305,16 @@ def main(argv: list[str] | None = None) -> int:
                          "was too large to send (>25 MB). Off by default: it "
                          "is tens of MB of upload per user, and the case is "
                          "one a rehearsal opts into. 30 covers the ceiling.")
-    ap.add_argument("--shared-drives", type=int, default=0, metavar="N",
-                    help="also create N Shared Drives (SEEDED-SD-*) once the "
-                         "per-user seed finishes. Shared drives belong to no "
-                         "user, so nothing else here creates them and "
-                         "shared_drives.py has nothing to migrate without "
-                         "this. Members are taken from the seeded users, one "
-                         "per drive-level role.")
+    ap.add_argument("--shared-drives", type=int, default=DEFAULT_SHARED_DRIVES,
+                    metavar="N",
+                    help=f"also create N Shared Drives (SEEDED-SD-*) once the "
+                         f"per-user seed finishes (default {DEFAULT_SHARED_DRIVES}; "
+                         f"0 disables). Shared drives belong to no user, so "
+                         f"nothing else here creates them and shared_drives.py "
+                         f"has nothing to migrate without this. Members are "
+                         f"taken from the seeded users, one per drive-level "
+                         f"role. Idempotent: re-running reuses a drive of the "
+                         f"same name rather than making a second.")
     ap.add_argument("--reset", action="store_true", help="DELETE everything")
     ap.add_argument("--target-gb-per-user", type=float, default=None,
                     help="after normal seeding, add large filler files until "

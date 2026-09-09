@@ -2583,8 +2583,11 @@ def seed_argv(body: dict, account_id: int | None = None) -> tuple[list[str], dic
     if body.get("reset"):
         argv.append("--reset")
     # Shared drives belong to no user, so the per-user seed never creates one
-    # and shared_drives.py has nothing to migrate. Opt-in: they cost real
-    # tenant objects and most seeds do not need them.
+    # and shared_drives.py has nothing to migrate without them. This was
+    # opt-in, and the result was a 200-user corpus with none: the caller
+    # simply did not pass the field. The seeder's own default covers it now
+    # (see DEFAULT_SHARED_DRIVES), so omitting it here means "use that"
+    # rather than "none" -- and 0 still explicitly disables.
     sd = body.get("shared_drives")
     if sd not in (None, "", 0, "0", False):
         try:
