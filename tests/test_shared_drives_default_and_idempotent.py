@@ -213,6 +213,14 @@ class TestEveryUserGetsMembership:
                            existing_members=["u0@x.test", "u1@x.test"])
         assert [e for e, _r in added] == ["u2@x.test", "u3@x.test", "u4@x.test"]
 
+    def test_the_standalone_cli_passes_everyone_too(self):
+        """A third copy of the same cap. Fixing seed() and seed_sandbox
+        still left this path building five-member drives."""
+        import inspect
+
+        src = inspect.getsource(ssd.main)
+        assert '[:len(ROLES)]' not in src
+
     def test_the_seeder_passes_everyone(self):
         """The cap used to live in the caller, so fixing only seed() would
         have changed nothing."""

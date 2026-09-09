@@ -346,14 +346,18 @@ def main(argv: list[str] | None = None) -> int:
         members = [m.strip() for m in args.members.split(",") if m.strip()]
     else:
         from db import MigrationDB
+        # Every user in the identity map. This was capped to one member
+        # per drive-level role as well -- the same five-member limit as the
+        # two in seed_sandbox, in a third place -- so fixing those alone
+        # still left this path building drives with five members.
         members = [r["source_email"] for r in
                    MigrationDB(settings.db_path).all_identities()
-                   if r["entity_type"] == "user"][:len(ROLES)]
+                   if r["entity_type"] == "user"]
     if not members:
         sys.exit("no members: pass --members or load an identity map first")
 
     print(f"Seeding {args.drives} shared drive(s) as {admin}, "
-          f"members: {', '.join(members)}")
+          f"across {len(members)} member(s)")
     made = seed(settings, admin, members, args.drives, args.files_per_folder)
     print(f"\n  {len(made['drives'])} drive(s), {made['folders']} folder(s), "
           f"{made['files']} file(s), {made['members']} membership(s), "
