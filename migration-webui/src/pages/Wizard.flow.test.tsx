@@ -243,13 +243,12 @@ describe('it reads like the Google Workspace signup it sits beside', () => {
 })
 
 describe('the panel beside the form says something true', () => {
-  /* Google puts marketing there. A decorative illustration would be the
-     filler the rest of this app avoids, so it carries what the wizard is
-     about to do -- and has to actually change with the answers, or it is
-     just a differently-shaped ornament. */
-  it('describes what setting up a domain will do', async () => {
+  /* Google puts marketing there. This carries what the wizard is about to
+     do -- and has to actually change with the answer, or it is just a
+     differently-shaped ornament. */
+  it('says what setting up a domain gets you', async () => {
     view()
-    expect(await screen.findByText(/throwaway Google Cloud project/i))
+    expect(await screen.findByText(/own throwaway Cloud project/i))
       .toBeInTheDocument()
   })
 
@@ -263,79 +262,64 @@ describe('the panel beside the form says something true', () => {
     view()
     await enterDomain('acme.com')
     await screen.findByTestId('purpose-seed')
-    expect(screen.getByText(/The two paths/i)).toBeInTheDocument()
+    expect(screen.getByText(/Rehearse it, or run it/i)).toBeInTheDocument()
     fireEvent.click(screen.getByTestId('purpose-migrate'))
-    expect(await screen.findByText(/A real migration/i)).toBeInTheDocument()
+    expect(await screen.findByText(/only ever reads the source/i))
+      .toBeInTheDocument()
   })
 
   it('names the tenant it is talking about', async () => {
     view()
     await enterDomain('acme.com')
     fireEvent.click(await screen.findByTestId('purpose-seed'))
-    expect(await screen.findByText(/written into acme\.com/i)).toBeInTheDocument()
+    expect(await screen.findByText(/written into\s+acme\.com/i)).toBeInTheDocument()
   })
 
   it('states the read-only guarantee on the migrate path', async () => {
-    /* The single most important fact about pointing this at a real tenant. */
+    /* The single most important fact about pointing this at a real tenant.
+       The artwork carries direction; this sentence carries the promise. */
     view()
     await enterDomain('acme.com')
     fireEvent.click(await screen.findByTestId('purpose-migrate'))
-    expect(await screen.findByText(/credential for it is read-only/i))
+    expect(await screen.findByText(/physically cannot write to it/i))
       .toBeInTheDocument()
   })
 })
 
-describe('the panel carries a picture, the way the signup does', () => {
-  /* Google fills that space with a product render. There is nothing to
-     render here, so it draws the mechanism -- which has to be a real
-     picture of a real thing, not a flourish, or it is just the filler this
-     app avoids in a nicer shape. */
+describe('the panel is designed, not annotated', () => {
+  /* It began as a labelled schematic -- tenant boxes, arrows, captions --
+     which read as a figure lifted out of documentation on the first screen
+     of a setup. The meaning lives in the composition now; the words live
+     under it. */
   const art = () => document.querySelector('svg[role="img"]')
 
-  it('shows one on the first step', async () => {
+  it('shows artwork on the first step', async () => {
     view()
     await screen.findByTestId('wizard-domain')
     expect(art()).toBeTruthy()
   })
 
-  it('describes itself for a reader who cannot see it', async () => {
+  it('carries no labels inside the drawing', async () => {
     view()
     await screen.findByTestId('wizard-domain')
-    expect(art()!.getAttribute('aria-label')).toMatch(/Cloud project/i)
+    expect(art()!.querySelectorAll('text')).toHaveLength(0)
   })
 
-  it('draws the copy direction once migrating is chosen', async () => {
+  it('still describes itself for a reader who cannot see it', async () => {
+    view()
+    await screen.findByTestId('wizard-domain')
+    expect(art()!.getAttribute('aria-label')).toMatch(/tenant/i)
+  })
+
+  it('changes with the choice rather than being one static picture', async () => {
     view()
     await enterDomain('acme.com')
     fireEvent.click(await screen.findByTestId('purpose-migrate'))
     await waitFor(() =>
-      expect(art()!.getAttribute('aria-label')).toMatch(/never written to/i))
-  })
-
-  it('says the source is only read -- in the picture, not just the prose', async () => {
-    view()
-    await enterDomain('acme.com')
-    fireEvent.click(await screen.findByTestId('purpose-migrate'))
-    await waitFor(() => expect(art()!.textContent).toMatch(/read-only/i))
-  })
-
-  it('draws data going INTO the tenant when seeding', async () => {
-    view()
-    await enterDomain('acme.com')
-    fireEvent.click(await screen.findByTestId('purpose-seed'))
+      expect(art()!.getAttribute('aria-label')).toMatch(/one direction only/i))
+    fireEvent.click(screen.getByTestId('purpose-seed'))
     await waitFor(() =>
-      expect(art()!.getAttribute('aria-label')).toMatch(/written into acme\.com/i))
-  })
-
-  it('names both tenants on the destination step', async () => {
-    view()
-    await enterDomain('acme.com')
-    await choose('migrate')
-    await enterDomain('newco.com')
-    // The run step: the diagram has done its job by now, so just confirm
-    // the pair reached the panels that matter.
-    await waitFor(() =>
-      expect(screen.getByTestId('qts-source')).toHaveTextContent('acme.com'))
+      expect(art()!.getAttribute('aria-label')).toMatch(/falling into a single tenant/i))
   })
 
   it('scales with its column instead of overflowing it', async () => {
@@ -343,5 +327,15 @@ describe('the panel carries a picture, the way the signup does', () => {
     await screen.findByTestId('wizard-domain')
     expect(art()!.getAttribute('viewBox')).toBeTruthy()
     expect(art()!.getAttribute('width')).toBe('100%')
+  })
+
+  it('gives its gradients unique ids per variant, so two cannot collide', async () => {
+    /* Every SVG on a page shares one id namespace: a fixed "grad" would
+       mean the second illustration silently renders with the first one's
+       fill. */
+    view()
+    await screen.findByTestId('wizard-domain')
+    const ids = [...art()!.querySelectorAll('[id]')].map((n) => n.id)
+    expect(ids.every((i) => i.startsWith('wa-setup'))).toBe(true)
   })
 })

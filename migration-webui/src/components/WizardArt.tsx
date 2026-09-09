@@ -1,24 +1,23 @@
 /**
  * The illustration beside each setup step.
  *
- * Google Workspace's signup puts a marketing render here -- a Gemini card,
- * a gradient sparkle, "Jump start your productivity with AI". We cannot
- * copy that honestly: there is no product shot to sell, and a decorative
- * flourish would be the filler the rest of this app avoids.
+ * This was a labelled schematic -- tenant boxes, arrows, captions. Correct,
+ * and it read as a figure lifted out of documentation: the panel Google
+ * fills with an atmospheric product render was answering a question nobody
+ * had asked yet. A setup's first screen is not where someone studies a
+ * diagram.
  *
- * So it draws the mechanism instead. Each step gets the picture of what is
- * actually about to happen to the tenant -- which fills the same visual
- * role, at the same scale, while telling the operator something they need:
- * that a migration READS the source and only ever WRITES the target, and
- * that a seed writes fabricated data into one tenant and touches nothing
- * else. That asymmetry is the single most consequential fact about pointing
- * this tool at a real company, and a diagram states it faster than the
- * paragraph underneath.
+ * So it is composed rather than annotated: layered cards on a soft gradient
+ * field, depth from shadow, a sweep of colour carrying the eye from one
+ * side to the other. The meaning survives in the composition -- two cards
+ * and a one-way sweep for a migration, one card being filled for a seed --
+ * without a single label inside the artwork. The words live under it, the
+ * way they do on the page this is modelled on.
  *
- * Hand-authored SVG with native shapes, sized by viewBox and scaled by CSS,
- * so it stays crisp at any width and adds no dependency. Colours come from
- * the theme rather than literals, so both light and dark render correctly --
- * a fill hardcoded for one is the classic unreadable-illustration bug.
+ * Hand-authored SVG: native shapes, gradients and one blur, sized by
+ * viewBox and scaled by CSS. No dependency, crisp at any width. The palette
+ * comes from the theme so both light and dark render -- a fill hardcoded
+ * for one is the classic unreadable-illustration bug.
  */
 import React from 'react'
 import { useTheme } from '@mui/material/styles'
@@ -26,143 +25,127 @@ import { Box } from '@mui/material'
 
 export type ArtKind = 'setup' | 'seed' | 'migrate'
 
-/** The five per-user services this tool actually moves, as small glyphs.
- *  Real services, in the order the engine copies them -- not five decorative
- *  dots that happen to number five. */
-const SERVICES = ['Drive', 'Gmail', 'Calendar', 'Contacts', 'Tasks']
+const ART_LABEL: Record<ArtKind, string> = {
+  setup: 'A tenant, with the project and credentials that get created alongside it',
+  seed: 'Fabricated content falling into a single tenant',
+  migrate: 'Content sweeping from one tenant into another, in one direction only',
+}
 
-const Tenant: React.FC<{
-  x: number; y: number; label: string; c: Record<string, string>
-  badge?: string; badgeTone?: 'read' | 'write'
-}> = ({ x, y, label, c, badge, badgeTone }) => (
-  <g>
-    <rect x={x} y={y} width={200} height={168} rx={16}
-          fill={c.surface} stroke={c.line} strokeWidth={1.5} />
-    <text x={x + 20} y={y + 34} fontSize={13} fontWeight={500} fill={c.text}>
-      {label}
-    </text>
-    <line x1={x + 20} y1={y + 48} x2={x + 180} y2={y + 48}
-          stroke={c.line} strokeWidth={1} />
-    {SERVICES.map((s, i) => (
-      <g key={s}>
-        <circle cx={x + 27} cy={y + 70 + i * 19} r={4} fill={c.accent} />
-        <text x={x + 40} y={y + 74 + i * 19} fontSize={11} fill={c.dim}>{s}</text>
-      </g>
-    ))}
-    {badge && (
-      <g>
-        <rect x={x + 112} y={y + 60} width={72} height={22} rx={11}
-              fill={badgeTone === 'read' ? c.calmBg : c.warnBg} />
-        <text x={x + 148} y={y + 75} fontSize={10} fontWeight={500}
-              textAnchor="middle"
-              fill={badgeTone === 'read' ? c.calm : c.warn}>{badge}</text>
-      </g>
-    )}
-  </g>
-)
-
-export const WizardArt: React.FC<{ kind: ArtKind; source?: string; target?: string }> =
-  ({ kind, source, target }) => {
-    const t = useTheme()
-    const c = {
-      surface: t.palette.background.paper,
-      line: t.palette.divider,
-      text: t.palette.text.primary,
-      dim: t.palette.text.secondary,
-      accent: t.palette.primary.main,
-      accentBg: t.palette.primary.light,
-      calm: t.palette.success.main,
-      calmBg: t.palette.success.light,
-      warn: t.palette.warning.dark,
-      warnBg: t.palette.warning.light,
-    }
-    const src = source || 'your tenant'
-    const dst = target || 'the destination'
-
-    return (
-      <Box sx={{ mb: 3 }}>
-        <svg viewBox="0 0 560 250" role="img" width="100%"
-             style={{ height: 'auto', display: 'block' }}
-             aria-label={
-               kind === 'migrate'
-                 ? `${src} is read and copied into ${dst}; the source is never written to`
-                 : kind === 'seed'
-                 ? `fabricated users, files and mail are written into ${src}`
-                 : `a Cloud project and a delegated service account are created for ${src}`
-             }>
-          <defs>
-            <marker id="wz-arrow" viewBox="0 0 10 10" refX="9" refY="5"
-                    markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-              <path d="M 0 0 L 10 5 L 0 10 z" fill={c.accent} />
-            </marker>
-          </defs>
-
-          {kind === 'migrate' && (
-            <>
-              <Tenant x={16} y={44} label={src} c={c} badge="read-only" badgeTone="read" />
-              <Tenant x={344} y={44} label={dst} c={c} badge="written" badgeTone="write" />
-              <line x1={232} y1={128} x2={332} y2={128} stroke={c.accent}
-                    strokeWidth={2} markerEnd="url(#wz-arrow)" />
-              <text x={282} y={118} fontSize={11} fill={c.dim} textAnchor="middle">
-                copy
-              </text>
-              <text x={282} y={150} fontSize={10} fill={c.dim} textAnchor="middle">
-                per user
-              </text>
-              {/* The claim the whole page rests on, drawn rather than asserted:
-                  nothing points back at the source. */}
-              <text x={116} y={238} fontSize={10} fill={c.calm} textAnchor="middle">
-                never written to
-              </text>
-            </>
-          )}
-
-          {kind === 'seed' && (
-            <>
-              <Tenant x={180} y={62} label={src} c={c} badge="written" badgeTone="write" />
-              {[0, 1, 2].map((i) => (
-                <g key={i}>
-                  <rect x={236 + i * 36} y={16} width={22} height={22} rx={5}
-                        fill={c.accentBg} stroke={c.accent} strokeWidth={1} />
-                  <line x1={247 + i * 36} y1={40} x2={247 + i * 36} y2={58}
-                        stroke={c.accent} strokeWidth={1.5}
-                        markerEnd="url(#wz-arrow)" strokeDasharray="3 3" />
-                </g>
-              ))}
-              <text x={280} y={244} fontSize={11} fill={c.dim} textAnchor="middle">
-                fabricated users, files, mail and events
-              </text>
-            </>
-          )}
-
-          {kind === 'setup' && (
-            <>
-              <Tenant x={16} y={44} label={src} c={c} />
-              <rect x={344} y={60} width={200} height={64} rx={12}
-                    fill={c.surface} stroke={c.line} strokeWidth={1.5} />
-              <text x={364} y={86} fontSize={12} fontWeight={500} fill={c.text}>
-                Cloud project
-              </text>
-              <text x={364} y={104} fontSize={10} fill={c.dim}>
-                created for this tenant only
-              </text>
-              <rect x={344} y={140} width={200} height={64} rx={12}
-                    fill={c.surface} stroke={c.line} strokeWidth={1.5} />
-              <text x={364} y={166} fontSize={12} fontWeight={500} fill={c.text}>
-                Service account
-              </text>
-              <text x={364} y={184} fontSize={10} fill={c.dim}>
-                acts for your users, once granted
-              </text>
-              <line x1={232} y1={104} x2={332} y2={92} stroke={c.accent}
-                    strokeWidth={2} markerEnd="url(#wz-arrow)" />
-              <line x1={232} y1={140} x2={332} y2={172} stroke={c.accent}
-                    strokeWidth={2} markerEnd="url(#wz-arrow)" />
-            </>
-          )}
-        </svg>
-      </Box>
-    )
+export const WizardArt: React.FC<{ kind: ArtKind }> = ({ kind }) => {
+  const t = useTheme()
+  const dark = t.palette.mode === 'dark'
+  const c = {
+    card: t.palette.background.paper,
+    edge: dark ? 'rgba(255,255,255,0.10)' : 'rgba(0,0,0,0.06)',
+    accent: t.palette.primary.main,
+    soft: t.palette.primary.light,
+    glow: dark ? 0.34 : 0.20,
+    shadow: dark ? 0.5 : 0.14,
   }
+  const uid = `wa-${kind}`
+
+  /** A card face. No text: the composition carries it. */
+  const Card = ({ x, y, w = 132, h = 96, o = 1, lines = 3 }:
+                { x: number; y: number; w?: number; h?: number; o?: number; lines?: number }) => (
+    <g opacity={o}>
+      <rect x={x} y={y} width={w} height={h} rx={14} fill={c.card}
+            stroke={c.edge} strokeWidth={1} filter={`url(#${uid}-sh)`} />
+      <rect x={x + 16} y={y + 18} width={w * 0.42} height={7} rx={3.5} fill={c.accent} />
+      {Array.from({ length: lines }).map((_, i) => (
+        <rect key={i} x={x + 16} y={y + 38 + i * 14} rx={3}
+              width={w - 32 - (i === lines - 1 ? 28 : 0)} height={6}
+              fill={c.accent} opacity={0.18} />
+      ))}
+    </g>
+  )
+
+  return (
+    <Box sx={{ mb: 3, mx: -1 }}>
+      <svg viewBox="0 0 560 260" role="img" width="100%"
+           style={{ height: 'auto', display: 'block' }}
+           aria-label={ART_LABEL[kind]}>
+        <defs>
+          <linearGradient id={`${uid}-g`} x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%" stopColor={c.accent} stopOpacity="0.85" />
+            <stop offset="100%" stopColor={c.soft} stopOpacity="0.15" />
+          </linearGradient>
+          <linearGradient id={`${uid}-sweep`} x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0%" stopColor={c.accent} stopOpacity="0" />
+            <stop offset="45%" stopColor={c.accent} stopOpacity="0.65" />
+            <stop offset="100%" stopColor={c.accent} stopOpacity="0.9" />
+          </linearGradient>
+          <filter id={`${uid}-blur`} x="-40%" y="-40%" width="180%" height="180%">
+            <feGaussianBlur stdDeviation="34" />
+          </filter>
+          <filter id={`${uid}-sh`} x="-30%" y="-30%" width="160%" height="180%">
+            <feDropShadow dx="0" dy="6" stdDeviation="10"
+                          floodColor="#000" floodOpacity={c.shadow} />
+          </filter>
+        </defs>
+
+        {/* The atmosphere: one soft field of colour, placed where the eye
+            should land first for this step. */}
+        <ellipse cx={kind === 'migrate' ? 280 : kind === 'seed' ? 280 : 190}
+                 cy={130} rx={190} ry={110}
+                 fill={`url(#${uid}-g)`} opacity={c.glow}
+                 filter={`url(#${uid}-blur)`} />
+
+        {kind === 'migrate' && (
+          <>
+            {/* One direction, stated by the gradient itself: it fades in at
+                the source and arrives solid at the destination. */}
+            <path d="M 150 196 C 250 214, 320 200, 430 156" fill="none"
+                  stroke={`url(#${uid}-sweep)`} strokeWidth={3} strokeLinecap="round" />
+            <Card x={44} y={74} o={0.55} w={120} h={86} lines={2} />
+            <Card x={62} y={58} />
+            <Card x={370} y={92} o={0.55} w={120} h={86} lines={2} />
+            <Card x={352} y={76} />
+            {[0, 1, 2].map((i) => (
+              <circle key={i} cx={228 + i * 46} cy={196 - i * 14} r={5 - i * 0.6}
+                      fill={c.accent} opacity={0.75 - i * 0.18} />
+            ))}
+          </>
+        )}
+
+        {kind === 'seed' && (
+          <>
+            {[0, 1, 2, 3].map((i) => (
+              <rect key={i} x={196 + i * 46} y={20 + (i % 2) * 14}
+                    width={26} height={26} rx={8}
+                    fill={c.accent} opacity={0.22 + i * 0.12} />
+            ))}
+            {[0, 1, 2, 3].map((i) => (
+              <line key={i} x1={209 + i * 46} y1={54 + (i % 2) * 14}
+                    x2={209 + i * 46} y2={92} stroke={c.accent}
+                    strokeWidth={2} strokeLinecap="round"
+                    opacity={0.35} strokeDasharray="2 7" />
+            ))}
+            <Card x={214} y={104} w={132} h={104} lines={4} />
+          </>
+        )}
+
+        {kind === 'setup' && (
+          <>
+            <Card x={70} y={62} w={150} h={116} lines={4} />
+            <rect x={300} y={70} width={168} height={54} rx={14} fill={c.card}
+                  stroke={c.edge} filter={`url(#${uid}-sh)`} />
+            <circle cx={330} cy={97} r={12} fill={c.soft} />
+            <rect x={352} y={90} width={86} height={7} rx={3.5} fill={c.accent} opacity={0.55} />
+            <rect x={352} y={104} width={58} height={6} rx={3} fill={c.accent} opacity={0.2} />
+            <rect x={300} y={140} width={168} height={54} rx={14} fill={c.card}
+                  stroke={c.edge} filter={`url(#${uid}-sh)`} />
+            <circle cx={330} cy={167} r={12} fill={c.soft} />
+            <rect x={352} y={160} width={72} height={7} rx={3.5} fill={c.accent} opacity={0.55} />
+            <rect x={352} y={174} width={94} height={6} rx={3} fill={c.accent} opacity={0.2} />
+            <path d="M 228 118 C 262 112, 272 100, 292 97" fill="none"
+                  stroke={c.accent} strokeWidth={2} opacity={0.4} strokeLinecap="round" />
+            <path d="M 228 136 C 262 146, 272 162, 292 166" fill="none"
+                  stroke={c.accent} strokeWidth={2} opacity={0.4} strokeLinecap="round" />
+          </>
+        )}
+      </svg>
+    </Box>
+  )
+}
 
 export default WizardArt

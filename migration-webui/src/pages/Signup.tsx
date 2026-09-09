@@ -73,7 +73,7 @@ const Signup: React.FC = () => {
             }}>
               <BrandIcon sx={{ fontSize: 20 }} />
             </Box>
-            <Typography sx={{ fontFamily: '"Plus Jakarta Sans", sans-serif', fontWeight: 700, fontSize: 18 }}>
+            <Typography sx={{ fontWeight: 700, fontSize: 18 }}>
               Bitport
             </Typography>
           </Stack>

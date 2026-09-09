@@ -10,7 +10,17 @@ import { createTheme, ThemeOptions } from '@mui/material/styles'
 // the palette/type/shape system beneath them.
 const baseOptions: ThemeOptions = {
   typography: {
-    fontFamily: '"Roboto", "Google Sans Flex", -apple-system, "Segoe UI", sans-serif',
+    // Google Sans Flex first, everywhere -- not just headings.
+    //
+    // It was Roboto-first, which is what Google itself does (Google Sans for
+    // headings, Roboto for body). Side by side in this app that read as two
+    // typefaces rather than one voice: the wizard's display heading and the
+    // paragraph under it were visibly different faces. One family, varied by
+    // weight and size, is the whole point of a variable font.
+    //
+    // Roboto stays as the first fallback, so a blocked font request degrades
+    // to the face this was designed against rather than to Times.
+    fontFamily: '"Google Sans Flex", "Roboto", -apple-system, "Segoe UI", sans-serif',
     h1: { fontFamily: '"Google Sans Flex", "Roboto", sans-serif', fontWeight: 500, fontSize: '2.375rem', lineHeight: 1.25, letterSpacing: '-0.25px' },
     h2: { fontFamily: '"Google Sans Flex", "Roboto", sans-serif', fontWeight: 500, fontSize: '2rem', lineHeight: 1.25, letterSpacing: '-0.25px' },
     h3: { fontFamily: '"Google Sans Flex", "Roboto", sans-serif', fontWeight: 500, fontSize: '1.75rem', lineHeight: 1.29 },

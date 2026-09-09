@@ -92,7 +92,7 @@ const WizardShell: React.FC<{
         <Typography
           component="h1"
           sx={{
-            fontFamily: '"Google Sans Flex", "Roboto", sans-serif',
+            // Family comes from the theme -- see typography.fontFamily.
             fontSize: { xs: '2rem', md: '2.75rem' },
             fontWeight: 400, lineHeight: 1.15, letterSpacing: '-0.5px',
             mb: 1.5, wordBreak: 'break-word',
@@ -117,40 +117,36 @@ const WizardShell: React.FC<{
   </Box>
 )
 
-/** The right-hand panel's content: a real sequence, numbered because it IS
- *  ordered, not because numbers look tidy. */
-const WhatHappens: React.FC<{
-  title: string; steps: string[]; note?: string
-  art: ArtKind; source?: string; target?: string
-}> = ({ title, steps, note, art, source, target }) => (
-    <>
-      <WizardArt kind={art} source={source} target={target} />
-      <Typography variant="subtitle2" color="text.secondary"
-                  sx={{ textTransform: 'uppercase', letterSpacing: '0.8px', mb: 2 }}>
-        {title}
+/** The panel beside the form: artwork, a headline, a couple of lines.
+ *
+ *  The same three beats as the page this is modelled on, and in the same
+ *  order. It was a numbered list of everything the wizard would do -- true,
+ *  and far more than anyone needs before they have typed a domain. The
+ *  detail belongs on the step that acts, not the step that asks. */
+const Aside: React.FC<{
+  art: ArtKind; title: string; body: string; note?: string
+}> = ({ art, title, body, note }) => (
+  <>
+    <WizardArt kind={art} />
+    <Typography
+      sx={{
+        fontSize: { xs: '1.375rem', md: '1.625rem' }, fontWeight: 400,
+        lineHeight: 1.25, letterSpacing: '-0.2px', mb: 1.5,
+      }}>
+      {title}
+    </Typography>
+    <Typography variant="body2" color="text.secondary" sx={{ lineHeight: 1.7 }}>
+      {body}
+    </Typography>
+    {note && (
+      <Typography variant="caption" color="text.secondary"
+                  sx={{ display: 'block', mt: 2.5, pt: 2,
+                        borderTop: '1px solid', borderColor: 'divider' }}>
+        {note}
       </Typography>
-      <Stack spacing={2.5}>
-        {steps.map((t, i) => (
-          <Stack key={t} direction="row" spacing={2} alignItems="flex-start">
-            <Box sx={{
-              flexShrink: 0, width: 26, height: 26, borderRadius: 999,
-              bgcolor: 'primary.light', color: 'primary.dark',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: 13, fontWeight: 500, mt: '1px',
-            }}>{i + 1}</Box>
-            <Typography variant="body2" sx={{ lineHeight: 1.6 }}>{t}</Typography>
-          </Stack>
-        ))}
-      </Stack>
-      {note && (
-        <Typography variant="caption" color="text.secondary"
-                    sx={{ display: 'block', mt: 3, pt: 2.5,
-                          borderTop: '1px solid', borderColor: 'divider' }}>
-          {note}
-        </Typography>
-      )}
-    </>
-  )
+    )}
+  </>
+)
 
 const DomainStep: React.FC<{
   heading: string
@@ -223,14 +219,12 @@ const Wizard: React.FC = () => {
         heading="Let's get started"
         sub="Which domain are you setting up? Everything after this is about this tenant."
         label="Domain" initial={domain}
-        aside={<WhatHappens
-          art="setup" source={domain || undefined}
-          title="What this sets up"
-          steps={[
-            'A throwaway Google Cloud project for this tenant, with the APIs it needs enabled.',
-            'A service account, and the domain-wide delegation grant that lets it act for your users.',
-            'Either a rehearsal corpus of fabricated data, or a real migration into a second tenant.',
-          ]}
+        aside={<Aside
+          art="setup"
+          title="One tenant at a time"
+          body="Bitport gives this domain its own throwaway Cloud project and
+                a service account that can act for its users. Nothing is
+                shared with any other tenant you set up."
           note="Nothing is created until you confirm on a later step." />}
         onNext={(d) => {
           setDomain(d)
@@ -253,26 +247,26 @@ const Wizard: React.FC = () => {
         heading={domain}
         sub="What is this domain for?"
         onBack={() => setStep('domain')}
-        aside={<WhatHappens
-          art={picked === 'migrate' ? 'migrate' : picked === 'seed' ? 'seed' : 'setup'}
-          source={domain}
-          title={picked === 'migrate' ? 'A real migration'
-                 : picked === 'seed' ? 'A rehearsal' : 'The two paths'}
-          steps={picked === 'migrate' ? [
-            `${domain} is read, never written — the credential for it is read-only.`,
-            'You name a destination tenant next, and both get a Cloud project and a delegation grant.',
-            'Users are matched, then Drive, Gmail, Calendar, contacts and tasks are copied.',
-          ] : picked === 'seed' ? [
-            `Fabricated users, files, mail and events are written into ${domain}.`,
-            'Nothing real is touched — this is a sandbox corpus for rehearsing a migration.',
-            'You can wipe it and reseed as often as you like.',
-          ] : [
-            'Seed fills a sandbox tenant with fabricated data, so a migration can be rehearsed end to end.',
-            'Migrate moves a real tenant into another one, reading the source and writing only the target.',
-          ]}
-          note={picked === 'seed'
-            ? 'Seeding writes data. It is only offered on accounts opted in to it.'
-            : undefined} />}>
+        aside={picked === 'migrate' ? (
+          <Aside art="migrate"
+            title="It only ever reads the source"
+            body={`${domain} is opened with a read-only credential — the tool
+                   physically cannot write to it. Everything lands in the
+                   destination tenant you name next.`} />
+        ) : picked === 'seed' ? (
+          <Aside art="seed"
+            title="A tenant full of convincing fiction"
+            body={`Fabricated users, files, mail and events are written into
+                   ${domain} so a migration can be rehearsed end to end. Wipe
+                   and reseed as often as you like.`}
+            note="Seeding writes data, so it is only offered on accounts opted in to it." />
+        ) : (
+          <Aside art="setup"
+            title="Rehearse it, or run it"
+            body="Seeding fills a sandbox tenant with fabricated data so the
+                  whole migration can be practised. Migrating moves a real
+                  tenant into another one." />
+        )}>
         <RadioGroup value={picked} onChange={(e) => setPicked(e.target.value as Purpose)}>
           {seedEnabled && (
             <FormControlLabel value="seed" sx={{ mb: 1, alignItems: 'flex-start' }}
@@ -317,14 +311,11 @@ const Wizard: React.FC = () => {
         heading="Where is it going?"
         sub={`${domain} is the source — it is read, never written. Which tenant should its data land in?`}
         label="Destination domain" initial={otherDomain} taken={domain}
-        aside={<WhatHappens
-          art="migrate" source={domain} target={otherDomain || undefined}
-          title="After this"
-          steps={[
-            `Both ${domain} and the destination get a Cloud project, a service account and a delegation grant.`,
-            'Users are matched between the two tenants, and you review the mapping before anything copies.',
-            'The copy runs per user, per service, and is resumable — it can be stopped and restarted.',
-          ]}
+        aside={<Aside art="migrate"
+          title="Two tenants, one direction"
+          body="Both sides get their own Cloud project and delegation grant.
+                Users are matched and reviewed before anything copies, and the
+                copy itself is resumable — it can be stopped and picked up."
           note="The source credential is read-only, so a migration cannot alter the tenant it reads." />}
         onBack={() => setStep('purpose')}
         onNext={(d) => { setOtherDomain(d); setStep('run') }} />
