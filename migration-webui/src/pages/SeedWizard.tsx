@@ -33,7 +33,14 @@ import { DwdStatus, fetchDwdStatus } from '@/api/controlPlane'
  * stepper with steps that mean something different.
  */
 
-const SeedWizard: React.FC = () => {
+const SeedWizard: React.FC<{
+  /** The tenant the Setup Wizard asked about, passed to the setup panel as
+   *  a starting value. Deliberately NOT used to prefill the typed-domain
+   *  confirmations below: typing the domain back is the only thing gating
+   *  a job that writes fabricated data into a tenant, and a gate that
+   *  arrives pre-satisfied is not a gate. */
+  sourceDomain?: string
+}> = ({ sourceDomain }) => {
   const [route, setRoute] = useState<'automated' | 'manual'>('automated')
   const [status, setStatus] = useState<StatusPayload | null>(null)
   const [actions, setActions] = useState<Record<string, ActionSpec>>({})
@@ -109,6 +116,7 @@ const SeedWizard: React.FC = () => {
 
       <Box sx={{ maxWidth: route === 'automated' ? 480 : undefined }}>
         <QuickTenantSetup side="source" view={route} showSeedOptions
+                          initialDomain={sourceDomain}
                            onRequestManual={() => setRoute('manual')} />
       </Box>
 

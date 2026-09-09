@@ -44,46 +44,128 @@ import QuickTenantSetup from '@/components/QuickTenantSetup'
 // -- SeedWizard.tsx owns that step's real UI.
 const SEED_STEP_TITLE_MARKER = 'seeded'
 
-type Mode = 'choose' | 'seed' | 'migrate'
+type Purpose = 'seed' | 'migrate'
+type Step = 'domain' | 'purpose' | 'counterpart' | 'run'
+
+/** Enough to catch a typo, not enough to argue with a real domain.
+ *  Deliberately not a strict RFC pattern: this gates a form, and every
+ *  over-tight domain regex eventually rejects somebody's valid TLD. */
+export function looksLikeDomain(v: string): boolean {
+  const d = v.trim().toLowerCase()
+  return /^[a-z0-9.-]+\.[a-z]{2,}$/.test(d) && !d.startsWith('.') && !d.endsWith('.')
+}
+
+const DomainStep: React.FC<{
+  title: string
+  help: string
+  label: string
+  initial?: string
+  /** Rejected as the answer, because it is the other side of the pair. */
+  taken?: string
+  onBack?: () => void
+  onNext: (domain: string) => void
+}> = ({ title, help, label, initial = '', taken, onBack, onNext }) => {
+  const [value, setValue] = useState(initial)
+  const d = value.trim().toLowerCase()
+  const same = !!taken && d === taken.trim().toLowerCase()
+  const shaped = looksLikeDomain(value)
+  // Only complain once there is something to complain about -- an error
+  // under an empty field the user has not reached yet is noise.
+  const error = value.trim() === '' ? ''
+    : same ? 'That is the same tenant. A migration needs two different domains.'
+    : !shaped ? 'That does not look like a domain (example: acme.com).'
+    : ''
+
+  return (
+    <Box sx={{ maxWidth: 560 }}>
+      {onBack && (
+        <Button size="small" startIcon={<BackIcon />} onClick={onBack} sx={{ mb: 1 }}>
+          Back
+        </Button>
+      )}
+      <Typography variant="h4" sx={{ fontWeight: 700, mb: 0.5 }}>{title}</Typography>
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+        {help}
+      </Typography>
+      <TextField
+        fullWidth autoFocus size="small" label={label} value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && shaped && !same) onNext(d)
+        }}
+        error={!!error} helperText={error || ' '}
+        inputProps={{ 'data-testid': 'wizard-domain' }}
+      />
+      <Button variant="contained" sx={{ mt: 1 }} data-testid="wizard-domain-next"
+              disabled={!shaped || same} onClick={() => onNext(d)}>
+        Continue
+      </Button>
+    </Box>
+  )
+}
 
 const Wizard: React.FC = () => {
   const [params] = useSearchParams()
-  // Always starts on the choice screen, even for a ?mode=seed deep link --
-  // that link only takes effect once seedEnabled is confirmed true below.
-  // Setting it from the URL param directly here would let a deep link (an
-  // old bookmark to /seed-wizard, MissionControl's own "Open Setup Wizard"
-  // button) bypass the seed_enabled gate entirely, since the URL is
-  // client-controlled and the account's real entitlement is not known yet
-  // on the very first render.
-  const [mode, setMode] = useState<Mode>('choose')
+  const [step, setStep] = useState<Step>('domain')
+  // The tenant this wizard is setting up, and -- for a migration -- the one
+  // it is moving into. Held here rather than inside each sub-wizard so the
+  // question is asked once, at the front, instead of once per panel.
+  const [domain, setDomain] = useState('')
+  const [otherDomain, setOtherDomain] = useState('')
+  const [purpose, setPurpose] = useState<Purpose | null>(null)
   const [seedEnabled, setSeedEnabled] = useState(false)
 
   useEffect(() => {
     fetchMe().then((a) => setSeedEnabled(a.seed_enabled)).catch(() => {})
   }, [])
 
+  // A ?mode=seed deep link still has to answer "which domain" first, and
+  // still only takes effect once seed_enabled is confirmed -- the URL is
+  // client-controlled and the entitlement is not known on first render.
   useEffect(() => {
-    if (seedEnabled && params.get('mode') === 'seed') setMode('seed')
+    if (seedEnabled && params.get('mode') === 'seed') setPurpose('seed')
   }, [seedEnabled, params])
 
-  if (mode === 'choose') {
+  if (step === 'domain') {
+    return (
+      <DomainStep
+        title="Setup Wizard"
+        help="Which domain are you setting up? Everything after this is
+              about this tenant."
+        label="Domain" initial={domain}
+        onNext={(d) => {
+          setDomain(d)
+          // A confirmed deep link skips straight past the question it
+          // already answered.
+          if (purpose === 'seed' && seedEnabled) { setStep('run'); return }
+          setStep('purpose')
+        }} />
+    )
+  }
+
+  if (step === 'purpose') {
     return (
       <Box>
-        <Typography variant="h4" sx={{ fontWeight: 700, mb: 0.5 }}>Setup Wizard</Typography>
+        <Button size="small" startIcon={<BackIcon />}
+                onClick={() => setStep('domain')} sx={{ mb: 1 }}>
+          Back
+        </Button>
+        <Typography variant="h4" sx={{ fontWeight: 700, mb: 0.5 }}>{domain}</Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-          What do you want to do?
+          What is this domain for?
         </Typography>
         <Grid container spacing={2}>
           {seedEnabled && (
             <Grid item xs={12} sm={6}>
               <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>
-                <CardActionArea onClick={() => setMode('seed')} sx={{ p: 1 }}>
+                <CardActionArea data-testid="purpose-seed" sx={{ p: 1 }}
+                                onClick={() => { setPurpose('seed'); setStep('run') }}>
                   <CardContent>
                     <SeedIcon color="action" sx={{ fontSize: 32, mb: 1 }} />
-                    <Typography variant="h6" sx={{ fontWeight: 600 }}>Seed a test tenant</Typography>
+                    <Typography variant="h6" sx={{ fontWeight: 600 }}>Seed it with test data</Typography>
                     <Typography variant="body2" color="text.secondary">
-                      Populate a sandbox source tenant with fabricated test
-                      data for rehearsal -- none of this touches real data.
+                      Fills {domain} with fabricated data for a rehearsal.
+                      Nothing here touches real data.
                     </Typography>
                   </CardContent>
                 </CardActionArea>
@@ -92,10 +174,11 @@ const Wizard: React.FC = () => {
           )}
           <Grid item xs={12} sm={6}>
             <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>
-              <CardActionArea onClick={() => setMode('migrate')} sx={{ p: 1 }}>
+              <CardActionArea data-testid="purpose-migrate" sx={{ p: 1 }}
+                              onClick={() => { setPurpose('migrate'); setStep('counterpart') }}>
                 <CardContent>
                   <MigrateIcon color="action" sx={{ fontSize: 32, mb: 1 }} />
-                  <Typography variant="h6" sx={{ fontWeight: 600 }}>Set up for a real migration</Typography>
+                  <Typography variant="h6" sx={{ fontWeight: 600 }}>Migrate it into another tenant</Typography>
                   <Typography variant="body2" color="text.secondary">
                     gcloud, projects, credentials, domain-wide delegation,
                     and the real copy.
@@ -109,12 +192,37 @@ const Wizard: React.FC = () => {
     )
   }
 
+  if (step === 'counterpart') {
+    return (
+      <DomainStep
+        title={`Migrate ${domain} into…`}
+        help={`${domain} is the source — it is read, never written. Which
+               tenant should its data land in?`}
+        label="Destination domain" initial={otherDomain} taken={domain}
+        onBack={() => setStep('purpose')}
+        onNext={(d) => { setOtherDomain(d); setStep('run') }} />
+    )
+  }
+
   return (
     <Box>
-      <Button size="small" startIcon={<BackIcon />} onClick={() => setMode('choose')} sx={{ mb: 1 }}>
-        Change
-      </Button>
-      {mode === 'seed' ? <SeedWizard /> : <MigrateWizard />}
+      <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
+        <Button size="small" startIcon={<BackIcon />}
+                data-testid="wizard-change"
+                onClick={() => setStep('domain')}>
+          Change
+        </Button>
+        <Chip size="small" variant="outlined" label={domain} />
+        {purpose === 'migrate' && otherDomain && (
+          <>
+            <Typography variant="caption" color="text.secondary">into</Typography>
+            <Chip size="small" variant="outlined" label={otherDomain} />
+          </>
+        )}
+      </Stack>
+      {purpose === 'seed'
+        ? <SeedWizard sourceDomain={domain} />
+        : <MigrateWizard sourceDomain={domain} targetDomain={otherDomain} />}
     </Box>
   )
 }
@@ -126,14 +234,21 @@ const Wizard: React.FC = () => {
  * QuickTenantSetup already automates, just for BOTH tenants instead of
  * only the source. Manual stays the fallback for when the automated
  * sign-in stalls on 2FA/captcha, same reasoning as SeedWizard's own. */
-const MigrateWizard: React.FC = () => {
+const MigrateWizard: React.FC<{
+  sourceDomain?: string
+  targetDomain?: string
+}> = ({ sourceDomain, targetDomain }) => {
   const [route, setRoute] = useState<'automated' | 'manual'>('automated')
   const navigate = useNavigate()
 
   return (
     <Box>
       <Stack direction="row" alignItems="center" spacing={2} sx={{ mb: 0.5 }}>
-        <Typography variant="h4" sx={{ fontWeight: 700 }}>Set up for a real migration</Typography>
+        <Typography variant="h4" sx={{ fontWeight: 700 }}>
+          {sourceDomain && targetDomain
+            ? `${sourceDomain} → ${targetDomain}`
+            : 'Set up for a real migration'}
+        </Typography>
         <Box sx={{ flex: 1 }} />
         {/* Goes to Migrations rather than resetting this form. Wiping the
             fields would look like starting something while actually
@@ -160,10 +275,12 @@ const MigrateWizard: React.FC = () => {
         <Grid container spacing={2}>
           <Grid item xs={12} md={6}>
             <QuickTenantSetup side="source" view="automated"
+                             initialDomain={sourceDomain}
                              onRequestManual={() => setRoute('manual')} />
           </Grid>
           <Grid item xs={12} md={6}>
             <QuickTenantSetup side="target" view="automated" showProvisionUsers
+                             initialDomain={targetDomain}
                              onRequestManual={() => setRoute('manual')} />
           </Grid>
         </Grid>

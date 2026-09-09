@@ -286,8 +286,13 @@ const QuickTenantSetup: React.FC<{
   /** Lets the automated view's "no key yet" notice jump straight to the
    * Manual tab instead of just telling the user where to look. */
   onRequestManual?: () => void
-}> = ({ side, view, showSeedOptions, showProvisionUsers, onRequestManual }) => {
-  const [domain, setDomain] = useState('')
+  /** The domain the Setup Wizard already asked for. A starting value, not
+   *  a lock: the field stays editable, because being sent here with the
+   *  wrong one is exactly when it needs changing. */
+  initialDomain?: string
+}> = ({ side, view, showSeedOptions, showProvisionUsers, onRequestManual,
+        initialDomain }) => {
+  const [domain, setDomain] = useState(initialDomain ?? '')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [orgId, setOrgId] = useState('')
