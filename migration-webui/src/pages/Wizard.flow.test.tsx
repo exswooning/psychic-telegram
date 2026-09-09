@@ -413,7 +413,14 @@ describe('the illustration fills its frame', () => {
     const vb = art().getAttribute('viewBox')!.split(' ').map(Number)
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
     for (const r of art().querySelectorAll('rect')) {
-      const x = Number(r.getAttribute('x')), y = Number(r.getAttribute('y'))
+      // Only rects that actually declare a position. The full-bleed texture
+      // rect omits x/y -- and Number(null) is 0, not NaN, so the obvious
+      // guard let it through and it became the bounds. These tests then
+      // measured the background and passed with the artwork shrunk back to
+      // its original size, which is precisely the bug they exist to catch.
+      const ax = r.getAttribute('x'), ay = r.getAttribute('y')
+      if (ax === null || ay === null) continue
+      const x = Number(ax), y = Number(ay)
       const w = Number(r.getAttribute('width')), h = Number(r.getAttribute('height'))
       if ([x, y, w, h].some(Number.isNaN)) continue
       minX = Math.min(minX, x); maxX = Math.max(maxX, x + w)

@@ -197,7 +197,7 @@ const AdminSignInStep: React.FC<{
         fullWidth type="password" label="Password" value={password}
         onChange={(e) => setPassword(e.target.value)}
         onKeyDown={(e) => { if (e.key === 'Enter' && ready) onNext(email.trim(), password, domain) }}
-        helperText="Used once to sign in to the Google consoles. Never stored."
+        helperText=" "
         inputProps={{ 'data-testid': 'admin-password',
                       autoComplete: 'current-password' }}
         sx={{ mt: 1, '& .MuiOutlinedInput-root': { height: 60 } }}

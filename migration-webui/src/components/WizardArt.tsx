@@ -45,6 +45,11 @@ export const WizardArt: React.FC<{ kind: ArtKind }> = ({ kind }) => {
     lit: dark ? 'rgba(255,255,255,0.16)' : 'rgba(255,255,255,0.9)',
     accent: t.palette.primary.main,
     soft: t.palette.primary.light,
+    // A second hue, kept close enough to stay one family. The teal side of
+    // Google's own range rather than a contrasting colour -- the point is
+    // depth in the field, not a second signal competing with the accent.
+    accent2: dark ? '#78d9ec' : '#12b5cb',
+    dots: dark ? 0.10 : 0.07,
     glow: dark ? 0.42 : 0.26,
     shadow: dark ? 0.55 : 0.16,
     bar: dark ? 0.30 : 0.16,
@@ -62,13 +67,19 @@ export const WizardArt: React.FC<{ kind: ArtKind }> = ({ kind }) => {
       <path d={`M ${x + 18} ${y + 0.5} H ${x + w - 18}`}
             stroke={c.lit} strokeWidth={1} fill="none" />
       {lead && (
-        <rect x={x + 22} y={y + 24} width={Math.min(w * 0.4, 74)} height={9}
-              rx={4.5} fill={c.accent} />
+        <>
+          <rect x={x + 22} y={y + 24} width={Math.min(w * 0.4, 74)} height={9}
+                rx={4.5} fill={c.accent} />
+          <rect x={x + 22} y={y + 41} width={w - 44} height={1}
+                fill={c.edge} />
+        </>
       )}
       {Array.from({ length: lines }).map((_, i) => (
-        <rect key={i} x={x + 22} y={y + (lead ? 48 : 26) + i * 18} rx={4}
-              width={w - 44 - (i === lines - 1 ? 46 : i * 12)} height={8}
-              fill={c.accent} opacity={c.bar} />
+        <rect key={i} x={x + 22} y={y + (lead ? 56 : 26) + i * 18} rx={4}
+              // Widths that ebb rather than march: uniform bars read as a
+              // placeholder, which is what they are trying not to look like.
+              width={(w - 44) * [0.96, 0.72, 0.88, 0.54][i % 4]}
+              height={8} fill={c.accent} opacity={c.bar} />
       ))}
     </g>
   )
@@ -80,10 +91,14 @@ export const WizardArt: React.FC<{ kind: ArtKind }> = ({ kind }) => {
             stroke={c.edge} strokeWidth={1} filter={`url(#${uid}-sh)`} />
       <path d={`M ${x + 16} ${y + 0.5} H ${x + w - 16}`}
             stroke={c.lit} strokeWidth={1} fill="none" />
-      <circle cx={x + 34} cy={y + h / 2} r={14} fill={c.soft} opacity={dark ? 0.9 : 1} />
-      <rect x={x + 60} y={y + h / 2 - 13} width={w - 90} height={9} rx={4.5}
+      <circle cx={x + 36} cy={y + h / 2} r={17} fill={c.soft}
+              opacity={dark ? 0.22 : 0.5} />
+      <circle cx={x + 36} cy={y + h / 2} r={17} fill="none"
+              stroke={c.accent} strokeWidth={1.5} opacity={0.45} />
+      <circle cx={x + 36} cy={y + h / 2} r={6} fill={c.accent} opacity={0.85} />
+      <rect x={x + 68} y={y + h / 2 - 14} width={w - 100} height={9} rx={4.5}
             fill={c.accent} opacity={0.5} />
-      <rect x={x + 60} y={y + h / 2 + 3} width={(w - 90) * 0.6} height={8} rx={4}
+      <rect x={x + 68} y={y + h / 2 + 3} width={(w - 100) * 0.62} height={8} rx={4}
             fill={c.accent} opacity={c.bar} />
     </g>
   )
@@ -103,6 +118,24 @@ export const WizardArt: React.FC<{ kind: ArtKind }> = ({ kind }) => {
             <stop offset="40%" stopColor={c.accent} stopOpacity="0.55" />
             <stop offset="100%" stopColor={c.accent} stopOpacity="0.95" />
           </linearGradient>
+          <linearGradient id={`${uid}-g2`} x1="1" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor={c.accent2} stopOpacity="0.7" />
+            <stop offset="100%" stopColor={c.accent2} stopOpacity="0" />
+          </linearGradient>
+          {/* A fine dot grid. Barely visible on its own -- what it does is
+              give the empty field a surface, so the cards read as sitting
+              ON something rather than floating in a void. */}
+          <pattern id={`${uid}-dots`} width="18" height="18"
+                   patternUnits="userSpaceOnUse">
+            <circle cx="1.5" cy="1.5" r="1.5" fill={c.accent} opacity={c.dots} />
+          </pattern>
+          <radialGradient id={`${uid}-fade`} cx="0.5" cy="0.5" r="0.5">
+            <stop offset="0%" stopColor="#fff" stopOpacity="1" />
+            <stop offset="100%" stopColor="#fff" stopOpacity="0" />
+          </radialGradient>
+          <mask id={`${uid}-mask`}>
+            <rect width="560" height="300" fill={`url(#${uid}-fade)`} />
+          </mask>
           <filter id={`${uid}-blur`} x="-50%" y="-50%" width="200%" height="200%">
             <feGaussianBlur stdDeviation="42" />
           </filter>
@@ -117,6 +150,13 @@ export const WizardArt: React.FC<{ kind: ArtKind }> = ({ kind }) => {
         <ellipse cx={kind === 'setup' ? 190 : 280} cy={150} rx={215} ry={125}
                  fill={`url(#${uid}-g)`} opacity={c.glow}
                  filter={`url(#${uid}-blur)`} />
+        {/* A second field, offset and in a different hue. One blob reads as
+            a spotlight; two overlapping ones read as depth. */}
+        <ellipse cx={kind === 'setup' ? 430 : 400} cy={210} rx={165} ry={110}
+                 fill={`url(#${uid}-g2)`} opacity={c.glow * 0.75}
+                 filter={`url(#${uid}-blur)`} />
+        <rect width="560" height="300" fill={`url(#${uid}-dots)`}
+              mask={`url(#${uid}-mask)`} />
 
         {kind === 'setup' && (
           <>
