@@ -29,6 +29,10 @@ vi.mock('@/components/QuickTenantSetup', () => ({
   default: ({ side, initialDomain }: { side: string; initialDomain?: string }) =>
     <div data-testid={`qts-${side}`}>{initialDomain}</div>,
 }))
+vi.mock('@/api/client', async () => {
+  const actual = await vi.importActual<Record<string, unknown>>('@/api/client')
+  return { ...actual, removeTenantSetup: vi.fn().mockResolvedValue({ ok: true }) }
+})
 vi.mock('@/components/JobRunner', () => ({ default: () => null }))
 vi.mock('@/api/client', () => ({
   fetchStatus: () => Promise.resolve({ steps: [] }),
@@ -67,7 +71,7 @@ const enterDomain = async (d: string) => {
 
 /** Radio, then Continue -- the same two beats as Google Workspace signup's
  *  "Number of employees" step, which this flow is modelled on. */
-const choose = async (purpose: 'seed' | 'migrate') => {
+const choose = async (purpose: 'seed' | 'migrate' | 'later') => {
   fireEvent.click(await screen.findByTestId(`purpose-${purpose}`))
   fireEvent.click(screen.getByTestId('purpose-next'))
 }
@@ -292,7 +296,7 @@ describe('it reads like the Google Workspace signup it sits beside', () => {
     view()
     await signIn('admin@acme.com')
     const radios = await screen.findAllByRole('radio')
-    expect(radios).toHaveLength(2)
+    expect(radios).toHaveLength(3)
   })
 
   it('will not continue until one is picked', async () => {
@@ -544,5 +548,82 @@ describe('setting everything up in one go', () => {
     view()
     await signIn('admin@acme.com')
     expect(await screen.findByTestId('purpose-next')).toBeInTheDocument()
+  })
+})
+
+
+describe('setting up without committing to a purpose', () => {
+  /* Setting a tenant up and deciding what to do with it are two decisions,
+     and the wizard forced them together. The thing you most want before
+     deciding is a count of what is in the tenant -- and counting needs the
+     very setup the decision was gating. */
+  it('is offered as a third choice', async () => {
+    view()
+    await signIn('admin@acme.com')
+    expect(await screen.findByTestId('purpose-later')).toBeInTheDocument()
+  })
+
+  it('does not ask for a second domain', async () => {
+    view()
+    await signIn('admin@acme.com')
+    await choose('later')
+    await waitFor(() => expect(screen.queryByTestId('wizard-domain')).toBeNull())
+  })
+
+  it('sets the tenant up so it can be read', async () => {
+    view()
+    await signIn('admin@acme.com')
+    await choose('later')
+    await waitFor(() =>
+      expect(screen.getByTestId('qts-source')).toHaveTextContent('acme.com'))
+  })
+
+  it('says the decision is still open', async () => {
+    view()
+    await signIn('admin@acme.com')
+    await choose('later')
+    expect(await screen.findByText(/Nothing here commits it to a seed or a migration/i))
+      .toBeInTheDocument()
+  })
+
+  it('explains that a later choice reuses this setup', async () => {
+    view()
+    await signIn('admin@acme.com')
+    fireEvent.click(await screen.findByTestId('purpose-later'))
+    expect(await screen.findByText(/reuses all of it/i)).toBeInTheDocument()
+  })
+})
+
+describe('emptying a tenant you have not committed to', () => {
+  const reach = async () => {
+    view()
+    await signIn('admin@acme.com')
+    await choose('later')
+    return screen.findByTestId('later-wipe')
+  }
+
+  it('offers a wipe', async () => {
+    expect(await reach()).toBeInTheDocument()
+  })
+
+  it('offers deleting all users', async () => {
+    await reach()
+    expect(screen.getByTestId('later-delete-users')).toBeInTheDocument()
+  })
+
+  it('gates both on typing the domain', async () => {
+    await reach()
+    fireEvent.click(screen.getByTestId('later-delete-users'))
+    expect(await screen.findByTestId('confirm-domain')).toBeInTheDocument()
+    expect(screen.getByTestId('confirm-act')).toBeDisabled()
+  })
+
+  it('promises no administrator is removed', async () => {
+    /* The one deletion with no cheap undo -- a Workspace address stays
+       reserved for 20 days and there would be no credential left to undo
+       it with. */
+    await reach()
+    expect(screen.getByText(/every super-admin and delegated admin is kept/i))
+      .toBeInTheDocument()
   })
 })

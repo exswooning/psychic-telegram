@@ -20,6 +20,7 @@ import JobRunner from '@/components/JobRunner'
 import SeedWizard from '@/pages/SeedWizard'
 import QuickTenantSetup from '@/components/QuickTenantSetup'
 import WizardArt from '@/components/WizardArt'
+import DecideLaterPanel from '@/components/DecideLaterPanel'
 import type { ArtKind } from '@/components/WizardArt'
 
 /**
@@ -46,7 +47,7 @@ import type { ArtKind } from '@/components/WizardArt'
 // -- SeedWizard.tsx owns that step's real UI.
 const SEED_STEP_TITLE_MARKER = 'seeded'
 
-type Purpose = 'seed' | 'migrate'
+type Purpose = 'seed' | 'migrate' | 'later'
 type Step = 'domain' | 'purpose' | 'counterpart' | 'run'
 
 /** Enough to catch a typo, not enough to argue with a real domain.
@@ -368,6 +369,13 @@ const Wizard: React.FC = () => {
                    ${domain} so a migration can be rehearsed end to end. Wipe
                    and reseed as often as you like.`}
             note="Seeding writes data, so it is only offered on accounts opted in to it." />
+        ) : picked === 'later' ? (
+          <Aside art="setup"
+            title="Count first, commit after"
+            body={`Creates what is needed to READ ${domain}, then counts it —
+                   accounts, mail, Drive. Choosing a seed or a migration
+                   later reuses all of it, so nothing here is wasted.`}
+            note="Includes emptying the tenant, for one you are evaluating rather than keeping." />
         ) : (
           <Aside art="setup"
             title="Rehearse it, or run it"
@@ -401,6 +409,20 @@ const Wizard: React.FC = () => {
                 </Typography>
                 <Typography variant="body2" color="text.secondary">
                   gcloud, projects, credentials, delegation, and the real copy.
+                </Typography>
+              </Box>
+            } />
+          <FormControlLabel value="later" sx={{ mt: 1, alignItems: 'flex-start' }}
+            control={<Radio inputProps={{ 'data-testid': 'purpose-later' } as never}
+                            sx={{ pt: 0.5 }} />}
+            label={
+              <Box sx={{ py: 0.5 }}>
+                <Typography variant="body1" sx={{ fontWeight: 500 }}>
+                  Set it up and decide later
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  Creates the credentials, then counts what is in the tenant.
+                  Pick seed or migrate afterwards.
                 </Typography>
               </Box>
             } />
@@ -468,7 +490,10 @@ const Wizard: React.FC = () => {
           </>
         )}
       </Stack>
-      {purpose === 'seed'
+      {purpose === 'later'
+        ? <DecideLaterPanel domain={domain} adminEmail={adminEmail}
+                            adminPassword={adminPassword} />
+        : purpose === 'seed'
         ? <SeedWizard sourceDomain={domain} adminEmail={adminEmail}
                       adminPassword={adminPassword} />
         : <MigrateWizard sourceDomain={domain} targetDomain={otherDomain}
