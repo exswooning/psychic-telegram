@@ -26,18 +26,30 @@ const JobRunner: React.FC<{ name: string; spec: ActionSpec; onDone?: () => void 
   const [typed, setTyped] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [queued, setQueued] = useState<string | null>(null)
+  const [blockedBy, setBlockedBy] = useState<string | null>(null)
   const sinceRef = useRef(0)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const poll = useCallback(async () => {
     try {
-      const job = await fetchJob(sinceRef.current)
+      // spec.label is the name this action's job is started under (see
+      // webui's launch_or_queue). Without it this panel streamed whatever
+      // the account's single Job happened to hold -- live, a read-only
+      // "count files per shared drive" panel displayed the reset phase of a
+      // running eleven-hour seed, complete with "still deleting: 85/200
+      // users" and a Stop button. Nothing was deleting; it was another
+      // job's transcript under this panel's heading.
+      const job = await fetchJob(sinceRef.current, undefined, spec.label)
       if (job.lines.length) {
         setLines((prev) => [...prev, ...job.lines])
         sinceRef.current = job.total
       }
       setRunning(job.running)
       setRc(job.rc)
+      // Why this panel is idle, when it is idle because something else has
+      // the box. Without it the page reads as broken: buttons that do
+      // nothing, counters at zero, no explanation anywhere.
+      setBlockedBy(job.now_running ?? null)
       if (!job.running && pollRef.current) {
         clearInterval(pollRef.current)
         pollRef.current = null
@@ -46,7 +58,7 @@ const JobRunner: React.FC<{ name: string; spec: ActionSpec; onDone?: () => void 
     } catch {
       // A dropped poll must not kill the stream; the next tick retries.
     }
-  }, [onDone])
+  }, [onDone, spec.label])
 
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current) }, [])
 
@@ -122,6 +134,14 @@ const JobRunner: React.FC<{ name: string; spec: ActionSpec; onDone?: () => void 
         <Typography variant="caption" color="info.main"
                     sx={{ display: 'block', mt: 0.5 }}>
           {queued}
+        </Typography>
+      )}
+      {blockedBy && !running && !queued && (
+        <Typography variant="caption" color="text.secondary"
+                    data-testid={`blocked-${name}`}
+                    sx={{ display: 'block', mt: 0.5 }}>
+          {blockedBy} is running on this tenant — start this and it will be
+          queued behind it.
         </Typography>
       )}
       {lines.length > 0 && (

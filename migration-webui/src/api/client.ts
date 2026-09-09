@@ -140,14 +140,33 @@ export interface JobStatus {
   // render this one -- confirmed live, both rendered for the same real
   // seed job simultaneously before this flag existed.
   external: boolean
+  /** What this snapshot is an answer ABOUT, echoed back when the caller
+   *  asked for a specific job by name. */
+  requested?: string
+  /** True when no job of the requested name has ever run for this account.
+   *  Distinct from "it ran and produced nothing". */
+  unknown?: boolean
+  /** The job actually holding this account's single Job slot right now, when
+   *  it is not the one asked for. This is what turns "the button does
+   *  nothing" into "the seed is running". */
+  now_running?: string | null
 }
 
-export async function fetchJob(since = 0, accountId?: string): Promise<JobStatus> {
+export async function fetchJob(since = 0, accountId?: string,
+                              name?: string): Promise<JobStatus> {
   // account is for an operator watching a job they started on somebody
   // else's tenant -- the wipe and reset cards can target one, and a job
   // you can start but not watch is worse than one you cannot start.
+  //
+  // `name` is which job the caller means. There is ONE Job per account and
+  // it is reused, so a panel that asks for "whatever is running" gets
+  // whichever job happens to hold it -- and _job_snapshot has carried a
+  // guard against exactly that since it reported a 298,185-item deletion
+  // as a job that had been destroyed. The guard only works if the caller
+  // says what it asked for, which is what this is.
   const acct = accountId ? `&account=${encodeURIComponent(accountId)}` : ''
-  return getJSON<JobStatus>(`/api/job?since=${since}${acct}`)
+  const want = name ? `&name=${encodeURIComponent(name)}` : ''
+  return getJSON<JobStatus>(`/api/job?since=${since}${acct}${want}`)
 }
 
 // The DMS mail import runs on its own Job, parallel to the migration, so it
