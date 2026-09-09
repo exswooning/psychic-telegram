@@ -244,10 +244,6 @@ GENERATED_LOCALPARTS = [
 # Safety
 # ======================================================================
 def assert_sandbox(settings: Settings, confirm_domain: str) -> None:
-    protected = {
-        d.strip().lower()
-        for d in os.getenv("PROTECTED_DOMAINS", "").split(",") if d.strip()
-    }
     domain = settings.source_domain.lower()
 
     if os.getenv("SANDBOX_MODE", "").lower() != "true":
@@ -257,8 +253,18 @@ def assert_sandbox(settings: Settings, confirm_domain: str) -> None:
             f"REFUSING: --confirm-domain '{confirm_domain}' does not match "
             f"SOURCE_DOMAIN '{settings.source_domain}'."
         )
-    if domain in protected:
-        sys.exit(f"REFUSING: {domain} is listed in PROTECTED_DOMAINS.")
+    # domain_guard, not the environment variable this used to read. Every
+    # configured domain is protected the moment the setup wizard writes it,
+    # so a client tenant is refused here without anyone having remembered
+    # to add it to a list. A sandbox is the declared exception, revoked by
+    # name and on the record.
+    import sys as _sys
+    _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    import domain_guard
+
+    refusal = domain_guard.refuse_reason(domain)
+    if refusal:
+        sys.exit("REFUSING: " + refusal)
     print(f"Sandbox guard passed for {domain}.")
 
 
@@ -522,6 +528,20 @@ def _drive_link(file_id: str, shape: int = 0) -> str:
             f"https://drive.google.com/drive/folders/{file_id}"][shape % 4]
 
 
+def _big_attachment_body(file_id: str) -> str:
+    """What Gmail actually sends when an attachment is too large.
+
+    Above 25 MB Gmail does not attach the file. It uploads it to Drive,
+    puts a /file/d/<id>/view link in the body with ?usp=drive_web, and
+    grants the recipients access. That link is the one shape a real tenant
+    produces in bulk, and the one whose rewrite decides whether migrated
+    mail still reaches its attachments.
+    """
+    return ("Sending this over Drive -- it was too large to attach.\r\n\r\n"
+            f"    https://drive.google.com/file/d/{file_id}/view?usp=drive_web"
+            "\r\n\r\nLet me know if you cannot open it.")
+
+
 def _linked_body(file_id: str, shape: int) -> str:
     return ("Recorded for audit. See the linked document for detail:\r\n\r\n"
             f"    {_drive_link(file_id, shape)}\r\n\r\nThanks.")
@@ -670,6 +690,21 @@ def seed_gmail(gmail, settings: Settings, user: str, peers: list[str],
     # depends on the rng having fired. The HTML one carries both hard cases
     # at once: an entity-encoded &amp;id= separator, and a quoted-printable
     # body whose soft line break lands inside the file id.
+    # The oversized-attachment case, when one was seeded. Deterministic
+    # like the two below: verifying it must not depend on the rng.
+    big_id = (drive_items or {}).get("big_attachment")
+    if big_id:
+        raw = _rfc822("Design assets (too large to attach)",
+                      _a_peer(rng, peers, external), user, 32,
+                      body=_big_attachment_body(big_id),
+                      msg_id=f"bigattach-{big_id}")
+        try:
+            insert(raw, ["INBOX"])
+            m["messages"] += 1
+            m["with_drive_link"] += 1
+        except Exception as exc:      # noqa: BLE001
+            print(f"  ! big-attachment message: {exc}")
+
     if linkable:
         for i, (subj, html) in enumerate([
                 ("Linked doc for review", ""),
@@ -2174,6 +2209,12 @@ def main(argv: list[str] | None = None) -> int:
                          "admin.directory.group granted. Off by default "
                          "because it is a tenant-level write that the other "
                          "seeding scopes do not cover.")
+    ap.add_argument("--big-file-mb", type=int, default=0, metavar="MB",
+                    help="seed one file of MB megabytes per user and a mail "
+                         "linking to it the way Gmail links an attachment it "
+                         "was too large to send (>25 MB). Off by default: it "
+                         "is tens of MB of upload per user, and the case is "
+                         "one a rehearsal opts into. 30 covers the ceiling.")
     ap.add_argument("--shared-drives", type=int, default=0, metavar="N",
                     help="also create N Shared Drives (SEEDED-SD-*) once the "
                          "per-user seed finishes. Shared drives belong to no "
@@ -2199,6 +2240,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.top_up_only and not args.target_gb_per_user:
         sys.exit("--top-up-only needs --target-gb-per-user")
+    # corpus.py reads this from the environment rather than taking it as a
+    # parameter: CorpusBuilder is constructed per user inside a worker, and
+    # threading one more argument through every call site to carry an
+    # opt-in extra is more edit than the extra is worth.
+    if args.big_file_mb:
+        os.environ["SEED_BIG_FILE_MB"] = str(args.big_file_mb)
+
     if args.top_up_only and args.reset:
         sys.exit("--top-up-only makes no sense with --reset")
 

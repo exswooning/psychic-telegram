@@ -153,6 +153,35 @@ def _pdf_bytes(title: str, seed: int) -> bytes:
     return body + os.urandom(rng.randint(20_000, 400_000))
 
 
+# One blob, generated once and shared. At 30 MB and 18 concurrent users a
+# per-user blob would be half a gigabyte of identical random bytes, on a box
+# whose worker count is already bounded by memory.
+_big_blob_cache: dict[int, bytes] = {}
+
+
+def _big_file_mb() -> int:
+    """Size of the oversized attachment, in MB. 0 disables it.
+
+    Off by default: it is tens of megabytes per user of upload time that an
+    ordinary seed should not pay for, and the case it covers is one a
+    migration rehearsal opts into.
+    """
+    try:
+        return max(0, int(os.getenv("SEED_BIG_FILE_MB", "0")))
+    except ValueError:
+        return 0
+
+
+def _big_blob(mb: int) -> bytes:
+    if mb not in _big_blob_cache:
+        # Not os.urandom: incompressible bytes make the upload the honest
+        # size, but generating tens of MB of them per run costs real CPU for
+        # a property nothing here needs. A repeating pattern uploads the
+        # same number of bytes.
+        _big_blob_cache[mb] = (b"BITPORT-OVERSIZED-ATTACHMENT-" * 36) [:1024] * mb * 1024
+    return _big_blob_cache[mb]
+
+
 def _iso(days_ago: int) -> str:
     return (datetime.now(timezone.utc) - timedelta(days=days_ago)).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
@@ -789,6 +818,32 @@ class CorpusBuilder:
         # building the doc incrementally via the Docs API (batchUpdate),
         # which needs a separate `documents` OAuth scope this tool doesn't
         # request.
+        # A file past Gmail's 25 MB attachment ceiling, which is the case
+        # this corpus existed to describe and never contained.
+        #
+        # Gmail does not attach a file that size -- it uploads it to Drive,
+        # replaces the attachment with a drive.google.com/file/d/<id>/view
+        # link, and GRANTS THE RECIPIENTS ACCESS. So the migration question
+        # is not "was the link rewritten" (it is, and 254 messages a user
+        # already prove that) but "does the recipient still reach the file
+        # afterwards" -- a permissions question the corpus could not ask,
+        # because every linked file was one the peer already had rights to.
+        #
+        # A binary, not a native Doc. A binary is UPLOADED, so it needs no
+        # extra scope; growing a Doc past its ~10 MB export ceiling needs
+        # the Docs API batchUpdate and a `documents` scope this tool does
+        # not request. It exercises the size paths without pretending to
+        # reproduce the export ceiling, which only a real oversized Doc can.
+        big_mb = _big_file_mb()
+        if big_mb:
+            big = self.binary(f"big-attachment-{big_mb}mb.bin", edge,
+                              _big_blob(big_mb), "application/octet-stream")
+            self.m["items"]["big_attachment"] = big
+            self.m["big_attachment_mb"] = big_mb
+            # Exactly what Gmail does on conversion: reader, to the peer.
+            if self._peer(0):
+                self.share_users(big, [self._peer(0)], "reader")
+
         if cfg["big_native"]:
             self._create(
                 {"name": "Oversized Doc", "parents": [edge], "mimeType": DOC_MIME},

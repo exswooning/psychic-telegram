@@ -54,3 +54,28 @@ def auth(settings, monkeypatch) -> FakeAuth:
     monkeypatch.setattr(drive_engine, "MediaIoBaseDownload", FakeDownloader)
     monkeypatch.setattr(gmail_engine, "MediaFileUpload", FakeMediaUpload)
     return FakeAuth(settings)
+
+
+@pytest.fixture(autouse=True)
+def _sandbox_is_unprotected(tmp_path_factory, monkeypatch):
+    """The same sandbox these tests seed, declared the same way.
+
+    tests/conftest.py carries an identical fixture; this directory has its
+    own conftest, so without it a test here that calls webui.seed_argv is
+    correctly refused by domain_guard -- every configured domain is
+    protected by default, which is the whole point of that guard and
+    exactly wrong for a suite that exists to build seed commands.
+
+    Protection by default is exercised in tests/test_domain_guard.py, which
+    patches this seam itself.
+    """
+    import sys as _sys
+
+    _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    import domain_guard
+
+    monkeypatch.setattr(
+        domain_guard, "REVOCATIONS_PATH",
+        str(tmp_path_factory.mktemp("guard") / "unprotected.json"))
+    monkeypatch.setattr(domain_guard, "configured_domains", lambda: set())
+    yield

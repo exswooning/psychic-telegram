@@ -51,6 +51,10 @@ try_rsync() {
 try_rsync -az --partial --timeout=90 -e "${SSH[*]}" \
   --exclude '.git/' --exclude '__pycache__/' --exclude '.pytest_cache/' \
   --exclude '.venv' --exclude 'scratch/' --exclude 'migration.db*' \
+  `# Protection state belongs to the DEPLOYMENT, not the checkout.`\
+  `# Syncing it would let a developer's local revocation travel to`\
+  `# production and unprotect a client's tenant.`\
+  --exclude 'unprotected_domains.json' \
   `# .venv without a trailing slash: with one, rsync matches only a`\
   `# DIRECTORY, and a checkout that symlinks its venv at an existing`\
   `# deployment then tries to ship the symlink over the real thing --`\

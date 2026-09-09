@@ -2310,10 +2310,11 @@ def seed_argv(body: dict, account_id: int | None = None) -> tuple[list[str], dic
                  if typed and typed == target else "")
         return [], {}, f"{typed!r} does not match the source domain {domain!r}{extra}"
 
-    protected = [d.strip().lower()
-                 for d in os.getenv("PROTECTED_DOMAINS", "").split(",") if d.strip()]
-    if domain in protected:
-        return [], {}, f"{domain} is listed in PROTECTED_DOMAINS"
+    import domain_guard
+
+    refusal = domain_guard.refuse_reason(domain)
+    if refusal:
+        return [], {}, refusal
 
     scale = (body.get("scale") or "medium").strip().lower()
     if scale not in SEED_SCALES:
@@ -2338,6 +2339,16 @@ def seed_argv(body: dict, account_id: int | None = None) -> tuple[list[str], dic
     argv.append("--yes")
     if body.get("create_users"):
         argv.append("--create-users")
+    big = body.get("big_file_mb")
+    if big:
+        # The >25 MB attachment case, which is what a real tenant's large
+        # attachments become: Gmail uploads them to Drive and sends a link.
+        try:
+            n = int(big)
+        except (TypeError, ValueError):
+            return [], {}, f"big_file_mb must be a number, got {big!r}"
+        if n > 0:
+            argv += ["--big-file-mb", str(n)]
     if body.get("groups"):
         # Advertised by seed_scopes_payload as a capability of this seeder,
         # with its scope, since before this endpoint could pass it -- so the
@@ -2495,10 +2506,11 @@ def reset_target_argv(body: dict, account_id: int | None = None) -> tuple[list[s
                 "but it is also not the target" if typed and typed == source else "")
         return [], {}, f"{typed!r} does not match the target domain {domain!r}{extra}"
 
-    protected = [d.strip().lower()
-                for d in os.getenv("PROTECTED_DOMAINS", "").split(",") if d.strip()]
-    if domain in protected:
-        return [], {}, f"{domain} is listed in PROTECTED_DOMAINS"
+    import domain_guard
+
+    refusal = domain_guard.refuse_reason(domain)
+    if refusal:
+        return [], {}, refusal
 
     argv = [PY, "reset_target.py", "--confirm-domain", domain, "--yes"]
     # Optional and additive: omitting it keeps today's full-wipe default
@@ -2579,10 +2591,11 @@ def wipe_source_argv(body: dict, account_id: int | None = None) -> tuple[list[st
                  "SOURCE corpus" if typed and typed == target else "")
         return [], {}, f"{typed!r} does not match the source domain {domain!r}{extra}"
 
-    protected = [d.strip().lower()
-                 for d in os.getenv("PROTECTED_DOMAINS", "").split(",") if d.strip()]
-    if domain in protected:
-        return [], {}, f"{domain} is listed in PROTECTED_DOMAINS"
+    import domain_guard
+
+    refusal = domain_guard.refuse_reason(domain)
+    if refusal:
+        return [], {}, refusal
 
     argv = [PY, "wipe_target.py", "--side", "source",
             "--confirm-domain", domain, "--apply"]
@@ -5519,6 +5532,14 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Loud, once, at boot. A domain someone turned protection OFF for is
+    # the state that should be impossible to forget -- a protected one is
+    # the expected case and announcing it every start trains people to skim.
+    import domain_guard
+
+    _report = domain_guard.startup_report()
+    if _report:
+        print(_report, flush=True)
     ap = argparse.ArgumentParser(description="Local web UI for the migration.")
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--host", default="127.0.0.1",

@@ -28,10 +28,7 @@ import RunningJobDetail from '@/components/RunningJobDetail'
 import { useRunningJobs, jobKind } from '@/hooks/useRunningJobs'
 import type { RunningJob } from '@/hooks/useRunningJobs'
 import SeedRunDashboard from '@/components/SeedRunDashboard'
-
-// Enough to see what happened today without turning the top of the page
-// into a wall; the rest is one click away.
-const DONE_PREVIEW = 12
+import { groupRunsByDomain } from '@/utils/groupRuns'
 
 const SEED_SCALES = ['tiny', 'small', 'medium', 'large', 'huge']
 // main.py migrate --services help text is the source of truth: "drive,
@@ -115,7 +112,6 @@ const Jobs: React.FC = () => {
     fetchCompletedJobs().then(setDone).catch(() => setDone([]))
   }, [running.length])
   const [openDone, setOpenDone] = useState<RunningJob | null>(null)
-  const [allDone, setAllDone] = useState(false)
   const [rawSides, setSides] = useState<RawSide[] | null>(null)
   const [seedJob, setSeedJob] = useState<JobStatus | null>(null)
   const [seedHistory, setSeedHistory] = useState<JobResult | null>(null)
@@ -240,6 +236,50 @@ const Jobs: React.FC = () => {
 
   const toggle = (key: string) => setExpanded((cur) => (cur === key ? null : key))
 
+  const [openDomain, setOpenDomain] = useState<string | null>(null)
+
+  // Grouped by the tenant it happened to. The rule lives in
+  // groupRunsByDomain so its test exercises that code rather than a copy.
+  const byDomain = useMemo(() => groupRunsByDomain(
+    done,
+    sides?.find((x) => x.side === 'source')?.cfg?.domain,
+    sides?.find((x) => x.side === 'target')?.cfg?.domain,
+  ), [done, sides])
+
+  // One finished run as a card. Extracted because it is rendered from
+  // inside a per-domain group now, and inlining it there put the whole
+  // thing three levels deep in a map inside a map.
+  const renderDoneCard = (d: CompletedJob) => {
+    // The id, when there is one: two wipes of the same tenant are two runs,
+    // and keying on the name alone made React render one and silently drop
+    // the other.
+    const key = d.runId || `name-${d.name}`
+    return (
+      <RunningJobCard
+        key={key}
+        job={{
+          key: `done-${key}`, kind: jobKind(d.name), label: d.name,
+          detail: `${d.lineCount.toLocaleString()} line(s) of output`
+            + (d.fromTranscript ? ' — read from the transcript' : ''),
+          pct: null, elapsedSec: d.elapsed,
+        }}
+        finished={{ rc: d.rc, when: d.finished }}
+        onOpen={async () => {
+          // The lines are fetched only when one is opened: most never are,
+          // and a finished seed carries thousands.
+          const full = await fetchJobHistory(d.name, d.runId).catch(() => null)
+          setOpenDone({
+            key: `done-${key}`, kind: jobKind(d.name), label: d.name,
+            detail: `exit ${d.rc ?? '?'} — ${d.lineCount.toLocaleString()} line(s)`,
+            pct: null, elapsedSec: d.elapsed,
+            done: true, finishedAt: d.finished, rc: d.rc,
+            lines: full?.lines ?? [],
+          })
+        }}
+      />
+    )
+  }
+
   return (
     <Box>
       <Stack direction="row" alignItems="center" sx={{ mb: 0.5 }}>
@@ -324,49 +364,53 @@ const Jobs: React.FC = () => {
               Finished runs
             </Typography>
             <Typography variant="caption" color="text.disabled">
-              {done.length.toLocaleString()} recorded, newest first
+              {done.length.toLocaleString()} recorded across{' '}
+              {byDomain.length} tenant{byDomain.length === 1 ? '' : 's'}
             </Typography>
           </Stack>
-          <Stack direction="row" flexWrap="wrap" gap={1.5} sx={{ mt: 0.5 }}>
-            {(allDone ? done : done.slice(0, DONE_PREVIEW)).map((d) => {
-              // The id, when there is one: two wipes of the same tenant are
-              // two runs, and keying on the name alone made React render
-              // one of them and silently drop the other.
-              const key = d.runId || `name-${d.name}`
+
+          {/* Grouped by the tenant it happened TO, because that is the
+              question being asked of this list -- "what has been done to
+              this domain" -- and a flat newest-first list answers it only
+              by reading every card. One row per tenant, expanded on click. */}
+          <Stack spacing={1} sx={{ mt: 0.5 }}>
+            {byDomain.map(({ domain, runs }) => {
+              const open = openDomain === domain
+              const newest = runs[0]
               return (
-                <RunningJobCard
-                  key={key}
-                  job={{
-                    key: `done-${key}`, kind: jobKind(d.name), label: d.name,
-                    detail: `${d.lineCount.toLocaleString()} line(s) of output`
-                      + (d.fromTranscript ? ' — read from the transcript' : ''),
-                    pct: null, elapsedSec: d.elapsed,
-                  }}
-                  finished={{ rc: d.rc, when: d.finished }}
-                  onOpen={async () => {
-                    // The lines are fetched only when one is opened: most
-                    // never are, and a finished seed carries thousands.
-                    const full = await fetchJobHistory(d.name, d.runId)
-                      .catch(() => null)
-                    setOpenDone({
-                      key: `done-${key}`, kind: jobKind(d.name), label: d.name,
-                      detail: `exit ${d.rc ?? '?'} — ${d.lineCount.toLocaleString()} line(s)`,
-                      pct: null, elapsedSec: d.elapsed,
-                      done: true, finishedAt: d.finished, rc: d.rc,
-                      lines: full?.lines ?? [],
-                    })
-                  }}
-                />
+                <Card key={domain} variant="outlined"
+                      data-testid={`domain-runs-${domain}`}>
+                  <CardContent sx={{ py: 1.25, '&:last-child': { pb: 1.25 } }}>
+                    <Stack direction="row" alignItems="center" spacing={1}
+                           sx={{ cursor: 'pointer' }}
+                           onClick={() => setOpenDomain(open ? null : domain)}>
+                      <DomainIcon fontSize="small" color="action" />
+                      <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
+                        {domain}
+                      </Typography>
+                      <Chip size="small" variant="outlined"
+                            label={`${runs.length} run${runs.length === 1 ? '' : 's'}`} />
+                      <Typography variant="caption" color="text.secondary"
+                                  sx={{ flexGrow: 1 }}>
+                        {newest?.finished
+                          ? `last: ${newest.name} · ${new Date(newest.finished * 1000).toLocaleString()}`
+                          : `last: ${newest?.name ?? '--'}`}
+                      </Typography>
+                      <ExpandIcon fontSize="small"
+                                  sx={{ transform: open ? 'rotate(180deg)' : 'none',
+                                        transition: 'transform .15s' }} />
+                    </Stack>
+                    <Collapse in={open}>
+                      <Stack direction="row" flexWrap="wrap" gap={1.5}
+                             sx={{ mt: 1.5 }}>
+                        {runs.map((d) => renderDoneCard(d))}
+                      </Stack>
+                    </Collapse>
+                  </CardContent>
+                </Card>
               )
             })}
           </Stack>
-          {done.length > DONE_PREVIEW && (
-            <Button size="small" sx={{ mt: 1 }}
-                    onClick={() => setAllDone((v) => !v)}>
-              {allDone ? 'Show fewer'
-                : `Show all ${done.length.toLocaleString()} runs`}
-            </Button>
-          )}
         </Box>
       )}
 

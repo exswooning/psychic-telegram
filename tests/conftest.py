@@ -82,6 +82,35 @@ def _reset_chat_shared_state():
 
 
 @pytest.fixture(autouse=True)
+def _sandbox_is_unprotected(tmp_path_factory, monkeypatch):
+    """These tests operate a sandbox, so give them one.
+
+    domain_guard protects every CONFIGURED domain by default -- the setup
+    wizard writing a tenant_configs row IS the protection. That is the right
+    default for a deployment and the wrong one for a suite: almost every
+    test here builds a seed or reset command against whatever domain it just
+    put in the environment, which the guard then correctly refuses.
+
+    So configured_domains() is emptied for the suite. What remains is the
+    behaviour these tests were written against and still assert: an explicit
+    PROTECTED_DOMAINS entry refuses, and nothing else does. Protection by
+    default is exercised directly, and only, in test_domain_guard.py, which
+    patches this same seam itself and is therefore unaffected.
+
+    REVOCATIONS_PATH is redirected too, so no test can write a revocation
+    into the checkout -- an unprotected_domains.json left behind by a test
+    run would travel to a deployment as real state.
+    """
+    import domain_guard
+
+    monkeypatch.setattr(
+        domain_guard, "REVOCATIONS_PATH",
+        str(tmp_path_factory.mktemp("guard") / "unprotected.json"))
+    monkeypatch.setattr(domain_guard, "configured_domains", lambda: set())
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _cleanup_account_dirs():
     """accounts_auth.create_account() writes real directories under
     data/accounts/{id}/ and keys/{id}/, relative to the actual repo

@@ -36,6 +36,8 @@ from __future__ import annotations
 import argparse
 import concurrent.futures as futures
 import os
+
+import domain_guard
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -93,8 +95,6 @@ def assert_sandbox(settings: Settings, confirm_domain: str,
     """
     if side not in ("source", "target"):
         raise ValueError(f"side must be source or target, got {side!r}")
-    protected = {d.strip().lower()
-                 for d in os.getenv("PROTECTED_DOMAINS", "").split(",") if d.strip()}
     domain = (settings.source_domain if side == "source"
               else settings.target_domain).lower()
     env_name = "SOURCE_DOMAIN" if side == "source" else "TARGET_DOMAIN"
@@ -104,8 +104,9 @@ def assert_sandbox(settings: Settings, confirm_domain: str,
     if confirm_domain.lower() != domain:
         sys.exit(f"REFUSING: --confirm-domain {confirm_domain!r} does not match "
                  f"{env_name} {domain!r}.")
-    if domain in protected:
-        sys.exit(f"REFUSING: {domain} is listed in PROTECTED_DOMAINS.")
+    refusal = domain_guard.refuse_reason(domain)
+    if refusal:
+        sys.exit("REFUSING: " + refusal)
     # Both tenants pointing at one domain means a wipe of either destroys
     # both sides of the migration at once.
     if settings.source_domain.lower() == settings.target_domain.lower():
