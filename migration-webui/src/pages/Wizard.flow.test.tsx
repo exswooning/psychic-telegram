@@ -400,3 +400,58 @@ describe('the panel is designed, not annotated', () => {
     expect(ids.every((i) => i.startsWith('wa-setup'))).toBe(true)
   })
 })
+
+
+describe('the illustration fills its frame', () => {
+  /* The first version drew inside about 70% of the viewBox width and half
+     its height. Scaled to the column, that rendered small with a dead band
+     above the headline -- empty space that read as a mistake rather than as
+     air. */
+  const art = () => document.querySelector('svg[role="img"]')!
+
+  const bounds = () => {
+    const vb = art().getAttribute('viewBox')!.split(' ').map(Number)
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
+    for (const r of art().querySelectorAll('rect')) {
+      const x = Number(r.getAttribute('x')), y = Number(r.getAttribute('y'))
+      const w = Number(r.getAttribute('width')), h = Number(r.getAttribute('height'))
+      if ([x, y, w, h].some(Number.isNaN)) continue
+      minX = Math.min(minX, x); maxX = Math.max(maxX, x + w)
+      minY = Math.min(minY, y); maxY = Math.max(maxY, y + h)
+    }
+    return { vw: vb[2], vh: vb[3], w: maxX - minX, h: maxY - minY, minX, maxX }
+  }
+
+  it('uses most of the width it is given', async () => {
+    view()
+    await screen.findByTestId('admin-email')
+    const b = bounds()
+    expect(b.w / b.vw).toBeGreaterThan(0.85)
+  })
+
+  it('and most of the height, so there is no dead band under it', async () => {
+    view()
+    await screen.findByTestId('admin-email')
+    const b = bounds()
+    expect(b.h / b.vh).toBeGreaterThan(0.65)
+  })
+
+  it('sits roughly centred rather than drifting to one side', async () => {
+    view()
+    await screen.findByTestId('admin-email')
+    const b = bounds()
+    const leftGap = b.minX
+    const rightGap = b.vw - b.maxX
+    expect(Math.abs(leftGap - rightGap)).toBeLessThan(b.vw * 0.12)
+  })
+
+  it('lights the top edge of every card, so none reads as a hole', async () => {
+    /* Dark mode specifically: a flat rectangle with no lit edge looks
+       punched out of the panel rather than resting on it. */
+    view()
+    await screen.findByTestId('admin-email')
+    const cards = art().querySelectorAll('rect[rx="18"], rect[rx="16"]')
+    const edges = art().querySelectorAll('path[stroke-width="1"]')
+    expect(edges.length).toBeGreaterThanOrEqual(cards.length)
+  })
+})

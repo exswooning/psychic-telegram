@@ -88,7 +88,7 @@ const WizardShell: React.FC<{
       </Button>
     )}
     <Grid container spacing={{ xs: 4, md: 8 }} alignItems="flex-start">
-      <Grid item xs={12} md={6}>
+      <Grid item xs={12} md={5}>
         <Typography
           component="h1"
           sx={{
@@ -105,7 +105,7 @@ const WizardShell: React.FC<{
         </Typography>
         {children}
       </Grid>
-      <Grid item xs={12} md={6}>
+      <Grid item xs={12} md={7}>
         {/* One step off the page, in whichever direction that is.
             `background.default` is the tint that lifts this off white in
             light mode -- and in dark mode it IS the page colour, so the
@@ -117,7 +117,7 @@ const WizardShell: React.FC<{
             ? th.palette.background.paper
             : th.palette.background.default,
           border: '1px solid', borderColor: 'divider',
-          borderRadius: 4, p: { xs: 3, md: 4 },
+          borderRadius: 6, p: { xs: 3, md: 5 },
         }}>
           {aside}
         </Box>
@@ -139,17 +139,18 @@ const Aside: React.FC<{
     <WizardArt kind={art} />
     <Typography
       sx={{
-        fontSize: { xs: '1.375rem', md: '1.625rem' }, fontWeight: 400,
-        lineHeight: 1.25, letterSpacing: '-0.2px', mb: 1.5,
+        fontSize: { xs: '1.5rem', md: '1.875rem' }, fontWeight: 400,
+        lineHeight: 1.22, letterSpacing: '-0.3px', mb: 1.75,
       }}>
       {title}
     </Typography>
-    <Typography variant="body2" color="text.secondary" sx={{ lineHeight: 1.7 }}>
+    <Typography color="text.secondary"
+                sx={{ fontSize: '1rem', lineHeight: 1.7 }}>
       {body}
     </Typography>
     {note && (
-      <Typography variant="caption" color="text.secondary"
-                  sx={{ display: 'block', mt: 2.5, pt: 2,
+      <Typography variant="body2" color="text.secondary"
+                  sx={{ display: 'block', mt: 3, pt: 2.5, opacity: 0.85,
                         borderTop: '1px solid', borderColor: 'divider' }}>
         {note}
       </Typography>
