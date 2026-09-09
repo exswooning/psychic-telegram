@@ -100,6 +100,69 @@ NEEDS_CONSOLE_CONFIG = {
 }
 
 
+# chat.spaces, which config.py already grants and which covers list. Not
+# chat.spaces.readonly: it would be the narrower and more obviously correct
+# choice, and it is not in the delegation, so the probe would answer 403 --
+# "could not tell" -- on every correctly configured tenant.
+CHAT_PROBE_SCOPE = "https://www.googleapis.com/auth/chat.spaces"
+
+
+def _chat_client(settings: Settings, tenant: str, subject: str):
+    """A delegated Chat client. Split out so the probe above can be tested
+    without a tenant -- the three answers it distinguishes are the whole
+    point of it, and they are decided by which exception comes back."""
+    import google_auth_httplib2
+    import httplib2
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+
+    creds = service_account.Credentials.from_service_account_file(
+        key_path(settings, tenant), scopes=[CHAT_PROBE_SCOPE]
+    ).with_subject(subject)
+    http = google_auth_httplib2.AuthorizedHttp(
+        creds, http=httplib2.Http(timeout=30))
+    return build("chat", "v1", http=http, cache_discovery=False)
+
+
+def chat_app_configured(settings: Settings, tenant: str,
+                        admin_email: str = "") -> tuple[bool | None, str]:
+    """Is the Chat app actually configured? Ask Chat, do not assume.
+
+    NEEDS_CONSOLE_CONFIG above can only say "this API has a console step",
+    which is true of every project forever -- so it warns identically before
+    and after somebody does the step, and can never confirm one was done. A
+    permanent warning is one people learn to skip past, and this one sat over
+    a real 200-user seed that produced 193 chat 404s.
+
+    One list call answers it properly. Google's own message on an
+    unconfigured project is unmistakable:
+
+        404 "Google Chat app not found. To create a Chat app, you must turn
+        on the Chat API and configure the app in the Google Cloud console."
+
+    Returns (True, ...) usable, (False, ...) definitely not, and (None, ...)
+    when the probe itself could not run -- a missing scope or an unreachable
+    network is not evidence either way, and reporting it as "broken" would
+    send someone to fix a console page that is already correct.
+    """
+    subject = admin_email or getattr(
+        settings, f"{tenant}_admin", "") or ""
+    if not subject:
+        return None, "no admin on file to impersonate"
+    try:
+        chat = _chat_client(settings, tenant, subject)
+        chat.spaces().list(pageSize=1).execute()
+        return True, "Chat answered -- the app is configured"
+    except Exception as exc:      # noqa: BLE001 - the message IS the result
+        text = str(exc)
+        if "Chat app not found" in text or "CHAT_APP_NOT_FOUND" in text:
+            return False, ("no Chat app configured on this project -- every "
+                           "chat call returns 404 until one is")
+        # 403 on the probe scope means the grant is missing, which says
+        # nothing about the console page.
+        return None, f"could not tell: {text[:160]}"
+
+
 def key_path(settings: Settings, tenant: str) -> str:
     return settings.source_sa_key if tenant == "source" else settings.target_sa_key
 

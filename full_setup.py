@@ -520,6 +520,35 @@ def run_full_setup(
             if not chat_ok and "name field" in chat_detail:
                 chat_phase.detail = _chat_access_hint(project, admin_email,
                                                       chat_detail)
+            # Ask Chat whether it worked, rather than believing the browser
+            # step's own account of itself. configure_chat_app reports on
+            # whether it could fill in a form; only Chat can say whether the
+            # result is usable, and the gap between those two is a tenant
+            # that finishes setup "ok" and then 404s on every call. A real
+            # 200-user seed produced 193 of those.
+            try:
+                import ensure_apis
+
+                # Always account-scoped. A bare Settings() falls back to
+                # env.sh's legacy tenant -- the c.example.com placeholder on
+                # this deployment -- so the probe would have reported on a
+                # tenant nobody asked about. test_account_scoping caught it.
+                usable, why = ensure_apis.chat_app_configured(
+                    Settings(account_id=account_id), side, admin_email)
+                if usable is True:
+                    chat_phase.status, chat_phase.detail = "ok", why
+                elif usable is False:
+                    # Still not "failed": run_full_setup's ok flag is
+                    # all(status != "failed"), and a tenant whose Drive,
+                    # Gmail and Calendar all work is set up -- refusing to
+                    # say so because of Chat would be its own lie. What
+                    # changes is that the detail now states the consequence
+                    # instead of trailing off, and /api/v2/dwd/status stops
+                    # guessing (see ensure_apis.chat_app_configured).
+                    chat_phase.status = "skipped"
+                    chat_phase.detail = why
+            except Exception as exc:      # noqa: BLE001 - advisory
+                pass
         except Exception as exc:      # noqa: BLE001 - never fail setup over this
             chat_phase.status, chat_phase.detail = "skipped", str(exc)[:150]
 

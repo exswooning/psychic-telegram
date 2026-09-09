@@ -2030,11 +2030,21 @@ async def dwd_status(tenant: str = "source", op: Operator = Depends(operator)):
             try:
                 import ensure_apis
                 api_res = ensure_apis.ensure(s, tenant, do_enable=False)
-                caveats = [
-                    {"api": api, "note": note}
-                    for api, note in ensure_apis.NEEDS_CONSOLE_CONFIG.items()
-                    if api_res.get("states", {}).get(api) == "ENABLED"
-                ]
+                for api, note in ensure_apis.NEEDS_CONSOLE_CONFIG.items():
+                    if api_res.get("states", {}).get(api) != "ENABLED":
+                        continue
+                    # Chat is the only entry, and it can now be ASKED rather
+                    # than assumed. The static note fired for every tenant
+                    # forever -- identical before and after somebody did the
+                    # console step -- so it could never confirm one was done
+                    # and people learned to skim it. It sat over a 200-user
+                    # seed that produced 193 chat 404s.
+                    if api == "chat.googleapis.com":
+                        usable, why = ensure_apis.chat_app_configured(s, tenant)
+                        if usable is True:
+                            continue          # genuinely fine: say nothing
+                        note = why if usable is False else note
+                    caveats.append({"api": api, "note": note})
             except Exception:      # noqa: BLE001 - advisory only
                 pass
 

@@ -30,6 +30,22 @@ const COUNT_ORDER = [
   'secondary calendars', 'chat messages', 'spaces', 'contacts', 'tasks',
 ]
 
+// What to CALL a counter, where its log name is ambiguous on screen.
+//
+// The seeder prints "messages" for Gmail and "chat messages" for Chat, which
+// is unambiguous in a sentence and not at all unambiguous as two tiles side
+// by side reading MESSAGES and CHAT MESSAGES -- the first looks like a total
+// that ought to include the second. It counts email, so it says email.
+//
+// Display only. The keys stay exactly as the log prints them, because that
+// is what seedLog.ts matches on; renaming them there would silently stop
+// parsing the line.
+const COUNT_LABEL: Record<string, string> = {
+  messages: 'emails',
+  drafts: 'email drafts',
+  'chat messages': 'chat messages',
+}
+
 // The User column carries an email plus a department/project line, both
 // noWrap. Unbounded, auto table layout sized it to the longest of those --
 // measured at 2,513px against a 1,256px container, which pushed all
@@ -49,11 +65,13 @@ const dur = (sec: number): string => {
 
 const Stat: React.FC<{
   label: string; value: React.ReactNode; hint?: string; accent?: boolean
-}> = ({ label, value, hint, accent }) => (
+  /** Defaults to the label. Set it where the two differ -- see COUNT_LABEL. */
+  testId?: string
+}> = ({ label, value, hint, accent, testId }) => (
   // data-testid: several of these labels ("files", "contacts", ...) are
   // also table column headers, so tests need to address the tile itself
   // rather than any element that happens to contain the same word.
-  <Box data-testid={`stat-${label}`} sx={{
+  <Box data-testid={`stat-${testId ?? label}`} sx={{
     px: 1.5, py: 1, borderRadius: 1, bgcolor: 'action.hover',
     minWidth: 104, flex: '1 1 104px',
   }}>
@@ -173,7 +191,11 @@ const SeedRunDashboard: React.FC<{
           </Typography>
           <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', gap: 1, mb: 1.5 }}>
             {counts.map((k) => (
-              <Stat key={k} label={k} value={fmt(run.totals[k])} />
+              // testid keyed on the log name, not the display name: tests
+              // address the datum, and renaming a label should not move
+              // where they look for it.
+              <Stat key={k} testId={k} label={COUNT_LABEL[k] || k}
+                    value={fmt(run.totals[k])} />
             ))}
           </Stack>
         </>

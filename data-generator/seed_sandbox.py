@@ -2900,7 +2900,10 @@ def main(argv: list[str] | None = None) -> int:
           f"(docs {totals['docs']:,}, sheets {totals['sheets']:,}, "
           f"slides {totals['slides']:,}, binaries {totals['binaries']:,})")
     print(f"  Folders     : {totals['folders']:,}")
-    print(f"  Messages    : {totals['messages']:,}  "
+    # "Emails", not "Messages". Two lines below reports Chat in messages
+    # too, and a reader scanning the block cannot tell whether the first
+    # number is email alone or a total that includes the second.
+    print(f"  Emails      : {totals['messages']:,}  "
           f"(+{totals['drafts']:,} drafts)")
     print(f"  Comments    : {totals['comments']:,}")
     print(f"  Events      : {totals['events']:,}  "
