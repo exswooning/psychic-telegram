@@ -16,12 +16,39 @@ TARGET="${1:?usage: ./sync_vps.sh user@host /remote/dir [key] [port]}"
 DEST="${2:?missing remote directory}"
 KEY="${3:-}"; PORT="${4:-22}"
 
-SSH=(ssh -p "$PORT" -o BatchMode=yes -o StrictHostKeyChecking=accept-new)
+# Keepalives, because the link to a VPS is not a LAN. Without them a
+# stalled transfer is indistinguishable from a slow one: a deploy sat on a
+# wedged rsync for over an hour, holding an sshd slot, until every NEW
+# connection failed at "timed out during banner exchange" -- which reads
+# exactly like a dead box, and is not one.
+SSH=(ssh -p "$PORT" -o BatchMode=yes -o StrictHostKeyChecking=accept-new
+     -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o TCPKeepAlive=yes)
 [[ -n "$KEY" ]] && SSH+=(-i "$KEY")
+
+# Retry the transfer, resuming what already crossed.
+#
+# --partial keeps a half-sent file so the retry resumes rather than
+# restarting it; --timeout gives up on a stalled socket in 90s instead of
+# waiting forever. The retry matters more than either: a deploy that dies
+# midway leaves the remote tree PART new and part old, with the stamp
+# unwritten, and the next thing anyone does runs against that mixture.
+try_rsync() {
+  local attempt
+  for attempt in 1 2 3; do
+    if rsync "$@"; then
+      return 0
+    fi
+    if [[ $attempt -lt 3 ]]; then
+      echo "  transfer failed (attempt $attempt/3) -- retrying in $((attempt * 5))s"
+      sleep $((attempt * 5))
+    fi
+  done
+  return 1
+}
 
 # Same exclusions as deploy_remote.py: never overwrite the remote's own
 # credentials or its resume ledger with whatever happens to be local.
-rsync -az -e "${SSH[*]}" \
+try_rsync -az --partial --timeout=90 -e "${SSH[*]}" \
   --exclude '.git/' --exclude '__pycache__/' --exclude '.pytest_cache/' \
   --exclude '.venv' --exclude 'scratch/' --exclude 'migration.db*' \
   `# .venv without a trailing slash: with one, rsync matches only a`\
@@ -53,7 +80,7 @@ echo "  synced to $TARGET:$DEST"
 # currently serving.
 LOCAL_DIST="$(cd "$(dirname "$0")" && pwd)/migration-webui/dist"
 if [[ -f "$LOCAL_DIST/index.html" ]]; then
-  rsync -az --delete -e "${SSH[*]}" \
+  try_rsync -az --delete --partial --timeout=90 -e "${SSH[*]}" \
     "$LOCAL_DIST/" "$TARGET:$DEST/migration-webui/dist/" || exit 1
   echo "  frontend dist synced (stale bundles pruned)"
 else
