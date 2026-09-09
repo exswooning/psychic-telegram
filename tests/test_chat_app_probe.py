@@ -30,22 +30,57 @@ class Boom:
     def spaces(self):
         return self
 
-    def list(self, **kw):
+    def create(self, **kw):
         return self
+
+    def delete(self, **kw):
+        return self
+
+    def list(self, **kw):
+        # An unconfigured project answers list with 200. That is exactly why
+        # listing was the wrong thing to probe.
+        return _Ok({"spaces": []})
 
     def execute(self):
         raise RuntimeError(self.message)
 
 
+class _Ok:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def execute(self):
+        return self.payload
+
+
 class Fine:
+    """A project whose Chat app exists: create succeeds, delete succeeds."""
+
+    def __init__(self):
+        self.created = 0
+        self.deleted = 0
+
     def spaces(self):
         return self
 
+    def create(self, **kw):
+        self.created += 1
+        self._resp = {"name": "spaces/probe1"}
+        return self
+
+    def delete(self, **kw):
+        self.deleted += 1
+        self._resp = {}
+        return self
+
     def list(self, **kw):
+        # Present precisely so a probe that calls THIS instead of create
+        # would pass -- which is the bug these tests exist to prevent.
+        self._resp = {"spaces": []}
         return self
 
     def execute(self):
-        return {"spaces": []}
+        return self._resp
 
 
 @pytest.fixture
@@ -120,3 +155,56 @@ class TestTheWarningStopsWhenItIsFixed:
 
         src = inspect.getsource(full_setup)
         assert "chat_app_configured" in src
+
+
+class TestItProbesTheOperationThatActuallyFails:
+    """The first version listed spaces. An unconfigured project answers
+    list with 200, so it reported "configured" -- and a 200-user chat
+    backfill launched on the strength of that produced 200 more
+    "Google Chat app not found" errors.
+
+    spaces.list returns the spaces a USER already belongs to and needs no
+    Chat app. spaces.create acts AS one, and is what the seeder and the
+    migrator actually call. Only the operation that fails in production is
+    evidence about production.
+    """
+
+    def test_it_creates_a_space(self, settings, monkeypatch):
+        client = Fine()
+        monkeypatch.setattr(ensure_apis, "_chat_client", lambda *a: client,
+                            raising=False)
+        ensure_apis.chat_app_configured(settings, "source")
+        assert client.created == 1, "probed without ever creating a space"
+
+    def test_it_cleans_up_after_itself(self, settings, monkeypatch):
+        """A probe that leaves objects in a customer tenant is one nobody
+        leaves switched on."""
+        client = Fine()
+        monkeypatch.setattr(ensure_apis, "_chat_client", lambda *a: client,
+                            raising=False)
+        ensure_apis.chat_app_configured(settings, "source")
+        assert client.deleted == 1
+
+    def test_listing_alone_would_not_satisfy_it(self):
+        import inspect
+
+        src = inspect.getsource(ensure_apis.chat_app_configured)
+        assert "spaces().create(" in src
+        assert "spaces().list(" not in src
+
+    def test_it_asks_for_the_delete_scope_too(self):
+        """chat.spaces covers create but NOT delete -- config.py grants
+        chat.delete separately. Without it the probe works and litters."""
+        assert any("chat.delete" in s for s in ensure_apis.CHAT_PROBE_SCOPES)
+
+    def test_a_space_it_cannot_remove_is_reported_not_hidden(self, settings,
+                                                             monkeypatch):
+        class Litter(Fine):
+            def delete(self, **kw):
+                raise RuntimeError("403 insufficient scope")
+
+        monkeypatch.setattr(ensure_apis, "_chat_client", lambda *a: Litter(),
+                            raising=False)
+        ok, why = ensure_apis.chat_app_configured(settings, "source")
+        assert ok is True
+        assert "could not be removed" in why and "by hand" in why

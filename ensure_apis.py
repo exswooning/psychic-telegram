@@ -50,6 +50,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import uuid
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -105,6 +106,11 @@ NEEDS_CONSOLE_CONFIG = {
 # choice, and it is not in the delegation, so the probe would answer 403 --
 # "could not tell" -- on every correctly configured tenant.
 CHAT_PROBE_SCOPE = "https://www.googleapis.com/auth/chat.spaces"
+# Creating the probe space needs chat.spaces; removing it needs chat.delete,
+# which config.py grants separately (chat.spaces covers create/list/patch but
+# NOT delete). Without the second one the probe works and litters.
+CHAT_PROBE_SCOPES = [CHAT_PROBE_SCOPE,
+                     "https://www.googleapis.com/auth/chat.delete"]
 
 
 def _chat_client(settings: Settings, tenant: str, subject: str):
@@ -117,7 +123,7 @@ def _chat_client(settings: Settings, tenant: str, subject: str):
     from googleapiclient.discovery import build
 
     creds = service_account.Credentials.from_service_account_file(
-        key_path(settings, tenant), scopes=[CHAT_PROBE_SCOPE]
+        key_path(settings, tenant), scopes=CHAT_PROBE_SCOPES
     ).with_subject(subject)
     http = google_auth_httplib2.AuthorizedHttp(
         creds, http=httplib2.Http(timeout=30))
@@ -151,8 +157,30 @@ def chat_app_configured(settings: Settings, tenant: str,
         return None, "no admin on file to impersonate"
     try:
         chat = _chat_client(settings, tenant, subject)
-        chat.spaces().list(pageSize=1).execute()
-        return True, "Chat answered -- the app is configured"
+        # CREATE, not list.
+        #
+        # The first version of this listed spaces, which returned 200 on a
+        # project with no Chat app at all -- so it reported "configured",
+        # and a 200-user chat backfill launched on the strength of that
+        # produced 200 more "Google Chat app not found" errors. spaces.list
+        # returns the spaces a USER already belongs to and needs no app;
+        # spaces.create acts AS one and is the call the seeder and the
+        # migrator actually make. Only the operation that fails in
+        # production is evidence about production.
+        #
+        # It cleans up after itself. A probe that leaves objects behind in
+        # a customer's tenant is not one anybody will leave switched on.
+        made = chat.spaces().create(
+            body={"spaceType": "SPACE",
+                  "displayName": f"BITPORT-PROBE-{uuid.uuid4().hex[:8]}"}
+        ).execute()
+        try:
+            chat.spaces().delete(name=made["name"]).execute()
+        except Exception as exc:      # noqa: BLE001
+            return True, (f"Chat works, but the probe space {made.get('name')} "
+                          f"could not be removed ({str(exc)[:80]}) -- delete "
+                          f"it by hand")
+        return True, "Chat accepted a space -- the app is configured"
     except Exception as exc:      # noqa: BLE001 - the message IS the result
         text = str(exc)
         if "Chat app not found" in text or "CHAT_APP_NOT_FOUND" in text:
