@@ -2246,6 +2246,12 @@ def main(argv: list[str] | None = None) -> int:
     # opt-in extra is more edit than the extra is worth.
     if args.big_file_mb:
         os.environ["SEED_BIG_FILE_MB"] = str(args.big_file_mb)
+    # Same channel, for the same reason, read by resources.seed_payload_mb()
+    # when it sizes the pool below: _media() copies its buffer into a
+    # BytesIO, so a filler chunk is resident once per user in flight. Left
+    # unset when there is no top-up, because then nothing pays for it.
+    if args.target_gb_per_user:
+        os.environ["SEED_FILLER_MB"] = str(_FILLER_CHUNK_BYTES // (1024 * 1024))
 
     if args.top_up_only and args.reset:
         sys.exit("--top-up-only makes no sense with --reset")

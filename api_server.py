@@ -2899,9 +2899,30 @@ class _SingleFlightCache:
         self._locks: dict = {}
         self._guard = threading.Lock()
 
+    def _purge(self, now: float) -> None:
+        """Drop what has expired, rather than keeping it until someone asks
+        for that key again.
+
+        An expired entry is already never served -- get() recomputes past
+        the deadline either way -- so this frees memory and changes no
+        behaviour. It was not free to skip: what these hold is the
+        aggregate of a 2.95M-row audit_log, and holding the last one per
+        key for the life of the process is how api_server.py reached 905 MB
+        RSS on a 3.8 GB box, pushed it into swap, and squeezed the seed run
+        it was reporting on. Measured live: idle, the process is flat at
+        57 MB for five minutes; the growth all arrives with somebody
+        browsing.
+
+        Called under _guard, and the dict holds a handful of keys, so the
+        sweep costs nothing worth measuring.
+        """
+        for k in [k for k, v in self._entries.items() if now >= v[0]]:
+            del self._entries[k]
+
     def get(self, key, produce):
         now = time.monotonic()
         with self._guard:
+            self._purge(now)
             hit = self._entries.get(key)
             if hit and now < hit[0]:
                 return hit[1]

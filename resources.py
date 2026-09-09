@@ -105,6 +105,39 @@ SEED_CLIENT_SET_MB = 22     # one drive+gmail+calendar client set, measured
 SEED_THREAD_CLIENT_MB = 7   # each extra worker resolves its own, measured
 
 
+def seed_payload_mb() -> int:
+    """The largest single upload buffer one concurrent user can hold, in MB.
+
+    The constants above model API CLIENTS. They do not model what is being
+    uploaded, and for an ordinary corpus that is right -- its files average
+    tens of KB. Two opt-in features break that assumption badly:
+
+        --big-file-mb N        one N MB binary per user (the >25 MB Gmail
+                               attachment case), default off
+        --target-gb-per-user   50 MB filler chunks until quota is reached
+
+    Both are careful to generate their blob ONCE and cache it. That does
+    not help: seed_sandbox._media() wraps every upload in io.BytesIO(data),
+    and BytesIO COPIES its buffer -- so the payload is resident once per
+    user in flight, not once per run. At 18 concurrent users a 50 MB filler
+    chunk is 900 MB nobody budgeted for, against a per-user charge of 127.
+
+    This is the same failure the docstring below describes for
+    SEED_MAIL_WORKERS: an input that silently invalidates the budget it
+    feeds. Read from the environment for the same reason those are -- the
+    seeder sets both before it sizes its pool.
+    """
+    def _mb(name: str) -> int:
+        try:
+            return max(0, int(os.getenv(name, "0") or 0))
+        except ValueError:
+            return 0
+    # max, not sum: a user is doing one upload at a time per thread, and the
+    # top-up pass and the corpus pass do not overlap.
+    return max(_mb("SEED_BIG_FILE_MB"), _mb("SEED_FILLER_MB"))
+
+
+
 def mb_per_seed_worker(mail_workers: int | None = None,
                        leaf_workers: int | None = None) -> int:
     """Peak resident memory one seeded USER needs, in MB.
@@ -139,7 +172,8 @@ def mb_per_seed_worker(mail_workers: int | None = None,
         leaf_workers = max(1, int(os.getenv("SEED_LEAF_WORKERS", "0"))
                            or saturating_leaf_workers())
     per_user = (SEED_CLIENT_SET_MB
-                + SEED_THREAD_CLIENT_MB * (mail_workers + leaf_workers))
+                + SEED_THREAD_CLIENT_MB * (mail_workers + leaf_workers)
+                + seed_payload_mb())
     return max(64, int(per_user * 1.3))
 
 
@@ -274,7 +308,12 @@ def seed_shape(budget_mb: float | None = None) -> dict:
         budget_mb = cached_probe().ram_usable_gb * 1024
     return best_shape(
         budget_mb,
-        mb_fixed=SEED_CLIENT_SET_MB + SEED_THREAD_CLIENT_MB * _seed_mail_workers(),
+        # Payload in mb_fixed, not mb_per_thread: one upload buffer is
+        # resident per USER in flight, and adding leaf threads does not add
+        # more of them.
+        mb_fixed=(SEED_CLIENT_SET_MB
+                  + SEED_THREAD_CLIENT_MB * _seed_mail_workers()
+                  + seed_payload_mb()),
         mb_per_thread=SEED_THREAD_CLIENT_MB,
         latency_sec=SEED_LEAF_SECONDS,
         ceiling_per_sec=DRIVE_WRITES_PER_SEC,
