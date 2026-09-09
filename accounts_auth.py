@@ -236,6 +236,30 @@ def update_tenant_config(account_id: int, side: str, *, domain: str | None = Non
     accidentally blank a key path a previous run already set."""
     if side not in ("source", "target"):
         raise ValueError(f"side must be 'source' or 'target', got {side!r}")
+
+    # A tenant cannot be its own counterpart.
+    #
+    # Live, this account's SOURCE row was overwritten with the TARGET
+    # tenant's domain and admin -- the Setup Wizard treats the first domain
+    # you give it as the source, and somebody used it to set up their
+    # destination. The row is not merely wrong: seed_argv's typed-domain
+    # gate compares what an operator types against source_domain, so once
+    # the target's name is sitting in that column, typing the target's name
+    # PASSES the check that exists to stop exactly that. A seed would then
+    # write fabricated data into the production destination.
+    #
+    # Refused here rather than in the wizard because the wizard is one of
+    # several writers (full_setup, the config endpoints, the CLI) and this
+    # is the single place they all pass through.
+    if domain:
+        other = "target" if side == "source" else "source"
+        existing = get_tenant_config(account_id, other) or {}
+        if (existing.get("domain") or "").strip().lower() == domain.strip().lower():
+            raise ValueError(
+                f"{domain!r} is already configured as this account's {other} "
+                f"tenant; one domain cannot be both. Clear the {other} side "
+                f"first if this is deliberate.")
+
     cols = {"domain": domain, "admin_email": admin_email, "sa_key_path": sa_key_path}
     sets = [f"{col}=?" for col, val in cols.items() if val is not None]
     if not sets:

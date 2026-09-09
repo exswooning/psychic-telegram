@@ -570,12 +570,35 @@ describe('setting up without committing to a purpose', () => {
     await waitFor(() => expect(screen.queryByTestId('wizard-domain')).toBeNull())
   })
 
-  it('sets the tenant up so it can be read', async () => {
+  it('asks which side the tenant is before setting it up', async () => {
+    /* It used to assume source. Live, somebody set up their DESTINATION
+       through this and the source row was overwritten with the target's
+       domain -- which disarms the typed-domain gate that stops a seed being
+       aimed at production. */
     view()
     await signIn('admin@acme.com')
     await choose('later')
+    expect(await screen.findByTestId('side-unset')).toBeInTheDocument()
+    expect(screen.queryByTestId('qts-source')).toBeNull()
+  })
+
+  it('sets it up once a side is chosen', async () => {
+    view()
+    await signIn('admin@acme.com')
+    await choose('later')
+    fireEvent.click(await screen.findByTestId('side-source'))
     await waitFor(() =>
       expect(screen.getByTestId('qts-source')).toHaveTextContent('acme.com'))
+  })
+
+  it('can set a tenant up as the destination, which it previously could not',
+     async () => {
+    view()
+    await signIn('admin@acme.com')
+    await choose('later')
+    fireEvent.click(await screen.findByTestId('side-target'))
+    await waitFor(() =>
+      expect(screen.getByTestId('qts-target')).toHaveTextContent('acme.com'))
   })
 
   it('says the decision is still open', async () => {
@@ -599,8 +622,19 @@ describe('emptying a tenant you have not committed to', () => {
     view()
     await signIn('admin@acme.com')
     await choose('later')
+    fireEvent.click(await screen.findByTestId('side-source'))
     return screen.findByTestId('later-wipe')
   }
+
+  it('is refused until a side is named', async () => {
+    /* Wipe and delete-users both take a side. Defaulting it is the same
+       mistake in a more expensive place. */
+    view()
+    await signIn('admin@acme.com')
+    await choose('later')
+    expect(await screen.findByTestId('later-wipe')).toBeDisabled()
+    expect(screen.getByTestId('later-delete-users')).toBeDisabled()
+  })
 
   it('offers a wipe', async () => {
     expect(await reach()).toBeInTheDocument()

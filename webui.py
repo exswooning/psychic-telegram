@@ -62,6 +62,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import account_context  # the one rule both servers answer with
 import accounts_auth  # stdlib-only itself; does not break the no-pip-install promise
 import fleet_agent  # stdlib-only; shares the process-scan naming rule
+import control_plane_db as cpdb  # stdlib-only; the audit log lives here
 import job_admission  # same -- control_plane_db is stdlib-only too
 import job_queue        # same -- the waiting room for jobs over the cap
 
@@ -5627,11 +5628,41 @@ class Handler(BaseHTTPRequestHandler):
                 return
             force = bool(body.get("force"))
             job = get_job(account_id)
+
+            # Recorded BEFORE the signal, like every other destructive
+            # action here. Stop kills work: a SIGINT ended a thirteen-hour,
+            # 200-user seed a few minutes short of writing its manifest, and
+            # afterwards there was nothing anywhere saying who had asked for
+            # that or why -- operator_actions_log had no row, the job log had
+            # only a KeyboardInterrupt traceback. An operator reconstructing
+            # it could not get past "something sent a signal".
+            #
+            # Best-effort: an audit table that is unwritable must not stop
+            # someone halting a runaway job.
+            _stop_action = None
+            try:
+                _stop_action = cpdb.begin_action(
+                    actor=_account_email(account_id), actor_role="operator",
+                    action="stop job (force)" if force else "stop job",
+                    reason=str(body.get("reason") or "")[:300],
+                    target=(job.name if job.running else "external process"),
+                    params={"force": force, "pid": getattr(job.proc, "pid", None)},
+                    account_id=account_id)
+            except Exception as exc:  # noqa: BLE001
+                print(f"could not record the stop: {exc}", flush=True)
+
+            def _note(outcome: str, detail: str) -> None:
+                if _stop_action is not None:
+                    cpdb.finish_action(_stop_action, outcome, detail[:300])
+
             if job.running:
-                self._json({"ok": True, "msg": job.stop(force)})
+                msg = job.stop(force)
+                _note("done", msg)
+                self._json({"ok": True, "msg": msg})
             else:
                 jobs = _external_processes()
                 if not jobs:
+                    _note("done", "nothing running")
                     self._json({"ok": True, "msg": "nothing running"})
                 else:
                     sent = []
@@ -5648,6 +5679,7 @@ class Handler(BaseHTTPRequestHandler):
                     msg = (f"{verb} sent to {len(sent)} external "
                            f"process(es): {', '.join(sent)}") if sent \
                         else "external process(es) already gone"
+                    _note("done", msg)
                     self._json({"ok": True, "msg": msg})
             return
 
