@@ -21,6 +21,7 @@ import SeedWizard from '@/pages/SeedWizard'
 import QuickTenantSetup from '@/components/QuickTenantSetup'
 import WizardArt from '@/components/WizardArt'
 import DecideLaterPanel from '@/components/DecideLaterPanel'
+import FitHeading from '@/components/FitHeading'
 import type { ArtKind } from '@/components/WizardArt'
 
 /**
@@ -90,16 +91,12 @@ const WizardShell: React.FC<{
     )}
     <Grid container spacing={{ xs: 4, md: 8 }} alignItems="flex-start">
       <Grid item xs={12} md={5}>
-        <Typography
-          component="h1"
-          sx={{
-            // Family comes from the theme -- see typography.fontFamily.
-            fontSize: { xs: '2.125rem', md: '3.25rem' },
-            fontWeight: 400, lineHeight: 1.15, letterSpacing: '-0.5px',
-            mb: 1.5, wordBreak: 'break-word',
-          }}>
-          {heading}
-        </Typography>
+        {/* Shrinks to fit rather than wrapping. The heading is often the
+            tenant's own domain, and a domain is a single token -- there is
+            no correct place to break one. */}
+        <Box sx={{ mb: 1.5 }}>
+          <FitHeading text={heading} />
+        </Box>
         <Typography variant="body1" color="text.secondary"
                     sx={{ mb: 4, fontSize: '1.0625rem', lineHeight: 1.6 }}>
           {sub}
