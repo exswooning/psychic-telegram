@@ -520,8 +520,28 @@ def _clear_workspace_addon_checkbox(page) -> bool:
         log("  clearing 'build as a Workspace add-on' -- this is IRREVERSIBLE "
             "for this project, and the classic Chat app fields do not render "
             "while it is set")
-        box.first.uncheck()
+        # The console renders this with Angular Material: the real <input>
+        # is visually hidden behind a styled overlay, so Playwright's
+        # uncheck() waits for an element that will never be actionable and
+        # times out after 30s. Confirmed live.
+        #
+        # force=True drives the hidden input directly; clicking the visible
+        # label is the fallback, since that is what a person actually hits.
+        try:
+            box.first.uncheck(force=True, timeout=5000)
+        except Exception:      # noqa: BLE001
+            page.locator(f'label:has-text("{_CHAT_ADDON_LABEL}")').first.click(
+                timeout=5000)
         page.wait_for_timeout(2500)
+        # Report what actually happened, not what was attempted.
+        try:
+            still = box.first.is_checked()
+        except Exception:      # noqa: BLE001
+            still = False
+        if still:
+            log("  the add-on checkbox is still set -- the app fields will "
+                "not render, and this step will report the field missing")
+            return False
         return True
     except Exception as exc:      # noqa: BLE001 - the page may not have it
         log(f"  (add-on checkbox: {str(exc)[:90]})")
