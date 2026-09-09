@@ -2029,11 +2029,49 @@ def fit_entries(entries: list[dict], available: int,
 # ======================================================================
 # Per-user worker
 # ======================================================================
+# The per-user services this seeder writes, in the order it writes them.
+# Named here so --only can be validated against the real list rather than a
+# second copy of it that drifts.
+SEEDABLE = ("drive", "gmail", "calendar", "chat", "contacts", "tasks")
+
+
+def _existing_drive_items(drive, settings: Settings, limit: int = 6) -> dict:
+    """A few already-seeded file ids, for a run that is not seeding Drive.
+
+    Mail, calendar and chat all embed Drive links -- that is the whole point
+    of seeding them, since link rewriting is the thing a migration has to
+    get right. A --only=chat pass has no fresh corpus to draw ids from, so
+    it reads a handful out of the tree a previous run left behind.
+
+    Best-effort: no MIGRATION-TEST tree yet just means no links, which is
+    strictly better than refusing to seed chat at all.
+    """
+    retry = _retry_factory(settings)
+    try:
+        roots = retry(lambda: drive.files().list(
+            q=("'root' in parents and 'me' in owners and trashed = false "
+               "and name = 'MIGRATION-TEST'"),
+            pageSize=1, fields="files(id)", spaces="drive").execute())()
+        found = roots.get("files") or []
+        if not found:
+            return {}
+        kids = retry(lambda: drive.files().list(
+            q=(f"'{found[0]['id']}' in parents and trashed = false "
+               "and mimeType != 'application/vnd.google-apps.folder'"),
+            pageSize=limit, fields="files(id)", spaces="drive").execute())()
+        return {f"existing-{i}": f["id"]
+                for i, f in enumerate(kids.get("files") or [])}
+    except Exception as exc:      # noqa: BLE001 - links are a nicety here
+        print(f"  ! could not find existing drive files for links: {str(exc)[:120]}")
+        return {}
+
+
 def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
                   external: str, scale: str, mail_count: int,
                   event_count: int, edge_cases: bool,
                   target_gb_per_user: float | None = None,
-                  groups: list[str] | None = None) -> dict:
+                  groups: list[str] | None = None,
+                  only: frozenset | None = None) -> dict:
     user = entry["email"]
     peers = [u for u in all_users if u != user]
     t0 = time.time()
@@ -2043,25 +2081,52 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
     chat = build_chat(settings, user)
     retry = _retry_factory(settings)
 
-    builder = CorpusBuilder(drive, settings, user, peers, external, scale,
-                            _media, retry, groups=groups)
-    drive_m = builder.build(entry["dept"], entry["project"], edge_cases)
-    gmail_m = seed_gmail(gmail, settings, user, peers, external, mail_count,
-                         drive_items=drive_m.get("items"))
-    gmail_m.update(seed_drafts(gmail, settings, user, peers))
-    cal_m = seed_calendar(cal, settings, user, peers, external, event_count,
-                          drive_items=drive_m.get("items"))
-    cal_m.update(seed_secondary_calendars(cal, settings, user, peers))
+    # `only` narrows the run to one or more services -- everything not named
+    # is skipped and reports zeroes, so a partial pass is visibly partial
+    # rather than looking like a service that produced nothing.
+    want = (lambda svc: only is None or svc in only)
+    empty = {"note": "not requested"}
+
+    if want("drive"):
+        builder = CorpusBuilder(drive, settings, user, peers, external, scale,
+                                _media, retry, groups=groups)
+        drive_m = builder.build(entry["dept"], entry["project"], edge_cases)
+        items = drive_m.get("items")
+    else:
+        drive_m = dict(empty)
+        # The link targets the other services embed. See _existing_drive_items.
+        items = _existing_drive_items(drive, settings) \
+            if (want("gmail") or want("calendar") or want("chat")) else None
+
+    if want("gmail"):
+        gmail_m = seed_gmail(gmail, settings, user, peers, external, mail_count,
+                             drive_items=items)
+        gmail_m.update(seed_drafts(gmail, settings, user, peers))
+    else:
+        gmail_m = dict(empty)
+
+    if want("calendar"):
+        cal_m = seed_calendar(cal, settings, user, peers, external, event_count,
+                              drive_items=items)
+        cal_m.update(seed_secondary_calendars(cal, settings, user, peers))
+    else:
+        cal_m = dict(empty)
+
     chat_m = seed_chat(chat, settings, user, peers, external,
-                       user.split("@")[0], drive_items=drive_m.get("items"))
+                       user.split("@")[0], drive_items=items) \
+        if want("chat") else dict(empty)
 
     # Separate credential (build_people_tasks, not build_services): contacts
     # and tasks write scopes are commonly granted on a different schedule
     # than drive/gmail/calendar/chat, and a missing grant here must not touch
     # anything already seeded successfully above.
-    people, tasks = build_people_tasks(settings, user)
-    contacts_m = seed_contacts(people, settings, user, peers, external)
-    tasks_m = seed_tasks(tasks, settings)
+    if want("contacts") or want("tasks"):
+        people, tasks = build_people_tasks(settings, user)
+        contacts_m = seed_contacts(people, settings, user, peers, external) \
+            if want("contacts") else dict(empty)
+        tasks_m = seed_tasks(tasks, settings) if want("tasks") else dict(empty)
+    else:
+        contacts_m = tasks_m = dict(empty)
 
     # Last: every other pass has to finish first so storageQuota.usage
     # reflects everything they wrote, not just some of it.
@@ -2081,22 +2146,32 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
         fill_m = top_up_storage(fresh_drive, settings, user, target_gb_per_user)
 
     elapsed = round(time.time() - t0, 1)
-    print(f"  [{user}] done in {elapsed}s: {drive_m['total_files']} files, "
-          f"{drive_m['folders']} folders, {drive_m.get('comments', 0)} comments, "
-          f"{gmail_m['messages']} messages, {gmail_m.get('drafts', 0)} drafts, "
-          f"{cal_m['events']} events, "
+    # .get() throughout, not [] -- a service that was skipped (--only) or
+    # that failed before it could fill in its counters has no key here, and
+    # a KeyError while PRINTING the summary loses the whole user's result
+    # after the work is already done and committed.
+    print(f"  [{user}] done in {elapsed}s: {drive_m.get('total_files', 0)} files, "
+          f"{drive_m.get('folders', 0)} folders, {drive_m.get('comments', 0)} comments, "
+          f"{gmail_m.get('messages', 0)} messages, {gmail_m.get('drafts', 0)} drafts, "
+          f"{cal_m.get('events', 0)} events, "
           f"{cal_m.get('calendars', 0)} secondary calendars, "
-          f"{chat_m['messages']} chat messages in {chat_m['spaces']} spaces"
-          + (f" ({chat_m['note']})" if chat_m["note"] else "")
-          + f", {contacts_m['contacts']} contacts"
-          + (f" ({contacts_m['note']})" if contacts_m["note"] else "")
-          + f", {tasks_m['tasks']} tasks"
-          + (f" ({tasks_m['note']})" if tasks_m["note"] else "")
+          f"{chat_m.get('messages', 0)} chat messages in {chat_m.get('spaces', 0)} spaces"
+          + (f" ({chat_m['note']})" if chat_m.get("note") else "")
+          + f", {contacts_m.get('contacts', 0)} contacts"
+          + (f" ({contacts_m['note']})" if contacts_m.get("note") else "")
+          + f", {tasks_m.get('tasks', 0)} tasks"
+          + (f" ({tasks_m['note']})" if tasks_m.get("note") else "")
           + (f", {fill_m['filler_files']} filler file(s) "
              f"({fill_m.get('usage_before_gb', 0):.1f}GB -> "
              f"{fill_m.get('usage_after_gb', 0):.1f}GB)"
              if target_gb_per_user else "")
-          + (f" ({fill_m['note']})" if fill_m.get("note") else ""))
+          + (f" ({fill_m['note']})" if fill_m.get("note") else "")
+          # Say what was deliberately not attempted. Without this a --only
+          # run prints "0 files, 0 messages, 0 events" for every user, which
+          # is indistinguishable in the transcript from a seed whose
+          # credentials were wrong -- and that transcript is what anyone
+          # judges the run by afterwards.
+          + (f"  [only: {','.join(sorted(only))}]" if only else ""))
     return {"user": user, "dept": entry["dept"], "project": entry["project"],
             "drive": drive_m, "gmail": gmail_m, "calendar": cal_m,
             "chat": chat_m, "contacts": contacts_m, "tasks": tasks_m,
@@ -2231,12 +2306,28 @@ def main(argv: list[str] | None = None) -> int:
                          "cleans up. Gmail's own usage accounting lags real "
                          "time, so a run right after heavy mail seeding can "
                          "undershoot; re-run with --top-up-only afterwards.")
+    ap.add_argument("--only", default="", metavar="SERVICES",
+                    help="seed only these services (comma-separated: "
+                         + ",".join(SEEDABLE) + "). Everything else is "
+                         "skipped and reports zero. For topping up one "
+                         "service on an existing corpus -- e.g. chat, once "
+                         "the Chat app is configured and the 404s stop.")
     ap.add_argument("--top-up-only", action="store_true",
                     help="skip every seeding step and only check/top up "
                          "storage toward --target-gb-per-user. Safe to run "
                          "repeatedly -- it never touches mail, Drive "
                          "documents, contacts or tasks.")
     args = ap.parse_args(argv)
+
+    only = None
+    if args.only:
+        only = frozenset(x.strip().lower() for x in args.only.split(",") if x.strip())
+        unknown = sorted(only - set(SEEDABLE))
+        if unknown:
+            sys.exit(f"--only: unknown service(s) {', '.join(unknown)}. "
+                     f"Choose from {', '.join(SEEDABLE)}.")
+        if not only:
+            sys.exit("--only was given with no services")
 
     if args.top_up_only and not args.target_gb_per_user:
         sys.exit("--top-up-only needs --target-gb-per-user")
@@ -2692,6 +2783,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.edge_cases == "all" or (args.edge_cases == "first" and i == 0),
                 args.target_gb_per_user,
                 group_emails,
+                only,
             ): e["email"]
             for i, e in enumerate(entries)
         }
@@ -2721,33 +2813,44 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  (no API metrics: {exc})")
 
     ok = [r for r in results if "error" not in r]
+
+    # .get() throughout. A --only run leaves the services it skipped with no
+    # counters at all, and a KeyError here would lose the manifest for a run
+    # whose work is already done -- the same failure the per-user summary
+    # line had. A skipped service contributes nothing, which is the truth.
+    def _sum(service: str, key: str, default=0) -> int:
+        return sum(r.get(service, {}).get(key, default) for r in ok)
+
+    def _grants(kind: str) -> int:
+        return sum(r.get("drive", {}).get("grants", {}).get(kind, 0) for r in ok)
+
     totals = {
         "users": len(ok),
-        "owned_files": sum(r["drive"]["total_files"] for r in ok),
-        "folders": sum(r["drive"]["folders"] for r in ok),
-        "docs": sum(r["drive"]["docs"] for r in ok),
-        "sheets": sum(r["drive"]["sheets"] for r in ok),
-        "slides": sum(r["drive"]["slides"] for r in ok),
-        "binaries": sum(r["drive"]["binaries"] for r in ok),
-        "shortcuts": sum(r["drive"]["shortcuts"] for r in ok),
-        "messages": sum(r["gmail"]["messages"] for r in ok),
-        "drafts": sum(r["gmail"].get("drafts", 0) for r in ok),
-        "comments": sum(r["drive"].get("comments", 0) for r in ok),
-        "events": sum(r["calendar"]["events"] for r in ok),
-        "secondary_calendars": sum(r["calendar"].get("calendars", 0) for r in ok),
-        "chat_spaces": sum(r["chat"].get("spaces", 0) for r in ok),
-        "chat_messages": sum(r["chat"].get("messages", 0) for r in ok),
-        "contacts": sum(r.get("contacts", {}).get("contacts", 0) for r in ok),
-        "tasks": sum(r.get("tasks", {}).get("tasks", 0) for r in ok),
-        "filler_files": sum(r.get("storage", {}).get("filler_files", 0) for r in ok),
-        "filler_gb": round(sum(
-            r.get("storage", {}).get("filler_bytes", 0) for r in ok) / 1e9, 2),
-        "grants_user": sum(r["drive"]["grants"]["user"] for r in ok),
-        "grants_domain": sum(r["drive"]["grants"]["domain"] for r in ok),
-        "grants_anyone": sum(r["drive"]["grants"]["anyone"] for r in ok),
-        "grants_external": sum(r["drive"]["grants"]["external"] for r in ok),
+        "owned_files": _sum("drive", "total_files"),
+        "folders": _sum("drive", "folders"),
+        "docs": _sum("drive", "docs"),
+        "sheets": _sum("drive", "sheets"),
+        "slides": _sum("drive", "slides"),
+        "binaries": _sum("drive", "binaries"),
+        "shortcuts": _sum("drive", "shortcuts"),
+        "messages": _sum("gmail", "messages"),
+        "drafts": _sum("gmail", "drafts"),
+        "comments": _sum("drive", "comments"),
+        "events": _sum("calendar", "events"),
+        "secondary_calendars": _sum("calendar", "calendars"),
+        "chat_spaces": _sum("chat", "spaces"),
+        "chat_messages": _sum("chat", "messages"),
+        "contacts": _sum("contacts", "contacts"),
+        "tasks": _sum("tasks", "tasks"),
+        "filler_files": _sum("storage", "filler_files"),
+        "filler_gb": round(_sum("storage", "filler_bytes") / 1e9, 2),
+        "grants_user": _grants("user"),
+        "grants_domain": _grants("domain"),
+        "grants_anyone": _grants("anyone"),
+        "grants_external": _grants("external"),
     }
-    rejected = sorted({x for r in ok for x in r["drive"]["grants_rejected"]})
+    rejected = sorted({x for r in ok
+                       for x in r.get("drive", {}).get("grants_rejected", [])})
 
     manifest = {
         "seeded_at": datetime.now(timezone.utc).isoformat(),

@@ -32,6 +32,7 @@ import type { RunningJob } from '@/hooks/useRunningJobs'
 import SeedRunDashboard from '@/components/SeedRunDashboard'
 import { groupRunsByDomain } from '@/utils/groupRuns'
 import TenantActionDialog from '@/components/TenantActionDialog'
+import SeedOneService from '@/components/SeedOneService'
 import { removeTenantSetup } from '@/api/client'
 import { formatPct } from '@/utils/formatPct'
 
@@ -455,6 +456,12 @@ const Jobs: React.FC = () => {
                                                             mode: 'delete_users' })}>
                             Delete users
                           </Button>
+                          {/* Only for the source: the seeder writes
+                              fabricated data, and the target is the tenant a
+                              migration writes INTO. */}
+                          {side === 'source' && seedEnabled && (
+                            <SeedOneService domain={domain} onStarted={refresh} />
+                          )}
                         </Stack>
                       )}
                       <ExpandIcon fontSize="small"

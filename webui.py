@@ -2427,6 +2427,24 @@ def live_check(kind: str) -> dict:
 SEED_SCALES = ("tiny", "small", "medium", "large", "huge")
 
 
+def _seedable_services() -> list[str]:
+    """seed_sandbox.SEEDABLE, read out of the source.
+
+    Parsed rather than imported: seed_sandbox pulls in the Google client
+    libraries at module level and this process has no reason to. AST rather
+    than a regex, so a reformatted tuple still resolves.
+    """
+    import ast as _ast
+
+    path = os.path.join(HERE, "data-generator", "seed_sandbox.py")
+    tree = _ast.parse(open(path, encoding="utf-8").read())
+    for node in tree.body:
+        if isinstance(node, _ast.Assign) and any(
+                getattr(t, "id", "") == "SEEDABLE" for t in node.targets):
+            return [str(e.value) for e in node.value.elts]  # type: ignore[attr-defined]
+    raise RuntimeError("SEEDABLE not found in seed_sandbox.py")
+
+
 def seed_argv(body: dict, account_id: int | None = None) -> tuple[list[str], dict, str]:
     """Build the seeder command, or return why it must not run.
 
@@ -2486,6 +2504,29 @@ def seed_argv(body: dict, account_id: int | None = None) -> tuple[list[str], dic
     argv.append("--yes")
     if body.get("create_users"):
         argv.append("--create-users")
+    only = body.get("only")
+    if only:
+        # Top up one service on an existing corpus rather than reseeding --
+        # what a chat backfill needs once the Chat app stops 404ing.
+        #
+        # Validated against the seeder's OWN list, imported rather than
+        # retyped: a second copy here would let this endpoint accept a name
+        # the child then rejects, and the operator would see a job that
+        # started and immediately died.
+        try:
+            wanted = [x.strip().lower()
+                      for x in str(only).split(",") if x.strip()]
+            names = _seedable_services()
+            unknown = [x for x in wanted if x not in names]
+            if unknown:
+                return [], {}, (f"unknown service(s): {', '.join(unknown)}. "
+                                f"Choose from {', '.join(names)}.")
+            if not wanted:
+                return [], {}, "only was given with no services"
+            argv += ["--only", ",".join(wanted)]
+        except Exception as exc:  # noqa: BLE001
+            return [], {}, f"could not validate services: {str(exc)[:120]}"
+
     big = body.get("big_file_mb")
     if big:
         # The >25 MB attachment case, which is what a real tenant's large

@@ -646,6 +646,10 @@ export interface SeedOptions {
   /** Blank = size to the machine. The server refuses anything past twice
    *  its own recommendation; a seed the kernel kills hours in costs more
    *  than a slow one. */
+  /** Seed only these services (comma-separated). For topping one up on a
+   *  corpus that already exists -- chat, once the Chat app stops 404ing --
+   *  rather than reseeding everything to recover one of them. */
+  only?: string
   workers?: string
   /** A deleted Workspace address stays taken for 20 days, so a
    *  wipe-and-recreate that reuses names fails until they age out. */
@@ -671,7 +675,7 @@ export async function runSeed(
   opts: SeedOptions = {},
 ): Promise<SeedResult> {
   const { allUsers, createUntilFull, workers, localpartPrefix,
-          sharedDrives, users, groups } = opts
+          sharedDrives, users, groups, only } = opts
   const res = await fetch('/api/seed', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -687,6 +691,7 @@ export async function runSeed(
       shared_drives: sharedDrives || undefined,
       users: users || undefined,
       groups: groups || undefined,
+      only: only || undefined,
     }),
   })
   return res.json()
