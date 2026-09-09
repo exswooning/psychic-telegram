@@ -65,23 +65,42 @@ def deleted_user_count(directory) -> int:
             return n
 
 
-def deletable_users(directory, admin_email: str, domain: str) -> list[str]:
-    """Every user in the target domain except the admin driving this.
+def deletable_users(directory, admin_email: str, domain: str,
+                    kept: list | None = None) -> list[str]:
+    """Every user in the target domain except its administrators.
 
     Deleting the operator's own account mid-run leaves every remaining call
     unauthenticated and the tenant half-wiped with no way to finish or undo.
+    That was the original reason, and it only ever protected the ONE admin
+    whose credentials were driving the run.
+
+    Every super-admin is kept now. A tenant's break-glass account is often
+    not the one automation signs in as, and "delete everyone except whoever
+    happens to be holding the keys right now" removes the account somebody
+    reaches for when that key stops working. Deleting a super-admin is also
+    the one deletion with no cheap undo: a Workspace address stays reserved
+    for 20 days, so recreating it fails until it ages out.
+
+    `kept` collects who was spared, so the caller can say so rather than
+    leaving it to be inferred from a count that does not add up.
     """
     out: list[str] = []
     token = None
+    driver = (admin_email or "").lower()
     while True:
         resp = directory.users().list(
             customer="my_customer", maxResults=200, pageToken=token,
-            fields="nextPageToken,users(primaryEmail)").execute()
+            # isAdmin and isDelegatedAdmin, not just the address: an admin is
+            # a property of the account, and the caller only knows one of them.
+            fields=("nextPageToken,users(primaryEmail,isAdmin,"
+                    "isDelegatedAdmin)")).execute()
         for u in resp.get("users", []):
             email = (u.get("primaryEmail") or "").lower()
             if not email.endswith("@" + domain.lower()):
                 continue
-            if email == (admin_email or "").lower():
+            if email == driver or u.get("isAdmin") or u.get("isDelegatedAdmin"):
+                if kept is not None:
+                    kept.append(email)
                 continue
             out.append(email)
         token = resp.get("nextPageToken")
@@ -191,10 +210,11 @@ def main(argv: list[str] | None = None) -> int:
              else settings.target_admin)
     domain = (settings.source_domain if args.side == "source"
               else settings.target_domain)
-    users = deletable_users(directory, admin, domain)
+    kept: list[str] = []
+    users = deletable_users(directory, admin, domain, kept=kept)
 
     print(f"{len(users)} user(s) would be deleted from {domain} ({args.side})")
-    print(f"  admin kept: {admin}")
+    print(f"  admin(s) kept: {', '.join(sorted(set(kept))) or admin}")
 
     # Deleted users keep consuming the domain user limit for 20 days, so a
     # wipe borrows against future capacity rather than returning any. Said

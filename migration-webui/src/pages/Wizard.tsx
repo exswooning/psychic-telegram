@@ -15,7 +15,7 @@ import {
   uploadCredential, fetchDwd, checkDwdNow, diagnoseScopes, ActionSpec,
   StatusPayload, ConfigFields, ConfigPayload, DwdPayload, ScopeDiagnosis, UploadKind,
 } from '@/api/client'
-import { fetchMe } from '@/api/controlPlane'
+import { fetchMe, startFullSetup } from '@/api/controlPlane'
 import JobRunner from '@/components/JobRunner'
 import SeedWizard from '@/pages/SeedWizard'
 import QuickTenantSetup from '@/components/QuickTenantSetup'
@@ -280,6 +280,8 @@ const Wizard: React.FC = () => {
   const [otherDomain, setOtherDomain] = useState('')
   const [purpose, setPurpose] = useState<Purpose | null>(null)
   const [picked, setPicked] = useState<Purpose | ''>('')
+  const [autoBusy, setAutoBusy] = useState(false)
+  const [autoErr, setAutoErr] = useState('')
   const [seedEnabled, setSeedEnabled] = useState(false)
 
   useEffect(() => {
@@ -322,6 +324,31 @@ const Wizard: React.FC = () => {
       if (!picked) return
       setPurpose(picked)
       setStep(picked === 'migrate' ? 'counterpart' : 'run')
+    }
+
+    // One click, no panels. full_setup already does the whole sequence --
+    // project, APIs, service account, key, delegation, verify -- and the
+    // only reason it was reached through a page of controls is that the
+    // page was written before the wizard knew the domain and the
+    // credentials. It knows both by now.
+    const setUpEverything = async () => {
+      if (!picked) return
+      setAutoErr('')
+      setAutoBusy(true)
+      try {
+        const r = await startFullSetup(
+          'set up from the wizard', 'source', domain, adminEmail,
+          adminPassword, { dryRun: false })
+        if (!r.ok) throw new Error(r.detail || 'could not start')
+        setPurpose(picked)
+        // Straight to the run view: full_setup is now the thing running, and
+        // its progress (and any 2-Step prompt) shows there.
+        setStep(picked === 'migrate' ? 'counterpart' : 'run')
+      } catch (e) {
+        setAutoErr(e instanceof Error ? e.message : String(e))
+      } finally {
+        setAutoBusy(false)
+      }
     }
     return (
       <WizardShell
@@ -378,10 +405,32 @@ const Wizard: React.FC = () => {
               </Box>
             } />
         </RadioGroup>
-        <Button variant="contained" size="large" sx={{ mt: 3, px: 4 }}
-                data-testid="purpose-next" disabled={!picked} onClick={go}>
-          Continue
-        </Button>
+        <Stack direction="row" spacing={1.5} sx={{ mt: 3, flexWrap: 'wrap' }}>
+          <Button variant="contained" size="large" sx={{ px: 4 }}
+                  data-testid="purpose-next" disabled={!picked || autoBusy}
+                  onClick={go}>
+            Continue
+          </Button>
+          {/* The whole sequence, unattended. Offered beside Continue rather
+              than instead of it: the step-by-step route is what you want
+              when a tenant is unusual or a phase has already failed once. */}
+          <Button variant="outlined" size="large" sx={{ px: 4 }}
+                  data-testid="purpose-auto"
+                  disabled={!picked || autoBusy} onClick={setUpEverything}>
+            {autoBusy ? 'Starting…' : 'Set everything up for me'}
+          </Button>
+        </Stack>
+        <Typography variant="caption" color="text.secondary"
+                    sx={{ display: 'block', mt: 1.5 }}>
+          Creates the Cloud project, service account and delegation grant for
+          {' '}{domain} without further prompts. Watch out for a 2-Step
+          prompt on your phone — the sign-in cannot answer it.
+        </Typography>
+        {autoErr && (
+          <Alert severity="error" sx={{ mt: 2 }} data-testid="purpose-auto-error">
+            {autoErr}
+          </Alert>
+        )}
       </WizardShell>
     )
   }

@@ -16,8 +16,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import Wizard, { looksLikeDomain, domainOf } from './Wizard'
 
 const seedEnabled = vi.fn()
+const fullSetup = vi.fn()
 vi.mock('@/api/controlPlane', () => ({
   fetchMe: () => seedEnabled(),
+  startFullSetup: (...a: unknown[]) => fullSetup(...a),
 }))
 vi.mock('@/pages/SeedWizard', () => ({
   default: ({ sourceDomain }: { sourceDomain?: string }) =>
@@ -460,5 +462,87 @@ describe('the illustration fills its frame', () => {
     const cards = art().querySelectorAll('rect[rx="18"], rect[rx="16"]')
     const edges = art().querySelectorAll('path[stroke-width="1"]')
     expect(edges.length).toBeGreaterThanOrEqual(cards.length)
+  })
+})
+
+
+describe('setting everything up in one go', () => {
+  /* full_setup already does the whole sequence -- project, APIs, service
+     account, key, delegation, verify. It was only ever reached through a
+     page of controls because that page predates the wizard knowing the
+     domain and the credentials. It knows both by the time this button
+     exists. */
+  beforeEach(() => { fullSetup.mockReset(); fullSetup.mockResolvedValue({ ok: true }) })
+
+  it('is offered once a purpose is picked', async () => {
+    view()
+    await signIn('admin@acme.com')
+    fireEvent.click(await screen.findByTestId('purpose-seed'))
+    expect(screen.getByTestId('purpose-auto')).toBeEnabled()
+  })
+
+  it('is not offered before one is', async () => {
+    view()
+    await signIn('admin@acme.com')
+    expect(await screen.findByTestId('purpose-auto')).toBeDisabled()
+  })
+
+  it('sends the domain and credentials it already has', async () => {
+    view()
+    await signIn('admin@acme.com', 'sekrit123')
+    fireEvent.click(await screen.findByTestId('purpose-seed'))
+    fireEvent.click(screen.getByTestId('purpose-auto'))
+    await waitFor(() => expect(fullSetup).toHaveBeenCalled())
+    const [, side, domain, email, password] = fullSetup.mock.calls[0]
+    expect(side).toBe('source')
+    expect(domain).toBe('acme.com')
+    expect(email).toBe('admin@acme.com')
+    expect(password).toBe('sekrit123')
+  })
+
+  it('runs for real, not as a dry run', async () => {
+    /* dryRun defaults to true on the API. A "set everything up" that
+       quietly did nothing would be the worst possible default here. */
+    view()
+    await signIn('admin@acme.com')
+    fireEvent.click(await screen.findByTestId('purpose-seed'))
+    fireEvent.click(screen.getByTestId('purpose-auto'))
+    await waitFor(() => expect(fullSetup).toHaveBeenCalled())
+    expect(fullSetup.mock.calls[0][5]).toMatchObject({ dryRun: false })
+  })
+
+  it('warns that a 2-Step prompt cannot be answered for you', async () => {
+    view()
+    await signIn('admin@acme.com')
+    expect(await screen.findByText(/2-Step prompt on your phone/i))
+      .toBeInTheDocument()
+  })
+
+  it('surfaces a refusal instead of moving on as if it worked', async () => {
+    fullSetup.mockResolvedValue({ ok: false, detail: 'capacity is full' })
+    view()
+    await signIn('admin@acme.com')
+    fireEvent.click(await screen.findByTestId('purpose-seed'))
+    fireEvent.click(screen.getByTestId('purpose-auto'))
+    expect(await screen.findByTestId('purpose-auto-error'))
+      .toHaveTextContent(/capacity is full/)
+  })
+
+  it('stays on the choice when it failed, so it can be retried', async () => {
+    fullSetup.mockResolvedValue({ ok: false, detail: 'nope' })
+    view()
+    await signIn('admin@acme.com')
+    fireEvent.click(await screen.findByTestId('purpose-seed'))
+    fireEvent.click(screen.getByTestId('purpose-auto'))
+    await screen.findByTestId('purpose-auto-error')
+    expect(screen.getByTestId('purpose-auto')).toBeInTheDocument()
+  })
+
+  it('the step-by-step route is still there beside it', async () => {
+    /* Which is what you want when a tenant is unusual, or a phase has
+       already failed once. */
+    view()
+    await signIn('admin@acme.com')
+    expect(await screen.findByTestId('purpose-next')).toBeInTheDocument()
   })
 })
