@@ -1,6 +1,15 @@
 import React from 'react'
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+// The hook reaches @/api/controlPlane, which reads localStorage at module
+// load. Mocked at the hook rather than the api module so a test can also
+// say what is running.
+const runningJobs = vi.hoisted(() => ({ current: [] as any[] }))
+vi.mock('@/hooks/useRunningJobs', () => ({
+  useRunningJobs: () => ({ jobs: runningJobs.current, loading: false,
+                           refresh: vi.fn() }),
+}))
+
 import WorkingDomains from './WorkingDomains'
 
 /* Two very different actions behind one card, which is the point of showing
@@ -138,5 +147,52 @@ describe('working domains', () => {
     render(<WorkingDomains tenants={tenants} onAct={vi.fn()} />)
     fireEvent.click(screen.getByTestId('repair-source'))
     expect(screen.getByLabelText(/password/i)).toBeInTheDocument()
+  })
+
+  it('shows a job running against this tenant, with a bar', () => {
+    /* Every action here starts a job somewhere else and used to say nothing
+       more about it -- a repair ran for twelve seconds while this card
+       showed four idle buttons, which reads as "click it again", on buttons
+       that wipe tenants. */
+    runningJobs.current = [{
+      key: 'k', kind: 'setup', label: 'repair console setup',
+      domain: 'src.example.com', detail: '12.6s · re-granting delegation', pct: null,
+    }]
+    const { container } = render(<WorkingDomains tenants={tenants} onAct={vi.fn()} />)
+    expect(screen.getByTestId('running-source')).toBeInTheDocument()
+    expect(screen.getByText('repair console setup')).toBeInTheDocument()
+    expect(container.querySelector('.MuiLinearProgress-root')).toBeTruthy()
+    runningJobs.current = []
+  })
+
+  it('leaves the other tenant alone', () => {
+    runningJobs.current = [{
+      key: 'k', kind: 'reset', label: 'wipe tenant data',
+      domain: 'src.example.com', detail: '3m', pct: 40,
+    }]
+    render(<WorkingDomains tenants={tenants} onAct={vi.fn()} />)
+    expect(screen.getByTestId('running-source')).toBeInTheDocument()
+    expect(screen.queryByTestId('running-target')).not.toBeInTheDocument()
+    runningJobs.current = []
+  })
+
+  it('shows no bar at all when nothing is running', () => {
+    runningJobs.current = []
+    const { container } = render(<WorkingDomains tenants={tenants} onAct={vi.fn()} />)
+    expect(screen.queryByTestId('running-source')).not.toBeInTheDocument()
+    expect(container.querySelector('.MuiLinearProgress-root')).toBeNull()
+  })
+
+  it('uses a real percentage when the job reports one', () => {
+    /* A full bar on a job with no percentage is a worse lie than no bar. */
+    runningJobs.current = [{
+      key: 'k', kind: 'reset', label: 'wipe tenant data',
+      domain: 'src.example.com', detail: '40%', pct: 40,
+    }]
+    const { container } = render(<WorkingDomains tenants={tenants} onAct={vi.fn()} />)
+    const bar = container.querySelector('.MuiLinearProgress-determinate')
+    expect(bar).toBeTruthy()
+    expect(bar?.getAttribute('aria-valuenow')).toBe('40')
+    runningJobs.current = []
   })
 })

@@ -18,9 +18,11 @@
  */
 import React, { useState } from 'react'
 import {
-  Alert, Box, Button, Card, CardContent, Chip, Dialog, DialogActions,
-  DialogContent, DialogTitle, Divider, Stack, TextField, Typography,
+  Alert, Box, Button, Card, CardContent, Chip, CircularProgress, Dialog,
+  DialogActions, DialogContent, DialogTitle, Divider, LinearProgress, Stack,
+  TextField, Typography,
 } from '@mui/material'
+import { useRunningJobs } from '@/hooks/useRunningJobs'
 import {
   DeleteForever as RemoveIcon, DeleteSweep as WipeIcon,
   PersonRemove as UsersIcon, Build as RepairIcon,
@@ -78,6 +80,15 @@ export const WorkingDomains: React.FC<{
   tenants: ConfiguredTenant[]
   onAct: (t: ConfiguredTenant, mode: Mode, password: string) => Promise<void>
 }> = ({ tenants, onAct }) => {
+  // Every action on this card starts a job somewhere else and says nothing
+  // more about it. A repair ran for twelve seconds with the header pill
+  // counting up and this card showing four idle buttons, which reads as
+  // "nothing happened, click it again" -- on buttons that wipe tenants.
+  //
+  // Same hook the Jobs page uses, so this is not a second poller: it
+  // already reports webui's per-account Job, which is what all four of
+  // these launch.
+  const { jobs } = useRunningJobs()
   const [target, setTarget] = useState<{ t: ConfiguredTenant; mode: Mode } | null>(null)
   const [typed, setTyped] = useState('')
   const [password, setPassword] = useState('')
@@ -152,6 +163,37 @@ export const WorkingDomains: React.FC<{
                   Remove setup
                 </Button>
               </Stack>
+              {(() => {
+                // Matched on domain, which is what the hook labels a job
+                // with -- not on which button was pressed, because a job
+                // started from the Jobs page acts on this tenant too and a
+                // reader watching this card should see that.
+                const live = jobs.find((j) => j.domain && j.domain === t.domain)
+                if (!live) return null
+                return (
+                  <Box sx={{ mt: 1, mb: 0.5 }} data-testid={`running-${t.side}`}>
+                    <Stack direction="row" spacing={1} alignItems="center">
+                      <CircularProgress size={13} thickness={6} />
+                      <Typography variant="caption" sx={{ fontWeight: 600 }}>
+                        {live.label}
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary"
+                                  sx={{ flexGrow: 1, overflow: 'hidden',
+                                        textOverflow: 'ellipsis',
+                                        whiteSpace: 'nowrap' }}>
+                        {live.detail}
+                      </Typography>
+                    </Stack>
+                    {/* Determinate when the job counts itself, indeterminate
+                        when it does not -- a full bar on a job with no
+                        percentage is a worse lie than no bar. */}
+                    {typeof live.pct === 'number'
+                      ? <LinearProgress variant="determinate" value={live.pct}
+                                        sx={{ mt: 0.5, height: 5, borderRadius: 3 }} />
+                      : <LinearProgress sx={{ mt: 0.5, height: 5, borderRadius: 3 }} />}
+                  </Box>
+                )
+              })()}
               <Typography variant="caption" color="text.secondary">
                 {t.adminEmail || 'no admin on file'}
                 {t.clientId ? ` · client ${t.clientId}` : ''}
