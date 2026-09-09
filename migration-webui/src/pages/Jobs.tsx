@@ -6,6 +6,7 @@ import {
 } from '@mui/material'
 import {
   Refresh as RefreshIcon, ExpandMore as ExpandIcon, Language as DomainIcon,
+  DeleteSweep as WipeIcon, PersonRemove as UsersIcon,
   Grass as SeedIcon, Key as KeyIcon, VpnKey as ScopeIcon,
   RocketLaunch as MigrateIcon, Science as DryRunIcon, Stop as StopIcon,
 } from '@mui/icons-material'
@@ -30,6 +31,8 @@ import { useRunningJobs, jobKind } from '@/hooks/useRunningJobs'
 import type { RunningJob } from '@/hooks/useRunningJobs'
 import SeedRunDashboard from '@/components/SeedRunDashboard'
 import { groupRunsByDomain } from '@/utils/groupRuns'
+import TenantActionDialog from '@/components/TenantActionDialog'
+import { removeTenantSetup } from '@/api/client'
 import { formatPct } from '@/utils/formatPct'
 
 const SEED_SCALES = ['tiny', 'small', 'medium', 'large', 'huge']
@@ -242,6 +245,17 @@ const Jobs: React.FC = () => {
 
   // Grouped by the tenant it happened to. The rule lives in
   // groupRunsByDomain so its test exercises that code rather than a copy.
+  // Which tenant a Wipe / Delete users was asked for, or null. Held here
+  // rather than per card so only one gate can ever be open.
+  //
+  // Narrower than the dialog's own Mode on purpose: this page offers the
+  // two data actions, not Repair (which needs a console sign-in) or Remove
+  // (which ends the tenant). Typing it that way is what makes the compiler
+  // refuse a fourth button wired to an endpoint that cannot serve it.
+  const [actOn, setActOn] = useState<
+    { domain: string; side: 'source' | 'target'
+      mode: 'wipe' | 'delete_users' } | null>(null)
+
   const byDomain = useMemo(() => groupRunsByDomain(
     done,
     sides?.find((x) => x.side === 'source')?.cfg?.domain,
@@ -329,6 +343,19 @@ const Jobs: React.FC = () => {
         </Box>
       )}
 
+      {/* Same gate as Mission Control's: typing the domain, not a generic
+          word, because the mistake worth catching is aiming at the wrong
+          one of two configured tenants. */}
+      <TenantActionDialog
+        target={actOn ? { domain: actOn.domain, mode: actOn.mode } : null}
+        onCancel={() => setActOn(null)}
+        onConfirm={async (password) => {
+          const r = await removeTenantSetup(actOn!.side, actOn!.domain,
+                                            password, actOn!.mode)
+          if (!r.ok) throw new Error(r.error || `could not ${actOn!.mode} the tenant`)
+          refresh()
+        }} />
+
       {/* Below Running Now on purpose: the queue only matters once the
           box is busy, and that is exactly when Running Now is non-empty. */}
       <Box sx={{ mb: 3 }} data-testid="job-queue">
@@ -382,7 +409,7 @@ const Jobs: React.FC = () => {
               this domain" -- and a flat newest-first list answers it only
               by reading every card. One row per tenant, expanded on click. */}
           <Stack spacing={1} sx={{ mt: 0.5 }}>
-            {byDomain.map(({ domain, runs }) => {
+            {byDomain.map(({ domain, runs, side, configured }) => {
               const open = openDomain === domain
               const newest = runs[0]
               return (
@@ -404,6 +431,32 @@ const Jobs: React.FC = () => {
                           ? `last: ${newest.name} · ${new Date(newest.finished * 1000).toLocaleString()}`
                           : `last: ${newest?.name ?? '--'}`}
                       </Typography>
+                      {/* The same two actions Mission Control's Working
+                          Domains card carries, on the card an operator is
+                          already looking at this tenant's history from.
+                          Same component, so the typed-domain gate and the
+                          copy explaining what survives cannot drift apart
+                          between the two places. stopPropagation because
+                          the header row is the expand toggle -- otherwise
+                          reaching for Wipe also collapses the runs. */}
+                      {configured && (
+                        <Stack direction="row" spacing={1}
+                               onClick={(e) => e.stopPropagation()}>
+                          <Button size="small" color="warning" variant="outlined"
+                                  startIcon={<WipeIcon />}
+                                  data-testid={`wipe-runs-${domain}`}
+                                  onClick={() => setActOn({ domain, side, mode: 'wipe' })}>
+                            Wipe data
+                          </Button>
+                          <Button size="small" color="error" variant="outlined"
+                                  startIcon={<UsersIcon />}
+                                  data-testid={`delete-users-runs-${domain}`}
+                                  onClick={() => setActOn({ domain, side,
+                                                            mode: 'delete_users' })}>
+                            Delete users
+                          </Button>
+                        </Stack>
+                      )}
                       <ExpandIcon fontSize="small"
                                   sx={{ transform: open ? 'rotate(180deg)' : 'none',
                                         transition: 'transform .15s' }} />

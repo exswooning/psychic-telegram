@@ -3,6 +3,13 @@ import type { CompletedJob } from '@/api/client'
 export interface DomainRuns {
   domain: string
   runs: CompletedJob[]
+  /** Which tenant this is. Exposed rather than re-derived by the caller:
+   *  the grouping below already decides it, and a second rule elsewhere is
+   *  exactly the disagreement this file's own docstring warns about. */
+  side: 'source' | 'target'
+  /** False for a tenant that no longer has a configuration -- its history
+   *  is still real, but there is nothing to act on. */
+  configured: boolean
 }
 
 /**
@@ -23,15 +30,19 @@ export interface DomainRuns {
 export function groupRunsByDomain(done: CompletedJob[], source?: string,
                                   target?: string): DomainRuns[] {
   const groups = new Map<string, CompletedJob[]>()
+  const sides = new Map<string, { side: 'source' | 'target'; configured: boolean }>()
   for (const d of done) {
     const toTarget = /target/i.test(d.name)
-    const domain = (toTarget ? target : source)
+    const configuredDomain = toTarget ? target : source
+    const domain = configuredDomain
       // A run whose tenant is no longer configured still happened, and
       // dropping it would make the history lie by omission.
       || (toTarget ? 'target (not configured)' : 'source (not configured)')
     const list = groups.get(domain) ?? []
     list.push(d)
     groups.set(domain, list)
+    sides.set(domain, { side: toTarget ? 'target' : 'source',
+                        configured: !!configuredDomain })
   }
   // Newest run first inside each tenant, and the tenant with the newest run
   // first overall -- the ordering the flat list had.
@@ -39,6 +50,8 @@ export function groupRunsByDomain(done: CompletedJob[], source?: string,
     .map(([domain, runs]) => ({
       domain,
       runs: [...runs].sort((a, b) => (b.finished ?? 0) - (a.finished ?? 0)),
+      side: sides.get(domain)!.side,
+      configured: sides.get(domain)!.configured,
     }))
     .sort((a, b) => (b.runs[0]?.finished ?? 0) - (a.runs[0]?.finished ?? 0))
 }

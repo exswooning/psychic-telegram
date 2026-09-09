@@ -18,10 +18,11 @@
  */
 import React, { useState } from 'react'
 import {
-  Alert, Box, Button, Card, CardContent, Chip, CircularProgress, Dialog,
-  DialogActions, DialogContent, DialogTitle, Divider, LinearProgress, Stack,
-  TextField, Typography,
+  Alert, Box, Button, Card, CardContent, Chip, CircularProgress, Divider,
+  LinearProgress, Stack, Typography,
 } from '@mui/material'
+import TenantActionDialog from '@/components/TenantActionDialog'
+import type { Mode } from '@/components/TenantActionDialog'
 import { useRunningJobs } from '@/hooks/useRunningJobs'
 import {
   DeleteForever as RemoveIcon, DeleteSweep as WipeIcon,
@@ -35,45 +36,6 @@ export interface ConfiguredTenant {
   adminEmail?: string
   project?: string
   clientId?: string
-}
-
-type Mode = 'wipe' | 'remove' | 'delete_users' | 'repair'
-
-const COPY: Record<Mode, { title: string; verb: string; warn: string }> = {
-  wipe: {
-    title: 'Wipe tenant data',
-    verb: 'Wipe data',
-    warn: 'Deletes the seeded Drive files, mail, calendar events, contacts '
-        + 'and tasks. The Cloud project, the delegation grant and the saved '
-        + 'configuration are kept, so the tenant stays ready to seed or '
-        + 'migrate again.',
-  },
-  // The one action here that adds rather than removes. It sits with these
-  // because it is per-tenant and needs the same admin password, not because
-  // it is dangerous -- hence the plain colour on its button.
-  repair: {
-    title: 'Repair console setup',
-    verb: 'Repair',
-    warn: 'Re-pastes the delegation grant (picking up any scope added since '
-        + 'this tenant was set up) and configures the Chat app. Both are '
-        + 'console steps with no API, done once during setup and unreachable '
-        + 'afterwards. Adds nothing and deletes nothing.',
-  },
-  delete_users: {
-    title: 'Delete all users',
-    verb: 'Delete users',
-    warn: 'Deletes every migrated account in this tenant, not just its '
-        + 'data, and invalidates the ledger that described them. A deleted '
-        + 'Workspace address stays reserved for 20 days, so recreating one '
-        + 'under the same name fails until it ages out.',
-  },
-  remove: {
-    title: 'Remove tenant setup',
-    verb: 'Remove setup',
-    warn: 'Deletes the data AND the Cloud project, revokes the delegation '
-        + 'grant, and forgets the configuration. Setting this tenant up '
-        + 'again means a fresh sign-in and a fresh grant.',
-  },
 }
 
 export const WorkingDomains: React.FC<{
@@ -90,23 +52,9 @@ export const WorkingDomains: React.FC<{
   // these launch.
   const { jobs } = useRunningJobs()
   const [target, setTarget] = useState<{ t: ConfiguredTenant; mode: Mode } | null>(null)
-  const [typed, setTyped] = useState('')
-  const [password, setPassword] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
 
   const configured = tenants.filter((t) => t.domain)
-  const ask = (t: ConfiguredTenant, mode: Mode) => {
-    setTarget({ t, mode }); setTyped(''); setPassword(''); setError('')
-  }
-  const matches = !!target &&
-    typed.trim().toLowerCase() === target.t.domain.toLowerCase()
-  // Only the teardown half signs in to Google. A wipe uses the service
-  // account that is already on file, so demanding a password for it would
-  // be asking for a credential nothing is going to use.
-  const needsPassword = target?.mode === 'remove'
-                     || target?.mode === 'repair'
-  const copy = target ? COPY[target.mode] : null
+  const ask = (t: ConfiguredTenant, mode: Mode) => setTarget({ t, mode })
 
   return (
     <Card variant="outlined" sx={{ borderRadius: 2, mb: 3 }}
@@ -204,53 +152,11 @@ export const WorkingDomains: React.FC<{
         </Stack>
       </CardContent>
 
-      <Dialog open={!!target} onClose={() => !busy && setTarget(null)}
-              maxWidth="sm" fullWidth>
-        <DialogTitle>{copy?.title} — {target?.t.domain}</DialogTitle>
-        <DialogContent>
-          <Alert severity={target?.mode === 'remove' ? 'error' : 'warning'}
-                 sx={{ mb: 2 }}>
-            {copy?.warn}
-          </Alert>
-          <TextField
-            fullWidth size="small" sx={{ mb: 2 }}
-            label={`Type ${target?.t.domain} to confirm`}
-            value={typed} onChange={(e) => setTyped(e.target.value)}
-            inputProps={{ 'data-testid': 'confirm-domain' }}
-          />
-          {needsPassword && (
-            <TextField
-              fullWidth size="small" type="password"
-              label="Super admin password"
-              helperText="Deleting the project and revoking the grant both
-                          sign in to Google"
-              value={password} onChange={(e) => setPassword(e.target.value)}
-              inputProps={{ 'data-testid': 'admin-password' }}
-            />
-          )}
-          {error && <Alert severity="error" sx={{ mt: 2 }}>{error}</Alert>}
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setTarget(null)} disabled={busy}>Cancel</Button>
-          <Button variant="contained" data-testid="confirm-act"
-                  color={target?.mode === 'remove' ? 'error' : 'warning'}
-                  disabled={!matches || (needsPassword && !password) || busy}
-                  onClick={async () => {
-                    if (!target) return
-                    setBusy(true); setError('')
-                    try {
-                      await onAct(target.t, target.mode, password)
-                      setTarget(null)
-                    } catch (e) {
-                      setError(String(e))
-                    } finally {
-                      setBusy(false)
-                    }
-                  }}>
-            {busy ? 'Working…' : copy?.verb}
-          </Button>
-        </DialogActions>
-      </Dialog>
+      <TenantActionDialog
+        target={target ? { domain: target.t.domain, mode: target.mode } : null}
+        onCancel={() => setTarget(null)}
+        onConfirm={(password) => onAct(target!.t, target!.mode, password)} />
+
     </Card>
   )
 }
