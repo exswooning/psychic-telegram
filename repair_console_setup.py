@@ -65,6 +65,7 @@ def repair(side: str, do_grant: bool, do_chat: bool,
            account_id: int | None = None) -> dict:
     from config import Settings
     import dwd_helper
+    import verify_scopes
 
     st = Settings(account_id=account_id) if account_id else Settings()
     key = st.source_sa_key if side == "source" else st.target_sa_key
@@ -93,10 +94,21 @@ def repair(side: str, do_grant: bool, do_chat: bool,
     project = keydata.get("project_id", "")
 
     if do_grant:
-        # Re-paste the whole scope line, not a diff. The console's Edit
-        # opens the entry with its current scopes in the box and replaces
-        # what is there, so anything left out is silently dropped.
-        scopes = dwd_helper._load_payload(side).get("scopes", "")
+        # grant_scopes, not _load_payload. Its own docstring says to use it
+        # "wherever a grant is being *written*" -- it unions OPTIONAL_SCOPES
+        # and every scope a feature toggle could need, where _load_payload
+        # returned a narrower line: 18 against 25 on the live tenant.
+        #
+        # dwd_helper MERGES into the existing entry (that is what --no-merge
+        # opts out of), so a narrow line does not drop what is already
+        # granted -- confirmed on the tenant, where all seven scopes missing
+        # from the narrow line still issued afterwards. It simply never adds
+        # them, which on a tenant that lacked one is a feature silently
+        # staying off.
+        from config import Settings as _S
+
+        scopes = ",".join(verify_scopes.grant_scopes(
+            _S(account_id=account_id) if account_id else _S(), side))
         n = len([x for x in scopes.split(",") if x])
         if not client_id:
             add(f"re-grant delegation ({side})", False,
