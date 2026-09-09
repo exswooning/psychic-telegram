@@ -21,6 +21,7 @@ import {
 } from '@mui/icons-material'
 import type { JobKind, RunningJob } from '@/hooks/useRunningJobs'
 import { describeElapsed } from '@/hooks/useRunningJobs'
+import { formatPct } from '@/utils/formatPct'
 
 const KIND: Record<JobKind, { label: string; icon: React.ReactElement;
                               color: 'success' | 'primary' | 'warning' | 'default' }> = {
@@ -105,7 +106,7 @@ export const RunningJobCard: React.FC<{
           {typeof job.pct === 'number' && (
             <Typography variant="caption" color="text.secondary"
                         sx={{ fontVariantNumeric: 'tabular-nums' }}>
-              {job.pct}%
+              {formatPct(job.pct)}
             </Typography>
           )}
         </Stack>

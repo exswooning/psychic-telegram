@@ -63,6 +63,7 @@ import account_context  # the one rule both servers answer with
 import accounts_auth  # stdlib-only itself; does not break the no-pip-install promise
 import fleet_agent  # stdlib-only; shares the process-scan naming rule
 import job_admission  # same -- control_plane_db is stdlib-only too
+import job_queue        # same -- the waiting room for jobs over the cap
 
 try:
     from wizard import State, build_steps
@@ -560,6 +561,23 @@ _SEED_FAILED_RE = re.compile(r"!\s+\S+\s+FAILED:")
 _COUNTER_RE = re.compile(r"\[(\d+)\s*/\s*(\d+)\]")
 
 
+def _pct(done: int, total: int) -> float:
+    """Percentage, keeping the part that whole numbers throw away.
+
+    round() to an integer reports the first finished user of two hundred as
+    0% -- work completed, progress none, for as long as it takes the second
+    one to land. On a run whose users take seventy-five minutes each that is
+    an hour and a quarter of a page saying nothing happened.
+
+    Two decimals is the resolution at which one item of ten thousand still
+    moves the number, and no more: a percentage with six decimals is not
+    more honest, only harder to read.
+    """
+    if total <= 0:
+        return 0.0
+    return round(min(done, total) / total * 100, 2)
+
+
 # Where a phase of work begins. A single job can run more than one --
 # `reset && seed` is one process writing one transcript -- and a finished
 # phase leaves its counters behind in it.
@@ -595,7 +613,7 @@ def _counter_progress_pct(lines: list[str]) -> int | None:
             done, total = int(m.group(1)), int(m.group(2))
             if total <= 0:
                 continue
-            pct = round(min(done, total) / total * 100)
+            pct = _pct(done, total)
             best = pct if best is None else max(best, pct)
     return best
 
@@ -622,7 +640,7 @@ def _seed_progress_pct(lines: list[str]) -> int | None:
     # counting it once loses the other.
     attempted = sum(len(_SEED_DONE_RE.findall(ln)) + len(_SEED_FAILED_RE.findall(ln))
                     for ln in lines)
-    return round(min(attempted, total) / total * 100)
+    return _pct(attempted, total)
 
 
 # ----------------------------------------------------------------------
@@ -1176,6 +1194,36 @@ DMS_METRICS_FILE = os.getenv("DMS_METRICS_FILE",
                              os.path.join(HERE, "dms_metrics.json"))
 
 
+def queue_payload(account_id: int | None = None) -> dict:
+    """What is running, what is waiting, and what the queue has done.
+
+    Deliberately includes other accounts' rows as names-and-positions only:
+    "you are third" is useless without being able to see that the two ahead
+    of you are real, and the old 503 told a tenant nothing at all about why
+    their launch was refused.
+    """
+    job_admission.reap_dead()
+    active = [j for j in job_admission.list_active() if job_admission.is_live(j)]
+    return {
+        "capacity": job_admission.MAX_CONCURRENT_TENANT_JOBS,
+        "running": [{"jobName": j.get("job_name"), "startedAt": j.get("started_at"),
+                     "mine": j.get("account_id") == account_id}
+                    for j in active],
+        "waiting": [{"id": w["id"], "jobName": w["job_name"],
+                     "requestedBy": w.get("requested_by") or "",
+                     "queuedAt": w.get("queued_at"), "position": i + 1,
+                     "mine": w.get("account_id") == account_id}
+                    for i, w in enumerate(job_queue.waiting())],
+        "recent": [{"id": r["id"], "jobName": r["job_name"], "status": r["status"],
+                    "requestedBy": r.get("requested_by") or "",
+                    "queuedAt": r.get("queued_at"),
+                    "finishedAt": r.get("finished_at"),
+                    "detail": r.get("detail") or "",
+                    "mine": r.get("account_id") == account_id}
+                   for r in job_queue.recent(15)],
+    }
+
+
 def _dms_metrics_payload() -> dict:
     """The last DMS counters scraped from the console, plus their age and
     whether a refresh scrape is running right now."""
@@ -1199,6 +1247,104 @@ def get_parallel_job(account_id: int | None, name: str) -> Job:
     if key not in _PARALLEL_JOBS:
         _PARALLEL_JOBS[key] = Job(account_id)
     return _PARALLEL_JOBS[key]
+
+
+# --------------------------------------------------------------------------
+# Launching heavy work: start it now, or stand it in line.
+#
+# Six endpoints had the same fifteen lines -- try_admit, 503 on refusal,
+# start, release-if-start-refused -- and that 503 was the whole problem the
+# queue exists to fix: a second account pressing Seed got "capacity is full,
+# try again shortly" and a page showing nothing running, because the job
+# filling the box belongs to someone else. Now the refusal enqueues.
+# --------------------------------------------------------------------------
+
+def _account_email(account_id: int | None) -> str:
+    """Who asked. "operator" for the un-cookied legacy path, which is the
+    honest label for it -- a queue whose every row says "" cannot tell one
+    waiting tenant from another."""
+    if account_id is None:
+        return "operator"
+    try:
+        return (accounts_auth.get_account(account_id) or {}).get("email", "")
+    except Exception:  # noqa: BLE001 - a name is never worth failing a launch
+        return ""
+
+
+def _env_overlay(env: dict | None) -> dict:
+    """Only what this env changes about our own.
+
+    The env builders (_account_env, gcloud_env, ...) return a full
+    os.environ copy with a handful of keys overridden. Storing that whole
+    copy in the control-plane DB would put the server's entire environment
+    in a table AND pin the queued job to the environment of the process
+    that queued it -- one deploy later, that is the stale one. The overlay
+    is re-applied to whatever os.environ says at dispatch time.
+
+    A key the builder *removed* is not represented; none of them remove.
+    """
+    if not env:
+        return {}
+    return {k: v for k, v in env.items() if os.environ.get(k) != v}
+
+
+def _job_finished(account_id: int | None, label: str) -> None:
+    """Free the slot, then give it to whoever is waiting.
+
+    This is the only moment a slot reliably frees on this box, so it is the
+    only place a dispatch is guaranteed to be tried. /api/queue also polls
+    it, for the slots freed by the other process (api_server.py's migrate).
+    """
+    job_admission.release(account_id, label)
+    try:
+        job_queue.dispatch_one(_queue_starter)
+    except Exception as exc:  # noqa: BLE001 - a bad queue must not wedge Job
+        print(f"queue dispatch after {label!r} failed: {exc}", flush=True)
+
+
+def _queue_starter(account_id: int | None, label: str,
+                   payload: dict) -> tuple[bool, str]:
+    """Start a job dispatch_one has already taken the slot for.
+
+    No release on failure: dispatch_one owns the slot it took and frees it
+    itself, and releasing here as well would free the NEXT job's slot.
+    """
+    env = dict(os.environ, **payload.get("env", {})) or None
+    return get_job(account_id).start(
+        label, list(payload["argv"]), env=env, cwd=payload.get("cwd") or None,
+        on_finish=lambda rc: _job_finished(account_id, label))
+
+
+def launch_or_queue(account_id: int | None, label: str, argv: list[str],
+                    env: dict | None = None, cwd: str | None = None,
+                    requested_by: str = "") -> tuple[str, str]:
+    """Run it now if the box has room, otherwise stand it in line.
+
+    Returns (state, message) where state is "started", "queued" or "error".
+    Queued is a success: the caller's work was accepted, it just has not
+    begun. Reporting it as an error is what the old 503 did.
+    """
+    admitted, why = job_admission.try_admit(account_id, label)
+    if admitted:
+        ok, msg = get_job(account_id).start(
+            label, argv, env=env, cwd=cwd,
+            on_finish=lambda rc: _job_finished(account_id, label))
+        if not ok:
+            # Job.start() refused (e.g. this account's job is already
+            # running) before ever spawning -- _drain(), and so on_finish,
+            # never runs, and nothing else would free the slot just taken.
+            job_admission.release(account_id, label)
+            return "error", msg
+        return "started", msg
+    try:
+        row = job_queue.enqueue(
+            account_id, label,
+            {"argv": list(argv), "env": _env_overlay(env), "cwd": cwd or ""},
+            requested_by=requested_by, reason=why)
+    except job_queue.QueueFull as exc:
+        return "error", str(exc)
+    return "queued", (f"the box is busy -- queued at position "
+                      f"{row['position']}; it will start on its own")
 
 
 def _subscription_ok(account_id: int | None) -> bool:
@@ -4734,6 +4880,17 @@ class Handler(BaseHTTPRequestHandler):
                    f"<p>You can close this tab and return to the migration UI.</p>")
             self._send(200, f"<html><body style='font:15px sans-serif;padding:40px'>"
                             f"{msg}</body></html>".encode(), "text/html; charset=utf-8")
+        elif path == "/api/queue":
+            # Poll-driven dispatch, on top of the on_finish hook. The hook
+            # only fires for jobs THIS process started; a migrate launched
+            # by api_server.py frees its slot in a different process, and
+            # without this the queue would sit full-looking until somebody
+            # ran a webui job. Cheap: reap_dead + one indexed SELECT.
+            try:
+                job_queue.dispatch_one(_queue_starter)
+            except Exception as exc:  # noqa: BLE001
+                print(f"queue dispatch on poll failed: {exc}", flush=True)
+            self._json(queue_payload(self._account_id()))
         elif path == "/api/job":
             since = 0
             if "since=" in self.path:
@@ -4849,6 +5006,20 @@ class Handler(BaseHTTPRequestHandler):
                                f"granted at Google until revoked in the admin console"})
             return
 
+        if self.path == "/api/queue/cancel":
+            # Scoped to the caller's own account unless they are the
+            # operator: a shared queue where anyone can drop anyone's work
+            # is worse than no queue.
+            caller = self._account_id()
+            scope = None if caller in (None, 1) else caller
+            dropped = job_queue.cancel(int(body.get("id") or 0),
+                                       account_id=scope)
+            self._json({"ok": dropped,
+                        "error": "" if dropped else
+                                 "not queued (already started, cancelled, "
+                                 "or belongs to another account)"})
+            return
+
         if self.path == "/api/seed":
             account_id = self._account_id()
             if not _subscription_ok(account_id):
@@ -4861,21 +5032,13 @@ class Handler(BaseHTTPRequestHandler):
             if err:
                 self._json({"ok": False, "error": err}, 400)
                 return
-            admitted, admit_msg = job_admission.try_admit(account_id, "seed")
-            if not admitted:
-                self._json({"ok": False, "error": admit_msg}, 503)
-                return
-            ok, msg = get_job(account_id).start(
-                "seed", argv, env=env,
+            state, msg = launch_or_queue(
+                account_id, "seed", argv, env=env,
                 cwd=os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                  "data-generator"),
-                on_finish=lambda rc: job_admission.release(account_id, "seed"))
-            if not ok:
-                # Job.start() refused (e.g. already running) before ever
-                # spawning a process -- _drain() (and so on_finish) never
-                # runs, so nothing else will free the slot just reserved.
-                job_admission.release(account_id, "seed")
-            self._json({"ok": ok, "error": "" if ok else msg})
+                requested_by=_account_email(account_id))
+            self._json({"ok": state != "error", "queued": state == "queued",
+                        "msg": msg, "error": msg if state == "error" else ""})
             return
 
         if self.path == "/api/repair_console_setup":
@@ -5085,17 +5248,13 @@ class Handler(BaseHTTPRequestHandler):
             if err:
                 self._json({"ok": False, "error": err}, 400)
                 return
-            admitted, admit_msg = job_admission.try_admit(account_id, "reset target")
-            if not admitted:
-                self._json({"ok": False, "error": admit_msg}, 503)
-                return
+
             # reset_target.py lives at the repo root, unlike the seeder.
-            ok, msg = get_job(account_id).start(
-                "reset target", argv, env=env,
-                on_finish=lambda rc: job_admission.release(account_id, "reset target"))
-            if not ok:
-                job_admission.release(account_id, "reset target")
-            self._json({"ok": ok, "error": "" if ok else msg})
+            state, msg = launch_or_queue(
+                account_id, "reset target", argv, env=env,
+                requested_by=_account_email(account_id))
+            self._json({"ok": state != "error", "queued": state == "queued",
+                        "msg": msg, "error": msg if state == "error" else ""})
             return
 
         if self.path == "/api/wipe_source":
@@ -5111,16 +5270,12 @@ class Handler(BaseHTTPRequestHandler):
             if err:
                 self._json({"ok": False, "error": err}, 400)
                 return
-            admitted, admit_msg = job_admission.try_admit(account_id, "wipe source")
-            if not admitted:
-                self._json({"ok": False, "error": admit_msg}, 503)
-                return
-            ok, msg = get_job(account_id).start(
-                "wipe source", argv, env=env,
-                on_finish=lambda rc: job_admission.release(account_id, "wipe source"))
-            if not ok:
-                job_admission.release(account_id, "wipe source")
-            self._json({"ok": ok, "error": "" if ok else msg})
+
+            state, msg = launch_or_queue(
+                account_id, "wipe source", argv, env=env,
+                requested_by=_account_email(account_id))
+            self._json({"ok": state != "error", "queued": state == "queued",
+                        "msg": msg, "error": msg if state == "error" else ""})
             return
 
         if self.path == "/api/wipe_target":
@@ -5139,16 +5294,12 @@ class Handler(BaseHTTPRequestHandler):
             if err:
                 self._json({"ok": False, "error": err}, 400)
                 return
-            admitted, admit_msg = job_admission.try_admit(account_id, "wipe target")
-            if not admitted:
-                self._json({"ok": False, "error": admit_msg}, 503)
-                return
-            ok, msg = get_job(account_id).start(
-                "wipe target", argv, env=env,
-                on_finish=lambda rc: job_admission.release(account_id, "wipe target"))
-            if not ok:
-                job_admission.release(account_id, "wipe target")
-            self._json({"ok": ok, "error": "" if ok else msg})
+
+            state, msg = launch_or_queue(
+                account_id, "wipe target", argv, env=env,
+                requested_by=_account_email(account_id))
+            self._json({"ok": state != "error", "queued": state == "queued",
+                        "msg": msg, "error": msg if state == "error" else ""})
             return
 
         if self.path == "/api/licences/assign":
@@ -5184,16 +5335,12 @@ class Handler(BaseHTTPRequestHandler):
             if err:
                 self._json({"ok": False, "error": err}, 400)
                 return
-            admitted, admit_msg = job_admission.try_admit(account_id, "reset drive ledger")
-            if not admitted:
-                self._json({"ok": False, "error": admit_msg}, 503)
-                return
-            ok, msg = get_job(account_id).start(
-                "reset drive ledger", argv, env=env,
-                on_finish=lambda rc: job_admission.release(account_id, "reset drive ledger"))
-            if not ok:
-                job_admission.release(account_id, "reset drive ledger")
-            self._json({"ok": ok, "error": "" if ok else msg})
+
+            state, msg = launch_or_queue(
+                account_id, "reset drive ledger", argv, env=env,
+                requested_by=_account_email(account_id))
+            self._json({"ok": state != "error", "queued": state == "queued",
+                        "msg": msg, "error": msg if state == "error" else ""})
             return
 
         if self.path == "/api/check":
@@ -5519,16 +5666,11 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": ok, "error": None if ok else msg})
             return
 
-        admitted, admit_msg = job_admission.try_admit(account_id, spec["label"])
-        if not admitted:
-            self._json({"ok": False, "error": admit_msg}, 503)
-            return
-        ok, msg = get_job(account_id).start(
-            spec["label"], _action_argv(name), env=env,
-            on_finish=lambda rc: job_admission.release(account_id, spec["label"]))
-        if not ok:
-            job_admission.release(account_id, spec["label"])
-        self._json({"ok": ok, "error": None if ok else msg})
+        state, msg = launch_or_queue(
+            account_id, spec["label"], _action_argv(name), env=env,
+            requested_by=_account_email(account_id))
+        self._json({"ok": state != "error", "queued": state == "queued",
+                    "msg": msg, "error": None if state != "error" else msg})
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -8,6 +8,8 @@ fidelity check compares a tenant against itself.
 The gate is reset_target's, reused rather than restated -- one place that
 knows which domain must be typed.
 """
+import inspect
+
 import webui
 
 
@@ -91,7 +93,10 @@ class TestTheRouteIsWired:
         src = open(os.path.join(root, "webui.py"), encoding="utf-8").read()
         block = src.split('if self.path == "/api/wipe_target":')[1][:900]
         assert "wipe_target_argv" in block
-        assert "job_admission.try_admit" in block, "two at once corrupt the run"
+        # launch_or_queue is what admits now -- and, when the box is full,
+        # queues instead of refusing. Two at once still cannot run.
+        assert "launch_or_queue" in block, "two at once corrupt the run"
+        assert "job_admission.try_admit" in inspect.getsource(webui.launch_or_queue)
         assert "_subscription_ok" in block
 
 

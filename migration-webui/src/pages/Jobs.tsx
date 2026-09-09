@@ -24,11 +24,13 @@ import {
 import type { CompletedJob } from '@/api/client'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
 import RunningJobCard from '@/components/RunningJobCard'
+import QueuePanel from '@/components/QueuePanel'
 import RunningJobDetail from '@/components/RunningJobDetail'
 import { useRunningJobs, jobKind } from '@/hooks/useRunningJobs'
 import type { RunningJob } from '@/hooks/useRunningJobs'
 import SeedRunDashboard from '@/components/SeedRunDashboard'
 import { groupRunsByDomain } from '@/utils/groupRuns'
+import { formatPct } from '@/utils/formatPct'
 
 const SEED_SCALES = ['tiny', 'small', 'medium', 'large', 'huge']
 // main.py migrate --services help text is the source of truth: "drive,
@@ -327,6 +329,12 @@ const Jobs: React.FC = () => {
         </Box>
       )}
 
+      {/* Below Running Now on purpose: the queue only matters once the
+          box is busy, and that is exactly when Running Now is non-empty. */}
+      <Box sx={{ mb: 3 }} data-testid="job-queue">
+        <QueuePanel />
+      </Box>
+
       {sides === null && (
         <Box sx={{ display: 'flex', justifyContent: 'center', py: 6 }}>
           <CircularProgress size={28} />
@@ -525,7 +533,7 @@ const SideJobCard: React.FC<{
             </Stack>
             {active ? (
               <Typography variant="caption" color="text.secondary">
-                {active.label}{typeof active.pct === 'number' && ` — ${active.pct}%`}
+                {active.label}{typeof active.pct === 'number' && ` — ${formatPct(active.pct)}`}
               </Typography>
             ) : (
               <Typography variant="caption" color="text.secondary">
@@ -676,7 +684,11 @@ const SeedPanel: React.FC<{ domain: string; onStarted: () => void }> = ({ domain
     try {
       const r = await runSeed(domain, scale, createUsers, false, { groups })
       if (!r.ok) throw new Error(r.error || 'seed failed')
-      setDone('Seed started -- see "Seed source tenant" below for live output.')
+      // A queued run is accepted, not started -- saying "started" and then
+      // showing no output is the confusing half of the old behaviour.
+      setDone(r.queued
+        ? (r.msg || 'The box is busy — this seed is queued and will start on its own.')
+        : 'Seed started -- see "Seed source tenant" below for live output.')
       setAsk(false)
       onStarted()
     } catch (e: any) {

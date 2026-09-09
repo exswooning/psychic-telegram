@@ -1257,7 +1257,11 @@ class TestSeedProgressParsing:
         lines = ["Seeding 3 users in x.com at scale small",
                 "  [a@x.com] starting (Eng, P1)",
                 "  [a@x.com] done in 1.0s: 1 files"]
-        assert webui._seed_progress_pct(lines) == round(1 / 3 * 100)
+        # One of three attempted. The exact rounding is incidental --
+        # _pct keeps two decimals now, so the first finished user of
+        # two hundred is 0.5% rather than a 0% that reads as nothing
+        # having happened.
+        assert webui._seed_progress_pct(lines) == webui._pct(1, 3)
 
     def test_a_per_label_failure_line_is_not_mistaken_for_a_user_failure(self):
         """"! label Archive: HTTP 400 ..." must not match the FAILED-user

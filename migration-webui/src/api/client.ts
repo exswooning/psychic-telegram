@@ -91,7 +91,7 @@ export async function fetchActions(): Promise<Record<string, ActionSpec>> {
 export async function runAction(
   name: string,
   confirm?: string
-): Promise<{ ok: boolean; error: string | null }> {
+): Promise<{ ok: boolean; error: string | null; queued?: boolean; msg?: string }> {
   const res = await fetch('/api/run', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -583,6 +583,55 @@ export async function diagnoseScopes(
 export interface SeedResult {
   ok: boolean
   error?: string
+  /** True when the box was full and the run was put in line instead. Still
+   *  `ok` -- the request was accepted, it just has not begun. The old
+   *  behaviour was a 503 with `ok: false`, which told a tenant their work
+   *  had been thrown away when in fact nobody's had. */
+  queued?: boolean
+  /** What to tell the operator, for either outcome. */
+  msg?: string
+}
+
+/** One heavy job: running now, waiting, or finished waiting. */
+export interface QueueEntry {
+  id?: number
+  jobName: string
+  status?: string
+  requestedBy?: string
+  position?: number
+  queuedAt?: string
+  startedAt?: string
+  finishedAt?: string
+  detail?: string
+  /** Whether this row belongs to the signed-in account. Other accounts'
+   *  rows are shown as names and positions only -- "you are third" is
+   *  meaningless if the two ahead of you are invisible. */
+  mine?: boolean
+}
+
+export interface QueueSnapshot {
+  capacity: number
+  running: QueueEntry[]
+  waiting: QueueEntry[]
+  recent: QueueEntry[]
+}
+
+/** Polling this also nudges the dispatcher, which is deliberate: a slot
+ *  freed by the OTHER server process (api_server.py's migrate) has no
+ *  in-process hook to fire, so without a poll the queue would look stuck
+ *  until somebody happened to run a webui job. */
+export function fetchQueue(): Promise<QueueSnapshot> {
+  return getJSON<QueueSnapshot>('/api/queue')
+}
+
+export async function cancelQueued(id: number): Promise<SeedResult> {
+  const res = await fetch('/api/queue/cancel', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ id }),
+  })
+  return res.json()
 }
 
 /** Everything optional about a seed run.
@@ -653,7 +702,7 @@ export async function runSeed(
  */
 export async function runResetTarget(
   confirmDomain: string
-): Promise<{ ok: boolean; error?: string }> {
+): Promise<SeedResult> {
   const res = await fetch('/api/reset_target', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -670,7 +719,7 @@ export async function runResetTarget(
  */
 export async function runWipeSource(
   confirmDomain: string, accountId?: string
-): Promise<{ ok: boolean; error?: string }> {
+): Promise<SeedResult> {
   const res = await fetch('/api/wipe_source', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -688,7 +737,7 @@ export async function runWipeSource(
  */
 export async function runWipeTarget(
   confirmDomain: string, accountId?: string
-): Promise<{ ok: boolean; error?: string }> {
+): Promise<SeedResult> {
   const res = await fetch('/api/wipe_target', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -703,7 +752,7 @@ export async function runWipeTarget(
  *  tenant's files were actually wiped). */
 export async function runResetDriveLedger(
   confirmDomain: string, services?: string, accountId?: string
-): Promise<{ ok: boolean; error?: string }> {
+): Promise<SeedResult> {
   const res = await fetch('/api/reset_drive_ledger', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

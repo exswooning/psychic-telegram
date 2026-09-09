@@ -106,3 +106,33 @@ class TestTheEndpointGuardsIt:
 
     def test_the_child_is_not_told_to_resolve_an_account(self):
         assert '"--account-id"' not in self._block()
+
+
+class TestTheChatStepCanActuallyReachTheConsole:
+    """The Chat app page is configured AS the Workspace admin, and a
+    Workspace super admin holds nothing on a Cloud project. full_setup
+    grants roles/editor for exactly this reason; repair did not, so a
+    tenant whose provision skipped the grant failed here every time -- and
+    reported it as a missing form field rather than a missing permission."""
+
+    def test_repair_grants_project_access_before_configuring_chat(self):
+        import inspect
+
+        import repair_console_setup as rcs
+
+        src = inspect.getsource(rcs.repair)
+        grant = src.index("grant_admin_console_access")
+        chat = src.index("--configure-chat")
+        assert grant < chat, "the grant must happen before the console step"
+
+    def test_it_uses_the_same_grant_provisioning_does(self):
+        """Not a second copy of the gcloud invocation -- one of them would
+        drift, and the one that drifts is the one nobody runs daily."""
+        import inspect
+
+        import provision_gcp
+        import repair_console_setup as rcs
+
+        assert "provision_gcp.grant_admin_console_access" in \
+            inspect.getsource(rcs.repair)
+        assert callable(provision_gcp.grant_admin_console_access)

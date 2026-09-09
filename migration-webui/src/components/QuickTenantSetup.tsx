@@ -694,8 +694,10 @@ const QuickTenantSetup: React.FC<{
         const r = await runSeed(domain.trim(), seedScale, createUsers, false,
                                 { users: seedUsers.trim() || undefined })
         if (!r.ok) throw new Error(r.error || 'seed failed')
-        setJobActive(true)
-        setPostDone('seed started — live output below')
+        setJobActive(!r.queued)
+        setPostDone(r.queued
+          ? (r.msg || 'the box is busy — queued, it will start on its own')
+          : 'seed started — live output below')
       } else if (postAction === 'maxUsers') {
         // createUsers forced true, allUsers left undefined -- seed_sandbox.py
         // requires --create-users alongside --create-until-full and refuses
@@ -704,8 +706,10 @@ const QuickTenantSetup: React.FC<{
         const r = await runSeed(domain.trim(), seedScale, true, false,
                                 { createUntilFull: true })
         if (!r.ok) throw new Error(r.error || 'could not add users')
-        setJobActive(true)
-        setPostDone('adding users until full — live output below')
+        setJobActive(!r.queued)
+        setPostDone(r.queued
+          ? (r.msg || 'the box is busy — queued, it will start on its own')
+          : 'adding users until full — live output below')
       } else if (postAction === 'mapUsers') {
         // The Reason Code is carried into the provisioning call the chain
         // fires next, so the account creation is audited under the same

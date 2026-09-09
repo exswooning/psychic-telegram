@@ -74,11 +74,28 @@ class TestTheChildIsPointedAtTheAccount:
 
 
 class TestTheRouteUsesIt:
-    def _block(self):
+    def _src(self):
         import os
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        src = open(os.path.join(root, "webui.py"), encoding="utf-8").read()
-        return src.split('if self.path != "/api/run":')[1]
+        return open(os.path.join(root, "webui.py"), encoding="utf-8").read()
+
+    def _block(self):
+        return self._src().split('if self.path != "/api/run":')[1]
+
+    def _launcher(self):
+        """launch_or_queue's own body.
+
+        The route used to inline admit-then-start; it now hands both to
+        launch_or_queue, which every heavy endpoint shares. The invariants
+        below did not change -- the code that upholds them moved, so these
+        follow it rather than passing vacuously on a block that no longer
+        contains the call.
+        """
+        import inspect
+
+        import webui
+
+        return inspect.getsource(webui.launch_or_queue)
 
     def test_it_resolves_an_account(self):
         b = self._block()
@@ -94,15 +111,15 @@ class TestTheRouteUsesIt:
 
     def test_it_uses_that_accounts_job_not_the_global_one(self):
         # The global JOB is why the transcript landed in logs/jobs/_none/.
-        b = self._block()
-        assert "get_job(account_id).start" in b
-        assert "JOB.start" not in b
+        assert "launch_or_queue(\n            account_id," in self._block()
+        assert "get_job(account_id).start" in self._launcher()
+        assert "JOB.start(" not in self._block()
 
     def test_it_admits_the_job(self):
         # Two migrations at once on one tenant corrupt the run.
-        b = self._block()
-        assert "job_admission.try_admit" in b
-        assert "job_admission.release" in b
+        launcher = self._launcher()
+        assert "job_admission.try_admit" in launcher
+        assert "job_admission.release" in launcher
 
     def test_it_checks_the_subscription(self):
         assert "_subscription_ok" in self._block()

@@ -25,6 +25,7 @@ const JobRunner: React.FC<{ name: string; spec: ActionSpec; onDone?: () => void 
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [typed, setTyped] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const [queued, setQueued] = useState<string | null>(null)
   const sinceRef = useRef(0)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -51,6 +52,7 @@ const JobRunner: React.FC<{ name: string; spec: ActionSpec; onDone?: () => void 
 
   const start = useCallback(async (confirm?: string) => {
     setError(null)
+    setQueued(null)
     setLines([])
     sinceRef.current = 0
     const res = await runAction(name, confirm)
@@ -58,6 +60,13 @@ const JobRunner: React.FC<{ name: string; spec: ActionSpec; onDone?: () => void 
       setError(res.error || 'could not start')
       return
     }
+    if (res.queued) {
+      // Accepted but not started: polling /api/job now would stream some
+      // OTHER job's output as if it were this one's.
+      setQueued(res.msg || 'the box is busy — queued, it will start on its own')
+      return
+    }
+    setQueued(null)
     setRunning(true)
     pollRef.current = setInterval(poll, 1000)
     poll()
@@ -107,6 +116,12 @@ const JobRunner: React.FC<{ name: string; spec: ActionSpec; onDone?: () => void 
       {error && (
         <Typography variant="caption" color="error" sx={{ display: 'block', mt: 0.5 }}>
           {error}
+        </Typography>
+      )}
+      {queued && (
+        <Typography variant="caption" color="info.main"
+                    sx={{ display: 'block', mt: 0.5 }}>
+          {queued}
         </Typography>
       )}
       {lines.length > 0 && (

@@ -20,6 +20,7 @@ import { Close as CloseIcon } from '@mui/icons-material'
 import type { RunningJob } from '@/hooks/useRunningJobs'
 import { describeElapsed } from '@/hooks/useRunningJobs'
 import SeedRunDashboard from '@/components/SeedRunDashboard'
+import { formatPct } from '@/utils/formatPct'
 
 const Stat: React.FC<{ label: string; value: string; hint?: string }> = ({
   label, value, hint,
@@ -75,7 +76,7 @@ export const RunningJobDetail: React.FC<{
               nothing at all, every one of its 76 attempts a failure. A bar
               that reads as a success rate is the misreading to prevent. */}
           <Stat label="Progress"
-                value={typeof job.pct === 'number' ? `${job.pct}%` : '--'}
+                value={typeof job.pct === 'number' ? formatPct(job.pct) : '--'}
                 hint={typeof job.pct === 'number' ? 'of the work attempted'
                   : 'not reported'} />
           <Stat label="ETA (projected)"

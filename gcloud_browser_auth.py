@@ -52,6 +52,8 @@ import sys
 import tempfile
 import time
 
+import signin_challenge
+
 
 def log(msg: str) -> None:
     # stderr, not stdout -- see dwd_helper.log()'s comment: full_setup.py
@@ -237,6 +239,7 @@ def _drive_browser(proc, url: str, email: str, password: str, timeout: int) -> N
         page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
         typed_email = typed_pw = sent_code = False
+        challenge = signin_challenge.Watcher(log)
         deadline = time.time() + timeout
         while time.time() < deadline and proc.poll() is None:
             for pg in list(browser.contexts[0].pages):
@@ -275,9 +278,13 @@ def _drive_browser(proc, url: str, email: str, password: str, timeout: int) -> N
                                     pass
                 except Exception:      # noqa: BLE001 - keep polling
                     continue
+            challenge.check(browser.contexts[0].pages)
             time.sleep(1)
 
         if proc.poll() is None:
+            stuck = challenge.check(browser.contexts[0].pages)
+            if stuck:
+                log(f"  stalled ON A 2-STEP PROMPT, unanswered: {stuck}")
             log("  stalled -- likely 2FA/captcha. Saving a screenshot for "
                 "diagnosis; connect over VNC (see connect_vps.sh) to finish "
                 "signing in by hand, then re-run.")

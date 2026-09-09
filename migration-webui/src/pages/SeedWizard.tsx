@@ -354,6 +354,7 @@ const SeedStep: React.FC = () => {
   const [sharedDrives, setSharedDrives] = useState('')
   const [users, setUsers] = useState('')
   const [err, setErr] = useState<string | null>(null)
+  const [queued, setQueued] = useState<string | null>(null)
   const [jobActive, setJobActive] = useState(false)
   const [jobRunning, setJobRunning] = useState(false)
 
@@ -364,8 +365,11 @@ const SeedStep: React.FC = () => {
       allUsers, createUntilFull, workers, localpartPrefix: prefix,
       sharedDrives, users,
     })
-    if (r.ok) setJobActive(true)
-    else setErr(r.error || 'could not start')
+    // A queued run has no live output to watch yet -- turning JobProgress
+    // on for one shows an empty transcript that reads as a stalled job.
+    if (r.ok && !r.queued) setJobActive(true)
+    setQueued(r.ok && r.queued ? (r.msg || 'queued — it will start on its own') : null)
+    if (!r.ok) setErr(r.error || 'could not start')
   }
 
   return (
@@ -501,6 +505,7 @@ const SeedStep: React.FC = () => {
         </Typography>
       )}
       {err && <Alert severity="error" sx={{ mt: 1 }}>{err}</Alert>}
+      {queued && <Alert severity="info" sx={{ mt: 1 }}>{queued}</Alert>}
       <JobProgress active={jobActive} expectedName="seed" onRunningChange={setJobRunning} />
     </Box>
   )
@@ -521,6 +526,7 @@ const SeedStep: React.FC = () => {
 const ResetTargetStep: React.FC = () => {
   const [confirmDomain, setConfirmDomain] = useState('')
   const [err, setErr] = useState<string | null>(null)
+  const [queued, setQueued] = useState<string | null>(null)
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [jobActive, setJobActive] = useState(false)
   const [jobRunning, setJobRunning] = useState(false)
@@ -530,8 +536,11 @@ const ResetTargetStep: React.FC = () => {
     setErr(null)
     setJobActive(false)
     const r = await runResetTarget(confirmDomain)
-    if (r.ok) setJobActive(true)
-    else setErr(r.error || 'could not start')
+    // A queued run has no live output to watch yet -- turning JobProgress
+    // on for one shows an empty transcript that reads as a stalled job.
+    if (r.ok && !r.queued) setJobActive(true)
+    setQueued(r.ok && r.queued ? (r.msg || 'queued — it will start on its own') : null)
+    if (!r.ok) setErr(r.error || 'could not start')
   }
 
   return (
@@ -559,6 +568,7 @@ const ResetTargetStep: React.FC = () => {
         </Grid>
       </Grid>
       {err && <Alert severity="error" sx={{ mt: 1 }}>{err}</Alert>}
+      {queued && <Alert severity="info" sx={{ mt: 1 }}>{queued}</Alert>}
       <JobProgress active={jobActive} expectedName="reset target" onRunningChange={setJobRunning} />
 
       <Dialog open={confirmOpen} onClose={() => setConfirmOpen(false)}>

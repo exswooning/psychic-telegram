@@ -128,6 +128,27 @@ def repair(side: str, do_grant: bool, do_chat: bool,
             add(f"configure Chat app ({side})", False,
                 "no project or admin on file for this tenant")
         else:
+            # Before the console step, not after: being a Workspace super
+            # admin confers nothing on a Cloud project, and full_setup
+            # grants roles/editor for exactly this reason while repair did
+            # not. A tenant whose provision skipped that grant therefore
+            # failed here every single time, and the failure arrived as
+            # "could not find the app name field -- console may have
+            # changed" -- a selector report for a page the account was
+            # never allowed to see. Confirmed on wsmig-src-96030:
+            #   You need additional access to the project: wsmig-src-96030
+            #   resourcemanager.projects.get (Missing)
+            # Non-fatal, exactly as in provision: an already-granted
+            # project reports ok, and an identity that cannot grant reports
+            # why, which is strictly more than the console page said.
+            import provision_gcp
+
+            steps: list = []
+            provision_gcp.grant_admin_console_access(
+                project, admin, steps, dry_run=False, env=env)
+            for st_ in steps:
+                add(f"project access for {admin} ({side})",
+                    st_.status == "ok", st_.detail)
             ok, detail = _run([PY, "gcloud_browser_auth.py",
                                "--configure-chat", "--project", project,
                                "--admin", admin], env)

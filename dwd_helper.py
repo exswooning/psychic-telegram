@@ -38,6 +38,8 @@ import sys
 import time
 from pathlib import Path
 
+import signin_challenge
+
 
 def log(msg: str) -> None:
     # stderr, not stdout: full_setup.py --json prints its one and only
@@ -341,6 +343,7 @@ def _open_dwd_console(p, headful: bool, timeout: int, url: str = DWD_URL,
     deadline = time.time() + timeout
     last_state = ""
     last_title = ""
+    challenge = signin_challenge.Watcher(log)
     # Optional unattended sign-in.
     #
     # Credentials come from the environment, never from argv: a command
@@ -424,6 +427,9 @@ def _open_dwd_console(p, headful: bool, timeout: int, url: str = DWD_URL,
             if t and "Sign in" in t and t != last_title:
                 log(f"  [title] {t[:80]}")
                 last_title = t
+        # A 2-Step prompt is rendered to an Xvfb display nobody is looking
+        # at. Reading it into the transcript is what puts it on the screen.
+        challenge.check(browser.contexts[0].pages)
         if admin_page is not None:
             page = admin_page
             if not page.url.startswith(ready_prefix):
@@ -441,6 +447,10 @@ def _open_dwd_console(p, headful: bool, timeout: int, url: str = DWD_URL,
                 break
         time.sleep(2)
     else:
+        stuck = signin_challenge.Watcher(lambda _m: None).check(
+            browser.contexts[0].pages)
+        if stuck:
+            log(f"timed out ON A 2-STEP PROMPT that was never answered: {stuck}")
         log(f"timed out waiting for {ready_text!r} on {page.url}. "
             "Re-run when signed in, "
             "or finish this by hand: "
