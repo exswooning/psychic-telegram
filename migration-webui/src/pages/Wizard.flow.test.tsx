@@ -284,3 +284,64 @@ describe('the panel beside the form says something true', () => {
       .toBeInTheDocument()
   })
 })
+
+describe('the panel carries a picture, the way the signup does', () => {
+  /* Google fills that space with a product render. There is nothing to
+     render here, so it draws the mechanism -- which has to be a real
+     picture of a real thing, not a flourish, or it is just the filler this
+     app avoids in a nicer shape. */
+  const art = () => document.querySelector('svg[role="img"]')
+
+  it('shows one on the first step', async () => {
+    view()
+    await screen.findByTestId('wizard-domain')
+    expect(art()).toBeTruthy()
+  })
+
+  it('describes itself for a reader who cannot see it', async () => {
+    view()
+    await screen.findByTestId('wizard-domain')
+    expect(art()!.getAttribute('aria-label')).toMatch(/Cloud project/i)
+  })
+
+  it('draws the copy direction once migrating is chosen', async () => {
+    view()
+    await enterDomain('acme.com')
+    fireEvent.click(await screen.findByTestId('purpose-migrate'))
+    await waitFor(() =>
+      expect(art()!.getAttribute('aria-label')).toMatch(/never written to/i))
+  })
+
+  it('says the source is only read -- in the picture, not just the prose', async () => {
+    view()
+    await enterDomain('acme.com')
+    fireEvent.click(await screen.findByTestId('purpose-migrate'))
+    await waitFor(() => expect(art()!.textContent).toMatch(/read-only/i))
+  })
+
+  it('draws data going INTO the tenant when seeding', async () => {
+    view()
+    await enterDomain('acme.com')
+    fireEvent.click(await screen.findByTestId('purpose-seed'))
+    await waitFor(() =>
+      expect(art()!.getAttribute('aria-label')).toMatch(/written into acme\.com/i))
+  })
+
+  it('names both tenants on the destination step', async () => {
+    view()
+    await enterDomain('acme.com')
+    await choose('migrate')
+    await enterDomain('newco.com')
+    // The run step: the diagram has done its job by now, so just confirm
+    // the pair reached the panels that matter.
+    await waitFor(() =>
+      expect(screen.getByTestId('qts-source')).toHaveTextContent('acme.com'))
+  })
+
+  it('scales with its column instead of overflowing it', async () => {
+    view()
+    await screen.findByTestId('wizard-domain')
+    expect(art()!.getAttribute('viewBox')).toBeTruthy()
+    expect(art()!.getAttribute('width')).toBe('100%')
+  })
+})

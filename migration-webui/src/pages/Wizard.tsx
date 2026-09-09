@@ -19,6 +19,8 @@ import { fetchMe } from '@/api/controlPlane'
 import JobRunner from '@/components/JobRunner'
 import SeedWizard from '@/pages/SeedWizard'
 import QuickTenantSetup from '@/components/QuickTenantSetup'
+import WizardArt from '@/components/WizardArt'
+import type { ArtKind } from '@/components/WizardArt'
 
 /**
  * One doorway for both "I need a real migration set up" and "I need a test
@@ -117,9 +119,12 @@ const WizardShell: React.FC<{
 
 /** The right-hand panel's content: a real sequence, numbered because it IS
  *  ordered, not because numbers look tidy. */
-const WhatHappens: React.FC<{ title: string; steps: string[]; note?: string }> =
-  ({ title, steps, note }) => (
+const WhatHappens: React.FC<{
+  title: string; steps: string[]; note?: string
+  art: ArtKind; source?: string; target?: string
+}> = ({ title, steps, note, art, source, target }) => (
     <>
+      <WizardArt kind={art} source={source} target={target} />
       <Typography variant="subtitle2" color="text.secondary"
                   sx={{ textTransform: 'uppercase', letterSpacing: '0.8px', mb: 2 }}>
         {title}
@@ -219,6 +224,7 @@ const Wizard: React.FC = () => {
         sub="Which domain are you setting up? Everything after this is about this tenant."
         label="Domain" initial={domain}
         aside={<WhatHappens
+          art="setup" source={domain || undefined}
           title="What this sets up"
           steps={[
             'A throwaway Google Cloud project for this tenant, with the APIs it needs enabled.',
@@ -248,6 +254,8 @@ const Wizard: React.FC = () => {
         sub="What is this domain for?"
         onBack={() => setStep('domain')}
         aside={<WhatHappens
+          art={picked === 'migrate' ? 'migrate' : picked === 'seed' ? 'seed' : 'setup'}
+          source={domain}
           title={picked === 'migrate' ? 'A real migration'
                  : picked === 'seed' ? 'A rehearsal' : 'The two paths'}
           steps={picked === 'migrate' ? [
@@ -310,6 +318,7 @@ const Wizard: React.FC = () => {
         sub={`${domain} is the source — it is read, never written. Which tenant should its data land in?`}
         label="Destination domain" initial={otherDomain} taken={domain}
         aside={<WhatHappens
+          art="migrate" source={domain} target={otherDomain || undefined}
           title="After this"
           steps={[
             `Both ${domain} and the destination get a Cloud project, a service account and a delegation grant.`,
