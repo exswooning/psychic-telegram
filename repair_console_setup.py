@@ -78,11 +78,19 @@ def repair(side: str, do_grant: bool, do_chat: bool,
         print(f"  {'ok  ' if ok else 'FAIL'} {name}"
               + (f"  {detail}" if detail else ""), flush=True)
 
+    import admin_secrets
+
+    # Per side. The credential file used to hold one pair, and it was the
+    # TARGET admin's -- so a source-side repair signed in with the target
+    # admin's password and sat on Google's sign-in form until it timed out,
+    # reporting "likely 2FA/captcha" about a password that was simply for a
+    # different account. Confirmed live on this deployment.
     env = dict(os.environ)
-    if not env.get("DWD_PASSWORD"):
-        return {"ok": False, "phases": [],
-                "error": "DWD_PASSWORD is not set -- both steps sign in to a "
-                         "Google console and neither can prompt"}
+    why = admin_secrets.missing(side, st)
+    if why:
+        return {"ok": False, "phases": [], "error": why}
+    env["DWD_PASSWORD"] = admin_secrets.password_for(side)
+    env["DWD_EMAIL"] = admin_secrets.email_for(side, st)
 
     try:
         with open(key, encoding="utf-8") as fh:

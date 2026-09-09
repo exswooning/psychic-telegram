@@ -103,11 +103,34 @@ class TestTheFormFillerUsesIt:
         assert "_open_chat_configuration_tab" in src
         assert src.index("_open_chat_configuration_tab") < src.index("name_box = None")
 
-    def test_the_new_failure_names_a_cause_worth_acting_on(self):
+    def test_the_failure_names_what_was_not_found(self):
+        """It used to blame a missing Configuration tab. A saved page from a
+        live run showed the tab was there all along, with the form behind an
+        add-on checkbox -- so an operator trusting that message went and
+        confirmed the API was enabled, which it was, and learned nothing.
+
+        The message must name the thing actually absent (the app name field)
+        and point at the evidence, not guess at a cause."""
         import inspect
         src = inspect.getsource(g._fill_chat_app_form)
-        assert "no Configuration tab" in src
-        assert "may not be enabled" in src
+        assert "app name field" in src
+        assert "/tmp" in src, "must point at the saved screenshot and page text"
+
+    def test_the_add_on_checkbox_is_cleared_before_looking(self):
+        """The console ships that checkbox SET, and the classic Chat app
+        fields do not render while it is. Probing for the field first is
+        what produced a whole run of "no Configuration tab"."""
+        import inspect
+        src = inspect.getsource(g._open_chat_configuration_tab)
+        assert "_clear_workspace_addon_checkbox" in src
+        assert src.index("_clear_workspace_addon_checkbox") < src.index("_CHAT_NAME_SEL")
+
+    def test_clearing_it_is_announced_as_irreversible(self):
+        """The console says the checkbox cannot be re-ticked. Automation
+        that walks through a one-way door should say so in the transcript."""
+        import inspect
+        src = inspect.getsource(g._clear_workspace_addon_checkbox)
+        assert "IRREVERSIBLE" in src
 
 
 class TestTheConsoleOpenerIsNotHardcodedToDWD:

@@ -481,7 +481,51 @@ def _try_accept_tos_at(page, url: str, timeout: int) -> str:
 # by hand -- exactly the "no step that needs a human to know which console
 # to open" tax this whole file exists to remove.
 _CHAT_NAME_SEL = ('input[aria-label*="app name" i]',
-                  'input[aria-label*="Name" i]')
+                  'input[aria-label*="Name" i]',
+                  # Observed live on wsmig-src-20736: the console labels the
+                  # section "Application info" and the field by placeholder
+                  # rather than aria-label on the current rollout.
+                  'input[placeholder*="name" i]',
+                  'input[formcontrolname*="name" i]')
+
+# The console now offers to build the Chat app as a Workspace add-on, and
+# that checkbox is CHECKED by default -- which hides the classic app fields
+# this step exists to fill. Confirmed from a saved page: the Configuration
+# tab was present all along, with "Build this Chat app as a Workspace
+# add-on" above an "Application info" section, and the step reported "no
+# Configuration tab" because it could not find a name field that was simply
+# not rendered yet.
+#
+# Clearing it is a ONE-WAY DOOR -- the console says so on the page itself.
+# Acceptable here only because these are throwaway per-tenant projects this
+# tool creates and deletes; it is logged loudly for the same reason.
+_CHAT_ADDON_LABEL = "Build this Chat app as a Workspace add-on"
+
+
+def _clear_workspace_addon_checkbox(page) -> bool:
+    """Uncheck the add-on option so the classic Chat app fields render.
+
+    Returns True if it cleared one. Best-effort: a console that no longer
+    shows this is fine, and so is one where it is already clear.
+    """
+    try:
+        box = page.locator(
+            f'label:has-text("{_CHAT_ADDON_LABEL}") input[type="checkbox"], '
+            f'input[type="checkbox"][aria-label*="add-on" i], '
+            f'mat-checkbox:has-text("{_CHAT_ADDON_LABEL}") input')
+        if box.count() == 0 or not box.first.is_visible():
+            return False
+        if not box.first.is_checked():
+            return False
+        log("  clearing 'build as a Workspace add-on' -- this is IRREVERSIBLE "
+            "for this project, and the classic Chat app fields do not render "
+            "while it is set")
+        box.first.uncheck()
+        page.wait_for_timeout(2500)
+        return True
+    except Exception as exc:      # noqa: BLE001 - the page may not have it
+        log(f"  (add-on checkbox: {str(exc)[:90]})")
+        return False
 _CHAT_STATUS_LABELS = ("LIVE", "Live", "ON", "On")
 _CHAT_SAVE_LABELS = ("SAVE", "Save")
 
@@ -584,6 +628,10 @@ def _open_chat_configuration_tab(page, attempts: int = 3) -> bool:
     which of those happened.
     """
     for _ in range(attempts):
+        # Before probing for the field: it does not exist while the add-on
+        # checkbox is set, and this step spent a live run reporting the tab
+        # missing when the tab was there and the field was not.
+        _clear_workspace_addon_checkbox(page)
         # Already there? The name field is the only proof that matters.
         for sel in _CHAT_NAME_SEL:
             loc = page.locator(sel)
@@ -635,10 +683,17 @@ def _fill_chat_app_form(page, project: str, timeout: int) -> tuple[bool, str]:
     # for a redesign instead of a missing click, and Chat was never
     # configured on any tenant this tool set up.
     if not _open_chat_configuration_tab(page):
-        _save_chat_diagnostics(page, project, "no-configuration-tab")
-        return False, ("the Chat API page has no Configuration tab -- the "
-                       "API may not be enabled on this project yet, or this "
-                       "account cannot administer it")
+        _save_chat_diagnostics(page, project, "no-app-name-field")
+        # Say what was actually not found. The old wording blamed a missing
+        # Configuration tab, and a saved page proved the tab was there --
+        # with the form behind an add-on checkbox. An operator who trusts
+        # that message goes and checks whether the API is enabled, which it
+        # is, and learns nothing.
+        return False, ("reached the Chat API Configuration page but found no "
+                       "app name field -- the console may have changed, or "
+                       "this account may not be able to administer the "
+                       "project (see the saved screenshot and page text in "
+                       "/tmp)")
 
     name_box = None
     for sel in _CHAT_NAME_SEL:
