@@ -144,3 +144,80 @@ class TestADefaultSeedIncludesThem:
         src = inspect.getsource(webui.seed_argv)
         assert "the caller simply did not pass the field" in src \
             or "did not pass the field" in src
+
+
+class TestEveryUserGetsMembership:
+    """It added one member per drive-level role and stopped -- five, on a
+    200-user tenant. A migration's membership restore was therefore
+    exercised against 5 rows when the real case is hundreds, and the
+    failures worth catching (an unmapped identity, a target account that
+    does not exist yet) only appear at size."""
+
+    def _seed(self, monkeypatch, members, existing_members=()):
+        d = FakeDrives([{"id": "d1", "name": "SEEDED-SD-1"}])
+        added: list[tuple] = []
+
+        class D(FakeDrives):
+            def permissions(self):
+                return self
+
+            def create(self, **kw):
+                body = kw.get("body") or {}
+                if "emailAddress" in body:
+                    # fileId too: seed() also grants FILE-level ACLs through
+                    # this same call, and counting those as drive membership
+                    # made 200 members look like 202.
+                    added.append((body["emailAddress"], body["role"],
+                                  kw.get("fileId")))
+                    self._resp = {"id": "p"}
+                    return self
+                return FakeDrives.create(self, **kw)
+
+            def list(self, **kw):
+                if "fileId" in kw:
+                    self._resp = {"permissions": [
+                        {"emailAddress": m} for m in existing_members]}
+                    return self
+                return FakeDrives.list(self, **kw)
+
+        dd = D([{"id": "d1", "name": "SEEDED-SD-1"}])
+        monkeypatch.setattr(ssd, "_drive_client", lambda *a, **k: dd)
+        monkeypatch.setattr(ssd, "_retry", lambda s: retry)
+        ssd.seed(object(), "admin@x.test", members, n_drives=1)
+        # Drive-level membership only.
+        return [(e, r) for e, r, fid in added if fid == "d1"]
+
+    def test_all_of_them_are_added(self, monkeypatch):
+        members = [f"u{i}@x.test" for i in range(200)]
+        added = self._seed(monkeypatch, members)
+        assert len(added) == 200, f"only {len(added)} of 200 got membership"
+
+    def test_roles_cycle_rather_than_running_out(self, monkeypatch):
+        members = [f"u{i}@x.test" for i in range(12)]
+        added = self._seed(monkeypatch, members)
+        roles = [r for _e, r in added]
+        assert set(roles) == set(ssd.ROLES)
+        assert roles[:len(ssd.ROLES)] == list(ssd.ROLES)
+
+    def test_the_organizer_is_still_first(self, monkeypatch):
+        """shared_drives.py restores organizer-first because a drive whose
+        organizer never landed cannot be administered afterwards."""
+        added = self._seed(monkeypatch, [f"u{i}@x.test" for i in range(5)])
+        assert added[0][1] == "organizer"
+
+    def test_existing_members_are_not_re_added(self, monkeypatch):
+        """create on a member already present is an error -- at 200 members
+        that turns a harmless second run into 200 logged failures."""
+        members = [f"u{i}@x.test" for i in range(5)]
+        added = self._seed(monkeypatch, members,
+                           existing_members=["u0@x.test", "u1@x.test"])
+        assert [e for e, _r in added] == ["u2@x.test", "u3@x.test", "u4@x.test"]
+
+    def test_the_seeder_passes_everyone(self):
+        """The cap used to live in the caller, so fixing only seed() would
+        have changed nothing."""
+        import inspect
+
+        src = inspect.getsource(ss.main)
+        assert "members = [e[\"email\"] for e in entries]" in src
+        assert "[:len(seed_shared_drives.ROLES)]" not in src

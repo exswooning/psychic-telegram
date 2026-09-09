@@ -2896,9 +2896,18 @@ def main(argv: list[str] | None = None) -> int:
     sd_made: dict = {}
     if args.shared_drives > 0:
         import seed_shared_drives
-        members = [e["email"] for e in entries][:len(seed_shared_drives.ROLES)]
-        print(f"\nSeeding {args.shared_drives} shared drive(s), "
-              f"members: {', '.join(members)}")
+        # Every seeded user, not the first five.
+        #
+        # This passed entries[:len(ROLES)] -- one member per drive-level
+        # role -- so a 200-user tenant produced shared drives with five
+        # members. A migration's membership restore was therefore exercised
+        # against 5 rows when the real case is hundreds, and per-member
+        # failures (unmapped identity, missing target account) could not
+        # show up at all at that size.
+        members = [e["email"] for e in entries]
+        print(f"\nSeeding {args.shared_drives} shared drive(s) across "
+              f"{len(members)} member(s), roles cycling through "
+              f"{', '.join(seed_shared_drives.ROLES)}")
         try:
             sd_made = seed_shared_drives.seed(
                 settings, settings.source_admin, members, args.shared_drives)

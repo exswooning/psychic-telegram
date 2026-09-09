@@ -128,6 +128,33 @@ def existing_by_name(drive, retry) -> dict:
     return out
 
 
+def _existing_members(drive, retry, drive_id: str) -> set:
+    """Who is already on this drive, lowercased.
+
+    Re-running must top up, not re-add: permissions().create on a member
+    who is already there is an error, and at 200 members that turns a
+    harmless second run into 200 logged failures.
+    """
+    out: set = set()
+    token = None
+    try:
+        while True:
+            resp = retry(lambda t=token: drive.permissions().list(
+                fileId=drive_id, supportsAllDrives=True,
+                useDomainAdminAccess=True, pageToken=t, pageSize=100,
+                fields="nextPageToken,permissions(emailAddress)").execute())()
+            for perm in resp.get("permissions", []):
+                addr = (perm.get("emailAddress") or "").lower()
+                if addr:
+                    out.add(addr)
+            token = resp.get("nextPageToken")
+            if not token:
+                break
+    except Exception as exc:      # noqa: BLE001 - an empty set just re-adds
+        print(f"    ! could not list members ({str(exc)[:80]})")
+    return out
+
+
 def seed(settings: Settings, admin: str, members: list[str],
          n_drives: int = 2, files_per_folder: int = 4) -> dict:
     drive = _drive_client(settings, admin)
@@ -160,13 +187,25 @@ def seed(settings: Settings, admin: str, members: list[str],
             made["drives"].append({"id": did, "name": name})
             print(f"  created shared drive {name} ({did})")
 
-        # Members first, mirroring the order shared_drives.py restores them
-        # in: a drive whose organizer never landed is unmanageable.
-        for i, role in enumerate(ROLES):
-            if i >= len(members):
-                break
+        # Every member, with roles cycling -- not one member per role.
+        #
+        # It iterated ROLES and stopped, so a drive got five members however
+        # many users existed. A membership restore tested against 5 rows
+        # says nothing about the 200-row case, and the failures worth
+        # catching (an unmapped identity, a target account that does not
+        # exist yet) only appear at size.
+        #
+        # ROLES order is preserved for the first few, so the organizer is
+        # still created first: shared_drives.py restores organizer-first
+        # because a drive whose organizer never landed cannot be
+        # administered afterwards.
+        already = _existing_members(drive, retry, did)
+        for i, member in enumerate(members):
+            role = ROLES[i % len(ROLES)]
+            if member.lower() in already:
+                continue          # idempotent, like the drive itself
             try:
-                retry(lambda m=members[i], r=role: drive.permissions().create(
+                retry(lambda m=member, r=role: drive.permissions().create(
                     fileId=did, body={"type": "user", "role": r,
                                       "emailAddress": m},
                     supportsAllDrives=True, sendNotificationEmail=False,
