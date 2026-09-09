@@ -133,3 +133,45 @@ class TestTheWatcher:
         w.check([FakePage(PASSWORD_PAGE)])      # challenge gone
         w.check([FakePage(TAP_YES)])            # and back -- a retry
         assert sum("47" in ln for ln in lines) == 2
+
+
+class TestEverySignInLoopIsCovered:
+    """There are three of them. The watcher went into two, and the third --
+    the Chat app configuration -- was the one that then sat on 'entered the
+    password' for ninety seconds and reported 'likely 2FA/captcha' as a
+    guess, with the answer on the screen it was already holding."""
+
+    def _sources(self):
+        import inspect
+
+        import dwd_helper
+        import gcloud_browser_auth
+
+        return {
+            "dwd console": inspect.getsource(dwd_helper._open_dwd_console),
+            "gcloud auth": inspect.getsource(gcloud_browser_auth._drive_browser),
+            "chat app": inspect.getsource(gcloud_browser_auth.configure_chat_app),
+        }
+
+    def test_each_one_watches_while_it_waits(self):
+        """Specifically `challenge.check(` -- inside the polling loop.
+
+        Checking only once, after the timeout, is what the code already did
+        by saving a screenshot: it tells you afterwards, when the ninety
+        seconds are gone. The point is to say it WHILE the phone is
+        buzzing. An earlier version of this test asserted merely that the
+        word appeared somewhere in the function, and passed with the
+        in-loop watcher deleted.
+        """
+        missing = [name for name, src in self._sources().items()
+                   if "challenge.check(" not in src]
+        assert not missing, f"sign-in loops that never poll for 2-Step: {missing}"
+
+    def test_the_chat_timeout_reports_what_it_saw(self):
+        import inspect
+
+        import gcloud_browser_auth
+
+        src = inspect.getsource(gcloud_browser_auth.configure_chat_app)
+        assert "signin_challenge.from_page" in src
+        assert "2-Step prompt" in src

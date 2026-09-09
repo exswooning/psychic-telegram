@@ -524,6 +524,13 @@ def configure_chat_app(email: str, password: str, project: str,
         # dance as _drive_browser, targeting whichever page the redirect
         # lands the browser on rather than a fixed URL.
         typed_email = typed_pw = False
+        # The THIRD sign-in loop in this codebase, and the one that was
+        # missed when the 2-Step watcher went into the other two. Live, this
+        # sat on "entered the password" until it timed out and reported
+        # "likely 2FA/captcha" as a guess -- while the page it was looking
+        # at could have said which device was being asked, or what code to
+        # tap. Headless on Xvfb, that prompt is rendered to nobody.
+        challenge = signin_challenge.Watcher(log)
         deadline = time.time() + timeout
         while time.time() < deadline and "accounts.google.com" in page.url:
             if not typed_email and _fill_visible(page, _EMAIL_SEL, email):
@@ -536,11 +543,17 @@ def configure_chat_app(email: str, password: str, project: str,
                 page.wait_for_timeout(4000)
                 typed_pw = True
                 continue
+            challenge.check([page])
             page.wait_for_timeout(500)
 
         if "accounts.google.com" in page.url:
             _save_chat_diagnostics(page, project, "stalled-signin")
+            # Say WHICH, when the page said. "likely 2FA/captcha" is a guess
+            # the operator then has to go and check by hand.
+            stuck = signin_challenge.from_page(page)
             browser.close()
+            if stuck:
+                return False, f"sign-in stopped at a 2-Step prompt: {stuck}"
             return False, "sign-in did not complete (likely 2FA/captcha)"
 
         page.wait_for_timeout(3000)  # client-rendered config form needs a beat
