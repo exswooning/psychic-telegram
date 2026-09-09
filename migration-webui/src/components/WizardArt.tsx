@@ -35,7 +35,10 @@ export const WizardArt: React.FC<{ kind: ArtKind }> = ({ kind }) => {
   const t = useTheme()
   const dark = t.palette.mode === 'dark'
   const c = {
-    card: t.palette.background.paper,
+    // The card faces sit ON the aside panel, which is `paper` in dark mode
+    // -- so `paper` here would make them invisible against it. One step
+    // further from the page in each direction.
+    card: dark ? '#35363a' : t.palette.background.paper,
     edge: dark ? 'rgba(255,255,255,0.10)' : 'rgba(0,0,0,0.06)',
     accent: t.palette.primary.main,
     soft: t.palette.primary.light,

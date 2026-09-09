@@ -761,7 +761,26 @@ class TestProgressFile:
 
         with open(progress_file, encoding="utf-8") as fh:
             final = json.load(fh)
-        assert final == {"pct": 100, "label": "done"}
+        # Field-by-field, not an exact dict: the checkpoint gained
+        # "challenge" (the 2-Step prompt the UI raises a banner for) and an
+        # equality assertion turns every future field into a failure here,
+        # which teaches whoever adds one to edit this line rather than read
+        # it.
+        assert final["pct"] == 100
+        assert final["label"] == "done"
+
+    def test_a_clean_run_reports_no_2_step_prompt(self, monkeypatch, tmp_path):
+        """The banner is driven off this field. Anything truthy left in it
+        at the end would leave "check your phone" on screen after a setup
+        that finished without ever asking."""
+        self._ok_common(monkeypatch)
+        progress_file = str(tmp_path / "p.json")
+
+        fs.run_full_setup("source", "c.example.com", "admin@c.example.com", "pw",
+                          progress_file=progress_file)
+
+        with open(progress_file, encoding="utf-8") as fh:
+            assert not json.load(fh).get("challenge")
 
     def test_pct_never_goes_backwards_across_checkpoints(self, monkeypatch, tmp_path):
         """_progress() overwrites the same file on every call -- this

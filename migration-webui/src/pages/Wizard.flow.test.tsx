@@ -13,7 +13,7 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import Wizard, { looksLikeDomain } from './Wizard'
+import Wizard, { looksLikeDomain, domainOf } from './Wizard'
 
 const seedEnabled = vi.fn()
 vi.mock('@/api/controlPlane', () => ({
@@ -47,6 +47,16 @@ beforeEach(() => {
 
 const view = () => render(<MemoryRouter><Wizard /></MemoryRouter>)
 
+/** Step one is a sign-in now: the domain comes out of the email. */
+const signIn = async (email: string, password = 'hunter22222') => {
+  fireEvent.change(await screen.findByTestId('admin-email'),
+                   { target: { value: email } })
+  fireEvent.change(screen.getByTestId('admin-password'),
+                   { target: { value: password } })
+  fireEvent.click(screen.getByTestId('creds-next'))
+}
+
+/** Only the destination step still asks for a bare domain. */
 const enterDomain = async (d: string) => {
   const box = await screen.findByTestId('wizard-domain')
   fireEvent.change(box, { target: { value: d } })
@@ -60,51 +70,100 @@ const choose = async (purpose: 'seed' | 'migrate') => {
   fireEvent.click(screen.getByTestId('purpose-next'))
 }
 
-describe('the tenant is the first question', () => {
-  it('opens asking for a domain, not for a mode', async () => {
+describe('the credential is the first question', () => {
+  /* It asked for a domain, then asked for the admin address on a later
+     panel -- which contains the domain. Two questions, one fact, and a
+     disagreement to handle when they differ. */
+  it('opens asking to sign in, not for a mode', async () => {
     view()
-    expect(await screen.findByTestId('wizard-domain')).toBeInTheDocument()
+    expect(await screen.findByTestId('admin-email')).toBeInTheDocument()
     expect(screen.queryByTestId('purpose-seed')).toBeNull()
   })
 
-  it('will not continue on an empty field', async () => {
+  it('will not continue on an empty form', async () => {
     view()
-    await screen.findByTestId('wizard-domain')
-    expect(screen.getByTestId('wizard-domain-next')).toBeDisabled()
+    await screen.findByTestId('admin-email')
+    expect(screen.getByTestId('creds-next')).toBeDisabled()
   })
 
-  it('will not continue on something that is not a domain', async () => {
+  it('will not continue on an address that is not one', async () => {
     view()
-    fireEvent.change(await screen.findByTestId('wizard-domain'),
-                     { target: { value: 'not a domain' } })
-    expect(screen.getByTestId('wizard-domain-next')).toBeDisabled()
+    fireEvent.change(await screen.findByTestId('admin-email'),
+                     { target: { value: 'admin' } })
+    fireEvent.change(screen.getByTestId('admin-password'),
+                     { target: { value: 'x' } })
+    expect(screen.getByTestId('creds-next')).toBeDisabled()
+  })
+
+  it('will not continue without a password', async () => {
+    view()
+    fireEvent.change(await screen.findByTestId('admin-email'),
+                     { target: { value: 'admin@acme.com' } })
+    expect(screen.getByTestId('creds-next')).toBeDisabled()
   })
 
   it('says why, rather than just staying disabled', async () => {
     view()
-    fireEvent.change(await screen.findByTestId('wizard-domain'),
-                     { target: { value: 'acme' } })
-    expect(screen.getByText(/does not look like a domain/)).toBeInTheDocument()
+    fireEvent.change(await screen.findByTestId('admin-email'),
+                     { target: { value: 'admin' } })
+    expect(screen.getByText(/full admin address/i)).toBeInTheDocument()
   })
 
   it('does not complain before anything has been typed', async () => {
     view()
-    await screen.findByTestId('wizard-domain')
-    expect(screen.queryByText(/does not look like a domain/)).toBeNull()
+    await screen.findByTestId('admin-email')
+    expect(screen.queryByText(/full admin address/i)).toBeNull()
+  })
+
+  it('promises the password is not kept', async () => {
+    /* Said twice on purpose -- under the field, and in the panel. Handing a
+       super-admin password to a web form is the moment someone hesitates. */
+    view()
+    await screen.findByTestId('admin-email')
+    expect(screen.getAllByText(/never stored/i).length).toBeGreaterThan(0)
+  })
+})
+
+describe('the domain comes out of the address', () => {
+  it('derives it rather than asking twice', async () => {
+    view()
+    fireEvent.change(await screen.findByTestId('admin-email'),
+                     { target: { value: 'admin@acme.com' } })
+    expect(await screen.findByTestId('derived-domain')).toHaveTextContent('acme.com')
+  })
+
+  it('shows it before it is acted on, so a typo is visible', async () => {
+    view()
+    fireEvent.change(await screen.findByTestId('admin-email'),
+                     { target: { value: 'admin@acme.co.uk' } })
+    expect(await screen.findByTestId('derived-domain')).toHaveTextContent('acme.co.uk')
+  })
+
+  it('carries it into the purpose step', async () => {
+    view()
+    await signIn('admin@acme.com')
+    expect(await screen.findByRole('heading', { name: 'acme.com' }))
+      .toBeInTheDocument()
+  })
+
+  it('domainOf takes the last @, so a quoted local part cannot fool it', () => {
+    expect(domainOf('a@b@acme.com')).toBe('acme.com')
+    expect(domainOf('ADMIN@ACME.COM')).toBe('acme.com')
+    expect(domainOf('nope')).toBe('')
   })
 })
 
 describe('then what the tenant is for', () => {
   it('offers seed and migrate once a domain is known', async () => {
     view()
-    await enterDomain('acme.com')
+    await signIn('admin@acme.com')
     expect(await screen.findByTestId('purpose-seed')).toBeInTheDocument()
     expect(screen.getByTestId('purpose-migrate')).toBeInTheDocument()
   })
 
   it('names the tenant being decided about', async () => {
     view()
-    await enterDomain('acme.com')
+    await signIn('admin@acme.com')
     expect(await screen.findByRole('heading', { name: 'acme.com' }))
       .toBeInTheDocument()
   })
@@ -112,7 +171,7 @@ describe('then what the tenant is for', () => {
   it('hides seeding from an account not entitled to it', async () => {
     seedEnabled.mockResolvedValue({ seed_enabled: false })
     view()
-    await enterDomain('acme.com')
+    await signIn('admin@acme.com')
     await screen.findByTestId('purpose-migrate')
     expect(screen.queryByTestId('purpose-seed')).toBeNull()
   })
@@ -121,14 +180,14 @@ describe('then what the tenant is for', () => {
 describe('seeding goes straight to work', () => {
   it('does not ask for a second domain', async () => {
     view()
-    await enterDomain('acme.com')
+    await signIn('admin@acme.com')
     await choose('seed')
     expect(await screen.findByTestId('seed-wizard')).toBeInTheDocument()
   })
 
   it('carries the domain into the setup panel', async () => {
     view()
-    await enterDomain('acme.com')
+    await signIn('admin@acme.com')
     await choose('seed')
     expect(await screen.findByTestId('seed-wizard'))
       .toHaveTextContent('seeding acme.com')
@@ -138,7 +197,7 @@ describe('seeding goes straight to work', () => {
 describe('migrating asks where it is going', () => {
   it('asks for a second domain', async () => {
     view()
-    await enterDomain('acme.com')
+    await signIn('admin@acme.com')
     await choose('migrate')
     expect(await screen.findByRole('heading', { name: /where is it going/i }))
       .toBeInTheDocument()
@@ -147,14 +206,14 @@ describe('migrating asks where it is going', () => {
 
   it('still names the source it is migrating away from', async () => {
     view()
-    await enterDomain('acme.com')
+    await signIn('admin@acme.com')
     await choose('migrate')
     expect(await screen.findByText(/acme\.com is the source/)).toBeInTheDocument()
   })
 
   it('refuses the same domain on both sides', async () => {
     view()
-    await enterDomain('acme.com')
+    await signIn('admin@acme.com')
     await choose('migrate')
     fireEvent.change(await screen.findByTestId('wizard-domain'),
                      { target: { value: 'acme.com' } })
@@ -164,14 +223,14 @@ describe('migrating asks where it is going', () => {
 
   it('says which side is read and which is written', async () => {
     view()
-    await enterDomain('acme.com')
+    await signIn('admin@acme.com')
     await choose('migrate')
     expect(await screen.findByText(/read, never written/)).toBeInTheDocument()
   })
 
   it('hands each domain to its own side', async () => {
     view()
-    await enterDomain('acme.com')
+    await signIn('admin@acme.com')
     await choose('migrate')
     await enterDomain('newco.com')
     await waitFor(() =>
@@ -183,18 +242,18 @@ describe('migrating asks where it is going', () => {
 describe('going back', () => {
   it('can change the tenant after choosing a purpose', async () => {
     view()
-    await enterDomain('acme.com')
+    await signIn('admin@acme.com')
     await choose('seed')
     fireEvent.click(await screen.findByTestId('wizard-change'))
-    expect(await screen.findByTestId('wizard-domain')).toBeInTheDocument()
+    expect(await screen.findByTestId('admin-email')).toBeInTheDocument()
   })
 
-  it('remembers what was typed rather than making it be retyped', async () => {
+  it('remembers the address rather than making it be retyped', async () => {
     view()
-    await enterDomain('acme.com')
+    await signIn('admin@acme.com')
     await choose('seed')
     fireEvent.click(await screen.findByTestId('wizard-change'))
-    expect(await screen.findByTestId('wizard-domain')).toHaveValue('acme.com')
+    expect(await screen.findByTestId('admin-email')).toHaveValue('admin@acme.com')
   })
 })
 
@@ -220,22 +279,23 @@ describe('it reads like the Google Workspace signup it sits beside', () => {
     expect(h.tagName).toBe('H1')
   })
 
-  it('asks exactly one question at a time', async () => {
+  it('asks for one thing at a time -- a sign-in is one thing', async () => {
     view()
-    await screen.findByTestId('wizard-domain')
+    await screen.findByTestId('admin-email')
+    // The password is type=password, so it is not a "textbox" role.
     expect(screen.getAllByRole('textbox')).toHaveLength(1)
   })
 
   it('offers the choice as radios, the way the signup does', async () => {
     view()
-    await enterDomain('acme.com')
+    await signIn('admin@acme.com')
     const radios = await screen.findAllByRole('radio')
     expect(radios).toHaveLength(2)
   })
 
   it('will not continue until one is picked', async () => {
     view()
-    await enterDomain('acme.com')
+    await signIn('admin@acme.com')
     expect(await screen.findByTestId('purpose-next')).toBeDisabled()
     fireEvent.click(screen.getByTestId('purpose-seed'))
     expect(screen.getByTestId('purpose-next')).toBeEnabled()
@@ -252,15 +312,16 @@ describe('the panel beside the form says something true', () => {
       .toBeInTheDocument()
   })
 
-  it('promises nothing is created yet, because nothing is', async () => {
+  it('explains what the password is for, where it is asked for', async () => {
     view()
-    expect(await screen.findByText(/Nothing is created until you confirm/i))
-      .toBeInTheDocument()
+    await screen.findByTestId('admin-email')
+    expect(screen.getAllByText(/used once to sign in/i).length)
+      .toBeGreaterThan(0)
   })
 
   it('changes when the purpose is picked', async () => {
     view()
-    await enterDomain('acme.com')
+    await signIn('admin@acme.com')
     await screen.findByTestId('purpose-seed')
     expect(screen.getByText(/Rehearse it, or run it/i)).toBeInTheDocument()
     fireEvent.click(screen.getByTestId('purpose-migrate'))
@@ -270,7 +331,7 @@ describe('the panel beside the form says something true', () => {
 
   it('names the tenant it is talking about', async () => {
     view()
-    await enterDomain('acme.com')
+    await signIn('admin@acme.com')
     fireEvent.click(await screen.findByTestId('purpose-seed'))
     expect(await screen.findByText(/written into\s+acme\.com/i)).toBeInTheDocument()
   })
@@ -279,7 +340,7 @@ describe('the panel beside the form says something true', () => {
     /* The single most important fact about pointing this at a real tenant.
        The artwork carries direction; this sentence carries the promise. */
     view()
-    await enterDomain('acme.com')
+    await signIn('admin@acme.com')
     fireEvent.click(await screen.findByTestId('purpose-migrate'))
     expect(await screen.findByText(/physically cannot write to it/i))
       .toBeInTheDocument()
@@ -295,25 +356,25 @@ describe('the panel is designed, not annotated', () => {
 
   it('shows artwork on the first step', async () => {
     view()
-    await screen.findByTestId('wizard-domain')
+    await screen.findByTestId('admin-email')
     expect(art()).toBeTruthy()
   })
 
   it('carries no labels inside the drawing', async () => {
     view()
-    await screen.findByTestId('wizard-domain')
+    await screen.findByTestId('admin-email')
     expect(art()!.querySelectorAll('text')).toHaveLength(0)
   })
 
   it('still describes itself for a reader who cannot see it', async () => {
     view()
-    await screen.findByTestId('wizard-domain')
+    await screen.findByTestId('admin-email')
     expect(art()!.getAttribute('aria-label')).toMatch(/tenant/i)
   })
 
   it('changes with the choice rather than being one static picture', async () => {
     view()
-    await enterDomain('acme.com')
+    await signIn('admin@acme.com')
     fireEvent.click(await screen.findByTestId('purpose-migrate'))
     await waitFor(() =>
       expect(art()!.getAttribute('aria-label')).toMatch(/one direction only/i))
@@ -324,7 +385,7 @@ describe('the panel is designed, not annotated', () => {
 
   it('scales with its column instead of overflowing it', async () => {
     view()
-    await screen.findByTestId('wizard-domain')
+    await screen.findByTestId('admin-email')
     expect(art()!.getAttribute('viewBox')).toBeTruthy()
     expect(art()!.getAttribute('width')).toBe('100%')
   })
@@ -334,7 +395,7 @@ describe('the panel is designed, not annotated', () => {
        mean the second illustration silently renders with the first one's
        fill. */
     view()
-    await screen.findByTestId('wizard-domain')
+    await screen.findByTestId('admin-email')
     const ids = [...art()!.querySelectorAll('[id]')].map((n) => n.id)
     expect(ids.every((i) => i.startsWith('wa-setup'))).toBe(true)
   })

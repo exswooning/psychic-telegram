@@ -63,6 +63,8 @@ import os
 import re
 import random
 import sys
+
+import signin_challenge
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -278,16 +280,37 @@ def run_full_setup(
     if side not in ("source", "target"):
         raise ValueError("side must be 'source' or 'target'")
 
+    # The 2-Step prompt, if one is on screen right now. Held here rather
+    # than passed through _progress's callers: the sign-in that raises it is
+    # several frames down inside dwd_helper/gcloud_browser_auth, and none of
+    # the phases in between know or care that a phone is buzzing.
+    _challenge = {"text": ""}
+    _last_pct, _last_label = {"v": 0}, {"v": ""}
+
     def _progress(pct: int, label: str) -> None:
         if not progress_file:
             return
         try:
+            _last_pct["v"], _last_label["v"] = pct, label
             tmp = progress_file + ".tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump({"pct": pct, "label": label}, fh)
+                json.dump({"pct": pct, "label": label,
+                           "challenge": _challenge["text"]}, fh)
             os.replace(tmp, progress_file)
         except OSError:
             pass
+
+    def _on_challenge(text: str) -> None:
+        """A 2-Step prompt appeared (or cleared) inside a browser sign-in.
+
+        Written straight out rather than waiting for the next phase: the
+        whole point is that the operator sees it WHILE the phone is asking,
+        and the phase it interrupts can sit there for the full timeout.
+        """
+        _challenge["text"] = text
+        _progress(_last_pct["v"], _last_label["v"])
+
+    signin_challenge.REPORTER = _on_challenge
 
     phases: list[Phase] = []
     _progress(2, "starting")

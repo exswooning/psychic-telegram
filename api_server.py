@@ -2393,7 +2393,7 @@ async def full_setup_status(side: str, account: int | None = None,
             except (OSError, ValueError):
                 continue
 
-        progress_pct = progress_label = None
+        progress_pct = progress_label = challenge = None
         if running:
             # Only meaningful while something is actually running -- once
             # it isn't, this is the last checkpoint a (possibly crashed)
@@ -2403,6 +2403,11 @@ async def full_setup_status(side: str, account: int | None = None,
                     prog = json.load(fh)
                 progress_pct = prog.get("pct")
                 progress_label = prog.get("label")
+                # A 2-Step prompt on the sign-in the run is blocked on. The
+                # browser is headless, so this is the only place it can be
+                # seen -- without it the phase just sits there until it
+                # times out and reports "likely 2FA".
+                challenge = prog.get("challenge") or None
             except (OSError, ValueError):
                 pass
         # `{"running": true}` in the state file, specifically -- not merely
@@ -2463,6 +2468,7 @@ async def full_setup_status(side: str, account: int | None = None,
                 }]}
         return {"running": running, "pid": pid, "result": result,
                 "progressPct": progress_pct, "progressLabel": progress_label,
+                "challenge": challenge,
                 "resultAt": result_at}
     return await _off_loop(_read)
 
@@ -2610,17 +2616,23 @@ async def teardown_status(op: Operator = Depends(operator)):
             except (OSError, ValueError):
                 continue
 
-        progress_pct = progress_label = None
+        progress_pct = progress_label = challenge = None
         if running:
             try:
                 with open(out + ".progress", encoding="utf-8") as fh:
                     prog = json.load(fh)
                 progress_pct = prog.get("pct")
                 progress_label = prog.get("label")
+                # A 2-Step prompt on the sign-in the run is blocked on. The
+                # browser is headless, so this is the only place it can be
+                # seen -- without it the phase just sits there until it
+                # times out and reports "likely 2FA".
+                challenge = prog.get("challenge") or None
             except (OSError, ValueError):
                 pass
         return {"running": running, "result": result,
-                "progressPct": progress_pct, "progressLabel": progress_label}
+                "progressPct": progress_pct, "progressLabel": progress_label,
+                "challenge": challenge}
     return await _off_loop(_read)
 
 

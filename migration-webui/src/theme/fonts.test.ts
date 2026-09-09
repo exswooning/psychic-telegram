@@ -87,3 +87,51 @@ describe('code still reads as code', () => {
     expect(declared().some((s) => s.startsWith('ui-monospace'))).toBe(true)
   })
 })
+
+describe('text is crisp on both grounds', () => {
+  /* Dark mode read as blurred. Left unset, macOS renders text with subpixel
+     antialiasing, which adds weight -- and on a dark ground that extra
+     weight looks like a soft, smeared edge. CssBaseline was mounted but the
+     theme never overrode it, so this was simply never set. */
+  const baseline = (t: typeof lightTheme) =>
+    (t.components?.MuiCssBaseline?.styleOverrides ?? {}) as {
+      html?: Record<string, string>; body?: Record<string, string>
+    }
+
+  it('asks for grayscale antialiasing', () => {
+    expect(baseline(lightTheme).html?.WebkitFontSmoothing).toBe('antialiased')
+    expect(baseline(lightTheme).html?.MozOsxFontSmoothing).toBe('grayscale')
+  })
+
+  it('in dark mode too, which is where it actually mattered', () => {
+    expect(baseline(darkTheme).html?.WebkitFontSmoothing).toBe('antialiased')
+  })
+
+  it('refuses synthesised weights', () => {
+    /* A variable font asked for a weight it lacks gets smeared sideways to
+       fake it -- its own kind of blur. Google Sans Flex covers 1..1000, so
+       this turns a wrong weight into a visibly wrong weight rather than a
+       fuzzy one. */
+    expect(baseline(lightTheme).body?.fontSynthesis).toBe('none')
+  })
+})
+
+describe('surfaces separate in both modes', () => {
+  /* default and paper swap roles between the themes: in light, default is
+     the tint that lifts a panel off white; in dark, default IS the page and
+     paper is the lift. A surface hardcoded to one of them vanishes in the
+     other -- which is what happened to the wizard's side panel. */
+  it('the two surface tokens are actually different in each mode', () => {
+    for (const t of [lightTheme, darkTheme])
+      expect(t.palette.background.default).not.toBe(t.palette.background.paper)
+  })
+
+  it('and they invert between modes, which is why one token cannot serve both', () => {
+    const lighter = (hex: string) =>
+      parseInt(hex.slice(1), 16)
+    expect(lighter(lightTheme.palette.background.paper))
+      .toBeGreaterThan(lighter(lightTheme.palette.background.default))
+    expect(lighter(darkTheme.palette.background.paper))
+      .toBeGreaterThan(lighter(darkTheme.palette.background.default))
+  })
+})

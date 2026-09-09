@@ -40,7 +40,11 @@ const SeedWizard: React.FC<{
    *  a job that writes fabricated data into a tenant, and a gate that
    *  arrives pre-satisfied is not a gate. */
   sourceDomain?: string
-}> = ({ sourceDomain }) => {
+  /** Carried from the wizard's sign-in step so the setup panel does not ask
+   *  for the same credential a second time. Never persisted. */
+  adminEmail?: string
+  adminPassword?: string
+}> = ({ sourceDomain, adminEmail, adminPassword }) => {
   const [route, setRoute] = useState<'automated' | 'manual'>('automated')
   const [status, setStatus] = useState<StatusPayload | null>(null)
   const [actions, setActions] = useState<Record<string, ActionSpec>>({})
@@ -117,6 +121,8 @@ const SeedWizard: React.FC<{
       <Box sx={{ maxWidth: route === 'automated' ? 480 : undefined }}>
         <QuickTenantSetup side="source" view={route} showSeedOptions
                           initialDomain={sourceDomain}
+                          initialEmail={adminEmail}
+                          initialPassword={adminPassword}
                            onRequestManual={() => setRoute('manual')} />
       </Box>
 

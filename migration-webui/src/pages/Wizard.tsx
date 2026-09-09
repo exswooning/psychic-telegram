@@ -80,7 +80,7 @@ const WizardShell: React.FC<{
   aside: React.ReactNode
   children: React.ReactNode
 }> = ({ heading, sub, onBack, aside, children }) => (
-  <Box sx={{ maxWidth: 1080, mx: 'auto', pt: { xs: 2, md: 6 }, pb: 6 }}>
+  <Box sx={{ maxWidth: 1320, mx: 'auto', pt: { xs: 2, md: 5 }, pb: 8, px: { xs: 0, md: 2 } }}>
     {onBack && (
       <Button size="small" startIcon={<BackIcon />} onClick={onBack}
               data-testid="wizard-back" sx={{ mb: 2, ml: -1 }}>
@@ -88,25 +88,34 @@ const WizardShell: React.FC<{
       </Button>
     )}
     <Grid container spacing={{ xs: 4, md: 8 }} alignItems="flex-start">
-      <Grid item xs={12} md={5}>
+      <Grid item xs={12} md={6}>
         <Typography
           component="h1"
           sx={{
             // Family comes from the theme -- see typography.fontFamily.
-            fontSize: { xs: '2rem', md: '2.75rem' },
+            fontSize: { xs: '2.125rem', md: '3.25rem' },
             fontWeight: 400, lineHeight: 1.15, letterSpacing: '-0.5px',
             mb: 1.5, wordBreak: 'break-word',
           }}>
           {heading}
         </Typography>
-        <Typography variant="body1" color="text.secondary" sx={{ mb: 4 }}>
+        <Typography variant="body1" color="text.secondary"
+                    sx={{ mb: 4, fontSize: '1.0625rem', lineHeight: 1.6 }}>
           {sub}
         </Typography>
         {children}
       </Grid>
-      <Grid item xs={12} md={7}>
+      <Grid item xs={12} md={6}>
+        {/* One step off the page, in whichever direction that is.
+            `background.default` is the tint that lifts this off white in
+            light mode -- and in dark mode it IS the page colour, so the
+            panel vanished into it and only its border remained. The two
+            tokens swap roles between the modes; the surface has to swap
+            with them. */}
         <Box sx={{
-          bgcolor: 'background.default',
+          bgcolor: (th) => th.palette.mode === 'dark'
+            ? th.palette.background.paper
+            : th.palette.background.default,
           border: '1px solid', borderColor: 'divider',
           borderRadius: 4, p: { xs: 3, md: 4 },
         }}>
@@ -147,6 +156,71 @@ const Aside: React.FC<{
     )}
   </>
 )
+
+/** The domain is in the email. Asking for both is asking someone to type
+ *  the same fact twice and then handling the case where they disagree. */
+export function domainOf(email: string): string {
+  const at = email.trim().toLowerCase().lastIndexOf('@')
+  return at === -1 ? '' : email.trim().toLowerCase().slice(at + 1)
+}
+
+const AdminSignInStep: React.FC<{
+  heading: string
+  sub: string
+  aside: React.ReactNode
+  initialEmail?: string
+  onBack?: () => void
+  onNext: (email: string, password: string, domain: string) => void
+}> = ({ heading, sub, aside, initialEmail = '', onBack, onNext }) => {
+  const [email, setEmail] = useState(initialEmail)
+  const [password, setPassword] = useState('')
+  const domain = domainOf(email)
+  const shaped = /^[^@\s]+@[^@\s]+$/.test(email.trim()) && looksLikeDomain(domain)
+  const error = email.trim() === '' ? ''
+    : !shaped ? 'Use the full admin address, like admin@acme.com.'
+    : ''
+  const ready = shaped && password.length > 0
+
+  return (
+    <WizardShell heading={heading} sub={sub} onBack={onBack} aside={aside}>
+      <TextField
+        fullWidth autoFocus label="Super admin email" value={email}
+        onChange={(e) => setEmail(e.target.value)}
+        error={!!error} helperText={error || ' '}
+        inputProps={{ 'data-testid': 'admin-email', spellCheck: false,
+                      autoCapitalize: 'none', autoCorrect: 'off',
+                      autoComplete: 'username' }}
+        sx={{ '& .MuiOutlinedInput-root': { height: 60 } }}
+      />
+      <TextField
+        fullWidth type="password" label="Password" value={password}
+        onChange={(e) => setPassword(e.target.value)}
+        onKeyDown={(e) => { if (e.key === 'Enter' && ready) onNext(email.trim(), password, domain) }}
+        helperText="Used once to sign in to the Google consoles. Never stored."
+        inputProps={{ 'data-testid': 'admin-password',
+                      autoComplete: 'current-password' }}
+        sx={{ mt: 1, '& .MuiOutlinedInput-root': { height: 60 } }}
+      />
+      {/* The domain is derived, and shown so it can be checked before it is
+          acted on -- not asked for a second time. */}
+      <Box sx={{ mt: 2.5, minHeight: 28 }}>
+        {domain && shaped && (
+          <Stack direction="row" spacing={1} alignItems="center">
+            <Typography variant="body2" color="text.secondary">
+              Setting up
+            </Typography>
+            <Chip size="small" label={domain} data-testid="derived-domain" />
+          </Stack>
+        )}
+      </Box>
+      <Button variant="contained" size="large" sx={{ mt: 2.5, px: 5, py: 1.25 }}
+              data-testid="creds-next" disabled={!ready}
+              onClick={() => onNext(email.trim(), password, domain)}>
+        Continue
+      </Button>
+    </WizardShell>
+  )
+}
 
 const DomainStep: React.FC<{
   heading: string
@@ -197,6 +271,11 @@ const Wizard: React.FC = () => {
   // it is moving into. Held here rather than inside each sub-wizard so the
   // question is asked once, at the front, instead of once per panel.
   const [domain, setDomain] = useState('')
+  const [adminEmail, setAdminEmail] = useState('')
+  // Held in memory for exactly as long as this wizard is open, handed to the
+  // server once, and never written anywhere -- not localStorage, not the
+  // audit log. See startFullSetup's own note.
+  const [adminPassword, setAdminPassword] = useState('')
   const [otherDomain, setOtherDomain] = useState('')
   const [purpose, setPurpose] = useState<Purpose | null>(null)
   const [picked, setPicked] = useState<Purpose | ''>('')
@@ -215,21 +294,22 @@ const Wizard: React.FC = () => {
 
   if (step === 'domain') {
     return (
-      <DomainStep
+      <AdminSignInStep
         heading="Let's get started"
-        sub="Which domain are you setting up? Everything after this is about this tenant."
-        label="Domain" initial={domain}
+        sub="Sign in as a super admin of the tenant you're setting up. We take
+             it from there — project, credentials, delegation, the lot."
+        initialEmail={adminEmail}
         aside={<Aside
           art="setup"
           title="One tenant at a time"
           body="Bitport gives this domain its own throwaway Cloud project and
                 a service account that can act for its users. Nothing is
                 shared with any other tenant you set up."
-          note="Nothing is created until you confirm on a later step." />}
-        onNext={(d) => {
+          note="Your password is used once to sign in to Google's consoles and is never stored." />}
+        onNext={(email, password, d) => {
+          setAdminEmail(email)
+          setAdminPassword(password)
           setDomain(d)
-          // A confirmed deep link skips straight past the question it
-          // already answered.
           if (purpose === 'seed' && seedEnabled) { setStep('run'); return }
           setStep('purpose')
         }} />
@@ -339,8 +419,10 @@ const Wizard: React.FC = () => {
         )}
       </Stack>
       {purpose === 'seed'
-        ? <SeedWizard sourceDomain={domain} />
-        : <MigrateWizard sourceDomain={domain} targetDomain={otherDomain} />}
+        ? <SeedWizard sourceDomain={domain} adminEmail={adminEmail}
+                      adminPassword={adminPassword} />
+        : <MigrateWizard sourceDomain={domain} targetDomain={otherDomain}
+                         adminEmail={adminEmail} adminPassword={adminPassword} />}
     </Box>
   )
 }
@@ -355,7 +437,9 @@ const Wizard: React.FC = () => {
 const MigrateWizard: React.FC<{
   sourceDomain?: string
   targetDomain?: string
-}> = ({ sourceDomain, targetDomain }) => {
+  adminEmail?: string
+  adminPassword?: string
+}> = ({ sourceDomain, targetDomain, adminEmail, adminPassword }) => {
   const [route, setRoute] = useState<'automated' | 'manual'>('automated')
   const navigate = useNavigate()
 
@@ -394,6 +478,8 @@ const MigrateWizard: React.FC<{
           <Grid item xs={12} md={6}>
             <QuickTenantSetup side="source" view="automated"
                              initialDomain={sourceDomain}
+                             initialEmail={adminEmail}
+                             initialPassword={adminPassword}
                              onRequestManual={() => setRoute('manual')} />
           </Grid>
           <Grid item xs={12} md={6}>

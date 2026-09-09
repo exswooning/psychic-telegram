@@ -21,6 +21,7 @@ would read off the screen anyway.
 from __future__ import annotations
 
 import re
+from typing import Callable
 
 # Phrases that mean "a human has to do something on another device".
 # Lowercased before matching; both apostrophes because Google uses U+2019.
@@ -99,6 +100,27 @@ def from_page(page) -> str:
         return ""
 
 
+# Set by a long-running job that wants the prompt somewhere other than its
+# own transcript -- full_setup puts it in the progress file the UI polls, so
+# a browser sitting on the setup page can say "your phone is asking for 47"
+# while it happens. A module-level hook rather than an argument threaded
+# through three call sites, because the Watcher is constructed deep inside
+# dwd_helper and gcloud_browser_auth and every caller in between would have
+# to carry a parameter it has no interest in.
+#
+# Called with the challenge text, or "" the moment it clears.
+REPORTER: "Callable[[str], None] | None" = None
+
+
+def _report(text: str) -> None:
+    if REPORTER is None:
+        return
+    try:
+        REPORTER(text)
+    except Exception:  # noqa: BLE001 - a reporter must never break a sign-in
+        pass
+
+
 class Watcher:
     """Logs a challenge once, and again only when it changes.
 
@@ -121,6 +143,11 @@ class Watcher:
                 self._log(f"  [2-STEP] {found}")
                 self._log("  [2-STEP] this is waiting for you on a device -- "
                           "the browser here is headless and cannot do it.")
+                _report(found)
             return found
+        if self._last:
+            # It cleared: somebody answered it. Say so, or the banner it
+            # raised stays up for the rest of the run.
+            _report("")
         self._last = ""
         return ""

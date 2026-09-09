@@ -19,6 +19,7 @@ import {
   buildIdentityMap, fetchIdentityMapStatus, IdentityMapStatus,
 } from '@/api/controlPlane'
 import { runSeed, fetchSeedScopes } from '@/api/client'
+import MfaBanner from '@/components/MfaBanner'
 import type { SeedCapability } from '@/api/client'
 import ReasonCodeDialog from './ReasonCodeDialog'
 import JobProgress from './JobProgress'
@@ -290,11 +291,17 @@ const QuickTenantSetup: React.FC<{
    *  a lock: the field stays editable, because being sent here with the
    *  wrong one is exactly when it needs changing. */
   initialDomain?: string
+  /** Handed down from the wizard's sign-in step. Starting values, not
+   *  locks: being sent here with the wrong ones is exactly when they need
+   *  changing. The password lives in React state for as long as the page is
+   *  open and is never written anywhere. */
+  initialEmail?: string
+  initialPassword?: string
 }> = ({ side, view, showSeedOptions, showProvisionUsers, onRequestManual,
-        initialDomain }) => {
+        initialDomain, initialEmail, initialPassword }) => {
   const [domain, setDomain] = useState(initialDomain ?? '')
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
+  const [email, setEmail] = useState(initialEmail ?? '')
+  const [password, setPassword] = useState(initialPassword ?? '')
   const [orgId, setOrgId] = useState('')
   const [dryRun, setDryRun] = useState(true)
   const [authDialogOpen, setAuthDialogOpen] = useState(false)
@@ -758,6 +765,12 @@ const QuickTenantSetup: React.FC<{
        * callback), so this tracks the actual gcloud/DWD automation, not a
        * fake animated bar. Scoped to the automated view -- that's the
        * only view that ever starts this job. */}
+      {/* Above the bar, not beside the label: while a 2-Step prompt is up
+          this is the only thing on the page that can move, and every second
+          it goes unnoticed is a second of a ten-minute timeout nobody gets
+          back. */}
+      <MfaBanner challenge={status?.challenge} />
+
       {view === 'automated' && status?.running && (
         <Box sx={{ mb: 2 }}>
           {typeof status.progressPct === 'number' ? (

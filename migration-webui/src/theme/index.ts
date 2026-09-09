@@ -47,6 +47,30 @@ const baseOptions: ThemeOptions = {
   // barely-there shadow instead of the default's much heavier one.
   shadows: Array(25).fill('0 1px 3px 0 rgba(60,64,67,0.15), 0 1px 2px 0 rgba(60,64,67,0.10)') as any,
   components: {
+    MuiCssBaseline: {
+      styleOverrides: {
+        // Light text on a dark ground is the reason this exists.
+        //
+        // Left unset, macOS renders text with subpixel antialiasing, which
+        // adds weight. On a dark background that extra weight reads as a
+        // soft, smeared edge -- the "blurred" dark mode. Grayscale
+        // antialiasing removes the colour fringing and the apparent
+        // thickening, so the same type looks crisp on both grounds. It is
+        // set globally rather than per-theme because the light side gains
+        // consistency from it and loses nothing.
+        html: {
+          WebkitFontSmoothing: 'antialiased',
+          MozOsxFontSmoothing: 'grayscale',
+          textRendering: 'optimizeLegibility',
+        },
+        // A variable font asked for a weight it does not have gets
+        // SYNTHESISED -- the browser smears the glyph sideways to fake it,
+        // which is its own kind of blur. Google Sans Flex covers 1..1000,
+        // so refusing synthesis makes a wrong weight visible as a wrong
+        // weight instead of a fuzzy one.
+        body: { fontSynthesis: 'none' },
+      },
+    },
     MuiCard: {
       styleOverrides: {
         root: { borderRadius: 8, boxShadow: 'none', border: '1px solid' },

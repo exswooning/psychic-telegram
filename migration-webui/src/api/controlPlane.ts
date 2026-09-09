@@ -454,6 +454,12 @@ export interface FullSetupStatus {
   /** Epoch seconds the result on disk was written. A failure from an
    *  earlier day looked exactly like one from a minute ago without it. */
   resultAt?: number | null
+  /** A 2-Step prompt currently on the sign-in this run is blocked on --
+   *  "Check your phone / tap 47 / Pixel 7". The browser doing the signing
+   *  in is headless on the server, so this is the only place that prompt
+   *  can be seen; without it the phase just sits there until it times out
+   *  and reports "likely 2FA" as a guess. Null when nothing is asking. */
+  challenge?: string | null
 }
 
 /**
