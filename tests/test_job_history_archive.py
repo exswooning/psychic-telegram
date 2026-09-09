@@ -104,3 +104,45 @@ class TestHugeTranscriptsAreNotReadWhole:
         assert res["lines"][-1].startswith("line 199999")
         # The count describes what was read, not what the file holds.
         assert res["line_count"] < 200_000
+
+
+class TestATranscriptWithNoResultFileStillCounts:
+    """A .json is written by the in-memory Job when a run finishes; a .log is
+    written by the child itself, the whole time. So a run the Job object
+    never owned -- started outside it, or one that outlived the restart that
+    forgot it -- has a complete transcript and no result file.
+
+    Live: a five-hour 200-user seed left 611 KB of seed.log and no
+    seed.json, and the Jobs page showed one unrelated wipe as the entire
+    history of that account.
+    """
+
+    def test_a_log_only_run_is_listed(self, account_id):
+        path = webui.job_log_path(account_id, "seed")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("Seeding 200 users\n  [a@x] done in 3979.8s: 1 files\n")
+        names = [r["name"] for r in webui.completed_jobs(account_id)]
+        assert "seed" in names, names
+
+    def test_it_is_not_listed_twice_when_a_result_exists(self, account_id):
+        """_save_result writes the .json beside the .log it was streaming
+        to, so both files exist for an ordinary run."""
+        _finish(account_id, "seed", 0, 1_700_000_000, ["x"])
+        with open(webui.job_log_path(account_id, "seed"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("x\n")
+        rows = [r for r in webui.completed_jobs(account_id) if r["name"] == "seed"]
+        assert len(rows) == 1, rows
+
+    def test_the_transcript_row_is_dated(self, account_id):
+        """Undated rows all sort to the bottom together, which is where the
+        seed would have gone even once it appeared."""
+        path = webui.job_log_path(account_id, "reset target")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("something\n")
+        row = [r for r in webui.completed_jobs(account_id)
+               if r["name"] == "reset target"][0]
+        assert row["finished"], "no timestamp on a transcript-only run"
+

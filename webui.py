@@ -1056,12 +1056,28 @@ def completed_jobs(account_id: int | None) -> list[dict]:
     # never happened at all -- one row each, because one run is all they can
     # prove. Skipped where the same job has archives: its newest archive IS
     # this file, and listing both showed every job twice.
+    #
+    # Both extensions, not just .json. A .json is written by the in-memory
+    # Job when a run finishes; a .log is written by the child itself, the
+    # whole time. So any run the Job object never owned -- a process started
+    # outside it, or one that outlived the restart that forgot it -- has a
+    # complete transcript and no result file, and listing only .json made it
+    # invisible. Live: a five-hour 200-user seed left 611 KB of seed.log and
+    # no seed.json, and the page showed one unrelated wipe as the entire
+    # history of the account.
+    seen: set[str] = set()
     for f in files:
-        if not f.endswith(".json") or ARCHIVE_RE.match(f):
+        if ARCHIVE_RE.match(f):
             continue
-        stem = f[: -len(".json")]
-        if stem in archived:
+        if f.endswith(".json"):
+            stem = f[: -len(".json")]
+        elif f.endswith(".log"):
+            stem = f[: -len(".log")]
+        else:
             continue
+        if stem in archived or stem in seen:
+            continue
+        seen.add(stem)
         res = (load_job_result(account_id, stem.replace("_", " "))
                or load_job_result(account_id, stem))
         if res:
