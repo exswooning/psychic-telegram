@@ -118,21 +118,31 @@ class TestTheFormFillerUsesIt:
         assert "app name field" in src
         assert "/tmp" in src, "must point at the saved screenshot and page text"
 
-    def test_the_add_on_checkbox_is_a_fallback_not_a_step(self):
-        """It used to be cleared unconditionally, on the theory that the
-        fields do not render while it is set. A live run disproved that: it
-        logged "the add-on checkbox is still set" and then found and filled
-        every field anyway. What the click DID do was raise an overlay that
-        never cleared, and every later click -- Save included -- timed out
-        against its backdrop.
-
-        Clearing it is also irreversible, so doing it when it is not in the
-        way is the worse half of the bargain regardless."""
+    def test_banners_are_dismissed_before_anything_is_clicked(self):
+        """A screenshot settled several rounds of guessing: the console
+        pins a cookie consent bar to the BOTTOM of the window, and Save is
+        at the foot of the form. Every click was landing on that bar --
+        which is why Playwright timed out on an actionable-looking button,
+        why force=True appeared to work and changed nothing, and why no
+        modal was ever found. There was no modal."""
         import inspect
         src = inspect.getsource(g._open_chat_configuration_tab)
-        first_look = src.index('_chat_field(page, "App name")')
-        clear = src.index("_clear_workspace_addon_checkbox")
-        assert first_look < clear, "the form is probed before anything is changed"
+        assert "_dismiss_console_banners" in src
+        assert src.index("_dismiss_console_banners") < src.index(
+            "_clear_workspace_addon_checkbox")
+
+    def test_the_add_on_checkbox_is_cleared(self):
+        """A Workspace add-on is not a Chat app: with the box ticked the
+        form fills, Save clicks without error, and spaces.create still
+        cannot resolve an app. It is irreversible, and deliberate on
+        projects this tool creates and deletes per tenant."""
+        import inspect
+        src = inspect.getsource(g._open_chat_configuration_tab)
+        # Superseded: a Workspace add-on is not a Chat app as far as
+        # spaces.create is concerned, so the box has to be cleared whether
+        # or not the fields happen to render behind it. What that earlier
+        # reasoning actually observed was the cookie bar blocking clicks.
+        assert "_clear_workspace_addon_checkbox" in src
 
     def test_clearing_it_is_announced_as_irreversible(self):
         """The console says the checkbox cannot be re-ticked. Automation

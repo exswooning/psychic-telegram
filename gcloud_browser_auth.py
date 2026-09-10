@@ -574,6 +574,43 @@ def _confirm_open_dialog(page, wait_ms: int = 8000) -> bool:
     return True
 
 
+# The console's own furniture, pinned over the page.
+#
+# A screenshot of the failing page settled what several rounds of guessing
+# could not: a cookie consent bar is fixed to the BOTTOM of the viewport
+# ("console.cloud.google.com uses cookies from Google ... Hide") and a
+# free-trial banner sits at the top. Save is at the foot of the form, so it
+# renders underneath the cookie bar -- every click was landing on that bar,
+# which is why Playwright timed out waiting for the button to be
+# actionable, why force=True appeared to work and changed nothing, and why
+# no modal or validation error was ever found: there was no modal.
+#
+# The evidence was in the log all along. The button list printed
+# ['Hide', 'Dismiss', 'Start free', ...] before anything else on the page.
+_CONSOLE_BANNER_LABELS = ("Hide", "Dismiss", "Got it", "No thanks", "Close")
+
+
+def _dismiss_console_banners(page) -> int:
+    """Clear the cookie bar and any promo banner. Returns how many went.
+
+    Cheap and idempotent -- a banner that is not there is simply skipped --
+    so it is called before filling and again before saving, since the
+    console re-renders them on navigation.
+    """
+    gone = 0
+    for label in _CONSOLE_BANNER_LABELS:
+        try:
+            btn = page.get_by_role("button", name=label, exact=True)
+            if btn.count() > 0 and btn.first.is_visible():
+                btn.first.click(timeout=4000)
+                page.wait_for_timeout(600)
+                gone += 1
+                log(f"  dismissed the console's {label!r} banner")
+        except Exception:      # noqa: BLE001 - a banner is never fatal
+            continue
+    return gone
+
+
 def _chat_field(page, label: str):
     """The input under a given console label, or None.
 
@@ -633,8 +670,21 @@ def _clear_workspace_addon_checkbox(page) -> bool:
         try:
             box.first.uncheck(force=True, timeout=5000)
         except Exception:      # noqa: BLE001
-            page.locator(f'label:has-text("{_CHAT_ADDON_LABEL}")').first.click(
-                timeout=5000)
+            try:
+                page.locator(
+                    f'label:has-text("{_CHAT_ADDON_LABEL}")').first.click(
+                        timeout=5000)
+            except Exception:      # noqa: BLE001
+                # Straight at the native control.
+                #
+                # The DOM says this element is checked, NOT disabled, with
+                # no aria-disabled -- an ordinary
+                # mdc-checkbox__native-control. So nothing about the
+                # checkbox refuses; a pointer event simply never reaches it
+                # past whatever is painted over the page. el.click()
+                # dispatches on the element itself and fires the change
+                # event Angular is listening for.
+                box.first.evaluate("el => el.click()")
         page.wait_for_timeout(2500)
         # Clearing it raises a "this cannot be undone" modal, and its
         # backdrop blocks everything until it is answered.
@@ -687,7 +737,10 @@ def configure_chat_app(email: str, password: str, project: str,
 
     with sync_playwright() as p:
         browser = dwd_helper._installed_browser_launch(p, headful=True)
-        page = browser.new_page()
+        # A tall viewport. The default 720px puts most of this form -- Save
+        # included -- below the fold, under a cookie bar pinned to the
+        # bottom of the window.
+        page = browser.new_page(viewport={"width": 1600, "height": 1200})
 
         try:
             page.goto(url, wait_until="domcontentloaded",
@@ -763,21 +816,23 @@ def _open_chat_configuration_tab(page, attempts: int = 3) -> bool:
         # Before probing for the field: it does not exist while the add-on
         # checkbox is set, and this step spent a live run reporting the tab
         # missing when the tab was there and the field was not.
-        # Look FIRST, clear only if the field is genuinely absent.
+        # Banners first: the cookie bar is pinned to the bottom of the
+        # window and swallows clicks aimed at anything under it.
+        _dismiss_console_banners(page)
+
+        # Then clear the add-on checkbox, because a Workspace add-on is not
+        # a Chat app as far as spaces.create is concerned.
         #
-        # This cleared the add-on checkbox unconditionally, on the theory
-        # that the fields do not render while it is set. The evidence says
-        # otherwise: a run logged "the add-on checkbox is still set" and
-        # then found and filled App name, Avatar URL and Description
-        # anyway. What the click DID do was raise an overlay that never
-        # cleared, and every later click -- including Save -- timed out
-        # against its backdrop.
+        # An earlier version made this conditional -- the fields render
+        # whether or not it is set, so it looked like a change worth
+        # avoiding. That reasoning was about RENDERING and the question is
+        # whether the saved app WORKS: with the box ticked the form fills,
+        # Save clicks without error, and the app still cannot be resolved.
+        # The clicks that failed while clearing it were the cookie bar, not
+        # the checkbox.
         #
-        # So the checkbox is a fallback for a page that really does hide
-        # the form, not a step. Touching a one-way setting that was not in
-        # the way was the worse half of the bargain regardless.
-        if _chat_field(page, "App name") is not None:
-            return True
+        # It is irreversible, and it is done deliberately on projects this
+        # tool creates and deletes per tenant.
         _clear_workspace_addon_checkbox(page)
         if _chat_field(page, "App name") is not None:
             return True
@@ -845,6 +900,9 @@ def _fill_chat_app_form(page, project: str, timeout: int) -> tuple[bool, str]:
                        "project (see the saved screenshot and page text in "
                        "/tmp)")
 
+    # Before anything else: the cookie bar covers the bottom of the page,
+    # which is exactly where Save is.
+    _dismiss_console_banners(page)
     _confirm_open_dialog(page)
     name_box = _chat_field(page, "App name")
     if name_box is None:
@@ -863,6 +921,12 @@ def _fill_chat_app_form(page, project: str, timeout: int) -> tuple[bool, str]:
         if not existing_name:
             name_box.click()
             name_box.type(f"{project} sandbox", delay=30)
+            # Blur. Angular reactive forms mark a control touched and run
+            # validation on blur, not on keystrokes -- a field typed into
+            # and never left can still count as pristine/invalid, which
+            # leaves Save enabled-looking and the submit a no-op.
+            name_box.press("Tab")
+            page.wait_for_timeout(500)
     except Exception as exc:      # noqa: BLE001
         _save_chat_diagnostics(page, project, "name-fill-failed")
         return False, f"could not set the app name: {exc}"
@@ -881,6 +945,8 @@ def _fill_chat_app_form(page, project: str, timeout: int) -> tuple[bool, str]:
             if not (box.input_value() or "").strip():
                 box.click()
                 box.type(value, delay=20)
+                box.press("Tab")
+                page.wait_for_timeout(400)
         except Exception as exc:      # noqa: BLE001 - not worth failing over
             log(f"  (could not set {label}: {str(exc)[:70]})")
 
@@ -892,6 +958,29 @@ def _fill_chat_app_form(page, project: str, timeout: int) -> tuple[bool, str]:
             except Exception:      # noqa: BLE001 - status may already be set
                 pass
             break
+
+    # What the form actually holds, before trying to submit it. Typing into
+    # a field and Angular's model having the value are different facts, and
+    # a save that silently does nothing is exactly what their difference
+    # looks like.
+    for label in ("App name", "Avatar URL", "Description"):
+        box = _chat_field(page, label)
+        try:
+            log(f"  {label} = {(box.input_value() or '')!r}" if box
+                else f"  {label} = <field not found>")
+        except Exception:      # noqa: BLE001
+            log(f"  {label} = <unreadable>")
+    try:
+        errs = [e.strip() for e in page.locator(
+            "mat-error, .mat-mdc-form-field-error").all_inner_texts() if e.strip()]
+        if errs:
+            log(f"  the form is rejecting: {errs[:6]}")
+    except Exception:      # noqa: BLE001
+        pass
+
+    # Again -- the console re-renders its banners on navigation, and the
+    # tab click counts.
+    _dismiss_console_banners(page)
 
     saved = False
     for label in _CHAT_SAVE_LABELS:
@@ -918,21 +1007,36 @@ def _fill_chat_app_form(page, project: str, timeout: int) -> tuple[bool, str]:
                 pass
             continue
         try:
+            # Into view first. The form is long and the console's viewport
+            # short, so Save is below the fold on arrival.
+            btn.first.scroll_into_view_if_needed(timeout=4000)
+            page.wait_for_timeout(400)
+        except Exception:      # noqa: BLE001 - not fatal
+            pass
+        try:
             btn.first.click(timeout=8000)
             page.wait_for_timeout(2500)
             saved = True
         except Exception as exc:      # noqa: BLE001
             log(f"  clicking {label} was blocked ({str(exc)[:70]}) -- "
-                f"retrying through whatever is covering it")
+                f"dispatching the click on the element itself")
+            # A JS click, not force=True.
+            #
+            # force skips Playwright's actionability WAIT but still sends a
+            # real mouse event at the button's coordinates -- which the CDK
+            # backdrop sitting over it swallows. So the call returns
+            # successfully, nothing is submitted, and the step reports a
+            # save that never happened. Confirmed: "configured a Chat app"
+            # followed by a probe that still 404s.
+            #
+            # el.click() dispatches straight to the element, so Angular's
+            # own (click) handler runs regardless of what is painted on top.
             try:
-                # force skips the actionability wait, which is what a
-                # leftover backdrop defeats. The button is already known to
-                # be visible and enabled at this point.
-                btn.first.click(force=True, timeout=8000)
-                page.wait_for_timeout(2500)
+                btn.first.evaluate("el => el.click()")
+                page.wait_for_timeout(3000)
                 saved = True
             except Exception as exc2:      # noqa: BLE001 - try the next label
-                log(f"  forced click also failed: {str(exc2)[:70]}")
+                log(f"  dispatched click also failed: {str(exc2)[:70]}")
                 continue
         break
 
@@ -945,6 +1049,47 @@ def _fill_chat_app_form(page, project: str, timeout: int) -> tuple[bool, str]:
             log(f"  buttons on the page: {visible}")
         except Exception as exc:      # noqa: BLE001
             log(f"  (could not list buttons: {str(exc)[:80]})")
+    if saved:
+        # What the console said in response, before anything is reloaded.
+        # The form holds every value, shows no validation error, reports
+        # Save as clicked -- and the value is gone on reload. Something is
+        # rejecting it, and a snackbar or toast is where the console says
+        # so. Not looking there is why this has been guesswork.
+        page.wait_for_timeout(2000)
+        for sel in ('[role="alert"]', ".mat-mdc-snack-bar-label",
+                    "simple-snack-bar", ".cdk-overlay-container"):
+            try:
+                loc = page.locator(sel)
+                if loc.count() == 0:
+                    continue
+                text = " ".join(t.strip() for t in loc.all_inner_texts()
+                                if t.strip())[:300]
+                if text:
+                    log(f"  console response ({sel}): {text!r}")
+                    break
+            except Exception:      # noqa: BLE001
+                continue
+
+        # Reload and read it back. Every previous version of this step
+        # reported on what it had attempted -- a form filled, a button
+        # clicked -- and each time the probe disagreed. A save that did not
+        # persist is the specific failure here, so it is the specific thing
+        # to check.
+        try:
+            page.reload(wait_until="domcontentloaded")
+            page.wait_for_timeout(4000)
+            _open_chat_configuration_tab(page)
+            back = _chat_field(page, "App name")
+            value = (back.input_value() or "").strip() if back else ""
+            if not value:
+                log("  Save was clicked but the app name is empty on reload "
+                    "-- the form did not persist")
+                saved = False
+            else:
+                log(f"  verified after reload: app name is {value!r}")
+        except Exception as exc:      # noqa: BLE001 - verification is a bonus
+            log(f"  (could not verify the save: {str(exc)[:80]})")
+
     _save_chat_diagnostics(page, project, "after-save" if saved else "no-save-button")
     if not saved:
         return False, "filled the form but could not find/click Save"

@@ -478,6 +478,13 @@ class _FakeNameField:
         self.typed = text
         self._value = text
 
+    def press(self, key):
+        """Playwright's press. The real caller sends Tab after typing --
+        Angular reactive forms mark a control touched and validate on blur,
+        not on keystrokes, so a field typed into and never left can still
+        count as pristine and the submit does nothing."""
+        self.pressed = key
+
 
 class _FakeClickable:
     def __init__(self, visible: bool = True, enabled: bool = True):
