@@ -90,12 +90,19 @@ export async function fetchActions(): Promise<Record<string, ActionSpec>> {
 
 export async function runAction(
   name: string,
-  confirm?: string
+  confirm?: string,
+  /** Which tenant to act on. /api/run has always resolved this through
+   *  resolve_target_account -- an operator cleaning up somebody else's
+   *  tenant is the normal case for these -- but no caller ever sent it, so
+   *  every action ran against whichever account the session happened to
+   *  resolve to, with nothing on screen naming it. */
+  accountId?: number | string,
 ): Promise<{ ok: boolean; error: string | null; queued?: boolean; msg?: string }> {
   const res = await fetch('/api/run', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action: name, confirm }),
+    body: JSON.stringify({ action: name, confirm,
+                           account_id: accountId ?? null }),
   })
   return res.json()
 }

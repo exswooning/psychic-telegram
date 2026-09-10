@@ -9,6 +9,7 @@ import {
   ActionSpec, SharedDriveStats,
 } from '@/api/client'
 import JobRunner from '@/components/JobRunner'
+import TenantScopePicker from '@/components/TenantScopePicker'
 import DmsImportButton from '@/components/DmsImportButton'
 import DmsMetrics from '@/components/DmsMetrics'
 
@@ -37,6 +38,9 @@ const Services: React.FC = () => {
   // Null until the shared-drive pass has actually run: a row of zeros
   // reads as "migrated nothing" rather than "has not run yet".
   const [sd, setSd] = useState<SharedDriveStats | null>(null)
+  // Which tenant every action on this page acts on. It was implicit --
+  // whichever the session resolved to -- and unnamed anywhere on screen.
+  const [scopeAccount, setScopeAccount] = useState<number | undefined>()
 
   useEffect(() => {
     fetchActions().then(setActions).catch((e) => setErr(String(e)))
@@ -74,6 +78,9 @@ const Services: React.FC = () => {
         Run the inventory first — each one is read-only and tells you what
         the migrate step would touch.
       </Typography>
+
+      <TenantScopePicker accountId={scopeAccount}
+                         onAccountChange={setScopeAccount} />
 
       {err && <Alert severity="warning" sx={{ mb: 3 }}>{err}</Alert>}
       {Object.keys(actions).length === 0 && !err && (
@@ -123,13 +130,13 @@ const Services: React.FC = () => {
             )}
             <Stack spacing={2}>
               {has('shared_drives_inventory') &&
-                <JobRunner name="shared_drives_inventory"
+                <JobRunner accountId={scopeAccount} name="shared_drives_inventory"
                            spec={actions.shared_drives_inventory} />}
               {has('shared_drives_migrate') &&
-                <JobRunner name="shared_drives_migrate"
+                <JobRunner accountId={scopeAccount} name="shared_drives_migrate"
                            spec={actions.shared_drives_migrate} />}
               {has('staging_drives_cleanup') &&
-                <JobRunner name="staging_drives_cleanup"
+                <JobRunner accountId={scopeAccount} name="staging_drives_cleanup"
                            spec={actions.staging_drives_cleanup} />}
             </Stack>
           </CardContent>
@@ -153,11 +160,11 @@ const Services: React.FC = () => {
             </Alert>
             <Stack spacing={2}>
               {has('groups_inventory') &&
-                <JobRunner name="groups_inventory" spec={actions.groups_inventory} />}
+                <JobRunner accountId={scopeAccount} name="groups_inventory" spec={actions.groups_inventory} />}
               {has('groups_migrate_dry') &&
-                <JobRunner name="groups_migrate_dry" spec={actions.groups_migrate_dry} />}
+                <JobRunner accountId={scopeAccount} name="groups_migrate_dry" spec={actions.groups_migrate_dry} />}
               {has('groups_migrate') &&
-                <JobRunner name="groups_migrate" spec={actions.groups_migrate} />}
+                <JobRunner accountId={scopeAccount} name="groups_migrate" spec={actions.groups_migrate} />}
             </Stack>
           </CardContent>
         </Card>
@@ -178,9 +185,9 @@ const Services: React.FC = () => {
             </Alert>
             <Stack spacing={2}>
               {has('sso_inventory') &&
-                <JobRunner name="sso_inventory" spec={actions.sso_inventory} />}
+                <JobRunner accountId={scopeAccount} name="sso_inventory" spec={actions.sso_inventory} />}
               {has('sso_migrate') &&
-                <JobRunner name="sso_migrate" spec={actions.sso_migrate} />}
+                <JobRunner accountId={scopeAccount} name="sso_migrate" spec={actions.sso_migrate} />}
             </Stack>
           </CardContent>
         </Card>
@@ -233,9 +240,9 @@ const Services: React.FC = () => {
             </Alert>
             <Stack spacing={2}>
               {has('phased_count_only') &&
-                <JobRunner name="phased_count_only" spec={actions.phased_count_only} />}
+                <JobRunner accountId={scopeAccount} name="phased_count_only" spec={actions.phased_count_only} />}
               {has('phased_migrate') &&
-                <JobRunner name="phased_migrate" spec={actions.phased_migrate} />}
+                <JobRunner accountId={scopeAccount} name="phased_migrate" spec={actions.phased_migrate} />}
             </Stack>
             {has('dms_import') && (
               <Box sx={{ mt: 2, pt: 2, borderTop: '1px solid', borderColor: 'divider' }}>

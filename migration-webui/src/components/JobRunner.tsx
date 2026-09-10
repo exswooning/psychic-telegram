@@ -16,8 +16,15 @@ import { runAction, stopJob, fetchJob, ActionSpec } from '@/api/client'
  * server itself checks, so a mis-click still cannot fire it -- the check is
  * real on the server; this dialog only saves a wasted round trip.
  */
-const JobRunner: React.FC<{ name: string; spec: ActionSpec; onDone?: () => void }> = ({
-  name, spec, onDone,
+const JobRunner: React.FC<{
+  name: string
+  spec: ActionSpec
+  onDone?: () => void
+  /** Which tenant to act on, and to watch. Omitted means the session's own
+   *  -- the behaviour every caller had before this existed. */
+  accountId?: number | string
+}> = ({
+  name, spec, onDone, accountId,
 }) => {
   const [running, setRunning] = useState(false)
   const [lines, setLines] = useState<string[]>([])
@@ -39,7 +46,13 @@ const JobRunner: React.FC<{ name: string; spec: ActionSpec; onDone?: () => void 
       // running eleven-hour seed, complete with "still deleting: 85/200
       // users" and a Stop button. Nothing was deleting; it was another
       // job's transcript under this panel's heading.
-      const job = await fetchJob(sinceRef.current, undefined, spec.label)
+      // Watch the tenant it was started on. Watching our own while it runs
+      // on another account's is how a panel shows nothing for a job that is
+      // plainly running.
+      const job = await fetchJob(sinceRef.current,
+                                 accountId === undefined || accountId === null
+                                   ? undefined : String(accountId),
+                                 spec.label)
       if (job.lines.length) {
         setLines((prev) => [...prev, ...job.lines])
         sinceRef.current = job.total
@@ -58,7 +71,7 @@ const JobRunner: React.FC<{ name: string; spec: ActionSpec; onDone?: () => void 
     } catch {
       // A dropped poll must not kill the stream; the next tick retries.
     }
-  }, [onDone, spec.label])
+  }, [onDone, spec.label, accountId])
 
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current) }, [])
 
@@ -67,7 +80,7 @@ const JobRunner: React.FC<{ name: string; spec: ActionSpec; onDone?: () => void 
     setQueued(null)
     setLines([])
     sinceRef.current = 0
-    const res = await runAction(name, confirm)
+    const res = await runAction(name, confirm, accountId)
     if (!res.ok) {
       setError(res.error || 'could not start')
       return
@@ -82,7 +95,7 @@ const JobRunner: React.FC<{ name: string; spec: ActionSpec; onDone?: () => void 
     setRunning(true)
     pollRef.current = setInterval(poll, 1000)
     poll()
-  }, [name, poll])
+  }, [name, poll, accountId])
 
   const handleClick = () => {
     if (spec.destructive) {
