@@ -11,14 +11,22 @@ protect you from.
 On the machine that is joining:
 
 ```
-./install_node.sh --coordinator http://100.x.y.z:8090 --token "$TOKEN"   # macOS, Linux
-.\install_node.ps1 -Coordinator http://100.x.y.z:8090 -Token $env:TOKEN  # Windows
+./install_node.sh --coordinator http://100.x.y.z --token "$TOKEN"   # macOS, Linux
+.\install_node.ps1 -Coordinator http://100.x.y.z -Token $env:TOKEN  # Windows
 ```
 
 The coordinator URL is whatever **that** machine can reach. On a tailnet
 that is the coordinator's Tailscale address: no port forwarding, nothing
-public, and `BITPORT_NODE_TOKEN` still required on every call. Set the same
-token on the coordinator, or `node_auth` refuses every request:
+public, and `BITPORT_NODE_TOKEN` still required on every call.
+
+Point it at the **Caddy port** -- 80 by default, or whatever `install.sh`
+picked when 80 was already taken -- and **not** 8090. `api_server.py` binds
+`127.0.0.1` only, on purpose (it warns loudly if you pass `--host`), so 8090
+is unreachable from any other machine and a node aimed there just gets
+connection refused. Caddy proxies `/api/v2/*` to it, which is the only path
+a node calls.
+
+Set the same token on the coordinator, or `node_auth` refuses every request:
 
 ```
 BITPORT_NODE_TOKEN=<a long random string>

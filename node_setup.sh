@@ -21,9 +21,11 @@
 #
 # e.g.
 #   ./node_setup.sh ubuntu@100.x.y.z root@78.47.176.120 \
-#       http://100.a.b.c:8090 "$TOKEN"
+#       http://100.a.b.c "$TOKEN"
 #
-# The coordinator URL is whatever the NODE can reach -- a Tailscale address
+# The coordinator URL is whatever the NODE can reach, on the CADDY port (80
+# by default) and never 8090: api_server.py binds 127.0.0.1 only, so 8090 is
+# unreachable from another machine. A Tailscale address
 # if both are on your tailnet, or the public HTTPS host.
 set -euo pipefail
 

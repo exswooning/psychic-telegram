@@ -12,13 +12,19 @@
   is the coordinator's Tailscale address -- no port forwarding, no public
   exposure, and the token is still required on every call.
 
+  Use the CADDY port (80 by default, or whatever install.sh picked when 80
+  was taken), NOT 8090. api_server.py binds 127.0.0.1 only -- deliberately,
+  see its own --host warning -- so 8090 is unreachable from another machine
+  and a node aimed at it just gets connection refused. Caddy proxies
+  /api/v2/* through to it, which is exactly the path a node calls.
+
   It deliberately does NOT fetch the tenant's service-account keys. Those
   are the credentials for the whole tenant, and an endpoint that served them
   to anything holding a node token would make the token equivalent to the
   keys. Copy them yourself; the last step prints how.
 
 .EXAMPLE
-  .\install_node.ps1 -Coordinator http://100.x.y.z:8090 -Token $env:TOKEN
+  .\install_node.ps1 -Coordinator http://100.x.y.z -Token $env:TOKEN
 #>
 param(
   [Parameter(Mandatory = $true)][string]$Coordinator,
