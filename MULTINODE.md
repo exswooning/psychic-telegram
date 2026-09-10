@@ -10,10 +10,31 @@ protect you from.
 
 On the machine that is joining:
 
+The Nodes page in the web UI builds these for you, with the token already
+in them. By hand:
+
+```bash
+# macOS, Linux
+BITPORT_COORDINATOR='http://100.x.y.z:81' BITPORT_NODE_TOKEN="$TOKEN" \
+  bash -c "$(curl -fsSL https://raw.githubusercontent.com/exswooning/psychic-telegram/workspace-migrator/install_node.sh)"
 ```
-./install_node.sh --coordinator http://100.x.y.z --token "$TOKEN"   # macOS, Linux
-.\install_node.ps1 -Coordinator http://100.x.y.z -Token $env:TOKEN  # Windows
+
+```powershell
+# Windows -- no admin, no second shell, no prompts
+$env:BITPORT_COORDINATOR='http://100.x.y.z:81'; $env:BITPORT_NODE_TOKEN='...'
+irm https://raw.githubusercontent.com/exswooning/psychic-telegram/workspace-migrator/install_node.ps1 | iex
 ```
+
+Settings travel in the environment because a piped script has no argv to
+take flags on -- and argv is readable by every process on the box, while
+that line carries a live credential.
+
+Windows needs no elevation. It used to: `winget install Git.Git` is
+machine-scope and raises a UAC prompt, and dismissing it left the run
+failing four commands later on `git: not recognized`. The code now arrives
+as a branch zip over HTTPS, so git is never needed. `irm | iex` also
+sidesteps the default Restricted execution policy, which refuses to run a
+script *file*.
 
 The coordinator URL is whatever **that** machine can reach. On a tailnet
 that is the coordinator's Tailscale address: no port forwarding, nothing

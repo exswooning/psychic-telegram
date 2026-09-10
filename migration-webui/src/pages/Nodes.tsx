@@ -10,6 +10,7 @@ import {
 import {
   fetchClaims, fetchNodeJoin, UserClaim, ClaimSummary, NodeJoinDetails,
 } from '@/api/controlPlane'
+import AddNodeWizard from '@/components/AddNodeWizard'
 
 /**
  * Nodes — who is migrating what, across machines.
@@ -71,7 +72,6 @@ export const Nodes: React.FC = () => {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const [revealed, setRevealed] = useState(false)
-  const [nodeTarget, setNodeTarget] = useState('')
 
   const refresh = useCallback(() => {
     setLoading(true)
@@ -99,15 +99,6 @@ export const Nodes: React.FC = () => {
     if (revealed) { setRevealed(false); fetchNodeJoin(false).then(setJoin).catch(() => {}); return }
     fetchNodeJoin(true).then((j) => { setJoin(j); setRevealed(true) }).catch(() => {})
   }
-
-  const coordinator = join?.coordinatorUrl || window.location.origin
-  const command = [
-    './node_setup.sh',
-    nodeTarget.trim() || '<user@node-address>',
-    'root@<coordinator-host>',
-    `'${coordinator}'`,
-    revealed && join?.token ? `'${join.token}'` : "'<node-token>'",
-  ].join(' ')
 
   const stale = claims.filter((c) => c.stale)
 
@@ -239,8 +230,8 @@ export const Nodes: React.FC = () => {
       </Paper>
 
       <Paper variant="outlined" sx={{ p: 2 }}>
-        <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>
-          Add a node
+        <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 2 }}>
+          Add a machine
         </Typography>
 
         {joinError && (
@@ -259,46 +250,7 @@ export const Nodes: React.FC = () => {
         )}
 
         {join?.enabled && (
-          <>
-            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-              The node connects outward to this coordinator — nothing here
-              reaches into it. Over the public address the token is what
-              authenticates it; on a tailnet, put the tailnet address below
-              instead and the traffic never leaves your private network.
-            </Typography>
-
-            <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 2 }}>
-              <TextField size="small" label="Node SSH target" sx={{ flex: 1 }}
-                         placeholder="ubuntu@100.x.y.z"
-                         value={nodeTarget}
-                         onChange={(e) => setNodeTarget(e.target.value)}
-                         inputProps={{ 'data-testid': 'node-target' }} />
-              <Button size="small" startIcon={revealed ? <HideIcon /> : <ShowIcon />}
-                      onClick={reveal} data-testid="reveal-token">
-                {revealed ? 'Hide token' : 'Show token'}
-              </Button>
-            </Stack>
-
-            <Box component="pre" data-testid="join-command"
-                 sx={{ fontSize: 11, p: 1.5, bgcolor: 'action.hover',
-                       borderRadius: 1, overflowX: 'auto', m: 0,
-                       whiteSpace: 'pre-wrap' }}>
-              {command}
-            </Box>
-            <Stack direction="row" spacing={1} sx={{ mt: 1 }} alignItems="center">
-              <Button size="small" startIcon={<CopyIcon />}
-                      onClick={() => navigator.clipboard?.writeText(command)}>
-                Copy
-              </Button>
-              <Typography variant="caption" color="text.secondary">
-                Run it from a machine that can reach both. Keys and the identity
-                map are copied through you, not served by this API — an endpoint
-                handing service-account keys to anything holding a node token
-                would make that token equivalent to the keys for the whole
-                tenant.
-              </Typography>
-            </Stack>
-          </>
+          <AddNodeWizard join={join} revealed={revealed} onReveal={reveal} />
         )}
       </Paper>
     </Box>

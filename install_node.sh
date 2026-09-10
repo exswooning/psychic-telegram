@@ -24,7 +24,11 @@
 # Copy them yourself; the last step prints the exact command.
 set -euo pipefail
 
-COORD="" TOKEN="" DIR="${BITPORT_DIR:-$HOME/bitport}" ACCOUNT="${BITPORT_ACCOUNT:-7}"
+# Flags OR the environment. The env form is what makes a piped one-liner
+# possible -- `curl ... | bash` has no way to pass arguments, and that is
+# the shape the Nodes page hands out.
+COORD="${BITPORT_COORDINATOR:-}" TOKEN="${BITPORT_NODE_TOKEN:-}"
+DIR="${BITPORT_DIR:-$HOME/bitport}" ACCOUNT="${BITPORT_ACCOUNT:-7}"
 REPO="${BITPORT_REPO:-https://github.com/exswooning/psychic-telegram}"
 BRANCH="${BITPORT_BRANCH:-workspace-migrator}"
 
@@ -38,8 +42,14 @@ while [ $# -gt 0 ]; do
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
-[ -n "$COORD" ] || { echo "--coordinator is required" >&2; exit 2; }
-[ -n "$TOKEN" ] || { echo "--token is required" >&2; exit 2; }
+[ -n "$COORD" ] || { echo "no coordinator: pass --coordinator or set BITPORT_COORDINATOR" >&2; exit 2; }
+[ -n "$TOKEN" ] || { echo "no node token: pass --token or set BITPORT_NODE_TOKEN" >&2; exit 2; }
+# api_server.py binds 127.0.0.1, so a node aimed at 8090 is unreachable from
+# any other machine. Caught here rather than in the reachability probe at the
+# end, where it presents as a network fault on a correctly configured box.
+case "$COORD" in
+  *:8090|*:8090/) echo "8090 is api_server's LOOPBACK port and is not reachable from this machine. Use the Caddy port the installer reported (80, or 81 if 80 was taken)." >&2; exit 2 ;;
+esac
 
 say() { printf '\n== %s\n' "$*"; }
 
