@@ -188,6 +188,34 @@ else
   # 1. Stray installers from earlier attempts -- identified by running in a
   #    DIFFERENT process group than this one, so we never kill ourselves.
   MYPGID=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')
+  # Every ancestor of this process, so the stray hunt below can never kill
+  # the chain it is running inside.
+  #
+  # $$ and $PPID alone were not enough. sudo allocating a pty -- the default
+  # since 1.9.14, and any `use_pty` config before it -- forks a MONITOR child
+  # which calls setsid(), so the real tree is
+  #
+  #     sudo (GRANDPARENT) -> sudo monitor ($PPID) -> bash install.sh ($$)
+  #
+  # Both sudo argv strings contain "bash install.sh", and the grandparent is
+  # in a different process group, so it matched the pattern, passed both
+  # guards, and got SIGKILLed -- by the script it was running. Live, from a
+  # real terminal on Ubuntu 26.04:
+  #
+  #     ==> Scan for prior/broken installs
+  #     Killed    sudo -E INSTALL_DIR=/opt/bitport ... bash install.sh
+  #
+  # which reads like the OOM killer and is nothing of the sort. Reproduced
+  # under `ssh -tt` (a pty is required; without one sudo forks no monitor
+  # and every pid shares one process group, which is why this hid).
+  ANCESTORS=" $$ "
+  _p=$$ _depth=0
+  while [ "$_depth" -lt 32 ]; do
+    _p=$(ps -o ppid= -p "$_p" 2>/dev/null | tr -d ' ')
+    { [ -n "$_p" ] && [ "$_p" != 0 ] && [ "$_p" != 1 ]; } || break
+    ANCESTORS="$ANCESTORS$_p "
+    _depth=$((_depth + 1))
+  done
   killed=0
   # Only hunt strays if we actually know our own group; without it we cannot
   # tell "someone else's installer" from "us" and must not guess.
@@ -200,7 +228,8 @@ else
     # matches a real `bash install.sh` / `/path/install.sh` but never
     # `selfinstall.sh`. And we never signal our own pid or our parent (sudo).
     for pid in $(pgrep -f "[ /]install\.sh" 2>/dev/null); do
-      { [ "$pid" = "$$" ] || [ "$pid" = "$PPID" ]; } && continue
+      # Ancestors, not just $$ and $PPID -- see ANCESTORS above.
+      case "$ANCESTORS" in *" $pid "*) continue ;; esac
       pg=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
       [ -n "$pg" ] && [ "$pg" != "$MYPGID" ] && { kill -9 "$pid" 2>/dev/null && killed=$((killed+1)); }
     done

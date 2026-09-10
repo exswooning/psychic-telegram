@@ -70,11 +70,15 @@ def test_stray_hunt_cannot_kill_its_own_sudo_parent():
     # installer in a different process group, so a bare `pgrep -f install.sh`
     # would flag the run's own sudo parent as a stray and SIGKILL the whole
     # run. Regression: the installer died with "Killed" at the scan step.
+    #
+    # This first asserted the guard was `$$` plus `$PPID`, which is one level
+    # short and let the SAME symptom come back -- see the ancestor test
+    # below. The pattern half is unchanged and still load-bearing.
     scan = SH[SH.index("Scan for prior/broken installs"):SH.index("System packages")]
     assert 'pgrep -f "[ /]install\\.sh"' in scan, \
         "stray-hunt pattern must require a space/slash so selfinstall.sh can't match"
-    assert '"$$"' in scan and '"$PPID"' in scan, \
-        "stray hunt must never signal its own pid or its parent (sudo)"
+    assert '"$ANCESTORS"' in scan, \
+        "stray hunt must never signal any process it is running underneath"
 
 
 def test_packagers_exclude_dev_env_sh():
@@ -166,3 +170,48 @@ def test_the_reverse_proxy_step_verifies_caddy_actually_started():
     block = SH[SH.index('step "Reverse proxy"'):SH.index('step "Superadmin account"')]
     assert "systemctl is-active caddy" in block
     assert "caddy is NOT running" in block
+
+
+def test_stray_hunt_skips_every_ancestor_not_just_the_parent():
+    """The installer SIGKILLed the sudo it was running under.
+
+    sudo allocating a pty forks a MONITOR child that calls setsid(), so the
+    tree is  sudo -> sudo monitor ($PPID) -> bash install.sh ($$).  Both
+    sudo argv strings contain "bash install.sh", so pgrep matches all three;
+    the grandparent sits in a different process group and passed both the
+    $$ and $PPID guards. Live on Ubuntu 26.04 that printed
+
+        ==> Scan for prior/broken installs
+        Killed    sudo -E INSTALL_DIR=/opt/bitport ... bash install.sh
+
+    which reads like an OOM kill and is not one. Reproduced under `ssh -tt`;
+    without a pty sudo forks no monitor and every pid shares one process
+    group, which is exactly why this hid from the earlier fix.
+    """
+    scan = SH[SH.index('step "Scan for prior/broken installs"'):]
+    scan = scan[:scan.index("# 2.")]
+    assert "ANCESTORS" in scan, "no ancestor set is built"
+    # Walks ppids rather than trusting $PPID alone.
+    assert "ps -o ppid=" in scan
+    assert 'case "$ANCESTORS" in *" $pid "*) continue' in scan
+    # The old two-name guard must be gone: it is what let the grandparent
+    # through, and leaving it beside the new one would read as belt-and-
+    # braces while still being the thing that failed.
+    assert '[ "$pid" = "$PPID" ]' not in scan
+
+
+def test_the_ancestor_walk_cannot_spin_forever():
+    """`ps` returning something unexpected must end the loop, not hang the
+    installer before it has done anything."""
+    scan = SH[SH.index('step "Scan for prior/broken installs"'):]
+    scan = scan[:scan.index("# 2.")]
+    assert "_depth" in scan and "-lt 32" in scan
+
+
+def test_it_still_kills_a_genuine_stray():
+    """The guard must not have been widened into doing nothing: a real
+    leftover installer from an earlier run is the reason this step exists."""
+    scan = SH[SH.index('step "Scan for prior/broken installs"'):]
+    scan = scan[:scan.index("# 2.")]
+    assert 'kill -9 "$pid"' in scan
+    assert '"$pg" != "$MYPGID"' in scan
