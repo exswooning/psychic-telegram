@@ -96,6 +96,30 @@ describe('the chooser lists domains, not logins', () => {
     expect(options.some((t) => t.includes('client@y.test'))).toBe(false)
   })
 
+  it('tells apart two accounts set up against the same domain', async () => {
+    /* Live, three accounts point at source.rohitrokaya.com.np. Four
+       identical rows is the same "which one is which" problem the logins
+       had, so the login comes back as a tiebreak -- on those rows only. */
+    me.mockResolvedValue({ id: 1, email: 'ops@x.test', is_superadmin: true })
+    admins.mockResolvedValue([
+      { id: 1, email: 'ops@x.test',
+        source_domain: 'src.example', target_domain: 'tgt.example' },
+      { id: 2, email: 'client@y.test',
+        source_domain: 'src.example', target_domain: 'tgt.example' },
+      { id: 3, email: 'solo@z.test',
+        source_domain: 'only.example', target_domain: 'other.example' },
+    ])
+    render(<Harness />)
+    await screen.findByTestId('scope-account')
+    fireEvent.mouseDown(screen.getByRole('combobox'))
+    const options = (await screen.findAllByRole('option'))
+      .map((o) => o.textContent || '')
+    expect(options).toContain('src.example \u2192 tgt.example (ops@x.test)')
+    expect(options).toContain('src.example \u2192 tgt.example (client@y.test)')
+    // The unambiguous row stays clean -- a tiebreak nobody needs is noise.
+    expect(options).toContain('only.example \u2192 other.example')
+  })
+
   it('falls back to the login for an account whose wizard has not run', async () => {
     /* An empty row would be unpickable, which is worse than a login. */
     me.mockResolvedValue({ id: 1, email: 'ops@x.test', is_superadmin: true })
