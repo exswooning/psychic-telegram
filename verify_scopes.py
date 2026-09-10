@@ -249,6 +249,92 @@ def required_scopes(settings: Settings, tenant: str,
     return sorted(want)
 
 
+def scopes_for_purpose(settings: Settings, tenant: str,
+                       purpose: str) -> list[str]:
+    """What this tenant's delegation should hold, given what it is for.
+
+    Setup grants the union, so a tenant is immediately usable either way.
+    The moment a purpose is chosen, the grant should narrow to it -- and for
+    a migration that is not tidiness, it is the safety property the whole
+    tool rests on.
+
+    The source side of a migration is READ-ONLY by construction: a
+    credential that cannot write cannot damage a client's live tenant,
+    whatever a bug or an operator does next. Seeding needs the opposite --
+    drive, gmail.insert, chat.spaces -- because writing fabricated data into
+    the source is its entire job. Leave the seed grant in place and choose
+    migrate, and the source credential can still write. The guarantee is
+    gone and nothing says so.
+
+    So: "seed" keeps the write scopes, "migrate" drops them. The target side
+    is unaffected either way -- it is written to in both modes.
+    """
+    if purpose not in ("seed", "migrate"):
+        raise ValueError(f"purpose must be 'seed' or 'migrate', got {purpose!r}")
+    # Only the SOURCE narrows. A migration writes to the target by
+    # definition, so removing its write scopes would break the thing being
+    # protected.
+    include_seed = (purpose == "seed") or tenant == "target"
+    want = set(required_scopes(settings, tenant, include_seed=include_seed))
+    want |= OPTIONAL_SCOPES
+    try:
+        want |= every_toggle_scopes(settings, tenant)
+    except Exception:      # noqa: BLE001 - never make a grant impossible
+        pass
+    if not include_seed:
+        # An ALLOWLIST, not a subtraction.
+        #
+        # Dropping the seeder's scopes was the obvious move and it is not
+        # enough: the union grant also carries provisioning and reset
+        # scopes, so a source narrowed only by removing SEED_SCOPES was
+        # left holding https://mail.google.com/ (full Gmail, including
+        # delete), admin.directory.user (create AND delete accounts),
+        # admin.directory.user.security, admin.directory.group,
+        # apps.licensing, gmail.settings.basic and chat.delete.
+        #
+        # Every one of those is a write scope on a tenant the tool promises
+        # it cannot write to. A denylist has to be right about every scope
+        # that exists now and every one added later; an allowlist only has
+        # to be right about what reading actually needs.
+        want = {sc for sc in want if _reads_only(sc)}
+    return sorted(want)
+
+
+# Read-only extras a migration legitimately needs beyond the .readonly
+# suffix rule. Deliberately empty: every scope the source side currently
+# needs either ends in .readonly or is not needed for reading at all.
+# Anything added here should come with the reason it cannot be read-only.
+SOURCE_READ_EXTRAS: set = set()
+
+
+def _reads_only(scope: str) -> bool:
+    """Can this scope only read?
+
+    The suffix is Google's own convention and the only signal available
+    without a per-scope table that would go stale. Anything else is treated
+    as a write scope and refused on a migration's source -- the safe
+    direction to be wrong in, since a missing read scope fails loudly on the
+    first call while a surviving write scope fails silently, forever, until
+    something uses it.
+    """
+    return scope.endswith(".readonly") or scope in SOURCE_READ_EXTRAS
+
+
+def _seed_scopes() -> set:
+    """The seeder's own write scopes, or an empty set if it is unavailable."""
+    import os
+    import sys
+
+    sys.path.insert(0, os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "data-generator"))
+    try:
+        from seed_sandbox import SEED_SCOPES
+
+        return set(SEED_SCOPES)
+    except Exception:      # noqa: BLE001 - seeding is optional
+        return set()
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[3])
     ap.add_argument("--tenant", choices=["source", "target"], required=True)
