@@ -12,7 +12,7 @@
 import React from 'react'
 import { render, screen, fireEvent } from '@testing-library/react'
 import { describe, it, expect, vi } from 'vitest'
-import AddNodeWizard, { joinCommand } from './AddNodeWizard'
+import AddNodeWizard, { joinCommand, removeCommand } from './AddNodeWizard'
 import type { NodeJoinDetails } from '@/api/controlPlane'
 
 const join = (over: Partial<NodeJoinDetails> = {}): NodeJoinDetails => ({
@@ -127,5 +127,61 @@ describe('the token', () => {
     render(<AddNodeWizard join={join()} revealed={false} onReveal={onReveal} />)
     fireEvent.click(screen.getByTestId('reveal-token'))
     expect(onReveal).toHaveBeenCalled()
+  })
+})
+
+describe('removing it from a machine', () => {
+  it('keeps the keys and the ledger by default', () => {
+    /* Removing a node is routine; destroying the credentials for somebody's
+       tenant is not, and the two must not share a button. */
+    expect(removeCommand('unix', false)).not.toContain('--purge')
+    expect(removeCommand('windows', false)).not.toContain('PURGE')
+  })
+
+  it('says so explicitly when asked to delete everything', () => {
+    expect(removeCommand('unix', true)).toContain('--purge')
+    expect(removeCommand('windows', true)).toContain('BITPORT_UNINSTALL_PURGE')
+  })
+
+  it('uses a form that can still carry flags', () => {
+    /* `curl | bash` has no argv, which is why joining passes env vars.
+       `bash -c "<script>" name args` does, so the remove command can take
+       --yes and --purge directly. */
+    const c = removeCommand('unix', false)
+    expect(c).toContain('bash -c "$(curl')
+    expect(c).toMatch(/\)" \w+ --yes/)
+  })
+
+  it('is hidden until asked for', () => {
+    /* It sits under the join flow, not beside it: the page's job is adding
+       machines, and a delete control at the same level invites a misclick. */
+    render(<AddNodeWizard join={join()} revealed onReveal={() => {}} />)
+    expect(screen.queryByTestId('purge-warning')).toBeNull()
+    expect(screen.getByTestId('remove-command').closest('.MuiCollapse-root'))
+      .toHaveClass('MuiCollapse-hidden')
+  })
+
+  it('opens when asked', () => {
+    render(<AddNodeWizard join={join()} revealed onReveal={() => {}} />)
+    fireEvent.click(screen.getByTestId('toggle-remove'))
+    expect(screen.getByTestId('remove-command').closest('.MuiCollapse-root'))
+      .not.toHaveClass('MuiCollapse-hidden')
+  })
+
+  it('warns before handing over the destructive form', () => {
+    render(<AddNodeWizard join={join()} revealed onReveal={() => {}} />)
+    fireEvent.click(screen.getByTestId('toggle-remove'))
+    expect(screen.queryByTestId('purge-warning')).toBeNull()
+    fireEvent.click(screen.getByTestId('purge-data'))
+    expect(screen.getByTestId('purge-warning')).toBeInTheDocument()
+    expect(screen.getByTestId('remove-command')).toHaveTextContent('--purge')
+  })
+
+  it('follows the OS picked above', () => {
+    render(<AddNodeWizard join={join()} revealed onReveal={() => {}} />)
+    fireEvent.click(screen.getByTestId('toggle-remove'))
+    expect(screen.getByTestId('remove-command')).toHaveTextContent('curl')
+    fireEvent.click(screen.getByTestId('os-windows'))
+    expect(screen.getByTestId('remove-command')).toHaveTextContent('iex')
   })
 })

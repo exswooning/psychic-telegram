@@ -21,7 +21,7 @@
  */
 import React, { useState } from 'react'
 import {
-  Alert, Box, Button, Chip, Link, Paper, Stack, TextField, ToggleButton,
+  Alert, Box, Button, Chip, Collapse, Link, Stack, TextField, ToggleButton,
   ToggleButtonGroup, Typography,
 } from '@mui/material'
 import {
@@ -66,6 +66,33 @@ export const joinCommand = (
   ].join('\n')
 }
 
+/**
+ * Taking it off again.
+ *
+ * Handed out as a command for the same reason the join is: this page never
+ * reaches into a node. fleet_agent.py's own reasoning -- a control plane
+ * that could reach into its nodes would need credentials for every machine
+ * holding service-account keys for both tenants, which turns a dashboard
+ * into a lateral-movement path across the whole migration.
+ *
+ * Defaults to keeping the keys and the ledger. Removing a node is routine;
+ * destroying the credentials for somebody's tenant is not, and the two
+ * should not share a button.
+ */
+export const removeCommand = (os: NodeOs, purge: boolean): string => {
+  if (os === 'windows') {
+    return [
+      "$env:BITPORT_UNINSTALL_YES='1'",
+      ...(purge ? ["$env:BITPORT_UNINSTALL_PURGE='1'"] : []),
+      `irm ${RAW}/uninstall_node.ps1 | iex`,
+    ].join('; ')
+  }
+  // `bash -c "<script>" name args` still passes arguments -- a plain
+  // `curl | bash` cannot, which is why the join command uses env vars.
+  return `bash -c "$(curl -fsSL ${RAW}/uninstall.sh)" bitport --yes`
+    + (purge ? ' --purge' : '')
+}
+
 const Step: React.FC<{ n: number; title: string; children: React.ReactNode }> =
   ({ n, title, children }) => (
     <Stack direction="row" spacing={2} sx={{ mb: 2.5 }}>
@@ -93,6 +120,8 @@ export const AddNodeWizard: React.FC<{
   // browsing the coordinator by an address the other machine can also use.
   const [addr, setAddr] = useState(join.coordinatorUrl || window.location.origin)
   const [copied, setCopied] = useState(false)
+  const [removing, setRemoving] = useState(false)
+  const [purge, setPurge] = useState(false)
 
   const loopback = /:8090\/?$/.test(addr.trim())
   const localOnly = /^https?:\/\/(localhost|127\.0\.0\.1)/i.test(addr.trim())
@@ -188,7 +217,57 @@ export const AddNodeWizard: React.FC<{
         )}
       </Step>
 
-      <Alert severity="info" sx={{ mt: 1 }}>
+      <Box sx={{ mt: 2, pt: 2, borderTop: '1px solid', borderColor: 'divider' }}>
+        <Button size="small" onClick={() => setRemoving((v) => !v)}
+                data-testid="toggle-remove">
+          {removing ? 'Hide' : 'Remove Bitport from a machine'}
+        </Button>
+        <Collapse in={removing}>
+          <Box sx={{ mt: 1.5 }}>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+              Run this on the machine you are removing — same as joining,
+              this page never reaches into one. It uses the OS picked above.
+            </Typography>
+            <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1.5 }}>
+              <ToggleButtonGroup exclusive size="small" value={purge}
+                                 onChange={(_, v) => v !== null && setPurge(v)}>
+                <ToggleButton value={false} data-testid="keep-data">
+                  Keep keys &amp; ledger
+                </ToggleButton>
+                <ToggleButton value={true} data-testid="purge-data">
+                  Delete everything
+                </ToggleButton>
+              </ToggleButtonGroup>
+            </Stack>
+            {purge && (
+              <Alert severity="error" sx={{ mb: 1.5 }} data-testid="purge-warning">
+                This deletes the service-account keys and the migration
+                ledger. New keys mean re-doing domain-wide delegation on both
+                tenants by hand, and without the ledger a resumed migration
+                re-copies every Drive file it already moved. The script asks
+                you to type PURGE before it does it.
+              </Alert>
+            )}
+            <Box component="pre" data-testid="remove-command"
+                 sx={{ fontSize: 11, p: 1.5, bgcolor: 'action.hover', m: 0,
+                       borderRadius: 1, overflowX: 'auto', whiteSpace: 'pre-wrap',
+                       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' }}>
+              {removeCommand(os, purge)}
+            </Box>
+            <Button size="small" startIcon={<CopyIcon />} sx={{ mt: 1 }}
+                    data-testid="copy-remove"
+                    onClick={() => navigator.clipboard?.writeText(removeCommand(os, purge))}>
+              Copy
+            </Button>
+            <Typography variant="caption" color="text.secondary"
+                        sx={{ display: 'block', mt: 1 }}>
+              Run it with no flags first and it only prints what would go.
+            </Typography>
+          </Box>
+        </Collapse>
+      </Box>
+
+      <Alert severity="info" sx={{ mt: 2 }}>
         <Typography variant="body2" sx={{ mb: 0.5 }}>
           Two things this deliberately does not do for you:
         </Typography>

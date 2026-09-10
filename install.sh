@@ -430,6 +430,18 @@ ok "systemd units installed and enabled"
 # 6. Caddy reverse proxy (real HTTPS when a domain is set)
 # ---------------------------------------------------------------------------
 step "Reverse proxy"
+# Back up whatever was there BEFORE overwriting it. Both branches below
+# write /etc/caddy/Caddyfile with a plain `>`, and this machine may already
+# have been serving something else through Caddy -- asuswb was running
+# Nextcloud and SABnzbd when Bitport landed on it. Without this there is
+# nothing for uninstall.sh to put back, and the other site is simply gone.
+# Never overwrite an existing backup: a second install would replace the
+# real original with Bitport's own config.
+if [ -f /etc/caddy/Caddyfile ] && [ ! -f /etc/caddy/Caddyfile.bitport-backup ] \
+   && ! grep -q "127.0.0.1:8090" /etc/caddy/Caddyfile 2>/dev/null; then
+  run "cp -a /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bitport-backup"
+  ok "saved the existing Caddyfile as /etc/caddy/Caddyfile.bitport-backup"
+fi
 if [ -n "$BITPORT_DOMAIN" ]; then
   # ACME (Let's Encrypt) needs the standard 80/443 for the HTTP-01 challenge
   # and to serve; those can't be freely relocated without a different
