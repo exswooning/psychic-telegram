@@ -266,7 +266,49 @@ def _post(path: str, payload: dict, timeout: float = 20.0) -> dict:
         detail = exc.read().decode()[:200]
         raise CoordinatorError(f"{exc.code} from coordinator: {detail}") from exc
     except Exception as exc:      # noqa: BLE001
-        raise CoordinatorError(f"cannot reach coordinator at {url}: {exc}") from exc
+        raise CoordinatorError(
+            f"cannot reach coordinator at {url}: {exc}{_why_unreachable(exc)}"
+        ) from exc
+
+
+def _why_unreachable(exc: Exception) -> str:
+    """The difference between the two failures is the whole diagnosis.
+
+    "<urlopen error timed out>" and "Connection refused" send you to
+    opposite ends of the problem, and neither string says so. A timeout
+    means the packets are going nowhere -- a firewall DROP, the wrong
+    address, or WiFi client isolation. Refused means the host answered:
+    it is up and reachable and nothing is listening on that port, which on
+    this stack usually means the Caddy port is not the one that was tried.
+
+    Reported live from a Windows node whose install had otherwise gone
+    perfectly: "reachable : NO -- <urlopen error timed out>", with no hint
+    which of the two worlds to look in.
+    """
+    import errno
+    import socket
+
+    text = str(exc).lower()
+    timed_out = isinstance(exc, socket.timeout) or "timed out" in text
+    refused = (getattr(exc, "errno", None) == errno.ECONNREFUSED
+               or "refused" in text)
+    if timed_out:
+        return ("\n    Timed out means nothing answered at all: packets are "
+                "being dropped, not rejected.\n"
+                "    Check, in this order -- the address really is that "
+                "machine's (ip -4 addr show scope global);\n"
+                "    its firewall allows the port (ufw allow <port>/tcp); "
+                "and the WiFi is not isolating\n"
+                "    clients from each other (AP/client isolation, common "
+                "on consumer routers).")
+    if refused:
+        return ("\n    Refused means the host is up and reachable and "
+                "nothing is listening on that port.\n"
+                "    Use the CADDY port (80, or whatever the installer "
+                "picked when 80 was taken), not 8090:\n"
+                "    api_server.py binds 127.0.0.1 only, so 8090 never "
+                "answers from another machine.")
+    return ""
 
 
 class CoordinatorError(RuntimeError):
