@@ -100,9 +100,52 @@ class TestItFindsPythonWithoutANewWindow:
         assert "--silent" in PS1
 
     def test_it_runs_python_rather_than_trusting_the_name(self):
-        """Windows ships a 0-byte "python" App Execution Alias that opens
-        the Store. Finding the name proves nothing."""
+        """Finding the name proves nothing -- the version has to be run."""
         assert "sys.version_info >= (3,10)" in PS1
+
+    def test_it_never_runs_the_microsoft_store_alias(self):
+        """Windows ships an App Execution Alias for "python": a 0-byte stub
+        under WindowsApps that writes "Python was not found; run without
+        arguments to install from the Microsoft Store" to STDERR.
+
+        Hit live on a laptop that ALREADY had Python 3.12 installed. Under
+        Windows PowerShell 5.1 with $ErrorActionPreference='Stop', a native
+        command's stderr write becomes a TERMINATING error -- the reported
+        failure was literally NativeCommandError -- so probing the stub
+        killed the run before the loop could reach `py`. 2>$null does not
+        help: the stream is redirected, the error record is still raised.
+
+        Skipping it by path is the fix that does not depend on which
+        PowerShell is running.
+        """
+        assert '"*\\WindowsApps\\*"' in CODE
+
+    def test_it_probes_by_full_path_not_by_name(self):
+        """A bare name resolves to whichever copy is first on PATH, which is
+        how the alias got run in the first place. -All enumerates every
+        candidate so a real interpreter behind the stub is still found."""
+        assert "-All" in CODE
+        assert "$cmd.Source" in CODE or "$src" in CODE
+
+    def test_every_native_probe_is_isolated(self):
+        """Defence in depth for the same failure: all streams redirected,
+        the preference lowered around the call, and a try/catch so one bad
+        candidate continues the loop instead of ending the install."""
+        find = CODE[CODE.index("function Find-Python"):CODE.index("$py = Find-Python")]
+        assert "*> $null" in find
+        assert "SilentlyContinue" in find
+        assert "catch" in find
+
+    def test_the_launcher_is_tried_first(self):
+        """`py` is the one name that is never an alias stub."""
+        assert '@("py", "python", "python3")' in CODE
+
+    def test_winget_is_not_pinned_to_user_scope(self):
+        """A plain install needed no elevation on a real laptop -- observed
+        -- because python.org's installer goes per-user when not elevated.
+        --scope user can instead fail with "no applicable installer found",
+        turning a working path into a dead one."""
+        assert "--scope user" not in CODE
 
 
 class TestTheLoopbackPortIsRefusedUpFront:

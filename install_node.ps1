@@ -80,16 +80,40 @@ function Sync-Path {
   ) | Where-Object { $_ }) -join ';'
 }
 function Find-Python {
-  foreach ($c in @("python", "python3", "py")) {
-    $exe = Get-Command $c -ErrorAction SilentlyContinue
-    if (-not $exe) { continue }
-    # 3.10 is the floor: the code uses `X | None` annotations at runtime.
-    # Windows also ships a "python" App Execution Alias that is a 0-byte
-    # stub opening the Store, so actually RUN it rather than trusting the
-    # name to exist.
-    & $c -c "import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)" 2>$null
-    if ($LASTEXITCODE -eq 0) { return $c }
-  }
+  # Windows ships an App Execution Alias for "python": a 0-byte stub under
+  # %LOCALAPPDATA%\Microsoft\WindowsApps that writes "Python was not found;
+  # run without arguments to install from the Microsoft Store" to STDERR and
+  # opens the Store. Two separate problems come from it, and both were hit
+  # live on a laptop that already had Python 3.12 installed:
+  #
+  #   * $ErrorActionPreference='Stop' turns a native command's stderr write
+  #     into a TERMINATING error, so probing the stub killed the whole run
+  #     before the loop could reach `py`. 2>$null was not enough; the stream
+  #     is redirected but the error record is still raised.
+  #   * Even suppressed, running it can pop the Store.
+  #
+  # So: skip anything under WindowsApps by path, probe by full path rather
+  # than by name (a name resolves to whichever copy is first on PATH), and
+  # keep every native call inside SilentlyContinue plus a try/catch.
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = 'SilentlyContinue'
+  try {
+    # `py`, the official launcher, first: it is the one name that is never
+    # an alias stub.
+    foreach ($name in @("py", "python", "python3")) {
+      foreach ($cmd in @(Get-Command $name -All -ErrorAction SilentlyContinue)) {
+        $src = $cmd.Source
+        if (-not $src) { continue }
+        if ($src -like "*\WindowsApps\*") { continue }
+        try {
+          # 3.10 is the floor: the code uses `X | None` annotations at
+          # runtime. *> $null covers every stream, not just stderr.
+          & $src -c "import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)" *> $null
+          if ($LASTEXITCODE -eq 0) { return $src }
+        } catch { continue }
+      }
+    }
+  } finally { $ErrorActionPreference = $prev }
   return $null
 }
 $py = Find-Python
@@ -98,7 +122,10 @@ if (-not $py) {
     throw "no Python 3.10+ and no winget to install it with. Install Python 3.12 from python.org and re-run."
   }
   Write-Host "  no Python 3.10+ -- installing (user scope, no admin prompt)"
-  winget install --id Python.Python.3.12 --scope user --silent `
+  # No --scope: observed live, a plain install needs no elevation because
+  # python.org's installer goes per-user when it is not run elevated, while
+  # --scope user can fail outright with "no applicable installer found".
+  winget install --id Python.Python.3.12 --silent `
     --accept-source-agreements --accept-package-agreements | Out-Null
   Sync-Path
   $py = Find-Python
