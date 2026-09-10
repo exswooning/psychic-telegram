@@ -106,6 +106,12 @@ export interface Account {
   /** Opt-in per account (default off) -- whether this account may seed a
    *  tenant with fabricated test data. See accounts_auth.set_seed_enabled. */
   seed_enabled: boolean
+  /** The Google Workspace domains this account migrates, from its
+   *  tenant_configs rows. Empty until the wizard has run. An operator
+   *  picking a tenant recognises "source.acme.com", not the address
+   *  somebody signed up with. */
+  source_domain?: string | null
+  target_domain?: string | null
 }
 
 export const signup = (email: string, password: string, name: string, plan = 'trial') =>
@@ -861,8 +867,10 @@ export interface VerifiedDomain {
   live: number; total: number; error?: string
 }
 
-export const fetchVerifiedDomains = () =>
-  cpFetch<{ domains: VerifiedDomain[] }>('/api/v2/setup/verified-domains')
+export const fetchVerifiedDomains = (accountId?: number) =>
+  cpFetch<{ domains: VerifiedDomain[] }>(
+    '/api/v2/setup/verified-domains'
+    + (accountId === undefined ? '' : `?account_id=${accountId}`))
 
 export const revertPublicShares = (reason: string, tenant = 'target') =>
   cpFetch<ActionResult>('/api/v2/emergency/revert-public', {

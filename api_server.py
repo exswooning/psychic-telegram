@@ -4171,7 +4171,8 @@ async def get_tenant_config_status(side: str, op: Operator = Depends(operator)):
 
 
 @app.get("/api/v2/setup/verified-domains")
-async def verified_domains(op: Operator = Depends(operator)):
+async def verified_domains(account_id: int | None = None,
+                           op: Operator = Depends(operator)):
     """Every domain this caller has set up (source and/or target), with its
     real functional DWD status -- the same token-per-scope check dwd_status
     runs, just scoped to whoever is asking instead of always reading the
@@ -4188,20 +4189,27 @@ async def verified_domains(op: Operator = Depends(operator)):
     "never set up" is not the same claim as "set up but not verified",
     and showing it here as some kind of failure would be exactly that
     conflation.
+
+    account_id names whose domains to report. Without it this always
+    answered about the caller, so an operator picking a different tenant in
+    the chooser got their OWN domains back and no indication of it -- the
+    two things a chooser exists to distinguish, rendered identically.
     """
     require_login(op)
+    account_id = account_id if account_id is not None else op.account_id
+    _require_account_access(account_id, op)
 
     def _check_side(side: str) -> dict | None:
         import verify_scopes
         from config import Settings
 
-        if op.account_id is not None:
-            cfg = accounts_auth.get_tenant_config(op.account_id, side) or {}
+        if account_id is not None:
+            cfg = accounts_auth.get_tenant_config(account_id, side) or {}
             domain = cfg.get("domain") or ""
             admin_email = cfg.get("admin_email") or ""
             if not domain:
                 return None
-            s = Settings(account_id=op.account_id)
+            s = Settings(account_id=account_id)
         else:
             # The legacy/tunnel caller has no tenant_configs row at all --
             # env.sh is still its real source of truth (see full_setup.py's

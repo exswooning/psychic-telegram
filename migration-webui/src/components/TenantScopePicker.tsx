@@ -17,9 +17,9 @@ import {
 } from '@mui/material'
 import { ArrowRightAlt as ToIcon } from '@mui/icons-material'
 import {
-  fetchAdminAccounts, fetchMe, fetchTenantConfigStatus,
+  fetchAdminAccounts, fetchMe, fetchVerifiedDomains,
 } from '@/api/controlPlane'
-import type { Account } from '@/api/controlPlane'
+import type { Account, VerifiedDomain } from '@/api/controlPlane'
 
 export interface TenantScope {
   accountId?: number
@@ -34,8 +34,7 @@ export const TenantScopePicker: React.FC<{
 }> = ({ accountId, onAccountChange }) => {
   const [accounts, setAccounts] = useState<Account[]>([])
   const [mine, setMine] = useState<Account | null>(null)
-  const [domains, setDomains] = useState<{ source: string; target: string }>(
-    { source: '', target: '' })
+  const [domains, setDomains] = useState<VerifiedDomain[]>([])
   const [loaded, setLoaded] = useState(false)
 
   useEffect(() => {
@@ -47,31 +46,49 @@ export const TenantScopePicker: React.FC<{
     }).catch(() => {})
   }, [])
 
-  // Domains are read here and kept here.
+  // Verified DOMAINS, not account logins.
   //
-  // An earlier version reported them upward through the same onChange the
-  // parent used to set the account -- so a slow config fetch could resolve
-  // after an account change and write its stale value back over the new
-  // one. State that flows both ways through one callback is a race waiting
-  // for a slow network.
+  // The first version listed the Bitport accounts these tenants belong to
+  // -- a@x.test, client@y.test -- which is an answer to a question nobody
+  // asked. Nothing on this page acts on an account; every button acts on a
+  // Google Workspace domain, and that is what an operator recognises and
+  // is deciding between.
+  //
+  // Held here rather than reported upward through the same callback that
+  // sets the account: a slow fetch resolving after a change would write its
+  // stale value back over the new one.
   useEffect(() => {
     let cancelled = false
     setLoaded(false)
-    // Cleared, not left standing: the previous tenant's domains under a
+    // Cleared, not left standing. The previous tenant's domains under a
     // newly-picked account read as an answer about the new one.
-    setDomains({ source: '', target: '' })
-    Promise.all([
-      fetchTenantConfigStatus('source').catch(() => null),
-      fetchTenantConfigStatus('target').catch(() => null),
-    ]).then(([s, t]) => {
-      if (cancelled) return
-      setDomains({ source: s?.domain || '', target: t?.domain || '' })
-      setLoaded(true)
-    })
+    setDomains([])
+    fetchVerifiedDomains(accountId)
+      .then((r) => {
+        if (cancelled) return
+        setDomains(r.domains || [])
+        setLoaded(true)
+      })
+      .catch(() => { if (!cancelled) setLoaded(true) })
     return () => { cancelled = true }
   }, [accountId])
 
-  const configured = domains.source || domains.target
+  const source = domains.find((d) => d.side === 'source')
+  const target = domains.find((d) => d.side === 'target')
+  const configured = !!(source?.domain || target?.domain)
+
+  /** A domain, with the state of its delegation. "verified" is not
+   *  decoration here: an unverified domain is one these actions will fail
+   *  against, and saying so beforehand is cheaper than a failed run. */
+  const chip = (d: VerifiedDomain | undefined, side: string) => (
+    <Chip size="small" data-testid={`scope-${side}`}
+          variant={d?.status === 'verified' ? 'filled' : 'outlined'}
+          color={d?.status === 'verified' ? 'success'
+                 : d?.status === 'error' ? 'error' : 'default'}
+          label={d?.domain
+            ? `${d.domain}${d.status === 'verified' ? '' : ` — ${d.status.replace(/_/g, ' ')}`}`
+            : `no ${side} domain`} />
+  )
 
   return (
     <Box sx={{ mb: 3 }} data-testid="tenant-scope">
@@ -82,32 +99,39 @@ export const TenantScopePicker: React.FC<{
         </Typography>
 
         {accounts.length > 1 ? (
-          <TextField select size="small" label="Tenant"
-                     sx={{ minWidth: 260 }}
+          <TextField select size="small" label="Domain"
+                     sx={{ minWidth: 300 }}
                      value={accountId ?? mine?.id ?? ''}
                      onChange={(e) => onAccountChange(Number(e.target.value))}
                      inputProps={{ 'data-testid': 'scope-account' }}>
             {accounts.map((a) => (
-              <MenuItem key={a.id} value={a.id}>{a.email}</MenuItem>
+              // The tenant's own domain is the label; the account it belongs
+              // to is the value, because that is what the API targets. The
+              // login address appears only for an account whose wizard has
+              // not run -- there is no domain to name it by yet, and an
+              // empty row would be unpickable.
+              <MenuItem key={a.id} value={a.id}>
+                {a.source_domain || a.target_domain || a.email}
+                {a.source_domain && a.target_domain
+                  ? ` \u2192 ${a.target_domain}` : ''}
+              </MenuItem>
             ))}
           </TextField>
         ) : null}
 
         {configured ? (
           <Stack direction="row" spacing={1} alignItems="center">
-            <Chip size="small" variant="outlined" label={domains.source || '—'}
-                  data-testid="scope-source" />
+            {chip(source, 'source')}
             <ToIcon fontSize="small" color="disabled" />
-            <Chip size="small" variant="outlined" label={domains.target || '—'}
-                  data-testid="scope-target" />
+            {chip(target, 'target')}
           </Stack>
         ) : null}
       </Stack>
 
       {loaded && !configured && (
         <Alert severity="warning" sx={{ mt: 1.5 }} data-testid="scope-unset">
-          No tenant is configured for this account, so these steps have
-          nothing to act on. Run the Setup Wizard first.
+          No verified domain for this tenant, so these steps have nothing to
+          act on. Run the Setup Wizard first.
         </Alert>
       )}
     </Box>

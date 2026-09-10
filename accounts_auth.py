@@ -324,11 +324,26 @@ def get_account(account_id: int) -> dict | None:
 
 
 def list_accounts() -> list[dict]:
-    """Every account, newest first -- the admin dashboard's one query."""
+    """Every account, newest first -- the admin dashboard's one query.
+
+    Each row carries its tenant DOMAINS as well as the login email. An
+    operator choosing which tenant to act on recognises
+    "source.acme.com", not the address somebody signed up with -- a
+    chooser listing logins answers a question nobody asked. One LEFT JOIN
+    rather than a per-account round trip, because the caller rendering a
+    list of ten would otherwise make twenty-one requests to label it.
+    """
     with cpdb.ro() as conn:
         rows = conn.execute(
-            "SELECT id, email, name, plan, created_at, subscription_active, "
-            "is_superadmin, seed_enabled FROM accounts ORDER BY id DESC"
+            "SELECT a.id, a.email, a.name, a.plan, a.created_at, "
+            "       a.subscription_active, a.is_superadmin, a.seed_enabled, "
+            "       s.domain AS source_domain, t.domain AS target_domain "
+            "  FROM accounts a "
+            "  LEFT JOIN tenant_configs s "
+            "         ON s.account_id = a.id AND s.side = 'source' "
+            "  LEFT JOIN tenant_configs t "
+            "         ON t.account_id = a.id AND t.side = 'target' "
+            " ORDER BY a.id DESC"
         ).fetchall()
     return [dict(r) for r in rows]
 
