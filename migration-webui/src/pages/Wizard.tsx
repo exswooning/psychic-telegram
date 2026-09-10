@@ -15,7 +15,10 @@ import {
   uploadCredential, fetchDwd, checkDwdNow, diagnoseScopes, ActionSpec,
   StatusPayload, ConfigFields, ConfigPayload, DwdPayload, ScopeDiagnosis, UploadKind,
 } from '@/api/client'
-import { fetchMe, startFullSetup } from '@/api/controlPlane'
+import { fetchMe, startFullSetup, fetchFullSetupStatus } from '@/api/controlPlane'
+import type { FullSetupStatus } from '@/api/controlPlane'
+import MfaBanner from '@/components/MfaBanner'
+import { repairConsoleSetup } from '@/api/client'
 import JobRunner from '@/components/JobRunner'
 import SeedWizard from '@/pages/SeedWizard'
 import QuickTenantSetup from '@/components/QuickTenantSetup'
@@ -280,6 +283,19 @@ const Wizard: React.FC = () => {
   const [picked, setPicked] = useState<Purpose | ''>('')
   const [autoBusy, setAutoBusy] = useState(false)
   const [autoErr, setAutoErr] = useState('')
+  // Live setup progress. full_setup writes a checkpoint the API already
+  // serves; the wizard used to fire and forget, so "Set everything up for
+  // me" looked identical to a button that had done nothing for a minute.
+  const [setup, setSetup] = useState<FullSetupStatus | null>(null)
+
+  useEffect(() => {
+    if (!autoBusy && !setup?.running) return undefined
+    const tick = () => fetchFullSetupStatus('source')
+      .then(setSetup).catch(() => {})
+    tick()
+    const id = setInterval(tick, 3000)
+    return () => clearInterval(id)
+  }, [autoBusy, setup?.running])
   const [seedEnabled, setSeedEnabled] = useState(false)
 
   useEffect(() => {
@@ -321,6 +337,25 @@ const Wizard: React.FC = () => {
     const go = () => {
       if (!picked) return
       setPurpose(picked)
+      // Narrow the delegation to what was just chosen.
+      //
+      // Setup grants the union so the tenant works either way immediately.
+      // Choosing migrate has to REMOVE the source's write scopes: the
+      // read-only source is the guarantee this tool rests on, and a grant
+      // left wide makes it untrue with nothing on screen to say so.
+      //
+      // Fire-and-forget on purpose. It drives a browser and takes minutes,
+      // the operator has work to get on with, and it reports itself on the
+      // Jobs page like any other job. A failure there leaves the grant
+      // WIDER than intended, never narrower, so nothing downstream breaks
+      // for want of a scope.
+      // 'later' deliberately does not narrow: it means no purpose has been
+      // chosen, and the union is what keeps the tenant usable either way.
+      if (adminPassword && (picked === 'seed' || picked === 'migrate')) {
+        repairConsoleSetup('source', adminPassword,
+                           { purpose: picked, chat: false })
+          .catch(() => {})
+      }
       setStep(picked === 'migrate' ? 'counterpart' : 'run')
     }
 
@@ -339,9 +374,9 @@ const Wizard: React.FC = () => {
           adminPassword, { dryRun: false })
         if (!r.ok) throw new Error(r.detail || 'could not start')
         setPurpose(picked)
-        // Straight to the run view: full_setup is now the thing running, and
-        // its progress (and any 2-Step prompt) shows there.
-        setStep(picked === 'migrate' ? 'counterpart' : 'run')
+        // Stay here while it runs. Jumping straight on meant the progress,
+        // and any 2-Step prompt waiting on somebody's phone, appeared on a
+        // panel the operator had not arrived at yet.
       } catch (e) {
         setAutoErr(e instanceof Error ? e.message : String(e))
       } finally {
@@ -448,6 +483,48 @@ const Wizard: React.FC = () => {
         {autoErr && (
           <Alert severity="error" sx={{ mt: 2 }} data-testid="purpose-auto-error">
             {autoErr}
+          </Alert>
+        )}
+
+        {/* A 2-Step prompt is answered on a phone, so it has to be visible
+            wherever the setup is being watched. */}
+        <MfaBanner challenge={setup?.challenge} />
+
+        {(autoBusy || setup?.running) && (
+          <Box sx={{ mt: 3 }} data-testid="setup-progress">
+            {typeof setup?.progressPct === 'number' ? (
+              <LinearProgress variant="determinate" value={setup.progressPct} />
+            ) : (
+              <LinearProgress />
+            )}
+            <Stack direction="row" justifyContent="space-between" sx={{ mt: 0.75 }}>
+              <Typography variant="body2" color="text.secondary">
+                {setup?.progressLabel || 'starting…'}
+              </Typography>
+              {typeof setup?.progressPct === 'number' && (
+                <Typography variant="body2" color="text.secondary"
+                            sx={{ fontVariantNumeric: 'tabular-nums' }}>
+                  {setup.progressPct}%
+                </Typography>
+              )}
+            </Stack>
+          </Box>
+        )}
+
+        {setup && !setup.running && setup.result && (
+          <Alert severity={setup.result.ok ? 'success' : 'warning'}
+                 sx={{ mt: 3 }} data-testid="setup-done"
+                 action={
+                   <Button size="small" onClick={() => {
+                     setPurpose(picked || null)
+                     setStep(picked === 'migrate' ? 'counterpart' : 'run')
+                   }}>
+                     Continue
+                   </Button>
+                 }>
+            {setup.result.ok
+              ? `${domain} is set up.`
+              : 'Setup finished with something unresolved — the detail is on the next step.'}
           </Alert>
         )}
       </WizardShell>

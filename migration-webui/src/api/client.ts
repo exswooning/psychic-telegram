@@ -239,14 +239,25 @@ export interface LicencePreflight {
  *  is the way back for one already set up. */
 export async function repairConsoleSetup(
   side: 'source' | 'target', adminPassword: string,
-  opts: { grant?: boolean; chat?: boolean } = {},
-): Promise<{ ok: boolean; error?: string }> {
+  opts: {
+    grant?: boolean; chat?: boolean
+    /** Narrow the delegation to what this tenant is for.
+     *
+     *  Setup grants the union so a tenant works either way immediately.
+     *  'migrate' then REMOVES the source's write scopes -- the read-only
+     *  source is the guarantee the tool rests on, and a grant left wide
+     *  makes it untrue with nothing on screen to say so. 'seed' keeps them,
+     *  because writing fabricated data into the source is what seeding is. */
+    purpose?: 'seed' | 'migrate'
+  } = {},
+): Promise<SeedResult> {
   const res = await fetch('/api/repair_console_setup', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       side, admin_password: adminPassword,
       grant: opts.grant ?? true, chat: opts.chat ?? true,
+      purpose: opts.purpose ?? '',
     }),
   })
   return res.json()

@@ -17,9 +17,11 @@ import Wizard, { looksLikeDomain, domainOf } from './Wizard'
 
 const seedEnabled = vi.fn()
 const fullSetup = vi.fn()
+const setupStatus = vi.fn().mockResolvedValue({ running: false, result: null })
 vi.mock('@/api/controlPlane', () => ({
   fetchMe: () => seedEnabled(),
   startFullSetup: (...a: unknown[]) => fullSetup(...a),
+  fetchFullSetupStatus: (...a: unknown[]) => setupStatus(...a),
 }))
 vi.mock('@/pages/SeedWizard', () => ({
   default: ({ sourceDomain }: { sourceDomain?: string }) =>
@@ -29,11 +31,13 @@ vi.mock('@/components/QuickTenantSetup', () => ({
   default: ({ side, initialDomain }: { side: string; initialDomain?: string }) =>
     <div data-testid={`qts-${side}`}>{initialDomain}</div>,
 }))
-vi.mock('@/api/client', async () => {
-  const actual = await vi.importActual<Record<string, unknown>>('@/api/client')
-  return { ...actual, removeTenantSetup: vi.fn().mockResolvedValue({ ok: true }) }
-})
+const narrowScopes = vi.fn().mockResolvedValue({ ok: true })
+const removeTenant = vi.fn().mockResolvedValue({ ok: true })
 vi.mock('@/components/JobRunner', () => ({ default: () => null }))
+// ONE factory for this module. There were two, and the second silently
+// replaced the first -- so repairConsoleSetup was declared in a mock that
+// never took effect, and every test using it failed with "no export
+// defined" while pointing at the wrong line.
 vi.mock('@/api/client', () => ({
   fetchStatus: () => Promise.resolve({ steps: [] }),
   fetchActions: () => Promise.resolve({}),
@@ -45,6 +49,8 @@ vi.mock('@/api/client', () => ({
   uploadCredential: () => Promise.resolve({ ok: true }),
   checkDwdNow: () => Promise.resolve({}),
   diagnoseScopes: () => Promise.resolve({}),
+  removeTenantSetup: (...a: unknown[]) => removeTenant(...a),
+  repairConsoleSetup: (...a: unknown[]) => narrowScopes(...a),
 }))
 
 beforeEach(() => {
@@ -659,5 +665,120 @@ describe('emptying a tenant you have not committed to', () => {
     await reach()
     expect(screen.getByText(/every super-admin and delegated admin is kept/i))
       .toBeInTheDocument()
+  })
+})
+
+
+describe('choosing a purpose narrows the delegation', () => {
+  /* Setup grants the union so the tenant works either way immediately.
+     Choosing migrate has to REMOVE the source's write scopes: the
+     read-only source is the guarantee this tool rests on, and a grant left
+     wide makes it untrue with nothing on screen to say so. Live, the source
+     held 25 scopes including full Gmail and admin.directory.user. */
+  beforeEach(() => { narrowScopes.mockClear() })
+
+  it('asks for the migrate scope set when migrating', async () => {
+    view()
+    await signIn('admin@acme.com', 'pw123456')
+    await choose('migrate')
+    await waitFor(() => expect(narrowScopes).toHaveBeenCalled())
+    const [side, , opts] = narrowScopes.mock.calls[0]
+    expect(side).toBe('source')
+    expect(opts).toMatchObject({ purpose: 'migrate' })
+  })
+
+  it('asks for the seed scope set when seeding', async () => {
+    view()
+    await signIn('admin@acme.com', 'pw123456')
+    await choose('seed')
+    await waitFor(() => expect(narrowScopes).toHaveBeenCalled())
+    expect(narrowScopes.mock.calls[0][2]).toMatchObject({ purpose: 'seed' })
+  })
+
+  it('does not narrow when the decision is deferred', async () => {
+    /* "later" means no purpose has been chosen, and the union is what
+       keeps the tenant usable either way. */
+    view()
+    await signIn('admin@acme.com', 'pw123456')
+    await choose('later')
+    await waitFor(() => expect(screen.getByTestId('side-unset')).toBeTruthy())
+    expect(narrowScopes).not.toHaveBeenCalled()
+  })
+
+  it('does not touch the Chat app while narrowing', async () => {
+    /* Re-running the console Chat step on every purpose choice would drive
+       a browser for minutes to redo something already done. */
+    view()
+    await signIn('admin@acme.com', 'pw123456')
+    await choose('migrate')
+    await waitFor(() => expect(narrowScopes).toHaveBeenCalled())
+    expect(narrowScopes.mock.calls[0][2]).toMatchObject({ chat: false })
+  })
+})
+
+
+describe('the setup reports itself while it runs', () => {
+  /* "Set everything up for me" fired and forgot: it jumped straight on, so
+     a minute of provisioning looked identical to a button that had done
+     nothing -- and any 2-Step prompt waiting on somebody's phone appeared
+     on a panel they had not arrived at. */
+  beforeEach(() => {
+    fullSetup.mockResolvedValue({ ok: true })
+    setupStatus.mockResolvedValue({ running: false, result: null })
+  })
+
+  it('shows a progress bar once it is running', async () => {
+    setupStatus.mockResolvedValue({
+      running: true, result: null, progressPct: 42,
+      progressLabel: 'enabling APIs' })
+    view()
+    await signIn('admin@acme.com')
+    fireEvent.click(await screen.findByTestId('purpose-seed'))
+    fireEvent.click(screen.getByTestId('purpose-auto'))
+    expect(await screen.findByTestId('setup-progress')).toBeInTheDocument()
+  })
+
+  it('says which phase it is in, not just that it is busy', async () => {
+    setupStatus.mockResolvedValue({
+      running: true, result: null, progressPct: 42,
+      progressLabel: 'enabling APIs' })
+    view()
+    await signIn('admin@acme.com')
+    fireEvent.click(await screen.findByTestId('purpose-seed'))
+    fireEvent.click(screen.getByTestId('purpose-auto'))
+    expect(await screen.findByText(/enabling APIs/)).toBeInTheDocument()
+    expect(screen.getByText('42%')).toBeInTheDocument()
+  })
+
+  it('stays on the step instead of jumping away', async () => {
+    setupStatus.mockResolvedValue({ running: true, result: null })
+    view()
+    await signIn('admin@acme.com')
+    fireEvent.click(await screen.findByTestId('purpose-seed'))
+    fireEvent.click(screen.getByTestId('purpose-auto'))
+    await screen.findByTestId('setup-progress')
+    expect(screen.getByTestId('purpose-seed')).toBeInTheDocument()
+  })
+
+  it('surfaces a 2-Step prompt where the setup is being watched', async () => {
+    /* The browser doing the signing in is headless on the server. */
+    setupStatus.mockResolvedValue({
+      running: true, result: null,
+      challenge: 'Check your phone / tap 47 / Pixel 7' })
+    view()
+    await signIn('admin@acme.com')
+    fireEvent.click(await screen.findByTestId('purpose-seed'))
+    fireEvent.click(screen.getByTestId('purpose-auto'))
+    expect(await screen.findByTestId('mfa-banner')).toHaveTextContent('47')
+  })
+
+  it('offers a way on once it has finished', async () => {
+    setupStatus.mockResolvedValue({
+      running: false, result: { side: 'source', ok: true, phases: [] } })
+    view()
+    await signIn('admin@acme.com')
+    fireEvent.click(await screen.findByTestId('purpose-seed'))
+    fireEvent.click(screen.getByTestId('purpose-auto'))
+    expect(await screen.findByTestId('setup-done')).toBeInTheDocument()
   })
 })

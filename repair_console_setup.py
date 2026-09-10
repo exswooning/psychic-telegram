@@ -62,7 +62,7 @@ def _run(argv: list[str], env: dict) -> tuple[bool, str]:
 
 
 def repair(side: str, do_grant: bool, do_chat: bool,
-           account_id: int | None = None) -> dict:
+           account_id: int | None = None, purpose: str = "") -> dict:
     from config import Settings
     import dwd_helper
     import verify_scopes
@@ -115,8 +115,21 @@ def repair(side: str, do_grant: bool, do_chat: bool,
         # staying off.
         from config import Settings as _S
 
-        scopes = ",".join(verify_scopes.grant_scopes(
-            _S(account_id=account_id) if account_id else _S(), side))
+        # A purpose narrows the grant; without one it stays the union.
+        #
+        # This matters in one direction only and it matters a lot. Choosing
+        # "migrate" must REMOVE the source's write scopes, and the console
+        # replaces a delegation wholesale rather than merging -- which is
+        # what makes removal possible at all. Passing the full set here
+        # after the operator picked migrate would silently re-widen the
+        # grant that had just been narrowed.
+        if purpose:
+            scopes = ",".join(verify_scopes.scopes_for_purpose(
+                st, side, purpose))
+            add(f"scopes narrowed for {purpose} ({side})", True,
+                f"{len(scopes.split(','))} scope(s)")
+        else:
+            scopes = ",".join(verify_scopes.grant_scopes(st, side))
         n = len([x for x in scopes.split(",") if x])
         if not client_id:
             add(f"re-grant delegation ({side})", False,
@@ -171,9 +184,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--account-id", type=int)
     ap.add_argument("--skip-grant", action="store_true")
     ap.add_argument("--skip-chat", action="store_true")
+    ap.add_argument("--purpose", choices=("seed", "migrate"), default="",
+                    help="narrow the delegation to what this purpose needs. "
+                         "'migrate' removes the source's write scopes -- the "
+                         "read-only guarantee the tool rests on -- while "
+                         "'seed' keeps them, because writing fabricated data "
+                         "into the source is what seeding does. Omitted, the "
+                         "grant stays the union of both.")
     a = ap.parse_args(argv)
 
-    res = repair(a.side, not a.skip_grant, not a.skip_chat, a.account_id)
+    res = repair(a.side, not a.skip_grant, not a.skip_chat, a.account_id,
+                 purpose=a.purpose)
     if res.get("error"):
         print(res["error"])
         return 2

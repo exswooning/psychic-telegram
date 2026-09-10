@@ -5119,13 +5119,33 @@ class Handler(BaseHTTPRequestHandler):
                             "the admin password is needed: both steps sign "
                             "in to a Google console and neither can prompt"})
                 return
+            # No --account-id here, deliberately: _account_env above sets
+            # MIGRATION_DB, and a child given both follows it into the
+            # per-account ledger hunting for tenant_configs that live in the
+            # control plane. The environment already names the tenant, which
+            # is why the flag is redundant as well as harmful.
             argv = [PY, "repair_console_setup.py", "--side", side]
             if not body.get("grant", True):
                 argv.append("--skip-grant")
             if not body.get("chat", True):
                 argv.append("--skip-chat")
-            ok, msg = get_job(account_id).start("repair console setup", argv,
-                                                env=env)
+            # Narrow the delegation to what this tenant is now for.
+            #
+            # Setup grants the union so a tenant works either way
+            # immediately; once an operator says "migrate", the source's
+            # write scopes have to GO, because the read-only source is the
+            # guarantee the whole tool rests on and a wide grant makes it
+            # untrue with nothing on screen to say so.
+            purpose = (body.get("purpose") or "").strip()
+            if purpose:
+                if purpose not in ("seed", "migrate"):
+                    self._json({"ok": False, "error":
+                                "purpose must be 'seed' or 'migrate'"})
+                    return
+                argv += ["--purpose", purpose]
+            label = f"narrow scopes for {purpose}" if purpose \
+                else "repair console setup"
+            ok, msg = get_job(account_id).start(label, argv, env=env)
             self._json({"ok": ok, "error": "" if ok else msg})
             return
 

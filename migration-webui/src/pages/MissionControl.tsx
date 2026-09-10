@@ -20,6 +20,7 @@ import RunOptions from '@/components/RunOptions'
 import LicenceReadiness from '@/components/LicenceReadiness'
 import EmergencyBrake from '@/components/EmergencyBrake'
 import WorkingDomains from '@/components/WorkingDomains'
+import InventoryPicker from '@/components/InventoryPicker'
 import type { ConfiguredTenant } from '@/components/WorkingDomains'
 import { removeTenantSetup, repairConsoleSetup } from '@/api/client'
 import ForensicModal from '@/components/ForensicModal'
@@ -328,6 +329,10 @@ const MissionControl: React.FC = () => {
           going on" is the first question, and it reads the same ledger the
           panels below render one facet of each. */}
       <AiDiagnostics />
+
+      {/* Counting is read-only, so it is aimable from here rather than
+          only from inside whichever tenant panel you had opened. */}
+      <InventoryPicker />
 
       <CoverageAudit />
 
