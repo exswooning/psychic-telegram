@@ -507,8 +507,15 @@ _CHAT_ADDON_LABEL = "Build this Chat app as a Workspace add-on"
 # click retries until it times out against
 # <div class="cdk-overlay-dark-backdrop">. Confirmed live: the form was
 # found and then nothing on it could be clicked.
-_CHAT_CONFIRM_LABELS = ("Clear", "Confirm", "Continue", "OK", "Ok",
-                        "Got it", "Remove", "Yes")
+# Affirmative labels only -- a Cancel would undo the change that raised the
+# dialog, which is the opposite of what the caller just asked for.
+#
+# "Disable" is here because turning off Enable Interactive features raises
+# exactly that confirmation, and the page then reports its buttons as
+# ['Cancel', 'Disable'] -- a modal covering Save, which read as Save having
+# vanished.
+_CHAT_CONFIRM_LABELS = ("Disable", "Clear", "Confirm", "Continue", "OK", "Ok",
+                        "Got it", "Remove", "Turn off", "Yes")
 
 
 def _confirm_open_dialog(page, wait_ms: int = 8000) -> bool:
@@ -640,6 +647,98 @@ def _chat_field(page, label: str):
         except Exception:      # noqa: BLE001
             continue
     return None
+
+
+def _set_checkbox(page, label_fragment: str, want: bool) -> bool:
+    """Tick or untick the checkbox whose label contains `label_fragment`.
+
+    Three routes, because the console paints things over its own form: the
+    normal click, then a forced one, then a click dispatched on the native
+    control itself. Returns whether the box ended up in the wanted state --
+    the state, not the attempt, because reporting the attempt is what made
+    this step claim success eleven times while nothing changed.
+    """
+    # Checkboxes AND slide toggles. "Enable Interactive features" is a
+    # mat-slide-toggle, not a mat-checkbox -- it was absent from a dump of
+    # every input[type=checkbox] on the page -- so a checkbox-only selector
+    # matched nothing and returned silently, which read in the log as the
+    # control not needing to change.
+    sel = (f'label:has-text("{label_fragment}") input[type="checkbox"], '
+           f'mat-checkbox:has-text("{label_fragment}") input[type="checkbox"], '
+           f'mat-slide-toggle:has-text("{label_fragment}") input, '
+           f'mat-slide-toggle:has-text("{label_fragment}") button[role="switch"], '
+           f'[role="switch"][aria-label*="{label_fragment}" i]')
+    try:
+        box = page.locator(sel)
+        if box.count() == 0:
+            # Say so. Returning quietly here is indistinguishable in the log
+            # from "already in the wanted state", and that is how a control
+            # nobody could find looked like a control that needed nothing.
+            log(f"  no control found for {label_fragment!r}")
+            return False
+        target = box.first
+
+        def state():
+            try:
+                return target.is_checked()
+            except Exception:      # noqa: BLE001 - a switch is not a checkbox
+                return (target.get_attribute("aria-checked") or "").lower() == "true"
+
+        if state() == want:
+            return True
+        for attempt in ("normal", "forced", "dispatched"):
+            try:
+                if attempt == "normal":
+                    target.click(timeout=4000)
+                elif attempt == "forced":
+                    target.click(force=True, timeout=4000)
+                else:
+                    target.evaluate("el => el.click()")
+                page.wait_for_timeout(900)
+                if state() == want:
+                    log(f"  {'set' if want else 'cleared'} "
+                        f"{label_fragment!r} ({attempt})")
+                    return True
+            except Exception:      # noqa: BLE001 - try the next route
+                continue
+        log(f"  could not change {label_fragment!r}")
+        return False
+    except Exception as exc:      # noqa: BLE001
+        log(f"  ({label_fragment}: {str(exc)[:70]})")
+        return False
+
+
+def _make_form_valid(page) -> None:
+    """Turn off what the form is demanding and we do not need.
+
+    Angular tags invalid controls with ng-invalid, and asking the form
+    directly ended eleven rounds of guesswork. Five required controls were
+    invalid, and none of them were fields anybody had been filling:
+
+      * four HTTP endpoint URLs -- App command, Added to space, Message,
+        Removed from space -- all sitting at the "https://" placeholder,
+        required because "Enable Interactive features" is on;
+      * an email list, required because "Make this Chat app available to
+        specific people and groups" is ticked.
+
+    We need the app to EXIST so spaces.create resolves. It never receives
+    an interaction, so it needs no endpoint, and restricting it to a list
+    of people is the opposite of what a tenant-wide migration wants.
+    """
+    if _set_checkbox(page, "Enable Interactive features", False):
+        # The console confirms this one in a modal ('Cancel' / 'Disable'),
+        # and until it is answered that modal covers everything including
+        # Save.
+        page.wait_for_timeout(1200)
+        _confirm_open_dialog(page, wait_ms=2000)
+    page.wait_for_timeout(1200)
+    # Only meaningful while interactive features are on; once they are off
+    # the console removes it, and its validation requirement with it.
+    if _set_checkbox(page, "Make this Chat app available to specific people",
+                     False):
+        page.wait_for_timeout(800)
+        _confirm_open_dialog(page, wait_ms=2000)
+    page.wait_for_timeout(800)
 
 
 def _clear_workspace_addon_checkbox(page) -> bool:
@@ -820,20 +919,15 @@ def _open_chat_configuration_tab(page, attempts: int = 3) -> bool:
         # window and swallows clicks aimed at anything under it.
         _dismiss_console_banners(page)
 
-        # Then clear the add-on checkbox, because a Workspace add-on is not
-        # a Chat app as far as spaces.create is concerned.
+        # The add-on checkbox is deliberately left alone.
         #
-        # An earlier version made this conditional -- the fields render
-        # whether or not it is set, so it looked like a change worth
-        # avoiding. That reasoning was about RENDERING and the question is
-        # whether the saved app WORKS: with the box ticked the form fills,
-        # Save clicks without error, and the app still cannot be resolved.
-        # The clicks that failed while clearing it were the cookie bar, not
-        # the checkbox.
-        #
-        # It is irreversible, and it is done deliberately on projects this
-        # tool creates and deletes per tenant.
-        _clear_workspace_addon_checkbox(page)
+        # Ten attempts went into clearing it, on the theory that a
+        # Workspace add-on is not a Chat app. Asking Angular which controls
+        # were invalid showed it was never the blocker: the form is held up
+        # by four HTTP endpoint URLs and an empty email list, neither of
+        # which has anything to do with it. Clearing it is irreversible, so
+        # not touching something that was not in the way is the right
+        # outcome twice over.
         if _chat_field(page, "App name") is not None:
             return True
         for sel in _CHAT_NAME_SEL:
@@ -981,6 +1075,11 @@ def _fill_chat_app_form(page, project: str, timeout: int) -> tuple[bool, str]:
     # Again -- the console re-renders its banners on navigation, and the
     # tab click counts.
     _dismiss_console_banners(page)
+
+    # Clear the requirements we do not need, or Save is a no-op: the form
+    # was invalid on four endpoint URLs and an empty email list, and an
+    # invalid Angular form swallows the submit without a word.
+    _make_form_valid(page)
 
     saved = False
     for label in _CHAT_SAVE_LABELS:

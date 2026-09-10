@@ -118,38 +118,46 @@ class TestTheFormFillerUsesIt:
         assert "app name field" in src
         assert "/tmp" in src, "must point at the saved screenshot and page text"
 
-    def test_banners_are_dismissed_before_anything_is_clicked(self):
+    def test_banners_are_dismissed_before_the_form_is_touched(self):
         """A screenshot settled several rounds of guessing: the console
         pins a cookie consent bar to the BOTTOM of the window, and Save is
         at the foot of the form. Every click was landing on that bar --
-        which is why Playwright timed out on an actionable-looking button,
-        why force=True appeared to work and changed nothing, and why no
-        modal was ever found. There was no modal."""
+        which is why Playwright timed out on an actionable-looking button
+        and why force=True appeared to work and changed nothing."""
         import inspect
         src = inspect.getsource(g._open_chat_configuration_tab)
         assert "_dismiss_console_banners" in src
-        assert src.index("_dismiss_console_banners") < src.index(
-            "_clear_workspace_addon_checkbox")
 
-    def test_the_add_on_checkbox_is_cleared(self):
-        """A Workspace add-on is not a Chat app: with the box ticked the
-        form fills, Save clicks without error, and spaces.create still
-        cannot resolve an app. It is irreversible, and deliberate on
-        projects this tool creates and deletes per tenant."""
+    def test_the_irreversible_checkbox_is_left_alone(self):
+        """Ten attempts went into clearing "build as a Workspace add-on",
+        on the theory that an add-on is not a Chat app. Asking Angular
+        which controls were ng-invalid showed it was never the blocker: the
+        form is held up by four HTTP endpoint URLs and an empty email list.
+
+        Clearing it is irreversible, so not touching something that was not
+        in the way is the right outcome twice over."""
         import inspect
         src = inspect.getsource(g._open_chat_configuration_tab)
-        # Superseded: a Workspace add-on is not a Chat app as far as
-        # spaces.create is concerned, so the box has to be cleared whether
-        # or not the fields happen to render behind it. What that earlier
-        # reasoning actually observed was the cookie bar blocking clicks.
-        assert "_clear_workspace_addon_checkbox" in src
+        assert "_clear_workspace_addon_checkbox" not in src
 
-    def test_clearing_it_is_announced_as_irreversible(self):
-        """The console says the checkbox cannot be re-ticked. Automation
-        that walks through a one-way door should say so in the transcript."""
+    def test_the_form_is_made_valid_before_saving(self):
+        """An invalid Angular form swallows its submit without a word --
+        which is exactly what "Save clicked, nothing persisted" looked
+        like."""
         import inspect
-        src = inspect.getsource(g._clear_workspace_addon_checkbox)
-        assert "IRREVERSIBLE" in src
+        src = inspect.getsource(g._fill_chat_app_form)
+        assert "_make_form_valid" in src
+        assert src.index("_make_form_valid") < src.index("saved = False")
+
+    def test_it_turns_off_interactivity_and_the_people_restriction(self):
+        """The two settings that make those five controls required. An app
+        that never receives an interaction needs no endpoint, and
+        restricting it to a list of people is the opposite of what a
+        tenant-wide migration wants."""
+        import inspect
+        src = inspect.getsource(g._make_form_valid)
+        assert "Enable Interactive features" in src
+        assert "specific people" in src
 
 
 class TestTheConsoleOpenerIsNotHardcodedToDWD:
