@@ -21,15 +21,18 @@
  */
 import React, { useEffect, useState } from 'react'
 import {
-  Alert, Box, Button, Chip, Collapse, Link, Stack, TextField, ToggleButton,
-  ToggleButtonGroup, Typography,
+  Alert, Box, Button, Chip, Collapse, Link, MenuItem, Stack, TextField,
+  ToggleButton, ToggleButtonGroup, Typography,
 } from '@mui/material'
 import {
   ContentCopy as CopyIcon, Visibility as ShowIcon,
   VisibilityOff as HideIcon, Check as CheckIcon,
 } from '@mui/icons-material'
-import { createJoinCode } from '@/api/controlPlane'
-import type { NodeJoinDetails, JoinCode } from '@/api/controlPlane'
+import {
+  createJoinCode, fetchAdminAccounts, fetchMe,
+} from '@/api/controlPlane'
+import type { NodeJoinDetails, JoinCode, Account } from '@/api/controlPlane'
+import { labelFor } from '@/utils/accountLabel'
 
 const RAW = 'https://raw.githubusercontent.com/exswooning/psychic-telegram/workspace-migrator'
 
@@ -144,6 +147,25 @@ export const AddNodeWizard: React.FC<{
   const [minting, setMinting] = useState(false)
   const [manual, setManual] = useState(false)
   const [left, setLeft] = useState(0)
+  // Which tenant, named by its DOMAINS. "Account id" was a raw database key
+  // on screen, and it earned the question it deserved: "what is account
+  // id?". Nobody recognises 7; everybody recognises the domain pair.
+  const [accounts, setAccounts] = useState<Account[]>([])
+
+  useEffect(() => {
+    fetchMe()
+      .then((me) => {
+        const mine = me as Account
+        setAccounts([mine])
+        setAccount(mine.id)
+        if (mine.is_superadmin) {
+          fetchAdminAccounts()
+            .then((all) => { if (all.length) setAccounts(all) })
+            .catch(() => { /* the one we have still names this tenant */ })
+        }
+      })
+      .catch(() => { /* leave the chooser empty rather than guessing an id */ })
+  }, [])
   const [purge, setPurge] = useState(false)
 
   // A visible countdown, because "it expired" is the one failure a code
@@ -185,10 +207,15 @@ export const AddNodeWizard: React.FC<{
           long-lived shared credential across two machines by hand. */}
       <Box sx={{ mb: 2 }}>
         <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
-          <TextField size="small" type="number" label="Account id" value={account}
-                     onChange={(e) => setAccount(Number(e.target.value) || 0)}
-                     sx={{ width: 130 }}
-                     inputProps={{ 'data-testid': 'node-account', min: 1 }} />
+          <TextField select size="small" label="Tenant" value={
+                       accounts.some((a) => a.id === account) ? account : ''}
+                     onChange={(e) => setAccount(Number(e.target.value))}
+                     sx={{ minWidth: 290 }}
+                     inputProps={{ 'data-testid': 'node-account' }}>
+            {accounts.map((a) => (
+              <MenuItem key={a.id} value={a.id}>{labelFor(a, accounts)}</MenuItem>
+            ))}
+          </TextField>
           <Button variant="contained" size="small" onClick={mint}
                   disabled={minting} data-testid="mint-code">
             {code ? 'New code' : 'Get a join code'}

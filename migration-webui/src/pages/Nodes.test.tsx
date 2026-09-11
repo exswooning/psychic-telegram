@@ -8,6 +8,16 @@ const join = vi.fn()
 vi.mock('@/api/controlPlane', () => ({
   fetchClaims: (...a: unknown[]) => claims(...a),
   fetchNodeJoin: (...a: unknown[]) => join(...a),
+  // AddNodeWizard names the tenant by its domains rather than by a raw
+  // account id, so it asks who is signed in and, for a superadmin, for the
+  // account list. Resolved, not rejected: an unmocked export throws inside
+  // render and takes the whole page's tests with it.
+  fetchMe: () => Promise.resolve({ id: 7, email: 'ops@x.test',
+                                   is_superadmin: false }),
+  fetchAdminAccounts: () => Promise.resolve([]),
+  createJoinCode: () => Promise.resolve({
+    code: 'TEST-CODE', accountId: 7, lifetimeSeconds: 900,
+    expiresAt: new Date(Date.now() + 900_000).toISOString() }),
 }))
 
 /**

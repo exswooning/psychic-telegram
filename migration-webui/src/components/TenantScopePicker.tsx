@@ -20,6 +20,7 @@ import {
   fetchAdminAccounts, fetchMe, fetchVerifiedDomains,
 } from '@/api/controlPlane'
 import type { Account, VerifiedDomain } from '@/api/controlPlane'
+import { labelFor } from '@/utils/accountLabel'
 
 export interface TenantScope {
   accountId?: number
@@ -73,27 +74,6 @@ export const TenantScopePicker: React.FC<{
     return () => { cancelled = true }
   }, [accountId])
 
-  /** What to call an account in the chooser.
-   *
-   *  Its domain, except that live several accounts share one -- three of
-   *  them are set up against source.rohitrokaya.com.np -- and four
-   *  identical rows is the same "which one is which" problem the login
-   *  labels had. So the login comes back, but only as a tiebreak, and
-   *  only on the rows that actually need one. */
-  const domainsOf = (a: Account) =>
-    a.source_domain && a.target_domain
-      ? `${a.source_domain} \u2192 ${a.target_domain}`
-      : (a.source_domain || a.target_domain || '')
-
-  const label = (a: Account) => {
-    const d = domainsOf(a)
-    if (!d) return a.email          // wizard has not run: nothing else to say
-    // Keyed on the whole pair, not just the source: two accounts moving
-    // the same source to different targets are already distinguishable.
-    const shared = accounts.filter((o) => domainsOf(o) === d).length > 1
-    return shared ? `${d} (${a.email})` : d
-  }
-
   const source = domains.find((d) => d.side === 'source')
   const target = domains.find((d) => d.side === 'target')
   const configured = !!(source?.domain || target?.domain)
@@ -128,7 +108,7 @@ export const TenantScopePicker: React.FC<{
             {accounts.map((a) => (
               // The tenant's own domain is the label; the account it belongs
               // to is the value, because that is what the API targets.
-              <MenuItem key={a.id} value={a.id}>{label(a)}</MenuItem>
+              <MenuItem key={a.id} value={a.id}>{labelFor(a, accounts)}</MenuItem>
             ))}
           </TextField>
         ) : null}

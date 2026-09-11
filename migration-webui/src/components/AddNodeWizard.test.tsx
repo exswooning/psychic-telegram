@@ -11,16 +11,32 @@
  */
 import React from 'react'
 import { render, screen, fireEvent } from '@testing-library/react'
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import AddNodeWizard, { joinCommand, removeCommand, codeCommand } from './AddNodeWizard'
 import type { NodeJoinDetails } from '@/api/controlPlane'
 
 // The component calls createJoinCode for real now; without this the module
 // loads its own base-URL handling and fails at import time in jsdom.
 const mint = vi.fn()
+const me = vi.fn()
+const admins = vi.fn()
 vi.mock('@/api/controlPlane', () => ({
   createJoinCode: (...a: unknown[]) => mint(...a),
+  fetchMe: () => me(),
+  fetchAdminAccounts: () => admins(),
 }))
+
+beforeEach(() => {
+  me.mockReset(); admins.mockReset(); mint.mockReset()
+  me.mockResolvedValue({ id: 7, email: 'ops@x.test', is_superadmin: true })
+  admins.mockResolvedValue([
+    { id: 7, email: 'ops@x.test',
+      source_domain: 'source.acme.test', target_domain: 'target.acme.test' },
+    { id: 68, email: 'admin@bitport.local',
+      source_domain: 'source.acme.test', target_domain: 'target.acme.test' },
+    { id: 4, email: 'solo@z.test', source_domain: 'only.test' },
+  ])
+})
 
 const join = (over: Partial<NodeJoinDetails> = {}): NodeJoinDetails => ({
   enabled: true, token: 'real-secret-token', revealed: true,
@@ -261,7 +277,10 @@ describe('minting a code in the UI', () => {
       expiresAt: new Date(Date.now() + 900_000).toISOString(),
     })
     render(<AddNodeWizard join={join()} revealed={false} onReveal={() => {}} />)
-    fireEvent.change(screen.getByTestId('node-account'), { target: { value: '68' } })
+    await screen.findByTestId('node-account')
+    fireEvent.mouseDown(screen.getByRole('combobox'))
+    fireEvent.click(await screen.findByRole(
+      'option', { name: /admin@bitport\.local/ }))
     fireEvent.click(screen.getByTestId('mint-code'))
     await screen.findByTestId('join-code')
     expect(mint).toHaveBeenCalledWith(68)
@@ -281,5 +300,37 @@ describe('minting a code in the UI', () => {
     fireEvent.click(screen.getByTestId('toggle-manual'))
     expect(screen.getByTestId('node-addr').closest('.MuiCollapse-root'))
       .not.toHaveClass('MuiCollapse-hidden')
+  })
+})
+
+describe('naming the tenant', () => {
+  it('offers domains, never a raw account id', async () => {
+    /* "Account id" with a number in it earned exactly the question it
+       deserved -- "what is account id?" -- for the second time, after the
+       same mistake on the Services page. Nobody recognises 7. */
+    render(<AddNodeWizard join={join()} revealed onReveal={() => {}} />)
+    await screen.findByTestId('node-account')
+    fireEvent.mouseDown(screen.getByRole('combobox'))
+    const opts = (await screen.findAllByRole('option')).map((o) => o.textContent || '')
+    expect(opts.some((t) => t.includes('source.acme.test'))).toBe(true)
+    expect(opts.some((t) => t.trim() === '7')).toBe(false)
+  })
+
+  it('disambiguates tenants that share a domain pair', async () => {
+    /* Live, three accounts point at the same pair. Three identical lines is
+       the same problem as three numbers. */
+    render(<AddNodeWizard join={join()} revealed onReveal={() => {}} />)
+    await screen.findByTestId('node-account')
+    fireEvent.mouseDown(screen.getByRole('combobox'))
+    const opts = (await screen.findAllByRole('option')).map((o) => o.textContent || '')
+    expect(opts.filter((t) => t.includes('(')).length).toBe(2)
+    expect(opts.some((t) => t === 'only.test')).toBe(true)
+  })
+
+  it('does not ask a non-superadmin for every account', async () => {
+    me.mockResolvedValue({ id: 7, email: 'ops@x.test', is_superadmin: false })
+    render(<AddNodeWizard join={join()} revealed onReveal={() => {}} />)
+    await screen.findByTestId('node-account')
+    expect(admins).not.toHaveBeenCalled()
   })
 })
