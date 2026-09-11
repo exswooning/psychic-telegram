@@ -154,7 +154,9 @@ class TestTheLoopbackPortIsRefusedUpFront:
         unreachable. Caught at the top rather than 90 seconds later in the
         probe, where it presents as a network fault."""
         assert ":8090" in PS1
-        assert PS1.index("':8090\\s*$'") < PS1.index("1/5")
+        # Before any work happens: the first Say() line, whatever it is
+        # numbered.
+        assert PS1.index("':8090\\s*$'") < PS1.index("checking prerequisites")
 
     def test_the_message_names_the_port_that_works(self):
         assert "Caddy port" in PS1
@@ -189,7 +191,10 @@ class TestHardeningTheTokenFileCannotKillTheInstall:
         Aborting over a hardening step throws away a working install -- and
         %USERPROFILE% already grants only the user, SYSTEM and
         Administrators, so what this adds is defence in depth."""
-        block = CODE[CODE.index("$hardened = $false"):CODE.index("5/5")]
+        # Anchored on the next real statement, not on a step number --
+        # renumbering the steps broke this once already.
+        block = CODE[CODE.index("$hardened = $false"):
+                     CODE.index("$env:BITPORT_COORDINATOR = $Coordinator")]
         assert "try {" in block and "} catch {" in block
         assert "throw" not in block
 

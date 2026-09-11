@@ -18,6 +18,16 @@ vi.mock('@/api/controlPlane', () => ({
   createJoinCode: () => Promise.resolve({
     code: 'TEST-CODE', accountId: 7, lifetimeSeconds: 900,
     expiresAt: new Date(Date.now() + 900_000).toISOString() }),
+  fetchJoinCodeStatus: () => Promise.resolve({
+    known: true, redeemed: false, expired: false,
+    redeemedAt: '', redeemedFrom: '' }),
+  // NodeList and NodeWorkSwitch render inside this page. Every export a
+  // CHILD reaches for has to be here: an unmocked one throws inside render
+  // and takes the whole page's tests with it, which is why these present as
+  // errors rather than failed assertions.
+  fetchFleet: () => Promise.resolve([]),
+  setNodeDirective: () => Promise.resolve({}),
+  connectToCoordinator: () => Promise.resolve({ ok: true }),
 }))
 
 /**

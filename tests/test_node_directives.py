@@ -155,3 +155,31 @@ class TestConnectingFromTheBrowser:
         src = inspect.getsource(api_server.connect_to_coordinator)
         assert "refused that code" in src
         assert "cannot reach" in src
+
+
+class TestTheDirectiveNamesNoServices:
+    """The switch had a Services box defaulting to "gmail".
+
+    Two things wrong with that. main.py's --services already defaults to
+    "all" -- everything the tenant has configured -- so the box overrode a
+    tenant-level setting from a page that is not where that setting lives.
+    And gmail is the wrong default wherever Google's own Data Migration
+    Service is handling the mail, which is this deployment's documented
+    arrangement (see Services.tsx's own DMS panel).
+
+    Chunking needed no setting either: user_claims already hands out users
+    one at a time, which is what stops two machines starting the same
+    mailbox.
+    """
+
+    def test_the_engine_default_is_everything(self):
+        src = open(os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "main.py"), encoding="utf-8").read()
+        assert 's.add_argument("--services", default="all"' in src
+
+    def test_the_agent_passes_no_services_when_none_are_given(self):
+        src = _code(node_agent.Agent.start)
+        # Only appended when the directive actually carries one, so the
+        # engine's own default survives.
+        assert 'if services:' in src
+        assert src.index("argv = [") < src.index("if services:")

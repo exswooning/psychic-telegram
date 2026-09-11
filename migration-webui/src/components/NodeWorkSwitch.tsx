@@ -14,7 +14,7 @@
  */
 import React, { useState } from 'react'
 import {
-  Alert, Box, Button, Paper, Stack, TextField, Typography,
+  Alert, Box, Button, Link, Paper, Stack, Typography,
 } from '@mui/material'
 import {
   PlayArrow as StartIcon, Stop as StopIcon,
@@ -22,7 +22,6 @@ import {
 import { setNodeDirective } from '@/api/controlPlane'
 
 export const NodeWorkSwitch: React.FC<{ accountId?: number }> = ({ accountId }) => {
-  const [services, setServices] = useState('gmail')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const [state, setState] = useState<'started' | 'stopped' | null>(null)
@@ -30,7 +29,11 @@ export const NodeWorkSwitch: React.FC<{ accountId?: number }> = ({ accountId }) 
   const send = (run: boolean) => {
     if (accountId === undefined) return
     setBusy(true); setErr('')
-    setNodeDirective(accountId, run, run ? services : '')
+    // No services: main.py's --services already defaults to "all",
+    // meaning everything this tenant has configured. Naming one here
+    // would override the tenant's own setting from a page that is not
+    // where that setting lives.
+    setNodeDirective(accountId, run)
       .then(() => setState(run ? 'started' : 'stopped'))
       .catch((e) => setErr(e instanceof Error ? e.message : String(e)))
       .finally(() => setBusy(false))
@@ -46,12 +49,17 @@ export const NodeWorkSwitch: React.FC<{ accountId?: number }> = ({ accountId }) 
         pick it up on their next poll — this page never connects to a
         machine, machines connect to it.
       </Typography>
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+        Nodes run <strong>whatever this tenant has switched on</strong> under{' '}
+        <Link href="/app/services">Other services</Link>, and each one claims
+        users from this coordinator one at a time — that is the chunking, and
+        it needs no setting here. There was a Services box; it did nothing a
+        per-node override should do, and it defaulted to Gmail, which is
+        wrong wherever Google&apos;s own Data Migration Service is handling
+        the mail.
+      </Typography>
       <Stack direction="row" spacing={1} alignItems="center"
              sx={{ flexWrap: 'wrap', gap: 1 }}>
-        <TextField size="small" label="Services" value={services}
-                   onChange={(e) => setServices(e.target.value)}
-                   sx={{ width: 200 }}
-                   inputProps={{ 'data-testid': 'work-services' }} />
         <Button variant="contained" size="small" startIcon={<StartIcon />}
                 disabled={busy || accountId === undefined}
                 onClick={() => send(true)} data-testid="work-start">
@@ -66,9 +74,9 @@ export const NodeWorkSwitch: React.FC<{ accountId?: number }> = ({ accountId }) 
 
       {state === 'started' && (
         <Alert severity="success" sx={{ mt: 1.5 }} data-testid="work-started">
-          Nodes on this tenant will start migrating {services || 'every service'}{' '}
-          within their poll interval. A node that is not running{' '}
-          <code>node_agent.py</code> will not notice.
+          Nodes on this tenant will start within their poll interval, on
+          whatever services the tenant has switched on. A machine whose agent
+          is not running will not notice.
         </Alert>
       )}
       {state === 'stopped' && (

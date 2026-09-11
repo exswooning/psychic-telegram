@@ -53,7 +53,7 @@ esac
 
 say() { printf '\n== %s\n' "$*"; }
 
-say "1/5  checking prerequisites"
+say "1/6  checking prerequisites"
 OS="$(uname -s)"
 command -v git >/dev/null || { echo "git is not installed" >&2; exit 1; }
 PY=""
@@ -74,7 +74,7 @@ done
 echo "  python: $($PY --version) at $(command -v $PY)"
 echo "  os    : $OS"
 
-say "2/5  fetching the code into $DIR"
+say "2/6  fetching the code into $DIR"
 if [ -d "$DIR/.git" ]; then
   git -C "$DIR" fetch --quiet && git -C "$DIR" checkout --quiet "$BRANCH" \
     && git -C "$DIR" pull --quiet
@@ -82,12 +82,12 @@ else
   git clone --quiet -b "$BRANCH" "$REPO" "$DIR"
 fi
 
-say "3/5  creating the virtualenv"
+say "3/6  creating the virtualenv"
 "$PY" -m venv "$DIR/.venv"
 "$DIR/.venv/bin/pip" install -q --upgrade pip
 "$DIR/.venv/bin/pip" install -q -r "$DIR/requirements.txt"
 
-say "4/5  writing node configuration"
+say "4/6  writing node configuration"
 # Never a command line: argv is readable by every process on the box.
 umask 077
 cat > "$DIR/node.env" <<ENVEOF
@@ -98,7 +98,7 @@ ENVEOF
 chmod 600 "$DIR/node.env"
 echo "  wrote $DIR/node.env (mode 600)"
 
-say "5/5  can this machine reach the coordinator?"
+say "5/6  can this machine reach the coordinator?"
 set +e
 ( cd "$DIR" && set -a && . ./node.env && set +a && \
   ./.venv/bin/python -c "
@@ -132,6 +132,50 @@ except Exception as exc:
 " )
 RC=$?
 set -e
+
+say "6/6  starting the agent"
+# One-time setup: a systemd user unit, so the agent comes back after a
+# reboot and nothing has to be started by hand again.
+#
+# --user, not a system unit: this installer does not require root, and a
+# node's agent wants this user's venv and this user's node.env. The cost is
+# that a user unit stops at logout unless lingering is enabled, so that is
+# asked for and reported rather than assumed.
+#
+# Non-fatal. The node is configured and working by now; a box without
+# systemd (macOS, a container) still runs the agent perfectly well by hand.
+AGENT_STARTED=0
+if command -v systemctl >/dev/null 2>&1 && [ -d "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" ]; then
+  mkdir -p "$HOME/.config/systemd/user"
+  cat > "$HOME/.config/systemd/user/bitport-node.service" <<UNIT
+[Unit]
+Description=Bitport worker node agent
+After=network-online.target
+
+[Service]
+WorkingDirectory=$DIR
+ExecStart=$DIR/.venv/bin/python $DIR/node_agent.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+UNIT
+  if systemctl --user daemon-reload 2>/dev/null \
+     && systemctl --user enable --now bitport-node.service 2>/dev/null; then
+    echo "  systemd user unit installed and started"
+    AGENT_STARTED=1
+    loginctl enable-linger "$(id -un)" 2>/dev/null \
+      && echo "  lingering enabled -- it runs without you logged in" \
+      || echo "  ! could not enable lingering: it will stop at logout"
+  else
+    echo "  ! could not start the systemd user unit"
+  fi
+fi
+[ "$AGENT_STARTED" = 1 ] || {
+  echo "  start the agent by hand:"
+  echo "    cd $DIR && ./.venv/bin/python node_agent.py"
+}
 
 cat <<DONEEOF
 

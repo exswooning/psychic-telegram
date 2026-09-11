@@ -69,7 +69,7 @@ if ($Coordinator -match ':8090\s*$') {
   throw "8090 is api_server's LOOPBACK port and is not reachable from this machine. Use the Caddy port the installer reported (80, or 81 if 80 was taken)."
 }
 
-Say "1/5  checking prerequisites"
+Say "1/6  checking prerequisites"
 function Sync-Path {
   # winget writes PATH to the registry; this process still holds the copy it
   # started with. Without this, a just-installed python is invisible until a
@@ -133,7 +133,7 @@ if (-not $py) {
 }
 Write-Host "  python: $(& $py --version)"
 
-Say "2/5  fetching the code into $Dir"
+Say "2/6  fetching the code into $Dir"
 # A branch zip over HTTPS, not a git clone: git's installer is machine-scope
 # and prompts for elevation, and that prompt is the single most likely thing
 # to stop this run. Nothing here needs git's history.
@@ -163,12 +163,12 @@ try {
 }
 Write-Host "  code in place"
 
-Say "3/5  creating the virtualenv"
+Say "3/6  creating the virtualenv"
 & $py -m venv "$Dir\.venv"
 & "$Dir\.venv\Scripts\python.exe" -m pip install -q --upgrade pip
 & "$Dir\.venv\Scripts\python.exe" -m pip install -q -r "$Dir\requirements.txt"
 
-Say "4/5  writing node configuration"
+Say "4/6  writing node configuration"
 $envFile = "$Dir\node.env"
 @(
   "BITPORT_COORDINATOR=$Coordinator",
@@ -211,7 +211,7 @@ if ($hardened) {
   Write-Host "    profile's permissions (you, SYSTEM, Administrators)."
 }
 
-Say "5/5  can this machine reach the coordinator?"
+Say "5/6  can this machine reach the coordinator?"
 $env:BITPORT_COORDINATOR = $Coordinator
 $env:BITPORT_NODE_TOKEN  = $Token
 $env:BITPORT_NODE_ID     = $env:COMPUTERNAME
@@ -252,6 +252,37 @@ Pop-Location
 Write-Host ""
 if ($rc -eq 0) { Write-Host "Node is ready." }
 else { Write-Host "Node installed, but it could NOT reach the coordinator." }
+Say "6/6  starting the agent at logon"
+# One-time setup, so nothing has to be started by hand again -- including
+# after a reboot, which a laptop does often.
+#
+# A Scheduled Task, not a Windows service: registering a service needs
+# admin, and this whole installer deliberately needs none. AtLogOn runs it
+# as this user, with this user's profile, which is where node.env and the
+# venv live.
+#
+# Non-fatal for the same reason the ACL step is: the node is configured and
+# working by now, and a machine where this cannot be registered still runs
+# the agent perfectly well when started by hand.
+$taskName = "Bitport node agent"
+try {
+  $action = New-ScheduledTaskAction -Execute "$Dir\.venv\Scripts\python.exe" `
+                                    -Argument "node_agent.py" -WorkingDirectory $Dir
+  $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+  $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
+                -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+  Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
+      -Settings $settings -Force -ErrorAction Stop | Out-Null
+  Start-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+  Write-Host "  registered '$taskName' -- it starts at logon and is running now"
+  $agentStarted = $true
+} catch {
+  Write-Host "  ! could not register the scheduled task ($($_.Exception.GetType().Name))"
+  Write-Host "    start it by hand instead:"
+  Write-Host "      cd $Dir; .\.venv\Scripts\python.exe node_agent.py"
+  $agentStarted = $false
+}
+
 Write-Host @"
 
 Still needed -- the tenant credentials, which this script will not fetch.

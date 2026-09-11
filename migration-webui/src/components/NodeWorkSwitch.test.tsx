@@ -16,16 +16,21 @@ vi.mock('@/api/controlPlane', () => ({
 beforeEach(() => { setDirective.mockReset(); setDirective.mockResolvedValue({}) })
 
 describe('starting and stopping', () => {
-  it('sends run=true with the chosen services', async () => {
+  it('names no services at all', async () => {
+    /* main.py's --services already defaults to "all" -- everything the
+       tenant has configured. The box that used to be here defaulted to
+       gmail, which is wrong wherever Google's own Data Migration Service is
+       handling the mail, and it overrode a tenant setting from a page that
+       is not where that setting lives. */
     render(<NodeWorkSwitch accountId={68} />)
     fireEvent.click(screen.getByTestId('work-start'))
-    await waitFor(() => expect(setDirective).toHaveBeenCalledWith(68, true, 'gmail'))
+    await waitFor(() => expect(setDirective).toHaveBeenCalledWith(68, true))
   })
 
   it('sends run=false to stop', async () => {
     render(<NodeWorkSwitch accountId={68} />)
     fireEvent.click(screen.getByTestId('work-stop'))
-    await waitFor(() => expect(setDirective).toHaveBeenCalledWith(68, false, ''))
+    await waitFor(() => expect(setDirective).toHaveBeenCalledWith(68, false))
   })
 
   it('says nodes pick it up on a poll, not instantly', async () => {
@@ -35,7 +40,9 @@ describe('starting and stopping', () => {
     fireEvent.click(screen.getByTestId('work-start'))
     const note = await screen.findByTestId('work-started')
     expect(note).toHaveTextContent('poll interval')
-    expect(note).toHaveTextContent('node_agent.py')
+    // Asserted on the meaning, not the filename: the agent installs itself
+    // as a service now, so naming the script would date the message.
+    expect(note).toHaveTextContent('agent is not running')
   })
 
   it('says stopping waits for the current user to finish', async () => {
@@ -60,5 +67,25 @@ describe('starting and stopping', () => {
     fireEvent.click(screen.getByTestId('work-start'))
     expect(await screen.findByTestId('work-error')).toHaveTextContent('superadmin only')
     expect(screen.queryByTestId('work-started')).toBeNull()
+  })
+})
+
+describe('what it says about scope', () => {
+  it('points at where services are actually configured', () => {
+    render(<NodeWorkSwitch accountId={68} />)
+    expect(screen.getByTestId('work-switch')).toHaveTextContent('Other services')
+  })
+
+  it('has no services input any more', () => {
+    render(<NodeWorkSwitch accountId={68} />)
+    expect(screen.queryByTestId('work-services')).toBeNull()
+  })
+
+  it('explains that claiming is the chunking', () => {
+    /* "take the entire work and do a chunk" -- it already does: each node
+       claims users one at a time from the coordinator. */
+    render(<NodeWorkSwitch accountId={68} />)
+    expect(screen.getByTestId('work-switch'))
+      .toHaveTextContent('one at a time')
   })
 })

@@ -13,6 +13,7 @@ import {
 import AddNodeWizard from '@/components/AddNodeWizard'
 import ConnectToCoordinator from '@/components/ConnectToCoordinator'
 import NodeWorkSwitch from '@/components/NodeWorkSwitch'
+import NodeList from '@/components/NodeList'
 
 /**
  * Nodes — who is migrating what, across machines.
@@ -260,6 +261,7 @@ export const Nodes: React.FC = () => {
         )}
       </Paper>
 
+      <NodeList />
       <NodeWorkSwitch accountId={workAccount} />
       <ConnectToCoordinator />
     </Box>
