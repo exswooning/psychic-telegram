@@ -5,6 +5,7 @@ import {
 import { Build as MaintenanceIcon } from '@mui/icons-material'
 import { fetchActions, fetchConfig, runResetDriveLedger, runWipeTarget, runWipeSource, ActionSpec } from '@/api/client'
 import JobRunner from '@/components/JobRunner'
+import TenantSelect from '@/components/TenantSelect'
 
 /**
  * Operator/superadmin-only ops panel -- ledger repair actions that only
@@ -124,11 +125,7 @@ const ResetDriveLedgerCard: React.FC = () => {
             value={services} onChange={(e) => setServices(e.target.value)}
             sx={{ width: 220 }}
           />
-          <TextField
-            size="small" label="Account id (blank = mine)"
-            value={account} onChange={(e) => setAccount(e.target.value)}
-            sx={{ width: 200 }}
-          />
+          <TenantSelect value={account} onChange={setAccount} width={280} />
           <Button variant="outlined" color="warning" disabled={!confirmDomain} onClick={run}>
             Reset Drive ledger
           </Button>
@@ -170,7 +167,7 @@ const WipeTargetCard: React.FC = () => {
         <Typography variant="h6" sx={{ fontWeight: 600, mb: 1 }}>Wipe target accounts</Typography>
         <Alert severity="error" sx={{ mb: 2 }}>
           Deletes every provisioned user on the TARGET tenant (
-          <strong>{account ? `whichever target account ${account} has configured`
+          <strong>{account ? 'the target of the tenant selected below'
                            : (domain || 'not set')}</strong>) and invalidates
           the ledger describing them. The admin driving it is never deleted. Deleted
           Workspace users are restorable for 20 days. Type the target domain
@@ -183,12 +180,8 @@ const WipeTargetCard: React.FC = () => {
             value={confirmDomain} onChange={(e) => setConfirmDomain(e.target.value)}
             sx={{ width: 280 }}
           />
-          <TextField
-            size="small" label="Account id (blank = mine)"
-            inputProps={{ 'data-testid': 'wipe-target-account' }}
-            value={account} onChange={(e) => setAccount(e.target.value)}
-            sx={{ width: 200 }}
-          />
+          <TenantSelect value={account} onChange={setAccount} width={280}
+                        testid="wipe-target-account" />
           <Button variant="outlined" color="error" disabled={!confirmDomain} onClick={run}>
             Wipe target accounts
           </Button>
@@ -247,12 +240,7 @@ const WipeSourceCard: React.FC = () => {
             value={confirmDomain} onChange={(e) => setConfirmDomain(e.target.value)}
             sx={{ width: 280 }}
           />
-          <TextField
-            size="small" label="Account id (blank = mine)"
-            inputProps={{ 'data-testid': 'wipe-source-account' }}
-            value={account} onChange={(e) => setAccount(e.target.value)}
-            sx={{ width: 200 }}
-          />
+          <TenantSelect value={account} onChange={setAccount} width={280} />
           <Button variant="contained" color="error" disabled={!confirmDomain} onClick={run}>
             Wipe source accounts
           </Button>
