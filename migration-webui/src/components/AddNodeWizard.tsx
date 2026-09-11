@@ -19,7 +19,7 @@
  * tailnet install reports nothing here and the operator is the only one who
  * knows the answer.
  */
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import {
   Alert, Box, Button, Chip, Collapse, Link, Stack, TextField, ToggleButton,
   ToggleButtonGroup, Typography,
@@ -28,11 +28,29 @@ import {
   ContentCopy as CopyIcon, Visibility as ShowIcon,
   VisibilityOff as HideIcon, Check as CheckIcon,
 } from '@mui/icons-material'
-import type { NodeJoinDetails } from '@/api/controlPlane'
+import { createJoinCode } from '@/api/controlPlane'
+import type { NodeJoinDetails, JoinCode } from '@/api/controlPlane'
 
 const RAW = 'https://raw.githubusercontent.com/exswooning/psychic-telegram/workspace-migrator'
 
 export type NodeOs = 'unix' | 'windows'
+
+/**
+ * The one line to run when you have a join code.
+ *
+ * Everything else -- which coordinator, which token, which tenant -- is
+ * inside the code, so this is the same length whatever the answers are.
+ * The coordinator serves the installer with those three baked in, deriving
+ * its own address from the request rather than from configuration, because
+ * BITPORT_PUBLIC_ORIGIN is empty on every LAN and tailnet install.
+ */
+export const codeCommand = (os: NodeOs, origin: string, code: string): string => {
+  const o = origin.replace(/\/+$/, '')
+  const c = code || '<code>'
+  return os === 'windows'
+    ? `irm ${o}/api/v2/j/${c} | iex`
+    : `curl -fsSL "${o}/api/v2/j/${c}?sh=true" | bash`
+}
 
 /**
  * The one line to paste on the joining machine.
@@ -121,7 +139,32 @@ export const AddNodeWizard: React.FC<{
   const [addr, setAddr] = useState(join.coordinatorUrl || window.location.origin)
   const [copied, setCopied] = useState(false)
   const [removing, setRemoving] = useState(false)
+  const [code, setCode] = useState<JoinCode | null>(null)
+  const [codeErr, setCodeErr] = useState('')
+  const [minting, setMinting] = useState(false)
+  const [manual, setManual] = useState(false)
+  const [left, setLeft] = useState(0)
   const [purge, setPurge] = useState(false)
+
+  // A visible countdown, because "it expired" is the one failure a code
+  // has that a token does not, and finding out on the other machine costs
+  // a walk back to this one.
+  useEffect(() => {
+    if (!code) return undefined
+    const tick = () => setLeft(Math.max(
+      0, Math.round((Date.parse(code.expiresAt) - Date.now()) / 1000)))
+    tick()
+    const t = window.setInterval(tick, 1000)
+    return () => window.clearInterval(t)
+  }, [code])
+
+  const mint = () => {
+    setMinting(true); setCodeErr('')
+    createJoinCode(account)
+      .then(setCode)
+      .catch((e) => setCodeErr(e instanceof Error ? e.message : String(e)))
+      .finally(() => setMinting(false))
+  }
 
   const loopback = /:8090\/?$/.test(addr.trim())
   const localOnly = /^https?:\/\/(localhost|127\.0\.0\.1)/i.test(addr.trim())
@@ -133,8 +176,85 @@ export const AddNodeWizard: React.FC<{
     window.setTimeout(() => setCopied(false), 2000)
   }
 
+  const mins = Math.floor(left / 60), secs = left % 60
+
   return (
     <Box data-testid="add-node-wizard">
+      {/* The code path first and the manual one folded away, because the
+          manual one asks four questions to build a line that carries a
+          long-lived shared credential across two machines by hand. */}
+      <Box sx={{ mb: 2 }}>
+        <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
+          <TextField size="small" type="number" label="Account id" value={account}
+                     onChange={(e) => setAccount(Number(e.target.value) || 0)}
+                     sx={{ width: 130 }}
+                     inputProps={{ 'data-testid': 'node-account', min: 1 }} />
+          <Button variant="contained" size="small" onClick={mint}
+                  disabled={minting} data-testid="mint-code">
+            {code ? 'New code' : 'Get a join code'}
+          </Button>
+          <ToggleButtonGroup exclusive size="small" value={os}
+                             onChange={(_, v) => v && setOs(v)}>
+            <ToggleButton value="unix" data-testid="os-unix">Linux / macOS</ToggleButton>
+            <ToggleButton value="windows" data-testid="os-windows">Windows</ToggleButton>
+          </ToggleButtonGroup>
+        </Stack>
+
+        {codeErr && (
+          <Alert severity="error" sx={{ mb: 1 }} data-testid="code-error">{codeErr}</Alert>
+        )}
+
+        {code ? (
+          <Box data-testid="code-panel">
+            <Stack direction="row" spacing={2} alignItems="center" sx={{ mb: 1 }}>
+              <Typography data-testid="join-code"
+                          sx={{ fontSize: 30, fontWeight: 700, letterSpacing: 3,
+                                fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' }}>
+                {code.code}
+              </Typography>
+              <Chip size="small" data-testid="code-expiry"
+                    color={left === 0 ? 'error' : left < 120 ? 'warning' : 'default'}
+                    label={left === 0 ? 'expired'
+                           : `expires in ${mins}:${String(secs).padStart(2, '0')}`} />
+            </Stack>
+            <Box component="pre" data-testid="code-command"
+                 sx={{ fontSize: 12, p: 1.5, bgcolor: 'action.hover', m: 0,
+                       borderRadius: 1, overflowX: 'auto', whiteSpace: 'pre-wrap',
+                       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' }}>
+              {codeCommand(os, window.location.origin, code.code)}
+            </Box>
+            <Button size="small" startIcon={copied ? <CheckIcon /> : <CopyIcon />}
+                    sx={{ mt: 1 }} data-testid="copy-code-command"
+                    onClick={() => {
+                      navigator.clipboard?.writeText(
+                        codeCommand(os, window.location.origin, code.code))
+                      setCopied(true); window.setTimeout(() => setCopied(false), 2000)
+                    }}>
+              {copied ? 'Copied' : 'Copy'}
+            </Button>
+            <Typography variant="caption" color="text.secondary"
+                        sx={{ display: 'block', mt: 1 }}>
+              Single use, and it expires on its own. The coordinator address,
+              the token and the tenant are all inside it — nothing else to
+              type, and no long-lived credential leaves this page.
+            </Typography>
+          </Box>
+        ) : (
+          <Typography variant="body2" color="text.secondary">
+            One short code carries the coordinator address, the token and the
+            tenant. Run one line on the new machine — nothing to copy across
+            by hand.
+          </Typography>
+        )}
+      </Box>
+
+      <Button size="small" onClick={() => setManual((v) => !v)}
+              data-testid="toggle-manual" sx={{ mb: manual ? 1 : 0 }}>
+        {manual ? 'Hide manual setup' : 'Set it up manually instead'}
+      </Button>
+
+      <Collapse in={manual}>
+      <Box sx={{ pt: 1 }}>
       <Step n={1} title="Where can the new machine reach this coordinator?">
         <TextField size="small" fullWidth value={addr}
                    onChange={(e) => setAddr(e.target.value)}
@@ -161,29 +281,7 @@ export const AddNodeWizard: React.FC<{
         )}
       </Step>
 
-      <Step n={2} title="What is it running?">
-        <ToggleButtonGroup exclusive size="small" value={os}
-                           onChange={(_, v) => v && setOs(v)}>
-          <ToggleButton value="unix" data-testid="os-unix">Linux / macOS</ToggleButton>
-          <ToggleButton value="windows" data-testid="os-windows">Windows</ToggleButton>
-        </ToggleButtonGroup>
-        {os === 'windows' && (
-          <Typography variant="caption" color="text.secondary"
-                      sx={{ display: 'block', mt: 0.75 }}>
-            Runs start to finish with no prompts: it needs no admin rights,
-            installs Python itself if missing, and needs no second shell.
-          </Typography>
-        )}
-      </Step>
-
-      <Step n={3} title="Which tenant will it work on?">
-        <TextField size="small" type="number" value={account}
-                   onChange={(e) => setAccount(Number(e.target.value) || 0)}
-                   sx={{ width: 140 }} label="Account id"
-                   inputProps={{ 'data-testid': 'node-account', min: 1 }} />
-      </Step>
-
-      <Step n={4} title="Run this on the new machine">
+      <Step n={2} title="Run this on the new machine">
         <Stack direction="row" spacing={1} sx={{ mb: 1 }}>
           <Button size="small" onClick={onReveal}
                   startIcon={revealed ? <HideIcon /> : <ShowIcon />}
@@ -216,6 +314,9 @@ export const AddNodeWizard: React.FC<{
           </Typography>
         )}
       </Step>
+
+      </Box>
+      </Collapse>
 
       <Box sx={{ mt: 2, pt: 2, borderTop: '1px solid', borderColor: 'divider' }}>
         <Button size="small" onClick={() => setRemoving((v) => !v)}

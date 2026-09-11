@@ -37,7 +37,31 @@ PUBLIC = {
     "/api/v2/whoami": "echoes the caller's own identity, nothing else",
     "/ws": "enforces inline -- a dependency cannot raise mid-handshake, so "
            "it closes with 1008 instead",
+    "/api/v2/j/{code}": (
+        "redeems a join code -- the machine calling it has no credential "
+        "yet, and collecting one is the whole point. The code stands in for "
+        "auth and is built to: single use (marked spent in the same write "
+        "transaction that validates it), expires in 15 minutes, stored only "
+        "as a SHA-256, 40 bits of entropy, and rate limited per source "
+        "address. See join_codes.py and tests/test_join_codes.py"),
 }
+
+
+def test_the_join_code_route_actually_has_those_protections():
+    """PUBLIC is a list of promises. This one is a live-token endpoint that
+    anyone can call, so the promise is checked rather than trusted."""
+    import inspect
+
+    import api_server
+    import join_codes
+    src = inspect.getsource(api_server.redeem_join_code)
+    assert "join_codes.redeem(code, addr=addr)" in src, "no rate-limit key passed"
+    assert '"Cache-Control": "no-store"' in src
+    redeem = inspect.getsource(join_codes.redeem)
+    assert "UPDATE join_codes SET used_at" in redeem
+    assert "expires_at" in redeem
+    assert join_codes.LIFETIME_S <= 30 * 60
+    assert "sha256" in inspect.getsource(join_codes._hash)
 
 
 def _routes():
@@ -94,8 +118,13 @@ class TestEveryRouteEnforces:
                 break
 
     def test_the_allowlist_stays_small_and_explained(self):
-        # A creeping allowlist is how this comes back.
-        assert len(PUBLIC) <= 6
+        # A creeping allowlist is how this comes back. Raised from 6 to 7
+        # for /api/v2/j/{code}, deliberately and once: a joining machine has
+        # no credential to present, so the code itself carries the
+        # protections -- checked by
+        # test_the_join_code_route_actually_has_those_protections rather
+        # than taken on the reason string's word.
+        assert len(PUBLIC) <= 7
         for path, reason in PUBLIC.items():
             assert reason and len(reason) > 15, path
 

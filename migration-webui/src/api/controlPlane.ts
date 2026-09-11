@@ -662,6 +662,21 @@ export interface NodeJoinDetails {
   leaseSeconds: number
 }
 
+export interface JoinCode {
+  code: string
+  expiresAt: string
+  lifetimeSeconds: number
+  accountId: number
+}
+
+/** A short, single-use code that stands in for copying the node token by
+ *  hand. Returned once and never recoverable -- only its hash is stored. */
+export const createJoinCode = (accountId?: number) =>
+  cpFetch<JoinCode>('/api/v2/nodes/join-code', {
+    method: 'POST',
+    body: JSON.stringify(accountId === undefined ? {} : { account_id: accountId }),
+  })
+
 export const fetchNodeJoin = (reveal = false) =>
   cpFetch<NodeJoinDetails>(`/api/v2/nodes/join?reveal=${reveal}`)
 

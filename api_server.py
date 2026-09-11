@@ -70,7 +70,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
     from fastapi import (Cookie, Depends, FastAPI, Header, HTTPException,
-                         Response, WebSocket, WebSocketDisconnect)
+                         Request, Response, WebSocket, WebSocketDisconnect)
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import JSONResponse
     from pydantic import BaseModel, Field
@@ -84,6 +84,7 @@ import job_queue
 import job_supervisor
 import ai_diagnostics
 import control_plane_db as cpdb
+import join_codes
 import user_claims as user_claims_mod
 
 SESSION_COOKIE = "bp_session"
@@ -3902,6 +3903,99 @@ async def node_join_details(reveal: bool = False,
         }
 
     return await _off_loop(_read)
+
+
+class JoinCodeRequest(BaseModel):
+    account_id: int | None = None
+
+
+@app.post("/api/v2/nodes/join-code")
+async def create_join_code(req: JoinCodeRequest, op: Operator = Depends(operator)):
+    """Mint a short, single-use code for adding a machine.
+
+    Superadmin-only, for the same reason /nodes/join is: the node token this
+    eventually hands over is ONE shared secret for the whole control plane,
+    and the claim body carries its own accountId -- so anything holding it
+    can claim users for any account. Making the token per-account is the
+    real fix and is not done yet.
+
+    What the code changes is exposure over TIME, not who may ask. Copying
+    the 43-character token onto a laptop by hand leaves it in a clipboard, a
+    chat message and usually a screenshot, and it never expires. A code is
+    dead in fifteen minutes and after one use.
+    """
+    require_login(op)
+    require_superadmin(op)
+    account_id = req.account_id if req.account_id is not None else op.account_id
+    _require_account_access(account_id, op)
+    if account_id is None:
+        raise HTTPException(400, "no account to make a join code for")
+
+    def _make() -> dict:
+        code, expires_at = join_codes.create(
+            account_id, created_by=str(op.name or "")[:200])
+        return {"code": code, "expiresAt": expires_at,
+                "lifetimeSeconds": join_codes.LIFETIME_S,
+                "accountId": account_id}
+    return await _off_loop(_make)
+
+
+@app.get("/api/v2/j/{code}")
+async def redeem_join_code(code: str, request: Request, sh: bool = False):
+    """Spend a join code and return an installer that has everything in it.
+
+    UNAUTHENTICATED, necessarily: the machine running this has no credential
+    yet -- collecting one is the entire point. What stands in for auth is
+    that the code is single-use, expires in fifteen minutes, is stored only
+    as a hash, and is rate limited per source address.
+
+    Served as a script rather than JSON so the whole join is one line the
+    operator can read off a screen and type. The script itself is trivial --
+    it sets three environment variables and pipes the real installer, which
+    stays the single canonical copy on GitHub.
+
+    The coordinator URL is taken from the request, not from configuration:
+    it is by definition an address the joining machine could reach, because
+    it just reached it. BITPORT_PUBLIC_ORIGIN is empty on any install
+    without a public domain, which is every LAN and tailnet one.
+    """
+    addr = (request.client.host if request.client else "") or ""
+    token = os.getenv("BITPORT_NODE_TOKEN", "").strip()
+    if not token:
+        raise HTTPException(503, "this control plane is not accepting nodes "
+                                 "(BITPORT_NODE_TOKEN is not set)")
+
+    def _spend() -> int:
+        try:
+            return join_codes.redeem(code, addr=addr)
+        except join_codes.JoinCodeError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    account_id = await _off_loop(_spend)
+
+    # The origin the browser/CLI actually used, honouring the proxy that
+    # terminated TLS -- Caddy sits in front of this on every real install.
+    proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""
+    origin = f"{proto}://{host}" if host else str(request.base_url).rstrip("/")
+    raw = ("https://raw.githubusercontent.com/exswooning/psychic-telegram/"
+           "workspace-migrator")
+
+    if sh:
+        body = (f"#!/usr/bin/env bash\n"
+                f"BITPORT_COORDINATOR='{origin}' \\\n"
+                f"BITPORT_NODE_TOKEN='{token}' \\\n"
+                f"BITPORT_ACCOUNT='{account_id}' \\\n"
+                f'  bash -c "$(curl -fsSL {raw}/install_node.sh)"\n')
+    else:
+        body = (f"$env:BITPORT_COORDINATOR='{origin}'\n"
+                f"$env:BITPORT_NODE_TOKEN='{token}'\n"
+                f"$env:BITPORT_ACCOUNT='{account_id}'\n"
+                f"irm {raw}/install_node.ps1 | iex\n")
+    # no-store: this body contains a live credential, and a proxy or browser
+    # keeping it would outlive the single use that bounds it.
+    return Response(content=body, media_type="text/plain",
+                    headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/v2/claims")

@@ -12,8 +12,15 @@
 import React from 'react'
 import { render, screen, fireEvent } from '@testing-library/react'
 import { describe, it, expect, vi } from 'vitest'
-import AddNodeWizard, { joinCommand, removeCommand } from './AddNodeWizard'
+import AddNodeWizard, { joinCommand, removeCommand, codeCommand } from './AddNodeWizard'
 import type { NodeJoinDetails } from '@/api/controlPlane'
+
+// The component calls createJoinCode for real now; without this the module
+// loads its own base-URL handling and fails at import time in jsdom.
+const mint = vi.fn()
+vi.mock('@/api/controlPlane', () => ({
+  createJoinCode: (...a: unknown[]) => mint(...a),
+}))
 
 const join = (over: Partial<NodeJoinDetails> = {}): NodeJoinDetails => ({
   enabled: true, token: 'real-secret-token', revealed: true,
@@ -183,5 +190,96 @@ describe('removing it from a machine', () => {
     expect(screen.getByTestId('remove-command')).toHaveTextContent('curl')
     fireEvent.click(screen.getByTestId('os-windows'))
     expect(screen.getByTestId('remove-command')).toHaveTextContent('iex')
+  })
+})
+
+describe('joining with a code', () => {
+  it('is one short line whatever the answers are', () => {
+    /* The manual line carries the coordinator URL, a 43-character token and
+       the account. All three live inside the code instead, so this is the
+       same length every time. */
+    const c = codeCommand('windows', 'https://h.example', 'B95B-RZ5Z')
+    expect(c).toBe('irm https://h.example/api/v2/j/B95B-RZ5Z | iex')
+    expect(c.length).toBeLessThan(60)
+  })
+
+  it('quotes the unix URL, because the query string would otherwise be eaten', () => {
+    /* `?sh=true` unquoted is a shell glob, and the failure is a confusing
+       "no matches found" rather than anything about joining. */
+    const c = codeCommand('unix', 'https://h.example', 'B95B-RZ5Z')
+    expect(c).toContain('"https://h.example/api/v2/j/B95B-RZ5Z?sh=true"')
+    expect(c).toContain('| bash')
+  })
+
+  it('never doubles the slash when the origin has one', () => {
+    expect(codeCommand('windows', 'https://h.example/', 'X')).toContain('example/api')
+  })
+
+  it('carries no credential of its own', () => {
+    /* The whole point: this line can be read aloud, put in a chat, or
+       photographed. The token is exchanged server-side, once. */
+    const c = codeCommand('windows', 'https://h.example', 'B95B-RZ5Z')
+    expect(c).not.toContain('BITPORT_NODE_TOKEN')
+  })
+})
+
+describe('minting a code in the UI', () => {
+  it('shows the code and a one-line command', async () => {
+    mint.mockResolvedValue({
+      code: 'B95B-RZ5Z', accountId: 7, lifetimeSeconds: 900,
+      expiresAt: new Date(Date.now() + 900_000).toISOString(),
+    })
+    render(<AddNodeWizard join={join()} revealed={false} onReveal={() => {}} />)
+    fireEvent.click(screen.getByTestId('mint-code'))
+    expect(await screen.findByTestId('join-code')).toHaveTextContent('B95B-RZ5Z')
+    expect(screen.getByTestId('code-command')).toHaveTextContent('/api/v2/j/B95B-RZ5Z')
+  })
+
+  it('counts down, because expiry is the one failure a token does not have', async () => {
+    mint.mockResolvedValue({
+      code: 'B95B-RZ5Z', accountId: 7, lifetimeSeconds: 900,
+      expiresAt: new Date(Date.now() + 900_000).toISOString(),
+    })
+    render(<AddNodeWizard join={join()} revealed={false} onReveal={() => {}} />)
+    fireEvent.click(screen.getByTestId('mint-code'))
+    expect(await screen.findByTestId('code-expiry')).toHaveTextContent(/expires in 1[45]:/)
+  })
+
+  it('says expired rather than showing a dead code as usable', async () => {
+    mint.mockResolvedValue({
+      code: 'B95B-RZ5Z', accountId: 7, lifetimeSeconds: 900,
+      expiresAt: new Date(Date.now() - 1000).toISOString(),
+    })
+    render(<AddNodeWizard join={join()} revealed={false} onReveal={() => {}} />)
+    fireEvent.click(screen.getByTestId('mint-code'))
+    expect(await screen.findByTestId('code-expiry')).toHaveTextContent('expired')
+  })
+
+  it('mints for the account that was chosen', async () => {
+    mint.mockResolvedValue({
+      code: 'X', accountId: 68, lifetimeSeconds: 900,
+      expiresAt: new Date(Date.now() + 900_000).toISOString(),
+    })
+    render(<AddNodeWizard join={join()} revealed={false} onReveal={() => {}} />)
+    fireEvent.change(screen.getByTestId('node-account'), { target: { value: '68' } })
+    fireEvent.click(screen.getByTestId('mint-code'))
+    await screen.findByTestId('join-code')
+    expect(mint).toHaveBeenCalledWith(68)
+  })
+
+  it('reports a failure instead of showing nothing', async () => {
+    mint.mockRejectedValue(new Error('superadmin only'))
+    render(<AddNodeWizard join={join()} revealed={false} onReveal={() => {}} />)
+    fireEvent.click(screen.getByTestId('mint-code'))
+    expect(await screen.findByTestId('code-error')).toHaveTextContent('superadmin only')
+  })
+
+  it('keeps the manual path available but out of the way', () => {
+    render(<AddNodeWizard join={join()} revealed onReveal={() => {}} />)
+    expect(screen.getByTestId('node-addr').closest('.MuiCollapse-root'))
+      .toHaveClass('MuiCollapse-hidden')
+    fireEvent.click(screen.getByTestId('toggle-manual'))
+    expect(screen.getByTestId('node-addr').closest('.MuiCollapse-root'))
+      .not.toHaveClass('MuiCollapse-hidden')
   })
 })
