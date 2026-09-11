@@ -69,10 +69,39 @@ That quota is shared. Every node uses the same service account and the same
 Cloud project, so the ceiling is ~120 writes/sec **in total**, not per node.
 Past it you buy 429s, not throughput.
 
+## What to copy to a node, and what not to
+
+Two things, and neither is served by the API -- an endpoint handing service
+account keys to anything holding a node token would make that token
+equivalent to the keys for the whole tenant.
+
+```bash
+# on the COORDINATOR
+./export_node_config.py --account-id 68 --out node-config.db
+```
+
+```bash
+# then, to the node
+scp    <coordinator>:<bitport-dir>/node-config.db  <node-dir>/migration.db
+scp -r <coordinator>:<bitport-dir>/keys/68         <node-dir>/keys/68
+```
+
+**Not the coordinator's own `migration.db`.** That is what this said to do
+for a long time, and `node_setup.sh` still did it. On a real deployment that
+file is 70 MB and holds every customer's `password_hash`, live session
+tokens, the operator audit log and every other tenant's configuration. A
+node reads exactly five columns of one table out of it:
+
+    SELECT side, domain, admin_email, sa_key_path, db_path
+      FROM tenant_configs WHERE account_id = ?
+
+`export_node_config.py` writes a 4 KB database containing that and nothing
+else.
+
 ## What it does not protect you from
 
-**Each node keeps its own ledger.** `node_setup.sh` copies `migration.db` to
-the node; nothing merges them afterwards. That matters differently per
+**Each node keeps its own ledger.** A node gets its own copy; nothing
+merges them afterwards. That matters differently per
 service:
 
 | service | duplicate check | safe across nodes? |

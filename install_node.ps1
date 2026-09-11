@@ -237,10 +237,20 @@ if ($rc -eq 0) { Write-Host "Node is ready." }
 else { Write-Host "Node installed, but it could NOT reach the coordinator." }
 Write-Host @"
 
-Still needed -- the tenant credentials, which this script will not fetch:
+Still needed -- the tenant credentials, which this script will not fetch.
+Run the first line ON THE COORDINATOR, in whatever directory Bitport is
+installed in there (/root/migration and /opt/bitport are both common):
 
-  scp -r <coordinator>:/opt/bitport/keys/$Account $Dir\keys\$Account
-  scp    <coordinator>:/opt/bitport/migration.db  $Dir\migration.db
+  ./export_node_config.py --account-id $Account --out node-config.db
+
+Then copy both to this machine:
+
+  scp <coordinator>:<bitport-dir>/node-config.db     $Dir\migration.db
+  scp -r <coordinator>:<bitport-dir>/keys/$Account   $Dir\keys\$Account
+
+node-config.db, not the coordinator's own migration.db. That file also
+holds every customer's password hash, live sessions and the audit log, and
+a node reads exactly five columns of one table out of it.
 
 Then, to take part in a migration:
 

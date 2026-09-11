@@ -59,14 +59,31 @@ say "3/5  copying tenant keys and ledger from $COORD"
 # trust relationship with each other, only with you.
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-scp -q -r "$COORD:/root/migration/keys/$ACCOUNT" "$TMP/keys-$ACCOUNT"
-scp -q "$COORD:/root/migration/migration.db" "$TMP/migration.db"
-scp -q "$COORD:/root/migration/env.sh" "$TMP/env.sh" 2>/dev/null || true
+COORD_DIR="${BITPORT_COORD_DIR:-/root/migration}"
+scp -q -r "$COORD:$COORD_DIR/keys/$ACCOUNT" "$TMP/keys-$ACCOUNT"
+
+# A MINIMAL control-plane database, not the coordinator's own.
+#
+# This copied $COORD_DIR/migration.db wholesale. On a real deployment that
+# is 70 MB and holds every customer's password_hash, live session tokens,
+# the operator audit log and every other tenant's configuration -- onto a
+# machine whose whole job is migrating one account's mailboxes. A node
+# reads five columns of one table out of it (config.py,
+# _load_account_tenant_config), and export_node_config.py writes exactly
+# those into a 4 KB file.
+ssh "$COORD" "cd '$COORD_DIR' && ./export_node_config.py \
+      --account-id $ACCOUNT --out '/tmp/bitport-node-$ACCOUNT.db'" >/dev/null
+scp -q "$COORD:/tmp/bitport-node-$ACCOUNT.db" "$TMP/migration.db"
+ssh "$COORD" "rm -f '/tmp/bitport-node-$ACCOUNT.db'"
+
+# env.sh is deliberately NOT copied any more. It is the legacy single-tenant
+# config, which a node running with --account-id does not read at all -- and
+# on this deployment it carries a live GROQ_API_KEY, which has nothing to do
+# with migrating a mailbox.
 
 ssh "$NODE" "mkdir -p $DIR/keys"
 scp -q -r "$TMP/keys-$ACCOUNT" "$NODE:$DIR/keys/$ACCOUNT"
 scp -q "$TMP/migration.db" "$NODE:$DIR/migration.db"
-[ -f "$TMP/env.sh" ] && scp -q "$TMP/env.sh" "$NODE:$DIR/env.sh"
 ssh "$NODE" "chmod 600 $DIR/keys/$ACCOUNT/*.json"
 
 say "4/5  writing node configuration"
