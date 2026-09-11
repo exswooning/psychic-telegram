@@ -177,12 +177,39 @@ $envFile = "$Dir\node.env"
 ) | Set-Content -Path $envFile -Encoding ASCII
 # Owner-only, the NTFS equivalent of chmod 600: a token in a world-readable
 # file is a token anyone on the machine has.
-$acl = Get-Acl $envFile
-$acl.SetAccessRuleProtection($true, $false)
-$acl.SetAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
-  "$env:USERDOMAIN\$env:USERNAME", "FullControl", "Allow")))
-Set-Acl -Path $envFile -AclObject $acl
-Write-Host "  wrote $envFile (owner-only)"
+#
+# icacls, not Get-Acl/Set-Acl. Set-Acl writes back every section the object
+# it was given carries, and one of those is the audit (SACL) section, whose
+# write needs SeSecurityPrivilege -- which an ordinary user does not have.
+# Observed live, on a run that had otherwise completed:
+#
+#   Set-Acl : The process does not possess the 'SeSecurityPrivilege'
+#   privilege which is required for this operation.
+#
+# icacls touches the DACL only, which is the thing actually being changed.
+#   /inheritance:r  drop the rules inherited from the parent directory
+#   /grant:r        replace, rather than add to, this user's grants
+#
+# NON-FATAL. By this point the file is written and the node is configured;
+# aborting over a hardening step would throw away a working install. And the
+# default is not open: %USERPROFILE% already grants only this user, SYSTEM
+# and Administrators, so what this removes is inherited access an admin
+# could grant themselves anyway. Worth doing, not worth failing for.
+$hardened = $false
+try {
+  $out = & icacls $envFile /inheritance:r /grant:r "${env:USERNAME}:(F)" 2>&1
+  $hardened = ($LASTEXITCODE -eq 0)
+  if (-not $hardened) { Write-Host "  ! icacls: $out" }
+} catch {
+  Write-Host "  ! could not restrict the file ($($_.Exception.GetType().Name))"
+}
+if ($hardened) {
+  Write-Host "  wrote $envFile (owner-only)"
+} else {
+  Write-Host "  wrote $envFile"
+  Write-Host "    could not restrict it further -- it still inherits your"
+  Write-Host "    profile's permissions (you, SYSTEM, Administrators)."
+}
 
 Say "5/5  can this machine reach the coordinator?"
 $env:BITPORT_COORDINATOR = $Coordinator

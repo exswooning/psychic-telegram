@@ -159,3 +159,47 @@ class TestTheLoopbackPortIsRefusedUpFront:
     def test_the_message_names_the_port_that_works(self):
         assert "Caddy port" in PS1
         assert "81" in PS1
+
+
+class TestHardeningTheTokenFileCannotKillTheInstall:
+    """Set-Acl needs a privilege an ordinary user does not have.
+
+    Live, on a run that had otherwise completed every step:
+
+        Set-Acl : The process does not possess the 'SeSecurityPrivilege'
+        privilege which is required for this operation.
+
+    Set-Acl writes back every section the ACL object carries, and one of
+    them is the audit (SACL) section -- whose write needs that privilege.
+    Nothing about the token file needs the SACL touched at all; the DACL is
+    the thing being changed, and icacls changes only that.
+    """
+
+    def test_it_does_not_round_trip_get_acl_into_set_acl(self):
+        assert "Set-Acl" not in CODE
+        assert "Get-Acl" not in CODE
+
+    def test_it_uses_icacls_on_the_dacl_only(self):
+        assert "icacls" in CODE
+        assert "/inheritance:r" in CODE
+        assert "/grant:r" in CODE
+
+    def test_a_failure_here_does_not_abort_the_install(self):
+        """By this point the file is written and the node is configured.
+        Aborting over a hardening step throws away a working install -- and
+        %USERPROFILE% already grants only the user, SYSTEM and
+        Administrators, so what this adds is defence in depth."""
+        block = CODE[CODE.index("$hardened = $false"):CODE.index("5/5")]
+        assert "try {" in block and "} catch {" in block
+        assert "throw" not in block
+
+    def test_it_says_what_the_permissions_actually_are_when_it_fails(self):
+        """"could not restrict it" without saying what that leaves is an
+        alarm with no action attached."""
+        assert "SYSTEM, Administrators" in PS1
+
+    def test_it_checks_the_exit_code_not_just_the_absence_of_an_exception(self):
+        """icacls reports refusal by exit code and a message on stdout, not
+        by throwing -- so a try/catch alone would call every failure a
+        success."""
+        assert "$LASTEXITCODE -eq 0" in CODE
