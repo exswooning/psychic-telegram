@@ -11,6 +11,8 @@ import {
   fetchClaims, fetchNodeJoin, UserClaim, ClaimSummary, NodeJoinDetails,
 } from '@/api/controlPlane'
 import AddNodeWizard from '@/components/AddNodeWizard'
+import ConnectToCoordinator from '@/components/ConnectToCoordinator'
+import NodeWorkSwitch from '@/components/NodeWorkSwitch'
 
 /**
  * Nodes — who is migrating what, across machines.
@@ -72,6 +74,9 @@ export const Nodes: React.FC = () => {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const [revealed, setRevealed] = useState(false)
+  // Which tenant the Start/Stop switch acts on. Lifted out of the wizard so
+  // both controls agree about what "this tenant" means.
+  const [workAccount, setWorkAccount] = useState<number | undefined>()
 
   const refresh = useCallback(() => {
     setLoading(true)
@@ -250,9 +255,13 @@ export const Nodes: React.FC = () => {
         )}
 
         {join?.enabled && (
-          <AddNodeWizard join={join} revealed={revealed} onReveal={reveal} />
+          <AddNodeWizard join={join} revealed={revealed} onReveal={reveal}
+                         onAccountChange={setWorkAccount} />
         )}
       </Paper>
+
+      <NodeWorkSwitch accountId={workAccount} />
+      <ConnectToCoordinator />
     </Box>
   )
 }

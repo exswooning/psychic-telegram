@@ -109,6 +109,23 @@ try:
     ok, why = uc.acquire($ACCOUNT, '__preflight__@invalid', node=uc.node_id())
     print('  reachable   :', 'yes' if ok else why)
     uc.release($ACCOUNT, '__preflight__@invalid', node=uc.node_id())
+    # Announce this machine, so the page that handed out the join code can
+    # say "connected" instead of leaving the operator to guess. Best effort:
+    # a coordinator that will not take a heartbeat has still proved
+    # reachable on the line above, which is what this step is testing.
+    try:
+        import json, os, urllib.request
+        req = urllib.request.Request(
+            uc.coordinator_url().rstrip('/') + '/api/v2/fleet/heartbeat',
+            data=json.dumps({'node_id': uc.node_id(),
+                             'hostname': uc.node_id()}).encode(),
+            method='POST',
+            headers={'Content-Type': 'application/json',
+                     'X-Node-Token': os.getenv('BITPORT_NODE_TOKEN', '')})
+        urllib.request.urlopen(req, timeout=15).read()
+        print('  announced   : yes')
+    except Exception as exc:
+        print('  announced   : no --', str(exc)[:80])
 except Exception as exc:
     print('  reachable   : NO --', str(exc)[:160])
     raise SystemExit(1)

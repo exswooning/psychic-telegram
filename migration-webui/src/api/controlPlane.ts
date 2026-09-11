@@ -677,6 +677,40 @@ export const createJoinCode = (accountId?: number) =>
     body: JSON.stringify(accountId === undefined ? {} : { account_id: accountId }),
   })
 
+export interface JoinCodeStatus {
+  known: boolean; redeemed: boolean; expired: boolean
+  redeemedAt: string; redeemedFrom: string
+}
+
+/** Has a machine redeemed this code yet -- polled by the page that minted
+ *  it, which otherwise leaves you to guess whether the command worked. */
+export const fetchJoinCodeStatus = (code: string) =>
+  cpFetch<JoinCodeStatus>(
+    `/api/v2/nodes/join-code/status?code=${encodeURIComponent(code)}`)
+
+/** Join THIS machine to another coordinator. Runs where the UI runs, so a
+ *  machine with a browser never needs a terminal to become a node. */
+export const connectToCoordinator = (body: {
+  command?: string; coordinator?: string; code?: string
+}) =>
+  cpFetch<{ ok: boolean; coordinator: string; accountId: number | null
+            nodeId: string; envPath: string }>('/api/v2/nodes/connect', {
+    method: 'POST', body: JSON.stringify(body),
+  })
+
+export interface NodeDirective {
+  accountId: number; run: boolean; services: string; updatedAt?: string
+}
+
+/** Desired state for a tenant's nodes. Written here, PULLED by each node --
+ *  nothing in this app opens a connection to a machine. */
+export const setNodeDirective = (accountId: number, run: boolean,
+                                 services = '') =>
+  cpFetch<NodeDirective>('/api/v2/nodes/directive', {
+    method: 'POST',
+    body: JSON.stringify({ account_id: accountId, run, services }),
+  })
+
 export const fetchNodeJoin = (reveal = false) =>
   cpFetch<NodeJoinDetails>(`/api/v2/nodes/join?reveal=${reveal}`)
 

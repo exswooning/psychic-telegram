@@ -29,7 +29,7 @@ import {
   VisibilityOff as HideIcon, Check as CheckIcon,
 } from '@mui/icons-material'
 import {
-  createJoinCode, fetchAdminAccounts, fetchMe,
+  createJoinCode, fetchAdminAccounts, fetchJoinCodeStatus, fetchMe,
 } from '@/api/controlPlane'
 import type { NodeJoinDetails, JoinCode, Account } from '@/api/controlPlane'
 import { labelFor } from '@/utils/accountLabel'
@@ -134,7 +134,9 @@ export const AddNodeWizard: React.FC<{
   join: NodeJoinDetails
   revealed: boolean
   onReveal: () => void
-}> = ({ join, revealed, onReveal }) => {
+  /** So the page's other controls act on the tenant chosen here. */
+  onAccountChange?: (accountId: number) => void
+}> = ({ join, revealed, onReveal, onAccountChange }) => {
   const [os, setOs] = useState<NodeOs>('unix')
   const [account, setAccount] = useState(7)
   // window.location.origin is a reasonable guess only when you are already
@@ -151,13 +153,17 @@ export const AddNodeWizard: React.FC<{
   // on screen, and it earned the question it deserved: "what is account
   // id?". Nobody recognises 7; everybody recognises the domain pair.
   const [accounts, setAccounts] = useState<Account[]>([])
+  // Whether a machine has taken this code yet. Without it the operator runs
+  // a command on another computer and comes back to a page still showing
+  // zero nodes, with nothing saying whether it worked.
+  const [joined, setJoined] = useState(false)
 
   useEffect(() => {
     fetchMe()
       .then((me) => {
         const mine = me as Account
         setAccounts([mine])
-        setAccount(mine.id)
+        setAccount(mine.id); onAccountChange?.(mine.id)
         if (mine.is_superadmin) {
           fetchAdminAccounts()
             .then((all) => { if (all.length) setAccounts(all) })
@@ -180,8 +186,20 @@ export const AddNodeWizard: React.FC<{
     return () => window.clearInterval(t)
   }, [code])
 
+  // Poll only while a live code is outstanding, and stop the moment it is
+  // taken -- a code is single use, so there is nothing further to learn.
+  useEffect(() => {
+    if (!code || joined) return undefined
+    const t = window.setInterval(() => {
+      fetchJoinCodeStatus(code.code)
+        .then((s) => { if (s.redeemed) setJoined(true) })
+        .catch(() => { /* transient: the countdown still tells the truth */ })
+    }, 3000)
+    return () => window.clearInterval(t)
+  }, [code, joined])
+
   const mint = () => {
-    setMinting(true); setCodeErr('')
+    setMinting(true); setCodeErr(''); setJoined(false)
     createJoinCode(account)
       .then(setCode)
       .catch((e) => setCodeErr(e instanceof Error ? e.message : String(e)))
@@ -209,7 +227,7 @@ export const AddNodeWizard: React.FC<{
         <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
           <TextField select size="small" label="Tenant" value={
                        accounts.some((a) => a.id === account) ? account : ''}
-                     onChange={(e) => setAccount(Number(e.target.value))}
+                     onChange={(e) => { const v = Number(e.target.value); setAccount(v); onAccountChange?.(v) }}
                      sx={{ minWidth: 290 }}
                      inputProps={{ 'data-testid': 'node-account' }}>
             {accounts.map((a) => (
@@ -233,6 +251,16 @@ export const AddNodeWizard: React.FC<{
 
         {code ? (
           <Box data-testid="code-panel">
+            {joined ? (
+              <Alert severity="success" sx={{ mb: 1 }} data-testid="node-joined">
+                A machine took this code — it is connected. It will appear
+                below once it reports in, and you can start its work there.
+              </Alert>
+            ) : (
+              <Alert severity="info" sx={{ mb: 1 }} data-testid="node-waiting">
+                Waiting for a machine to run it…
+              </Alert>
+            )}
             <Stack direction="row" spacing={2} alignItems="center" sx={{ mb: 1 }}>
               <Typography data-testid="join-code"
                           sx={{ fontSize: 30, fontWeight: 700, letterSpacing: 3,

@@ -10,7 +10,7 @@
  * piped script has no argv (so every setting travels in the environment).
  */
 import React from 'react'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import AddNodeWizard, { joinCommand, removeCommand, codeCommand } from './AddNodeWizard'
 import type { NodeJoinDetails } from '@/api/controlPlane'
@@ -20,14 +20,18 @@ import type { NodeJoinDetails } from '@/api/controlPlane'
 const mint = vi.fn()
 const me = vi.fn()
 const admins = vi.fn()
+const codeStatus = vi.fn()
 vi.mock('@/api/controlPlane', () => ({
   createJoinCode: (...a: unknown[]) => mint(...a),
   fetchMe: () => me(),
   fetchAdminAccounts: () => admins(),
+  fetchJoinCodeStatus: (...a: unknown[]) => codeStatus(...a),
 }))
 
 beforeEach(() => {
-  me.mockReset(); admins.mockReset(); mint.mockReset()
+  me.mockReset(); admins.mockReset(); mint.mockReset(); codeStatus.mockReset()
+  codeStatus.mockResolvedValue({ known: true, redeemed: false, expired: false,
+                                 redeemedAt: '', redeemedFrom: '' })
   me.mockResolvedValue({ id: 7, email: 'ops@x.test', is_superadmin: true })
   admins.mockResolvedValue([
     { id: 7, email: 'ops@x.test',
@@ -332,5 +336,46 @@ describe('naming the tenant', () => {
     render(<AddNodeWizard join={join()} revealed onReveal={() => {}} />)
     await screen.findByTestId('node-account')
     expect(admins).not.toHaveBeenCalled()
+  })
+})
+
+describe('confirming a machine actually joined', () => {
+  const liveCode = {
+    code: 'B95B-RZ5Z', accountId: 7, lifetimeSeconds: 900,
+    expiresAt: new Date(Date.now() + 900_000).toISOString(),
+  }
+
+  it('says it is waiting until one does', async () => {
+    /* You ran a command on another computer and came back to a page showing
+       zero nodes, with nothing saying whether it had worked. */
+    mint.mockResolvedValue(liveCode)
+    render(<AddNodeWizard join={join()} revealed onReveal={() => {}} />)
+    fireEvent.click(screen.getByTestId('mint-code'))
+    expect(await screen.findByTestId('node-waiting')).toBeInTheDocument()
+    expect(screen.queryByTestId('node-joined')).toBeNull()
+  })
+
+  it('confirms once the code is redeemed', async () => {
+    mint.mockResolvedValue(liveCode)
+    codeStatus.mockResolvedValue({ known: true, redeemed: true, expired: false,
+                                   redeemedAt: '2026-09-12T00:00:00Z',
+                                   redeemedFrom: '10.0.0.9' })
+    render(<AddNodeWizard join={join()} revealed onReveal={() => {}} />)
+    fireEvent.click(screen.getByTestId('mint-code'))
+    expect(await screen.findByTestId('node-joined', {}, { timeout: 5000 }))
+      .toBeInTheDocument()
+  }, 10000)
+
+  it('does not poll before there is a code to poll about', async () => {
+    render(<AddNodeWizard join={join()} revealed onReveal={() => {}} />)
+    await screen.findByTestId('node-account')
+    expect(codeStatus).not.toHaveBeenCalled()
+  })
+
+  it('reports the tenant upward so the other controls agree', async () => {
+    const seen: number[] = []
+    render(<AddNodeWizard join={join()} revealed onReveal={() => {}}
+                          onAccountChange={(id) => seen.push(id)} />)
+    await waitFor(() => expect(seen).toContain(7))
   })
 })

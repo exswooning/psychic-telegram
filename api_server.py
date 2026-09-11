@@ -59,6 +59,8 @@ import datetime as _dt
 import logging
 import os
 import re
+import socket
+import urllib.error
 import sqlite3
 import subprocess
 import threading
@@ -4337,6 +4339,173 @@ async def verified_domains(account_id: int | None = None,
                   if d is not None]
         return {"domains": domains}
     return await _off_loop(_read)
+
+
+class ConnectRequest(BaseModel):
+    """Either a code plus where to redeem it, or the whole command line."""
+    coordinator: str = ""
+    code: str = ""
+    command: str = ""
+
+
+@app.post("/api/v2/nodes/connect")
+async def connect_to_coordinator(req: ConnectRequest,
+                                 op: Operator = Depends(operator)):
+    """Join THIS machine to another Bitport as a worker node.
+
+    The other half of the join code. The code already turns joining into one
+    line, but that line still needs a terminal -- and a machine running this
+    UI does not need one: it can redeem the code itself and write its own
+    node.env.
+
+    Runs on the machine being joined, by its own admin, against a
+    coordinator they hold a code for. It is an outbound call, the same one
+    the installer makes; nothing here lets a coordinator reach in.
+    """
+    require_login(op)
+    require_superadmin(op)
+
+    coordinator, code = req.coordinator.strip(), req.code.strip()
+    if req.command and not (coordinator and code):
+        # Paste the whole line rather than picking it apart by hand -- it is
+        # on the clipboard already, and splitting a URL correctly is exactly
+        # the sort of step that gets done wrong once and blamed on the tool.
+        m = re.search(r"(https?://[^\s'\"]+)/api/v2/j/([A-Za-z0-9-]+)",
+                      req.command)
+        if m:
+            coordinator, code = m.group(1), m.group(2)
+    if not coordinator or not code:
+        raise HTTPException(400, "need a coordinator address and a join code "
+                                 "-- or paste the whole command line")
+    if not coordinator.startswith(("http://", "https://")):
+        coordinator = "https://" + coordinator
+
+    def _join() -> dict:
+        import urllib.request
+        url = f"{coordinator.rstrip('/')}/api/v2/j/{code}?sh=true"
+        try:
+            with urllib.request.urlopen(url, timeout=30) as resp:
+                body = resp.read().decode()
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode()[:200]
+            raise HTTPException(400, f"the coordinator refused that code: "
+                                     f"{detail}") from exc
+        except Exception as exc:      # noqa: BLE001
+            raise HTTPException(400, f"cannot reach {coordinator}: "
+                                     f"{str(exc)[:160]}") from exc
+
+        # The redeem route serves a shell script that sets exactly these.
+        got = dict(re.findall(r"(BITPORT_[A-Z_]+)='([^']*)'", body))
+        token = got.get("BITPORT_NODE_TOKEN", "")
+        account = got.get("BITPORT_ACCOUNT", "")
+        if not token:
+            raise HTTPException(502, "the coordinator's reply carried no node "
+                                     "token -- is it running a current Bitport?")
+
+        # Written where node_agent.py and both installers look for it, mode
+        # 600: a token in a world-readable file is a token every process on
+        # this machine has.
+        path = os.path.join(HERE, "node.env")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(f"BITPORT_COORDINATOR={got.get('BITPORT_COORDINATOR', coordinator)}\n")
+            fh.write(f"BITPORT_NODE_TOKEN={token}\n")
+            fh.write(f"BITPORT_NODE_ID={socket.gethostname()}\n")
+            fh.write(f"BITPORT_ACCOUNT={account}\n")
+        return {"ok": True, "coordinator": got.get("BITPORT_COORDINATOR", coordinator),
+                "accountId": int(account) if account.isdigit() else None,
+                "nodeId": socket.gethostname(), "envPath": path}
+    return await _off_loop(_join)
+
+
+class DirectiveRequest(BaseModel):
+    account_id: int | None = None
+    run: bool = False
+    services: str = ""
+
+
+@app.get("/api/v2/nodes/join-code/status")
+async def join_code_status(code: str, op: Operator = Depends(operator)):
+    """Has a machine redeemed this code yet?
+
+    The page that minted it polls this, because until now the operator ran a
+    command on another computer and came back to a page still saying zero
+    nodes, with nothing to say whether it had worked.
+
+    Superadmin-gated even though the caller must already know the code:
+    otherwise this answers "does this code exist" for anyone who asks, which
+    is a probe oracle against the one thing standing in for authentication
+    on the redeem route.
+    """
+    require_login(op)
+    require_superadmin(op)
+
+    def _read() -> dict:
+        return join_codes.status(code)
+    return await _off_loop(_read)
+
+
+@app.get("/api/v2/nodes/directive")
+async def get_node_directive(account_id: int, _: None = Depends(node_auth)):
+    """What a node should be doing. Polled BY the node, never pushed to it.
+
+    node_auth, not a session: the caller is a machine holding the node
+    token. It is deliberately the only thing the coordinator tells a node,
+    and it tells it only when asked -- nothing here opens a connection to a
+    node, which is the property that keeps a compromised dashboard from
+    becoming a way onto every machine holding service-account keys.
+    """
+    def _read() -> dict:
+        with cpdb.ro() as conn:
+            row = conn.execute(
+                "SELECT run, services, updated_at FROM node_directives "
+                "WHERE account_id=?", (account_id,)).fetchone()
+        return {"accountId": account_id,
+                "run": bool(row["run"]) if row else False,
+                "services": (row["services"] if row else "") or "",
+                "updatedAt": row["updated_at"] if row else ""}
+    return await _off_loop(_read)
+
+
+@app.post("/api/v2/nodes/directive")
+async def set_node_directive(req: DirectiveRequest,
+                             op: Operator = Depends(operator)):
+    """Turn a tenant's node work on or off.
+
+    Writes an intention; it does not reach out to anything. A node applies
+    it the next time it asks, which is within its poll interval.
+    """
+    require_login(op)
+    require_superadmin(op)
+    account_id = req.account_id if req.account_id is not None else op.account_id
+    _require_account_access(account_id, op)
+    if account_id is None:
+        raise HTTPException(400, "no account to set a directive for")
+
+    def _write() -> dict:
+        # Audited: this starts writes against a live tenant from a machine
+        # that is not this one, and "who turned this on" is the first
+        # question after a surprise.
+        action = cpdb.begin_action(
+            actor=str(op.name or "") or "operator", actor_role="superadmin",
+            action="start node work" if req.run else "stop node work",
+            reason=f"services={req.services or 'all'}",
+            target=f"account {account_id}", params={"run": req.run},
+            account_id=account_id)
+        with cpdb.rw() as conn:
+            conn.execute(
+                "INSERT INTO node_directives (account_id, run, services, "
+                "updated_at, updated_by) VALUES (?,?,?,?,?) "
+                "ON CONFLICT(account_id) DO UPDATE SET run=excluded.run, "
+                "services=excluded.services, updated_at=excluded.updated_at, "
+                "updated_by=excluded.updated_by",
+                (account_id, 1 if req.run else 0, req.services[:200],
+                 time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                 str(op.name or "")[:200]))
+        cpdb.finish_action(action, "ok", "")
+        return {"accountId": account_id, "run": req.run,
+                "services": req.services}
+    return await _off_loop(_write)
 
 
 @app.post("/api/v2/fleet/heartbeat")

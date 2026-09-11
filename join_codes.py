@@ -144,6 +144,27 @@ def redeem(code: str, addr: str = "") -> int:
     raise JoinCodeError(reason)
 
 
+def status(code: str) -> dict:
+    """Whether a code has been redeemed yet, for the page that minted it.
+
+    Deliberately says nothing a caller could not already work out from
+    holding the code, and the endpoint in front of it is superadmin-gated
+    so it cannot be used to probe whether a guessed code exists.
+    """
+    with cpdb.ro() as conn:
+        row = conn.execute(
+            "SELECT expires_at, used_at, used_from FROM join_codes "
+            "WHERE code_hash=?", (_hash(code),)).fetchone()
+    if row is None:
+        return {"known": False, "redeemed": False, "expired": False,
+                "redeemedAt": "", "redeemedFrom": ""}
+    return {"known": True,
+            "redeemed": bool(row["used_at"]),
+            "expired": not row["used_at"] and row["expires_at"] <= _now(),
+            "redeemedAt": row["used_at"] or "",
+            "redeemedFrom": row["used_from"] or ""}
+
+
 def purge_expired(older_than_s: int = 24 * 3600) -> int:
     """Spent and expired codes are not secrets, but they are not evidence
     either. Kept a day so "it said already used" can be checked."""
