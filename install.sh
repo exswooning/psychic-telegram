@@ -104,11 +104,19 @@ ask() {  # ask VAR "prompt" "default"
   local reply; read -r -p "  $prompt${def:+ [$def]}: " reply || true
   printf -v "$var" '%s' "${reply:-$def}"
 }
+# PASSWORD_GIVEN records whether a HUMAN supplied the password, as opposed
+# to this script inventing one. The superadmin step below resets an existing
+# account's password to whatever it holds -- so on a re-run with a generated
+# value it would silently change the password of the account you log in with,
+# to a string printed only as "(generated)". That turns "safe to re-run",
+# which this installer promises at the top, into a lockout.
+PASSWORD_GIVEN=0
 ask_secret() {  # ask_secret VAR "prompt"
   local var="$1" prompt="$2" cur="${!1:-}"
-  if [ -n "$cur" ]; then echo "  $prompt: ${DIM}(from env)${RESET}"; return; fi
+  if [ -n "$cur" ]; then PASSWORD_GIVEN=1; echo "  $prompt: ${DIM}(from env)${RESET}"; return; fi
   if [ "${NONINTERACTIVE:-0}" = 1 ]; then printf -v "$var" '%s' "$(openssl rand -base64 12)"; echo "  $prompt: ${DIM}(generated)${RESET}"; return; fi
   local reply; read -r -s -p "  $prompt (blank = generate): " reply || true; echo
+  [ -n "$reply" ] && PASSWORD_GIVEN=1
   printf -v "$var" '%s' "${reply:-$(openssl rand -base64 12)}"
 }
 
@@ -498,6 +506,7 @@ if [ "$DRY_RUN" = 1 ]; then
 else
   cd "$INSTALL_DIR"
   BP_EMAIL="$BITPORT_ADMIN_EMAIL" BP_PASS="$BITPORT_ADMIN_PASSWORD" \
+  BP_PASS_GIVEN="$PASSWORD_GIVEN" \
   "$INSTALL_DIR/.venv/bin/python" - <<'PY'
 import os, sys
 sys.path.insert(0, os.getcwd())   # cwd is INSTALL_DIR, so the control-plane DB resolves here
@@ -510,18 +519,32 @@ try:
     a.bootstrap_legacy_account()
 except Exception:
     pass
+given = os.environ.get("BP_PASS_GIVEN") == "1"
 existing = a.authenticate(email, pw)
 if existing is None:
     try:
         a.create_account(email, pw, "Administrator", plan="internal")
         print(f"  created account {email}")
-    except Exception as e:
-        # already exists with a different password: reset it
-        import manage_account
-        manage_account.set_password(email, pw)
-        print(f"  reset password for existing account {email}")
+    except Exception:
+        # The account is already there with a different password.
+        #
+        # Only reset it if a HUMAN asked for this one. A re-run that did not
+        # supply a password holds one this script invented and printed as
+        # "(generated)" -- resetting to that locks the owner out of their own
+        # install, which is the opposite of the "safe to re-run" promise at
+        # the top of this file. Leaving it alone is always recoverable; the
+        # next line still makes sure they are a superadmin.
+        if given:
+            import manage_account
+            manage_account.set_password(email, pw)
+            print(f"  reset password for existing account {email}")
+        else:
+            print(f"  {email} already exists -- password left as it was")
+            print("  (pass BITPORT_ADMIN_PASSWORD to change it)")
 a.promote_to_superadmin(email)
-print(f"  {email} is superadmin, login verified={a.authenticate(email, pw) is not None}")
+verified = a.authenticate(email, pw) is not None
+print(f"  {email} is superadmin"
+      + (f", login verified={verified}" if given or existing else ""))
 PY
 fi
 

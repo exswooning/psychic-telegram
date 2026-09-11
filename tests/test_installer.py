@@ -215,3 +215,33 @@ def test_it_still_kills_a_genuine_stray():
     scan = scan[:scan.index("# 2.")]
     assert 'kill -9 "$pid"' in scan
     assert '"$pg" != "$MYPGID"' in scan
+
+
+def test_a_rerun_does_not_reset_the_password_it_invented():
+    """install.sh promises "Safe to re-run: every step checks before it acts"
+    at the top, and the superadmin step did not.
+
+    It resets an existing account's password to whatever BITPORT_ADMIN_PASSWORD
+    holds. On a re-run without one, NONINTERACTIVE makes ask_secret INVENT a
+    password and print it only as "(generated)" -- so re-running to pick up
+    new code would silently change the password of the account you log in
+    with, to a string nobody ever saw. A lockout from your own install, from
+    the documented way to update it.
+
+    The reset now happens only when a human actually supplied a password.
+    """
+    assert "PASSWORD_GIVEN=0" in SH
+    assert "PASSWORD_GIVEN=1" in SH
+    assert 'BP_PASS_GIVEN="$PASSWORD_GIVEN"' in SH
+    step = SH[SH.index('step "Superadmin account"'):]
+    assert "if given:" in step
+    assert step.index("if given:") < step.index("manage_account.set_password")
+    assert "password left as it was" in step
+
+
+def test_both_ways_of_supplying_one_count_as_given():
+    """From the environment (the unattended path) and from the prompt (the
+    interactive one). A blank prompt means "generate", which does not."""
+    fn = SH[SH.index("ask_secret() {"):SH.index("\nask INSTALL_DIR")]
+    assert fn.count("PASSWORD_GIVEN=1") == 2
+    assert '[ -n "$reply" ] && PASSWORD_GIVEN=1' in fn
