@@ -161,6 +161,9 @@ export interface FleetNode {
   users_running: number
   users_failed: number
   error_rate: number
+  /** Whether this machine may pick up work at all -- ANDed with the
+   *  tenant's directive, so one laptop can sit out a run. */
+  takes_work?: number
   /** Derived server-side from last_seen, not stored -- a node that dies
    *  cannot mark itself down, so liveness has to be computed on read. */
   healthy: boolean
@@ -696,6 +699,14 @@ export const connectToCoordinator = (body: {
   cpFetch<{ ok: boolean; coordinator: string; accountId: number | null
             nodeId: string; envPath: string }>('/api/v2/nodes/connect', {
     method: 'POST', body: JSON.stringify(body),
+  })
+
+/** Include or exclude one machine from the work. Read by that node on its
+ *  next poll -- nothing is pushed to it. */
+export const setNodeTakesWork = (nodeId: string, takesWork: boolean) =>
+  cpFetch<{ nodeId: string; takesWork: boolean }>('/api/v2/nodes/takes-work', {
+    method: 'POST',
+    body: JSON.stringify({ node_id: nodeId, takes_work: takesWork }),
   })
 
 export interface NodeDirective {

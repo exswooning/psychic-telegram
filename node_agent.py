@@ -71,8 +71,12 @@ class Agent:
 
     # -- the two things it does ------------------------------------------
     def directive(self) -> dict:
+        # node_id, so the answer can be about THIS machine: the operator can
+        # exclude one laptop from a run without stopping the run.
+        import urllib.parse
         return _get(f"{self.coordinator}/api/v2/nodes/directive"
-                    f"?account_id={self.account_id}", self.token)
+                    f"?account_id={self.account_id}"
+                    f"&node_id={urllib.parse.quote(self.node_id)}", self.token)
 
     def heartbeat(self) -> None:
         """Best effort. A coordinator that cannot be told is not a reason to

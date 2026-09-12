@@ -4526,7 +4526,8 @@ async def join_code_status(code: str, op: Operator = Depends(operator)):
 
 
 @app.get("/api/v2/nodes/directive")
-async def get_node_directive(account_id: int, _: None = Depends(node_auth)):
+async def get_node_directive(account_id: int, node_id: str = "",
+                             _: None = Depends(node_auth)):
     """What a node should be doing. Polled BY the node, never pushed to it.
 
     node_auth, not a session: the caller is a machine holding the node
@@ -4536,12 +4537,27 @@ async def get_node_directive(account_id: int, _: None = Depends(node_auth)):
     becoming a way onto every machine holding service-account keys.
     """
     def _read() -> dict:
+        # Both reads inside the one connection: the second used to sit after
+        # the `with` had closed it, which every caller saw as a 500.
         with cpdb.ro() as conn:
             row = conn.execute(
                 "SELECT run, services, updated_at FROM node_directives "
                 "WHERE account_id=?", (account_id,)).fetchone()
+            # AND the tenant's directive with this machine's own switch, so
+            # a laptop can be excluded from a run without stopping the run.
+            # An unknown node_id is treated as allowed: a node that has not
+            # heartbeated yet must not be silently idle on its first poll,
+            # which would look exactly like a broken install.
+            takes = True
+            if node_id:
+                n = conn.execute("SELECT takes_work FROM fleet_nodes "
+                                 "WHERE node_id=?", (node_id,)).fetchone()
+                takes = bool(n["takes_work"]) if n else True
+        run = bool(row["run"]) if row else False
         return {"accountId": account_id,
-                "run": bool(row["run"]) if row else False,
+                "run": run and takes,
+                "tenantRun": run,
+                "takesWork": takes,
                 "services": (row["services"] if row else "") or "",
                 "updatedAt": row["updated_at"] if row else ""}
     return await _off_loop(_read)
@@ -4585,6 +4601,36 @@ async def set_node_directive(req: DirectiveRequest,
         cpdb.finish_action(action, "ok", "")
         return {"accountId": account_id, "run": req.run,
                 "services": req.services}
+    return await _off_loop(_write)
+
+
+class NodeWorkFlag(BaseModel):
+    node_id: str
+    takes_work: bool
+
+
+@app.post("/api/v2/nodes/takes-work")
+async def set_node_takes_work(req: NodeWorkFlag,
+                              op: Operator = Depends(operator)):
+    """Include or exclude one machine from the work.
+
+    Still nothing pushed: this sets a flag the node reads on its next poll,
+    the same way the tenant-level directive works. Excluding a machine
+    therefore takes effect within a poll, and a node already migrating a
+    user finishes that user first -- stopping mid-user strands a mailbox.
+    """
+    require_login(op)
+    require_superadmin(op)
+
+    def _write() -> dict:
+        with cpdb.rw() as conn:
+            cur = conn.execute(
+                "UPDATE fleet_nodes SET takes_work=? WHERE node_id=?",
+                (1 if req.takes_work else 0, req.node_id))
+            if cur.rowcount == 0:
+                raise HTTPException(404, f"no machine called {req.node_id!r} "
+                                         "has checked in")
+        return {"nodeId": req.node_id, "takesWork": req.takes_work}
     return await _off_loop(_write)
 
 

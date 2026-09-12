@@ -280,3 +280,60 @@ class TestTheAgentSurvivesItsOwnFailures:
         blank line in the one log that says what the agent is doing."""
         src = _code(node_agent.Agent.tick)
         assert src.count("return ") >= 6
+
+
+class TestPickingWhichMachineRuns:
+    """One directive per tenant meant every node acted on it.
+
+    "Can I select what device runs migration" -- no, until now. Excluding a
+    laptop meant stopping the whole tenant, or stopping its agent by hand on
+    the machine itself.
+    """
+
+    def test_the_node_says_who_it_is(self):
+        src = _code(node_agent.Agent.directive)
+        assert "node_id=" in src
+
+    def test_the_answer_ands_the_two_switches(self):
+        import api_server
+        src = _code(api_server.get_node_directive)
+        assert "run and takes" in src
+
+    def test_an_excluded_node_can_tell_that_apart_from_a_stopped_tenant(self):
+        """Both give run=false, and they are completely different
+        situations -- one is "you are sitting out", the other is "nobody is
+        working". The node's own log should not conflate them."""
+        import api_server
+        src = _code(api_server.get_node_directive)
+        assert '"tenantRun"' in src
+        assert '"takesWork"' in src
+
+    def test_a_machine_that_never_checked_in_still_works(self):
+        """Defaulting an unknown node to idle would make a first poll look
+        exactly like a broken install."""
+        import api_server
+        src = _code(api_server.get_node_directive)
+        assert "takes = bool(n[\"takes_work\"]) if n else True" in src
+
+    def test_the_column_defaults_to_taking_work(self):
+        """Every node that joined before this column existed was already
+        working; upgrading must not silently idle a fleet."""
+        import control_plane_db as db
+        src = open(db.__file__, encoding="utf-8").read()
+        assert '("takes_work", "INTEGER NOT NULL DEFAULT 1")' in src
+
+    def test_excluding_an_unknown_machine_is_an_error(self):
+        """Not a silent no-op: a typo would otherwise read as success and
+        the machine would keep working."""
+        import api_server
+        src = _code(api_server.set_node_takes_work)
+        assert "cur.rowcount == 0" in src
+        assert "404" in src
+
+    def test_both_reads_share_one_connection(self):
+        """The second sat outside the `with` once, which every caller saw as
+        a 500 -- caught live rather than in review."""
+        import api_server
+        src = _code(api_server.get_node_directive)
+        body = src[src.index("with cpdb.ro()"):src.index("return {")]
+        assert body.count("conn.execute") == 2

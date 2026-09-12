@@ -12,10 +12,10 @@
  */
 import React, { useCallback, useEffect, useState } from 'react'
 import {
-  Box, Chip, Paper, Stack, Table, TableBody, TableCell, TableHead,
-  TableRow, Typography,
+  Box, Chip, Paper, Stack, Switch, Table, TableBody, TableCell, TableHead,
+  TableRow, Tooltip, Typography,
 } from '@mui/material'
-import { fetchFleet } from '@/api/controlPlane'
+import { fetchFleet, setNodeTakesWork } from '@/api/controlPlane'
 import type { FleetNode } from '@/api/controlPlane'
 
 const ago = (iso: string): string => {
@@ -31,6 +31,7 @@ const ago = (iso: string): string => {
 export const NodeList: React.FC = () => {
   const [nodes, setNodes] = useState<FleetNode[]>([])
   const [loaded, setLoaded] = useState(false)
+  const [busy, setBusy] = useState('')
 
   const refresh = useCallback(() => {
     fetchFleet()
@@ -67,6 +68,7 @@ export const NodeList: React.FC = () => {
             <TableHead>
               <TableRow>
                 <TableCell>machine</TableCell>
+                <TableCell>takes work</TableCell>
                 <TableCell>state</TableCell>
                 <TableCell>doing</TableCell>
                 <TableCell>last heard from</TableCell>
@@ -79,6 +81,27 @@ export const NodeList: React.FC = () => {
                 <TableRow key={n.node_id} data-testid={`node-${n.node_id}`}>
                   <TableCell sx={{ fontSize: 12, fontWeight: 600 }}>
                     {n.node_id}
+                  </TableCell>
+                  <TableCell>
+                    {/* Excluding a machine does not stop the run: the node
+                        ANDs this with the tenant's directive on its next
+                        poll, and finishes the user it is on first. */}
+                    <Tooltip title={n.takes_work === 0
+                      ? 'Sitting out — the tenant can still be running'
+                      : 'Picks up users when this tenant is running'}>
+                      <Switch size="small" disabled={busy === n.node_id}
+                              checked={n.takes_work !== 0}
+                              data-testid={`takes-${n.node_id}`}
+                              onChange={(e) => {
+                                const want = e.target.checked
+                                setBusy(n.node_id)
+                                setNodes((cur) => cur.map((x) => x.node_id === n.node_id
+                                  ? { ...x, takes_work: want ? 1 : 0 } : x))
+                                setNodeTakesWork(n.node_id, want)
+                                  .catch(() => refresh())
+                                  .finally(() => { setBusy(''); refresh() })
+                              }} />
+                    </Tooltip>
                   </TableCell>
                   <TableCell>
                     {/* `healthy`, computed from last_seen at read time --
@@ -111,7 +134,10 @@ export const NodeList: React.FC = () => {
             <Typography variant="caption" color="text.secondary">
               Offline means nothing has been heard from it recently — a node
               that dies cannot report that it died, so this is measured from
-              the last check-in rather than stored.
+              the last check-in rather than stored. Turning off “takes work”
+              excludes one machine without stopping the tenant&apos;s run; it
+              applies on that node&apos;s next poll, and it finishes the user
+              it is on first.
             </Typography>
           </Stack>
         </Box>

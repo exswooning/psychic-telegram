@@ -103,6 +103,14 @@ def _apply_column_upgrades(conn: sqlite3.Connection) -> None:
         # going forward, matching Pricing.tsx's "no card required to start"
         # framing (signup still grants access; the manual step is deciding
         # who *stays* active, not gating the trial itself).
+        # DEFAULT 1: a machine that has gone to the trouble of joining wants
+        # to work, and every node that joined before this column existed was
+        # already working. Excluding one is the deliberate act, not
+        # including it -- the other way round would have silently idled a
+        # fleet on upgrade.
+        "fleet_nodes": [
+            ("takes_work", "INTEGER NOT NULL DEFAULT 1"),
+        ],
         "accounts": [
             ("subscription_active", "INTEGER NOT NULL DEFAULT 1"),
             ("is_superadmin", "INTEGER NOT NULL DEFAULT 0"),
