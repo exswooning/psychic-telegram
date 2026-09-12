@@ -72,6 +72,111 @@ def rewrite_bytes(body: bytes, lookup: Callable[[str], str | None]) -> tuple[byt
     return DRIVE_ID.sub(repl, body), hits
 
 
+# A bare file id, but only inside IMPORTRANGE's first argument.
+#
+# DRIVE_ID above requires the host on purpose -- matching a bare "/d/" made
+# base64 a minefield. But Sheets accepts IMPORTRANGE("<id>", ...) with no URL
+# at all, and that form is common because the editor offers it. Anchoring on
+# the function name is what makes a bare id safe to match here: the context
+# is four characters of quote-and-paren after a literal IMPORTRANGE, which
+# base64 does not produce.
+IMPORTRANGE_ID = re.compile(
+    rb"(IMPORTRANGE\s*\(\s*[\"'])([A-Za-z0-9_-]{20,})"
+)
+
+# Which parts of an OOXML package can hold a link. Everything else in the
+# zip is media -- rewriting bytes inside a PNG would corrupt it for no
+# possible gain, and the id pattern could match its entropy by chance.
+_OOXML_TEXT_SUFFIXES = (".xml", ".rels", ".vml", ".txt")
+
+
+def has_drive_ref(data: bytes) -> bool:
+    """Does this file mention any Drive id at all?
+
+    Cheap gate for the rewrite post-pass. A rewrite needs the WHOLE mapping
+    to exist, which is only true after every file has migrated -- but
+    re-exporting every native file to find out which ones had references
+    would double the run. This answers it from the copy already in hand.
+
+    Deliberately ignores whether an id is mapped: at the moment this is
+    asked, the referenced file may not have migrated yet.
+    """
+    import io
+    import zipfile
+
+    try:
+        z = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile:
+        return bool(DRIVE_ID.search(data))
+    try:
+        for name in z.namelist():
+            if not name.lower().endswith(_OOXML_TEXT_SUFFIXES):
+                continue
+            part = z.read(name)
+            if DRIVE_ID.search(part) or IMPORTRANGE_ID.search(part):
+                return True
+    finally:
+        z.close()
+    return False
+
+
+def rewrite_zip(data: bytes, lookup: Callable[[str], str | None]) -> tuple[bytes, int]:
+    """Rewrite Drive links inside an OOXML file (.xlsx, .docx, .pptx).
+
+    A Google Sheet exported for migration is a zip of XML parts, and a
+    formula like IMPORTRANGE or a cell hyperlink lives in one of them as
+    text. Rewriting the zip as one blob does not work: the parts are
+    deflated, so the id is not there to find.
+
+    Rebuilt rather than edited in place, because a zip entry's size and CRC
+    are recorded in two places and an id can change length.
+
+    Returns the original bytes unchanged when nothing matched, so a caller
+    can cheaply tell whether an upload is even needed.
+    """
+    import io
+    import zipfile
+
+    try:
+        src = zipfile.ZipFile(io.BytesIO(data))
+        names = src.namelist()
+    except zipfile.BadZipFile:
+        # Not a package -- a .png export of a Drawing, say. Fall back to
+        # treating it as one blob, which is right for anything text-ish and
+        # harmless for anything else (no host, no match).
+        return rewrite_bytes(data, lookup)
+
+    hits = 0
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+        for name in names:
+            body = src.read(name)
+            if name.lower().endswith(_OOXML_TEXT_SUFFIXES):
+                body, n = rewrite_bytes(body, lookup)
+                body, n2 = _rewrite_importrange(body, lookup)
+                hits += n + n2
+            # Preserve each entry's own metadata: dates and the external
+            # attribute bits, or the package can stop opening cleanly.
+            dst.writestr(src.getinfo(name), body)
+    src.close()
+    return (out.getvalue(), hits) if hits else (data, 0)
+
+
+def _rewrite_importrange(body: bytes,
+                         lookup: Callable[[str], str | None]) -> tuple[bytes, int]:
+    hits = 0
+
+    def repl(m: "re.Match[bytes]") -> bytes:
+        nonlocal hits
+        target = lookup(m.group(2).decode("ascii", "replace"))
+        if not target:
+            return m.group(0)
+        hits += 1
+        return m.group(1) + target.encode("ascii")
+
+    return IMPORTRANGE_ID.sub(repl, body), hits
+
+
 def rewrite_text(text: str, lookup: Callable[[str], str | None]) -> tuple[str, int]:
     """Rewrite the Drive links in ordinary text.
 

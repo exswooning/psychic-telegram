@@ -480,6 +480,9 @@ class DriveMigrator:
     # -- entry point ----------------------------------------------------------
     def run(self, delta: bool = False) -> dict:
         self.delta = delta
+        # (item, target id, export mime) for native files that mentioned a
+        # Drive id. Drained at the end of the user, when every id is known.
+        self._pending_link_rewrites: list[tuple[dict, str, str]] = []
         # One query instead of one per item. get_target_id runs before every
         # create -- and again for every deferred shortcut at the end of the
         # run -- so on a resume it is the most frequent query in the engine.
@@ -515,6 +518,10 @@ class DriveMigrator:
             finally:
                 self._close_file_pool()
             self._fixup_shortcuts()
+            # After the pool is drained and shortcuts are fixed: both can
+            # add mappings, and a rewrite is only correct once no more are
+            # coming.
+            self._rewrite_pending_links()
         finally:
             # `_staging_drive_id`, not `self.server_side`.
             #
@@ -1325,6 +1332,18 @@ class DriveMigrator:
             self._bump("skipped")
             return
 
+        # Asked now, while the export is in hand: finding out later would
+        # mean re-exporting every native file instead of only the ones that
+        # mention an id.
+        had_ref = False
+        if self.settings.rewrite_drive_links:
+            try:
+                import link_rewrite
+                with open(path, "rb") as fh:
+                    had_ref = link_rewrite.has_drive_ref(fh.read())
+            except Exception:      # noqa: BLE001 - a missed rewrite, not a failure
+                had_ref = False
+
         body = {"name": item["name"], "mimeType": item["mimeType"], "parents": [tgt_parent]}
         if item.get("modifiedTime"):
             body["modifiedTime"] = item["modifiedTime"]
@@ -1347,10 +1366,81 @@ class DriveMigrator:
         self.db.log_audit(self.source_user, item["id"], "file", "SUCCESS",
                           modified_time=item.get("modifiedTime"), bytes_moved=size)
         self._bump("files")
+        if had_ref and self.settings.rewrite_drive_links:
+            # Queued, not rewritten here. This file may reference a document
+            # that has not migrated yet -- a Sheet's IMPORTRANGE pointing at
+            # next week's folder is ordinary -- so the mapping it needs does
+            # not exist until the whole tree is done.
+            self._pending_link_rewrites.append((item, tgt_id, export_mime))
         touched = self._sync_acls(item["id"], tgt_id, item.get("shared"))
         if self.settings.migrate_comments:
             touched += self._sync_comments(item["id"], tgt_id)
         self._restore_modified_time(tgt_id, item, touched)
+
+    def _rewrite_pending_links(self) -> None:
+        """Point migrated documents at their migrated neighbours.
+
+        A Sheet's IMPORTRANGE, a Doc's hyperlink and a cell's HYPERLINK()
+        all name a file by its Drive id. Those ids change, so a document
+        that arrives perfectly still reads from the SOURCE tenant -- and
+        keeps reading from it, which is worse than breaking, because it
+        looks fine until the source is torn down.
+
+        Gmail and Calendar have rewritten these since they were written
+        (rewrite_raw, rewrite_text). Drive files themselves did not, because
+        the content is inside an OOXML package rather than in a body string.
+
+        Runs at the end of the user, when every id is known. Re-exports
+        rather than holding every file on disk: only files that mentioned an
+        id at all get here, which on a real corpus is a small fraction.
+        """
+        if not self._pending_link_rewrites:
+            return
+        import link_rewrite
+        fixed = 0
+        for item, tgt_id, export_mime in self._pending_link_rewrites:
+            try:
+                path, _size = self._download_via(
+                    lambda: self.src.files().export_media(
+                        fileId=item["id"], mimeType=export_mime))
+            except Exception as exc:      # noqa: BLE001
+                log.debug("[%s] re-export for link rewrite failed on %s: %s",
+                          self.source_user, item.get("name"), exc)
+                continue
+            try:
+                with open(path, "rb") as fh:
+                    data = fh.read()
+                out, hits = link_rewrite.rewrite_zip(
+                    data, self.db.target_for_source_id)
+                if not hits:
+                    # Every id in it pointed outside this migration. Leaving
+                    # it alone is right: an unmapped id is a file that did
+                    # not move, and inventing a target for it would break a
+                    # link that currently works.
+                    continue
+                with open(path, "wb") as fh:
+                    fh.write(out)
+                media = MediaFileUpload(path, mimetype=export_mime,
+                                        resumable=len(out) > LARGE_UPLOAD_THRESHOLD)
+                self._retry(lambda: self.tgt.files().update(
+                    fileId=tgt_id, media_body=media, fields="id",
+                    supportsAllDrives=True).execute())
+                self.db.log_audit(self.source_user, item["id"], "link_rewrite",
+                                  "SUCCESS", f"{hits} Drive link(s) repointed")
+                fixed += hits
+                self._bump("links_rewritten", hits)
+            except Exception as exc:      # noqa: BLE001
+                # The file itself migrated. A failed rewrite leaves it
+                # pointing at the source, which is recorded rather than
+                # raised: losing the whole user over a stale link would be
+                # the worse trade.
+                self.db.log_audit(self.source_user, item["id"], "link_rewrite",
+                                  "FAILED", str(exc)[:200])
+            finally:
+                self._cleanup(path)
+        if fixed:
+            log.info("[%s] repointed %d Drive link(s) inside migrated files",
+                     self.source_user, fixed)
 
     @staticmethod
     def _cleanup(path: str) -> None:

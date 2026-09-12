@@ -656,8 +656,15 @@ class Settings:
     )
     # Drive comments need no extra scope, but they cost an extra API call per
     # file and cannot preserve the original author, so they are opt-in too.
+    # ON by default. A comment thread is the argument that produced the
+    # document, and a migration that silently drops it delivers the file
+    # and loses the reasoning -- which nobody notices until they go looking
+    # for a decision months later. It was off to save API calls; that is
+    # the wrong side of the trade for content somebody wrote by hand.
+    # MIGRATE_COMMENTS=0 turns it off on a tenant where the call volume
+    # genuinely matters.
     migrate_comments: bool = field(
-        default_factory=lambda: _env_bool("MIGRATE_COMMENTS", False)
+        default_factory=lambda: _env_bool("MIGRATE_COMMENTS", True)
     )
     # When a file is shared through its parent folder, Drive reports the grant
     # as inherited. Preserving the folder hierarchy already preserves that
