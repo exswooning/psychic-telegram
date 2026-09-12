@@ -416,6 +416,16 @@ class SystemResources:
     # Set when a cgroup limit is tighter than the host's own figures, which is
     # the normal case in a container and on many VPSes.
     container_limited: bool = False
+    # True when ram_total_gb is a made-up number rather than a measurement.
+    #
+    # The unknown-platform branch assumes 4 GB so worker sizing has
+    # something to divide by, which is the right call for sizing and the
+    # wrong one for reporting: a node heartbeat carried that 4.0 to the
+    # coordinator, where it rendered as this machine's RAM next to real
+    # figures from real probes. A 16 GB laptop showing "4 GB RAM" is worse
+    # than one showing nothing, because nothing invites a question and a
+    # wrong number answers it.
+    ram_estimated: bool = False
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -743,6 +753,44 @@ def _probe_linux(r: SystemResources) -> None:
 _FD_LIMIT_RESULT: tuple[int, int] | None = raise_file_limit()
 
 
+def _probe_windows(r: SystemResources) -> None:
+    """Real figures from GlobalMemoryStatusEx.
+
+    ctypes, so no dependency: requirements.txt is stdlib-plus-google-client
+    for the migration engines on purpose, and a worker node installs exactly
+    that. Before this, win32 fell through to the unknown-platform branch and
+    reported an assumed 4 GB.
+
+    Page file is deliberately not reported as swap. Windows commits rather
+    than swaps, so ullTotalPageFile minus physical is not the same quantity
+    Linux calls swap, and putting it in that field would make the two
+    platforms look comparable when they are not.
+    """
+    import ctypes
+
+    class MEMORYSTATUSEX(ctypes.Structure):
+        _fields_ = [("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+    r.cpu_logical = r.cpu_physical = _visible_cpus()
+    m = MEMORYSTATUSEX()
+    m.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m)):
+        r.ram_estimated = True
+        r.notes.append("GlobalMemoryStatusEx failed; assuming 4 GB usable")
+        r.ram_total_gb = r.ram_usable_gb = 4.0
+        return
+    r.ram_total_gb = m.ullTotalPhys / 1e9
+    r.ram_usable_gb = m.ullAvailPhys / 1e9
+
+
 def probe() -> SystemResources:
     r = SystemResources(platform=sys.platform)
     try:
@@ -750,9 +798,13 @@ def probe() -> SystemResources:
             _probe_macos(r)
         elif sys.platform.startswith("linux"):
             _probe_linux(r)
+        elif sys.platform == "win32":
+            _probe_windows(r)
         else:
             r.cpu_logical = r.cpu_physical = _visible_cpus()
+            r.ram_estimated = True
             r.notes.append(f"no memory probe for {sys.platform}; assuming 4 GB usable")
+            r.ram_total_gb = r.ram_usable_gb = 4.0
             r.ram_total_gb = r.ram_usable_gb = 4.0
     except Exception as exc:  # noqa: BLE001
         r.notes.append(f"probe failed ({exc}); using conservative defaults")

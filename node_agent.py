@@ -98,7 +98,13 @@ class Agent:
             import resources
             r = resources.probe()
             out["cpu_cores"] = r.cpu_logical or None
-            out["ram_gb"] = round(r.ram_total_gb, 1) or None
+            # Omitted when it is a guess rather than a measurement. The
+            # unknown-platform branch assumes 4 GB so worker sizing has
+            # something to divide by; sending that to the coordinator put
+            # "4 GB RAM" on a 16 GB laptop, beside real figures from real
+            # probes, with nothing marking it as invented.
+            out["ram_gb"] = (None if r.ram_estimated
+                             else round(r.ram_total_gb, 1) or None)
             out["platform"] = r.platform or None
         except Exception:      # noqa: BLE001 - specs are not worth a failure
             pass
@@ -123,7 +129,7 @@ class Agent:
         try:
             import resources
             r = resources.probe()
-            if r.ram_total_gb:
+            if r.ram_total_gb and not r.ram_estimated:
                 out["ram_pct"] = round((1 - r.ram_usable_gb / r.ram_total_gb) * 100, 1)
         except Exception:      # noqa: BLE001
             pass

@@ -32,6 +32,41 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
+def _specs() -> dict:
+    """What this machine IS, alongside how busy it is.
+
+    The fleet table has carried cpu_pct/ram_pct/disk_pct since the first
+    migration, and they say "78% of something" without ever saying of what.
+    This agent reported the percentages and not the denominators, so a node
+    running it showed "not reported" under specs on the Nodes page while
+    happily reporting load.
+
+    Never raises, for the same reason the metrics above do not: a missing
+    heartbeat reads as a dead node, which is a worse report than a missing
+    core count.
+    """
+    out: dict = {}
+    try:
+        import resources
+
+        r = resources.probe()
+        out["cpu_cores"] = r.cpu_logical or None
+        # Omitted when assumed rather than measured -- a guess rendered as
+        # this machine's RAM is worse than a blank.
+        if not getattr(r, "ram_estimated", False):
+            out["ram_gb"] = round(r.ram_total_gb, 1) or None
+        out["platform"] = r.platform or None
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        import shutil
+
+        out["disk_gb"] = round(shutil.disk_usage(HERE).total / 1e9, 1)
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
 def _pct_cpu_ram_disk() -> tuple[float | None, float | None, float | None]:
     """Best-effort host metrics. Never raises: a metrics hiccup must not stop
     the heartbeat, because a missing heartbeat reads as a dead node."""
@@ -40,7 +75,7 @@ def _pct_cpu_ram_disk() -> tuple[float | None, float | None, float | None]:
         import resources
 
         r = resources.probe()
-        if r.ram_total_gb:
+        if r.ram_total_gb and not getattr(r, "ram_estimated", False):
             ram = round((1 - r.ram_usable_gb / r.ram_total_gb) * 100, 1)
     except Exception:  # noqa: BLE001
         pass
@@ -116,6 +151,7 @@ def _commit() -> str:
 
 def build_payload(node_id: str) -> dict:
     cpu, ram, disk = _pct_cpu_ram_disk()
+    specs = _specs()
     job, pid = _active_job()
     mode = os.getenv("TRANSFER_MODE") or ""
     try:
@@ -132,6 +168,8 @@ def build_payload(node_id: str) -> dict:
         "cpu_pct": cpu, "ram_pct": ram, "disk_pct": disk,
         "active_job": job, "job_pid": pid,
         "transfer_mode": mode or None,
+        # The denominators the three percentages above are fractions of.
+        **specs,
     }
 
 
