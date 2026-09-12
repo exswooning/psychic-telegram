@@ -110,3 +110,63 @@ describe('choosing which machines work', () => {
     await waitFor(() => expect(fleet.mock.calls.length).toBeGreaterThan(before))
   })
 })
+
+describe('an offline machine explains itself', () => {
+  it('offers the question, not just the state', async () => {
+    /* "offline" alone states a fact and leaves you with a question the
+       coordinator cannot answer by acting -- nothing here reaches into a
+       machine -- so the most it can honestly do is say where to look. */
+    fleet.mockResolvedValue([node({ healthy: false })])
+    render(<NodeList />)
+    expect(await screen.findByTestId('state-DESKTOP-6T3O8A3'))
+      .toHaveTextContent('why?')
+  })
+
+  it('opens an ordered checklist when asked', async () => {
+    fleet.mockResolvedValue([node({ healthy: false })])
+    render(<NodeList />)
+    fireEvent.click(await screen.findByTestId('state-DESKTOP-6T3O8A3'))
+    const why = await screen.findByTestId('why-DESKTOP-6T3O8A3')
+    expect(why).toHaveTextContent('Is it on and awake?')
+    expect(why).toHaveTextContent('Is the agent running there?')
+    expect(why).toHaveTextContent('Can it still reach here?')
+  })
+
+  it('says plainly that no button can fix it remotely', async () => {
+    /* The honest part. A page that implied it could restart a node would be
+       claiming the one capability this design deliberately does not have. */
+    fleet.mockResolvedValue([node({ healthy: false })])
+    render(<NodeList />)
+    fireEvent.click(await screen.findByTestId('state-DESKTOP-6T3O8A3'))
+    expect(await screen.findByTestId('why-DESKTOP-6T3O8A3'))
+      .toHaveTextContent('never opens a connection to a machine')
+  })
+
+  it('says a sleeping machine comes back on its own', async () => {
+    fleet.mockResolvedValue([node({ healthy: false })])
+    render(<NodeList />)
+    fireEvent.click(await screen.findByTestId('state-DESKTOP-6T3O8A3'))
+    expect(await screen.findByTestId('why-DESKTOP-6T3O8A3'))
+      .toHaveTextContent('reconnects by itself')
+  })
+
+  it('gives no such prompt for a healthy machine', async () => {
+    fleet.mockResolvedValue([node()])
+    render(<NodeList />)
+    const chip = await screen.findByTestId('state-DESKTOP-6T3O8A3')
+    expect(chip).toHaveTextContent('online')
+    fireEvent.click(chip)
+    expect(screen.queryByTestId('why-DESKTOP-6T3O8A3')).toBeNull()
+  })
+
+  it('closes again', async () => {
+    fleet.mockResolvedValue([node({ healthy: false })])
+    render(<NodeList />)
+    const chip = await screen.findByTestId('state-DESKTOP-6T3O8A3')
+    fireEvent.click(chip)
+    await screen.findByTestId('why-DESKTOP-6T3O8A3')
+    fireEvent.click(chip)
+    await waitFor(() =>
+      expect(screen.queryByTestId('why-DESKTOP-6T3O8A3')).toBeNull())
+  })
+})

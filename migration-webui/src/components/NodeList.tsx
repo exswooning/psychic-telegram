@@ -32,6 +32,11 @@ export const NodeList: React.FC = () => {
   const [nodes, setNodes] = useState<FleetNode[]>([])
   const [loaded, setLoaded] = useState(false)
   const [busy, setBusy] = useState('')
+  // Which offline machine's checklist is open. "offline" on its own tells
+  // you a fact and leaves you with a question; the coordinator cannot
+  // restart a node -- by design, nothing here reaches into a machine -- so
+  // the most it can honestly do is say where to look, in order.
+  const [why, setWhy] = useState('')
 
   const refresh = useCallback(() => {
     fetchFleet()
@@ -110,7 +115,10 @@ export const NodeList: React.FC = () => {
                     <Chip size="small"
                           color={n.healthy ? 'success' : 'default'}
                           variant={n.healthy ? 'filled' : 'outlined'}
-                          label={n.healthy ? 'online' : 'offline'}
+                          label={n.healthy ? 'online' : 'offline — why?'}
+                          onClick={n.healthy ? undefined
+                            : () => setWhy((w) => w === n.node_id ? '' : n.node_id)}
+                          sx={n.healthy ? undefined : { cursor: 'pointer' }}
                           data-testid={`state-${n.node_id}`} />
                   </TableCell>
                   <TableCell sx={{ fontSize: 12 }}>
@@ -125,6 +133,48 @@ export const NodeList: React.FC = () => {
                              sx={{ fontSize: 12, fontVariantNumeric: 'tabular-nums',
                                    color: n.users_failed > 0 ? 'warning.main' : undefined }}>
                     {n.users_failed}
+                  </TableCell>
+                </TableRow>
+              ))}
+              {nodes.filter((n) => n.node_id === why).map((n) => (
+                <TableRow key={`${n.node_id}-why`}>
+                  <TableCell colSpan={7} sx={{ bgcolor: 'action.hover' }}>
+                    <Box data-testid={`why-${n.node_id}`} sx={{ py: 1 }}>
+                      <Typography variant="body2" sx={{ fontWeight: 600, mb: 1 }}>
+                        {n.node_id} has not checked in for {ago(n.last_seen)
+                          .replace(' ago', '')}. Check in this order:
+                      </Typography>
+                      <Typography variant="body2" component="div" sx={{ mb: 1 }}>
+                        <strong>1. Is it on and awake?</strong> A sleeping
+                        machine freezes its agent, so heartbeats stop. It
+                        reconnects by itself within about 20 seconds of
+                        waking — there is nothing to click here, and no
+                        button could do it: this page never opens a
+                        connection to a machine.
+                        <br />
+                        <strong>2. Is the agent running there?</strong> Most
+                        likely if it has never been seen more than once. On
+                        that machine:
+                        <Box component="pre" sx={{ fontSize: 11, my: 0.5,
+                                                   whiteSpace: 'pre-wrap' }}>
+{`# Windows
+cd $env:USERPROFILE\\bitport; .\\.venv\\Scripts\\python.exe node_agent.py
+
+# Linux / macOS
+systemctl --user status bitport-node   # or: ./.venv/bin/python node_agent.py`}
+                        </Box>
+                        <strong>3. Can it still reach here?</strong> The
+                        agent logs <code>coordinator unreachable</code> each
+                        poll when it cannot — check{' '}
+                        <code>node_agent_run.log</code> beside its install.
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        If none of that explains it, re-running the joiner
+                        with a fresh code is safe: it keeps the keys and the
+                        ledger, and registers the agent to start on its own
+                        from then on.
+                      </Typography>
+                    </Box>
                   </TableCell>
                 </TableRow>
               ))}
