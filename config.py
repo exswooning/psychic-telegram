@@ -74,8 +74,9 @@ EXPORT_MIME_MAP: dict[str, tuple[str, str]] = {
 # recreate_inherited_acls, so adopting the inline list would silently ignore
 # that setting rather than fail.
 DRIVE_FILE_FIELDS = (
-    "id,name,mimeType,parents,modifiedTime,size,md5Checksum,owners,shared,"
-    "capabilities(canDownload),shortcutDetails,trashed,description,starred"
+    "id,name,mimeType,parents,modifiedTime,createdTime,size,md5Checksum,"
+    "owners,shared,capabilities(canDownload),shortcutDetails,trashed,"
+    "description,starred"
 )
 
 # ======================================================================

@@ -1252,6 +1252,10 @@ class DriveMigrator:
         body = {"name": item["name"], "parents": [tgt_parent]}
         if item.get("modifiedTime"):
             body["modifiedTime"] = item["modifiedTime"]
+        # Same reason as the native path: without it every file claims to
+        # have been created on migration day.
+        if item.get("createdTime"):
+            body["createdTime"] = item["createdTime"]
         if item.get("description"):
             body["description"] = item["description"]
         try:
@@ -1347,6 +1351,14 @@ class DriveMigrator:
         body = {"name": item["name"], "mimeType": item["mimeType"], "parents": [tgt_parent]}
         if item.get("modifiedTime"):
             body["modifiedTime"] = item["modifiedTime"]
+        # createdTime as well as modifiedTime. Drive accepts it on create,
+        # and without it every migrated file claims to have been created on
+        # migration day -- which breaks sort-by-created, "what did we have
+        # before the merger", and any retention reasoning that starts from
+        # a file's age. modifiedTime was already restored; this was simply
+        # never asked for.
+        if item.get("createdTime"):
+            body["createdTime"] = item["createdTime"]
         try:
             media = MediaFileUpload(path, mimetype=export_mime,
                                     resumable=size > LARGE_UPLOAD_THRESHOLD)
