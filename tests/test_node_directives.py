@@ -230,3 +230,53 @@ class TestJoiningAlsoStartsTheAgent:
         src = _code(api_server._start_node_agent)
         assert src.index("subprocess.Popen") < src.index("systemctl")
         assert src.rstrip().endswith('return {"started": True, "detail": detail}')
+
+
+class TestTheAgentSurvivesItsOwnFailures:
+    """An exception escaping tick() escapes the loop in main() too.
+
+    The agent then exits, and the node is silently offline with no process
+    left to say why -- indistinguishable from a sleeping laptop, and
+    permanent. Anything that can fail once (a bad path, a full disk, a
+    permission) would otherwise end that machine's participation for good.
+    """
+
+    def _agent(self, **over):
+        class A(node_agent.Agent):
+            pass
+        for name, fn in over.items():
+            setattr(A, name, fn)
+        return A("http://127.0.0.1:9", "t", "n", 1)
+
+    def test_a_failed_start_costs_one_cycle_not_the_agent(self):
+        def boom(self, services):
+            raise OSError("no such python")
+        a = self._agent(directive=lambda self: {"run": True, "services": ""},
+                        start=boom)
+        assert "could not start" in a.tick()
+        assert "could not start" in a.tick()      # still looping
+
+    def test_a_failed_stop_does_not_end_it_either(self):
+        class P:
+            pid = 1
+
+            def poll(self):
+                return None
+        def boom(self):
+            raise OSError("process vanished")
+        a = self._agent(directive=lambda self: {"run": False}, stop=boom)
+        a.proc = P()
+        assert "could not stop" in a.tick()
+
+    def test_an_unreachable_coordinator_is_just_a_state(self):
+        """A laptop coming out of standby finds its in-flight request dead.
+        That is one cycle, not the end of the run."""
+        a = node_agent.Agent("http://127.0.0.1:9", "t", "n", 1)
+        assert "unreachable" in a.tick()
+        assert "unreachable" in a.tick()
+
+    def test_every_branch_of_tick_returns_a_string(self):
+        """main() prints whatever tick returns; a None would read as a
+        blank line in the one log that says what the agent is doing."""
+        src = _code(node_agent.Agent.tick)
+        assert src.count("return ") >= 6

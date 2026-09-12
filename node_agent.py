@@ -129,12 +129,23 @@ class Agent:
         except Exception as exc:      # noqa: BLE001
             return f"coordinator unreachable ({str(exc)[:60]})"
         want = bool(d.get("run"))
+        # Both wrapped. An exception escaping here escapes the loop in
+        # main() too, and the agent exits -- leaving the node silently
+        # offline with no process left to say why. Anything that can fail
+        # once (a bad path, a full disk, a permission) would otherwise end
+        # the machine's participation permanently rather than for one cycle.
         if want and not running:
-            self.start(str(d.get("services") or ""))
-            return "started"
+            try:
+                self.start(str(d.get("services") or ""))
+                return "started"
+            except Exception as exc:      # noqa: BLE001
+                return f"could not start ({str(exc)[:70]})"
         if not want and running:
-            self.stop()
-            return "stopping"
+            try:
+                self.stop()
+                return "stopping"
+            except Exception as exc:      # noqa: BLE001
+                return f"could not stop ({str(exc)[:70]})"
         if running:
             return "running"
         return "idle"
