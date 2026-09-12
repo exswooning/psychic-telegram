@@ -184,9 +184,17 @@ if [[ -d "$(cd "$(dirname "$0")" && pwd)/systemd" ]]; then
 fi
 
 if "${SSH[@]}" "$TARGET" "systemctl list-unit-files bitport-webui.service >/dev/null 2>&1"; then
-  "${SSH[@]}" "$TARGET" "systemctl restart bitport-webui bitport-api; sleep 2; \
+  # bitport-fleet too, and it is not an afterthought: it was missing for
+  # long enough that the running fleet_agent.py was FIFTEEN DAYS older than
+  # the file beside it. A change to it deployed, appeared to deploy, and
+  # changed nothing -- which is the exact failure this script's own header
+  # is about, one service short. Restarted with `|| true` because a box that
+  # never enabled it must not fail an otherwise good deploy.
+  "${SSH[@]}" "$TARGET" "systemctl restart bitport-webui bitport-api; \
+    systemctl restart bitport-fleet 2>/dev/null || true; sleep 2; \
     if systemctl is-active --quiet bitport-webui && systemctl is-active --quiet bitport-api; then \
       echo '  restarted via systemd: bitport-webui, bitport-api both active'; \
+      systemctl is-active --quiet bitport-fleet && echo '  restarted via systemd: bitport-fleet active'; \
     else \
       echo '  RESTART DID NOT TAKE: one or both services failed to start' >&2; \
       systemctl status bitport-webui bitport-api --no-pager -l | tail -30; exit 1; \

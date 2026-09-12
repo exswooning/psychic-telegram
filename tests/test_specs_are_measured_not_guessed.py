@@ -116,3 +116,41 @@ class TestFleetAgentSendsDenominators:
         fields = api_server.Heartbeat.model_fields
         for key in fleet_agent.build_payload("t"):
             assert key in fields, f"heartbeat model rejects {key}"
+
+
+class TestTheDeployActuallyRedeploysTheAgent:
+    """The running fleet_agent.py was fifteen days older than the file.
+
+    sync_vps.sh restarted bitport-webui and bitport-api and nothing else, so
+    a change to fleet_agent.py rsynced, reported success, and changed
+    nothing -- the process kept running the code it had started with. That
+    is precisely the failure this script's own header describes ("An rsync
+    alone updates the files while the running server keeps serving the page
+    it already has in memory"), one service short of being fixed.
+    """
+
+    def _sh(self) -> str:
+        with open(os.path.join(ROOT, "sync_vps.sh"), encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_the_fleet_service_is_restarted(self):
+        assert "systemctl restart bitport-fleet" in self._sh()
+
+    def test_a_box_without_it_still_deploys(self):
+        """Not every host runs a fleet agent, and one that does not must not
+        fail an otherwise good deploy."""
+        sh = self._sh()
+        line = [l for l in sh.splitlines()
+                if "systemctl restart bitport-fleet" in l][0]
+        assert "|| true" in line
+
+    def test_every_unit_the_installer_enables_gets_restarted(self):
+        """The gap was invisible because nothing compared the two lists."""
+        sh = self._sh()
+        with open(os.path.join(ROOT, "install.sh"), encoding="utf-8") as fh:
+            install = fh.read()
+        for unit in ("bitport-webui", "bitport-api"):
+            assert unit in install and unit in sh, unit
+        # xvfb and the backup timer are deliberately excluded: neither holds
+        # Python code that a deploy changes.
+        assert "xvfb" not in sh.split("systemctl restart")[1][:200]
