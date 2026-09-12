@@ -301,8 +301,15 @@ def main(argv: list[str] | None = None) -> int:
     _load_env(args.env)
     coordinator = os.getenv("BITPORT_COORDINATOR", "").strip()
     token = os.getenv("BITPORT_NODE_TOKEN", "").strip()
-    node_id = os.getenv("BITPORT_NODE_ID", "").strip() or os.uname().nodename \
-        if hasattr(os, "uname") else os.getenv("COMPUTERNAME", "node")
+    # Parenthesised, and the configured id checked FIRST on every platform.
+    # Written as one expression this bound as `(A or B) if uname else C`, so
+    # on Windows -- which has no os.uname -- it took C and ignored
+    # BITPORT_NODE_ID entirely. It happened to look right only because the
+    # installer writes COMPUTERNAME into that variable, so the two agreed.
+    node_id = os.getenv("BITPORT_NODE_ID", "").strip()
+    if not node_id:
+        node_id = (os.uname().nodename if hasattr(os, "uname")
+                   else os.getenv("COMPUTERNAME", "node"))
     account = os.getenv("BITPORT_ACCOUNT", "").strip()
     if not coordinator or not token:
         sys.exit(f"no coordinator or token in {args.env} -- "

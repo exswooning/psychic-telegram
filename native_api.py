@@ -46,6 +46,9 @@ SOURCE_SCOPES = [
     "https://www.googleapis.com/auth/documents.readonly",
     "https://www.googleapis.com/auth/presentations.readonly",
 ]
+# Kept in config.SOURCE_SCOPES too, and a test asserts the two agree: a
+# scope listed here but never granted fails at the point of use, which is
+# mid-run on the one file that needed it.
 
 # Export formats to try, in descending fidelity, after the default fails.
 #

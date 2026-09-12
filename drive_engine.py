@@ -1025,10 +1025,18 @@ class DriveMigrator:
         tgt_id, note = native_api.REBUILDERS[mime](
             src_api, tgt_api, item["id"], item["name"])
 
-        # Created at the API's own default location, so move it into place.
+        # Created at the API's own default location -- the user's root -- so
+        # MOVE it rather than adding a parent. addParents alone leaves the
+        # old parent attached, and Drive genuinely supports a file in two
+        # folders, so the result is the document appearing both in My Drive
+        # and in its proper folder, with no error anywhere.
+        current = self._retry(lambda: self.tgt.files().get(
+            fileId=tgt_id, fields="parents",
+            supportsAllDrives=True).execute()).get("parents") or []
         self._retry(lambda: self.tgt.files().update(
-            fileId=tgt_id, addParents=tgt_parent, fields="id",
-            supportsAllDrives=True).execute())
+            fileId=tgt_id, addParents=tgt_parent,
+            removeParents=",".join(current) if current else None,
+            fields="id", supportsAllDrives=True).execute())
 
         self.db.record_mapping(self.source_user, item["id"], tgt_id, "file",
                                parent_target_id=tgt_parent, source_name=item["name"])

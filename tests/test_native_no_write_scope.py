@@ -156,3 +156,61 @@ class TestTheApiRebuild:
         for name in ("sheets", "docs", "slides"):
             assert name in auth._API_VERSIONS, name
         assert hasattr(auth.AuthManager, "api")
+
+
+class TestTheBugsFoundByReadingItBack:
+    """Four things that only a review caught, because nothing had run them.
+
+    preflight.py and _sync_native_api were both written and committed
+    without ever executing against a tenant -- there is no working tenant
+    to execute them against. Everything below would have failed at the
+    point of use, hours into a run or on the first invocation.
+    """
+
+    def test_preflight_calls_an_auth_method_that_exists(self):
+        """It called auth.service(api, version, side, user). No such method
+        -- AuthManager exposes source_drive/target_drive and api(). It would
+        have raised AttributeError on the first user."""
+        import auth
+        import preflight
+        src = inspect.getsource(preflight._fetch)
+        assert "auth.api(" in src
+        assert "auth.service(" not in src
+        assert hasattr(auth.AuthManager, "api")
+
+    def test_the_node_id_expression_is_not_a_precedence_trap(self):
+        """`A or B if cond else C` binds as `(A or B) if cond else C`, so on
+        Windows -- no os.uname -- it took C and ignored BITPORT_NODE_ID
+        entirely. It looked correct only because the installer writes
+        COMPUTERNAME into that variable, so the two agreed by coincidence."""
+        src = _code(__import__("node_agent").main)
+        assert 'node_id = os.getenv("BITPORT_NODE_ID", "").strip()' in src
+        assert "if not node_id:" in src
+
+    def test_the_rebuilt_file_is_moved_not_given_a_second_parent(self):
+        """spreadsheets.create puts the file in the user's root. addParents
+        alone leaves that parent attached, and Drive genuinely supports a
+        file in two folders -- so the document appears in My Drive AND its
+        proper folder, with no error anywhere to notice."""
+        src = _code(drive_engine.DriveMigrator._sync_native_api)
+        assert "removeParents" in src
+        assert 'fields="parents"' in src
+
+    def test_the_scopes_it_needs_are_actually_granted(self):
+        """native_api.SOURCE_SCOPES was a list nothing read. A delegated
+        token request fails WHOLE if any scope is unauthorised, so a missing
+        one does not degrade -- it takes out the entire rebuild, mid-run, on
+        the one file that needed it."""
+        import config
+        for scope in na.SOURCE_SCOPES:
+            assert scope in config.SOURCE_SCOPES, scope
+
+    def test_adding_them_kept_the_source_read_only(self):
+        """The whole point of using the document APIs instead of
+        files.copy. If this ever fails, the trade this module exists to
+        avoid has been made by accident."""
+        import config
+        writable = [s for s in config.SOURCE_SCOPES
+                    if not s.endswith(".readonly")
+                    and not s.endswith("directory.group.readonly")]
+        assert writable == [], writable

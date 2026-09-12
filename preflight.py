@@ -146,7 +146,7 @@ ALWAYS_LOST = """ALSO LOST, whatever mode you use -- not skips, properties of th
 def _fetch(settings, side: str, user: str) -> list[dict]:
     from auth import AuthManager
     auth = AuthManager(settings)
-    drive = auth.service("drive", "v3", side, user)
+    drive = auth.api(side, "drive", user)
     fields = ("nextPageToken, files(id,name,mimeType,quotaBytesUsed,"
               "capabilities(canDownload),trashed)")
     items, token = [], None

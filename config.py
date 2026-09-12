@@ -92,6 +92,14 @@ SOURCE_SCOPES = [
     "https://www.googleapis.com/auth/calendar.readonly",
     "https://www.googleapis.com/auth/admin.directory.user.readonly",
     "https://www.googleapis.com/auth/admin.directory.group.readonly",
+    # A document's own API, for a native file too large to export. All
+    # read-only, so they cost the source guarantee nothing -- and they have
+    # to be in the BASELINE grant rather than added on demand, because a
+    # missing one is only discovered when a delegated token request fails
+    # WHOLE, halfway through a run, on the one file that needed it.
+    "https://www.googleapis.com/auth/spreadsheets.readonly",
+    "https://www.googleapis.com/auth/documents.readonly",
+    "https://www.googleapis.com/auth/presentations.readonly",
 ]
 
 TARGET_SCOPES = [
