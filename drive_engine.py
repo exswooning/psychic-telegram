@@ -989,7 +989,55 @@ class DriveMigrator:
                  ("download_upload", native_or_binary)]
         if self.settings.transfer_mode == "download_upload":
             order.reverse()
+        # native_api LAST, and only for native files.
+        #
+        # Last because it rebuilds a document rather than moving one: it is
+        # the most faithful thing available that neither exports nor writes
+        # to the source, and still less faithful than either path above.
+        # Reached when the export ceiling beat every format AND files.copy
+        # was unavailable -- which is exactly the case that used to end in a
+        # skip, with the file simply not migrating.
+        if is_native:
+            order.append(("native_api", self._sync_native_api))
         return order
+
+    def _sync_native_api(self, item: dict, tgt_parent: str) -> None:
+        """Rebuild a native file through its own API. Read-only on the source.
+
+        spreadsheets.get returns cells, formulas and formats as JSON -- a
+        paginated data read, not an export, so Google's 10 MB export ceiling
+        does not apply to it at all. The rebuild runs against the TARGET's
+        credential, so the source is only ever read: the structural
+        guarantee config.py describes stays intact.
+        """
+        import native_api
+        mime = item.get("mimeType") or ""
+        if not native_api.can_rebuild(mime):
+            self.db.log_audit(
+                self.source_user, item["id"], "file", "SKIPPED_UNEXPORTABLE",
+                native_api.API_FIDELITY.get(mime, f"no API rebuild for {mime}"))
+            self._bump("skipped")
+            return
+
+        kind = "sheets" if mime == native_api.SHEET else "docs"
+        src_api = self.auth.api("source", kind, self.source_user)
+        tgt_api = self.auth.api("target", kind, self.target_user)
+        tgt_id, note = native_api.REBUILDERS[mime](
+            src_api, tgt_api, item["id"], item["name"])
+
+        # Created at the API's own default location, so move it into place.
+        self._retry(lambda: self.tgt.files().update(
+            fileId=tgt_id, addParents=tgt_parent, fields="id",
+            supportsAllDrives=True).execute())
+
+        self.db.record_mapping(self.source_user, item["id"], tgt_id, "file",
+                               parent_target_id=tgt_parent, source_name=item["name"])
+        self.db.log_audit(self.source_user, item["id"], "file", "SUCCESS", note)
+        self._bump("files")
+        self._bump("degraded_format")
+        log.info("[%s] %s %s", self.source_user, item.get("name"), note)
+        touched = self._sync_acls(item["id"], tgt_id, item.get("shared"))
+        self._restore_modified_time(tgt_id, item, touched)
 
     # Skips another strategy CAN legitimately overturn: both mean "this
     # path cannot carry this file", not "this file must not be carried".
@@ -1291,6 +1339,45 @@ class DriveMigrator:
             touched += self._sync_comments(item["id"], tgt_id)
         self._restore_modified_time(tgt_id, item, touched)
 
+    def _export_within_ceiling(self, item: dict, export_mime: str):
+        """Export in the best format that fits under Google's ceiling.
+
+        The 10 MB cap is on the representation Google BUILDS, not on the
+        file, and those differ enormously: a text-heavy Doc that is 12 MB as
+        .docx is often 2 MB as .odt and a few hundred KB as .html. Trying
+        the next format down costs one call and rescues files that would
+        otherwise not migrate at all -- with no new scope and nothing
+        written to the source.
+
+        Returns (path, size, mime, note) or None. The note is recorded on
+        the file: "migrated" and "migrated as HTML with layout flattened"
+        are different claims, and a verification that cannot tell them apart
+        is not a verification.
+        """
+        import native_api
+        attempts = [(export_mime, "")] + [
+            (mime, note) for mime, _ext, note in native_api.alt_formats(item["mimeType"])]
+        last_exc = None
+        for mime, note in attempts:
+            try:
+                path, size = self._download_via(
+                    lambda: self.src.files().export_media(
+                        fileId=item["id"], mimeType=mime))
+            except (PermanentAPIError, RuntimeError) as exc:
+                last_exc = exc
+                if "exportSizeLimitExceeded" not in str(exc):
+                    raise
+                continue          # too big in this format; try a smaller one
+            if size <= self.settings.export_size_limit:
+                return path, size, mime, note
+            # Google built it but it is over the ceiling -- the same
+            # condition, noticed by us instead of by them.
+            self._cleanup(path)
+        if last_exc is not None:
+            log.debug("[%s] every export format exceeded the ceiling for %s",
+                      self.source_user, item.get("name"))
+        return None
+
     def _sync_native(self, item: dict, tgt_parent: str) -> None:
         export_mime, _ext = EXPORT_MIME_MAP.get(item["mimeType"], (None, None))
         if not export_mime:
@@ -1299,42 +1386,33 @@ class DriveMigrator:
             self._bump("skipped")
             return
 
+        got = None
         try:
-            path, size = self._download_via(
-                lambda: self.src.files().export_media(fileId=item["id"], mimeType=export_mime)
-            )
+            got = self._export_within_ceiling(item, export_mime)
         except (PermanentAPIError, RuntimeError) as exc:
-            # Google refusing the export for size is the SAME condition the
-            # guard below treats as a skip -- the only difference is who
-            # noticed first. Recording it as FAILED made 27 files look like
-            # errors to investigate when they are a documented Google
-            # ceiling (~10 MB per export) that no retry, scope or quota
-            # changes.
-            #
-            # Still recorded, not swallowed: the file genuinely did not
-            # migrate, and an operator needs the list. It belongs with the
-            # other skips so the failure count means "something went wrong"
-            # rather than "something is impossible".
-            if "exportSizeLimitExceeded" in str(exc):
-                self.db.log_audit(
-                    self.source_user, item["id"], "file",
-                    "SKIPPED_EXPORT_TOO_LARGE",
-                    f"Google refused the export: this native file is past its "
-                    f"export ceiling (~10 MB). Not retryable -- download it by "
-                    f"hand, or keep it in place and link to it. ({exc})"[:400])
-                self._bump("skipped")
-                return
             self.db.log_audit(self.source_user, item["id"], "file", "FAILED", str(exc))
             self._bump("failed")
             return
-
-        if size > self.settings.export_size_limit:
-            self._cleanup(path)
-            self.db.log_audit(self.source_user, item["id"], "file",
-                              "SKIPPED_EXPORT_TOO_LARGE",
-                              f"{size} bytes exceeds the {self.settings.export_size_limit}-byte export ceiling")
+        if got is None:
+            # No format fitted. Recorded as a SKIP, not a failure: this is a
+            # documented Google ceiling that no retry, scope or quota
+            # changes -- and it is in _RETRYABLE_SKIPS, so the cascade still
+            # offers it to files.copy, which never exports at all.
+            import native_api
+            tried = ", ".join(
+                [".docx/.xlsx/.pptx"]
+                + [ext for _m, ext, _n in native_api.alt_formats(item["mimeType"])])
+            self.db.log_audit(
+                self.source_user, item["id"], "file",
+                "SKIPPED_EXPORT_TOO_LARGE",
+                f"every export format exceeded the ~10 MB ceiling (tried "
+                f"{tried}). Not retryable by export -- the cascade will try "
+                f"files.copy, which never exports. Failing that, "
+                f"download it by hand from the Drive web UI, which uses a "
+                f"different path and is not capped."[:400])
             self._bump("skipped")
             return
+        path, size, export_mime, fidelity_note = got
 
         # Asked now, while the export is in hand: finding out later would
         # mean re-exporting every native file instead of only the ones that
@@ -1376,7 +1454,15 @@ class DriveMigrator:
         self.db.record_mapping(self.source_user, item["id"], tgt_id, "file",
                                parent_target_id=tgt_parent, source_name=item["name"])
         self.db.log_audit(self.source_user, item["id"], "file", "SUCCESS",
+                          fidelity_note or "",
                           modified_time=item.get("modifiedTime"), bytes_moved=size)
+        if fidelity_note:
+            # Migrated, but not in its preferred form. Counted separately so
+            # "500 files migrated" does not quietly include 12 that are now
+            # flat text.
+            self._bump("degraded_format")
+            log.info("[%s] %s migrated as %s", self.source_user,
+                     item.get("name"), fidelity_note)
         self._bump("files")
         if had_ref and self.settings.rewrite_drive_links:
             # Queued, not rewritten here. This file may reference a document

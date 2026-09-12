@@ -1526,15 +1526,18 @@ class TestExportSizeRefusalIsASkipNotAFailure:
     """
 
     def test_the_refusal_is_classified_as_a_skip(self):
+        # Read from the function that records it, not a character window
+        # after the first mention of the error. The ceiling is now detected
+        # in _export_within_ceiling and recorded in _sync_native, so the two
+        # are deliberately not adjacent -- and a window test would have to
+        # be retuned every time either moves, while asserting nothing more.
         import inspect
 
         import drive_engine
 
-        src = inspect.getsource(drive_engine)
-        i = src.index("exportSizeLimitExceeded")
-        window = src[i:i + 700]
-        assert "SKIPPED_EXPORT_TOO_LARGE" in window
-        assert '_bump("skipped")' in window
+        src = inspect.getsource(drive_engine.DriveMigrator._sync_native)
+        assert "SKIPPED_EXPORT_TOO_LARGE" in src
+        assert '_bump("skipped")' in src
 
     def test_it_says_the_file_did_not_migrate_and_is_not_retryable(self):
         """A skip that reads as success would quietly lose the file. The
@@ -1543,11 +1546,21 @@ class TestExportSizeRefusalIsASkipNotAFailure:
 
         import drive_engine
 
-        src = inspect.getsource(drive_engine)
-        i = src.index("exportSizeLimitExceeded")
-        window = src[i:i + 700]
-        assert "Not retryable" in window
-        assert "download it by" in window
+        src = inspect.getsource(drive_engine.DriveMigrator._sync_native)
+        assert "Not retryable" in src
+        assert "download it by" in src
+
+    def test_it_names_the_formats_it_tried(self):
+        """There are several now. "Too large" is a different message when
+        four representations were attempted, and an operator deciding
+        whether to grant the write scope needs to know it was not one."""
+        import inspect
+
+        import drive_engine
+
+        src = inspect.getsource(drive_engine.DriveMigrator._sync_native)
+        assert "tried" in src
+        assert "alt_formats" in src
 
     def test_other_export_errors_are_still_failures(self):
         """Only this one condition is reclassified. Treating every export
@@ -1557,11 +1570,15 @@ class TestExportSizeRefusalIsASkipNotAFailure:
 
         import drive_engine
 
-        src = inspect.getsource(drive_engine)
-        i = src.index("exportSizeLimitExceeded")
-        window = src[i:i + 900]
-        assert '"file", "FAILED"' in window
-        assert '_bump("failed")' in window
+        # Same relocation as above: the ceiling is detected in
+        # _export_within_ceiling, which RE-RAISES anything that is not the
+        # ceiling, and _sync_native records that as FAILED.
+        detect = inspect.getsource(drive_engine.DriveMigrator._export_within_ceiling)
+        assert 'if "exportSizeLimitExceeded" not in str(exc):' in detect
+        assert "raise" in detect
+        record = inspect.getsource(drive_engine.DriveMigrator._sync_native)
+        assert '"file", "FAILED"' in record
+        assert '_bump("failed")' in record
 
 
 class TestBlockedIsNotFailed:
@@ -1635,9 +1652,14 @@ class TestDriveFallsBackBetweenCopyStrategies:
         assert [n for n, _ in m2._file_strategies(True)][0] == "server_side"
 
     def test_the_other_path_is_offered_as_a_fallback(self):
-        m = self._mig("download_upload")
-        assert [n for n, _ in m._file_strategies(True)] == [
-            "download_upload", "server_side"]
+        # The configured mode first, then the other copy path. native_api
+        # was added after this and sits last -- asserted as an ordering
+        # rather than an exact list, because the point is which comes
+        # first, and a third read-only route should not fail this.
+        names = [n for n, _ in m._file_strategies(True)] \
+            if (m := self._mig("download_upload")) else []
+        assert names[:2] == ["download_upload", "server_side"]
+        assert "server_side" in names
 
     def test_link_flip_is_never_fallen_back_into(self):
         """Publishing a file the operator did not agree to expose is not a

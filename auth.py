@@ -31,7 +31,11 @@ from config import Settings, source_scopes, target_scopes
 log = logging.getLogger(__name__)
 
 _API_VERSIONS = {"drive": "v3", "gmail": "v1", "calendar": "v3",
-                 "chat": "v1", "people": "v1", "tasks": "v1"}
+                 "chat": "v1", "people": "v1", "tasks": "v1",
+                 # A document's own API, for rebuilding a native file that
+                 # is too large to export. Read-only on the source -- see
+                 # native_api.py.
+                 "sheets": "v4", "docs": "v1", "slides": "v1"}
 
 
 class AuthManager:
@@ -197,6 +201,16 @@ class AuthManager:
                 pass
         cache[key] = svc
         return svc
+
+    def api(self, tenant: str, name: str, user: str):
+        """Any API in _API_VERSIONS, for either tenant, as one user.
+
+        The shorthands below cover the fixed set the engines were written
+        around. native_api needs sheets and docs on BOTH sides -- read on
+        the source, write on the target -- and adding two more pairs of
+        shorthands for that would be six methods to say one thing.
+        """
+        return self._service(tenant, name, user)
 
     # -- shorthands mirrored by tests/fakes.FakeAuth ------------------------
     def source_drive(self, user: str):
