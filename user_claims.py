@@ -40,6 +40,8 @@ import datetime as _dt
 import os
 import socket
 
+from datetime import datetime
+
 import control_plane_db as cpdb
 
 # Long enough that an ordinary stall (a slow Drive listing, a retry storm)
@@ -73,6 +75,46 @@ def _expiry(seconds: int = LEASE_SECONDS) -> str:
     return _stamp(_now() + _dt.timedelta(seconds=seconds))
 
 
+def _parse(stamp: str) -> datetime:
+    """A stored timestamp back into a datetime. Both shapes appear in this
+    table -- _stamp writes milliseconds, SQLite's own DEFAULT does not."""
+    text = (stamp or "").replace("Z", "")
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            # UTC-aware, because _now() is: subtracting a naive datetime
+            # from an aware one raises, and every stamp in this table is
+            # written in UTC.
+            return datetime.strptime(text, fmt).replace(tzinfo=_dt.timezone.utc)
+        except ValueError:
+            continue
+    # Unparseable: treat as long past, so a corrupt stamp does not pin a
+    # user to a node forever.
+    return datetime(1970, 1, 1, tzinfo=_dt.timezone.utc)
+
+
+def _audit_takeover(account_id: int | None, source_user: str, owner: str,
+                    me: str, verdict: dict) -> None:
+    """Write down that one node took another's user, and on what grounds.
+
+    This is the one place the tool decides by itself to re-deliver work,
+    which on Drive means duplicate files. An operator finding those later
+    must be able to find the decision, the numbers behind it, and the node
+    that was waited for.
+    """
+    try:
+        action = cpdb.begin_action(
+            actor=me, actor_role="node",
+            action="take over an offline node's user",
+            reason=verdict["reason"],
+            target=f"{source_user} (was {owner})",
+            params={"redoCostS": round(verdict["redoCostS"]),
+                    "waitDeadlineS": round(verdict["waitDeadlineS"])},
+            account_id=account_id)
+        cpdb.finish_action(action, "ok", "")
+    except Exception:      # noqa: BLE001 - never block the claim on audit
+        pass
+
+
 def _local_acquire(account_id: int | None, source_user: str, *, node: str | None = None,
             services: str = "", lease_seconds: int = LEASE_SECONDS,
             force: bool = False) -> tuple[bool, str]:
@@ -84,6 +126,10 @@ def _local_acquire(account_id: int | None, source_user: str, *, node: str | None
     """
     me = node or node_id()
     now = _stamp(_now())
+    # Filled in when this call takes a user from another node; written after
+    # the transaction commits, never inside it.
+    took: tuple[str, dict] | None = None
+    pending_audit: tuple[str, dict] | None = None
     with cpdb.rw() as conn:
         # BEGIN IMMEDIATE, not the default deferred transaction: two nodes
         # racing on SELECT-then-INSERT could both read "unclaimed" and both
@@ -91,7 +137,10 @@ def _local_acquire(account_id: int | None, source_user: str, *, node: str | None
         # decision, the same way job_admission.try_admit does.
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
-            "SELECT node_id, status, lease_expires FROM user_claims "
+            # services too: the reassignment policy prices a redo by what
+            # was being migrated, and Drive costs far more to redo than
+            # Gmail does.
+            "SELECT node_id, status, lease_expires, services FROM user_claims "
             "WHERE account_id IS ? AND source_user=?",
             (account_id, source_user)).fetchone()
 
@@ -105,15 +154,41 @@ def _local_acquire(account_id: int | None, source_user: str, *, node: str | None
                 conn.rollback()
                 return False, f"held by {owner} until {expires}"
             if not live and owner != me and not force:
-                # The lease lapsed, but this node cannot safely resume
-                # another node's work -- that node's local ledger is what
-                # knows which items already landed.
-                conn.rollback()
-                return False, (
-                    f"lease from {owner} expired at {expires}; another node "
-                    f"cannot resume it safely (its item ledger is local). "
-                    f"Restart {owner}, or force to accept re-inserting what "
-                    f"it already delivered.")
+                # The lease lapsed. Another node CAN take it -- but only
+                # once waiting for the owner has stopped being worth it,
+                # because that owner's local ledger is what knows which
+                # items already landed and taking over means re-delivering
+                # them. claim_policy states the trade-off and the bound:
+                # wait up to the cost of redoing the user, then stop.
+                #
+                # Until this, an expired lease was simply refused and a
+                # human had to force it. That is safe and it stalls: a
+                # laptop that never comes back held its user forever, with
+                # nothing else allowed to finish it.
+                import claim_policy
+                stale = max(0.0, (_now() - _parse(expires)).total_seconds()
+                            + lease_seconds)
+                verdict = claim_policy.decide(stale, row["services"] or services,
+                                              account_id)
+                if not verdict["reassign"]:
+                    conn.rollback()
+                    return False, (
+                        f"lease from {owner} expired at {expires}; "
+                        f"{verdict['reason']}. Restart {owner} and it resumes "
+                        f"for free, or force to take it now and accept "
+                        f"re-delivering what it already did.")
+                # Taking it over. Recorded as forced_from, exactly as a
+                # manual force is: the next person to wonder why a user has
+                # duplicate Drive files needs to find this.
+                #
+                # The audit is DEFERRED to after the commit. Writing it here
+                # deadlocks against this transaction's own BEGIN IMMEDIATE,
+                # and since _audit_takeover swallows its errors so it can
+                # never block a claim, the record simply never appeared --
+                # silently, which is the worst possible outcome for the one
+                # thing that explains a duplicated Drive later.
+                force = True
+                pending_audit = (owner, verdict)
             conn.execute(
                 "UPDATE user_claims SET node_id=?, status='CLAIMED', services=?, "
                 "renewed_at=?, lease_expires=?, forced_from=?, detail='' "
@@ -121,15 +196,19 @@ def _local_acquire(account_id: int | None, source_user: str, *, node: str | None
                 (me, services, now, _expiry(lease_seconds),
                  owner if (force and owner != me) else "",
                  account_id, source_user))
-            return True, ""
-
-        conn.execute(
-            "INSERT INTO user_claims (account_id, source_user, node_id, status, "
-            "services, claimed_at, renewed_at, lease_expires) "
-            "VALUES (?,?,?,'CLAIMED',?,?,?,?)",
-            (account_id, source_user, me, services, now, now,
-             _expiry(lease_seconds)))
-        return True, ""
+            took = pending_audit
+        else:
+            conn.execute(
+                "INSERT INTO user_claims (account_id, source_user, node_id, status, "
+                "services, claimed_at, renewed_at, lease_expires) "
+                "VALUES (?,?,?,'CLAIMED',?,?,?,?)",
+                (account_id, source_user, me, services, now, now,
+                 _expiry(lease_seconds)))
+    # Outside the transaction, so the audit's own write cannot deadlock
+    # against the BEGIN IMMEDIATE this call held.
+    if took:
+        _audit_takeover(account_id, source_user, took[0], me, took[1])
+    return True, ""
 
 
 def _local_renew(account_id: int | None, source_user: str, *, node: str | None = None,
