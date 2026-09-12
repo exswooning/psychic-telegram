@@ -337,3 +337,51 @@ class TestPickingWhichMachineRuns:
         src = _code(api_server.get_node_directive)
         body = src[src.index("with cpdb.ro()"):src.index("return {")]
         assert body.count("conn.execute") == 2
+
+
+class TestNodesReportWhatTheyAre:
+    """cpu_pct/ram_pct/disk_pct were stored from the start and say "78% of
+    something" without ever saying of what. The denominator is the part an
+    operator deciding where to put work actually needs.
+    """
+
+    def test_specs_are_measured_once_not_every_poll(self):
+        """Cores and RAM do not change between polls; re-probing every 20
+        seconds spends real work to re-learn the same answer."""
+        src = _code(node_agent.Agent.specs)
+        assert "self._specs is not None" in src
+        assert "self._specs = out" in src
+
+    def test_load_is_measured_every_time(self):
+        """The opposite property, and the reason they are separate methods:
+        these change constantly."""
+        src = _code(node_agent.Agent.load)
+        assert "_specs" not in src
+
+    def test_a_failed_reading_is_omitted_rather_than_zeroed(self):
+        """upsert_node leaves a stored value alone for None. 0.0 would read
+        as "idle" on a node that is flat out -- and Windows genuinely has no
+        getloadavg, so cpu_pct is null there rather than wrong."""
+        src = _code(node_agent.Agent.load)
+        assert src.count("except Exception") == 3
+        assert "= 0" not in src.replace("[0]", "")
+
+    def test_disk_has_a_windows_path(self):
+        """os.statvfs does not exist there; shutil.disk_usage does."""
+        src = _code(node_agent.Agent.specs)
+        assert "statvfs" in src and "shutil.disk_usage" in src
+
+    def test_specs_never_break_the_heartbeat(self):
+        """A missing heartbeat reads as a dead node, which is a far worse
+        report than a missing core count."""
+        src = _code(node_agent.Agent.heartbeat)
+        assert "except Exception" in src
+        beat = _code(node_agent.Agent.specs)
+        assert "except Exception" in beat
+
+    def test_the_heartbeat_model_accepts_them_all_optionally(self):
+        import api_server
+        fields = api_server.Heartbeat.model_fields
+        for name in ("cpu_cores", "ram_gb", "disk_gb", "platform"):
+            assert name in fields, name
+            assert not fields[name].is_required(), name

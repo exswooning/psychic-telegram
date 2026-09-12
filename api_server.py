@@ -1364,6 +1364,14 @@ async def revert_public(body: RevertPublic, op: Operator = Depends(operator)):
 # ======================================================================
 class Heartbeat(BaseModel):
     node_id: str
+    # What the machine is, alongside how busy it is. All optional: an older
+    # node sends none of them, and a node that cannot measure one sends that
+    # one as null rather than inventing a zero -- upsert_node already treats
+    # None as "no reading" and leaves the stored value alone.
+    cpu_cores: int | None = None
+    ram_gb: float | None = None
+    disk_gb: float | None = None
+    platform: str | None = None
     hostname: str | None = None
     location: str | None = None
     code_commit: str | None = None

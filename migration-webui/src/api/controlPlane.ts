@@ -164,6 +164,12 @@ export interface FleetNode {
   /** Whether this machine may pick up work at all -- ANDed with the
    *  tenant's directive, so one laptop can sit out a run. */
   takes_work?: number
+  /** What the machine IS, as opposed to how busy it is. Null on an older
+   *  node, or for any one reading it could not take. */
+  cpu_cores?: number | null
+  ram_gb?: number | null
+  disk_gb?: number | null
+  platform?: string | null
   /** Derived server-side from last_seen, not stored -- a node that dies
    *  cannot mark itself down, so liveness has to be computed on read. */
   healthy: boolean

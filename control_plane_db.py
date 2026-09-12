@@ -110,6 +110,17 @@ def _apply_column_upgrades(conn: sqlite3.Connection) -> None:
         # fleet on upgrade.
         "fleet_nodes": [
             ("takes_work", "INTEGER NOT NULL DEFAULT 1"),
+            # What the machine IS, as opposed to how busy it is. The table
+            # carried cpu_pct/ram_pct/disk_pct from the start, which say
+            # "78% of something" without ever saying of what -- and the
+            # thing an operator deciding where to put work needs is the
+            # denominator. Nullable: a node that cannot measure one reports
+            # nothing rather than a made-up zero, and older nodes send none
+            # of them at all.
+            ("cpu_cores", "INTEGER"),
+            ("ram_gb", "REAL"),
+            ("disk_gb", "REAL"),
+            ("platform", "TEXT"),
         ],
         "accounts": [
             ("subscription_active", "INTEGER NOT NULL DEFAULT 1"),

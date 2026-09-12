@@ -18,6 +18,23 @@ import {
 import { fetchFleet, setNodeTakesWork } from '@/api/controlPlane'
 import type { FleetNode } from '@/api/controlPlane'
 
+/** A percentage bar is meaningless without its denominator: "78%" of an
+ *  unknown amount of RAM does not help anyone decide where to put work. */
+const spec = (n: FleetNode): string => {
+  const bits: string[] = []
+  if (n.cpu_cores) bits.push(`${n.cpu_cores} core${n.cpu_cores === 1 ? '' : 's'}`)
+  if (n.ram_gb) bits.push(`${n.ram_gb} GB RAM`)
+  if (n.disk_gb) bits.push(`${Math.round(n.disk_gb)} GB disk`)
+  return bits.join(' · ')
+}
+
+const OS_NAME: Record<string, string> = {
+  darwin: 'macOS', win32: 'Windows', linux: 'Linux',
+}
+
+const pct = (v: number | null | undefined): string =>
+  v === null || v === undefined ? '—' : `${Math.round(v)}%`
+
 const ago = (iso: string): string => {
   const then = Date.parse(iso)
   if (Number.isNaN(then)) return '—'
@@ -73,6 +90,10 @@ export const NodeList: React.FC = () => {
             <TableHead>
               <TableRow>
                 <TableCell>machine</TableCell>
+                <TableCell>specs</TableCell>
+                <TableCell align="right">cpu</TableCell>
+                <TableCell align="right">ram</TableCell>
+                <TableCell align="right">disk</TableCell>
                 <TableCell>takes work</TableCell>
                 <TableCell>state</TableCell>
                 <TableCell>doing</TableCell>
@@ -86,7 +107,33 @@ export const NodeList: React.FC = () => {
                 <TableRow key={n.node_id} data-testid={`node-${n.node_id}`}>
                   <TableCell sx={{ fontSize: 12, fontWeight: 600 }}>
                     {n.node_id}
+                    {n.platform && (
+                      <Typography variant="caption" color="text.secondary"
+                                  sx={{ display: 'block', fontWeight: 400 }}>
+                        {OS_NAME[n.platform] || n.platform}
+                      </Typography>
+                    )}
                   </TableCell>
+                  <TableCell sx={{ fontSize: 12 }}
+                             data-testid={`spec-${n.node_id}`}>
+                    {spec(n) || <span style={{ opacity: 0.6 }}>not reported</span>}
+                  </TableCell>
+                  {/* Live load, next to the capacity it is a fraction of.
+                      A dash where a node could not measure one -- 0% would
+                      read as idle on a machine that is flat out. */}
+                  <TableCell align="right" sx={{ fontSize: 12,
+                                                 fontVariantNumeric: 'tabular-nums' }}
+                             data-testid={`cpu-${n.node_id}`}>{pct(n.cpu_pct)}</TableCell>
+                  <TableCell align="right" sx={{ fontSize: 12,
+                                                 fontVariantNumeric: 'tabular-nums',
+                                                 color: (n.ram_pct ?? 0) > 90
+                                                   ? 'warning.main' : undefined }}
+                             data-testid={`ram-${n.node_id}`}>{pct(n.ram_pct)}</TableCell>
+                  <TableCell align="right" sx={{ fontSize: 12,
+                                                 fontVariantNumeric: 'tabular-nums',
+                                                 color: (n.disk_pct ?? 0) > 90
+                                                   ? 'warning.main' : undefined }}
+                             data-testid={`disk-${n.node_id}`}>{pct(n.disk_pct)}</TableCell>
                   <TableCell>
                     {/* Excluding a machine does not stop the run: the node
                         ANDs this with the tenant's directive on its next
@@ -138,7 +185,7 @@ export const NodeList: React.FC = () => {
               ))}
               {nodes.filter((n) => n.node_id === why).map((n) => (
                 <TableRow key={`${n.node_id}-why`}>
-                  <TableCell colSpan={7} sx={{ bgcolor: 'action.hover' }}>
+                  <TableCell colSpan={11} sx={{ bgcolor: 'action.hover' }}>
                     <Box data-testid={`why-${n.node_id}`} sx={{ py: 1 }}>
                       <Typography variant="body2" sx={{ fontWeight: 600, mb: 1 }}>
                         {n.node_id} has not checked in for {ago(n.last_seen)

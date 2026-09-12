@@ -21,7 +21,8 @@ const node = (over = {}) => ({
   cpu_pct: null, ram_pct: null, disk_pct: null, active_job: null,
   job_pid: null, transfer_mode: null, users_done: 3, users_running: 0,
   users_failed: 0, error_rate: 0, healthy: true, secondsSinceHeartbeat: 4,
-  takes_work: 1,
+  takes_work: 1, cpu_cores: 8, ram_gb: 16, disk_gb: 494,
+  platform: 'win32',
   ...over,
 })
 
@@ -168,5 +169,50 @@ describe('an offline machine explains itself', () => {
     fireEvent.click(chip)
     await waitFor(() =>
       expect(screen.queryByTestId('why-DESKTOP-6T3O8A3')).toBeNull())
+  })
+})
+
+describe('what each machine is', () => {
+  it('shows cores, memory and disk', async () => {
+    /* The table carried cpu_pct/ram_pct/disk_pct from the start, which say
+       "78% of something" without ever saying of what -- and the denominator
+       is the part someone deciding where to put work needs. */
+    fleet.mockResolvedValue([node()])
+    render(<NodeList />)
+    const cell = await screen.findByTestId('spec-DESKTOP-6T3O8A3')
+    expect(cell).toHaveTextContent('8 cores')
+    expect(cell).toHaveTextContent('16 GB RAM')
+    expect(cell).toHaveTextContent('494 GB disk')
+  })
+
+  it('names the operating system readably', async () => {
+    fleet.mockResolvedValue([node()])
+    render(<NodeList />)
+    await waitFor(() => expect(screen.getByTestId('node-DESKTOP-6T3O8A3'))
+      .toHaveTextContent('Windows'))
+  })
+
+  it('says "not reported" for a node too old to send them', async () => {
+    fleet.mockResolvedValue([node({ cpu_cores: null, ram_gb: null,
+                                    disk_gb: null, platform: null })])
+    render(<NodeList />)
+    expect(await screen.findByTestId('spec-DESKTOP-6T3O8A3'))
+      .toHaveTextContent('not reported')
+  })
+
+  it('shows a dash, never 0%, for a reading it could not take', async () => {
+    /* 0% reads as idle on a machine that is flat out. Windows has no
+       getloadavg, so cpu_pct genuinely arrives null there. */
+    fleet.mockResolvedValue([node({ cpu_pct: null, ram_pct: 61, disk_pct: 45 })])
+    render(<NodeList />)
+    expect(await screen.findByTestId('cpu-DESKTOP-6T3O8A3')).toHaveTextContent('—')
+    expect(screen.getByTestId('ram-DESKTOP-6T3O8A3')).toHaveTextContent('61%')
+  })
+
+  it('singularises a one-core machine', async () => {
+    fleet.mockResolvedValue([node({ cpu_cores: 1 })])
+    render(<NodeList />)
+    expect(await screen.findByTestId('spec-DESKTOP-6T3O8A3'))
+      .toHaveTextContent('1 core ')
   })
 })

@@ -68,6 +68,7 @@ class Agent:
         self.account_id, self.python, self.workdir = account_id, python, workdir
         self.proc: subprocess.Popen | None = None
         self.services = ""
+        self._specs: dict | None = None
 
     # -- the two things it does ------------------------------------------
     def directive(self) -> dict:
@@ -78,19 +79,75 @@ class Agent:
                     f"?account_id={self.account_id}"
                     f"&node_id={urllib.parse.quote(self.node_id)}", self.token)
 
+    def specs(self) -> dict:
+        """What this machine is. Measured once and cached: cores and RAM do
+        not change between polls, and probing them every 20 seconds would
+        spend real work to re-learn the same answer."""
+        if self._specs is not None:
+            return self._specs
+        out: dict = {}
+        try:
+            import resources
+            r = resources.probe()
+            out["cpu_cores"] = r.cpu_logical or None
+            out["ram_gb"] = round(r.ram_total_gb, 1) or None
+            out["platform"] = r.platform or None
+        except Exception:      # noqa: BLE001 - specs are not worth a failure
+            pass
+        try:
+            st = os.statvfs(self.workdir)
+            out["disk_gb"] = round(st.f_blocks * st.f_frsize / 1e9, 1)
+        except Exception:      # noqa: BLE001 - Windows has no statvfs
+            try:
+                import shutil
+                out["disk_gb"] = round(shutil.disk_usage(self.workdir).total / 1e9, 1)
+            except Exception:      # noqa: BLE001
+                pass
+        self._specs = out
+        return out
+
+    def load(self) -> dict:
+        """How busy it is right now. Separate from specs because these do
+        change every poll, and because a failed measurement here must send
+        null rather than zero -- upsert_node leaves a stored value alone for
+        None, and 0.0 would read as "idle" on a node that is flat out."""
+        out: dict = {}
+        try:
+            import resources
+            r = resources.probe()
+            if r.ram_total_gb:
+                out["ram_pct"] = round((1 - r.ram_usable_gb / r.ram_total_gb) * 100, 1)
+        except Exception:      # noqa: BLE001
+            pass
+        try:
+            load1 = os.getloadavg()[0]
+            out["cpu_pct"] = round(min(100.0, load1 / max(os.cpu_count() or 1, 1) * 100), 1)
+        except Exception:      # noqa: BLE001 - no getloadavg on Windows
+            pass
+        try:
+            import shutil
+            u = shutil.disk_usage(self.workdir)
+            out["disk_pct"] = round(u.used / u.total * 100, 1)
+        except Exception:      # noqa: BLE001
+            pass
+        return out
+
     def heartbeat(self) -> None:
         """Best effort. A coordinator that cannot be told is not a reason to
         stop migrating -- the claim calls are what must not be guessed at,
         and main.py already stops on its own if those fail."""
         running = self.proc is not None and self.proc.poll() is None
         try:
-            _post(f"{self.coordinator}/api/v2/fleet/heartbeat", self.token, {
+            body = {
                 "node_id": self.node_id,
                 "hostname": self.node_id,
                 "active_job": (f"migrate {self.services or 'all'}"
                                if running else None),
                 "job_pid": self.proc.pid if running else None,
-            })
+            }
+            body.update(self.specs())
+            body.update(self.load())
+            _post(f"{self.coordinator}/api/v2/fleet/heartbeat", self.token, body)
         except Exception:      # noqa: BLE001 - reported by absence instead
             pass
 
