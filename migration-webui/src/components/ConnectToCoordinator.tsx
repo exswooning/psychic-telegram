@@ -22,7 +22,9 @@ export const ConnectToCoordinator: React.FC = () => {
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const [ok, setOk] = useState<{ coordinator: string; nodeId: string
-                                 accountId: number | null } | null>(null)
+                                 accountId: number | null
+                                 agentStarted?: boolean
+                                 agentDetail?: string } | null>(null)
 
   const go = () => {
     setBusy(true); setErr(''); setOk(null)
@@ -73,12 +75,23 @@ export const ConnectToCoordinator: React.FC = () => {
               {err}
             </Alert>
           )}
-          {ok && (
+          {ok && ok.agentStarted !== false && (
             <Alert severity="success" sx={{ mt: 1.5 }} data-testid="connect-ok">
               Joined <strong>{ok.coordinator}</strong> as{' '}
               <strong>{ok.nodeId}</strong>
-              {ok.accountId ? ` for account ${ok.accountId}` : ''}. Start the
-              agent on this machine to pick up work:
+              {ok.accountId ? ` for account ${ok.accountId}` : ''}. The agent
+              is running — this machine will show as online on that
+              coordinator within about a minute
+              {ok.agentDetail?.includes('boot')
+                ? ', and will come back on its own after a reboot' : ''}.
+            </Alert>
+          )}
+          {ok && ok.agentStarted === false && (
+            <Alert severity="warning" sx={{ mt: 1.5 }} data-testid="connect-no-agent">
+              Joined <strong>{ok.coordinator}</strong> as{' '}
+              <strong>{ok.nodeId}</strong>, but the agent could not be
+              started here ({ok.agentDetail}). Until it runs, this machine
+              shows as offline and Start does nothing to it:
               <Box component="pre" sx={{ fontSize: 11, mt: 1, mb: 0,
                                          whiteSpace: 'pre-wrap' }}>
                 ./.venv/bin/python node_agent.py

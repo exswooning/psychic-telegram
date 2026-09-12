@@ -33,16 +33,47 @@ describe('joining from the browser', () => {
       expect.objectContaining({ command: cmd })))
   })
 
-  it('confirms what it joined, and what to run next', async () => {
+  it('confirms what it joined and that it is already running', async () => {
+    /* Joining and running used to be two steps, and only the first
+       happened -- a laptop sat "offline, 7h ago" on the coordinator with
+       nothing anywhere explaining why. */
     connect.mockResolvedValue({ ok: true, coordinator: 'https://h.example',
-                                nodeId: 'laptop', accountId: 68 })
+                                nodeId: 'laptop', accountId: 68,
+                                agentStarted: true, agentDetail: 'started' })
     openIt()
     fireEvent.change(screen.getByTestId('connect-input'), { target: { value: 'X' } })
     fireEvent.click(screen.getByTestId('connect-submit'))
     const ok = await screen.findByTestId('connect-ok')
     expect(ok).toHaveTextContent('h.example')
     expect(ok).toHaveTextContent('laptop')
-    expect(ok).toHaveTextContent('node_agent.py')
+    expect(ok).toHaveTextContent('agent is running')
+  })
+
+  it('says it will survive a reboot only when it actually will', async () => {
+    connect.mockResolvedValue({ ok: true, coordinator: 'https://h.example',
+                                nodeId: 'laptop', accountId: 68,
+                                agentStarted: true, agentDetail: 'started' })
+    openIt()
+    fireEvent.change(screen.getByTestId('connect-input'), { target: { value: 'X' } })
+    fireEvent.click(screen.getByTestId('connect-submit'))
+    expect(await screen.findByTestId('connect-ok')).not.toHaveTextContent('reboot')
+  })
+
+  it('warns, and falls back to the command, when the agent will not start', async () => {
+    /* A node that joined but has no agent is invisible and inert: offline
+       on the coordinator, and Start does nothing to it. Saying so beats a
+       green tick. */
+    connect.mockResolvedValue({ ok: true, coordinator: 'https://h.example',
+                                nodeId: 'laptop', accountId: 68,
+                                agentStarted: false,
+                                agentDetail: 'node_agent.py is not in this install' })
+    openIt()
+    fireEvent.change(screen.getByTestId('connect-input'), { target: { value: 'X' } })
+    fireEvent.click(screen.getByTestId('connect-submit'))
+    const warn = await screen.findByTestId('connect-no-agent')
+    expect(warn).toHaveTextContent('not in this install')
+    expect(warn).toHaveTextContent('node_agent.py')
+    expect(screen.queryByTestId('connect-ok')).toBeNull()
   })
 
   it('shows why it failed rather than silently doing nothing', async () => {

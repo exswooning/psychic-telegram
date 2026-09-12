@@ -183,3 +183,50 @@ class TestTheDirectiveNamesNoServices:
         # engine's own default survives.
         assert 'if services:' in src
         assert src.index("argv = [") < src.index("if services:")
+
+
+class TestJoiningAlsoStartsTheAgent:
+    """A node that joined but has no agent is invisible and inert.
+
+    Live: a laptop sat "offline, 7h ago" on the Machines list. Nothing was
+    broken -- it had joined, written node.env, and proved it could reach the
+    coordinator. Joining and running were simply two steps and only the
+    first had happened, with nothing anywhere saying so. Pressing Start did
+    nothing to it either, silently.
+    """
+
+    def test_connect_starts_it(self):
+        import api_server
+        src = _code(api_server.connect_to_coordinator)
+        assert "_start_node_agent()" in src
+
+    def test_it_outlives_the_request_that_launched_it(self):
+        """Without start_new_session the agent dies with the worker that
+        served the click, and the node goes quiet for a reason nobody would
+        connect to a page they clicked minutes earlier."""
+        import api_server
+        src = _code(api_server._start_node_agent)
+        assert "start_new_session" in src
+        assert 'hasattr(os, "setsid")' in src
+
+    def test_it_does_not_start_a_second_one(self):
+        """Two agents double every poll and race each other to launch the
+        same migration."""
+        import api_server
+        src = _code(api_server._start_node_agent)
+        assert "pgrep" in src
+        assert "already running" in src
+
+    def test_a_failure_is_reported_rather_than_shown_as_success(self):
+        import api_server
+        src = _code(api_server._start_node_agent)
+        assert '"started": False' in src
+
+    def test_boot_persistence_is_separate_from_starting(self):
+        """Order matters: start it now so the machine is useful, then try to
+        make that survive a reboot. Failing the second is not failing the
+        first."""
+        import api_server
+        src = _code(api_server._start_node_agent)
+        assert src.index("subprocess.Popen") < src.index("systemctl")
+        assert src.rstrip().endswith('return {"started": True, "detail": detail}')

@@ -4348,6 +4348,76 @@ class ConnectRequest(BaseModel):
     command: str = ""
 
 
+def _start_node_agent() -> dict:
+    """Run node_agent.py here, and keep it running across restarts if we can.
+
+    Two separate things, and the order matters: start it now so the machine
+    is useful immediately, then try to make that survive a reboot. A failure
+    to do the second is not a failure of the first.
+
+    start_new_session so it outlives the request that launched it -- without
+    it the agent dies with this worker, and the node goes quiet again for
+    reasons nobody would connect to a page they clicked minutes earlier.
+    """
+    import shutil
+    import subprocess
+
+    script = os.path.join(HERE, "node_agent.py")
+    if not os.path.isfile(script):
+        return {"started": False, "detail": "node_agent.py is not in this install"}
+
+    python = os.path.join(HERE, ".venv", "bin", "python")
+    if not os.path.isfile(python):
+        python = sys.executable
+
+    # Already running? Starting a second one would double every poll and
+    # race the first to launch the same migration.
+    try:
+        existing = subprocess.run(["pgrep", "-f", "node_agent.py"],
+                                  capture_output=True, text=True, timeout=10)
+        if existing.returncode == 0 and existing.stdout.strip():
+            return {"started": True, "detail": "already running"}
+    except Exception:      # noqa: BLE001 - no pgrep is not a reason to stop
+        pass
+
+    detail = "started"
+    try:
+        log = open(os.path.join(HERE, "logs", "node_agent.log"), "a",
+                   encoding="utf-8")
+    except OSError:
+        log = subprocess.DEVNULL
+    try:
+        kwargs = {"start_new_session": True} if hasattr(os, "setsid") else {}
+        subprocess.Popen([python, script], cwd=HERE, stdout=log,
+                         stderr=subprocess.STDOUT, **kwargs)
+    except Exception as exc:      # noqa: BLE001
+        return {"started": False, "detail": str(exc)[:160]}
+
+    # And across reboots. Best effort: a box without systemd still has a
+    # running agent from the line above.
+    if shutil.which("systemctl"):
+        try:
+            unit = os.path.expanduser("~/.config/systemd/user/bitport-node.service")
+            os.makedirs(os.path.dirname(unit), exist_ok=True)
+            with open(unit, "w", encoding="utf-8") as fh:
+                fh.write("[Unit]\nDescription=Bitport worker node agent\n"
+                         "After=network-online.target\n\n[Service]\n"
+                         f"WorkingDirectory={HERE}\n"
+                         f"ExecStart={python} {script}\n"
+                         "Restart=always\nRestartSec=10\n\n"
+                         "[Install]\nWantedBy=default.target\n")
+            subprocess.run(["systemctl", "--user", "daemon-reload"],
+                           capture_output=True, timeout=20)
+            r = subprocess.run(["systemctl", "--user", "enable",
+                                "bitport-node.service"],
+                               capture_output=True, timeout=20)
+            if r.returncode == 0:
+                detail = "started, and enabled at boot"
+        except Exception:      # noqa: BLE001 - the running agent is the point
+            pass
+    return {"started": True, "detail": detail}
+
+
 @app.post("/api/v2/nodes/connect")
 async def connect_to_coordinator(req: ConnectRequest,
                                  op: Operator = Depends(operator)):
@@ -4412,9 +4482,19 @@ async def connect_to_coordinator(req: ConnectRequest,
             fh.write(f"BITPORT_NODE_TOKEN={token}\n")
             fh.write(f"BITPORT_NODE_ID={socket.gethostname()}\n")
             fh.write(f"BITPORT_ACCOUNT={account}\n")
+        # Start it now, rather than printing a command for someone to run.
+        #
+        # A node that has joined but has no agent running is invisible and
+        # inert: it shows offline on the coordinator's Machines list, and
+        # pressing Start does nothing to it, with nothing anywhere saying
+        # why. Observed exactly once, which was enough -- a laptop sat
+        # "offline, 7h ago" because joining and running were two steps and
+        # only the first had happened.
+        agent = _start_node_agent()
         return {"ok": True, "coordinator": got.get("BITPORT_COORDINATOR", coordinator),
                 "accountId": int(account) if account.isdigit() else None,
-                "nodeId": socket.gethostname(), "envPath": path}
+                "nodeId": socket.gethostname(), "envPath": path,
+                "agentStarted": agent["started"], "agentDetail": agent["detail"]}
     return await _off_loop(_join)
 
 
