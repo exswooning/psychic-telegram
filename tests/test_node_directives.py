@@ -385,3 +385,97 @@ class TestNodesReportWhatTheyAre:
         for name in ("cpu_cores", "ram_gb", "disk_gb", "platform"):
             assert name in fields, name
             assert not fields[name].is_required(), name
+
+
+class TestItDoesNotCrashloop:
+    """Observed live on a Windows node: fifteen processes in five minutes.
+
+      12:32:47  started pid 10540 ... main.py --account-id 68 migrate
+      12:33:08  started pid 12412 ... main.py --account-id 68 migrate
+      12:33:29  started pid 8704  ... main.py --account-id 68 migrate
+
+    The child died in under a second every time -- that node has no keys
+    copied to it yet -- and tick() read "not running" as "start it" with no
+    memory that the last one had just failed. Nothing throttled it and
+    nothing said why, so the only visible symptom was a list of pids.
+    """
+
+    def _agent(self, tmp, code=2, ran=0.0):
+        import time as _t
+
+        class P:
+            returncode = code
+
+            def poll(self):
+                return code
+        a = node_agent.Agent("http://x", "t", "n", 68, workdir=str(tmp))
+        a.proc, a.started_at = P(), _t.time() - ran
+        return a
+
+    def test_a_failed_child_is_not_relaunched_immediately(self, tmp_path):
+        a = self._agent(tmp_path)
+        a._reap()
+        assert a.fails == 1
+        assert a.next_try > 0
+
+    def test_each_failure_waits_longer(self, tmp_path):
+        waits = []
+        import time as _t
+        a = self._agent(tmp_path)
+        for _ in range(4):
+            a._reap()
+            waits.append(round(a.next_try - _t.time()))
+            a.proc = self._agent(tmp_path).proc
+        assert waits == sorted(waits) and waits[0] < waits[-1], waits
+
+    def test_the_wait_is_capped(self, tmp_path):
+        """An unbounded doubling stops retrying in any useful timeframe --
+        a tenant switched back on should be picked up the same day."""
+        import time as _t
+        a = self._agent(tmp_path)
+        a.fails = 40
+        a._reap()
+        assert a.next_try - _t.time() <= node_agent.Agent.BACKOFF_CAP_S + 1
+
+    def test_a_long_run_that_exits_is_not_a_failure(self, tmp_path):
+        """A child that worked for twenty minutes and finished has ended,
+        not failed to launch. Punishing it would delay the next real run."""
+        a = self._agent(tmp_path, code=1, ran=900)
+        a._reap()
+        assert a.fails == 0
+
+    def test_a_clean_exit_still_pauses(self, tmp_path):
+        """Otherwise a completed run relaunches on the next poll and
+        re-walks a finished tenant every twenty seconds."""
+        import time as _t
+        a = self._agent(tmp_path, code=0, ran=900)
+        a._reap()
+        assert a.fails == 0
+        assert a.next_try > _t.time()
+
+    def test_stop_clears_the_penalty(self, tmp_path):
+        """The operator has intervened. Making them wait out a backoff from
+        before they did is the wrong behaviour on the one control they
+        have."""
+        a = node_agent.Agent("http://x", "t", "n", 68, workdir=str(tmp_path))
+        a.fails, a.next_try = 5, 9e9
+        a.directive = lambda: {"run": False}
+        a.tick()
+        assert a.fails == 0 and a.next_try == 0.0
+
+    def test_the_state_line_says_why_it_is_waiting(self, tmp_path):
+        a = node_agent.Agent("http://x", "t", "n", 68, workdir=str(tmp_path))
+        a.fails, a.next_try, a.last_exit = 2, 9e9, 2
+        a.directive = lambda: {"run": True, "services": ""}
+        state = a.tick()
+        assert "holding off" in state
+        assert "last exit 2" in state
+
+    def test_it_prints_the_childs_own_last_words(self, tmp_path):
+        """A backoff with no cause moves the mystery rather than solving
+        it. The child's stderr is the diagnosis, and it is otherwise in a
+        file nobody has been told about."""
+        src = _code(node_agent.Agent._reap)
+        assert "_print_log_tail" in src
+        tail = _code(node_agent.Agent._print_log_tail)
+        assert "node_agent_run.log" in tail

@@ -69,6 +69,14 @@ class Agent:
         self.proc: subprocess.Popen | None = None
         self.services = ""
         self._specs: dict | None = None
+        # Crashloop state. Without it a child that dies instantly is
+        # restarted every poll forever: observed live, 15 processes in five
+        # minutes, because tick() read "not running" as "start it" with no
+        # memory that the last one had just failed.
+        self.fails = 0
+        self.last_exit: int | None = None
+        self.next_try = 0.0
+        self.started_at = 0.0
 
     # -- the two things it does ------------------------------------------
     def directive(self) -> dict:
@@ -159,6 +167,7 @@ class Agent:
             argv += ["--services", services]
         log = os.path.join(self.workdir, "node_agent_run.log")
         self.services = services
+        self.started_at = time.time()
         # start_new_session so a restart of this agent does not take the
         # migration with it. POSIX only; on Windows it is ignored, and a
         # migration there does not survive the agent, which is worth knowing
@@ -183,7 +192,60 @@ class Agent:
         except Exception:      # noqa: BLE001 - already gone is fine
             pass
 
+    # A child that ran this long before exiting was doing real work, so its
+    # exit is an ending rather than a failure to launch.
+    HEALTHY_RUN_S = 120
+    BACKOFF_CAP_S = 600
+
+    def _reap(self) -> None:
+        """Notice a child that has exited, and remember how it went.
+
+        The whole point of the crashloop guard: a migration that cannot
+        start -- no keys copied to this node yet, a tenant whose services
+        are switched off, a bad account id -- exits in under a second, and
+        relaunching it on a 20 second timer produces nothing but processes
+        and log volume.
+        """
+        if self.proc is None or self.proc.poll() is None:
+            return
+        code = self.proc.returncode
+        ran = time.time() - (self.started_at or time.time())
+        self.proc = None
+        self.last_exit = code
+        if code == 0 or ran >= self.HEALTHY_RUN_S:
+            # Finished, or ran long enough to have done something. Either
+            # way this is not a launch failure, so do not punish the next
+            # attempt -- but still pause, or a completed run restarts
+            # immediately and re-walks a finished tenant every 20 seconds.
+            self.fails = 0
+            self.next_try = time.time() + self.HEALTHY_RUN_S
+            return
+        self.fails += 1
+        wait = min(POLL_S * (2 ** self.fails), self.BACKOFF_CAP_S)
+        self.next_try = time.time() + wait
+        print(f"  child exited {code} after {ran:.0f}s "
+              f"(failure {self.fails}) -- next attempt in {wait:.0f}s",
+              flush=True)
+        self._print_log_tail()
+
+    def _print_log_tail(self, lines: int = 8) -> None:
+        """Why it died, where the operator is already looking.
+
+        A backoff message with no cause just moves the mystery: the child's
+        own last words are the diagnosis, and they are otherwise buried in a
+        file nobody has been told about yet.
+        """
+        try:
+            path = os.path.join(self.workdir, "node_agent_run.log")
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                tail = fh.readlines()[-lines:]
+            for line in tail:
+                print(f"    | {line.rstrip()}", flush=True)
+        except Exception:      # noqa: BLE001 - the backoff still holds
+            pass
+
     def tick(self) -> str:
+        self._reap()
         running = self.proc is not None and self.proc.poll() is None
         try:
             d = self.directive()
@@ -196,11 +258,20 @@ class Agent:
         # once (a bad path, a full disk, a permission) would otherwise end
         # the machine's participation permanently rather than for one cycle.
         if want and not running:
+            wait = self.next_try - time.time()
+            if wait > 0:
+                return (f"holding off {wait:.0f}s after {self.fails} failed "
+                        f"start(s), last exit {self.last_exit}")
             try:
                 self.start(str(d.get("services") or ""))
                 return "started"
             except Exception as exc:      # noqa: BLE001
                 return f"could not start ({str(exc)[:70]})"
+        if not want:
+            # Stop clears the backoff. The operator has intervened, and
+            # making them wait out a penalty from before they did is the
+            # wrong behaviour on the one control they have.
+            self.fails, self.next_try = 0, 0.0
         if not want and running:
             try:
                 self.stop()
