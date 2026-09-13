@@ -149,8 +149,53 @@ class TestWhatItDestroys:
             assert all(line.startswith("WOULD REMOVE") for line in out)
             assert os.path.exists(probe)
 
-    def test_services_are_stopped_after_the_files_go(self):
-        """Stopping first would leave the box quiet while the files were
-        still there."""
+    def test_services_stop_first_now_that_the_code_is_a_target(self):
+        """This asserted the opposite, and the opposite was right until the
+        code directory became a target: stopping last left the box quiet
+        while the files were still there, which mattered when the files
+        were all that went.
+
+        Now HERE is removed too, so a service still running would be
+        writing into a tree being deleted, and a systemd restart could
+        bring one back up mid-wipe. Disabling happens afterwards, once
+        there is nothing left for a unit to start.
+        """
         src = _code(deadman.wipe)
-        assert src.index("shutil.rmtree") < src.index("systemctl")
+        assert src.index("stopped the services") < src.index("for path in targets")
+        assert src.index("for path in targets") < src.index("disable")
+
+
+class TestTheCodeGoesToo:
+    def test_the_code_directory_is_a_target(self):
+        src = _code(deadman.targets)
+        assert 'include_code' in src
+        assert "out.append(HERE)" in src
+
+    def test_it_is_removed_last(self):
+        """HERE contains this script, its venv and everything else, so
+        removing it ends the process doing the removing. The credentials
+        must already be gone by then -- a failure partway through should
+        have taken the material that matters, not the code that reads it."""
+        paths = deadman.targets({"include_backups": True, "include_code": True})
+        assert paths[-1] == deadman.HERE
+
+    def test_services_stop_before_anything_is_deleted(self):
+        """Nothing should be writing to what is about to be removed, and no
+        restart should bring a service back up mid-wipe."""
+        src = _code(deadman.wipe)
+        assert src.index("stopped the services") < src.index("for path in targets")
+
+    def test_the_operating_system_is_still_not_touched(self):
+        src = _code(deadman.targets)
+        for dangerous in ('"/"', '"/etc"', '"/usr"', '"/var"', '"/bin"', '"/home"'):
+            assert dangerous not in src, dangerous
+
+    def test_it_does_not_claim_a_forensic_wipe(self):
+        """Overwriting does not reliably destroy data on an SSD -- wear
+        levelling means the blocks written are usually not the blocks that
+        held the old copy, and a snapshot defeats it outright. Saying so is
+        the difference between a tool and a promise it cannot keep."""
+        doc = inspect.getsource(deadman.targets)
+        assert "wear levelling" in doc
+        assert "not a forensic wipe" in doc
+        assert "provider" in doc

@@ -453,8 +453,11 @@ const Wizard: React.FC = () => {
                   Set it up and decide later
                 </Typography>
                 <Typography variant="body2" color="text.secondary">
-                  Creates the credentials, then counts what is in the tenant.
-                  Pick seed or migrate afterwards.
+                  Builds the Cloud project, the service account and the
+                  delegation grant, then counts what is in the tenant.
+                  {' '}<strong>Grants what BOTH need</strong>, so the tenant
+                  can seed or migrate immediately — choosing later narrows
+                  it rather than setting anything up again.
                 </Typography>
               </Box>
             } />
@@ -511,22 +514,81 @@ const Wizard: React.FC = () => {
           </Box>
         )}
 
-        {setup && !setup.running && setup.result && (
-          <Alert severity={setup.result.ok ? 'success' : 'warning'}
-                 sx={{ mt: 3 }} data-testid="setup-done"
-                 action={
-                   <Button size="small" onClick={() => {
-                     setPurpose(picked || null)
-                     setStep(picked === 'migrate' ? 'counterpart' : 'run')
-                   }}>
-                     Continue
-                   </Button>
-                 }>
-            {setup.result.ok
-              ? `${domain} is set up.`
-              : 'Setup finished with something unresolved — the detail is on the next step.'}
-          </Alert>
-        )}
+        {setup && !setup.running && setup.result && (() => {
+          // How much of it worked, and which step stopped.
+          //
+          // This said "Setup finished with something unresolved -- the
+          // detail is on the next step", which tells the reader nothing and
+          // sends them somewhere else to find out. The result has carried
+          // per-phase status and detail all along; it was simply thrown
+          // away. Someone who has just watched a browser drive two consoles
+          // for several minutes deserves to know whether it got as far as
+          // the delegation grant.
+          const phases = setup.result.phases || []
+          const done = phases.filter((p) => /ok|done|success/i.test(p.status))
+          const failed = phases.filter((p) => !/ok|done|success|skip/i.test(p.status))
+          const ok = setup.result.ok
+          return (
+            <Alert severity={ok ? 'success' : 'warning'}
+                   sx={{ mt: 3 }} data-testid="setup-done"
+                   action={
+                     <Button size="small" onClick={() => {
+                       setPurpose(picked || null)
+                       // 'later' means no purpose has been chosen, so
+                       // pushing it into seed or migrate would be choosing
+                       // one on the operator's behalf -- which is what the
+                       // option exists to avoid. It lands on the run step's
+                       // own decide-later view instead.
+                       setStep(picked === 'migrate' ? 'counterpart' : 'run')
+                     }}>
+                       Continue
+                     </Button>
+                   }>
+              <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                {ok ? `${domain} is set up.`
+                    : `${domain}: ${done.length} of ${phases.length} steps finished.`}
+              </Typography>
+              {ok && picked === 'later' && (
+                <Typography variant="body2" sx={{ mt: 0.5 }}
+                            data-testid="setup-both-ready">
+                  The project, service account and delegation are in place
+                  with the scopes for <strong>both</strong> seeding and
+                  migrating. Nothing else needs setting up for either —
+                  picking one later only narrows the grant.
+                </Typography>
+              )}
+              {!ok && failed.length > 0 && (
+                <Typography variant="body2" sx={{ mt: 0.5 }}
+                            data-testid="setup-failure-detail">
+                  Stopped at <strong>{failed[0].name}</strong>
+                  {failed[0].detail ? ` — ${failed[0].detail}` : ''}
+                </Typography>
+              )}
+              {phases.length > 0 && (
+                <Box component="ul" data-testid="setup-phases"
+                     sx={{ m: 0, mt: 1, pl: 2.5, fontSize: 13 }}>
+                  {phases.map((p) => (
+                    <li key={p.name}>
+                      {/ok|done|success/i.test(p.status) ? '✓' :
+                        /skip/i.test(p.status) ? '–' : '✗'}{' '}
+                      {p.name}
+                      {p.detail && !/ok|done|success/i.test(p.status)
+                        ? ` — ${p.detail}` : ''}
+                    </li>
+                  ))}
+                </Box>
+              )}
+              {!ok && setup.result.missingScopes?.length ? (
+                <Typography variant="body2" sx={{ mt: 1 }}
+                            data-testid="setup-missing-scopes">
+                  {setup.result.missingScopes.length} scope(s) not granted yet —
+                  the credentials exist, so re-running finishes from here
+                  rather than starting over.
+                </Typography>
+              ) : null}
+            </Alert>
+          )
+        })()}
       </WizardShell>
     )
   }

@@ -242,12 +242,27 @@ def armed() -> tuple[bool, str]:
 # The destructive part
 # ---------------------------------------------------------------------------
 def targets(cfg: dict) -> list[str]:
-    """What gets destroyed. Credentials and tenant data -- not the OS.
+    """What gets destroyed, secrets first and the code last.
 
-    Wiping the operating system leaves an unusable box and protects nothing
-    extra: the secret material is these paths, and a machine that still
-    boots can be inspected afterwards to confirm the switch did what it
-    said.
+    Order matters and is not cosmetic. The code directory contains this
+    script, its venv and everything else, so removing it ends the process
+    doing the removing. Credentials go first so that a failure partway
+    through has already taken the material that matters; the code is the
+    last thing standing.
+
+    Not the operating system. A box that still boots can be inspected
+    afterwards to confirm the switch did what it said, and wiping the OS
+    protects nothing extra -- the secret material is these paths.
+
+    On "unrecoverable", plainly: rm is what this can do. Overwriting does
+    not reliably destroy data on an SSD, because wear levelling means the
+    blocks just written are usually not the blocks that held the old copy,
+    and a copy-on-write filesystem or a hypervisor snapshot defeats it
+    outright. This makes the data gone from the running system and from
+    anyone with ordinary access. It is not a forensic wipe and this file
+    will not pretend otherwise. If the provider's disk images matter,
+    destroy the VPS from the provider's console -- which is the only thing
+    that actually reaches them.
     """
     out = [os.path.join(HERE, "keys"), "/etc/bitport",
            os.path.join(HERE, "data"), os.path.join(HERE, "migration.db"),
@@ -255,11 +270,21 @@ def targets(cfg: dict) -> list[str]:
            os.path.join(HERE, "identities.csv")]
     if cfg.get("include_backups", True):
         out.append(os.path.join(HERE, "backups"))
+    if cfg.get("include_code", True):
+        # LAST. Everything above must already be gone, because removing
+        # this removes the interpreter's own working tree.
+        out.append(HERE)
     return [p for p in out if os.path.exists(p)]
 
 
 def wipe(cfg: dict, dry: bool = True) -> list[str]:
     done = []
+    if not dry:
+        # First, so nothing is writing to what is about to be removed and
+        # no restart brings a service back up mid-wipe.
+        subprocess.run(["systemctl", "stop", "bitport-api", "bitport-webui",
+                        "bitport-fleet"], capture_output=True, timeout=60)
+        done.append("stopped the services")
     for path in targets(cfg):
         if dry:
             done.append(f"WOULD REMOVE {path}")
@@ -273,11 +298,17 @@ def wipe(cfg: dict, dry: bool = True) -> list[str]:
         except OSError as exc:
             done.append(f"FAILED {path}: {exc}")
     if not dry:
-        # Stop the services last: doing it first would leave the box quiet
-        # while the files were still there.
-        subprocess.run(["systemctl", "stop", "bitport-api", "bitport-webui"],
+        # Services BEFORE the code directory, which is why this runs inside
+        # the loop's shadow rather than after it: by the time HERE is
+        # removed the units' ExecStart no longer exists, and systemctl stop
+        # on a unit whose binary is gone leaves a failed unit rather than a
+        # clean one.
+        subprocess.run(["systemctl", "stop", "bitport-api", "bitport-webui",
+                        "bitport-fleet"], capture_output=True, timeout=60)
+        subprocess.run(["systemctl", "disable", "bitport-api", "bitport-webui",
+                        "bitport-fleet", "bitport-backup.timer"],
                        capture_output=True, timeout=60)
-        done.append("stopped bitport-api, bitport-webui")
+        done.append("stopped and disabled the services")
     return done
 
 
