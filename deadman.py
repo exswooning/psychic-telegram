@@ -563,9 +563,27 @@ def wipe(cfg: dict, dry: bool = True) -> list[str]:
     if not dry:
         # First, so nothing is writing to what is about to be removed and
         # no restart brings a service back up mid-wipe.
-        subprocess.run(["systemctl", "stop", "bitport-api", "bitport-webui",
-                        "bitport-fleet"], capture_output=True, timeout=60)
-        done.append("stopped the services")
+        #
+        # Wrapped, because an unhandled FileNotFoundError here -- no
+        # systemctl, a stripped container -- would abort the wipe BEFORE a
+        # single credential was removed, which is the one failure this
+        # function must not have.
+        try:
+            subprocess.run(["systemctl", "stop", "bitport-api",
+                            "bitport-webui", "bitport-fleet"],
+                           capture_output=True, timeout=60)
+            done.append("stopped the services")
+        except Exception as exc:      # noqa: BLE001
+            done.append(f"could not stop the services ({exc}) -- continuing")
+        # The cron runs this with the install directory as the working
+        # directory, and HERE is about to be removed. Stepping out first
+        # keeps every later subprocess -- the crontab edit, the Caddyfile
+        # restore, the journal vacuum -- spawning from a directory that
+        # still exists.
+        try:
+            os.chdir("/")
+        except OSError:
+            pass
     for path in targets(cfg):
         if dry:
             done.append(f"WOULD REMOVE {path}")

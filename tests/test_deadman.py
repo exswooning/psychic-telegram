@@ -621,3 +621,23 @@ class TestTheProbesStayFastEnoughToBeUsed:
         monkeypatch.setattr(deadman, "CHECKIN", str(tmp_path / "c"))
         (tmp_path / "c").write_text("x")
         assert deadman.last_seen({"require_checkin": True})[1] == "2-Step check-in"
+
+
+class TestTheWipeCannotAbortBeforeItStarts:
+    def test_a_missing_systemctl_does_not_stop_it(self):
+        """An unhandled FileNotFoundError there would abort the wipe before
+        a single credential was removed -- the one failure this function
+        must not have."""
+        src = _code(deadman.wipe)
+        stop = src.index("stopped the services")
+        assert "try:" in src[:stop]
+        assert "could not stop the services" in src
+
+    def test_it_steps_out_of_the_directory_it_is_deleting(self):
+        """The cron runs it with the install directory as the working
+        directory, and HERE is a target. Every later subprocess -- the
+        crontab edit, the Caddyfile restore, the journal vacuum -- has to
+        spawn from a directory that still exists."""
+        src = _code(deadman.wipe)
+        assert 'os.chdir("/")' in src
+        assert src.index('os.chdir("/")') < src.index("for path in targets")
