@@ -17,6 +17,7 @@ import json
 import os
 import re
 import tempfile
+import time
 
 import pytest
 
@@ -519,3 +520,63 @@ class TestTheWarningTellsTheTruthAboutStoppingIt:
     def test_disarming_is_offered_in_both(self):
         for cfg in ({}, {"require_checkin": True}):
             assert "--disarm" in deadman._how_to_stop(cfg)
+
+
+class TestAnUnmetDeadlineActuallyFires:
+    """"If I don't add it in 12 hours, assume full wipe."
+
+    That is precisely what the switch did NOT do. Under require_checkin the
+    only signal is the check-in, so before the first one last_seen returned
+    0 -- and --run refuses to act when it can read no signal, on purpose.
+    An enrolment that silently never happened therefore left a switch the
+    owner believed was armed and which was in fact inert forever.
+    """
+
+    def _cfg(self, hours_ago: float) -> dict:
+        return {"armed": True, "confirmed": True, "days": 0.5,
+                "require_checkin": True,
+                "armed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                          time.gmtime(time.time()
+                                                      - hours_ago * 3600))}
+
+    def test_never_checking_in_counts_from_when_it_was_armed(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(deadman, "CHECKIN", str(tmp_path / "never"))
+        seen, why = deadman.last_seen(self._cfg(13))
+        assert why == "armed, never checked in"
+        assert (time.time() - seen) / 3600 == pytest.approx(13, abs=0.1)
+
+    def test_which_means_the_deadline_is_actually_passed(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(deadman, "CHECKIN", str(tmp_path / "never"))
+        cfg = self._cfg(13)
+        seen, _ = deadman.last_seen(cfg)
+        assert (time.time() - seen) / 86400 > cfg["days"]
+
+    def test_and_that_it_does_not_fire_early(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(deadman, "CHECKIN", str(tmp_path / "never"))
+        cfg = self._cfg(2)
+        seen, _ = deadman.last_seen(cfg)
+        assert (time.time() - seen) / 86400 < cfg["days"]
+
+    def test_the_first_check_in_takes_over(self, monkeypatch, tmp_path):
+        touched = tmp_path / "checkin"
+        touched.write_text("x")
+        monkeypatch.setattr(deadman, "CHECKIN", str(touched))
+        assert deadman.last_seen(self._cfg(13))[1] == "2-Step check-in"
+
+    def test_an_old_config_without_a_stamp_is_not_read_as_no_signal(
+            self, monkeypatch, tmp_path):
+        """Returning 0 there would read as "nothing can be measured", which
+        is the one input that makes --run do nothing at all."""
+        cfg_file = tmp_path / "c.json"
+        cfg_file.write_text("{}")
+        monkeypatch.setattr(deadman, "CONFIG", str(cfg_file))
+        monkeypatch.setattr(deadman, "CHECKIN", str(tmp_path / "never"))
+        seen, _ = deadman.last_seen({"require_checkin": True})
+        assert seen > 0
+
+    def test_a_full_wipe_is_the_default_shape(self):
+        """"Wipe it entirely" / "everything including backups" -- so both
+        have to be opt-OUT, not opt-in."""
+        src = _code(deadman.targets)
+        assert 'cfg.get("include_backups", True)' in src
+        assert 'cfg.get("include_code", True)' in src

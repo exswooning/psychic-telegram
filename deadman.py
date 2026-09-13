@@ -26,6 +26,7 @@ disarmable from anywhere that can reach the box.
 from __future__ import annotations
 
 import argparse
+import calendar
 import glob
 import json
 import os
@@ -269,6 +270,20 @@ def signals() -> dict[str, float]:
     }
 
 
+def _armed_at(cfg: dict) -> float:
+    """When the switch was armed, as epoch seconds.
+
+    Falls back to the config file's own mtime: a config written by an older
+    version has no armed_at, and returning 0 there would read as "no signal
+    at all" and quietly render the switch inert.
+    """
+    stamp = cfg.get("armed_at") or ""
+    try:
+        return calendar.timegm(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ"))
+    except (ValueError, TypeError):
+        return _mtime(CONFIG)
+
+
 def last_seen(cfg: dict | None = None) -> tuple[float, str]:
     """When somebody was last here, and how we know.
 
@@ -279,8 +294,19 @@ def last_seen(cfg: dict | None = None) -> tuple[float, str]:
     12-hour proof-of-life into "has anything happened lately".
     """
     sig = signals()
-    if (cfg or {}).get("require_checkin"):
-        return sig["2-Step check-in"], "2-Step check-in"
+    cfg = cfg or {}
+    if cfg.get("require_checkin"):
+        seen = sig["2-Step check-in"]
+        if not seen:
+            # Never checked in. Count from the moment it was ARMED, because
+            # the alternative is that the switch never fires at all: --run
+            # refuses to act when it can read no signal, so an enrolment
+            # that silently never happened would leave a switch the owner
+            # believes is armed and which is in fact inert. Arming IS the
+            # start of the clock, and that is also the only reading that
+            # makes "wipe if I never check in" mean what it says.
+            return _armed_at(cfg), "armed, never checked in"
+        return seen, "2-Step check-in"
     name = max(sig, key=lambda k: sig[k])
     return sig[name], name
 
