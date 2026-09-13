@@ -157,3 +157,41 @@ describe('the account chooser', () => {
     expect(label?.className).toMatch(/MuiInputLabel-shrink/)
   })
 })
+
+
+describe('a page that passes no account', () => {
+  /* The Authenticator page renders this with no email prop. refresh()
+     returned early on an empty target, so the API was never called -- and
+     the account list arrives IN that response, so the page could not
+     discover the seeds it already held. It showed "nothing is stored" no
+     matter what was stored. */
+
+  it('still asks the server what seeds exist', async () => {
+    render(<AuthenticatorCode />)
+    await waitFor(() => expect(code).toHaveBeenCalledWith(''))
+  })
+
+  it('lists them instead of showing an empty page', async () => {
+    code.mockResolvedValue(ok({ accounts: ['deadman@bitport', 'admin@src.test'],
+                                email: '', code: '' }))
+    render(<AuthenticatorCode />)
+    expect(await screen.findByTestId('mfa-account')).toBeInTheDocument()
+  })
+
+  it('picks the only one when there is only one', async () => {
+    /* Otherwise it is a dropdown reading "select an account…" above a code
+       that will not appear until they act on it. */
+    code.mockResolvedValueOnce(ok({ accounts: ['deadman@bitport'],
+                                    email: '', code: '' }))
+    render(<AuthenticatorCode />)
+    await waitFor(() => expect(code).toHaveBeenCalledWith('deadman@bitport'))
+  })
+
+  it('does not guess when there are several', async () => {
+    code.mockResolvedValue(ok({ accounts: ['a@x.test', 'b@x.test'],
+                                email: '', code: '' }))
+    render(<AuthenticatorCode />)
+    await screen.findByTestId('mfa-account')
+    expect(code).not.toHaveBeenCalledWith('a@x.test')
+  })
+})

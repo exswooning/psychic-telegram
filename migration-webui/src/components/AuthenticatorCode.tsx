@@ -37,9 +37,21 @@ export const AuthenticatorCode: React.FC<{
   const [left, setLeft] = useState(0)
 
   const refresh = useCallback((target: string) => {
-    if (!target) return
+    // Asked for even with no account chosen. It used to return early here,
+    // so a page that renders this without an email prop never called the
+    // API at all -- and since the account list arrives IN that response,
+    // the page could not discover the seeds it already held. It rendered as
+    // "nothing is stored" no matter what was stored. The endpoint's own
+    // empty-email branch, which exists to return exactly that list, was
+    // unreachable.
     fetchMfaCode(target)
-      .then((r) => { setSt(r); setLeft(r.secondsRemaining); setErr(r.error || '') })
+      .then((r) => {
+        setSt(r); setLeft(r.secondsRemaining); setErr(r.error || '')
+        // One seed and nothing to choose between: choosing it for them
+        // beats a dropdown reading "select an account…" above a code that
+        // will not appear until they do.
+        if (!target && r.accounts?.length === 1) setWho(r.accounts[0])
+      })
       .catch((e) => setErr(e instanceof Error ? e.message : String(e)))
   }, [])
 
