@@ -1,0 +1,171 @@
+"""One-time passwords, so the browser can answer its own 2-Step prompt.
+
+The setup wizard drives a real browser through Google's sign-in, and a
+2-Step prompt stops it dead -- install_node's own note says "watch out for
+a 2-Step prompt on your phone: the sign-in cannot answer it". Every
+unattended setup ended by waiting for a human holding a phone.
+
+An authenticator secret is the one second factor a program can present.
+Implemented on the standard library because requirements.txt is
+deliberately stdlib-plus-google-client -- a worker node installs exactly
+that, and a one-time password is thirty lines rather than a dependency.
+"""
+from __future__ import annotations
+
+import base64
+import inspect
+import re
+
+import pytest
+
+import totp
+
+# RFC 6238 Appendix B. The shared secret is the ASCII string
+# "12345678901234567890"; these are the published expected values.
+RFC_SECRET = base64.b32encode(b"12345678901234567890").decode()
+RFC_VECTORS = [
+    (59, "287082"), (1111111109, "081804"), (1111111111, "050471"),
+    (1234567890, "005924"), (2000000000, "279037"), (20000000000, "353130"),
+]
+
+
+class TestItAgreesWithTheSpecification:
+    @pytest.mark.parametrize("when,expected", RFC_VECTORS)
+    def test_rfc_6238_vectors(self, when, expected):
+        """Checked against the RFC's own published values rather than
+        against itself. A hand-rolled HMAC that is confidently wrong looks
+        exactly like one that is right until a real sign-in rejects it."""
+        assert totp.code_at(RFC_SECRET, when=when) == expected
+
+    def test_the_code_changes_with_the_window(self):
+        a = totp.code_at(RFC_SECRET, when=1111111109)
+        b = totp.code_at(RFC_SECRET, when=1111111109 + totp.PERIOD)
+        assert a != b
+
+    def test_it_is_stable_within_a_window(self):
+        # Anchored to a window BOUNDARY. 1000 and 1029 look like the same
+        # 30 seconds and are not: 1000//30 is 33 and 1029//30 is 34, so the
+        # first version of this asserted that two different windows produce
+        # the same code, and was right to fail.
+        base = 1000 - (1000 % totp.PERIOD)
+        assert (totp.code_at(RFC_SECRET, when=base)
+                == totp.code_at(RFC_SECRET, when=base + totp.PERIOD - 1))
+
+    def test_it_is_always_six_digits(self):
+        """Including when the value has leading zeros -- 005924 is in the
+        vectors above precisely because that case is easy to get wrong."""
+        for when, _ in RFC_VECTORS:
+            code = totp.code_at(RFC_SECRET, when=when)
+            assert len(code) == 6 and code.isdigit()
+
+
+class TestItAcceptsWhatPeopleActuallyPaste:
+    def test_googles_spaced_lowercase_form(self):
+        """The 2-Step page prints the seed in lowercase groups of four.
+        Rejecting it would send somebody to reformat a secret by hand, which
+        is how a character gets dropped."""
+        assert totp.normalise("abcd efgh ijkl mnop") == "ABCDEFGHIJKLMNOP"
+
+    def test_an_otpauth_uri(self):
+        assert totp.normalise(
+            "otpauth://totp/X:a@b.com?secret=JBSWY3DPEHPK3PXP&issuer=X"
+        ) == "JBSWY3DPEHPK3PXP"
+
+    def test_it_pads_for_base32(self):
+        """Google omits the padding; base32 needs a multiple of eight."""
+        out = totp.normalise("JBSWY3DPEHPK3PX")
+        assert len(out) % 8 == 0
+
+    def test_both_forms_give_the_same_code(self):
+        plain = totp.code_at("JBSWY3DPEHPK3PXP", when=59)
+        spaced = totp.code_at("jbsw y3dp ehpk 3pxp", when=59)
+        assert plain == spaced
+
+
+class TestTheSecretsFile:
+    def test_it_lives_outside_the_database(self, tmp_path):
+        """migration.db is copied to worker nodes and taken in backups. A
+        node gets a code by ASKING the coordinator, never by holding a seed."""
+        assert totp.SECRETS_FILE.startswith("/etc/bitport")
+        # Docstring stripped: it EXPLAINS why the database is the wrong
+        # place, so an "is it absent" check against the raw text finds the
+        # explanation and fails -- a test bug that pushes someone to delete
+        # the reasoning.
+        src = inspect.getsource(totp.load_secrets)
+        src = re.sub(r'""".*?"""', "", src, flags=re.S)
+        assert "migration.db" not in src and "cpdb" not in src
+
+    def test_saving_leaves_it_owner_only(self, tmp_path):
+        p = tmp_path / "totp.env"
+        totp.save_secret("a@b.test", "JBSWY3DPEHPK3PXP", path=str(p))
+        assert oct(p.stat().st_mode)[-3:] == "600"
+
+    def test_a_bad_secret_is_rejected_before_it_is_stored(self, tmp_path):
+        """Otherwise it is discovered at a sign-in, minutes into a run that
+        is now blocked on the thing it was meant to unblock."""
+        p = tmp_path / "totp.env"
+        with pytest.raises(Exception):
+            totp.save_secret("a@b.test", "not base32 at all !!", path=str(p))
+        assert not p.exists()
+
+    def test_a_second_account_does_not_replace_the_first(self, tmp_path):
+        p = tmp_path / "totp.env"
+        totp.save_secret("a@b.test", "JBSWY3DPEHPK3PXP", path=str(p))
+        totp.save_secret("c@d.test", RFC_SECRET, path=str(p))
+        got = totp.load_secrets(str(p))
+        assert set(got) == {"a@b.test", "c@d.test"}
+
+    def test_replacing_one_keeps_it_single(self, tmp_path):
+        p = tmp_path / "totp.env"
+        totp.save_secret("a@b.test", "JBSWY3DPEHPK3PXP", path=str(p))
+        totp.save_secret("a@b.test", RFC_SECRET, path=str(p))
+        assert len(totp.load_secrets(str(p))) == 1
+
+    def test_an_unknown_account_returns_nothing_rather_than_a_wrong_code(self, tmp_path):
+        assert totp.code_for("nobody@x.test", path=str(tmp_path / "none")) is None
+
+    def test_the_file_says_what_it_costs(self, tmp_path):
+        """Read by whoever finds it later. A seed beside the password is one
+        factor, not two."""
+        p = tmp_path / "totp.env"
+        totp.save_secret("a@b.test", "JBSWY3DPEHPK3PXP", path=str(p))
+        assert "ONE factor, not two" in p.read_text()
+
+
+class TestTheEndpointsGuardIt:
+    def test_reading_a_code_is_superadmin_only(self):
+        """It is the second factor for an account that can administer a
+        Google tenant. Handing it to any signed-in caller would make the
+        session cookie sufficient for both factors."""
+        import api_server
+        src = inspect.getsource(api_server.mfa_code)
+        assert "require_superadmin(op)" in src
+
+    def test_storing_a_seed_is_superadmin_only(self):
+        import api_server
+        src = inspect.getsource(api_server.mfa_store_secret)
+        assert "require_superadmin(op)" in src
+
+    def test_the_audit_row_does_not_contain_the_secret(self):
+        """The point of the record is that somebody added a second factor to
+        the machine, not what it was."""
+        import api_server
+        src = inspect.getsource(api_server.mfa_store_secret)
+        i = src.index("begin_action")
+        assert "req.secret" not in src[i:]
+
+    def test_the_time_left_is_returned_with_the_code(self):
+        """A code with two seconds on it is rejected by the time it is
+        typed."""
+        import api_server
+        src = inspect.getsource(api_server.mfa_code)
+        assert "secondsRemaining" in src
+
+
+class TestNoNewDependency:
+    def test_it_is_standard_library_only(self):
+        src = inspect.getsource(totp)
+        for lib in ("pyotp", "oathtool", "cryptography", "passlib"):
+            assert lib not in src, lib
+        assert re.search(r"^import hmac$", src, re.M)
+        assert re.search(r"^import hashlib$", src, re.M)

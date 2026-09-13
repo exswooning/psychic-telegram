@@ -22,6 +22,13 @@ vi.mock('@/api/controlPlane', () => ({
   fetchMe: () => seedEnabled(),
   startFullSetup: (...a: unknown[]) => fullSetup(...a),
   fetchFullSetupStatus: (...a: unknown[]) => setupStatus(...a),
+  // AuthenticatorCode renders beside the 2-Step banner. Every export a
+  // CHILD reaches for has to be here: an unmocked one throws inside render
+  // and takes the parent's assertions with it -- which is how this file
+  // started failing to find the banner itself.
+  fetchMfaCode: () => Promise.resolve({
+    accounts: [], email: '', code: '', secondsRemaining: 0 }),
+  storeMfaSecret: () => Promise.resolve({ ok: true }),
 }))
 vi.mock('@/pages/SeedWizard', () => ({
   default: ({ sourceDomain }: { sourceDomain?: string }) =>

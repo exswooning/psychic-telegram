@@ -4681,6 +4681,72 @@ async def deadman_status(op: Operator = Depends(operator)):
     return await _off_loop(_read)
 
 
+class TotpSecret(BaseModel):
+    email: str
+    secret: str
+
+
+@app.get("/api/v2/mfa/code")
+async def mfa_code(email: str = "", op: Operator = Depends(operator)):
+    """The current authenticator code for an account we hold a seed for.
+
+    Superadmin-only. This is the second factor for an account that can
+    administer a Google tenant -- handing it to any signed-in caller would
+    make the session cookie sufficient for both factors.
+
+    Returns the seconds remaining as well as the code, because a code with
+    two seconds left will be rejected by the time it is typed, and a UI that
+    cannot say so invites exactly that.
+    """
+    require_login(op)
+    require_superadmin(op)
+
+    def _read() -> dict:
+        import totp
+        known = sorted(totp.load_secrets())
+        who = (email or "").strip().lower()
+        if not who:
+            return {"accounts": known, "code": "", "secondsRemaining": 0,
+                    "email": ""}
+        got = totp.code_for(who)
+        if not got:
+            return {"accounts": known, "code": "", "secondsRemaining": 0,
+                    "email": who, "error": f"no authenticator seed stored for {who}"}
+        code, left = got
+        return {"accounts": known, "email": who, "code": code,
+                "secondsRemaining": left, "period": totp.PERIOD}
+    return await _off_loop(_read)
+
+
+@app.post("/api/v2/mfa/secret")
+async def mfa_store_secret(req: TotpSecret, op: Operator = Depends(operator)):
+    """Store an account's authenticator seed.
+
+    Audited without the secret in it: the point of the record is that
+    somebody added a second factor to the machine, not what it was.
+    """
+    require_login(op)
+    require_superadmin(op)
+
+    def _write() -> dict:
+        import totp
+        try:
+            totp.save_secret(req.email, req.secret)
+        except Exception as exc:      # noqa: BLE001
+            raise HTTPException(400, f"that does not look like a valid "
+                                     f"authenticator secret: {str(exc)[:120]}") from exc
+        action = cpdb.begin_action(
+            actor=str(op.name or "") or "operator", actor_role="superadmin",
+            action="store an authenticator seed",
+            reason="enables unattended sign-in for this account",
+            target=req.email, params={}, account_id=None)
+        cpdb.finish_action(action, "ok", "")
+        code, left = totp.code_for(req.email)
+        return {"ok": True, "email": req.email, "code": code,
+                "secondsRemaining": left}
+    return await _off_loop(_write)
+
+
 @app.post("/api/v2/deadman/touch")
 async def deadman_touch(op: Operator = Depends(operator)):
     """I am here. Reset the countdown.

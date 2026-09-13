@@ -18,6 +18,7 @@ import {
 import { fetchMe, startFullSetup, fetchFullSetupStatus } from '@/api/controlPlane'
 import type { FullSetupStatus } from '@/api/controlPlane'
 import MfaBanner from '@/components/MfaBanner'
+import AuthenticatorCode from '@/components/AuthenticatorCode'
 import { repairConsoleSetup } from '@/api/client'
 import JobRunner from '@/components/JobRunner'
 import SeedWizard from '@/pages/SeedWizard'
@@ -492,6 +493,14 @@ const Wizard: React.FC = () => {
         {/* A 2-Step prompt is answered on a phone, so it has to be visible
             wherever the setup is being watched. */}
         <MfaBanner challenge={setup?.challenge} />
+        {/* And the code itself, right underneath it. The banner could only
+            ever say "go and find your phone", which is exactly what stopped
+            an unattended setup from being unattended. */}
+        {setup?.challenge ? (
+          <Box sx={{ mt: 2 }}>
+            <AuthenticatorCode email={adminEmail} />
+          </Box>
+        ) : null}
 
         {(autoBusy || setup?.running) && (
           <Box sx={{ mt: 3 }} data-testid="setup-progress">

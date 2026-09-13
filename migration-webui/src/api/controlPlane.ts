@@ -715,6 +715,22 @@ export const setNodeTakesWork = (nodeId: string, takesWork: boolean) =>
     body: JSON.stringify({ node_id: nodeId, takes_work: takesWork }),
   })
 
+export interface MfaCode {
+  accounts: string[]; email: string; code: string
+  secondsRemaining: number; period?: number; error?: string
+}
+
+/** The current authenticator code for an account whose seed we hold.
+ *  Superadmin-only: it is the second factor for an account that can
+ *  administer a Google tenant. */
+export const fetchMfaCode = (email: string) =>
+  cpFetch<MfaCode>(`/api/v2/mfa/code?email=${encodeURIComponent(email)}`)
+
+export const storeMfaSecret = (email: string, secret: string) =>
+  cpFetch<{ ok: boolean; email: string; code: string; secondsRemaining: number }>(
+    '/api/v2/mfa/secret',
+    { method: 'POST', body: JSON.stringify({ email, secret }) })
+
 export interface DeadmanStatus {
   armed: boolean
   state: string

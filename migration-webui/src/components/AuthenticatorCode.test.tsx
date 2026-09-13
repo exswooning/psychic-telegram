@@ -1,0 +1,114 @@
+/**
+ * The 2-Step code on the page, so nobody has to find a phone.
+ *
+ * The wizard drives a real browser through Google's sign-in and a 2-Step
+ * prompt stops it dead. Until now the UI could only DISPLAY the challenge
+ * and tell the operator to go and deal with it, which is the whole reason
+ * an unattended setup was not unattended.
+ */
+import React from 'react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import AuthenticatorCode from './AuthenticatorCode'
+
+const code = vi.fn()
+const store = vi.fn()
+vi.mock('@/api/controlPlane', () => ({
+  fetchMfaCode: (...a: unknown[]) => code(...a),
+  storeMfaSecret: (...a: unknown[]) => store(...a),
+}))
+
+const ok = (over = {}) => ({
+  accounts: ['admin@src.test'], email: 'admin@src.test',
+  code: '481920', secondsRemaining: 22, period: 30, ...over,
+})
+
+beforeEach(() => {
+  code.mockReset(); store.mockReset()
+  code.mockResolvedValue(ok())
+  store.mockResolvedValue({ ok: true, email: 'a@b.test', code: '000000',
+                            secondsRemaining: 30 })
+})
+
+describe('showing the code', () => {
+  it('shows it grouped, the way an authenticator app does', async () => {
+    render(<AuthenticatorCode email="admin@src.test" />)
+    expect(await screen.findByTestId('mfa-code')).toHaveTextContent('481 920')
+  })
+
+  it('shows how long is left as loudly as the digits', async () => {
+    /* A code with two seconds on it is rejected by the time it is typed,
+       and a UI showing only the digits invites exactly that. */
+    render(<AuthenticatorCode email="admin@src.test" />)
+    expect(await screen.findByTestId('mfa-seconds')).toHaveTextContent('22')
+  })
+
+  it('says to wait when the window is nearly closed', async () => {
+    code.mockResolvedValue(ok({ secondsRemaining: 3 }))
+    render(<AuthenticatorCode email="admin@src.test" />)
+    expect(await screen.findByTestId('mfa-expiring'))
+      .toHaveTextContent('wait for the next one')
+  })
+
+  it('copies the digits alone, not the spaced form', async () => {
+    const writeText = vi.fn()
+    Object.assign(navigator, { clipboard: { writeText } })
+    render(<AuthenticatorCode email="admin@src.test" />)
+    fireEvent.click(await screen.findByTestId('mfa-copy'))
+    expect(writeText).toHaveBeenCalledWith('481920')
+  })
+
+  it('asks the server for the account it was given', async () => {
+    render(<AuthenticatorCode email="admin@src.test" />)
+    await waitFor(() => expect(code).toHaveBeenCalledWith('admin@src.test'))
+  })
+})
+
+describe('when no seed is stored', () => {
+  it('offers to take one', async () => {
+    code.mockResolvedValue(ok({ accounts: [], code: '',
+                                error: 'no authenticator seed stored for x' }))
+    render(<AuthenticatorCode email="x@y.test" />)
+    expect(await screen.findByTestId('mfa-new-secret')).toBeInTheDocument()
+  })
+
+  it('states the trade-off rather than burying it', async () => {
+    /* A seed beside the password is one factor, not two. Somebody enabling
+       this should read that at the moment they enable it, not afterwards. */
+    code.mockResolvedValue(ok({ accounts: [], code: '' }))
+    render(<AuthenticatorCode />)
+    expect(await screen.findByTestId('mfa-tradeoff'))
+      .toHaveTextContent('one factor')
+  })
+
+  it('will not save an empty field', async () => {
+    code.mockResolvedValue(ok({ accounts: [], code: '' }))
+    render(<AuthenticatorCode />)
+    expect(await screen.findByTestId('mfa-save')).toBeDisabled()
+  })
+
+  it('saves what was pasted and re-reads', async () => {
+    code.mockResolvedValue(ok({ accounts: [], code: '' }))
+    render(<AuthenticatorCode />)
+    fireEvent.change(await screen.findByTestId('mfa-new-email'),
+                     { target: { value: 'a@b.test' } })
+    fireEvent.change(screen.getByTestId('mfa-new-secret'),
+                     { target: { value: 'abcd efgh ijkl mnop' } })
+    fireEvent.click(screen.getByTestId('mfa-save'))
+    await waitFor(() => expect(store)
+      .toHaveBeenCalledWith('a@b.test', 'abcd efgh ijkl mnop'))
+  })
+
+  it('reports a rejected secret instead of looking saved', async () => {
+    code.mockResolvedValue(ok({ accounts: [], code: '' }))
+    store.mockRejectedValue(new Error('that does not look like a valid authenticator secret'))
+    render(<AuthenticatorCode />)
+    fireEvent.change(await screen.findByTestId('mfa-new-email'),
+                     { target: { value: 'a@b.test' } })
+    fireEvent.change(screen.getByTestId('mfa-new-secret'),
+                     { target: { value: 'not base32!' } })
+    fireEvent.click(screen.getByTestId('mfa-save'))
+    expect(await screen.findByTestId('mfa-error'))
+      .toHaveTextContent('does not look like a valid')
+  })
+})
