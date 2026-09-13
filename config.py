@@ -116,6 +116,11 @@ TARGET_SCOPES = [
 # `unauthorized_client`, so a feature nobody asked for must never widen the
 # grant a working deployment depends on.
 GMAIL_SETTINGS_SCOPE = "https://www.googleapis.com/auth/gmail.settings.basic"
+# Mailbox DELEGATION sits behind its own scope, separate from the rest of
+# settings. Without it delegates().list fails and an assistant silently
+# loses access to an executive's mailbox -- no error is raised anywhere,
+# and the person affected is rarely the person running the migration.
+GMAIL_SHARING_SCOPE = "https://www.googleapis.com/auth/gmail.settings.sharing"
 DRIVE_WRITE_SCOPE = "https://www.googleapis.com/auth/drive"
 DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 CALENDAR_WRITE_SCOPE = "https://www.googleapis.com/auth/calendar"
@@ -197,6 +202,7 @@ def source_scopes(settings: "Settings") -> list[str]:
         # No read-only variant of this scope exists, so reading filters
         # necessarily grants the ability to write them too.
         scopes.append(GMAIL_SETTINGS_SCOPE)
+        scopes.append(GMAIL_SHARING_SCOPE)
     if settings.migrate_chat:
         # No read-only variant exists for either scope.
         scopes.extend(CHAT_SCOPES)
@@ -232,6 +238,10 @@ def target_scopes(settings: "Settings") -> list[str]:
         scopes.append(GROUP_WRITE_SCOPE)
     if settings.migrate_gmail_settings:
         scopes.append(GMAIL_SETTINGS_SCOPE)
+        # The target needs it too: delegation is CREATED here, and a scope
+        # granted on only one side fails at the point of use rather than at
+        # setup, which is the pattern this file keeps having to undo.
+        scopes.append(GMAIL_SHARING_SCOPE)
     if settings.migrate_chat:
         scopes.extend(CHAT_SCOPES)
         scopes.append(CHAT_MEMBERSHIP_SCOPE)

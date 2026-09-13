@@ -608,7 +608,194 @@ class GmailMigrator:
         if self.settings.migrate_gmail_settings:
             self._migrate_filters()
             self._migrate_signatures()
+            self._migrate_vacation()
+            self._migrate_imap_pop()
+            self._migrate_forwarding()
+            self._migrate_delegates()
         return dict(self.stats)
+
+    # -- the settings that break a person's day -----------------------------
+    #
+    # Filters and signatures migrated; these four did not, and they are the
+    # ones somebody notices on cutover morning. None of them produces an
+    # error anywhere when it is missing -- the mailbox simply behaves
+    # differently, and the user has no way to know why.
+    #
+    # Each is independent and each is best-effort: a tenant that has not
+    # granted the settings scope, or has the feature switched off, must not
+    # take out a migration that has already delivered the mail. They warn
+    # with what to grant, exactly as _migrate_filters does.
+
+    @staticmethod
+    def _settings_has(svc, *names: str) -> bool:
+        """Does this client's discovery document actually expose these?
+
+        A missing method raises AttributeError, which is deliberately NOT in
+        OPTIONAL_PASS_ERRORS -- catching it there would swallow real bugs in
+        this file. But these four passes run AFTER the mail is delivered,
+        and an older googleapiclient without delegates() must not take out a
+        completed migration. Asked rather than caught.
+        """
+        settings = svc.users().settings()
+        return all(hasattr(settings, n) for n in names)
+
+    def _migrate_vacation(self) -> None:
+        """The out-of-office responder, including its schedule."""
+        if not self._settings_has(self.src, "getVacation") \
+                or not self._settings_has(self.tgt, "updateVacation"):
+            return
+        try:
+            v = self._retry(lambda: self.src.users().settings()
+                            .getVacation(userId="me").execute())
+        except OPTIONAL_PASS_ERRORS as exc:
+            log.warning("[%s] could not read the vacation responder, NOT "
+                        "migrated (needs gmail.settings.basic on the SOURCE): "
+                        "%s", self.source_user, exc)
+            return
+        if not v or not v.get("enableAutoReply"):
+            # Off is the default on a new mailbox, so there is nothing to do
+            # and nothing worth reporting.
+            return
+        try:
+            self._retry(lambda: self.tgt.users().settings().updateVacation(
+                userId="me", body=v).execute())
+            self.stats["vacation_migrated"] = 1
+        except OPTIONAL_PASS_ERRORS as exc:
+            log.warning("[%s] vacation responder not migrated: %s",
+                        self.source_user, exc)
+
+    def _migrate_imap_pop(self) -> None:
+        """IMAP and POP access.
+
+        Worth more than it looks: a desktop client keeps working against the
+        SOURCE after cutover, so the user sees mail arriving normally right
+        up until the source is torn down -- and then loses a mailbox that
+        appeared healthy the day before.
+        """
+        for name, getter, setter in (
+            ("imap", "getImap", "updateImap"),
+            ("pop", "getPop", "updatePop"),
+        ):
+            if not self._settings_has(self.src, getter) \
+                    or not self._settings_has(self.tgt, setter):
+                continue
+            try:
+                cur = self._retry(lambda g=getter: getattr(
+                    self.src.users().settings(), g)(userId="me").execute())
+            except OPTIONAL_PASS_ERRORS as exc:
+                log.warning("[%s] could not read %s settings, NOT migrated: "
+                            "%s", self.source_user, name, exc)
+                continue
+            try:
+                self._retry(lambda st=setter, b=cur: getattr(
+                    self.tgt.users().settings(), st)(
+                        userId="me", body=b).execute())
+                self.stats[f"{name}_migrated"] = 1
+            except OPTIONAL_PASS_ERRORS as exc:
+                log.warning("[%s] %s settings not migrated: %s",
+                            self.source_user, name, exc)
+
+    def _migrate_forwarding(self) -> None:
+        """Forwarding addresses, and the auto-forward rule that uses one.
+
+        An address must be ADDED before auto-forwarding can point at it, so
+        the order here is not cosmetic. Google also requires the target to
+        verify a forwarding address it has not seen before, so these arrive
+        pending rather than live -- which is the correct outcome: silently
+        re-enabling forwarding to an outside address on a tenant somebody
+        just migrated into would be a data-exfiltration path, not a feature.
+        """
+        if not self._settings_has(self.src, "forwardingAddresses") \
+                or not self._settings_has(self.tgt, "forwardingAddresses"):
+            return
+        try:
+            addrs = self._retry(lambda: self.src.users().settings()
+                                .forwardingAddresses().list(userId="me")
+                                .execute()).get("forwardingAddresses", [])
+        except OPTIONAL_PASS_ERRORS as exc:
+            log.warning("[%s] could not read forwarding addresses, NOT "
+                        "migrated: %s", self.source_user, exc)
+            return
+        for addr in addrs:
+            try:
+                self._retry(lambda a=addr: self.tgt.users().settings()
+                            .forwardingAddresses().create(
+                                userId="me",
+                                body={"forwardingEmail": a["forwardingEmail"]}
+                            ).execute())
+                self.stats["forwarding_addresses"] = \
+                    self.stats.get("forwarding_addresses", 0) + 1
+            except OPTIONAL_PASS_ERRORS as exc:
+                log.warning("[%s] forwarding address %s not migrated: %s",
+                            self.source_user, a.get("forwardingEmail"), exc)
+        if not self._settings_has(self.src, "getAutoForwarding"):
+            return
+        try:
+            auto = self._retry(lambda: self.src.users().settings()
+                               .getAutoForwarding(userId="me").execute())
+        except OPTIONAL_PASS_ERRORS:
+            return
+        if not auto or not auto.get("enabled"):
+            return
+        if not self._settings_has(self.tgt, "updateAutoForwarding"):
+            return
+        try:
+            self._retry(lambda: self.tgt.users().settings()
+                        .updateAutoForwarding(userId="me", body=auto).execute())
+            self.stats["auto_forwarding"] = 1
+        except OPTIONAL_PASS_ERRORS as exc:
+            # Expected until the address is verified. Logged at info, not
+            # warning: it is the documented behaviour, not a fault.
+            log.info("[%s] auto-forwarding not enabled on the target (the "
+                     "address usually needs verifying first): %s",
+                     self.source_user, exc)
+
+    def _migrate_delegates(self) -> None:
+        """Mailbox delegation -- an assistant reading an executive's mail.
+
+        The most damaging of these to lose. The delegate simply stops seeing
+        the mailbox, no error is raised anywhere, and the person affected is
+        rarely the person running the migration.
+
+        Delegate addresses are remapped to the target domain the same way
+        every other identity is: a delegation naming an address that no
+        longer exists would be rejected, and silently dropping it is how
+        this became invisible in the first place.
+        """
+        if not self._settings_has(self.src, "delegates") \
+                or not self._settings_has(self.tgt, "delegates"):
+            return
+        try:
+            delegates = self._retry(lambda: self.src.users().settings()
+                                    .delegates().list(userId="me").execute()
+                                    ).get("delegates", [])
+        except OPTIONAL_PASS_ERRORS as exc:
+            log.warning("[%s] could not read delegates, delegation NOT "
+                        "migrated. Needs gmail.settings.sharing on the SOURCE. "
+                        "Error: %s", self.source_user, exc)
+            return
+        for d in delegates:
+            src_addr = d.get("delegateEmail") or ""
+            # db.resolve_identity is what every other identity lookup in
+            # this engine uses -- the signature rewriter and the sendAs
+            # migration both go through it. Inventing a second mapping here
+            # would be a second answer to the same question.
+            tgt_addr = self.db.resolve_identity(src_addr)
+            if not tgt_addr:
+                log.warning("[%s] delegate %s has no target identity -- "
+                            "delegation dropped", self.source_user, src_addr)
+                self.stats["delegates_unmapped"] = \
+                    self.stats.get("delegates_unmapped", 0) + 1
+                continue
+            try:
+                self._retry(lambda a=tgt_addr: self.tgt.users().settings()
+                            .delegates().create(
+                                userId="me", body={"delegateEmail": a}
+                            ).execute())
+                self.stats["delegates"] = self.stats.get("delegates", 0) + 1
+            except OPTIONAL_PASS_ERRORS as exc:
+                log.warning("[%s] delegate %s not migrated: %s",
+                            self.source_user, tgt_addr, exc)
 
     # -- signatures --------------------------------------------------------
     def _rewrite_identities(self, html: str) -> str:
