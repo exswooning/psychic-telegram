@@ -130,3 +130,30 @@ describe('adding a second account', () => {
     expect(screen.queryByTestId('mfa-new-secret')).toBeNull()
   })
 })
+
+describe('the account chooser', () => {
+  it('is absent until there is something to choose between', async () => {
+    /* With no seeds stored it was a dropdown whose only entry was "select
+       an account", sitting above the form for creating the first one. */
+    code.mockResolvedValue(ok({ accounts: [], code: '' }))
+    render(<AuthenticatorCode />)
+    await screen.findByTestId('mfa-new-secret')
+    expect(screen.queryByTestId('mfa-account')).toBeNull()
+  })
+
+  it('appears once an account exists', async () => {
+    render(<AuthenticatorCode email="admin@src.test" />)
+    expect(await screen.findByTestId('mfa-account')).toBeInTheDocument()
+  })
+
+  it('keeps its label clear of the option text', async () => {
+    /* A native select does not take part in MUI's label-shrink logic, so
+       "Account" rendered directly on top of the first option and both were
+       unreadable. Only visible with a native select, which is why every
+       value-based assertion passed while the page looked broken. */
+    render(<AuthenticatorCode email="admin@src.test" />)
+    await screen.findByTestId('mfa-account')
+    const label = document.querySelector('label')
+    expect(label?.className).toMatch(/MuiInputLabel-shrink/)
+  })
+})

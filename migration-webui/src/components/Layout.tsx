@@ -43,6 +43,7 @@ import {
   StopCircle as InterruptIcon,
   AdminPanelSettings as AdminIconNav,
   SwapHoriz as IdentitiesIconNav,
+  VpnKey as AuthenticatorIconNav,
   Build as MaintenanceIconNav,
   Rule as ScopeIconNav,
   Terminal as LogsIconNav,
@@ -115,7 +116,9 @@ const OPERATOR_NAV_ITEMS = [
   // run, and it was previously only reachable once a prompt had already
   // appeared mid-setup -- which is the one moment there is no time to go
   // and fetch a key from Google.
-  { path: '/authenticator', label: 'Authenticator', icon: <IdentitiesIconNav />, group: 'Set up' },
+  // Its own icon: it shipped sharing Identities' arrows, so two unrelated
+  // items sat adjacent in the same group looking like a pair.
+  { path: '/authenticator', label: 'Authenticator', icon: <AuthenticatorIconNav />, group: 'Set up' },
   { path: '/maintenance', label: 'Maintenance', icon: <MaintenanceIconNav /> , group: 'Operate' },
   { path: '/services', label: 'Other services', icon: <ScopeIconNav /> , group: 'Migrate' },
   { path: '/scope', label: 'Scope', icon: <ScopeIconNav /> , group: 'Check' },

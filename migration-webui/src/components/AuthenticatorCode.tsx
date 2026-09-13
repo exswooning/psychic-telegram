@@ -66,13 +66,24 @@ export const AuthenticatorCode: React.FC<{
         Authenticator code
       </Typography>
 
-      <TextField select size="small" label="Account" sx={{ minWidth: 300, mb: 2 }}
-                 value={who} onChange={(e) => setWho(e.target.value)}
-                 SelectProps={{ native: true }}
-                 inputProps={{ 'data-testid': 'mfa-account' }}>
-        <option value="">select an account…</option>
-        {(st?.accounts || []).map((a) => <option key={a} value={a}>{a}</option>)}
-      </TextField>
+      {/* Only once there is something to choose between. With no seeds
+          stored it was a dropdown whose single entry was "select an
+          account", above a form for creating the first one. */}
+      {(st?.accounts?.length || 0) > 0 && (
+        // shrink, always. A native select does not take part in MUI's
+        // label-shrink logic, so the floating "Account" label sat directly
+        // on top of the first option's text and both were unreadable. It
+        // shows only with a native select, which is why it survived every
+        // test that asserted on values rather than looking at it.
+        <TextField select size="small" label="Account" sx={{ minWidth: 300, mb: 2 }}
+                   value={who} onChange={(e) => setWho(e.target.value)}
+                   SelectProps={{ native: true }}
+                   InputLabelProps={{ shrink: true }}
+                   inputProps={{ 'data-testid': 'mfa-account' }}>
+          <option value="">select an account…</option>
+          {(st?.accounts || []).map((a) => <option key={a} value={a}>{a}</option>)}
+        </TextField>
+      )}
 
       {st?.code ? (
         <Stack direction="row" spacing={2} alignItems="center" sx={{ mb: 1 }}>
