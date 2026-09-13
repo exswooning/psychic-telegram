@@ -10,7 +10,7 @@
 import React from 'react'
 
 export const QrCode: React.FC<{ matrix: boolean[][]; size?: number }> = ({
-  matrix, size = 220,
+  matrix, size = 264,
 }) => {
   if (!matrix.length) return null
   const n = matrix.length

@@ -236,3 +236,29 @@ class TestEnrolment:
         import inspect
         src = inspect.getsource(totp.qr_matrix) + inspect.getsource(totp.enrol)
         assert "http" not in src.replace("otpauth", "")
+
+    def test_the_quiet_zone_is_the_spec_minimum(self, tmp_path):
+        """Four clear modules is how a scanner finds the symbol at all. At
+        two, a screen QR looks perfectly fine to a person and a phone simply
+        refuses to read it."""
+        e = totp.enrol("deadman@bitport", path=str(tmp_path / "t.env"))
+        m = e["matrix"]
+        assert all(not any(row) for row in m[:4]), "top quiet zone"
+        assert all(not any(row) for row in m[-4:]), "bottom quiet zone"
+        assert all(not any(r[:4]) and not any(r[-4:]) for r in m), "side quiet zones"
+
+    def test_the_matrix_already_carries_its_border(self, tmp_path):
+        """So a caller that helpfully adds its own padding is not needed,
+        and one that does not is still correct."""
+        e = totp.enrol("deadman@bitport", path=str(tmp_path / "t.env"))
+        assert len(e["matrix"]) >= 37 + 8
+
+    def test_the_finder_patterns_are_where_a_camera_looks(self, tmp_path):
+        e = totp.enrol("deadman@bitport", path=str(tmp_path / "t.env"))
+        m = e["matrix"]; n = len(m)
+        eye = [[1,1,1,1,1,1,1],[1,0,0,0,0,0,1],[1,0,1,1,1,0,1],[1,0,1,1,1,0,1],
+               [1,0,1,1,1,0,1],[1,0,0,0,0,0,1],[1,1,1,1,1,1,1]]
+        for ox, oy in ((4, 4), (n - 11, 4), (4, n - 11)):
+            assert all(m[oy + y][ox + x] == bool(v)
+                       for y, row in enumerate(eye)
+                       for x, v in enumerate(row)), (ox, oy)

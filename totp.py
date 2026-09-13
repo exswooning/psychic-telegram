@@ -170,7 +170,12 @@ def qr_matrix(text: str) -> list[list[bool]]:
         import qrcode
     except ImportError:
         return []
-    qr = qrcode.QRCode(border=2, error_correction=qrcode.constants.ERROR_CORRECT_M)
+    # border=4 is the spec's minimum quiet zone, not a style choice: a
+    # scanner locates the symbol by finding four clear modules around it,
+    # and a screen QR with less is exactly the one a phone refuses to read
+    # while looking perfectly fine to a person. get_matrix() returns the
+    # border included, so the caller draws it without adding its own.
+    qr = qrcode.QRCode(border=4, error_correction=qrcode.constants.ERROR_CORRECT_M)
     qr.add_data(text)
     qr.make(fit=True)
     return [[bool(c) for c in row] for row in qr.get_matrix()]
