@@ -157,22 +157,28 @@ def _last_interactive_login() -> float:
 def _last_sshd_auth() -> float:
     """Every accepted authentication, pty or not. This is what a deploy
     looks like, and what `last` cannot see."""
+    # Newest-first with a line cap, NOT a 60-day window. The window form
+    # read the whole journal every time: on this box -- 74 days uptime and
+    # thousands of accepted auths -- that took longer than the 25 seconds a
+    # caller was willing to wait, so `--status` appeared to hang and the
+    # countdown API call behind the page hung with it. Reading in reverse
+    # lets journalctl stop as soon as it has enough, and the first Accepted
+    # line IS the answer, so there is nothing to scan past it.
     try:
         out = subprocess.run(
-            ["journalctl", "-u", "ssh", "-u", "sshd", "--since", "60 days ago",
+            ["journalctl", "-u", "ssh", "-u", "sshd", "-r", "-n", "500",
              "-o", "short-unix", "--no-pager"],
-            capture_output=True, text=True, timeout=60).stdout
+            capture_output=True, text=True, timeout=20).stdout
     except Exception:      # noqa: BLE001
         return 0.0
-    newest = 0.0
     for line in out.splitlines():
         if "Accepted" not in line:
             continue
         try:
-            newest = max(newest, float(line.split()[0]))
+            return float(line.split()[0])
         except (ValueError, IndexError):
             continue
-    return newest
+    return 0.0
 
 
 def _last_webui_login() -> float:
@@ -293,10 +299,14 @@ def last_seen(cfg: dict | None = None) -> tuple[float, str]:
     letting an incidental signal hold the switch open would quietly turn a
     12-hour proof-of-life into "has anything happened lately".
     """
-    sig = signals()
     cfg = cfg or {}
     if cfg.get("require_checkin"):
-        seen = sig["2-Step check-in"]
+        # Read directly rather than through signals(): in this mode the
+        # other five are display only, and the decision to destroy a machine
+        # should not be waiting on a journal scan that can time out. A
+        # timed-out probe returns 0.0, which reads as "no signal" -- and
+        # that is the input that makes --run do nothing at all.
+        seen = _last_checkin()
         if not seen:
             # Never checked in. Count from the moment it was ARMED, because
             # the alternative is that the switch never fires at all: --run
@@ -307,6 +317,7 @@ def last_seen(cfg: dict | None = None) -> tuple[float, str]:
             # makes "wipe if I never check in" mean what it says.
             return _armed_at(cfg), "armed, never checked in"
         return seen, "2-Step check-in"
+    sig = signals()
     name = max(sig, key=lambda k: sig[k])
     return sig[name], name
 

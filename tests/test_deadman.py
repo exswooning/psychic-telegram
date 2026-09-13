@@ -378,7 +378,12 @@ class TestTheCheckIn:
 class TestRequiringTheCheckIn:
     def test_only_the_deliberate_signal_counts_in_that_mode(self, monkeypatch):
         """Otherwise a deploy holds a 12-hour proof-of-life open, and the
-        deadline quietly degrades into "has anything happened lately"."""
+        deadline quietly degrades into "has anything happened lately".
+
+        Asserted against a signals() that would WIN if it were consulted:
+        the incidental entries here are newer than the check-in, so reading
+        them at all would change the answer."""
+        monkeypatch.setattr(deadman, "_last_checkin", lambda: 100.0)
         monkeypatch.setattr(deadman, "signals", lambda: {
             "2-Step check-in": 100.0, "deploy": 9_999_999.0,
             "sshd auth": 9_999_999.0})
@@ -580,3 +585,39 @@ class TestAnUnmetDeadlineActuallyFires:
         src = _code(deadman.targets)
         assert 'cfg.get("include_backups", True)' in src
         assert 'cfg.get("include_code", True)' in src
+
+
+class TestTheProbesStayFastEnoughToBeUsed:
+    """`--status` appeared to hang, and the countdown API call behind the
+    page hung with it: the sshd probe read a 60-DAY journal window on a box
+    with 74 days of uptime and thousands of accepted auths."""
+
+    def test_the_journal_is_read_newest_first_with_a_cap(self):
+        src = _code(deadman._last_sshd_auth)
+        assert '"-r"' in src and '"-n"' in src
+        assert "60 days ago" not in src
+
+    def test_it_stops_at_the_first_match(self):
+        """The newest Accepted line IS the answer; scanning past it is the
+        whole cost."""
+        src = _code(deadman._last_sshd_auth)
+        assert "return float(" in src
+        assert "max(newest" not in src
+
+    def test_every_probe_has_a_timeout(self):
+        """One that blocks forever takes the cron with it, and the cron is
+        the only thing that ever checks the deadline."""
+        for fn in (deadman._last_sshd_auth, deadman._last_interactive_login):
+            assert "timeout=" in _code(fn), fn.__name__
+
+    def test_the_firing_decision_does_not_wait_on_a_probe(self, monkeypatch, tmp_path):
+        """A timed-out probe returns 0.0, which reads as "no signal" -- the
+        one input that makes --run do nothing at all. Under require_checkin
+        the other signals are display only, so the decision must not depend
+        on them."""
+        def explode():
+            raise AssertionError("signals() must not be called in this mode")
+        monkeypatch.setattr(deadman, "signals", explode)
+        monkeypatch.setattr(deadman, "CHECKIN", str(tmp_path / "c"))
+        (tmp_path / "c").write_text("x")
+        assert deadman.last_seen({"require_checkin": True})[1] == "2-Step check-in"
