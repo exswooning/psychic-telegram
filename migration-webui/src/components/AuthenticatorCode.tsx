@@ -19,7 +19,16 @@ import { ContentCopy as CopyIcon, Check as CheckIcon } from '@mui/icons-material
 import { fetchMfaCode, storeMfaSecret } from '@/api/controlPlane'
 import type { MfaCode } from '@/api/controlPlane'
 
-export const AuthenticatorCode: React.FC<{ email?: string }> = ({ email = '' }) => {
+export const AuthenticatorCode: React.FC<{
+  email?: string
+  /** Keep the "add a seed" form visible even once one is stored.
+   *
+   *  The form was shown only when NO account had a seed, which is right
+   *  inside the wizard -- there, it is a rescue for a prompt already on
+   *  screen. On a page whose whole purpose is managing these, hiding it
+   *  after the first one makes adding a second account impossible. */
+  allowAdd?: boolean
+}> = ({ email = '', allowAdd = false }) => {
   const [who, setWho] = useState(email)
   const [st, setSt] = useState<MfaCode | null>(null)
   const [err, setErr] = useState('')
@@ -103,7 +112,7 @@ export const AuthenticatorCode: React.FC<{ email?: string }> = ({ email = '' }) 
 
       {err && <Alert severity="info" sx={{ mb: 1 }} data-testid="mfa-error">{err}</Alert>}
 
-      {(!st?.accounts?.length || err) && (
+      {(allowAdd || !st?.accounts?.length || err) && (
         <Box sx={{ mt: 1 }}>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
             Paste the setup key from Google&apos;s 2-Step page — the spaced

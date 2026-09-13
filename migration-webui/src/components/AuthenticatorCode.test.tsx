@@ -112,3 +112,21 @@ describe('when no seed is stored', () => {
       .toHaveTextContent('does not look like a valid')
   })
 })
+
+describe('adding a second account', () => {
+  it('keeps the form available when asked to', async () => {
+    /* The form showed only when NO seed existed, which is right inside the
+       wizard -- there it rescues a prompt already on screen. On a page whose
+       purpose is managing these, hiding it after the first made adding a
+       second account impossible. */
+    render(<AuthenticatorCode email="admin@src.test" allowAdd />)
+    expect(await screen.findByTestId('mfa-new-secret')).toBeInTheDocument()
+    expect(screen.getByTestId('mfa-code')).toHaveTextContent('481 920')
+  })
+
+  it('still hides it by default, where it is only a rescue', async () => {
+    render(<AuthenticatorCode email="admin@src.test" />)
+    await screen.findByTestId('mfa-code')
+    expect(screen.queryByTestId('mfa-new-secret')).toBeNull()
+  })
+})

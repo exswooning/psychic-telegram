@@ -111,6 +111,11 @@ const OPERATOR_NAV_ITEMS = [
   // used to live entirely in whoever's terminal last ran it.
   { path: '/tests', label: 'Test suite', icon: <TestsIconNav /> , group: 'Operate' },
   { path: '/identities', label: 'Identities', icon: <IdentitiesIconNav /> , group: 'Set up' },
+  // Under Set up, not Admin: a 2-Step seed is something you store BEFORE a
+  // run, and it was previously only reachable once a prompt had already
+  // appeared mid-setup -- which is the one moment there is no time to go
+  // and fetch a key from Google.
+  { path: '/authenticator', label: 'Authenticator', icon: <IdentitiesIconNav />, group: 'Set up' },
   { path: '/maintenance', label: 'Maintenance', icon: <MaintenanceIconNav /> , group: 'Operate' },
   { path: '/services', label: 'Other services', icon: <ScopeIconNav /> , group: 'Migrate' },
   { path: '/scope', label: 'Scope', icon: <ScopeIconNav /> , group: 'Check' },
