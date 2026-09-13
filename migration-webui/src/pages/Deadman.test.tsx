@@ -10,9 +10,11 @@ import Deadman from './Deadman'
 
 const status = vi.fn()
 const wipe = vi.fn()
+const touch = vi.fn()
 vi.mock('@/api/controlPlane', () => ({
   fetchDeadman: () => status(),
   deadmanWipeNow: (...a: unknown[]) => wipe(...a),
+  deadmanTouch: () => touch(),
 }))
 
 const st = (over = {}) => ({
@@ -25,7 +27,8 @@ const st = (over = {}) => ({
 })
 
 beforeEach(() => {
-  status.mockReset(); wipe.mockReset()
+  status.mockReset(); wipe.mockReset(); touch.mockReset()
+  touch.mockResolvedValue({ ok: true, newestSignal: 'manual touch' })
   status.mockResolvedValue(st()); wipe.mockResolvedValue({ ok: true, removed: [] })
 })
 
@@ -113,5 +116,39 @@ describe('wipe now', () => {
     fireEvent.click(screen.getByTestId('wipe-go'))
     expect(await screen.findByTestId('deadman-error'))
       .toHaveTextContent('type WIPE')
+  })
+})
+
+describe('resetting the timer', () => {
+  it('offers an explicit reset while it is counting down', async () => {
+    /* Being signed in is NOT a signal: a session row is written at LOGIN,
+       so somebody already signed in could watch this page reach zero while
+       looking straight at it. That is the worst failure this feature could
+       have. */
+    render(<Deadman />)
+    expect(await screen.findByTestId('deadman-touch')).toBeInTheDocument()
+  })
+
+  it('resets and re-reads, so the number visibly moves', async () => {
+    render(<Deadman />)
+    fireEvent.click(await screen.findByTestId('deadman-touch'))
+    await waitFor(() => expect(touch).toHaveBeenCalled())
+    await waitFor(() => expect(status.mock.calls.length).toBeGreaterThan(1))
+  })
+
+  it('does not reset merely because the page was opened', async () => {
+    /* A forgotten open tab must not hold a dead man switch alive for
+       months -- which is exactly what "any page view counts" would mean. */
+    render(<Deadman />)
+    await screen.findByTestId('countdown')
+    expect(touch).not.toHaveBeenCalled()
+  })
+
+  it('surfaces a refusal rather than looking like it reset', async () => {
+    touch.mockRejectedValue(new Error('superadmin only'))
+    render(<Deadman />)
+    fireEvent.click(await screen.findByTestId('deadman-touch'))
+    expect(await screen.findByTestId('deadman-error'))
+      .toHaveTextContent('superadmin only')
   })
 })

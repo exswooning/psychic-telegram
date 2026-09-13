@@ -730,6 +730,12 @@ export interface DeadmanStatus {
 export const fetchDeadman = () =>
   cpFetch<DeadmanStatus>('/api/v2/deadman/status')
 
+/** "I am here" -- resets the countdown. Explicit rather than automatic on
+ *  page load, so a forgotten open tab cannot hold the switch open. */
+export const deadmanTouch = () =>
+  cpFetch<{ ok: boolean; newestSignal: string }>('/api/v2/deadman/touch',
+                                                 { method: 'POST' })
+
 /** Destroy the credentials and tenant data now. Irreversible. */
 export const deadmanWipeNow = (reason: string) =>
   cpFetch<{ ok: boolean; removed: string[] }>('/api/v2/deadman/wipe', {

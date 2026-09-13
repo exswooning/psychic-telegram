@@ -199,3 +199,30 @@ class TestTheCodeGoesToo:
         assert "wear levelling" in doc
         assert "not a forensic wipe" in doc
         assert "provider" in doc
+
+
+class TestResettingIt:
+    def test_a_manual_touch_is_a_signal(self):
+        assert "manual touch" in deadman.signals()
+
+    def test_touch_writes_where_the_signal_reads(self, monkeypatch, tmp_path):
+        t = tmp_path / "alive"
+        monkeypatch.setattr(deadman, "TOUCH", str(t))
+        deadman.main(["--touch"])
+        assert t.exists()
+        assert deadman.signals()["manual touch"] > 0
+
+    def test_the_endpoint_requires_a_superadmin(self):
+        """It holds off the most destructive automation on the machine."""
+        import api_server
+        src = inspect.getsource(api_server.deadman_touch)
+        assert "require_superadmin(op)" in src
+
+    def test_being_signed_in_is_not_itself_a_signal(self):
+        """The web-UI signal reads the newest SESSION, and a session is
+        written at login. Someone already signed in could otherwise watch
+        the countdown reach zero while looking straight at it -- which is
+        why the reset is a button and not a page load."""
+        src = _code(deadman._last_webui_login)
+        assert "sessions" in src
+        assert "MAX(expires_at)" in src

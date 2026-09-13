@@ -4681,6 +4681,32 @@ async def deadman_status(op: Operator = Depends(operator)):
     return await _off_loop(_read)
 
 
+@app.post("/api/v2/deadman/touch")
+async def deadman_touch(op: Operator = Depends(operator)):
+    """I am here. Reset the countdown.
+
+    Needed because the web-UI signal reads the newest SESSION, and a session
+    is created at sign-in, not on every request. Someone already signed in
+    could therefore watch the countdown page tick to zero and be destroyed
+    by the automation while looking straight at it -- which is the single
+    worst failure this feature could have.
+
+    A deliberate act rather than a side effect of loading the page: a
+    forgotten open tab should not keep a dead man switch alive forever,
+    which is exactly what "any page view resets it" would mean.
+    """
+    require_login(op)
+    require_superadmin(op)
+
+    def _touch() -> dict:
+        import deadman
+        deadman.main(["--touch"])
+        seen, why = deadman.last_seen()
+        return {"ok": True, "newestSignal": why,
+                "secondsSinceSeen": round(time.time() - seen) if seen else None}
+    return await _off_loop(_touch)
+
+
 @app.post("/api/v2/deadman/wipe")
 async def deadman_wipe_now(req: WipeNowRequest,
                            op: Operator = Depends(operator)):

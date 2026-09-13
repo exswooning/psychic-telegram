@@ -15,8 +15,11 @@ import {
   Alert, Box, Button, Chip, Dialog, DialogActions, DialogContent,
   DialogTitle, LinearProgress, Paper, Stack, TextField, Typography,
 } from '@mui/material'
-import { Timer as TimerIcon, DeleteForever as WipeIcon } from '@mui/icons-material'
-import { fetchDeadman, deadmanWipeNow } from '@/api/controlPlane'
+import {
+  Timer as TimerIcon, DeleteForever as WipeIcon,
+  Favorite as AliveIcon,
+} from '@mui/icons-material'
+import { fetchDeadman, deadmanWipeNow, deadmanTouch } from '@/api/controlPlane'
 import type { DeadmanStatus } from '@/api/controlPlane'
 
 const hms = (secs: number): string => {
@@ -118,6 +121,17 @@ export const Deadman: React.FC = () => {
                 until everything below is destroyed. Last sign of life:{' '}
                 <strong>{st.newestSignal}</strong>, {ago(st.secondsSinceSeen)}.
               </Typography>
+              {/* Explicit, because being signed in is not a signal: a
+                  session is created at LOGIN, so someone already signed in
+                  could watch this reach zero while looking at it. Not fired
+                  on page load either -- a forgotten open tab must not hold
+                  the switch open indefinitely. */}
+              <Button size="small" variant="outlined" sx={{ mt: 1.5 }}
+                      startIcon={<AliveIcon />} data-testid="deadman-touch"
+                      onClick={() => deadmanTouch().then(refresh).catch(
+                        (e) => setErr(e instanceof Error ? e.message : String(e)))}>
+                I&apos;m here — reset the timer
+              </Button>
             </>
           ) : (
             <Typography variant="body2" color="text.secondary"
