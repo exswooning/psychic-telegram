@@ -19,7 +19,7 @@ import {
   Timer as TimerIcon, DeleteForever as WipeIcon,
   Favorite as AliveIcon,
 } from '@mui/icons-material'
-import { fetchDeadman, deadmanWipeNow, deadmanTouch } from '@/api/controlPlane'
+import { fetchDeadman, deadmanWipeNow, deadmanTouch, deadmanCheckin } from '@/api/controlPlane'
 import type { DeadmanStatus } from '@/api/controlPlane'
 
 const hms = (secs: number): string => {
@@ -43,6 +43,8 @@ export const Deadman: React.FC = () => {
   const [reason, setReason] = useState('')
   const [busy, setBusy] = useState(false)
   const [done, setDone] = useState<string[] | null>(null)
+  const [code, setCode] = useState('')
+  const [said, setSaid] = useState('')
 
   const refresh = useCallback(() => {
     fetchDeadman()
@@ -121,17 +123,50 @@ export const Deadman: React.FC = () => {
                 until everything below is destroyed. Last sign of life:{' '}
                 <strong>{st.newestSignal}</strong>, {ago(st.secondsSinceSeen)}.
               </Typography>
-              {/* Explicit, because being signed in is not a signal: a
-                  session is created at LOGIN, so someone already signed in
-                  could watch this reach zero while looking at it. Not fired
-                  on page load either -- a forgotten open tab must not hold
-                  the switch open indefinitely. */}
-              <Button size="small" variant="outlined" sx={{ mt: 1.5 }}
-                      startIcon={<AliveIcon />} data-testid="deadman-touch"
-                      onClick={() => deadmanTouch().then(refresh).catch(
-                        (e) => setErr(e instanceof Error ? e.message : String(e)))}>
-                I&apos;m here — reset the timer
-              </Button>
+              {/* The check-in, not a button, is what resets a 12-hour
+                  deadline. A button can be pressed by anything holding a
+                  superadmin session -- including automation that outlives
+                  its owner -- so it proves the machine is in use, not that
+                  a person is alive. The 2-Step code proves the person. */}
+              <Stack direction="row" spacing={1} alignItems="flex-start"
+                     sx={{ mt: 2 }}>
+                <TextField size="small" label="2-Step code" value={code}
+                           onChange={(e) => { setCode(e.target.value); setSaid('') }}
+                           error={!!said && said !== 'ok'}
+                           helperText={said && said !== 'ok' ? said : ' '}
+                           sx={{ width: 190 }}
+                           inputProps={{
+                             'data-testid': 'checkin-code',
+                             inputMode: 'numeric', autoComplete: 'one-time-code',
+                           }} />
+                <Button size="small" variant="contained" sx={{ mt: 0.5 }}
+                        startIcon={<AliveIcon />} data-testid="deadman-checkin"
+                        disabled={code.replace(/\D/g, '').length < 6}
+                        onClick={() => deadmanCheckin(code).then((r) => {
+                          if (!r.ok) { setSaid(r.error || 'rejected'); return }
+                          setCode(''); setSaid('ok'); refresh()
+                        }).catch((e) => setSaid(
+                          e instanceof Error ? e.message : String(e)))}>
+                  I&apos;m here — reset the timer
+                </Button>
+              </Stack>
+              {said === 'ok' && (
+                <Alert severity="success" sx={{ mb: 1 }} data-testid="checkin-ok">
+                  Checked in. The countdown is back to {st.days * 24} hours.
+                </Alert>
+              )}
+
+              {/* Only where an incidental signal still counts. Under
+                  requireCheckin it would be a button that appears to reset
+                  a clock it cannot reset -- worse than absent. */}
+              {!st.requireCheckin && (
+                <Button size="small" variant="text" sx={{ mt: 0.5 }}
+                        data-testid="deadman-touch"
+                        onClick={() => deadmanTouch().then(refresh).catch(
+                          (e) => setErr(e instanceof Error ? e.message : String(e)))}>
+                  or just mark the machine as in use
+                </Button>
+              )}
             </>
           ) : (
             <Typography variant="body2" color="text.secondary"

@@ -4662,7 +4662,7 @@ async def deadman_status(op: Operator = Depends(operator)):
         import deadman
         cfg = deadman.load()
         sig = deadman.signals()
-        seen, why = deadman.last_seen()
+        seen, why = deadman.last_seen(cfg)
         ok, state = deadman.armed()
         days = float(cfg.get("days") or 0)
         age = (time.time() - seen) if seen else None
@@ -4675,6 +4675,7 @@ async def deadman_status(op: Operator = Depends(operator)):
             "secondsRemaining": (None if (age is None or not days)
                                  else round(days * 86400 - age)),
             "targets": deadman.targets(cfg),
+            "requireCheckin": bool(cfg.get("require_checkin")),
             "emailConfigured": bool(
                 deadman._email_config().get("DEADMAN_EMAIL_TO")),
         }
@@ -4767,10 +4768,46 @@ async def deadman_touch(op: Operator = Depends(operator)):
     def _touch() -> dict:
         import deadman
         deadman.main(["--touch"])
-        seen, why = deadman.last_seen()
+        seen, why = deadman.last_seen(deadman.load())
         return {"ok": True, "newestSignal": why,
                 "secondsSinceSeen": round(time.time() - seen) if seen else None}
     return await _off_loop(_touch)
+
+
+class CheckinRequest(BaseModel):
+    code: str
+    email: str = ""
+
+
+@app.post("/api/v2/deadman/checkin")
+async def deadman_checkin(req: CheckinRequest, op: Operator = Depends(operator)):
+    """Prove you are alive by typing a current 2-Step code.
+
+    The difference between this and /touch is the whole reason a 12-hour
+    deadline is defensible. /touch is a button: anything holding a
+    superadmin session can press it, including automation that outlives its
+    owner. This needs the second factor, so it is evidence about a PERSON,
+    not about the machine still being in use.
+
+    The code is not logged anywhere -- not in the audit trail, not in the
+    switch's own log, which records only which account matched.
+    """
+    require_login(op)
+    require_superadmin(op)
+
+    def _checkin() -> dict:
+        import deadman
+        ok, who = deadman.record_checkin(req.code, req.email)
+        if not ok:
+            # 200 with ok=false, deliberately: a 401 here would be
+            # indistinguishable from the session having expired, and the one
+            # thing this form must never do is tell somebody their check-in
+            # failed for a reason they cannot act on.
+            return {"ok": False, "error": who}
+        seen, why = deadman.last_seen(deadman.load())
+        return {"ok": True, "account": who, "newestSignal": why,
+                "secondsSinceSeen": round(time.time() - seen) if seen else 0}
+    return await _off_loop(_checkin)
 
 
 @app.post("/api/v2/deadman/wipe")

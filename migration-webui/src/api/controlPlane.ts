@@ -741,6 +741,9 @@ export interface DeadmanStatus {
   secondsRemaining: number | null
   targets: string[]
   emailConfigured: boolean
+  /** When set, the 2-Step check-in is the ONLY signal that resets the
+   *  clock -- a deploy or an ssh login no longer counts. */
+  requireCheckin: boolean
 }
 
 export const fetchDeadman = () =>
@@ -751,6 +754,18 @@ export const fetchDeadman = () =>
 export const deadmanTouch = () =>
   cpFetch<{ ok: boolean; newestSignal: string }>('/api/v2/deadman/touch',
                                                  { method: 'POST' })
+
+/** Prove a PERSON is alive, by typing a current 2-Step code.
+ *
+ *  Different from a touch in the way that matters: a touch is a button, and
+ *  anything holding a superadmin session can press it -- including
+ *  automation that outlives its owner. This needs the second factor, which
+ *  is what makes a 12-hour deadline evidence about a person rather than
+ *  about the machine still being in use. */
+export const deadmanCheckin = (code: string, email = '') =>
+  cpFetch<{ ok: boolean; error?: string; account?: string }>(
+    '/api/v2/deadman/checkin',
+    { method: 'POST', body: JSON.stringify({ code, email }) })
 
 /** Destroy the credentials and tenant data now. Irreversible. */
 export const deadmanWipeNow = (reason: string) =>

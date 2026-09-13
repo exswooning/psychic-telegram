@@ -70,13 +70,18 @@ def seconds_remaining(when: float | None = None, period: int = PERIOD) -> int:
     return int(period - (now % period))
 
 
-def load_secrets(path: str = SECRETS_FILE) -> dict[str, str]:
+def load_secrets(path: str | None = None) -> dict[str, str]:
     """email -> secret, from a root-only file.
 
     Not the database: this is a credential, and migration.db is copied to
     worker nodes and taken in backups. Keeping it in /etc/bitport means a
     node gets the code by ASKING the coordinator, never by holding the seed.
     """
+    # Resolved here, not in the signature. A default argument binds at
+    # DEFINITION time, so SECRETS_FILE could be reassigned -- by a test, or
+    # by a caller relocating it -- and every one of these functions would go
+    # on reading the original path while appearing to honour the change.
+    path = path or SECRETS_FILE
     out: dict[str, str] = {}
     try:
         with open(path, encoding="utf-8") as fh:
@@ -91,8 +96,9 @@ def load_secrets(path: str = SECRETS_FILE) -> dict[str, str]:
     return out
 
 
-def save_secret(email: str, secret: str, path: str = SECRETS_FILE) -> None:
+def save_secret(email: str, secret: str, path: str | None = None) -> None:
     """Add or replace one account's seed, leaving the file mode 600."""
+    path = path or SECRETS_FILE
     base64.b32decode(normalise(secret), casefold=True)   # reject it now, not at sign-in
     current = load_secrets(path)
     current[email.strip().lower()] = normalise(secret)
@@ -105,9 +111,9 @@ def save_secret(email: str, secret: str, path: str = SECRETS_FILE) -> None:
             fh.write(f"{k}={v}\n")
 
 
-def code_for(email: str, path: str = SECRETS_FILE) -> tuple[str, int] | None:
+def code_for(email: str, path: str | None = None) -> tuple[str, int] | None:
     """(code, seconds left) for an account, or None if no seed is stored."""
-    secret = load_secrets(path).get((email or "").strip().lower())
+    secret = load_secrets(path or SECRETS_FILE).get((email or "").strip().lower())
     if not secret:
         return None
     return code_at(secret), seconds_remaining()

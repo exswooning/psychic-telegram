@@ -29,9 +29,11 @@ import argparse
 import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -196,9 +198,66 @@ def _last_webui_login() -> float:
         return 0.0
 
 
+CHECKIN = "/etc/bitport/deadman.checkin"
+
+
+def _last_checkin() -> float:
+    """The deliberate one: somebody typed a current 2-Step code.
+
+    Every other signal here is INCIDENTAL -- a deploy ran, a cron
+    authenticated, a browser session existed. Those prove the machine is
+    being used, which is not the same claim as the owner being alive and in
+    possession of their second factor, and it is the second claim a dead man
+    switch is actually asking about.
+
+    It is also what makes a short deadline defensible. Twelve hours of
+    incidental quiet happens on an ordinary weekend -- measured on this
+    host, three gaps past 12h in 21 days, the longest 27.9. Twelve hours
+    without a deliberate check-in means the person did not check in.
+    """
+    return _mtime(CHECKIN)
+
+
+def record_checkin(code: str, email: str = "") -> tuple[bool, str]:
+    """Verify a 2-Step code and, if it is right, reset the clock.
+
+    The previous code is accepted as well as the current one. Clocks drift,
+    and a code typed at second 29 of its window arrives in the next -- so
+    rejecting the previous window would reject correct codes, on the one
+    control standing between an operator and the destruction of everything.
+    """
+    import totp
+
+    secrets = totp.load_secrets()
+    if not secrets:
+        return False, ("no authenticator seed stored -- add one on the "
+                       "Authenticator page before arming a check-in deadline")
+    typed = re.sub(r"\D", "", code or "")
+    if len(typed) != totp.DIGITS:
+        return False, f"a code is {totp.DIGITS} digits"
+
+    now = time.time()
+    wanted = [email.strip().lower()] if email.strip() else list(secrets)
+    for who in wanted:
+        secret = secrets.get(who)
+        if not secret:
+            continue
+        for offset in (0, -totp.PERIOD):
+            if totp.code_at(secret, when=now + offset) == typed:
+                os.makedirs(os.path.dirname(CHECKIN), exist_ok=True)
+                with open(CHECKIN, "w", encoding="utf-8") as fh:
+                    fh.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} "
+                             f"{who}\n")
+                os.chmod(CHECKIN, 0o600)
+                _log(f"check-in accepted for {who}")
+                return True, who
+    return False, "that code is not current for any stored account"
+
+
 def signals() -> dict[str, float]:
     """Every independent reason to believe somebody is still here."""
     return {
+        "2-Step check-in": _last_checkin(),
         "interactive login": _last_interactive_login(),
         "sshd auth": _last_sshd_auth(),
         "web UI login": _last_webui_login(),
@@ -210,8 +269,18 @@ def signals() -> dict[str, float]:
     }
 
 
-def last_seen() -> tuple[float, str]:
+def last_seen(cfg: dict | None = None) -> tuple[float, str]:
+    """When somebody was last here, and how we know.
+
+    With require_checkin set, ONLY the deliberate 2-Step check-in counts.
+    That is the whole point of that mode: a deploy proves the machine is in
+    use, not that its owner is alive and holding their second factor, and
+    letting an incidental signal hold the switch open would quietly turn a
+    12-hour proof-of-life into "has anything happened lately".
+    """
     sig = signals()
+    if (cfg or {}).get("require_checkin"):
+        return sig["2-Step check-in"], "2-Step check-in"
     name = max(sig, key=lambda k: sig[k])
     return sig[name], name
 
@@ -305,8 +374,155 @@ def system_traces() -> list[str]:
                   + glob.glob("/etc/systemd/system/x11vnc.service"))
 
 
+GIT_ENV = "/etc/bitport/deadman.git"
+
+# Anything matching these never leaves this machine, whatever git thinks.
+#
+# The push happens moments before everything is destroyed, to a repository
+# that is PUBLIC -- install_node.sh clones it with no credential at all. A
+# mistake here does not lose data, it publishes service-account keys for
+# live tenants and every customer's password hash, permanently, to an
+# archive that is mirrored the moment it lands.
+#
+# So the filter is a denylist on top of an allowlist, not either alone.
+_NEVER_PUSH = re.compile(
+    r"(^|/)(keys|data|backups|node_modules|\.venv|logs)(/|$)"
+    r"|\.(db|db-wal|db-shm|pem|p12|key)$"
+    r"|(^|/)(env\.sh|node\.env|identities\.csv|.*sa\.json|"
+    r"deadman\.(env|git|json)|totp\.env)$"
+)
+
+
+def _safe_to_push(rel: str) -> bool:
+    return not _NEVER_PUSH.search(rel)
+
+
+def push_code(cfg: dict, dry: bool = True) -> list[str]:
+    """Save the code to GitHub before destroying the machine it is on.
+
+    What this is for: the wipe should cost the credentials and the tenant
+    data, not the work. Everything else here is recoverable by redeploying
+    -- but only if the code survives, and the deployed tree is an rsync of
+    somebody's laptop rather than a git checkout, so a local change that
+    never went back has no other copy.
+
+    The allowlist is taken from the REMOTE's own file list, not from this
+    machine. Only paths git already tracks upstream can be pushed, so a
+    stray keys/ directory or a new .env cannot be swept in by a `git add .`
+    -- there is no `git add .` here, and a file the remote has never heard
+    of is never sent. _NEVER_PUSH then rejects the obvious shapes on top of
+    that, because two independent filters fail independently.
+    """
+    out: list[str] = []
+    env = _email_config()
+    try:
+        with open(GIT_ENV, encoding="utf-8") as fh:
+            for line in fh:
+                if "=" in line and not line.strip().startswith("#"):
+                    k, _, v = line.strip().partition("=")
+                    env[k.strip()] = v.strip().strip("'\"")
+    except OSError:
+        pass
+    remote, token = env.get("DEADMAN_GIT_REMOTE", ""), env.get("DEADMAN_GIT_TOKEN", "")
+    if not remote or not token:
+        out.append("no git remote or token configured -- code NOT pushed "
+                   f"(set DEADMAN_GIT_REMOTE and DEADMAN_GIT_TOKEN in {GIT_ENV})")
+        return out
+
+    branch = env.get("DEADMAN_GIT_BRANCH", "deadman-snapshot")
+    # The token goes through the ENVIRONMENT, never argv. A URL of the form
+    # https://<token>@github.com/... is the obvious way to do this and it
+    # puts the token in the process table, where on this shared VPS every
+    # other account can read it with `ps`. git's credential helper can be an
+    # inline shell function, so the secret is passed the same way the rest
+    # of this codebase passes passwords.
+    genv = dict(os.environ, DEADMAN_GIT_TOKEN=token)
+    helper = ["-c", "credential.helper=!f() { echo username=x; "
+                    "echo password=$DEADMAN_GIT_TOKEN; }; f"]
+    git = ["git"] + helper
+    # 0700 and unpredictable: /tmp is world-traversable, and a fixed
+    # pid-based name is guessable by anyone who can watch for the wipe.
+    work = tempfile.mkdtemp(prefix="deadman-push-")
+    try:
+        if dry:
+            out.append(f"WOULD push tracked files to {remote} branch {branch}")
+            return out
+        os.rmdir(work)          # git clone wants to create it
+        subprocess.run(git + ["clone", "--depth", "1", remote, work],
+                       capture_output=True, timeout=300, check=True, env=genv)
+        tracked = subprocess.run(["git", "-C", work, "ls-files"],
+                                 capture_output=True, text=True,
+                                 timeout=120).stdout.splitlines()
+        if not tracked:
+            # The allowlist IS the remote's file list, so an empty one means
+            # nothing can ever be staged. Reported loudly because the next
+            # branch would otherwise call that "nothing to push -- the
+            # deployed code matches the remote", which is a false all-clear
+            # delivered moments before the code is destroyed. Seen for real:
+            # a --depth 1 clone of a repo whose HEAD names a branch that
+            # does not exist comes back empty and silent.
+            out.append("the remote lists NO tracked files -- nothing could be "
+                       "pushed (wrong branch, or an empty repository?)")
+            return out
+        copied = 0
+        for rel in tracked:
+            if not _safe_to_push(rel):
+                continue
+            src = os.path.join(HERE, rel)
+            if not os.path.isfile(src):
+                continue
+            dst = os.path.join(work, rel)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(src, dst)
+            copied += 1
+        # Stage by explicit path, never `git add .`: an untracked secret in
+        # the working tree is exactly what that would sweep up.
+        subprocess.run(["git", "-C", work, "add", "--"] +
+                       [r for r in tracked if _safe_to_push(r)],
+                       capture_output=True, timeout=120)
+        staged = subprocess.run(["git", "-C", work, "diff", "--cached",
+                                 "--name-only"], capture_output=True,
+                                text=True, timeout=60).stdout.split()
+        leaked = [f for f in staged if not _safe_to_push(f)]
+        if leaked:
+            # Belt and braces, checked after staging rather than trusted
+            # before it. Refusing to push is always better than publishing
+            # a key.
+            out.append(f"REFUSED to push: {len(leaked)} unsafe path(s) staged")
+            return out
+        if not staged:
+            out.append("nothing to push -- the deployed code matches the remote")
+            return out
+        subprocess.run(["git", "-C", work, "-c", "user.email=deadman@bitport",
+                        "-c", "user.name=Bitport dead man switch",
+                        "commit", "-m",
+                        f"Snapshot before dead man switch wipe "
+                        f"({time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())})"],
+                       capture_output=True, timeout=120)
+        r = subprocess.run(git + ["-C", work, "push", remote,
+                                  f"HEAD:refs/heads/{branch}"],
+                           capture_output=True, text=True, timeout=300, env=genv)
+        if r.returncode == 0:
+            out.append(f"pushed {len(staged)} changed file(s) to {branch}")
+        else:
+            out.append(f"push FAILED: {r.stderr[-200:]}")
+    except Exception as exc:      # noqa: BLE001
+        # Never block the wipe. The destruction is the point; saving the
+        # code is a courtesy, and a courtesy that could prevent the
+        # destruction would defeat the whole mechanism.
+        out.append(f"push failed ({str(exc)[:160]}) -- wiping anyway")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    return out
+
+
 def wipe(cfg: dict, dry: bool = True) -> list[str]:
     done = []
+    # BEFORE anything is removed, and before the services are stopped: the
+    # push reads the working tree, so it has to happen while there still is
+    # one. It cannot block the wipe -- push_code swallows its own failures.
+    if cfg.get("push_code", True):
+        done += push_code(cfg, dry=dry)
     if not dry:
         # First, so nothing is writing to what is about to be removed and
         # no restart brings a service back up mid-wipe.
@@ -387,9 +603,29 @@ def wipe(cfg: dict, dry: bool = True) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+def _how_to_stop(cfg: dict) -> str:
+    """What actually resets the clock -- which differs by mode.
+
+    Under require_checkin it is ONLY the 2-Step code. Telling somebody to
+    "sign in to the web UI" there is worse than telling them nothing: they
+    do it, see they are signed in, believe they are safe, and the machine is
+    destroyed anyway on schedule.
+    """
+    if cfg.get("require_checkin"):
+        return ("  - open the Dead man switch page and type a current 2-Step "
+                "code\n"
+                "    (signing in is NOT enough in this mode, and neither is "
+                "an ssh login)\n"
+                f"  - or run: {HERE}/deadman.py --checkin <code>\n"
+                f"  - or, to stop it entirely: {HERE}/deadman.py --disarm\n")
+    return ("  - sign in to the web UI\n"
+            "  - ssh to the box\n"
+            f"  - run: {HERE}/deadman.py --disarm\n")
+
+
 def report(cfg: dict) -> str:
     sig = signals()
-    seen, why = last_seen()
+    seen, why = last_seen(cfg)
     now = time.time()
     lines = ["  Aliveness signals (newest wins):"]
     for name, ts in sorted(sig.items(), key=lambda kv: -kv[1]):
@@ -424,6 +660,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--yes", action="store_true",
                     help="with --arm: confirm that it may actually destroy")
     ap.add_argument("--touch", action="store_true", help="I am alive")
+    ap.add_argument("--checkin", metavar="CODE",
+                    help="prove it with a current 2-Step code")
+    ap.add_argument("--email", default="",
+                    help="with --checkin: which account's code this is")
+    ap.add_argument("--require-checkin", action="store_true",
+                    help="with --arm: ONLY a 2-Step check-in counts as life")
     args = ap.parse_args(argv)
     cfg = load()
 
@@ -441,11 +683,31 @@ def main(argv: list[str] | None = None) -> int:
         _log("DISARMED -- nothing will be destroyed until this file is removed")
         return 0
 
+    if args.checkin is not None:
+        ok, who = record_checkin(args.checkin, args.email)
+        print(f"  {'check-in accepted for ' + who if ok else who}")
+        return 0 if ok else 1
+
     if args.arm:
-        if args.days < 7:
-            sys.exit("refusing a deadline under 7 days: this host has a "
-                     "measured 13-day gap in interactive logins during "
-                     "normal operation")
+        # The floor applies to the INCIDENTAL signals only. Twelve hours of
+        # no deploy and no ssh is an ordinary weekend -- measured here,
+        # three gaps past 12h in 21 days, the longest 27.9. Twelve hours
+        # without somebody typing a current 2-Step code is not ambiguous:
+        # it means they did not type one. A deliberate signal is what makes
+        # a short deadline a proof of life rather than a coin toss.
+        if args.days < 7 and not args.require_checkin:
+            sys.exit("refusing a deadline under 7 days without --require-checkin: "
+                     "this host has measured 12-hour gaps in ordinary use, so a "
+                     "short deadline on incidental signals fires on a quiet "
+                     "weekend. With --require-checkin the deadline measures a "
+                     "deliberate act and a short one is meaningful.")
+        if args.require_checkin:
+            import totp
+            if not totp.load_secrets():
+                sys.exit("--require-checkin needs an authenticator seed stored "
+                         "first, or the deadline can never be met. Add one on "
+                         "the Authenticator page.")
+            cfg["require_checkin"] = True
         cfg.update({"armed": True, "days": args.days,
                     "confirmed": bool(args.yes),
                     "armed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ",
@@ -469,7 +731,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # --run: the scheduled check.
     ok, state = armed()
-    seen, why = last_seen()
+    seen, why = last_seen(cfg)
     if not seen:
         _log("no aliveness signal could be read at all -- doing nothing. "
              "A switch that fires when it cannot measure fires at random.")
@@ -498,10 +760,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"Newest signal was: {why}.\n\n"
                 f"At {days} days everything below is destroyed permanently:\n"
                 + "\n".join(f"  {p}" for p in targets(cfg))
-                + "\n\nTo stop it, do ANY of:\n"
-                  "  - sign in to the web UI\n"
-                  "  - ssh to the box\n"
-                  f"  - run: {HERE}/deadman.py --disarm\n")
+                + "\n\nTo stop it:\n" + _how_to_stop(cfg))
             sent.add(str(frac))
             cfg["warned"] = sorted(sent)
             try:

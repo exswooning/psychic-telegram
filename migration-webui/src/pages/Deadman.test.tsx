@@ -11,10 +11,12 @@ import Deadman from './Deadman'
 const status = vi.fn()
 const wipe = vi.fn()
 const touch = vi.fn()
+const checkin = vi.fn()
 vi.mock('@/api/controlPlane', () => ({
   fetchDeadman: () => status(),
   deadmanWipeNow: (...a: unknown[]) => wipe(...a),
   deadmanTouch: () => touch(),
+  deadmanCheckin: (...a: unknown[]) => checkin(...a),
 }))
 
 const st = (over = {}) => ({
@@ -23,11 +25,12 @@ const st = (over = {}) => ({
   newestSignal: 'sshd auth', secondsSinceSeen: 120,
   secondsRemaining: 7 * 86400 - 120,
   targets: ['/root/migration/keys', '/etc/bitport'],
-  emailConfigured: true, ...over,
+  emailConfigured: true, requireCheckin: false, ...over,
 })
 
 beforeEach(() => {
-  status.mockReset(); wipe.mockReset(); touch.mockReset()
+  status.mockReset(); wipe.mockReset(); touch.mockReset(); checkin.mockReset()
+  checkin.mockResolvedValue({ ok: true, account: 'admin@src.test' })
   touch.mockResolvedValue({ ok: true, newestSignal: 'manual touch' })
   status.mockResolvedValue(st()); wipe.mockResolvedValue({ ok: true, removed: [] })
 })
@@ -150,5 +153,62 @@ describe('resetting the timer', () => {
     fireEvent.click(await screen.findByTestId('deadman-touch'))
     expect(await screen.findByTestId('deadman-error'))
       .toHaveTextContent('superadmin only')
+  })
+})
+
+
+describe('checking in', () => {
+  /* "An authenticator code that I put in once per 12 hours." A button can
+     be pressed by anything holding a superadmin session, including
+     automation that outlives its owner; the code proves a PERSON. */
+
+  it('sends the code that was typed', async () => {
+    render(<Deadman />)
+    fireEvent.change(await screen.findByTestId('checkin-code'),
+                     { target: { value: '481920' } })
+    fireEvent.click(screen.getByTestId('deadman-checkin'))
+    await waitFor(() => expect(checkin).toHaveBeenCalledWith('481920'))
+  })
+
+  it('will not send a half-typed code', async () => {
+    render(<Deadman />)
+    fireEvent.change(await screen.findByTestId('checkin-code'),
+                     { target: { value: '4819' } })
+    expect(screen.getByTestId('deadman-checkin')).toBeDisabled()
+  })
+
+  it('says why a code was rejected instead of looking reset', async () => {
+    /* Silently appearing to have checked in is the one failure that gets
+       the machine destroyed by someone who thought they had checked in. */
+    checkin.mockResolvedValue({ ok: false,
+                                error: 'that code is not current for any stored account' })
+    render(<Deadman />)
+    fireEvent.change(await screen.findByTestId('checkin-code'),
+                     { target: { value: '000000' } })
+    fireEvent.click(screen.getByTestId('deadman-checkin'))
+    expect(await screen.findByText(/not current for any stored account/))
+      .toBeInTheDocument()
+  })
+
+  it('confirms in hours, the unit the deadline is set in', async () => {
+    render(<Deadman />)
+    fireEvent.change(await screen.findByTestId('checkin-code'),
+                     { target: { value: '481920' } })
+    fireEvent.click(screen.getByTestId('deadman-checkin'))
+    expect(await screen.findByTestId('checkin-ok')).toHaveTextContent('168 hours')
+  })
+
+  it('hides the plain touch button when only a check-in counts', async () => {
+    /* It would be a button that appears to reset a clock it cannot reset,
+       which is worse than no button at all. */
+    status.mockResolvedValue(st({ requireCheckin: true }))
+    render(<Deadman />)
+    await screen.findByTestId('checkin-code')
+    expect(screen.queryByTestId('deadman-touch')).toBeNull()
+  })
+
+  it('keeps it where an incidental signal still counts', async () => {
+    render(<Deadman />)
+    expect(await screen.findByTestId('deadman-touch')).toBeInTheDocument()
   })
 })
