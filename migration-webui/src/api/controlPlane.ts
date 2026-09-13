@@ -755,6 +755,25 @@ export const deadmanTouch = () =>
   cpFetch<{ ok: boolean; newestSignal: string }>('/api/v2/deadman/touch',
                                                  { method: 'POST' })
 
+export interface DeadmanEnrolment {
+  email: string
+  secret: string
+  uri: string
+  setupKey: string
+  /** The QR as on/off modules. A matrix rather than server-built SVG: the
+   *  page draws it with ordinary elements instead of injecting markup, and
+   *  the one payload that must never be wrong never passes through
+   *  dangerouslySetInnerHTML. Empty if the encoder is unavailable -- the
+   *  setup key is typed into the same app and works without it. */
+  matrix: boolean[][]
+}
+
+/** The QR and setup key for the check-in account. Fetched only when asked
+ *  for: it returns the SEED, and a page that loads it automatically leaves
+ *  the second factor for the wipe switch on any screen left open. */
+export const fetchDeadmanEnrolment = () =>
+  cpFetch<DeadmanEnrolment>('/api/v2/deadman/enrol')
+
 /** Prove a PERSON is alive, by typing a current 2-Step code.
  *
  *  Different from a touch in the way that matters: a touch is a button, and

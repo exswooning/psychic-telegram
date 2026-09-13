@@ -13,3 +13,4 @@ tqdm>=4.66.0
 
 # TUI dashboard: `curses` ships with CPython on Linux/macOS. Windows needs this.
 windows-curses>=2.3.2; sys_platform == "win32"
+qrcode

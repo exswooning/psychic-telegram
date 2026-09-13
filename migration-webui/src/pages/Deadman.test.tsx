@@ -12,11 +12,13 @@ const status = vi.fn()
 const wipe = vi.fn()
 const touch = vi.fn()
 const checkin = vi.fn()
+const enrol = vi.fn()
 vi.mock('@/api/controlPlane', () => ({
   fetchDeadman: () => status(),
   deadmanWipeNow: (...a: unknown[]) => wipe(...a),
   deadmanTouch: () => touch(),
   deadmanCheckin: (...a: unknown[]) => checkin(...a),
+  fetchDeadmanEnrolment: () => enrol(),
 }))
 
 const st = (over = {}) => ({
@@ -31,6 +33,11 @@ const st = (over = {}) => ({
 beforeEach(() => {
   status.mockReset(); wipe.mockReset(); touch.mockReset(); checkin.mockReset()
   checkin.mockResolvedValue({ ok: true, account: 'admin@src.test' })
+  enrol.mockResolvedValue({
+    email: 'deadman@bitport', secret: 'ABCD2345', setupKey: 'ABCD 2345',
+    uri: 'otpauth://totp/deadman?secret=ABCD2345&issuer=Bitport',
+    matrix: [[true, false], [false, true]],
+  })
   touch.mockResolvedValue({ ok: true, newestSignal: 'manual touch' })
   status.mockResolvedValue(st()); wipe.mockResolvedValue({ ok: true, removed: [] })
 })
@@ -210,5 +217,56 @@ describe('checking in', () => {
   it('keeps it where an incidental signal still counts', async () => {
     render(<Deadman />)
     expect(await screen.findByTestId('deadman-touch')).toBeInTheDocument()
+  })
+})
+
+
+describe('enrolling a phone', () => {
+  it('does not fetch the seed until asked', async () => {
+    /* It returns the SEED. A page that loads it on mount leaves the second
+       factor for the wipe switch sitting on any screen left open. */
+    render(<Deadman />)
+    await screen.findByTestId('checkin-code')
+    expect(enrol).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('qr')).toBeNull()
+  })
+
+  it('draws a scannable QR on request', async () => {
+    render(<Deadman />)
+    fireEvent.click(await screen.findByTestId('show-qr'))
+    expect(await screen.findByTestId('qr')).toBeInTheDocument()
+  })
+
+  it('offers the setup key too, for a camera that will not focus', async () => {
+    render(<Deadman />)
+    fireEvent.click(await screen.findByTestId('show-qr'))
+    expect(await screen.findByTestId('setup-key')).toHaveTextContent('ABCD 2345')
+  })
+
+  it('says plainly what the code on screen is', async () => {
+    render(<Deadman />)
+    fireEvent.click(await screen.findByTestId('show-qr'))
+    expect(await screen.findByTestId('enrol-warning')).toHaveTextContent(/seed/)
+  })
+
+  it('hides it again, so it is not left on screen', async () => {
+    render(<Deadman />)
+    fireEvent.click(await screen.findByTestId('show-qr'))
+    await screen.findByTestId('qr')
+    fireEvent.click(screen.getByTestId('show-qr'))
+    expect(screen.queryByTestId('qr')).toBeNull()
+  })
+
+  it('still enrols when the QR encoder is unavailable', async () => {
+    /* The setup key is typed into the same app and works without it, so a
+       missing encoder should cost the convenience, not the enrolment. */
+    enrol.mockResolvedValue({
+      email: 'deadman@bitport', secret: 'ABCD2345', setupKey: 'ABCD 2345',
+      uri: 'otpauth://x', matrix: [],
+    })
+    render(<Deadman />)
+    fireEvent.click(await screen.findByTestId('show-qr'))
+    expect(await screen.findByTestId('setup-key')).toBeInTheDocument()
+    expect(screen.queryByTestId('qr')).toBeNull()
   })
 })

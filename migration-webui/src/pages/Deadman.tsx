@@ -19,8 +19,12 @@ import {
   Timer as TimerIcon, DeleteForever as WipeIcon,
   Favorite as AliveIcon,
 } from '@mui/icons-material'
-import { fetchDeadman, deadmanWipeNow, deadmanTouch, deadmanCheckin } from '@/api/controlPlane'
-import type { DeadmanStatus } from '@/api/controlPlane'
+import {
+  fetchDeadman, deadmanWipeNow, deadmanTouch, deadmanCheckin,
+  fetchDeadmanEnrolment,
+} from '@/api/controlPlane'
+import QrCode from '@/components/QrCode'
+import type { DeadmanStatus, DeadmanEnrolment } from '@/api/controlPlane'
 
 const hms = (secs: number): string => {
   const s = Math.max(0, secs)
@@ -45,6 +49,7 @@ export const Deadman: React.FC = () => {
   const [done, setDone] = useState<string[] | null>(null)
   const [code, setCode] = useState('')
   const [said, setSaid] = useState('')
+  const [enrol, setEnrol] = useState<DeadmanEnrolment | null>(null)
 
   const refresh = useCallback(() => {
     fetchDeadman()
@@ -150,6 +155,48 @@ export const Deadman: React.FC = () => {
                   I&apos;m here — reset the timer
                 </Button>
               </Stack>
+              {/* Not loaded on mount: it returns the SEED, and a page that
+                  fetches it automatically leaves the second factor for the
+                  wipe switch sitting on any screen left open. */}
+              <Button size="small" variant="text" sx={{ mt: 0.5 }}
+                      data-testid="show-qr"
+                      onClick={() => (enrol ? setEnrol(null)
+                        : fetchDeadmanEnrolment().then(setEnrol).catch(
+                          (e) => setErr(e instanceof Error ? e.message : String(e))))}>
+                {enrol ? 'hide' : 'set up'} Google Authenticator
+              </Button>
+
+              {enrol && (
+                <Paper variant="outlined" sx={{ p: 2, mt: 1 }} data-testid="enrolment">
+                  <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}
+                         alignItems={{ xs: 'stretch', sm: 'flex-start' }}>
+                    <QrCode matrix={enrol.matrix} />
+                    <Box sx={{ minWidth: 0 }}>
+                      <Typography variant="body2" sx={{ mb: 1 }}>
+                        Google Authenticator → <strong>+</strong> →{' '}
+                        <strong>Scan a QR code</strong>.
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary"
+                                  sx={{ mb: 1 }}>
+                        Or <strong>Enter a setup key</strong>, with this:
+                      </Typography>
+                      <Typography data-testid="setup-key"
+                                  sx={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                                        fontSize: 15, fontWeight: 700,
+                                        wordBreak: 'break-all', mb: 1 }}>
+                        {enrol.setupKey}
+                      </Typography>
+                      <Alert severity="warning" data-testid="enrol-warning">
+                        This is the seed itself. Scanning it again on another
+                        phone gives that phone the same power to hold this
+                        machine open — and the codes it produces are the only
+                        thing standing between the countdown and a wipe.
+                      </Alert>
+                    </Box>
+                  </Stack>
+                </Paper>
+              )}
+
               {said === 'ok' && (
                 <Alert severity="success" sx={{ mb: 1 }} data-testid="checkin-ok">
                   Checked in. The countdown is back to {st.days * 24} hours.

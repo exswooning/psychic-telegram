@@ -4647,6 +4647,13 @@ class WipeNowRequest(BaseModel):
     reason: str = ""
 
 
+# The account the dead man check-in is enrolled under. Not a Google
+# address on purpose: this seed exists to prove a person is alive, and
+# pinning it to a tenant account would tie the switch's fate to whether
+# that tenant still exists.
+CHECKIN_ACCOUNT = "deadman@bitport"
+
+
 @app.get("/api/v2/deadman/status")
 async def deadman_status(op: Operator = Depends(operator)):
     """The countdown, and every signal feeding it.
@@ -4772,6 +4779,28 @@ async def deadman_touch(op: Operator = Depends(operator)):
         return {"ok": True, "newestSignal": why,
                 "secondsSinceSeen": round(time.time() - seen) if seen else None}
     return await _off_loop(_touch)
+
+
+@app.get("/api/v2/deadman/enrol")
+async def deadman_enrol(op: Operator = Depends(operator)):
+    """The QR and setup key for the check-in account.
+
+    Superadmin-only, and not fetched unless asked for: this returns the
+    SEED, and a page that renders it on every load leaves the second factor
+    for the wipe switch sitting on any screen left open.
+
+    Re-enrolling returns the existing seed rather than a new one. Rotating
+    it silently would leave the phone holding the old one, and the machine
+    would then wipe itself on schedule because the codes stopped matching --
+    which is the worst possible way for an enrolment bug to show up.
+    """
+    require_login(op)
+    require_superadmin(op)
+
+    def _read() -> dict:
+        import totp
+        return totp.enrol(CHECKIN_ACCOUNT)
+    return await _off_loop(_read)
 
 
 class CheckinRequest(BaseModel):

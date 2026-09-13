@@ -169,3 +169,70 @@ class TestNoNewDependency:
             assert lib not in src, lib
         assert re.search(r"^import hmac$", src, re.M)
         assert re.search(r"^import hashlib$", src, re.M)
+
+
+class TestEnrolment:
+    """A QR scannable by Google Authenticator, and the key behind it."""
+
+    def test_re_enrolling_returns_the_same_seed(self, tmp_path):
+        """Rotating it silently would leave the phone holding the old one,
+        and the machine would then wipe itself on schedule because the codes
+        stopped matching -- the worst possible way for an enrolment bug to
+        surface."""
+        p = str(tmp_path / "t.env")
+        first = totp.enrol("deadman@bitport", path=p)
+        assert totp.enrol("deadman@bitport", path=p)["secret"] == first["secret"]
+
+    def test_the_uri_is_what_an_authenticator_app_expects(self, tmp_path):
+        e = totp.enrol("deadman@bitport", path=str(tmp_path / "t.env"))
+        assert e["uri"].startswith("otpauth://totp/")
+        assert f"secret={e['secret']}" in e["uri"]
+        assert "issuer=Bitport" in e["uri"]
+
+    def test_it_does_not_spell_out_the_defaults(self, tmp_path):
+        """SHA1/6/30 are what every app assumes, and including them only
+        makes the QR denser and harder for a camera to read off a screen."""
+        e = totp.enrol("deadman@bitport", path=str(tmp_path / "t.env"))
+        for noise in ("algorithm=", "digits=", "period="):
+            assert noise not in e["uri"], noise
+
+    def test_the_seed_it_hands_out_is_the_one_that_verifies(self, tmp_path):
+        p = str(tmp_path / "t.env")
+        e = totp.enrol("deadman@bitport", path=p)
+        assert totp.code_for("deadman@bitport", p)[0] == totp.code_at(e["secret"])
+
+    def test_the_setup_key_is_the_secret_in_readable_groups(self, tmp_path):
+        """It gets typed by hand into a phone."""
+        e = totp.enrol("deadman@bitport", path=str(tmp_path / "t.env"))
+        assert e["setupKey"].replace(" ", "") == e["secret"]
+
+    def test_the_seed_is_160_bits(self, tmp_path):
+        """The RFC 4226 recommendation."""
+        import base64
+        e = totp.enrol("deadman@bitport", path=str(tmp_path / "t.env"))
+        assert len(base64.b32decode(totp.normalise(e["secret"]))) == 20
+
+    def test_the_qr_is_a_square_grid(self, tmp_path):
+        e = totp.enrol("deadman@bitport", path=str(tmp_path / "t.env"))
+        m = e["matrix"]
+        assert m and all(len(row) == len(m) for row in m)
+
+    def test_a_missing_encoder_costs_the_qr_and_not_the_enrolment(self, monkeypatch):
+        """The setup key is typed into the same app and works without it."""
+        import builtins
+        real = builtins.__import__
+
+        def no_qrcode(name, *a, **k):
+            if name == "qrcode":
+                raise ImportError("gone")
+            return real(name, *a, **k)
+
+        monkeypatch.setattr(builtins, "__import__", no_qrcode)
+        assert totp.qr_matrix("otpauth://totp/x?secret=Y") == []
+
+    def test_the_secret_is_encoded_locally(self):
+        """A QR service would be handed the second factor for a switch that
+        destroys the machine."""
+        import inspect
+        src = inspect.getsource(totp.qr_matrix) + inspect.getsource(totp.enrol)
+        assert "http" not in src.replace("otpauth", "")

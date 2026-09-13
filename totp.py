@@ -117,3 +117,60 @@ def code_for(email: str, path: str | None = None) -> tuple[str, int] | None:
     if not secret:
         return None
     return code_at(secret), seconds_remaining()
+
+
+def enrol(email: str, issuer: str = "Bitport",
+          path: str | None = None) -> dict:
+    """Everything an authenticator app needs to add this account.
+
+    Creates the seed if there isn't one, and returns the SAME seed if there
+    is: re-enrolling must not silently invalidate the phone already holding
+    it. On a dead man switch that mistake is not a login annoyance -- it is
+    a machine that wipes itself because the codes stopped matching.
+
+    The QR is returned as a matrix of booleans rather than rendered markup,
+    so the page draws it with ordinary elements. Sending SVG for the client
+    to inject would mean trusting a server-built HTML string with the one
+    payload that must never be wrong.
+
+    The secret is never sent anywhere to be encoded. A QR service would be
+    handed the second factor for a switch that destroys the machine.
+    """
+    import base64
+    import secrets as _secrets
+    import urllib.parse
+
+    who = (email or "").strip().lower()
+    stored = load_secrets(path)
+    secret = stored.get(who)
+    if not secret:
+        # 160 bits, the RFC 4226 recommendation.
+        secret = base64.b32encode(_secrets.token_bytes(20)).decode().rstrip("=")
+        save_secret(who, secret, path)
+    # SHA1/6/30 are the defaults every authenticator app assumes, and
+    # spelling them out only makes the QR denser and harder to scan off a
+    # screen. The label is the local part alone for the same reason.
+    label = urllib.parse.quote(who.split("@")[0] or who)
+    uri = (f"otpauth://totp/{label}?secret={secret}"
+           f"&issuer={urllib.parse.quote(issuer)}")
+    return {"email": who, "secret": secret, "uri": uri,
+            "setupKey": " ".join(secret[i:i + 4]
+                                 for i in range(0, len(secret), 4)),
+            "matrix": qr_matrix(uri)}
+
+
+def qr_matrix(text: str) -> list[list[bool]]:
+    """The QR as a grid of on/off modules, or [] if it cannot be built.
+
+    Empty rather than an exception: the setup key is typed by hand into the
+    same app and works without this, so a missing library should cost the
+    convenience and not the enrolment.
+    """
+    try:
+        import qrcode
+    except ImportError:
+        return []
+    qr = qrcode.QRCode(border=2, error_correction=qrcode.constants.ERROR_CORRECT_M)
+    qr.add_data(text)
+    qr.make(fit=True)
+    return [[bool(c) for c in row] for row in qr.get_matrix()]
