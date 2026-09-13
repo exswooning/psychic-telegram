@@ -26,6 +26,7 @@ disarmable from anywhere that can reach the box.
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import shutil
@@ -268,13 +269,40 @@ def targets(cfg: dict) -> list[str]:
            os.path.join(HERE, "data"), os.path.join(HERE, "migration.db"),
            os.path.join(HERE, "env.sh"),
            os.path.join(HERE, "identities.csv")]
+
+    # The browser profile. This is not housekeeping: full_setup drives a
+    # real Chrome through Google's sign-in as a super-admin, and the profile
+    # keeps the resulting SESSION COOKIES. Leaving it behind after a wipe
+    # means the credentials are gone and a logged-in browser is not, which
+    # is most of what the credentials were for.
+    out += [os.path.expanduser("~/.config/google-chrome"),
+            os.path.expanduser("~/.config/chromium")]
+    out += sorted(glob.glob("/tmp/playwright*"))
+
     if cfg.get("include_backups", True):
         out.append(os.path.join(HERE, "backups"))
     if cfg.get("include_code", True):
-        # LAST. Everything above must already be gone, because removing
-        # this removes the interpreter's own working tree.
+        # Everything inside HERE is subsumed by this; the entries above are
+        # listed separately so the credentials go FIRST and a failure part
+        # way through has already taken the material that matters.
         out.append(HERE)
+        # The playwright browsers themselves -- hundreds of megabytes, and
+        # no use to anything once the code is gone.
+        out.append(os.path.expanduser("~/.cache/ms-playwright"))
     return [p for p in out if os.path.exists(p)]
+
+
+def system_traces() -> list[str]:
+    """What lives outside the install directory and still names this tenant.
+
+    Removing the code and leaving these behind produces a machine that
+    advertises what it used to be: unit files naming paths and ports, a
+    Caddyfile carrying the public domain, and a cron entry that goes on
+    firing every ten minutes against an interpreter that no longer exists.
+    """
+    return sorted(glob.glob("/etc/systemd/system/bitport-*")
+                  + glob.glob("/etc/systemd/system/xvfb.service")
+                  + glob.glob("/etc/systemd/system/x11vnc.service"))
 
 
 def wipe(cfg: dict, dry: bool = True) -> list[str]:
@@ -297,18 +325,64 @@ def wipe(cfg: dict, dry: bool = True) -> list[str]:
             done.append(f"removed {path}")
         except OSError as exc:
             done.append(f"FAILED {path}: {exc}")
-    if not dry:
-        # Services BEFORE the code directory, which is why this runs inside
-        # the loop's shadow rather than after it: by the time HERE is
-        # removed the units' ExecStart no longer exists, and systemctl stop
-        # on a unit whose binary is gone leaves a failed unit rather than a
-        # clean one.
-        subprocess.run(["systemctl", "stop", "bitport-api", "bitport-webui",
-                        "bitport-fleet"], capture_output=True, timeout=60)
-        subprocess.run(["systemctl", "disable", "bitport-api", "bitport-webui",
-                        "bitport-fleet", "bitport-backup.timer"],
-                       capture_output=True, timeout=60)
-        done.append("stopped and disabled the services")
+    # What is left outside the install directory. Removing the code and
+    # leaving these produces a machine that advertises what it used to be.
+    for unit in system_traces():
+        if dry:
+            done.append(f"WOULD REMOVE {unit}")
+            continue
+        try:
+            os.remove(unit)
+            done.append(f"removed {unit}")
+        except OSError as exc:
+            done.append(f"FAILED {unit}: {exc}")
+
+    if dry:
+        done.append("WOULD remove the cron entry, restore the Caddyfile "
+                    "and vacuum the journal")
+        return done
+
+    subprocess.run(["systemctl", "disable", "bitport-api", "bitport-webui",
+                    "bitport-fleet", "bitport-backup.timer"],
+                   capture_output=True, timeout=60)
+    subprocess.run(["systemctl", "daemon-reload"], capture_output=True, timeout=60)
+    done.append("disabled the services and reloaded systemd")
+
+    # The cron entry outlives everything it refers to, and goes on firing
+    # every ten minutes against an interpreter that is no longer there.
+    try:
+        cur = subprocess.run(["crontab", "-l"], capture_output=True,
+                             text=True, timeout=30).stdout
+        kept = [ln for ln in cur.splitlines() if HERE not in ln]
+        if len(kept) != len(cur.splitlines()):
+            subprocess.run(["crontab", "-"], input="\n".join(kept) + "\n",
+                           text=True, capture_output=True, timeout=30)
+            done.append("removed the cron entries pointing at the install")
+    except Exception as exc:      # noqa: BLE001
+        done.append(f"could not edit crontab: {exc}")
+
+    # Caddy carries the public domain. install.sh saved whatever was there
+    # before, so put it back rather than leaving a config for a site that
+    # no longer exists.
+    try:
+        backup = "/etc/caddy/Caddyfile.bitport-backup"
+        if os.path.exists(backup):
+            shutil.move(backup, "/etc/caddy/Caddyfile")
+            done.append("restored the Caddyfile that predated Bitport")
+        elif os.path.exists("/etc/caddy/Caddyfile"):
+            os.remove("/etc/caddy/Caddyfile")
+            done.append("removed Bitport's Caddyfile")
+        subprocess.run(["systemctl", "reload", "caddy"],
+                       capture_output=True, timeout=30)
+    except OSError as exc:
+        done.append(f"could not clear the Caddyfile: {exc}")
+
+    # The journal and syslog quote tenant domains, user addresses and file
+    # names on every run. Vacuuming is the only lever available; it is not
+    # a secure erase, and neither is anything else here.
+    subprocess.run(["journalctl", "--vacuum-time=1s"],
+                   capture_output=True, timeout=120)
+    done.append("vacuumed the systemd journal")
     return done
 
 

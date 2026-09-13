@@ -146,7 +146,12 @@ class TestWhatItDestroys:
             probe = os.path.join(d, "keep.txt")
             open(probe, "w").close()
             out = deadman.wipe({"include_backups": False}, dry=True)
-            assert all(line.startswith("WOULD REMOVE") for line in out)
+            # Asserted on the property, not the prefix: the dry run also
+            # summarises the side effects (cron, Caddyfile, journal) that
+            # are not file removals, and requiring every line to start
+            # "WOULD REMOVE" failed on a line that removes nothing.
+            assert all(not line.startswith("removed ") for line in out)
+            assert all(not line.startswith("FAILED ") for line in out)
             assert os.path.exists(probe)
 
     def test_services_stop_first_now_that_the_code_is_a_target(self):
@@ -226,3 +231,56 @@ class TestResettingIt:
         src = _code(deadman._last_webui_login)
         assert "sessions" in src
         assert "MAX(expires_at)" in src
+
+
+class TestItLeavesNoTraceOutsideTheInstall:
+    """"Why does it not wipe everything" -- because it did not.
+
+    Removing /root/migration takes the code and every secret inside it, but
+    a machine was left advertising what it used to be: six systemd units, a
+    Caddyfile carrying the public domain, a cron entry firing every ten
+    minutes at a deleted interpreter, and -- the one that matters -- the
+    Chrome profile the browser automation signed into Google with.
+    """
+
+    def test_the_browser_profile_goes(self):
+        """full_setup drives a real Chrome through a super-admin sign-in and
+        the profile keeps the SESSION COOKIES. Credentials gone and a
+        logged-in browser still there is most of what the credentials were
+        for."""
+        src = _code(deadman.targets)
+        assert "google-chrome" in src
+        assert "playwright" in src
+
+    def test_the_systemd_units_go(self):
+        src = _code(deadman.system_traces)
+        assert "bitport-*" in src
+        assert "xvfb" in src
+
+    def test_the_cron_entry_goes(self):
+        """It outlives everything it refers to and keeps firing at an
+        interpreter that is no longer there."""
+        src = _code(deadman.wipe)
+        assert "crontab" in src
+        assert "HERE not in ln" in src
+
+    def test_the_caddyfile_is_restored_not_just_deleted(self):
+        """install.sh saved whatever was there before. Putting it back beats
+        leaving the box with no web server config at all."""
+        src = _code(deadman.wipe)
+        assert "Caddyfile.bitport-backup" in src
+        assert "shutil.move" in src
+
+    def test_the_journal_is_vacuumed(self):
+        """It quotes tenant domains, user addresses and file names on every
+        run."""
+        src = _code(deadman.wipe)
+        assert "--vacuum-time" in src
+
+    def test_a_dry_run_still_changes_nothing_outside_the_tree(self):
+        """The new steps are side effects rather than file removals, so the
+        dry path has to return before them rather than skipping each."""
+        out = deadman.wipe({"include_code": False, "include_backups": False},
+                           dry=True)
+        assert any("WOULD remove the cron entry" in line for line in out)
+        assert all(not line.startswith("removed ") for line in out)
