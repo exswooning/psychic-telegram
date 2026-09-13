@@ -190,6 +190,12 @@ if "${SSH[@]}" "$TARGET" "systemctl list-unit-files bitport-webui.service >/dev/
   # changed nothing -- which is the exact failure this script's own header
   # is about, one service short. Restarted with `|| true` because a box that
   # never enabled it must not fail an otherwise good deploy.
+  # Permissions BEFORE the restart. rsync -a preserves the sending side's
+  # modes, so a file that is 644 on a developer's laptop lands 644 here --
+  # which is how a deploy quietly re-opens what harden.sh just closed. Run
+  # every time rather than once, because "once" is only true until the next
+  # deploy.
+  "${SSH[@]}" "$TARGET" "cd '$DEST' && [ -f harden.sh ] && bash harden.sh '$DEST' >/dev/null 2>&1 || true"
   "${SSH[@]}" "$TARGET" "systemctl restart bitport-webui bitport-api; \
     systemctl restart bitport-fleet 2>/dev/null || true; sleep 2; \
     if systemctl is-active --quiet bitport-webui && systemctl is-active --quiet bitport-api; then \

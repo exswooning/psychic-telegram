@@ -551,6 +551,20 @@ fi
 # ---------------------------------------------------------------------------
 # 8. health check + summary
 # ---------------------------------------------------------------------------
+step "Permissions"
+# Before the health check, so a box is never briefly live with a
+# world-readable ledger. keys/ holds service-account credentials for real
+# tenants and migration.db holds every customer's password_hash; neither
+# has any business being readable by anything but this service.
+if [ "$DRY_RUN" = 1 ]; then
+  ok "dry-run: would restrict keys/, the ledgers and /etc/bitport"
+elif [ -f "$INSTALL_DIR/harden.sh" ]; then
+  run "bash '$INSTALL_DIR/harden.sh' '$INSTALL_DIR' root"
+  ok "secrets restricted to the service account"
+else
+  warn "harden.sh missing -- check permissions on keys/ and the ledgers"
+fi
+
 step "Health check"
 if [ "$DRY_RUN" = 1 ]; then
   ok "dry-run: skipped"

@@ -245,3 +245,69 @@ def test_both_ways_of_supplying_one_count_as_given():
     fn = SH[SH.index("ask_secret() {"):SH.index("\nask INSTALL_DIR")]
     assert fn.count("PASSWORD_GIVEN=1") == 2
     assert '[ -n "$reply" ] && PASSWORD_GIVEN=1' in fn
+
+
+def test_a_fresh_install_restricts_the_secrets():
+    """keys/ holds service-account credentials for real tenants and
+    migration.db holds every customer's password_hash. On a shared box both
+    were left world-readable -- found by auditing a live VPS, not by
+    review."""
+    assert "harden.sh" in SH
+    step = SH[SH.index('step "Permissions"'):SH.index('step "Health check"')]
+    assert "harden.sh" in step
+
+
+def test_it_happens_before_the_box_goes_live():
+    """Otherwise there is a window where a running service is serving from a
+    world-readable ledger."""
+    assert SH.index('step "Permissions"') < SH.index('step "Health check"')
+
+
+def test_every_deploy_re_applies_it():
+    """rsync -a preserves the SENDING side's modes, so a file that is 644 on
+    a developer's laptop lands 644 on the server -- a deploy quietly
+    re-opens what hardening closed. "Once" is only true until the next
+    deploy."""
+    import os
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "sync_vps.sh"), encoding="utf-8") as fh:
+        sync = fh.read()
+    assert "harden.sh" in sync
+    assert sync.index("harden.sh") < sync.index("systemctl restart bitport-webui")
+
+
+def test_hardening_never_fails_a_deploy():
+    """A box that predates harden.sh must still deploy."""
+    import os
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "sync_vps.sh"), encoding="utf-8") as fh:
+        # The invoking line, not the first line that mentions it -- the
+        # comment above it names the file too.
+        line = [l for l in fh if 'bash harden.sh' in l][0]
+    assert "|| true" in line
+
+
+def test_it_sweeps_all_json_not_a_remembered_list():
+    """The first version named inventories and manifests and left
+    run_state.json, dms_metrics.json and staging_drives_before_sigkill.json
+    open -- all three name real users or Drive ids. An allowlist of secrets
+    is only as good as the last person to extend it."""
+    import os
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "harden.sh"), encoding="utf-8") as fh:
+        harden = fh.read()
+    assert '"$DIR"/*.json' in harden
+
+
+def test_it_does_not_claim_to_defeat_root():
+    """The request that prompted this asked to "encrypt the code" on a box
+    shared with other administrators. Root reads another process's memory
+    and any key it holds, so at-rest encryption and file modes are both
+    bypassed rather than weakened. Saying so in the file is the only honest
+    protection available."""
+    import os
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "harden.sh"), encoding="utf-8") as fh:
+        harden = fh.read()
+    assert "CANNOT" in harden
+    assert "root" in harden
