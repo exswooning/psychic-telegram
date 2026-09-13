@@ -29,6 +29,7 @@ import Services from '@/pages/Services'
 import Scope from '@/pages/Scope'
 import Logs from '@/pages/Logs'
 import GcpTeardown from '@/pages/GcpTeardown'
+import Deadman from '@/pages/Deadman'
 import useMigration from '@/hooks/useMigration'
 import { fetchMe, Account } from '@/api/controlPlane'
 
@@ -118,6 +119,7 @@ const App: React.FC = () => {
             <Route path="/scope" element={<Scope />} />
             <Route path="/logs" element={<Logs />} />
             <Route path="/gcp-teardown" element={<GcpTeardown />} />
+            <Route path="/deadman" element={<Deadman />} />
             <Route path="/admin/accounts" element={<AdminAccounts />} />
           </Routes>
         </Layout>

@@ -4642,6 +4642,85 @@ async def set_node_takes_work(req: NodeWorkFlag,
     return await _off_loop(_write)
 
 
+class WipeNowRequest(BaseModel):
+    confirm: str = ""
+    reason: str = ""
+
+
+@app.get("/api/v2/deadman/status")
+async def deadman_status(op: Operator = Depends(operator)):
+    """The countdown, and every signal feeding it.
+
+    Superadmin-only: it lists the paths that would be destroyed and how long
+    is left, which is a map of where the credentials are and when nobody is
+    watching them.
+    """
+    require_login(op)
+    require_superadmin(op)
+
+    def _read() -> dict:
+        import deadman
+        cfg = deadman.load()
+        sig = deadman.signals()
+        seen, why = deadman.last_seen()
+        ok, state = deadman.armed()
+        days = float(cfg.get("days") or 0)
+        age = (time.time() - seen) if seen else None
+        return {
+            "armed": ok, "state": state, "days": days,
+            "signals": {k: (None if not v else round(time.time() - v))
+                        for k, v in sig.items()},
+            "newestSignal": why if seen else "",
+            "secondsSinceSeen": None if age is None else round(age),
+            "secondsRemaining": (None if (age is None or not days)
+                                 else round(days * 86400 - age)),
+            "targets": deadman.targets(cfg),
+            "emailConfigured": bool(
+                deadman._email_config().get("DEADMAN_EMAIL_TO")),
+        }
+    return await _off_loop(_read)
+
+
+@app.post("/api/v2/deadman/wipe")
+async def deadman_wipe_now(req: WipeNowRequest,
+                           op: Operator = Depends(operator)):
+    """Destroy the credentials and tenant data NOW.
+
+    The reason this button exists: the automatic timer is for when nobody
+    CAN press it. If the owner is present and wants the material gone -- a
+    stolen laptop, a co-administrator who should no longer have root -- then
+    waiting out a deadline is the wrong behaviour, and so is making them
+    find an SSH client.
+
+    Gated on typing the word, not on a checkbox. This is irreversible, it
+    takes out live tenants' credentials, and the audit row is written BEFORE
+    the deletion so the record survives the thing it records.
+    """
+    require_login(op)
+    require_superadmin(op)
+    if req.confirm != "WIPE":
+        raise HTTPException(400, "type WIPE to confirm -- this is permanent")
+
+    def _fire() -> dict:
+        import deadman
+        action = cpdb.begin_action(
+            actor=str(op.name or "") or "operator", actor_role="superadmin",
+            action="dead man switch: wipe now",
+            reason=req.reason[:300] or "no reason given",
+            target="credentials and tenant data", params={}, account_id=None)
+        cfg = deadman.load()
+        deadman.notify("[Bitport] wiped on request",
+                       f"{op.name or 'an operator'} triggered an immediate "
+                       f"wipe. Reason: {req.reason or 'none given'}")
+        removed = deadman.wipe(cfg, dry=False)
+        try:
+            cpdb.finish_action(action, "ok", "; ".join(removed)[:500])
+        except Exception:      # noqa: BLE001 - the ledger may be gone now
+            pass
+        return {"ok": True, "removed": removed}
+    return await _off_loop(_fire)
+
+
 @app.post("/api/v2/fleet/heartbeat")
 async def heartbeat(hb: Heartbeat, _: None = Depends(node_auth)):
     await _off_loop(cpdb.upsert_node, hb.node_id,

@@ -45,6 +45,64 @@ LOG = os.path.join(HERE, "logs", "deadman.log")
 WARN_AT = (0.5, 0.75, 0.9)
 
 
+EMAIL_ENV = "/etc/bitport/deadman.env"
+
+
+def _email_config() -> dict:
+    """Read SMTP or API credentials from a root-only file.
+
+    Not from argv and not from this repo: it is a password, and argv is
+    readable by every process on the box. Absent config is not an error --
+    the switch still warns to its log and the countdown page still renders;
+    it just cannot reach you off the machine.
+    """
+    cfg = {}
+    try:
+        with open(EMAIL_ENV, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, _, v = line.partition("=")
+                    cfg[k.strip()] = v.strip().strip("'\"")
+    except OSError:
+        pass
+    return cfg
+
+
+def notify(subject: str, body: str) -> bool:
+    """Best effort, and never fatal.
+
+    A switch that crashes because it could not send mail is a switch that
+    stops warning and then fires silently -- the worst of both behaviours.
+    """
+    cfg = _email_config()
+    to = cfg.get("DEADMAN_EMAIL_TO", "")
+    if not to:
+        _log(f"[no email configured] {subject}")
+        return False
+    try:
+        import smtplib
+        from email.message import EmailMessage
+
+        msg = EmailMessage()
+        msg["Subject"] = subject
+        msg["From"] = cfg.get("SMTP_FROM") or cfg.get("SMTP_USER") or to
+        msg["To"] = to
+        msg.set_content(body)
+        host = cfg.get("SMTP_HOST", "smtp.gmail.com")
+        port = int(cfg.get("SMTP_PORT", "587"))
+        with smtplib.SMTP(host, port, timeout=30) as smtp:
+            smtp.starttls()
+            if cfg.get("SMTP_USER"):
+                smtp.login(cfg["SMTP_USER"], cfg.get("SMTP_PASS", ""))
+            smtp.send_message(msg)
+        _log(f"emailed {to}: {subject}")
+        return True
+    except Exception as exc:      # noqa: BLE001
+        _log(f"could not send mail ({str(exc)[:120]}): {subject}")
+        return False
+
+
 def _log(msg: str) -> None:
     line = f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}  {msg}"
     print(line, flush=True)
@@ -317,16 +375,54 @@ def main(argv: list[str] | None = None) -> int:
         _log(f"{state}; last seen {age_days:.1f}d ago via {why}")
         return 0
 
+    # One email per threshold crossed, remembered on disk. A cron running
+    # every few minutes would otherwise send hundreds of identical warnings
+    # and train the recipient to ignore exactly the message that matters.
+    sent = set(cfg.get("warned", []))
     for frac in WARN_AT:
-        if age_days >= days * frac:
-            _log(f"WARNING: {age_days:.1f} of {days} days with no sign of "
-                 f"life (newest signal: {why}). Run `deadman.py --disarm` "
-                 f"or `--touch` to stop this.")
+        if age_days < days * frac:
+            continue
+        left = max(0.0, days - age_days)
+        _log(f"WARNING: {age_days:.1f} of {days} days with no sign of life "
+             f"(newest signal: {why}).")
+        if str(frac) not in sent:
+            notify(
+                f"[Bitport] dead man switch: {left * 24:.0f} hours left",
+                f"No sign of life on {os.uname().nodename} for "
+                f"{age_days * 24:.0f} hours.\n"
+                f"Newest signal was: {why}.\n\n"
+                f"At {days} days everything below is destroyed permanently:\n"
+                + "\n".join(f"  {p}" for p in targets(cfg))
+                + "\n\nTo stop it, do ANY of:\n"
+                  "  - sign in to the web UI\n"
+                  "  - ssh to the box\n"
+                  f"  - run: {HERE}/deadman.py --disarm\n")
+            sent.add(str(frac))
+            cfg["warned"] = sorted(sent)
+            try:
+                with open(CONFIG, "w", encoding="utf-8") as fh:
+                    json.dump(cfg, fh, indent=2)
+            except OSError:
+                pass
     if age_days < days:
+        if age_days < days * WARN_AT[0] and cfg.get("warned"):
+            # Back below the first threshold: forget the warnings so the
+            # next quiet spell warns again from the start rather than
+            # silently skipping straight to destruction.
+            cfg["warned"] = []
+            try:
+                with open(CONFIG, "w", encoding="utf-8") as fh:
+                    json.dump(cfg, fh, indent=2)
+            except OSError:
+                pass
         return 0
 
     _log(f"DEADLINE PASSED: {age_days:.1f} days since {why}. Destroying "
          f"credentials and tenant data.")
+    notify("[Bitport] dead man switch FIRED -- data destroyed",
+           f"No sign of life for {age_days:.1f} days on "
+           f"{os.uname().nodename}. Credentials and tenant data have been "
+           f"permanently destroyed.")
     for line in wipe(cfg, dry=False):
         _log(f"  {line}")
     _log("dead man switch complete")

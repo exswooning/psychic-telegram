@@ -715,6 +715,28 @@ export const setNodeTakesWork = (nodeId: string, takesWork: boolean) =>
     body: JSON.stringify({ node_id: nodeId, takes_work: takesWork }),
   })
 
+export interface DeadmanStatus {
+  armed: boolean
+  state: string
+  days: number
+  signals: Record<string, number | null>
+  newestSignal: string
+  secondsSinceSeen: number | null
+  secondsRemaining: number | null
+  targets: string[]
+  emailConfigured: boolean
+}
+
+export const fetchDeadman = () =>
+  cpFetch<DeadmanStatus>('/api/v2/deadman/status')
+
+/** Destroy the credentials and tenant data now. Irreversible. */
+export const deadmanWipeNow = (reason: string) =>
+  cpFetch<{ ok: boolean; removed: string[] }>('/api/v2/deadman/wipe', {
+    method: 'POST',
+    body: JSON.stringify({ confirm: 'WIPE', reason }),
+  })
+
 export interface NodeDirective {
   accountId: number; run: boolean; services: string; updatedAt?: string
 }
