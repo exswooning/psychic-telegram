@@ -5,6 +5,7 @@
  * and how many delegation scopes are live.
  */
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import Identities from './Identities'
 
@@ -15,6 +16,7 @@ vi.mock('@/api/controlPlane', () => ({
   fetchVerifiedDomains: () => verifiedDomains(),
   fetchTenantInventory: (...a: unknown[]) => tenantInventory(...a),
   fetchAllDomains: () => allDomains(),
+  linkDomains: () => Promise.resolve({ ok: true, detail: '' }),
 }))
 const removeTenantSetup = vi.fn()
 vi.mock('@/api/client', () => ({
@@ -55,20 +57,20 @@ beforeEach(() => {
 
 describe('the scoped-domain cards', () => {
   it('shows a card per configured domain', async () => {
-    render(<Identities />)
+    render(<MemoryRouter><Identities /></MemoryRouter>)
     expect(await screen.findByTestId('domain-card-source')).toBeInTheDocument()
     expect(screen.getByTestId('domain-card-target')).toBeInTheDocument()
   })
 
   it('names the domain and its live scope count', async () => {
-    render(<Identities />)
+    render(<MemoryRouter><Identities /></MemoryRouter>)
     const src = await screen.findByTestId('domain-card-source')
     expect(src).toHaveTextContent('src.example')
     expect(src).toHaveTextContent('17/17 live')
   })
 
   it('shows the status of each side', async () => {
-    render(<Identities />)
+    render(<MemoryRouter><Identities /></MemoryRouter>)
     const tgt = await screen.findByTestId('domain-card-target')
     expect(tgt).toHaveTextContent('Propagating')
     expect(tgt).toHaveTextContent('3/17 live')
@@ -76,14 +78,14 @@ describe('the scoped-domain cards', () => {
 
   it('renders nothing when no domain is set up yet', async () => {
     verifiedDomains.mockResolvedValue({ domains: [] })
-    render(<Identities />)
+    render(<MemoryRouter><Identities /></MemoryRouter>)
     await waitFor(() => expect(verifiedDomains).toHaveBeenCalled())
     expect(screen.queryByTestId('scoped-domains')).toBeNull()
   })
 
   it('does not crash the page when the domain check fails', async () => {
     verifiedDomains.mockRejectedValue(new Error('down'))
-    render(<Identities />)
+    render(<MemoryRouter><Identities /></MemoryRouter>)
     // The identity map section still renders.
     expect(await screen.findByText('Load into identity_map')).toBeInTheDocument()
     expect(screen.queryByTestId('scoped-domains')).toBeNull()
@@ -93,14 +95,14 @@ describe('the scoped-domain cards', () => {
 
 describe('clicking a domain shows its stats', () => {
   it('does not read the tenant until the card is opened', async () => {
-    render(<Identities />)
+    render(<MemoryRouter><Identities /></MemoryRouter>)
     await screen.findByTestId('domain-card-source')
     expect(tenantInventory).not.toHaveBeenCalled()
     expect(screen.queryByTestId('domain-stats-source')).toBeNull()
   })
 
   it('fetches and shows users, data and licences on click', async () => {
-    render(<Identities />)
+    render(<MemoryRouter><Identities /></MemoryRouter>)
     fireEvent.click(await screen.findByTestId('domain-card-open-source'))
     const stats = await screen.findByTestId('domain-stats-source')
     await waitFor(() => expect(tenantInventory.mock.calls[0][0]).toBe('source'))
@@ -111,7 +113,7 @@ describe('clicking a domain shows its stats', () => {
   })
 
   it('is honest that licence counts are assigned, not free seats', async () => {
-    render(<Identities />)
+    render(<MemoryRouter><Identities /></MemoryRouter>)
     fireEvent.click(await screen.findByTestId('domain-card-open-source'))
     const stats = await screen.findByTestId('domain-stats-source')
     expect(stats).toHaveTextContent(/free seats/i)
@@ -122,7 +124,7 @@ describe('clicking a domain shows its stats', () => {
       { side: 'target', domain: 'tgt.example', adminEmail: 'a@tgt.example',
         status: 'not_set_up', live: 0, total: 0 },
     ] })
-    render(<Identities />)
+    render(<MemoryRouter><Identities /></MemoryRouter>)
     fireEvent.click(await screen.findByTestId('domain-card-open-target'))
     expect(await screen.findByTestId('domain-stats-target'))
       .toHaveTextContent(/not set up/i)
@@ -133,7 +135,7 @@ describe('clicking a domain shows its stats', () => {
 
 describe('all configured domains (superadmin)', () => {
   it('lists every configured domain across accounts', async () => {
-    render(<Identities />)
+    render(<MemoryRouter><Identities /></MemoryRouter>)
     await screen.findByTestId('all-domains')
     // Two accounts, three configured rows.
     expect(screen.getByTestId('config-68-source')).toHaveTextContent('target.saraf.com')
@@ -142,7 +144,7 @@ describe('all configured domains (superadmin)', () => {
   })
 
   it('shows which have a key on file and which do not', async () => {
-    render(<Identities />)
+    render(<MemoryRouter><Identities /></MemoryRouter>)
     await screen.findByTestId('all-domains')
     expect(screen.getByTestId('config-68-source')).toHaveTextContent('Key on file')
     expect(screen.getByTestId('config-68-target')).toHaveTextContent('No key')
@@ -153,14 +155,14 @@ describe('all configured domains (superadmin)', () => {
       { accountId: 68, accountEmail: '', side: 'source', domain: 'x.com',
         adminEmail: 'a@x.com', hasKey: true, clientId: '1' },
     ] })
-    render(<Identities />)
+    render(<MemoryRouter><Identities /></MemoryRouter>)
     await screen.findByTestId('scoped-domains')
     expect(screen.queryByTestId('all-domains')).toBeNull()
   })
 
   it('does not break the page when the list cannot be read', async () => {
     allDomains.mockRejectedValue(new Error('down'))
-    render(<Identities />)
+    render(<MemoryRouter><Identities /></MemoryRouter>)
     expect(await screen.findByText('Load into identity_map')).toBeInTheDocument()
     expect(screen.queryByTestId('all-domains')).toBeNull()
   })
@@ -172,20 +174,20 @@ describe('the live delegation check has a spinner', () => {
     // A verified-domains call that never resolves keeps the page in the
     // loading state, so the spinner must be on screen.
     verifiedDomains.mockReturnValue(new Promise(() => {}))
-    render(<Identities />)
+    render(<MemoryRouter><Identities /></MemoryRouter>)
     expect(await screen.findByTestId('scoped-domains-loading')).toBeInTheDocument()
     expect(screen.queryByTestId('scoped-domains')).toBeNull()
   })
 
   it('replaces the spinner with the cards once it resolves', async () => {
-    render(<Identities />)
+    render(<MemoryRouter><Identities /></MemoryRouter>)
     expect(await screen.findByTestId('scoped-domains')).toBeInTheDocument()
     expect(screen.queryByTestId('scoped-domains-loading')).toBeNull()
   })
 
   it('says why it takes a moment', async () => {
     verifiedDomains.mockReturnValue(new Promise(() => {}))
-    render(<Identities />)
+    render(<MemoryRouter><Identities /></MemoryRouter>)
     expect(await screen.findByTestId('scoped-domains-loading'))
       .toHaveTextContent(/verifies each scope/i)
   })
@@ -201,7 +203,7 @@ describe('the all-configured cards are clickable too', () => {
       truncated: false, error: '', deep: false, deepSampled: 0,
       licenseCounts: { 'Business Standard': 42 }, licenseError: '',
     })
-    render(<Identities />)
+    render(<MemoryRouter><Identities /></MemoryRouter>)
     // account 66's target card
     fireEvent.click(await screen.findByTestId('config-open-66-target'))
     await screen.findByTestId('config-stats-66-target')
@@ -212,7 +214,7 @@ describe('the all-configured cards are clickable too', () => {
   })
 
   it('does not read a card with no key', async () => {
-    render(<Identities />)
+    render(<MemoryRouter><Identities /></MemoryRouter>)
     // account 68 target has hasKey:false in the fixture
     fireEvent.click(await screen.findByTestId('config-open-68-target'))
     expect(await screen.findByTestId('config-stats-68-target'))
@@ -230,7 +232,7 @@ describe('overwritten (superseded) domains', () => {
         hasKey: true, clientId: '9', superseded: true,
         replacedBy: 'source.saraf.com' },
     ] })
-    render(<Identities />)
+    render(<MemoryRouter><Identities /></MemoryRouter>)
     const card = await screen.findByTestId('config-68-source')
     expect(card).toHaveTextContent('Superseded')
     expect(card).toHaveTextContent('target.saraf.com')     // still shown
@@ -246,7 +248,7 @@ describe('overwritten (superseded) domains', () => {
 
 describe('deleting a domain setup', () => {
   it('tears down what the wizard made, keeping the data, for the right account', async () => {
-    render(<Identities />)
+    render(<MemoryRouter><Identities /></MemoryRouter>)
     // account 66 target card (from the default allDomains fixture)
     fireEvent.click(await screen.findByTestId('config-open-66-target'))
     fireEvent.click(await screen.findByTestId('delete-config-66-target'))
@@ -263,7 +265,7 @@ describe('deleting a domain setup', () => {
   })
 
   it('will not delete until the domain is typed back exactly', async () => {
-    render(<Identities />)
+    render(<MemoryRouter><Identities /></MemoryRouter>)
     fireEvent.click(await screen.findByTestId('config-open-66-target'))
     fireEvent.click(await screen.findByTestId('delete-config-66-target'))
     fireEvent.change(await screen.findByTestId('delete-confirm-domain'),
@@ -275,7 +277,7 @@ describe('deleting a domain setup', () => {
 
   it('reports a failure instead of claiming it started', async () => {
     removeTenantSetup.mockResolvedValue({ ok: false, error: 'wrong password' })
-    render(<Identities />)
+    render(<MemoryRouter><Identities /></MemoryRouter>)
     fireEvent.click(await screen.findByTestId('config-open-66-target'))
     fireEvent.click(await screen.findByTestId('delete-config-66-target'))
     fireEvent.change(await screen.findByTestId('delete-confirm-domain'),
@@ -292,7 +294,7 @@ describe('deleting a domain setup', () => {
         adminEmail: 'i@old.com', hasKey: true, clientId: '1', superseded: true,
         replacedBy: 'new.com' },
     ] })
-    render(<Identities />)
+    render(<MemoryRouter><Identities /></MemoryRouter>)
     fireEvent.click(await screen.findByTestId('config-open-68-source'))
     await screen.findByTestId('config-stats-68-source')
     expect(screen.queryByTestId('delete-config-68-source')).toBeNull()
@@ -303,7 +305,7 @@ describe('a dead delegation reads as an explanation, not a raw error', () => {
   it('explains it when the read REJECTS', async () => {
     tenantInventory.mockRejectedValue(
       new Error("invalid_grant: No valid verifier for issuer: source-sa@x"))
-    render(<Identities />)
+    render(<MemoryRouter><Identities /></MemoryRouter>)
     fireEvent.click(await screen.findByTestId('domain-card-open-source'))
     const stats = await screen.findByTestId('domain-stats-source')
     expect(stats).toHaveTextContent(/delegation is not live/i)
@@ -321,10 +323,21 @@ describe('a dead delegation reads as an explanation, not a raw error', () => {
       licenseCounts: {}, licenseError: '',
       error: 'invalid_grant: No valid verifier for issuer: source-sa@x',
     })
-    render(<Identities />)
+    render(<MemoryRouter><Identities /></MemoryRouter>)
     fireEvent.click(await screen.findByTestId('domain-card-open-source'))
     const stats = await screen.findByTestId('domain-stats-source')
     expect(stats).toHaveTextContent(/delegation is not live/i)
     expect(stats).not.toHaveTextContent('0/0')      // not shown as an empty tenant
+  })
+})
+
+
+describe('choosing the active source and target from all domains', () => {
+  it('opens a picker of configured domains instead of overwriting', async () => {
+    render(<MemoryRouter><Identities /></MemoryRouter>)
+    fireEvent.click(await screen.findByTestId('choose-pair'))
+    // the shared picker's selects appear
+    expect(await screen.findByTestId('link-source')).toBeInTheDocument()
+    expect(screen.getByTestId('link-target')).toBeInTheDocument()
   })
 })

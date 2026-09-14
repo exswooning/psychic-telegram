@@ -8,7 +8,7 @@ import {
 import {
   Refresh as RefreshIcon, People as IdentitiesIcon,
   Language as DomainIcon, ExpandMore as ExpandIcon,
-  DeleteOutline as DeleteIcon,
+  DeleteOutline as DeleteIcon, SwapHoriz as SwapIcon,
 } from '@mui/icons-material'
 import {
   fetchActions, fetchIdentities, saveIdentityPair, IdentityRow, ActionSpec,
@@ -20,6 +20,7 @@ import {
   fetchAllDomains, ConfiguredDomain,
 } from '@/api/controlPlane'
 import JobRunner from '@/components/JobRunner'
+import LinkDomainsDialog from '@/components/LinkDomainsDialog'
 
 /**
  * Operator/superadmin-only: what init-db has actually loaded
@@ -417,6 +418,7 @@ const Identities: React.FC = () => {
   const [allDomains, setAllDomains] = useState<ConfiguredDomain[]>([])
   const [allSuper, setAllSuper] = useState(false)
   const [domainsLoading, setDomainsLoading] = useState(true)
+  const [pickOpen, setPickOpen] = useState(false)
 
   // The configured-domain list is config-only (no Google call), so it can
   // poll cheaply -- that is what makes a domain you just set up appear here
@@ -487,9 +489,13 @@ const Identities: React.FC = () => {
 
   return (
     <Box>
-      <Stack direction="row" alignItems="center" sx={{ mb: 0.5 }}>
+      <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.5 }}>
         <IdentitiesIcon color="action" sx={{ mr: 1 }} />
         <Typography variant="h4" sx={{ fontWeight: 700, flexGrow: 1 }}>Identities</Typography>
+        <Button variant="outlined" size="small" startIcon={<SwapIcon />}
+                data-testid="choose-pair" onClick={() => setPickOpen(true)}>
+          Choose source &amp; target
+        </Button>
         <Tooltip title="Re-check">
           <span>
             <IconButton size="small" onClick={refresh} disabled={loading}>
@@ -499,8 +505,13 @@ const Identities: React.FC = () => {
         </Tooltip>
       </Stack>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-        The source→target user mapping every migration action needs.
+        The source→target user mapping every migration action needs. Pick which
+        two of your set-up domains are the active pair — nothing gets overwritten.
       </Typography>
+
+      <LinkDomainsDialog title="Choose source &amp; target" open={pickOpen}
+                         onClose={() => setPickOpen(false)} onLinked={refresh} />
+
 
       {domainsLoading && domains.length === 0 && (
         <Box sx={{ mb: 3 }} data-testid="scoped-domains-loading">

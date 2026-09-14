@@ -2,17 +2,14 @@ import React, { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Alert, Box, Button, Chip, CircularProgress, IconButton, LinearProgress,
-  Paper, Stack, Typography, Dialog, DialogTitle, DialogContent, DialogActions,
-  TextField, Divider, Link,
+  Paper, Stack, Typography,
 } from '@mui/material'
 import {
   Refresh as RefreshIcon, ArrowForward as ArrowIcon,
   AddCircleOutline as NewIcon, ExpandMore as ExpandIcon,
 } from '@mui/icons-material'
-import {
-  fetchMigrations, MigrationRow,
-  fetchAllDomains, ConfiguredDomain, linkDomains,
-} from '@/api/controlPlane'
+import { fetchMigrations, MigrationRow } from '@/api/controlPlane'
+import LinkDomainsDialog from '@/components/LinkDomainsDialog'
 
 /**
  * Migrations — every tenant pair, and what each one is doing.
@@ -45,113 +42,6 @@ const Counts: React.FC<{ row: MigrationRow }> = ({ row }) => {
     </Stack>
   )
 }
-
-/** Connect two already-set-up domains into a migration pair, reusing their
- *  keys -- the alternative to running the Setup Wizard from scratch. */
-const LinkDialog: React.FC<{
-  open: boolean; onClose: () => void; onLinked: () => void
-}> = ({ open, onClose, onLinked }) => {
-  const navigate = useNavigate()
-  const [domains, setDomains] = useState<ConfiguredDomain[]>([])
-  const [src, setSrc] = useState('')
-  const [tgt, setTgt] = useState('')
-  const [reason, setReason] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [err, setErr] = useState('')
-
-  useEffect(() => {
-    if (!open) return
-    setErr(''); setSrc(''); setTgt(''); setReason('')
-    fetchAllDomains()
-      .then((r) => setDomains(r.domains.filter((d) => d.hasKey && !d.superseded)))
-      .catch((e) => setErr(e instanceof Error ? e.message : String(e)))
-  }, [open])
-
-  const key = (d: ConfiguredDomain) => `${d.accountId}:${d.side}`
-  const byKey = (k: string) => domains.find((d) => key(d) === k)
-  const label = (d: ConfiguredDomain) =>
-    `${d.domain} — ${d.side} · ${d.accountEmail || `account #${d.accountId}`}`
-
-  const ready = src && tgt && src !== tgt && reason.trim().length >= 3
-
-  const connect = async () => {
-    const s = byKey(src); const t = byKey(tgt)
-    if (!s || !t) return
-    setBusy(true); setErr('')
-    try {
-      const r = await linkDomains(reason.trim(),
-        { accountId: s.accountId, side: s.side },
-        { accountId: t.accountId, side: t.side })
-      if (!r.ok) throw new Error(r.detail || 'could not link the domains')
-      onLinked(); onClose()
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return (
-    <Dialog open={open} onClose={busy ? undefined : onClose} fullWidth maxWidth="sm">
-      <DialogTitle>Start a migration</DialogTitle>
-      <DialogContent>
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-          Connect two domains you have already set up. It reuses their existing
-          keys — no re-setup, and nothing is re-granted, because delegation is
-          tied to the key, not the account.
-        </Typography>
-        {err && <Alert severity="error" sx={{ mb: 2 }} data-testid="link-error">{err}</Alert>}
-        <Stack spacing={2}>
-          <TextField select fullWidth label="Source (read from)" value={src}
-                     onChange={(e) => setSrc(e.target.value)}
-                     SelectProps={{ native: true }} InputLabelProps={{ shrink: true }}
-                     inputProps={{ 'data-testid': 'link-source' }}
-                     helperText="the tenant whose data is copied">
-            <option value="">select a source…</option>
-            {domains.map((d) => (
-              <option key={key(d)} value={key(d)}>{label(d)}</option>
-            ))}
-          </TextField>
-          <TextField select fullWidth label="Target (written to)" value={tgt}
-                     onChange={(e) => setTgt(e.target.value)}
-                     SelectProps={{ native: true }} InputLabelProps={{ shrink: true }}
-                     error={!!tgt && tgt === src}
-                     helperText={tgt && tgt === src
-                       ? 'source and target must differ'
-                       : 'the tenant the data lands in'}
-                     inputProps={{ 'data-testid': 'link-target' }}>
-            <option value="">select a target…</option>
-            {domains.map((d) => (
-              <option key={key(d)} value={key(d)}>{label(d)}</option>
-            ))}
-          </TextField>
-          <TextField fullWidth label="Reason" value={reason}
-                     onChange={(e) => setReason(e.target.value)}
-                     placeholder="e.g. rehearsal: rohitrokaya into the new tenant"
-                     inputProps={{ 'data-testid': 'link-reason' }} />
-        </Stack>
-        <Alert severity="info" sx={{ mt: 2 }}>
-          The pair lands on your account, replacing its current source/target.
-          Any key already there is backed up first, so this is reversible.
-        </Alert>
-        <Divider sx={{ my: 2 }} />
-        <Typography variant="body2" color="text.secondary">
-          Need to set up a brand-new domain instead?{' '}
-          <Link component="button" type="button" onClick={() => navigate('/wizard')}
-                data-testid="link-to-wizard">Open the Setup Wizard</Link>.
-        </Typography>
-      </DialogContent>
-      <DialogActions>
-        <Button onClick={onClose} disabled={busy}>Cancel</Button>
-        <Button variant="contained" onClick={connect} disabled={!ready || busy}
-                data-testid="link-connect">
-          {busy ? 'Connecting…' : 'Connect'}
-        </Button>
-      </DialogActions>
-    </Dialog>
-  )
-}
-
 
 export const Migrations: React.FC = () => {
   const navigate = useNavigate()
@@ -196,8 +86,8 @@ export const Migrations: React.FC = () => {
                 onClick={() => setLinkOpen(true)}>
           Start a new migration
         </Button>
-        <LinkDialog open={linkOpen} onClose={() => setLinkOpen(false)}
-                    onLinked={refresh} />
+        <LinkDomainsDialog title="Start a migration" open={linkOpen}
+                           onClose={() => setLinkOpen(false)} onLinked={refresh} />
         <IconButton size="small" onClick={refresh} aria-label="refresh">
           <RefreshIcon fontSize="small" />
         </IconButton>
