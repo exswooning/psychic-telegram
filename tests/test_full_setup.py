@@ -988,3 +988,93 @@ class TestReprovisionAndScopeChoice:
         granted = set(seen.get("scopes", "").split(","))
         assert "req-a" in granted
         assert "req-b" in granted
+
+
+class TestAnUnusableUploadedKeyProvisionsFresh:
+    """The uploaded key's project was not administrable by the admin and no
+    delegation was live, so setup announced "provisioning a fresh one" --
+    and then never did, because uploaded_key was set to None from inside the
+    branch that had already committed to using it. Control never reached the
+    provisioning branch, so step 3 failed with "no client ID from step 1".
+    Live: source.sarafgloabalexim.com, key project wsmig-src-20736.
+    """
+
+    def _common(self, monkeypatch):
+        monkeypatch.setattr(fs.dwd_helper, "run", lambda *a, **k: 0)
+        monkeypatch.setattr(fs.gcloud_browser_auth, "configure_chat_app",
+                            lambda *a, **k: (True, "mocked"))
+        monkeypatch.setattr(fs.verify_scopes, "required_scopes",
+                            lambda settings, tenant: ["scope-a"])
+        monkeypatch.setattr(fs.verify_scopes, "verify",
+                            lambda settings, tenant, scopes: [
+                                {"scope": s, "ok": True} for s in scopes])
+        monkeypatch.setattr(fs.accounts_auth, "update_tenant_config",
+                            lambda *a, **k: None)
+        monkeypatch.setattr(fs, "_vs_for", lambda account_id: None)
+
+    def _uploaded(self, tmp_path, client_id="old-client"):
+        up = tmp_path / "uploaded-sa.json"
+        up.write_text(json.dumps({"client_id": client_id,
+                                  "project_id": "wsmig-src-20736"}))
+        return up
+
+    def test_it_provisions_and_produces_a_client_id(self, monkeypatch, tmp_path):
+        self._common(monkeypatch)
+        up = self._uploaded(tmp_path)
+        monkeypatch.setattr(fs.accounts_auth, "get_tenant_config",
+                            lambda account_id, side: {"sa_key_path": str(up)})
+        monkeypatch.setattr(fs, "_admin_can_reach_project",
+                            lambda *a, **k: False)   # not administrable
+        monkeypatch.setattr(fs, "_delegation_already_live",
+                            lambda *a, **k: False)   # nothing live to protect
+        monkeypatch.setattr(fs.provision_gcp, "gcloud_ready", lambda: (True, "me"))
+        monkeypatch.setattr(fs.provision_gcp, "can_create_projects", lambda a: True)
+        monkeypatch.setattr(fs.provision_gcp, "detect_org", lambda env=None: "")
+
+        called = {"provision_side": False}
+
+        def fake_provision_side(side, project, org, key_dest, dry_run, force,
+                                env=None, on_step=None, admin_email=""):
+            called["provision_side"] = True
+            with open(key_dest, "w") as f:
+                json.dump({"client_id": "fresh-999", "project_id": project}, f)
+            return {"side": side, "project": project, "ok": True,
+                    "steps": [{"name": "x", "status": "ok", "detail": ""}],
+                    "clientId": "fresh-999"}
+        monkeypatch.setattr(fs.provision_gcp, "provision_side", fake_provision_side)
+
+        res = fs.run_full_setup("source", "source.sarafgloabalexim.com",
+                                "info@source.sarafgloabalexim.com", "pw",
+                                account_id=68, keys_dir=str(tmp_path))
+
+        assert called["provision_side"] is True, (
+            "the unusable key must trigger a real provision, not just a claim")
+        assert res["clientId"] == "fresh-999"
+        # The exact failure this fixes must be gone.
+        details = " ".join(p.get("detail", "") for p in res["phases"])
+        assert "no client ID from step 1" not in details
+
+    def test_a_live_delegation_is_not_thrown_away(self, monkeypatch, tmp_path):
+        """The opposite case must still hold: an uploaded key whose project
+        the admin cannot administer BUT which is already carrying a working
+        delegation is left exactly as it is -- re-provisioning a live tenant
+        to unlock a console step is not a trade to make unasked."""
+        self._common(monkeypatch)
+        up = self._uploaded(tmp_path)
+        monkeypatch.setattr(fs.accounts_auth, "get_tenant_config",
+                            lambda account_id, side: {"sa_key_path": str(up)})
+        monkeypatch.setattr(fs, "_admin_can_reach_project", lambda *a, **k: False)
+        monkeypatch.setattr(fs, "_delegation_already_live", lambda *a, **k: True)
+
+        called = {"provision_side": False}
+        monkeypatch.setattr(fs.provision_gcp, "provision_side",
+                            lambda *a, **k: called.update(provision_side=True) or {})
+        monkeypatch.setattr(fs.provision_gcp, "gcloud_ready",
+                            lambda: (True, "me"))
+
+        res = fs.run_full_setup("source", "source.sarafgloabalexim.com",
+                                "info@source.sarafgloabalexim.com", "pw",
+                                account_id=68, keys_dir=str(tmp_path))
+
+        assert called["provision_side"] is False, "a live delegation was re-provisioned"
+        assert res["clientId"] == "old-client"

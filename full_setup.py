@@ -358,14 +358,22 @@ def run_full_setup(
 
     p = Phase(f"provision Cloud project ({side})")
     phases.append(p)
-    if uploaded_key and os.path.isfile(uploaded_key):
+    # A flag decides whether the uploaded key is used -- not the if-branch
+    # itself -- because the administrability check below can find the key
+    # unusable and require provisioning fresh instead. Setting uploaded_key
+    # = None from inside this branch could never re-route into the
+    # provisioning branch, so the run announced "provisioning a fresh one"
+    # and then did nothing, failing at delegation with "no client ID from
+    # step 1". Clearing the flag makes control fall through to provisioning,
+    # the same way the explicit `reprovision` path clears it up front.
+    use_uploaded = bool(uploaded_key and os.path.isfile(uploaded_key))
+    if use_uploaded:
         client_id = provision_gcp.client_id_of(uploaded_key)
         if not client_id:
             p.status, p.detail = "failed", (
                 f"{uploaded_key} exists but has no client_id in it -- "
                 "re-upload the key")
             return {"side": side, "ok": False, "phases": [x.as_dict() for x in phases]}
-        p.status, p.detail = "skipped", "using an uploaded service-account key"
 
         # Can this admin actually administer the project behind that key?
         #
@@ -413,10 +421,14 @@ def run_full_setup(
                     uploaded_key = None
                     key_path = os.path.join(keys_dir, f"{side}-sa.json")
                     client_id = ""
-                    p.status, p.detail = "skipped", (
-                        "the uploaded key's project is not administrable by "
-                        "this admin -- provisioning a fresh one")
-    elif dry_run:
+                    # Fall through to real provisioning below instead of
+                    # only claiming it: this is the fix for "no client ID
+                    # from step 1".
+                    use_uploaded = False
+        if use_uploaded:
+            p.status, p.detail = "skipped", "using an uploaded service-account key"
+
+    if not use_uploaded and dry_run:
         # A dry run touches no real gcloud state at all -- every
         # provision_gcp step already no-ops under dry_run and reports
         # nothing beyond "ok"/"project X" either way, so driving a real
@@ -429,7 +441,7 @@ def run_full_setup(
         p.status, p.detail = "skipped", "dry run"
         client_id = (provision_gcp.client_id_of(key_path)
                     if os.path.isfile(key_path) else "")
-    else:
+    elif not use_uploaded:
         # provision_side(), not provision(): the latter always creates BOTH
         # source and target in one call, which is wrong here on two counts --
         # it does work for a side the caller did not ask for, and (worse) it
