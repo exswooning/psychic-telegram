@@ -63,7 +63,7 @@ const LinkDialog: React.FC<{
     if (!open) return
     setErr(''); setSrc(''); setTgt(''); setReason('')
     fetchAllDomains()
-      .then((r) => setDomains(r.domains.filter((d) => d.hasKey)))
+      .then((r) => setDomains(r.domains.filter((d) => d.hasKey && !d.superseded)))
       .catch((e) => setErr(e instanceof Error ? e.message : String(e)))
   }, [open])
 

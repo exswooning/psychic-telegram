@@ -217,3 +217,25 @@ describe('the all-configured cards are clickable too', () => {
     expect(tenantInventory).not.toHaveBeenCalled()
   })
 })
+
+
+describe('overwritten (superseded) domains', () => {
+  it('keeps them visible and marked, and does not read them live', async () => {
+    allDomains.mockResolvedValue({ superadmin: true, domains: [
+      { accountId: 68, accountEmail: 'b@x', side: 'source',
+        domain: 'target.saraf.com', adminEmail: 'i@target.saraf.com',
+        hasKey: true, clientId: '9', superseded: true,
+        replacedBy: 'source.saraf.com' },
+    ] })
+    render(<Identities />)
+    const card = await screen.findByTestId('config-68-source')
+    expect(card).toHaveTextContent('Superseded')
+    expect(card).toHaveTextContent('target.saraf.com')     // still shown
+    fireEvent.click(screen.getByTestId('config-open-68-source'))
+    const stats = await screen.findByTestId('config-stats-68-source')
+    expect(stats).toHaveTextContent(/replaced/i)
+    expect(stats).toHaveTextContent('source.saraf.com')
+    // the inventory endpoint reads the ACTIVE slot, so it must not be called
+    expect(tenantInventory).not.toHaveBeenCalled()
+  })
+})

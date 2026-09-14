@@ -214,10 +214,13 @@ const DomainCard: React.FC<{ d: VerifiedDomain }> = ({ d }) => {
  *  right tenant, not the caller's own. */
 const ConfigDomainCard: React.FC<{ d: ConfiguredDomain }> = ({ d }) => {
   const [open, setOpen] = useState(false)
+  // A superseded domain's live stats can't be read: the inventory endpoint
+  // reads the slot's ACTIVE domain, which is the one that replaced this. So
+  // its card explains what happened instead of fetching a stranger's numbers.
   return (
     <Card elevation={0} data-testid={`config-${d.accountId}-${d.side}`}
           sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider',
-                height: '100%' }}>
+                height: '100%', opacity: d.superseded ? 0.85 : 1 }}>
       <CardActionArea onClick={() => setOpen((v) => !v)}
                       data-testid={`config-open-${d.accountId}-${d.side}`}>
         <CardContent sx={{ py: 1.5 }}>
@@ -225,14 +228,19 @@ const ConfigDomainCard: React.FC<{ d: ConfiguredDomain }> = ({ d }) => {
             <Chip size="small" label={d.side} variant="outlined"
                   sx={{ textTransform: 'capitalize' }} />
             <Box sx={{ flexGrow: 1 }} />
-            <Chip size="small" label={d.hasKey ? 'Key on file' : 'No key'}
-                  color={d.hasKey ? 'success' : 'default'}
-                  variant={d.hasKey ? 'filled' : 'outlined'} />
+            {d.superseded ? (
+              <Chip size="small" label="Superseded" color="warning" variant="outlined" />
+            ) : (
+              <Chip size="small" label={d.hasKey ? 'Key on file' : 'No key'}
+                    color={d.hasKey ? 'success' : 'default'}
+                    variant={d.hasKey ? 'filled' : 'outlined'} />
+            )}
             <ExpandIcon fontSize="small" color="action"
                         sx={{ transform: open ? 'rotate(180deg)' : 'none',
                               transition: '0.2s' }} />
           </Stack>
-          <Typography sx={{ fontWeight: 700, wordBreak: 'break-all' }}>
+          <Typography sx={{ fontWeight: 700, wordBreak: 'break-all',
+                            textDecoration: d.superseded ? 'line-through' : 'none' }}>
             {d.domain}
           </Typography>
           <Typography variant="body2" color="text.secondary"
@@ -243,8 +251,21 @@ const ConfigDomainCard: React.FC<{ d: ConfiguredDomain }> = ({ d }) => {
       </CardActionArea>
       <Collapse in={open} unmountOnExit>
         <Divider />
-        <TenantStats side={d.side} accountId={d.accountId} canRead={d.hasKey}
-                     testId={`config-stats-${d.accountId}-${d.side}`} />
+        {d.superseded ? (
+          <Box sx={{ p: 2 }} data-testid={`config-stats-${d.accountId}-${d.side}`}>
+            <Typography variant="body2" color="text.secondary">
+              This domain was replaced in its slot{d.replacedBy
+                ? <> by <strong>{d.replacedBy}</strong></> : null}. It is kept
+              here so nothing you set up disappears, and its key is backed up
+              {d.hasKey ? ' on disk' : ' (the key was not preserved)'} — but its
+              live stats can no longer be read, because the slot now points at
+              the domain that replaced it.
+            </Typography>
+          </Box>
+        ) : (
+          <TenantStats side={d.side} accountId={d.accountId} canRead={d.hasKey}
+                       testId={`config-stats-${d.accountId}-${d.side}`} />
+        )}
       </Collapse>
     </Card>
   )
@@ -264,6 +285,14 @@ const Identities: React.FC = () => {
   const [allSuper, setAllSuper] = useState(false)
   const [domainsLoading, setDomainsLoading] = useState(true)
 
+  // The configured-domain list is config-only (no Google call), so it can
+  // poll cheaply -- that is what makes a domain you just set up appear here
+  // on its own, which the slow live check below cannot afford to.
+  const refreshAllDomains = useCallback(() => {
+    fetchAllDomains().then((r) => { setAllDomains(r.domains); setAllSuper(r.superadmin) })
+      .catch(() => { /* leave the last good list up */ })
+  }, [])
+
   const refresh = useCallback(() => {
     setLoading(true); setError(null)
     fetchIdentities()
@@ -273,18 +302,24 @@ const Identities: React.FC = () => {
     // Two live Google calls PER SCOPE per side -- it asks Google whether
     // each delegated token actually works, not whether a flag is set -- so
     // it takes a few seconds and earns a spinner. It rides this explicit
-    // refresh rather than a poll.
+    // refresh, never the poll below.
     setDomainsLoading(true)
     fetchVerifiedDomains()
       .then((r) => setDomains(r.domains))
       .catch(() => setDomains([]))
       .finally(() => setDomainsLoading(false))
-    // Every domain configured anywhere -- config only, no live Google call.
-    fetchAllDomains().then((r) => { setAllDomains(r.domains); setAllSuper(r.superadmin) })
-      .catch(() => setAllDomains([]))
-  }, [])
+    refreshAllDomains()
+  }, [refreshAllDomains])
 
   useEffect(() => { refresh(); fetchActions().then(setActions) }, [refresh])
+
+  // Poll only the cheap config list, so a domain added elsewhere shows up
+  // here within a few seconds without re-running the slow live delegation
+  // check on every tick.
+  useEffect(() => {
+    const t = window.setInterval(refreshAllDomains, 8000)
+    return () => window.clearInterval(t)
+  }, [refreshAllDomains])
 
   const addPair = async () => {
     setAddErr(null); setAddOk(null)

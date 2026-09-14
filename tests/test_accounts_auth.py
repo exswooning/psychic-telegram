@@ -343,3 +343,66 @@ class TestSettingsAccountScoping:
         account_id = aa.create_account("badside@example.com", "hunter22222", "XX")
         with pytest.raises(ValueError, match="side must be"):
             aa.get_tenant_config(account_id, "sideways")
+
+
+class TestSupersededConfigs:
+    """A domain set up in a slot that already held a DIFFERENT one used to
+    vanish -- tenant_configs keeps one (account, side) row. snapshot_superseded
+    preserves the old one so nothing set up ever disappears."""
+
+    def _acct(self, aa_mod):
+        return aa_mod.create_account("owner@ex.com", "hunter22222", "Owner")
+
+    def test_a_changed_domain_is_preserved(self, db, monkeypatch, tmp_path):
+        monkeypatch.setattr(aa, "HERE", str(tmp_path))
+        acct = self._acct(aa)
+        aa.update_tenant_config(acct, "source", domain="first.com",
+                                admin_email="a@first.com",
+                                sa_key_path="keys/x/source-sa.json")
+        aa.snapshot_superseded(acct, "source", "second.com")
+        rows = aa.list_superseded(acct)
+        assert len(rows) == 1
+        assert rows[0]["domain"] == "first.com"
+        assert rows[0]["replaced_by"] == "second.com"
+
+    def test_the_same_domain_is_not_a_supersession(self, db, monkeypatch, tmp_path):
+        monkeypatch.setattr(aa, "HERE", str(tmp_path))
+        acct = self._acct(aa)
+        aa.update_tenant_config(acct, "source", domain="same.com",
+                                admin_email="a@same.com")
+        aa.snapshot_superseded(acct, "source", "same.com")     # re-run, not a swap
+        assert aa.list_superseded(acct) == []
+
+    def test_an_empty_slot_records_nothing(self, db, monkeypatch, tmp_path):
+        monkeypatch.setattr(aa, "HERE", str(tmp_path))
+        acct = self._acct(aa)
+        aa.snapshot_superseded(acct, "source", "first.com")    # nothing there yet
+        assert aa.list_superseded(acct) == []
+
+    def test_it_backs_up_the_old_key(self, db, monkeypatch, tmp_path):
+        """The old key survives, so the superseded domain is not just a name."""
+        monkeypatch.setattr(aa, "HERE", str(tmp_path))
+        acct = self._acct(aa)
+        kd = tmp_path / "keys" / str(acct)
+        kd.mkdir(parents=True, exist_ok=True)
+        (kd / "source-sa.json").write_text('{"client_id": "KEEP"}')
+        aa.update_tenant_config(acct, "source", domain="first.com",
+                                admin_email="a@first.com",
+                                sa_key_path=f"keys/{acct}/source-sa.json")
+        aa.snapshot_superseded(acct, "source", "second.com")
+        row = aa.list_superseded(acct)[0]
+        assert row["key_path"], "no key backup recorded"
+        backup = tmp_path / row["key_path"]
+        assert backup.is_file()
+        assert "KEEP" in backup.read_text()
+
+    def test_list_superseded_can_span_accounts(self, db, monkeypatch, tmp_path):
+        monkeypatch.setattr(aa, "HERE", str(tmp_path))
+        a = aa.create_account("a@ex.com", "hunter22222", "Aa")
+        b = aa.create_account("b@ex.com", "hunter22222", "Bb")
+        for acct in (a, b):
+            aa.update_tenant_config(acct, "source", domain="old.com",
+                                    admin_email="x@old.com")
+            aa.snapshot_superseded(acct, "source", "new.com")
+        assert len(aa.list_superseded()) == 2          # None = all accounts
+        assert len(aa.list_superseded(a)) == 1

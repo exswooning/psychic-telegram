@@ -198,3 +198,26 @@ describe('connecting two set-up domains', () => {
     expect(await screen.findByTestId('link-error')).toHaveTextContent('no key on file')
   })
 })
+
+
+describe('the picker excludes overwritten domains', () => {
+  it('does not offer a superseded domain to link', async () => {
+    fetchAllDomains.mockResolvedValue({ superadmin: true, domains: [
+      { accountId: 66, accountEmail: 'a@x', side: 'source',
+        domain: 'source.rohit.com', adminEmail: 'i@source.rohit.com',
+        hasKey: true, clientId: '1', superseded: false },
+      { accountId: 68, accountEmail: 'b@x', side: 'source',
+        domain: 'gone.saraf.com', adminEmail: 'i@gone.saraf.com',
+        hasKey: true, clientId: '9', superseded: true, replacedBy: 'now.saraf.com' },
+    ] })
+    fetchMigrations.mockResolvedValue({ migrations: [], maxConcurrent: 2, activeTotal: 0 })
+    render(<MemoryRouter><Migrations /></MemoryRouter>)
+    fireEvent.click(await screen.findByTestId('new-migration'))
+    await screen.findByTestId('link-connect')
+    await waitFor(() => expect(fetchAllDomains).toHaveBeenCalled())
+    const src = screen.getByTestId('link-source') as HTMLSelectElement
+    const texts = Array.from(src.options).map((o) => o.textContent || '')
+    expect(texts.some((t) => t.includes('source.rohit.com'))).toBe(true)
+    expect(texts.some((t) => t.includes('gone.saraf.com'))).toBe(false)
+  })
+})

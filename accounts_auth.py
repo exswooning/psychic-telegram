@@ -313,6 +313,69 @@ def get_tenant_config(account_id: int, side: str) -> dict | None:
     return dict(row) if row else None
 
 
+def snapshot_superseded(account_id: int, side: str, incoming_domain: str) -> None:
+    """Preserve a domain about to be overwritten in a slot.
+
+    tenant_configs keeps exactly one (account, side) row, so setting a new
+    domain up in a slot that already held a DIFFERENT one used to erase the
+    old -- it vanished from every view, key and all. Called BEFORE the new
+    setup writes anything (full_setup runs it at the top, while the old key
+    is still intact), this copies the old key to a timestamped backup and
+    records the old domain, so nothing a person set up is ever silently
+    lost.
+
+    A no-op when the slot is empty, or when the incoming domain is the same
+    one already there -- re-running setup on the SAME domain is not a
+    supersession, it is a refresh.
+    """
+    if side not in ("source", "target"):
+        raise ValueError(f"side must be 'source' or 'target', got {side!r}")
+    old = get_tenant_config(account_id, side) or {}
+    old_domain = (old.get("domain") or "").strip()
+    if not old_domain:
+        return
+    if old_domain.lower() == (incoming_domain or "").strip().lower():
+        return
+
+    backup_rel = ""
+    key_rel = old.get("sa_key_path") or ""
+    if key_rel:
+        key_abs = key_rel if os.path.isabs(key_rel) else os.path.join(HERE, key_rel)
+        if os.path.isfile(key_abs):
+            import shutil
+            stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+            backup_abs = f"{key_abs}.superseded-{stamp}"
+            try:
+                shutil.copy2(key_abs, backup_abs)
+                backup_rel = (os.path.relpath(backup_abs, HERE)
+                              if not os.path.isabs(key_rel) else backup_abs)
+            except OSError:
+                backup_rel = ""      # a failed copy must not lose the record
+
+    with cpdb.rw() as conn:
+        conn.execute(
+            "INSERT INTO superseded_configs "
+            "(account_id, side, domain, admin_email, key_path, replaced_by) "
+            "VALUES (?,?,?,?,?,?)",
+            (account_id, side, old_domain, old.get("admin_email") or "",
+             backup_rel, (incoming_domain or "").strip()),
+        )
+
+
+def list_superseded(account_id: int | None = None) -> list[dict]:
+    """Every domain that was overwritten in a slot, newest first. All
+    accounts when account_id is None (the superadmin, cross-account view)."""
+    q = ("SELECT id, account_id, side, domain, admin_email, key_path, "
+         "replaced_by, superseded_at FROM superseded_configs")
+    args: tuple = ()
+    if account_id is not None:
+        q += " WHERE account_id=?"
+        args = (account_id,)
+    q += " ORDER BY superseded_at DESC"
+    with cpdb.ro() as conn:
+        return [dict(r) for r in conn.execute(q, args).fetchall()]
+
+
 def get_account(account_id: int) -> dict | None:
     with cpdb.ro() as conn:
         row = conn.execute(

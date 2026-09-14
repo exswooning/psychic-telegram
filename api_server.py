@@ -4506,9 +4506,10 @@ async def all_configured_domains(op: Operator = Depends(operator)):
                 params = (op.account_id,)
             q += " ORDER BY t.account_id, t.side"
             db_rows = conn.execute(q, params).fetchall()
+        def _abs(k: str) -> str:
+            return os.path.join(HERE, k) if k and not os.path.isabs(k) else k
         for r in db_rows:
-            key = r["sa_key_path"] or ""
-            abspath = os.path.join(HERE, key) if key and not os.path.isabs(key) else key
+            abspath = _abs(r["sa_key_path"] or "")
             has_key = bool(abspath) and os.path.isfile(abspath)
             client_id = provision_gcp.client_id_of(abspath) if has_key else ""
             rows.append({
@@ -4519,6 +4520,29 @@ async def all_configured_domains(op: Operator = Depends(operator)):
                 "adminEmail": r["admin_email"] or "",
                 "hasKey": has_key,
                 "clientId": client_id,
+                "superseded": False,
+            })
+
+        # Overwritten domains -- ones a setup replaced in a slot. Kept so a
+        # domain a person set up never vanishes; marked so the UI can show it
+        # as history rather than an active pair. Same account scoping.
+        emails = {r["account_id"]: r["account_email"] for r in db_rows}
+        for sup in accounts_auth.list_superseded(
+                None if is_super else op.account_id):
+            abspath = _abs(sup.get("key_path") or "")
+            has_key = bool(abspath) and os.path.isfile(abspath)
+            rows.append({
+                "accountId": sup["account_id"],
+                "accountEmail": emails.get(sup["account_id"], ""),
+                "side": sup["side"],
+                "domain": sup["domain"],
+                "adminEmail": sup.get("admin_email") or "",
+                "hasKey": has_key,
+                "clientId": (provision_gcp.client_id_of(abspath)
+                             if has_key else ""),
+                "superseded": True,
+                "replacedBy": sup.get("replaced_by") or "",
+                "supersededAt": sup.get("superseded_at") or "",
             })
         return {"domains": rows, "superadmin": is_super}
     return await _off_loop(_read)

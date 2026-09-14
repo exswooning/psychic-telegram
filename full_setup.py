@@ -332,6 +332,16 @@ def run_full_setup(
     # exactly as it always was before this branch existed.
     existing = (accounts_auth.get_tenant_config(account_id, side)
                 if account_id is not None else None)
+    # Before anything is written: if this slot already holds a DIFFERENT
+    # domain, preserve it (its key is still intact at this point). A slot
+    # keeps one row, so without this the previous domain -- one somebody set
+    # up -- would just vanish when this run overwrites it. A re-run on the
+    # SAME domain is a refresh, not a supersession, and records nothing.
+    if account_id is not None:
+        try:
+            accounts_auth.snapshot_superseded(account_id, side, domain)
+        except Exception as exc:      # noqa: BLE001 - never block a setup
+            log(f"  (could not snapshot the previous {side} domain: {exc})")
     uploaded_key = existing["sa_key_path"] if existing else None
     key_path = uploaded_key or os.path.join(keys_dir, f"{side}-sa.json")
 

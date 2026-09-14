@@ -1048,6 +1048,11 @@ export interface ConfiguredDomain {
   adminEmail: string
   hasKey: boolean
   clientId: string
+  /** A domain a later setup overwrote in its slot. Kept so nothing set up
+   *  ever disappears; shown as history, not an active pair. */
+  superseded: boolean
+  replacedBy?: string
+  supersededAt?: string
 }
 
 export const fetchAllDomains = () =>
