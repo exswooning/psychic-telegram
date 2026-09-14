@@ -829,7 +829,15 @@ class TestFullSetup:
         assert ours, f"full_setup.py was never launched; saw {calls}"
         assert "--seed" not in ours[0]
 
-    def test_status_reports_not_running_with_no_result_by_default(self, cp):
+    def test_status_reports_not_running_with_no_result_by_default(self, monkeypatch, tmp_path, cp):
+        # Isolate HERE the way the other status tests do (623/642): these
+        # full-setup tests share the repo logs dir, and a sibling that
+        # starts a source run leaves {"running": true} behind. That marker
+        # is now reconciled into an interrupted RESULT at startup rather than
+        # silently ignored, so "never set up returns no result" has to read
+        # from a clean dir to actually be testing the default.
+        import api_server
+        monkeypatch.setattr(api_server, "HERE", str(tmp_path))
         r = cp.get("/api/v2/full-setup/status?side=source", headers=ADMIN)
         assert r.status_code == 200
         body = r.json()

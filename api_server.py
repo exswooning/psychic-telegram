@@ -524,6 +524,73 @@ def _reconcile_inventory_scans() -> None:
                 continue
 
 
+def _reconcile_full_setup_state() -> None:
+    """A full_setup run killed mid-flight leaves its state file saying
+    {"running": true} with no phases, and nothing ever rewrites it -- the
+    child was killed, so it could not.
+
+    full_setup_status decides "running" by a live ps-grep, so it correctly
+    reports the process as gone; but the state file with no "phases" is
+    neither a result nor progress, so the wizard shows neither an outcome
+    nor a way forward and sits at its last checkpoint. Seen for real this
+    session: every API restart (each deploy) kills an in-progress setup,
+    and KillMode=process protects the child from the restart only while it
+    is genuinely still working -- a run interrupted at the gcloud phase is
+    not.
+
+    Mirror of _reconcile_inventory_scans: turn the orphan into an explicit
+    interrupted RESULT (phases present, so the status endpoint surfaces it)
+    that says plainly what happened and that nothing was changed. Never
+    fatal: a stuck wizard is better fixed late than a control plane that
+    will not start.
+    """
+    root = os.path.join(HERE, "logs")
+    if not os.path.isdir(root):
+        return
+    try:
+        ps_out = subprocess.run(["ps", "-eo", "args="], capture_output=True,
+                                text=True, timeout=5).stdout
+    except Exception:      # noqa: BLE001
+        ps_out = ""
+    alive = any("full_setup.py" in ln and "grep" not in ln
+                for ln in ps_out.splitlines())
+    for name in os.listdir(root):
+        # The live state file, not the .partial checkpoint or the .err log.
+        if not (name.startswith("full-setup-") and name.endswith(".json")):
+            continue
+        path = os.path.join(root, name)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict) or not data.get("running"):
+            continue
+        # A run still genuinely in flight must be left alone. ps cannot say
+        # WHICH side is alive from args= only, so if any full_setup is
+        # running this is skipped -- it will be reconciled on the next
+        # restart when nothing is, and the ps-grep in the status endpoint
+        # keeps the UI honest in the meantime.
+        if alive:
+            continue
+        result = {
+            "running": False, "interrupted": True, "phases": [],
+            "error": ("this setup run was interrupted when the server "
+                      "restarted before it finished. Nothing was changed on "
+                      "your tenant that a re-run will not simply redo -- "
+                      "start it again."),
+        }
+        tmp = path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(result, fh)
+            os.replace(tmp, path)
+            print(f"reconciled orphaned full-setup state: {name} "
+                  "(marked interrupted, no process found)", flush=True)
+        except OSError:
+            continue
+
+
 @asynccontextmanager
 def _ensure_account_schemas() -> None:
     """Bring every account ledger up to the current schema at startup.
@@ -650,6 +717,7 @@ async def lifespan(_: FastAPI):
     await _off_loop(accounts_auth.bootstrap_legacy_account)
     await _off_loop(_reconcile_active_jobs)
     await _off_loop(_reconcile_inventory_scans)
+    await _off_loop(_reconcile_full_setup_state)
     await _off_loop(_ensure_account_schemas)
     task = asyncio.create_task(_tailer())
     watchdog = asyncio.create_task(_supervise_jobs())

@@ -11,6 +11,9 @@ from the UI with no failure and no reason, while the traceback sat unread in
 the .err next to it.
 """
 import inspect
+import json
+import os
+import tempfile
 
 import full_setup
 
@@ -72,3 +75,62 @@ class TestACrashedRunIsReported:
         src = self._read_src()
         i = src.index("if not running and result is None")
         assert "result = {" in src[i:], "the guard must precede the write"
+
+
+class TestAnInterruptedRunIsReconciledAtStartup:
+    """A run killed by an API restart (every deploy does this) leaves
+    {"running": true} and an EMPTY .err -- a clean kill writes no traceback.
+
+    full_setup_status only synthesises a crash when it finds an exception
+    line in the .err, and deliberately refuses to report on the marker alone
+    (it survives forever and would re-report the same failure on every
+    call). So a cleanly-killed run left the wizard in limbo: no result, no
+    progress, no way forward. This reconciler converts the marker ONCE at
+    startup into a dated interrupted result, the same way inventory scans
+    are reconciled.
+    """
+    def _run(self, monkeypatch, state: dict):
+        import api_server
+        d = tempfile.mkdtemp()
+        logs = os.path.join(d, "logs")
+        os.makedirs(logs)
+        path = os.path.join(logs, "full-setup-source.json")
+        with open(path, "w") as fh:
+            json.dump(state, fh)
+        monkeypatch.setattr(api_server, "HERE", d)
+        api_server._reconcile_full_setup_state()
+        with open(path) as fh:
+            return json.load(fh)
+
+    def test_a_stuck_running_marker_becomes_an_interrupted_result(self, monkeypatch):
+        out = self._run(monkeypatch, {"running": True})
+        assert out["running"] is False
+        assert out["interrupted"] is True
+        assert "phases" in out, "must read as a result, not a bare marker"
+        assert "interrupted" in out["error"].lower()
+
+    def test_it_says_nothing_was_changed_that_a_rerun_will_not_redo(self, monkeypatch):
+        """The operator has to know it is safe to just start again."""
+        out = self._run(monkeypatch, {"running": True})
+        assert "start it again" in out["error"].lower()
+
+    def test_a_finished_result_is_left_untouched(self, monkeypatch):
+        """It has phases and no running marker -- not an orphan."""
+        done = {"running": False, "ok": True,
+                "phases": [{"name": "setup (source)", "status": "ok"}]}
+        assert self._run(monkeypatch, done) == done
+
+    def test_a_never_set_up_tenant_is_left_untouched(self, monkeypatch):
+        """No running marker means no run began -- inventing a failure here
+        is the exact bug the runtime path was careful to avoid."""
+        idle = {"running": False}
+        assert self._run(monkeypatch, idle) == idle
+
+    def test_it_is_wired_into_startup(self):
+        import api_server
+        import inspect
+        src = inspect.getsource(api_server.lifespan) if hasattr(
+            api_server, "lifespan") else ""
+        # The reconcilers are invoked together in the startup block.
+        whole = inspect.getsource(api_server)
+        assert "_off_loop(_reconcile_full_setup_state)" in whole
