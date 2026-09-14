@@ -300,7 +300,7 @@ describe('deleting a domain setup', () => {
 })
 
 describe('a dead delegation reads as an explanation, not a raw error', () => {
-  it('explains that delegation is not live', async () => {
+  it('explains it when the read REJECTS', async () => {
     tenantInventory.mockRejectedValue(
       new Error("invalid_grant: No valid verifier for issuer: source-sa@x"))
     render(<Identities />)
@@ -308,5 +308,23 @@ describe('a dead delegation reads as an explanation, not a raw error', () => {
     const stats = await screen.findByTestId('domain-stats-source')
     expect(stats).toHaveTextContent(/delegation is not live/i)
     expect(stats).not.toHaveTextContent('invalid_grant')
+  })
+
+  it('explains it when the read RESOLVES 200 with an error field', async () => {
+    // The real shape: snapshot() catches the dead delegation and reports it
+    // in the body rather than raising, so accounts:0 with an error must not
+    // render as an empty tenant.
+    tenantInventory.mockResolvedValue({
+      side: 'source', domain: 'src.example', accounts: 0, users: [],
+      totals: { emails: 0, threads: 0, driveBytes: 0, covered: 0 },
+      truncated: false, deep: false, deepSampled: 0,
+      licenseCounts: {}, licenseError: '',
+      error: 'invalid_grant: No valid verifier for issuer: source-sa@x',
+    })
+    render(<Identities />)
+    fireEvent.click(await screen.findByTestId('domain-card-open-source'))
+    const stats = await screen.findByTestId('domain-stats-source')
+    expect(stats).toHaveTextContent(/delegation is not live/i)
+    expect(stats).not.toHaveTextContent('0/0')      // not shown as an empty tenant
   })
 })

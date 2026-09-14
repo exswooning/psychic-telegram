@@ -75,6 +75,12 @@ const TenantStats: React.FC<{
       .finally(() => setBusy(false))
   }, [side, accountId, canRead])
   const licences = Object.entries(inv?.licenseCounts || {})
+  // The read can fail two ways: the request rejects (err), OR it returns 200
+  // with an error field -- snapshot() catches a dead delegation and reports
+  // it in the body rather than raising, so a card that only checked the
+  // reject path rendered "0 users / 0 GB", which reads as an empty tenant
+  // rather than an unreadable one. Treat both the same.
+  const failure = err || inv?.error || ''
   return (
     <Box sx={{ p: 2 }} data-testid={testId}>
       {!canRead ? (
@@ -89,15 +95,15 @@ const TenantStats: React.FC<{
             Reading the tenant live…
           </Typography>
         </Stack>
-      ) : err ? (
+      ) : failure ? (
         <Alert severity="warning">
-          {/(invalid_grant|unauthorized_client|no valid verifier)/i.test(err)
+          {/(invalid_grant|unauthorized_client|no valid verifier)/i.test(failure)
             ? 'Its stats cannot be read because the domain-wide delegation '
               + 'is not live — the service account has a key here, but its '
               + 'client ID was never granted (or was revoked) in this '
               + "tenant's Admin Console. Re-run setup, or grant delegation "
               + 'for the client ID, and the stats will appear.'
-            : err}
+            : failure}
         </Alert>
       ) : inv ? (
         <>
