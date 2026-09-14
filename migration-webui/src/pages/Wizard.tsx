@@ -4,11 +4,13 @@ import {
   Box, Typography, Card, CardContent, CardActionArea,
   Chip, Button, TextField, Grid, Alert, Divider, RadioGroup, FormControlLabel,
   Radio, LinearProgress, Stack, IconButton, Tooltip, Tabs, Tab,
+  InputAdornment,
 } from '@mui/material'
 import {
   Refresh as RefreshIcon, Grass as SeedIcon, RocketLaunch as MigrateIcon,
   ArrowBack as BackIcon,
   AddCircleOutline as NewMigrationIcon,
+  Visibility as ShowIcon, VisibilityOff as HideIcon,
 } from '@mui/icons-material'
 import {
   fetchStatus, checkStep, fetchConfig, saveConfig, setRunMode, fetchActions,
@@ -177,6 +179,7 @@ const AdminSignInStep: React.FC<{
 }> = ({ heading, sub, aside, initialEmail = '', onBack, onNext }) => {
   const [email, setEmail] = useState(initialEmail)
   const [password, setPassword] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
   const domain = domainOf(email)
   const shaped = /^[^@\s]+@[^@\s]+$/.test(email.trim()) && looksLikeDomain(domain)
   const error = email.trim() === '' ? ''
@@ -196,12 +199,27 @@ const AdminSignInStep: React.FC<{
         sx={{ '& .MuiOutlinedInput-root': { height: 60 } }}
       />
       <TextField
-        fullWidth type="password" label="Password" value={password}
+        fullWidth type={showPassword ? 'text' : 'password'} label="Password"
+        value={password}
         onChange={(e) => setPassword(e.target.value)}
         onKeyDown={(e) => { if (e.key === 'Enter' && ready) onNext(email.trim(), password, domain) }}
         helperText=" "
         inputProps={{ 'data-testid': 'admin-password',
                       autoComplete: 'current-password' }}
+        InputProps={{
+          endAdornment: (
+            <InputAdornment position="end">
+              <IconButton
+                aria-label={showPassword ? 'Hide password' : 'Show password'}
+                data-testid="toggle-password"
+                onClick={() => setShowPassword((v) => !v)}
+                onMouseDown={(e) => e.preventDefault()}
+                edge="end">
+                {showPassword ? <HideIcon /> : <ShowIcon />}
+              </IconButton>
+            </InputAdornment>
+          ),
+        }}
         sx={{ mt: 1, '& .MuiOutlinedInput-root': { height: 60 } }}
       />
       {/* The domain is derived, and shown so it can be checked before it is

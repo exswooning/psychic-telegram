@@ -121,6 +121,18 @@ describe('the credential is the first question', () => {
     expect(screen.getByTestId('creds-next')).toBeDisabled()
   })
 
+  it('hides the password by default and reveals it on the eye', async () => {
+    /* A tenant super-admin password typed blind is a support ticket waiting
+       to happen; the field is masked until asked otherwise. */
+    view()
+    const pw = await screen.findByTestId('admin-password')
+    expect(pw).toHaveAttribute('type', 'password')
+    fireEvent.click(screen.getByTestId('toggle-password'))
+    expect(pw).toHaveAttribute('type', 'text')
+    fireEvent.click(screen.getByTestId('toggle-password'))
+    expect(pw).toHaveAttribute('type', 'password')
+  })
+
   it('says why, rather than just staying disabled', async () => {
     view()
     fireEvent.change(await screen.findByTestId('admin-email'),
