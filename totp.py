@@ -138,7 +138,6 @@ def enrol(email: str, issuer: str = "Bitport",
     """
     import base64
     import secrets as _secrets
-    import urllib.parse
 
     who = (email or "").strip().lower()
     stored = load_secrets(path)
@@ -147,6 +146,26 @@ def enrol(email: str, issuer: str = "Bitport",
         # 160 bits, the RFC 4226 recommendation.
         secret = base64.b32encode(_secrets.token_bytes(20)).decode().rstrip("=")
         save_secret(who, secret, path)
+    return _enrol_payload(who, secret, issuer)
+
+
+def qr_for(email: str, issuer: str = "Bitport",
+           path: str | None = None) -> dict | None:
+    """The QR and setup key for an account that ALREADY has a seed.
+
+    None, never a new seed, when there is none stored. enrol() creates on
+    demand because that is its job inside the wizard; a "show me the QR"
+    button on a management page must not mint a second factor as a side
+    effect of being clicked, least of all one the operator then believes
+    was already there.
+    """
+    who = (email or "").strip().lower()
+    secret = load_secrets(path).get(who)
+    return _enrol_payload(who, secret, issuer) if secret else None
+
+
+def _enrol_payload(who: str, secret: str, issuer: str) -> dict:
+    import urllib.parse
     # SHA1/6/30 are the defaults every authenticator app assumes, and
     # spelling them out only makes the QR denser and harder to scan off a
     # screen. The label is the local part alone for the same reason.

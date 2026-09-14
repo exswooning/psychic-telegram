@@ -16,8 +16,9 @@ import {
   Alert, Box, Button, CircularProgress, Paper, Stack, TextField, Typography,
 } from '@mui/material'
 import { ContentCopy as CopyIcon, Check as CheckIcon } from '@mui/icons-material'
-import { fetchMfaCode, storeMfaSecret } from '@/api/controlPlane'
-import type { MfaCode } from '@/api/controlPlane'
+import { fetchMfaCode, storeMfaSecret, fetchMfaQr } from '@/api/controlPlane'
+import type { MfaCode, MfaQr } from '@/api/controlPlane'
+import QrCode from '@/components/QrCode'
 
 export const AuthenticatorCode: React.FC<{
   email?: string
@@ -34,6 +35,7 @@ export const AuthenticatorCode: React.FC<{
   const [err, setErr] = useState('')
   const [secret, setSecret] = useState('')
   const [copied, setCopied] = useState(false)
+  const [qr, setQr] = useState<MfaQr | null>(null)
   const [left, setLeft] = useState(0)
 
   const refresh = useCallback((target: string) => {
@@ -55,7 +57,7 @@ export const AuthenticatorCode: React.FC<{
       .catch((e) => setErr(e instanceof Error ? e.message : String(e)))
   }, [])
 
-  useEffect(() => { refresh(who) }, [who, refresh])
+  useEffect(() => { refresh(who); setQr(null) }, [who, refresh])
 
   useEffect(() => {
     // Tick locally, and re-fetch when the window rolls. Polling every second
@@ -124,7 +126,47 @@ export const AuthenticatorCode: React.FC<{
                   }}>
             {copied ? 'Copied' : 'Copy'}
           </Button>
+          {/* Fetched only on click. The otpauth URI carries the SECRET, so
+              a QR shown on every load leaves the second factor sitting on
+              any open screen -- the same reason the code page reveals it
+              behind a button rather than on arrival. */}
+          <Button size="small" data-testid="mfa-show-qr"
+                  onClick={() => (qr ? setQr(null)
+                    : fetchMfaQr(who).then((r) => {
+                        if (r.error) { setErr(r.error); return }
+                        setErr(''); setQr(r)
+                      }).catch((e) => setErr(e instanceof Error ? e.message : String(e))))}>
+            {qr ? 'Hide QR' : 'Sync a phone'}
+          </Button>
         </Stack>
+      ) : null}
+
+      {qr ? (
+        <Paper variant="outlined" sx={{ p: 2, mb: 1 }} data-testid="mfa-qr-panel">
+          <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}
+                 alignItems={{ xs: 'stretch', sm: 'flex-start' }}>
+            <QrCode matrix={qr.matrix} />
+            <Box sx={{ minWidth: 0 }}>
+              <Typography variant="body2" sx={{ mb: 1 }}>
+                Google Authenticator → <strong>+</strong> →{' '}
+                <strong>Scan a QR code</strong>.
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5 }}>
+                Or <strong>Enter a setup key</strong>, with this:
+              </Typography>
+              <Typography data-testid="mfa-qr-key"
+                          sx={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                                fontSize: 15, fontWeight: 700, wordBreak: 'break-all',
+                                mb: 1 }}>
+                {qr.setupKey}
+              </Typography>
+              <Alert severity="warning" data-testid="mfa-qr-warning">
+                This is the seed itself. Any phone that scans it produces the
+                same codes — treat it like the password.
+              </Alert>
+            </Box>
+          </Stack>
+        </Paper>
       ) : null}
 
       {left <= 5 && st?.code ? (

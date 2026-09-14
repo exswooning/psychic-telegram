@@ -262,3 +262,36 @@ class TestEnrolment:
             assert all(m[oy + y][ox + x] == bool(v)
                        for y, row in enumerate(eye)
                        for x, v in enumerate(row)), (ox, oy)
+
+
+class TestQrForAnExistingSeed:
+    """The Authenticator tab shows a QR to sync a phone. Unlike enrol(), it
+    must never MINT a seed as a side effect of being looked at."""
+
+    def test_it_returns_the_qr_for_a_stored_account(self, tmp_path):
+        p = str(tmp_path / "t.env")
+        totp.save_secret("admin@src.test", "ABCD2345ABCD2345ABCD2345ABCD2345", p)
+        got = totp.qr_for("admin@src.test", path=p)
+        assert got and got["uri"].startswith("otpauth://totp/")
+        assert got["matrix"]
+
+    def test_it_never_creates_one(self, tmp_path):
+        """A "show QR" click is a read. Minting a second factor here would
+        hand back one the operator then assumes was already there."""
+        p = str(tmp_path / "t.env")
+        assert totp.qr_for("nobody@x.test", path=p) is None
+        assert "nobody@x.test" not in totp.load_secrets(p)
+
+    def test_the_seed_it_shows_is_the_one_that_verifies(self, tmp_path):
+        p = str(tmp_path / "t.env")
+        e = totp.enrol("deadman@bitport", path=p)
+        got = totp.qr_for("deadman@bitport", path=p)
+        assert got["secret"] == e["secret"]
+        assert totp.code_at(got["secret"]) == totp.code_for("deadman@bitport", p)[0]
+
+    def test_enrol_and_qr_for_agree_on_the_uri(self, tmp_path):
+        """They share one payload builder, so a fix to one cannot drift the
+        other into producing an unscannable code."""
+        p = str(tmp_path / "t.env")
+        e = totp.enrol("deadman@bitport", path=p)
+        assert totp.qr_for("deadman@bitport", path=p)["uri"] == e["uri"]

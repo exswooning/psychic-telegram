@@ -726,6 +726,23 @@ export interface MfaCode {
 export const fetchMfaCode = (email: string) =>
   cpFetch<MfaCode>(`/api/v2/mfa/code?email=${encodeURIComponent(email)}`)
 
+export interface MfaQr {
+  email: string
+  secret: string
+  uri: string
+  setupKey: string
+  /** The QR as on/off modules, drawn by <QrCode>. Empty if the encoder is
+   *  unavailable -- the setup key still enrols a phone by hand. */
+  matrix: boolean[][]
+  error?: string
+}
+
+/** The QR and setup key to sync a phone with an account's EXISTING seed.
+ *  Fetched only on demand: the otpauth URI carries the secret. Never
+ *  creates a seed -- an account with none returns { error }. */
+export const fetchMfaQr = (email: string) =>
+  cpFetch<MfaQr>(`/api/v2/mfa/qr?email=${encodeURIComponent(email)}`)
+
 export const storeMfaSecret = (email: string, secret: string) =>
   cpFetch<{ ok: boolean; email: string; code: string; secondsRemaining: number }>(
     '/api/v2/mfa/secret',

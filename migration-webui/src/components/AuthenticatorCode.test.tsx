@@ -13,9 +13,11 @@ import AuthenticatorCode from './AuthenticatorCode'
 
 const code = vi.fn()
 const store = vi.fn()
+const qr = vi.fn()
 vi.mock('@/api/controlPlane', () => ({
   fetchMfaCode: (...a: unknown[]) => code(...a),
   storeMfaSecret: (...a: unknown[]) => store(...a),
+  fetchMfaQr: (...a: unknown[]) => qr(...a),
 }))
 
 const ok = (over = {}) => ({
@@ -24,7 +26,10 @@ const ok = (over = {}) => ({
 })
 
 beforeEach(() => {
-  code.mockReset(); store.mockReset()
+  code.mockReset(); store.mockReset(); qr.mockReset()
+  qr.mockResolvedValue({ email: 'admin@src.test', secret: 'ABCD2345',
+    uri: 'otpauth://totp/admin?secret=ABCD2345&issuer=Bitport',
+    setupKey: 'ABCD 2345', matrix: [[true, false], [false, true]] })
   code.mockResolvedValue(ok())
   store.mockResolvedValue({ ok: true, email: 'a@b.test', code: '000000',
                             secondsRemaining: 30 })
@@ -193,5 +198,53 @@ describe('a page that passes no account', () => {
     render(<AuthenticatorCode />)
     await screen.findByTestId('mfa-account')
     expect(code).not.toHaveBeenCalledWith('a@x.test')
+  })
+})
+
+
+describe('syncing a phone by QR', () => {
+  it('does not fetch the QR until asked', async () => {
+    /* The otpauth URI carries the secret. A QR on every load leaves the
+       second factor sitting on any open screen. */
+    render(<AuthenticatorCode email="admin@src.test" />)
+    await screen.findByTestId('mfa-code')
+    expect(qr).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('mfa-qr-panel')).toBeNull()
+  })
+
+  it('draws it for the selected account on request', async () => {
+    render(<AuthenticatorCode email="admin@src.test" />)
+    fireEvent.click(await screen.findByTestId('mfa-show-qr'))
+    expect(await screen.findByTestId('mfa-qr-panel')).toBeInTheDocument()
+    await waitFor(() => expect(qr).toHaveBeenCalledWith('admin@src.test'))
+  })
+
+  it('offers the setup key alongside the QR', async () => {
+    render(<AuthenticatorCode email="admin@src.test" />)
+    fireEvent.click(await screen.findByTestId('mfa-show-qr'))
+    expect(await screen.findByTestId('mfa-qr-key')).toHaveTextContent('ABCD 2345')
+  })
+
+  it('says plainly the QR is the seed', async () => {
+    render(<AuthenticatorCode email="admin@src.test" />)
+    fireEvent.click(await screen.findByTestId('mfa-show-qr'))
+    expect(await screen.findByTestId('mfa-qr-warning')).toHaveTextContent(/seed/)
+  })
+
+  it('hides it again so it is not left on screen', async () => {
+    render(<AuthenticatorCode email="admin@src.test" />)
+    fireEvent.click(await screen.findByTestId('mfa-show-qr'))
+    await screen.findByTestId('mfa-qr-panel')
+    fireEvent.click(screen.getByTestId('mfa-show-qr'))
+    expect(screen.queryByTestId('mfa-qr-panel')).toBeNull()
+  })
+
+  it('reports an account with no seed instead of drawing nothing', async () => {
+    qr.mockResolvedValue({ error: 'no authenticator seed stored for x@y.test' })
+    render(<AuthenticatorCode email="admin@src.test" />)
+    fireEvent.click(await screen.findByTestId('mfa-show-qr'))
+    expect(await screen.findByTestId('mfa-error'))
+      .toHaveTextContent('no authenticator seed stored')
+    expect(screen.queryByTestId('mfa-qr-panel')).toBeNull()
   })
 })

@@ -4726,6 +4726,30 @@ async def mfa_code(email: str = "", op: Operator = Depends(operator)):
     return await _off_loop(_read)
 
 
+@app.get("/api/v2/mfa/qr")
+async def mfa_qr(email: str = "", op: Operator = Depends(operator)):
+    """The QR and setup key to sync a phone with an EXISTING seed.
+
+    Superadmin-only, like the code itself: the otpauth URI carries the
+    secret, so this is the second factor in scannable form.
+
+    Never creates a seed. A QR request is a read; minting a second factor as
+    a side effect of someone clicking "show QR" -- one they would then
+    assume had existed all along -- is the kind of surprise that has no place
+    anywhere near the account that arms the wipe switch.
+    """
+    require_login(op)
+    require_superadmin(op)
+
+    def _read() -> dict:
+        import totp
+        got = totp.qr_for((email or "").strip().lower())
+        if not got:
+            return {"error": f"no authenticator seed stored for {email}"}
+        return got
+    return await _off_loop(_read)
+
+
 @app.post("/api/v2/mfa/secret")
 async def mfa_store_secret(req: TotpSecret, op: Operator = Depends(operator)):
     """Store an account's authenticator seed.
