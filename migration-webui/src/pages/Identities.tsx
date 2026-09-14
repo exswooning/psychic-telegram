@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Box, Typography, Card, CardContent, CardActionArea, Stack, TextField, Button, Alert,
   Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Chip,
@@ -288,10 +288,34 @@ const Identities: React.FC = () => {
   // The configured-domain list is config-only (no Google call), so it can
   // poll cheaply -- that is what makes a domain you just set up appear here
   // on its own, which the slow live check below cannot afford to.
-  const refreshAllDomains = useCallback(() => {
-    fetchAllDomains().then((r) => { setAllDomains(r.domains); setAllSuper(r.superadmin) })
-      .catch(() => { /* leave the last good list up */ })
+  // The slow live delegation check, on its own so the poll can re-run it
+  // ONLY when a domain actually changed -- never every tick.
+  const refreshVerified = useCallback(() => {
+    setDomainsLoading(true)
+    fetchVerifiedDomains()
+      .then((r) => setDomains(r.domains))
+      .catch(() => setDomains([]))
+      .finally(() => setDomainsLoading(false))
   }, [])
+
+  // A fingerprint of the config list, so the poll can tell "nothing changed"
+  // from "a domain was added or swapped" without re-running the live check
+  // on every 8s tick.
+  const configSig = useRef('')
+
+  const refreshAllDomains = useCallback(() => {
+    fetchAllDomains().then((r) => {
+      setAllDomains(r.domains); setAllSuper(r.superadmin)
+      const sig = r.domains
+        .map((d) => `${d.accountId}:${d.side}:${d.domain}:${d.hasKey}`)
+        .sort().join('|')
+      // First load seeds the fingerprint; a later change re-runs the slow
+      // live check so a domain you just set up shows its real status on its
+      // own, instead of waiting for a manual refresh.
+      if (configSig.current && sig !== configSig.current) refreshVerified()
+      configSig.current = sig
+    }).catch(() => { /* leave the last good list up */ })
+  }, [refreshVerified])
 
   const refresh = useCallback(() => {
     setLoading(true); setError(null)
@@ -303,13 +327,9 @@ const Identities: React.FC = () => {
     // each delegated token actually works, not whether a flag is set -- so
     // it takes a few seconds and earns a spinner. It rides this explicit
     // refresh, never the poll below.
-    setDomainsLoading(true)
-    fetchVerifiedDomains()
-      .then((r) => setDomains(r.domains))
-      .catch(() => setDomains([]))
-      .finally(() => setDomainsLoading(false))
+    refreshVerified()
     refreshAllDomains()
-  }, [refreshAllDomains])
+  }, [refreshAllDomains, refreshVerified])
 
   useEffect(() => { refresh(); fetchActions().then(setActions) }, [refresh])
 
