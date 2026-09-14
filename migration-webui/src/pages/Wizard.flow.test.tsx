@@ -320,8 +320,17 @@ describe('it reads like the Google Workspace signup it sits beside', () => {
   it('offers the choice as radios, the way the signup does', async () => {
     view()
     await signIn('admin@acme.com')
-    const radios = await screen.findAllByRole('radio')
-    expect(radios).toHaveLength(3)
+    // 3 purpose radios; the 2 source/target role radios are a separate group.
+    expect(await screen.findByTestId('purpose-seed')).toBeInTheDocument()
+    expect(screen.getByTestId('purpose-migrate')).toBeInTheDocument()
+    expect(screen.getByTestId('purpose-later')).toBeInTheDocument()
+  })
+
+  it('lets the domain be set up as source or target', async () => {
+    view()
+    await signIn('admin@acme.com')
+    expect(await screen.findByTestId('role-source')).toBeChecked()
+    expect(screen.getByTestId('role-target')).toBeInTheDocument()
   })
 
   it('will not continue until one is picked', async () => {

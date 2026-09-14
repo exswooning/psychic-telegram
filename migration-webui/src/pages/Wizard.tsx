@@ -298,6 +298,7 @@ const Wizard: React.FC = () => {
   // audit log. See startFullSetup's own note.
   const [adminPassword, setAdminPassword] = useState('')
   const [otherDomain, setOtherDomain] = useState('')
+  const [role, setRole] = useState<'source' | 'target'>('source')
   const [purpose, setPurpose] = useState<Purpose | null>(null)
   const [picked, setPicked] = useState<Purpose | ''>('')
   const [autoBusy, setAutoBusy] = useState(false)
@@ -309,12 +310,12 @@ const Wizard: React.FC = () => {
 
   useEffect(() => {
     if (!autoBusy && !setup?.running) return undefined
-    const tick = () => fetchFullSetupStatus('source')
+    const tick = () => fetchFullSetupStatus(role)
       .then(setSetup).catch(() => {})
     tick()
     const id = setInterval(tick, 3000)
     return () => clearInterval(id)
-  }, [autoBusy, setup?.running])
+  }, [autoBusy, setup?.running, role])
   const [seedEnabled, setSeedEnabled] = useState(false)
 
   useEffect(() => {
@@ -389,7 +390,7 @@ const Wizard: React.FC = () => {
       setAutoBusy(true)
       try {
         const r = await startFullSetup(
-          'set up from the wizard', 'source', domain, adminEmail,
+          'set up from the wizard', role, domain, adminEmail,
           adminPassword, { dryRun: false })
         if (!r.ok) throw new Error(r.detail || 'could not start')
         setPurpose(picked)
@@ -434,6 +435,24 @@ const Wizard: React.FC = () => {
                   whole migration can be practised. Migrating moves a real
                   tenant into another one." />
         )}>
+        <Box sx={{ mb: 2 }} data-testid="role-toggle">
+          <Typography variant="body2" sx={{ fontWeight: 600, mb: 0.5 }}>
+            Set {domain} up as your:
+          </Typography>
+          <RadioGroup row value={role}
+                      onChange={(e) => setRole(e.target.value as 'source' | 'target')}>
+            <FormControlLabel value="source"
+              control={<Radio size="small" inputProps={{ 'data-testid': 'role-source' } as never} />}
+              label="Source (read from)" />
+            <FormControlLabel value="target"
+              control={<Radio size="small" inputProps={{ 'data-testid': 'role-target' } as never} />}
+              label="Target (written to)" />
+          </RadioGroup>
+          <Typography variant="caption" color="text.secondary">
+            Source is read-only; target is written to. This is which slot it
+            fills — not the domain name.
+          </Typography>
+        </Box>
         <RadioGroup value={picked} onChange={(e) => setPicked(e.target.value as Purpose)}>
           {seedEnabled && (
             <FormControlLabel value="seed" sx={{ mb: 1, alignItems: 'flex-start' }}
