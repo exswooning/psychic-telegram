@@ -44,6 +44,24 @@ CHALLENGE_PHRASES = (
     "yubikey",
 )
 
+# The gcloud --no-launch-browser flow ends on a page that DISPLAYS the
+# verification code for the terminal, headed "Sign in to the gcloud CLI"
+# ("You are seeing this page because you ran gcloud auth login ... you can
+# close this tab"). gcloud_browser_auth._drive_browser reads that code off
+# the page and pipes it to gcloud itself -- it is the automation's OWN
+# output, not a prompt for anyone. Its "copy this code" wording trips
+# CHALLENGE_PHRASES, so it was shown to the operator as a 2-Step prompt
+# telling them to "answer on your own device" -- the exact work the tool had
+# just done for them. These markers appear ONLY on that terminal-code page,
+# never on a real 2-Step challenge (an earlier page in the same sign-in), so
+# excluding them cannot hide a genuine prompt.
+_NOT_A_CHALLENGE = (
+    "sign in to the gcloud cli",
+    "you are seeing this page because you ran",
+    "gcloud auth login",
+    "you can close this tab",
+)
+
 # Chrome/Google chrome-plating that carries no instruction.
 #
 # WHOLE lines, not prefixes. As a prefix pattern "google" swallowed
@@ -84,7 +102,11 @@ def describe(text: str, max_lines: int = 6) -> str:
     """
     if not text:
         return ""
-    if not any(p in text.lower() for p in CHALLENGE_PHRASES):
+    low = text.lower()
+    if not any(p in low for p in CHALLENGE_PHRASES):
+        return ""
+    # The automation's own gcloud code page is not a prompt for anyone.
+    if any(m in low for m in _NOT_A_CHALLENGE):
         return ""
     kept = [ln for ln in _lines(text) if len(ln) <= 160][:max_lines]
     return " / ".join(kept)

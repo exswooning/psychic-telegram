@@ -175,3 +175,47 @@ class TestEverySignInLoopIsCovered:
         src = inspect.getsource(gcloud_browser_auth.configure_chat_app)
         assert "signin_challenge.from_page" in src
         assert "2-Step prompt" in src
+
+
+class TestTheGcloudCodePageIsNotAChallenge:
+    """The gcloud --no-launch-browser flow ends on a page that DISPLAYS the
+    verification code for the terminal, headed "Sign in to the gcloud CLI".
+    _drive_browser reads that code off the page itself -- it is the
+    automation's own output. Its "copy this code" wording tripped the
+    challenge detector, so the operator was shown a "answer on your own
+    device" banner for work the tool had already done. This is the whole
+    reason "Set everything up for me" looked like it demanded manual sign-in.
+    """
+
+    _GCLOUD = (
+        "Sign in to the gcloud CLI\n"
+        "You are seeing this page because you ran the following command in "
+        "the gcloud CLI from this or another machine. If this is not the "
+        "case, close this tab.\n"
+        "gcloud auth login --no-launch-browser\n"
+        "Enter the following verification code in the gcloud CLI:\n"
+        "4/0ATsMZqCaYxO61823OWuSnc2LEIk-l81-2R4FC_dJzPvgbDoeZe\n"
+        "Copy\nYou can close this tab when you're done."
+    )
+
+    def test_it_is_suppressed(self):
+        import signin_challenge as sc
+        assert sc.describe(self._GCLOUD) == ""
+
+    def test_a_real_2step_prompt_still_surfaces(self):
+        """The exclusion must not swallow a genuine phone prompt -- its
+        markers appear only on the terminal-code page, an earlier page in
+        the same sign-in than any real challenge."""
+        import signin_challenge as sc
+        prompt = ("2-Step Verification\nCheck your phone\n"
+                  "Google sent a notification to your Pixel 7. Tap 47.")
+        assert "Check your phone" in sc.describe(prompt)
+
+    def test_a_2step_that_mentions_gcloud_in_passing_is_not_lost(self):
+        """Defensive: a real challenge page that happened to include the
+        word gcloud somewhere still surfaces, because the markers are
+        whole phrases unique to the code page, not the bare word."""
+        import signin_challenge as sc
+        prompt = ("Check your phone\nApprove the sign-in for the gcloud "
+                  "project you are configuring.")
+        assert sc.describe(prompt) != ""
