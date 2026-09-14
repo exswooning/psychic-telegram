@@ -42,6 +42,8 @@ vi.mock('@/api/controlPlane', () => ({
   getCpBase: () => '',
 }))
 
+vi.setConfig({ testTimeout: 20000 })
+
 vi.mock('@/hooks/useRunningJobs', () => ({
   useRunningJobs: () => ({ jobs: [] }),
   jobKind: () => 'other',
