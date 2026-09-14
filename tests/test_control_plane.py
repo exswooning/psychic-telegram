@@ -22,6 +22,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import time
 
 import pytest
 
@@ -1814,6 +1815,51 @@ class TestScanReportsProgress:
         snap = ti.snapshot(S(), "source", deep=True, deep_sample=1,
                            on_progress=boom)
         assert snap["totals"]["shared"] == 7
+
+
+class TestASupersededScanIsNotShownAsTheCurrentTenant:
+    """Set a new source up over an old one and the previous tenant's deep
+    walk stays on disk under the same (account, side) key. The panel adopts
+    any scan reported present -- it carries the sharing figures the live
+    snapshot does not -- so serving it labels the OLD tenant's 200 accounts
+    and 14 GB as the current tenant's. That is the "why is it showing the
+    old tenant while I set up a new one" bug, live on account 68.
+    """
+
+    def _match(self, monkeypatch, current, scanned):
+        # account_id=None makes Settings read SOURCE_DOMAIN from the env,
+        # which is what _scan_domain_matches consults for the legacy path.
+        import api_server
+        monkeypatch.setenv("SOURCE_DOMAIN", current)
+        return api_server._scan_domain_matches({"domain": scanned}, "source", None)
+
+    def test_a_scan_for_a_superseded_domain_is_not_this_tenants(self, monkeypatch):
+        ok, cur = self._match(monkeypatch, "new.example", "old.example")
+        assert ok is False
+        assert cur == "new.example"
+
+    def test_the_current_tenants_scan_matches(self, monkeypatch):
+        ok, _ = self._match(monkeypatch, "new.example", "new.example")
+        assert ok is True
+
+    def test_a_case_difference_is_not_read_as_a_swap(self, monkeypatch):
+        """Domains are case-insensitive; New.Example and new.example are the
+        same tenant, and dropping the scan over that would re-walk 200
+        accounts for nothing."""
+        ok, _ = self._match(monkeypatch, "New.Example", "new.example")
+        assert ok is True
+
+    def test_an_unknown_current_domain_does_not_hide_a_scan(self, monkeypatch):
+        """If the current domain cannot be read, keep showing what there is
+        rather than blanking the panel -- absent-config is not a swap."""
+        ok, _ = self._match(monkeypatch, "", "old.example")
+        assert ok is True
+
+    def test_the_endpoint_reports_the_supersession(self):
+        import api_server, inspect
+        src = inspect.getsource(api_server.get_tenant_inventory_scan)
+        assert "_scan_domain_matches" in src
+        assert "supersededDomain" in src
 
 
 class TestScansAreReconciledAtStartup:

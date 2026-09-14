@@ -4227,6 +4227,30 @@ async def start_tenant_inventory_scan(side: str, limit: int = 250,
     return {"started": True, "detail": "scan running"}
 
 
+def _scan_domain_matches(data: dict, side: str,
+                         account_id: int | None) -> tuple[bool, str]:
+    """Whether a cached scan belongs to the side's CURRENTLY configured
+    tenant, and what that current domain is.
+
+    A scan is keyed by (account, side), not by domain, so setting a new
+    source up over an old one leaves the previous tenant's deep walk on disk
+    under the same key. Returning it labels one tenant's 200 accounts and
+    14 GB as the current tenant's -- the "why is it showing the old tenant"
+    bug. Case-insensitive: a domain is, and dropping a scan over New.Example
+    vs new.example would re-walk 200 accounts for nothing.
+    """
+    try:
+        from config import Settings
+        s = Settings(account_id=account_id)
+        current = (s.source_domain if side == "source" else s.target_domain) or ""
+    except Exception:      # noqa: BLE001 - a config read must not 500 a GET
+        current = ""
+    scanned = (data.get("domain") or "").strip().lower()
+    if current and scanned and scanned != current.strip().lower():
+        return False, current
+    return True, current
+
+
 @app.get("/api/v2/setup/tenant-inventory/scan")
 async def get_tenant_inventory_scan(side: str,
                                     op: Operator = Depends(operator)):
@@ -4245,6 +4269,17 @@ async def get_tenant_inventory_scan(side: str,
         except Exception as exc:      # noqa: BLE001
             return {"running": False, "present": False,
                     "error": f"could not read scan result: {str(exc)[:120]}"}
+
+        # A scan is keyed by (account, side), not by domain, so a tenant
+        # swap on this side leaves the previous tenant's walk on disk under
+        # the same key. The panel adopts any scan reported present, so
+        # serving a superseded one shows the old tenant as the new one.
+        ok, current = _scan_domain_matches(data, side, op.account_id)
+        if not ok:
+            return {"running": False, "present": False,
+                    "supersededDomain": data.get("domain"),
+                    "currentDomain": current}
+
         data["present"] = True
         # How old the answer is, so the page can say so rather than
         # presenting a stale walk of the tenant as what is there now.
