@@ -1,15 +1,18 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import {
-  Box, Typography, Card, CardContent, Stack, TextField, Button, Alert,
+  Box, Typography, Card, CardContent, CardActionArea, Stack, TextField, Button, Alert,
   Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Chip,
-  IconButton, Tooltip, Grid, LinearProgress,
+  IconButton, Tooltip, Grid, LinearProgress, Collapse, CircularProgress, Divider,
 } from '@mui/material'
 import {
   Refresh as RefreshIcon, People as IdentitiesIcon,
-  Language as DomainIcon,
+  Language as DomainIcon, ExpandMore as ExpandIcon,
 } from '@mui/icons-material'
 import { fetchActions, fetchIdentities, saveIdentityPair, IdentityRow, ActionSpec } from '@/api/client'
-import { fetchVerifiedDomains, VerifiedDomain } from '@/api/controlPlane'
+import {
+  fetchVerifiedDomains, VerifiedDomain,
+  fetchTenantInventory, TenantInventory,
+} from '@/api/controlPlane'
 import JobRunner from '@/components/JobRunner'
 
 /**
@@ -33,54 +36,168 @@ const DOMAIN_STATUS: Record<VerifiedDomain['status'],
  *  as, and how many delegation scopes are actually live. The same
  *  functional check the Jobs page cards use, put here because a user mapping
  *  is only meaningful once the domains it maps between are actually set up. */
+const GB = (bytes: number) => (bytes / 1e9)
+
+/** A small labelled figure in the stats grid. */
+const Stat: React.FC<{ label: string; value: React.ReactNode }> = ({ label, value }) => (
+  <Box>
+    <Typography sx={{ fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
+      {value}
+    </Typography>
+    <Typography variant="caption" color="text.secondary">{label}</Typography>
+  </Box>
+)
+
 const DomainCard: React.FC<{ d: VerifiedDomain }> = ({ d }) => {
   const st = DOMAIN_STATUS[d.status] ?? DOMAIN_STATUS.error
   const frac = d.total > 0 ? d.live / d.total : 0
+  const setUp = d.total > 0 && !d.error
+  const [open, setOpen] = useState(false)
+  const [inv, setInv] = useState<TenantInventory | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [invErr, setInvErr] = useState('')
+
+  const toggle = () => {
+    const next = !open
+    setOpen(next)
+    // Fetched on first open, not on render: this is two live Google calls
+    // per account, so it must never ride a poll or a page load -- a click
+    // is the explicit trigger it needs.
+    if (next && setUp && !inv && !busy) {
+      setBusy(true); setInvErr('')
+      fetchTenantInventory(d.side)
+        .then(setInv)
+        .catch((e) => setInvErr(e instanceof Error ? e.message : String(e)))
+        .finally(() => setBusy(false))
+    }
+  }
+
+  const licences = Object.entries(inv?.licenseCounts || {})
+
   return (
     <Card elevation={0} data-testid={`domain-card-${d.side}`}
           sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider',
                 height: '100%' }}>
-      <CardContent>
-        <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.5 }}>
-          <DomainIcon fontSize="small" color="action" />
-          <Chip size="small" label={d.side} variant="outlined"
-                sx={{ textTransform: 'capitalize' }} />
-          <Box sx={{ flexGrow: 1 }} />
-          <Chip size="small" label={st.label} color={st.color}
-                variant={st.color === 'default' ? 'outlined' : 'filled'} />
-        </Stack>
-        <Typography sx={{ fontWeight: 700, wordBreak: 'break-all' }}>
-          {d.domain || '(not set up)'}
-        </Typography>
-        {d.adminEmail && (
-          <Typography variant="body2" color="text.secondary"
-                      sx={{ wordBreak: 'break-all', mb: 1 }}>
-            {d.adminEmail}
+      <CardActionArea onClick={toggle} data-testid={`domain-card-open-${d.side}`}
+                      sx={{ p: 0 }}>
+        <CardContent>
+          <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.5 }}>
+            <DomainIcon fontSize="small" color="action" />
+            <Chip size="small" label={d.side} variant="outlined"
+                  sx={{ textTransform: 'capitalize' }} />
+            <Box sx={{ flexGrow: 1 }} />
+            <Chip size="small" label={st.label} color={st.color}
+                  variant={st.color === 'default' ? 'outlined' : 'filled'} />
+            <ExpandIcon fontSize="small" color="action"
+                        sx={{ transform: open ? 'rotate(180deg)' : 'none',
+                              transition: '0.2s' }} />
+          </Stack>
+          <Typography sx={{ fontWeight: 700, wordBreak: 'break-all' }}>
+            {d.domain || '(not set up)'}
           </Typography>
-        )}
-        {d.error ? (
-          <Alert severity="warning" sx={{ mt: 1 }}>{d.error}</Alert>
-        ) : d.total > 0 ? (
-          <Box sx={{ mt: 1 }}>
-            <Stack direction="row" justifyContent="space-between" sx={{ mb: 0.5 }}>
-              <Typography variant="caption" color="text.secondary">
-                Delegation scopes
-              </Typography>
-              <Typography variant="caption"
-                          sx={{ fontVariantNumeric: 'tabular-nums' }}>
-                {d.live}/{d.total} live
+          {d.adminEmail && (
+            <Typography variant="body2" color="text.secondary"
+                        sx={{ wordBreak: 'break-all', mb: 1 }}>
+              {d.adminEmail}
+            </Typography>
+          )}
+          {d.error ? (
+            <Alert severity="warning" sx={{ mt: 1 }}>{d.error}</Alert>
+          ) : setUp ? (
+            <Box sx={{ mt: 1 }}>
+              <Stack direction="row" justifyContent="space-between" sx={{ mb: 0.5 }}>
+                <Typography variant="caption" color="text.secondary">
+                  Delegation scopes
+                </Typography>
+                <Typography variant="caption"
+                            sx={{ fontVariantNumeric: 'tabular-nums' }}>
+                  {d.live}/{d.total} live
+                </Typography>
+              </Stack>
+              <LinearProgress variant="determinate" value={frac * 100}
+                              color={frac >= 1 ? 'success' : frac > 0 ? 'warning' : 'error'}
+                              sx={{ height: 6, borderRadius: 1 }} />
+            </Box>
+          ) : (
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+              No delegation scopes yet — finish it in the Setup Wizard.
+            </Typography>
+          )}
+        </CardContent>
+      </CardActionArea>
+
+      <Collapse in={open} unmountOnExit>
+        <Divider />
+        <Box sx={{ p: 2 }} data-testid={`domain-stats-${d.side}`}>
+          {!setUp ? (
+            <Typography variant="body2" color="text.secondary">
+              This tenant is not set up yet, so there is nothing to read.
+              Finish it in the Setup Wizard, then its stats appear here.
+            </Typography>
+          ) : busy ? (
+            <Stack direction="row" spacing={1} alignItems="center">
+              <CircularProgress size={16} />
+              <Typography variant="body2" color="text.secondary">
+                Reading the tenant live…
               </Typography>
             </Stack>
-            <LinearProgress variant="determinate" value={frac * 100}
-                            color={frac >= 1 ? 'success' : frac > 0 ? 'warning' : 'error'}
-                            sx={{ height: 6, borderRadius: 1 }} />
-          </Box>
-        ) : (
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-            No delegation scopes yet.
-          </Typography>
-        )}
-      </CardContent>
+          ) : invErr ? (
+            <Alert severity="warning">{invErr}</Alert>
+          ) : inv ? (
+            <>
+              <Grid container spacing={2} sx={{ mb: licences.length ? 1.5 : 0 }}>
+                <Grid item xs={6} sm={3}>
+                  <Stat label="Users" value={inv.accounts.toLocaleString()} />
+                </Grid>
+                <Grid item xs={6} sm={3}>
+                  <Stat label="Drive"
+                        value={`${GB(inv.totals.driveBytes).toFixed(1)} GB`} />
+                </Grid>
+                <Grid item xs={6} sm={3}>
+                  <Stat label="Email" value={inv.totals.emails.toLocaleString()} />
+                </Grid>
+                <Grid item xs={6} sm={3}>
+                  <Stat label="Measured from"
+                        value={`${inv.totals.covered}/${inv.accounts}`} />
+                </Grid>
+              </Grid>
+
+              <Typography variant="caption" color="text.secondary"
+                          sx={{ fontWeight: 600 }}>
+                Licences (assigned)
+              </Typography>
+              {inv.licenseError ? (
+                <Typography variant="body2" color="text.secondary">
+                  Couldn&apos;t read licences — the licensing scope isn&apos;t granted.
+                </Typography>
+              ) : licences.length ? (
+                <Stack direction="row" sx={{ flexWrap: 'wrap', gap: 0.75, mt: 0.5 }}>
+                  {licences.map(([sku, n]) => (
+                    <Chip key={sku} size="small" variant="outlined"
+                          label={`${sku} · ${n.toLocaleString()}`} />
+                  ))}
+                </Stack>
+              ) : (
+                <Typography variant="body2" color="text.secondary">
+                  No licences assigned.
+                </Typography>
+              )}
+              <Typography variant="caption" color="text.secondary"
+                          sx={{ display: 'block', mt: 1.5 }}>
+                Google only reports licences <em>in use</em> per SKU; free seats
+                need a Reseller scope this tool doesn&apos;t request, so those
+                counts are what is assigned, not what remains.
+              </Typography>
+              {inv.truncated && (
+                <Typography variant="caption" color="warning.main"
+                            sx={{ display: 'block', mt: 1 }}>
+                  Showing the first {inv.users.length} of {inv.accounts} accounts.
+                </Typography>
+              )}
+            </>
+          ) : null}
+        </Box>
+      </Collapse>
     </Card>
   )
 }
