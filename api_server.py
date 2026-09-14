@@ -554,11 +554,17 @@ def _reconcile_full_setup_state() -> None:
         ps_out = ""
     alive = any("full_setup.py" in ln and "grep" not in ln
                 for ln in ps_out.splitlines())
-    for name in os.listdir(root):
+    # os.walk, not listdir: a run started for a specific account lands in
+    # logs/<account_id>/full-setup-<side>.json (see _full_setup_state_path),
+    # so a flat scan of logs/ would miss every per-account run and only
+    # catch the legacy X-Operator path at the top level. Mirrors
+    # _reconcile_inventory_scans, which walks for the same reason.
+    for dirpath, _dirs, files in os.walk(root):
+      for name in files:
         # The live state file, not the .partial checkpoint or the .err log.
         if not (name.startswith("full-setup-") and name.endswith(".json")):
             continue
-        path = os.path.join(root, name)
+        path = os.path.join(dirpath, name)
         try:
             with open(path, encoding="utf-8") as fh:
                 data = json.load(fh)

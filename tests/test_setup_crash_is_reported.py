@@ -89,10 +89,10 @@ class TestAnInterruptedRunIsReconciledAtStartup:
     startup into a dated interrupted result, the same way inventory scans
     are reconciled.
     """
-    def _run(self, monkeypatch, state: dict):
+    def _run(self, monkeypatch, state: dict, subdir: str = ""):
         import api_server
         d = tempfile.mkdtemp()
-        logs = os.path.join(d, "logs")
+        logs = os.path.join(d, "logs", subdir) if subdir else os.path.join(d, "logs")
         os.makedirs(logs)
         path = os.path.join(logs, "full-setup-source.json")
         with open(path, "w") as fh:
@@ -125,6 +125,15 @@ class TestAnInterruptedRunIsReconciledAtStartup:
         is the exact bug the runtime path was careful to avoid."""
         idle = {"running": False}
         assert self._run(monkeypatch, idle) == idle
+
+    def test_a_per_account_run_is_reconciled_too(self, monkeypatch):
+        """Runs started for a specific account land in
+        logs/<account_id>/full-setup-source.json, not the top level. A flat
+        scan caught only the legacy X-Operator path and left every
+        account-scoped wizard stuck -- which is the view a signed-in user
+        actually sees."""
+        out = self._run(monkeypatch, {"running": True}, subdir="66")
+        assert out["interrupted"] is True and out["running"] is False
 
     def test_it_is_wired_into_startup(self):
         import api_server
