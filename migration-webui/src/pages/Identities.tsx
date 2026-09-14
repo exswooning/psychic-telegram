@@ -12,6 +12,7 @@ import { fetchActions, fetchIdentities, saveIdentityPair, IdentityRow, ActionSpe
 import {
   fetchVerifiedDomains, VerifiedDomain,
   fetchTenantInventory, TenantInventory,
+  fetchAllDomains, ConfiguredDomain,
 } from '@/api/controlPlane'
 import JobRunner from '@/components/JobRunner'
 
@@ -212,6 +213,8 @@ const Identities: React.FC = () => {
   const [addErr, setAddErr] = useState<string | null>(null)
   const [addOk, setAddOk] = useState<string | null>(null)
   const [domains, setDomains] = useState<VerifiedDomain[]>([])
+  const [allDomains, setAllDomains] = useState<ConfiguredDomain[]>([])
+  const [allSuper, setAllSuper] = useState(false)
 
   const refresh = useCallback(() => {
     setLoading(true); setError(null)
@@ -222,6 +225,9 @@ const Identities: React.FC = () => {
     // Two live Google calls per side, but the caller already asked for a
     // refresh here, so it rides the same explicit trigger rather than a poll.
     fetchVerifiedDomains().then((r) => setDomains(r.domains)).catch(() => setDomains([]))
+    // Every domain configured anywhere -- config only, no live Google call.
+    fetchAllDomains().then((r) => { setAllDomains(r.domains); setAllSuper(r.superadmin) })
+      .catch(() => setAllDomains([]))
   }, [])
 
   useEffect(() => { refresh(); fetchActions().then(setActions) }, [refresh])
@@ -266,6 +272,62 @@ const Identities: React.FC = () => {
               </Grid>
             ))}
           </Grid>
+        </Box>
+      )}
+
+      {allSuper && allDomains.length > 0 && (
+        <Box sx={{ mb: 3 }} data-testid="all-domains">
+          <Typography variant="h6" sx={{ fontWeight: 600, mb: 0.5 }}>
+            All configured domains
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+            Every tenant set up on this box, across accounts — a setup
+            overwrites the role it targets, and a tenant can be set up under a
+            different account, so this is where a domain that looks
+            &quot;missing&quot; above actually is.
+          </Typography>
+          {Object.entries(
+            allDomains.reduce((acc, d) => {
+              (acc[d.accountEmail || `account #${d.accountId}`] ||= []).push(d)
+              return acc
+            }, {} as Record<string, ConfiguredDomain[]>),
+          ).map(([account, list]) => (
+            <Box key={account} sx={{ mb: 2 }}>
+              <Typography variant="caption" color="text.secondary"
+                          sx={{ fontWeight: 700 }}>
+                {account}
+              </Typography>
+              <Grid container spacing={1.5} sx={{ mt: 0 }}>
+                {list.map((d) => (
+                  <Grid item xs={12} sm={6} md={4} key={`${d.accountId}-${d.side}`}>
+                    <Card elevation={0} data-testid={`config-${d.accountId}-${d.side}`}
+                          sx={{ borderRadius: 2, border: '1px solid',
+                                borderColor: 'divider', height: '100%' }}>
+                      <CardContent sx={{ py: 1.5 }}>
+                        <Stack direction="row" alignItems="center" spacing={1}
+                               sx={{ mb: 0.5 }}>
+                          <Chip size="small" label={d.side} variant="outlined"
+                                sx={{ textTransform: 'capitalize' }} />
+                          <Box sx={{ flexGrow: 1 }} />
+                          <Chip size="small"
+                                label={d.hasKey ? 'Key on file' : 'No key'}
+                                color={d.hasKey ? 'success' : 'default'}
+                                variant={d.hasKey ? 'filled' : 'outlined'} />
+                        </Stack>
+                        <Typography sx={{ fontWeight: 700, wordBreak: 'break-all' }}>
+                          {d.domain}
+                        </Typography>
+                        <Typography variant="body2" color="text.secondary"
+                                    sx={{ wordBreak: 'break-all' }}>
+                          {d.adminEmail}
+                        </Typography>
+                      </CardContent>
+                    </Card>
+                  </Grid>
+                ))}
+              </Grid>
+            </Box>
+          ))}
         </Box>
       )}
 

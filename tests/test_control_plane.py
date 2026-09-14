@@ -1817,6 +1817,69 @@ class TestScanReportsProgress:
         assert snap["totals"]["shared"] == 7
 
 
+class TestAllConfiguredDomains:
+    """verified_domains answers "the CURRENT source+target for one account".
+    A setup overwrites the role it targets, and a tenant can be configured
+    under a different account, so a domain that is really set up looked
+    missing on every page. This lists every configured domain, across
+    accounts, config-only (no live Google call)."""
+
+    def _signed_in(self, cp, email):
+        cp.post("/api/v2/auth/signup",
+                json={"email": email, "password": "hunter22222", "name": "User"})
+        return cp.get("/api/v2/auth/me", headers=ADMIN).json()["id"]
+
+    def test_a_superadmin_sees_every_accounts_domains(self, cp, tmp_path, monkeypatch):
+        import api_server, accounts_auth
+
+        a = self._signed_in(cp, "a@example.com")
+        cp.post("/api/v2/auth/logout")
+        b = self._signed_in(cp, "b@example.com")
+        # Patch HERE only after sign-in: signup reserves keys/<id>/ under it.
+        monkeypatch.setattr(api_server, "HERE", str(tmp_path))
+        keydir = tmp_path / "keys" / str(a)
+        keydir.mkdir(parents=True)
+        (keydir / "source-sa.json").write_text(json.dumps({"client_id": "111"}))
+        accounts_auth.update_tenant_config(
+            a, "source", domain="a-src.example",
+            admin_email="admin@a-src.example",
+            sa_key_path=f"keys/{a}/source-sa.json")
+
+        accounts_auth.promote_to_superadmin("b@example.com")
+        accounts_auth.update_tenant_config(
+            b, "target", domain="b-tgt.example",
+            admin_email="admin@b-tgt.example",
+            sa_key_path=f"keys/{b}/target-sa.json")   # no file -> hasKey False
+
+        body = cp.get("/api/v2/setup/all-domains", headers=ADMIN).json()
+        assert body["superadmin"] is True
+        by = {(d["accountId"], d["side"]): d for d in body["domains"]}
+        assert by[(a, "source")]["domain"] == "a-src.example"
+        assert by[(a, "source")]["hasKey"] is True
+        assert by[(a, "source")]["clientId"] == "111"
+        assert by[(b, "target")]["hasKey"] is False
+
+    def test_a_regular_account_sees_only_its_own(self, cp, tmp_path, monkeypatch):
+        import api_server, accounts_auth
+
+        a = self._signed_in(cp, "solo@example.com")
+        cp.post("/api/v2/auth/logout")
+        b = self._signed_in(cp, "nosey@example.com")
+        monkeypatch.setattr(api_server, "HERE", str(tmp_path))
+        accounts_auth.update_tenant_config(
+            a, "source", domain="solo.example", admin_email="x@solo.example",
+            sa_key_path="")
+        accounts_auth.update_tenant_config(
+            b, "source", domain="nosey.example", admin_email="x@nosey.example",
+            sa_key_path="")
+        # nosey is NOT a superadmin -> must not see solo's domain.
+        body = cp.get("/api/v2/setup/all-domains", headers=ADMIN).json()
+        assert body["superadmin"] is False
+        got = {d["domain"] for d in body["domains"]}
+        assert "nosey.example" in got
+        assert "solo.example" not in got
+
+
 class TestASupersededScanIsNotShownAsTheCurrentTenant:
     """Set a new source up over an old one and the previous tenant's deep
     walk stays on disk under the same (account, side) key. The panel adopts

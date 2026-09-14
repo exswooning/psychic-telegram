@@ -4458,6 +4458,61 @@ async def verified_domains(account_id: int | None = None,
     return await _off_loop(_read)
 
 
+@app.get("/api/v2/setup/all-domains")
+async def all_configured_domains(op: Operator = Depends(operator)):
+    """Every domain configured on this box, across accounts.
+
+    verified_domains answers "the CURRENT source and target for one account",
+    which is two cards. But a setup overwrites the role it targets -- set a
+    new source up and the old one is gone from that view -- and a tenant can
+    be configured under a different account entirely (an operator account,
+    the automation account). So "which domains have I actually set up
+    anywhere" had no answer on any page, and a domain that was really there
+    looked missing.
+
+    Superadmin sees every account's rows; anyone else sees only their own --
+    the same account isolation every other read here enforces. No live
+    Google call: this lists what is CONFIGURED (domain, admin, whether the
+    key file is on disk and its client id), fast, so it can render the whole
+    map at once. Live delegation status stays the per-card check the caller
+    triggers by opening one.
+    """
+    require_login(op)
+    is_super = bool(getattr(op, "is_superadmin", False))
+
+    def _read() -> dict:
+        import provision_gcp
+        rows: list[dict] = []
+        with cpdb.ro() as conn:
+            q = ("SELECT t.account_id, t.side, t.domain, t.admin_email, "
+                 "t.sa_key_path, a.email AS account_email "
+                 "FROM tenant_configs t "
+                 "LEFT JOIN accounts a ON a.id = t.account_id "
+                 "WHERE t.domain IS NOT NULL AND t.domain != ''")
+            params: tuple = ()
+            if not is_super:
+                q += " AND t.account_id = ?"
+                params = (op.account_id,)
+            q += " ORDER BY t.account_id, t.side"
+            db_rows = conn.execute(q, params).fetchall()
+        for r in db_rows:
+            key = r["sa_key_path"] or ""
+            abspath = os.path.join(HERE, key) if key and not os.path.isabs(key) else key
+            has_key = bool(abspath) and os.path.isfile(abspath)
+            client_id = provision_gcp.client_id_of(abspath) if has_key else ""
+            rows.append({
+                "accountId": r["account_id"],
+                "accountEmail": r["account_email"] or "",
+                "side": r["side"],
+                "domain": r["domain"],
+                "adminEmail": r["admin_email"] or "",
+                "hasKey": has_key,
+                "clientId": client_id,
+            })
+        return {"domains": rows, "superadmin": is_super}
+    return await _off_loop(_read)
+
+
 class ConnectRequest(BaseModel):
     """Either a code plus where to redeem it, or the whole command line."""
     coordinator: str = ""

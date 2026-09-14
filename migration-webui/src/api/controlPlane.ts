@@ -1033,6 +1033,26 @@ export const fetchVerifiedDomains = (accountId?: number) =>
     '/api/v2/setup/verified-domains'
     + (accountId === undefined ? '' : `?account_id=${accountId}`))
 
+// -- Every configured domain, across accounts --------------------------------
+// verified_domains answers "the current source and target for one account".
+// This lists what is CONFIGURED anywhere -- a setup overwrites the role it
+// targets, and a tenant can be set up under a different account, so a domain
+// that is really there could look missing. No live Google call: config plus
+// whether the key file is on disk. Superadmin sees all; anyone else, own only.
+export interface ConfiguredDomain {
+  accountId: number
+  accountEmail: string
+  side: 'source' | 'target'
+  domain: string
+  adminEmail: string
+  hasKey: boolean
+  clientId: string
+}
+
+export const fetchAllDomains = () =>
+  cpFetch<{ domains: ConfiguredDomain[]; superadmin: boolean }>(
+    '/api/v2/setup/all-domains')
+
 export const revertPublicShares = (reason: string, tenant = 'target') =>
   cpFetch<ActionResult>('/api/v2/emergency/revert-public', {
     method: 'POST',

@@ -10,9 +10,11 @@ import Identities from './Identities'
 
 const verifiedDomains = vi.fn()
 const tenantInventory = vi.fn()
+const allDomains = vi.fn()
 vi.mock('@/api/controlPlane', () => ({
   fetchVerifiedDomains: () => verifiedDomains(),
   fetchTenantInventory: (...a: unknown[]) => tenantInventory(...a),
+  fetchAllDomains: () => allDomains(),
 }))
 vi.mock('@/api/client', () => ({
   fetchActions: () => Promise.resolve({}),
@@ -22,7 +24,7 @@ vi.mock('@/api/client', () => ({
 vi.mock('@/components/JobRunner', () => ({ default: () => null }))
 
 beforeEach(() => {
-  verifiedDomains.mockReset(); tenantInventory.mockReset()
+  verifiedDomains.mockReset(); tenantInventory.mockReset(); allDomains.mockReset()
   verifiedDomains.mockResolvedValue({ domains: [
     { side: 'source', domain: 'src.example', adminEmail: 'admin@src.example',
       status: 'verified', live: 17, total: 17 },
@@ -35,6 +37,17 @@ beforeEach(() => {
     truncated: false, error: '', deep: false, deepSampled: 0,
     licenseCounts: { 'Business Starter': 200 }, licenseError: '',
   })
+  allDomains.mockResolvedValue({ superadmin: true, domains: [
+    { accountId: 68, accountEmail: 'admin@bitport.local', side: 'source',
+      domain: 'target.saraf.com', adminEmail: 'info@target.saraf.com',
+      hasKey: true, clientId: '118368' },
+    { accountId: 66, accountEmail: 'auto@bitport.local', side: 'target',
+      domain: 'target.rohit.com.np', adminEmail: 'info@target.rohit.com.np',
+      hasKey: true, clientId: '105869' },
+    { accountId: 68, accountEmail: 'admin@bitport.local', side: 'target',
+      domain: 'target.rohit.com.np', adminEmail: 'info@target.rohit.com.np',
+      hasKey: false, clientId: '' },
+  ] })
 })
 
 describe('the scoped-domain cards', () => {
@@ -111,5 +124,41 @@ describe('clicking a domain shows its stats', () => {
     expect(await screen.findByTestId('domain-stats-target'))
       .toHaveTextContent(/not set up/i)
     expect(tenantInventory).not.toHaveBeenCalled()
+  })
+})
+
+
+describe('all configured domains (superadmin)', () => {
+  it('lists every configured domain across accounts', async () => {
+    render(<Identities />)
+    await screen.findByTestId('all-domains')
+    // Two accounts, three configured rows.
+    expect(screen.getByTestId('config-68-source')).toHaveTextContent('target.saraf.com')
+    expect(screen.getByTestId('config-66-target')).toHaveTextContent('target.rohit.com.np')
+    expect(screen.getByTestId('config-68-target')).toBeInTheDocument()
+  })
+
+  it('shows which have a key on file and which do not', async () => {
+    render(<Identities />)
+    await screen.findByTestId('all-domains')
+    expect(screen.getByTestId('config-68-source')).toHaveTextContent('Key on file')
+    expect(screen.getByTestId('config-68-target')).toHaveTextContent('No key')
+  })
+
+  it('is hidden for a non-superadmin', async () => {
+    allDomains.mockResolvedValue({ superadmin: false, domains: [
+      { accountId: 68, accountEmail: '', side: 'source', domain: 'x.com',
+        adminEmail: 'a@x.com', hasKey: true, clientId: '1' },
+    ] })
+    render(<Identities />)
+    await screen.findByTestId('scoped-domains')
+    expect(screen.queryByTestId('all-domains')).toBeNull()
+  })
+
+  it('does not break the page when the list cannot be read', async () => {
+    allDomains.mockRejectedValue(new Error('down'))
+    render(<Identities />)
+    expect(await screen.findByText('Load into identity_map')).toBeInTheDocument()
+    expect(screen.queryByTestId('all-domains')).toBeNull()
   })
 })
