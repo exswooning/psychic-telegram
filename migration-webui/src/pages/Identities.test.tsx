@@ -162,3 +162,28 @@ describe('all configured domains (superadmin)', () => {
     expect(screen.queryByTestId('all-domains')).toBeNull()
   })
 })
+
+
+describe('the live delegation check has a spinner', () => {
+  it('shows a spinner while the scoped-domain check is running', async () => {
+    // A verified-domains call that never resolves keeps the page in the
+    // loading state, so the spinner must be on screen.
+    verifiedDomains.mockReturnValue(new Promise(() => {}))
+    render(<Identities />)
+    expect(await screen.findByTestId('scoped-domains-loading')).toBeInTheDocument()
+    expect(screen.queryByTestId('scoped-domains')).toBeNull()
+  })
+
+  it('replaces the spinner with the cards once it resolves', async () => {
+    render(<Identities />)
+    expect(await screen.findByTestId('scoped-domains')).toBeInTheDocument()
+    expect(screen.queryByTestId('scoped-domains-loading')).toBeNull()
+  })
+
+  it('says why it takes a moment', async () => {
+    verifiedDomains.mockReturnValue(new Promise(() => {}))
+    render(<Identities />)
+    expect(await screen.findByTestId('scoped-domains-loading'))
+      .toHaveTextContent(/verifies each scope/i)
+  })
+})

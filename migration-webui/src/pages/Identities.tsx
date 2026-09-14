@@ -215,6 +215,7 @@ const Identities: React.FC = () => {
   const [domains, setDomains] = useState<VerifiedDomain[]>([])
   const [allDomains, setAllDomains] = useState<ConfiguredDomain[]>([])
   const [allSuper, setAllSuper] = useState(false)
+  const [domainsLoading, setDomainsLoading] = useState(true)
 
   const refresh = useCallback(() => {
     setLoading(true); setError(null)
@@ -222,9 +223,15 @@ const Identities: React.FC = () => {
       .then(setRows)
       .catch((e) => setError(e instanceof Error ? e.message : String(e)))
       .finally(() => setLoading(false))
-    // Two live Google calls per side, but the caller already asked for a
-    // refresh here, so it rides the same explicit trigger rather than a poll.
-    fetchVerifiedDomains().then((r) => setDomains(r.domains)).catch(() => setDomains([]))
+    // Two live Google calls PER SCOPE per side -- it asks Google whether
+    // each delegated token actually works, not whether a flag is set -- so
+    // it takes a few seconds and earns a spinner. It rides this explicit
+    // refresh rather than a poll.
+    setDomainsLoading(true)
+    fetchVerifiedDomains()
+      .then((r) => setDomains(r.domains))
+      .catch(() => setDomains([]))
+      .finally(() => setDomainsLoading(false))
     // Every domain configured anywhere -- config only, no live Google call.
     fetchAllDomains().then((r) => { setAllDomains(r.domains); setAllSuper(r.superadmin) })
       .catch(() => setAllDomains([]))
@@ -259,6 +266,23 @@ const Identities: React.FC = () => {
       <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
         The source→target user mapping every migration action needs.
       </Typography>
+
+      {domainsLoading && domains.length === 0 && (
+        <Box sx={{ mb: 3 }} data-testid="scoped-domains-loading">
+          <Typography variant="h6" sx={{ fontWeight: 600, mb: 1.5 }}>
+            Scoped domains
+          </Typography>
+          <Stack direction="row" spacing={1.5} alignItems="center"
+                 sx={{ p: 2, border: '1px solid', borderColor: 'divider',
+                       borderRadius: 2 }}>
+            <CircularProgress size={20} />
+            <Typography variant="body2" color="text.secondary">
+              Checking delegation live with Google — a few seconds per side,
+              because it verifies each scope's token actually works.
+            </Typography>
+          </Stack>
+        </Box>
+      )}
 
       {domains.length > 0 && (
         <Box sx={{ mb: 3 }} data-testid="scoped-domains">
