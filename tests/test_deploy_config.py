@@ -861,6 +861,52 @@ class TestSeedFromTheUI:
             "target_gb_per_user": "lots"})
         assert "must be a number" in err
 
+    def test_external_email_is_passed_and_validated(self):
+        argv, _, _ = webui.seed_argv(
+            {"confirm_domain": "sandbox-src.example",
+             "external_email": "you@gmail.com"})
+        assert argv[argv.index("--external-email") + 1] == "you@gmail.com"
+        _, _, err = webui.seed_argv(
+            {"confirm_domain": "sandbox-src.example", "external_email": "nope"})
+        assert "not an address" in err
+
+    def test_mail_and_events_counts_are_passed(self):
+        argv, _, _ = webui.seed_argv(
+            {"confirm_domain": "sandbox-src.example", "mail": 40, "events": 12})
+        assert argv[argv.index("--mail") + 1] == "40"
+        assert argv[argv.index("--events") + 1] == "12"
+
+    def test_a_non_numeric_mail_count_is_refused(self):
+        _, _, err = webui.seed_argv(
+            {"confirm_domain": "sandbox-src.example", "mail": "lots"})
+        assert "must be a whole number" in err
+
+    def test_fit_to_licenses_is_opt_in(self):
+        argv, _, _ = webui.seed_argv({"confirm_domain": "sandbox-src.example"})
+        assert "--fit-to-licenses" not in argv
+        argv, _, _ = webui.seed_argv(
+            {"confirm_domain": "sandbox-src.example", "fit_to_licenses": True})
+        assert "--fit-to-licenses" in argv
+
+    def test_edge_cases_is_passed_and_validated(self):
+        argv, _, _ = webui.seed_argv(
+            {"confirm_domain": "sandbox-src.example", "edge_cases": "all"})
+        assert argv[argv.index("--edge-cases") + 1] == "all"
+        _, _, err = webui.seed_argv(
+            {"confirm_domain": "sandbox-src.example", "edge_cases": "some"})
+        assert "must be first, all or none" in err
+
+    def test_top_up_only_needs_a_target(self):
+        """It skips every seeding step, so with nothing to top up toward it
+        would do nothing at all -- refused rather than a silent no-op."""
+        _, _, err = webui.seed_argv(
+            {"confirm_domain": "sandbox-src.example", "top_up_only": True})
+        assert "needs target_gb_per_user" in err
+        argv, _, _ = webui.seed_argv(
+            {"confirm_domain": "sandbox-src.example", "top_up_only": True,
+             "target_gb_per_user": 30})
+        assert "--top-up-only" in argv
+
     def test_seeding_still_targets_only_the_source(self):
         """There is no code path that points the seeder at the target: the
         domain is read from SOURCE_DOMAIN, never from the request body."""

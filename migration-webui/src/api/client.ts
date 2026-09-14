@@ -702,6 +702,31 @@ export interface SeedOptions {
    *  Drive ACLs that need them to exist first. Needs
    *  admin.directory.group; the seeder says so and carries on without it. */
   groups?: boolean
+  /** Seed up to the tenant's available Workspace seats instead of a fixed
+   *  user list -- the requested set, capped at the licences free. */
+  fitToLicenses?: boolean
+  /** Ignore the user list and create accounts one at a time until the
+   *  tenant's licences run out. */
+  createUntilFullAlso?: boolean
+  /** The outside address every cross-domain share, invite and mail points
+   *  at -- the case a migration most often gets wrong. */
+  externalEmail?: string
+  /** Messages per user. Blank scales with the chosen size. */
+  mail?: string
+  /** Events per user. Blank scales with the chosen size. */
+  events?: string
+  /** One oversized file per user (in MB) plus the "sent over Drive" mail
+   *  that links to it -- what Gmail does with an attachment too big to send. */
+  bigFileMb?: string
+  /** After seeding, add filler files until each user's total Workspace
+   *  storage reaches this many GB. */
+  targetGbPerUser?: string
+  /** Skip every seeding step and only top up storage toward
+   *  targetGbPerUser. Needs a target to top up toward. */
+  topUpOnly?: boolean
+  /** The full awkward-corpus set on user 1 (\'first\'), on everyone
+   *  (\'all\'), or nobody (\'none\'). */
+  edgeCases?: string
 }
 
 export async function runSeed(
@@ -712,7 +737,9 @@ export async function runSeed(
   opts: SeedOptions = {},
 ): Promise<SeedResult> {
   const { allUsers, createUntilFull, workers, localpartPrefix,
-          sharedDrives, users, groups, only } = opts
+          sharedDrives, users, groups, only, fitToLicenses,
+          externalEmail, mail, events, bigFileMb, targetGbPerUser,
+          topUpOnly, edgeCases } = opts
   const res = await fetch('/api/seed', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -729,6 +756,14 @@ export async function runSeed(
       users: users || undefined,
       groups: groups || undefined,
       only: only || undefined,
+      fit_to_licenses: fitToLicenses || undefined,
+      external_email: externalEmail || undefined,
+      mail: mail || undefined,
+      events: events || undefined,
+      big_file_mb: bigFileMb || undefined,
+      target_gb_per_user: targetGbPerUser || undefined,
+      top_up_only: topUpOnly || undefined,
+      edge_cases: edgeCases || undefined,
     }),
   })
   return res.json()

@@ -37,6 +37,7 @@ import { removeTenantSetup } from '@/api/client'
 import { formatPct } from '@/utils/formatPct'
 
 const SEED_SCALES = ['tiny', 'small', 'medium', 'large', 'huge']
+const SEEDABLE_SERVICES = ['drive', 'gmail', 'calendar', 'chat', 'contacts', 'tasks']
 // main.py migrate --services help text is the source of truth: "drive,
 // gmail,calendar,chat,contacts,tasks -- or 'all' for every per-user
 // service." CLI default is drive,gmail,calendar.
@@ -581,7 +582,7 @@ const SideJobCard: React.FC<{
 
     return (
       <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>
-        <Box onClick={onToggle} sx={{
+        <Box onClick={onToggle} data-testid={`tenant-card-${side}`} sx={{
           display: 'flex', alignItems: 'center', gap: 1.5, p: 2, cursor: 'pointer',
           '&:hover': { bgcolor: 'action.hover' },
         }}>
@@ -727,6 +728,28 @@ const SeedPanel: React.FC<{ domain: string; onStarted: () => void }> = ({ domain
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [done, setDone] = useState<string | null>(null)
+  // Every remaining seeder ability, behind an "Advanced" disclosure so the
+  // common case (scale + create users) stays a two-click job.
+  const [advanced, setAdvanced] = useState(false)
+  const [users, setUsers] = useState('')
+  const [allUsers, setAllUsers] = useState(false)
+  const [createUntilFull, setCreateUntilFull] = useState(false)
+  const [fitToLicenses, setFitToLicenses] = useState(false)
+  const [localpartPrefix, setLocalpartPrefix] = useState('')
+  const [sharedDrives, setSharedDrives] = useState('')
+  const [workers, setWorkers] = useState('')
+  const [externalEmail, setExternalEmail] = useState('')
+  const [mail, setMail] = useState('')
+  const [events, setEvents] = useState('')
+  const [bigFileMb, setBigFileMb] = useState('')
+  const [targetGb, setTargetGb] = useState('')
+  const [topUpOnly, setTopUpOnly] = useState(false)
+  const [edgeCases, setEdgeCases] = useState('first')
+  // All services on by default; unchecking any sends --only for the rest.
+  const [services, setServices] = useState<Record<string, boolean>>(
+    () => Object.fromEntries(SEEDABLE_SERVICES.map((x) => [x, true])))
+  const onlyList = SEEDABLE_SERVICES.filter((x) => services[x])
+  const limited = onlyList.length !== SEEDABLE_SERVICES.length
   // Whether the group scope is actually delegated. seed_scopes_payload has
   // advertised this capability all along; the checkbox says plainly when
   // the grant behind it is missing, rather than letting someone tick it and
@@ -742,7 +765,24 @@ const SeedPanel: React.FC<{ domain: string; onStarted: () => void }> = ({ domain
   const launch = async () => {
     setBusy(true); setError(null)
     try {
-      const r = await runSeed(domain, scale, createUsers, false, { groups })
+      const r = await runSeed(domain, scale, createUsers, false, {
+        groups,
+        users: users.trim() || undefined,
+        allUsers: allUsers || undefined,
+        createUntilFull: createUntilFull || undefined,
+        fitToLicenses: fitToLicenses || undefined,
+        localpartPrefix: localpartPrefix.trim() || undefined,
+        sharedDrives: sharedDrives.trim() || undefined,
+        workers: workers.trim() || undefined,
+        externalEmail: externalEmail.trim() || undefined,
+        mail: mail.trim() || undefined,
+        events: events.trim() || undefined,
+        bigFileMb: bigFileMb.trim() || undefined,
+        targetGbPerUser: targetGb.trim() || undefined,
+        topUpOnly: topUpOnly || undefined,
+        edgeCases: edgeCases !== 'first' ? edgeCases : undefined,
+        only: limited ? onlyList.join(',') : undefined,
+      })
       if (!r.ok) throw new Error(r.error || 'seed failed')
       // A queued run is accepted, not started -- saying "started" and then
       // showing no output is the confusing half of the old behaviour.
@@ -788,10 +828,140 @@ const SeedPanel: React.FC<{ domain: string; onStarted: () => void }> = ({ domain
               </Typography>}
           />
         </Tooltip>
-        <Button size="small" variant="contained" startIcon={<SeedIcon />} onClick={() => setAsk(true)}>
+        <Button size="small" variant="contained" startIcon={<SeedIcon />}
+                data-testid="seed-now" onClick={() => setAsk(true)}>
           Seed now
         </Button>
+        <Button size="small" variant="text" data-testid="seed-advanced-toggle"
+                endIcon={<ExpandIcon sx={{ transform: advanced ? 'rotate(180deg)' : 'none',
+                                           transition: '0.2s' }} />}
+                onClick={() => setAdvanced((v) => !v)}>
+          {advanced ? 'Fewer options' : 'Advanced options'}
+        </Button>
       </Stack>
+
+      <Collapse in={advanced} unmountOnExit data-testid="seed-advanced">
+        <Box sx={{ mt: 1.5, p: 2, border: '1px solid', borderColor: 'divider',
+                   borderRadius: 1, bgcolor: 'action.hover' }}>
+          {/* Who gets seeded */}
+          <Typography variant="overline" color="text.secondary">Who</Typography>
+          <Stack direction="row" spacing={2} sx={{ flexWrap: 'wrap', gap: 1.5, mb: 1.5 }}>
+            <Tooltip title="Comma-separated localparts (alice,bob). Blank seeds every user the tenant already has.">
+              <TextField size="small" label="Users" value={users} sx={{ width: 220 }}
+                         placeholder="blank = all existing users"
+                         onChange={(e) => setUsers(e.target.value)}
+                         inputProps={{ 'data-testid': 'seed-users' }} />
+            </Tooltip>
+            <Tooltip title="Prefix every generated username. A deleted Workspace address stays taken for 20 days, so reusing names fails until they age out.">
+              <TextField size="small" label="Localpart prefix" value={localpartPrefix}
+                         sx={{ width: 160 }}
+                         onChange={(e) => setLocalpartPrefix(e.target.value)}
+                         inputProps={{ 'data-testid': 'seed-prefix' }} />
+            </Tooltip>
+          </Stack>
+          <FormGroup row sx={{ mb: 1.5 }}>
+            <Tooltip title="Discover every user via the Directory API, and fail loudly with the scope to grant if it cannot.">
+              <FormControlLabel control={<Switch size="small" checked={allUsers}
+                onChange={(e) => setAllUsers(e.target.checked)}
+                inputProps={{ 'data-testid': 'seed-all-users' } as any} />}
+                label={<Typography variant="body2">All users</Typography>} />
+            </Tooltip>
+            <Tooltip title="Seed up to the tenant's available Workspace seats — the requested set, capped at the licences free.">
+              <FormControlLabel control={<Switch size="small" checked={fitToLicenses}
+                onChange={(e) => setFitToLicenses(e.target.checked)}
+                inputProps={{ 'data-testid': 'seed-fit' } as any} />}
+                label={<Typography variant="body2">Fit to licences</Typography>} />
+            </Tooltip>
+            <Tooltip title="Ignore the user list and create accounts one at a time until the tenant's licences run out.">
+              <FormControlLabel control={<Switch size="small" checked={createUntilFull}
+                onChange={(e) => setCreateUntilFull(e.target.checked)}
+                inputProps={{ 'data-testid': 'seed-until-full' } as any} />}
+                label={<Typography variant="body2">Create until full</Typography>} />
+            </Tooltip>
+          </FormGroup>
+
+          <Divider sx={{ my: 1.5 }} />
+          {/* How much */}
+          <Typography variant="overline" color="text.secondary">How much</Typography>
+          <Stack direction="row" spacing={2} sx={{ flexWrap: 'wrap', gap: 1.5, mb: 1.5 }}>
+            <Tooltip title="Messages per user. Blank scales with the chosen size.">
+              <TextField size="small" type="number" label="Mail / user" value={mail}
+                         sx={{ width: 120 }} onChange={(e) => setMail(e.target.value)}
+                         inputProps={{ 'data-testid': 'seed-mail', min: 0 }} />
+            </Tooltip>
+            <Tooltip title="Events per user. Blank scales with the chosen size.">
+              <TextField size="small" type="number" label="Events / user" value={events}
+                         sx={{ width: 120 }} onChange={(e) => setEvents(e.target.value)}
+                         inputProps={{ 'data-testid': 'seed-events', min: 0 }} />
+            </Tooltip>
+            <Tooltip title="One oversized file per user (MB) plus the 'sent over Drive' mail linking to it.">
+              <TextField size="small" type="number" label="Big file MB" value={bigFileMb}
+                         sx={{ width: 120 }} onChange={(e) => setBigFileMb(e.target.value)}
+                         inputProps={{ 'data-testid': 'seed-bigfile', min: 0 }} />
+            </Tooltip>
+            <Tooltip title="Number of Shared Drives (SEEDED-SD-*) to create — nothing else here makes them.">
+              <TextField size="small" type="number" label="Shared drives" value={sharedDrives}
+                         sx={{ width: 130 }} onChange={(e) => setSharedDrives(e.target.value)}
+                         inputProps={{ 'data-testid': 'seed-shared-drives', min: 0 }} />
+            </Tooltip>
+            <Tooltip title="Parallel users. Blank sizes the pool to this machine.">
+              <TextField size="small" type="number" label="Workers" value={workers}
+                         sx={{ width: 100 }} onChange={(e) => setWorkers(e.target.value)}
+                         inputProps={{ 'data-testid': 'seed-workers', min: 1 }} />
+            </Tooltip>
+          </Stack>
+          <Stack direction="row" spacing={2} sx={{ flexWrap: 'wrap', gap: 1.5, mb: 1.5,
+                                                   alignItems: 'center' }}>
+            <Tooltip title="After seeding, add filler files until each user's total Workspace storage reaches this many GB.">
+              <TextField size="small" type="number" label="Target GB / user" value={targetGb}
+                         sx={{ width: 150 }} onChange={(e) => setTargetGb(e.target.value)}
+                         inputProps={{ 'data-testid': 'seed-target-gb', min: 0 }} />
+            </Tooltip>
+            <Tooltip title="Skip all seeding; only top up storage toward the target above. Needs a target.">
+              <FormControlLabel control={<Switch size="small" checked={topUpOnly}
+                disabled={!targetGb.trim()}
+                onChange={(e) => setTopUpOnly(e.target.checked)}
+                inputProps={{ 'data-testid': 'seed-topup' } as any} />}
+                label={<Typography variant="body2">Top up only</Typography>} />
+            </Tooltip>
+          </Stack>
+
+          <Divider sx={{ my: 1.5 }} />
+          {/* What */}
+          <Typography variant="overline" color="text.secondary">What</Typography>
+          <Stack direction="row" spacing={2} sx={{ flexWrap: 'wrap', gap: 1.5, mb: 1,
+                                                   alignItems: 'center' }}>
+            <Tooltip title="The outside address every cross-domain share, invite and mail points at.">
+              <TextField size="small" label="External collaborator" value={externalEmail}
+                         sx={{ width: 240 }} placeholder="you@gmail.com"
+                         onChange={(e) => setExternalEmail(e.target.value)}
+                         inputProps={{ 'data-testid': 'seed-external' }} />
+            </Tooltip>
+            <Tooltip title="Full awkward-corpus set on the first user, everyone, or nobody.">
+              <TextField select size="small" label="Edge cases" value={edgeCases}
+                         sx={{ width: 130 }} onChange={(e) => setEdgeCases(e.target.value)}
+                         inputProps={{ 'data-testid': 'seed-edge' }}>
+                {['first', 'all', 'none'].map((v) => <MenuItem key={v} value={v}>{v}</MenuItem>)}
+              </TextField>
+            </Tooltip>
+          </Stack>
+          <Box>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5 }}>
+              Limit to services {limited ? '' : '(all)'}
+            </Typography>
+            <FormGroup row>
+              {SEEDABLE_SERVICES.map((svc) => (
+                <FormControlLabel key={svc}
+                  control={<Checkbox size="small" checked={services[svc]}
+                    onChange={(e) => setServices((s) => ({ ...s, [svc]: e.target.checked }))}
+                    inputProps={{ 'data-testid': `seed-svc-${svc}` } as any} />}
+                  label={<Typography variant="body2">{svc}</Typography>} />
+              ))}
+            </FormGroup>
+          </Box>
+        </Box>
+      </Collapse>
+
       {done && <Alert severity="success" sx={{ mt: 1 }} onClose={() => setDone(null)}>{done}</Alert>}
 
       <ReasonCodeDialog

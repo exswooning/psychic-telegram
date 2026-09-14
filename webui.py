@@ -2652,6 +2652,47 @@ def seed_argv(body: dict, account_id: int | None = None) -> tuple[list[str], dic
         except (TypeError, ValueError):
             return [], {}, "target_gb_per_user must be a number"
 
+    # top-up-only: skip every seeding step, just check/top up storage toward
+    # target_gb_per_user. Only meaningful with a target, so it is rejected
+    # without one rather than silently doing nothing.
+    if body.get("top_up_only"):
+        if not target_gb:
+            return [], {}, "top_up_only needs target_gb_per_user to top up toward"
+        argv.append("--top-up-only")
+
+    # fit-to-licenses: seed up to the tenant's available Workspace seats.
+    if body.get("fit_to_licenses"):
+        argv.append("--fit-to-licenses")
+
+    # The external collaborator every cross-domain share, invite and mail
+    # points at. Validated as an address so a typo does not become a grant
+    # to a malformed principal Drive would reject mid-run.
+    ext = (body.get("external_email") or "").strip()
+    if ext:
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", ext):
+            return [], {}, f"external_email is not an address: {ext!r}"
+        argv += ["--external-email", ext]
+
+    # Per-user message and event counts. Blank means "scale with --scale".
+    for field, flag in (("mail", "--mail"), ("events", "--events")):
+        val = body.get(field)
+        if val not in (None, ""):
+            try:
+                n = int(val)
+            except (TypeError, ValueError):
+                return [], {}, f"{field} must be a whole number, got {val!r}"
+            if n < 0:
+                return [], {}, f"{field} cannot be negative"
+            argv += [flag, str(n)]
+
+    # edge-cases: the full awkward-corpus set on user 1, everyone, or nobody.
+    edge = (body.get("edge_cases") or "").strip()
+    if edge:
+        if edge not in ("first", "all", "none"):
+            return [], {}, ("edge_cases must be first, all or none, got "
+                            f"{edge!r}")
+        argv += ["--edge-cases", edge]
+
     env = gcloud_env()
     # Set here rather than asking the operator to export it: the value carries
     # no judgement, the typed domain above is what actually gates this.
