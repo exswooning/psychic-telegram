@@ -49,37 +49,110 @@ const Stat: React.FC<{ label: string; value: React.ReactNode }> = ({ label, valu
   </Box>
 )
 
+/** The live stats for one tenant, fetched when this mounts (i.e. when the
+ *  card opens, since the Collapse is unmountOnExit). accountId lets a
+ *  superadmin read a tenant belonging to ANOTHER account -- the "all
+ *  configured domains" cards span accounts; omitted, it is the caller's own. */
+const TenantStats: React.FC<{
+  side: 'source' | 'target'; accountId?: number; canRead: boolean; testId: string
+}> = ({ side, accountId, canRead, testId }) => {
+  const [inv, setInv] = useState<TenantInventory | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  useEffect(() => {
+    // Mounted only while open, so this IS the click-triggered fetch -- two
+    // live Google calls per account, never a page load or a poll.
+    if (!canRead) return
+    setBusy(true); setErr('')
+    fetchTenantInventory(side, 250, false, accountId)
+      .then(setInv)
+      .catch((e) => setErr(e instanceof Error ? e.message : String(e)))
+      .finally(() => setBusy(false))
+  }, [side, accountId, canRead])
+  const licences = Object.entries(inv?.licenseCounts || {})
+  return (
+    <Box sx={{ p: 2 }} data-testid={testId}>
+      {!canRead ? (
+        <Typography variant="body2" color="text.secondary">
+          This tenant is not set up yet, so there is nothing to read. Finish it
+          in the Setup Wizard, then its stats appear here.
+        </Typography>
+      ) : busy ? (
+        <Stack direction="row" spacing={1} alignItems="center">
+          <CircularProgress size={16} />
+          <Typography variant="body2" color="text.secondary">
+            Reading the tenant live…
+          </Typography>
+        </Stack>
+      ) : err ? (
+        <Alert severity="warning">{err}</Alert>
+      ) : inv ? (
+        <>
+          <Grid container spacing={2} sx={{ mb: licences.length ? 1.5 : 0 }}>
+            <Grid item xs={6} sm={3}>
+              <Stat label="Users" value={inv.accounts.toLocaleString()} />
+            </Grid>
+            <Grid item xs={6} sm={3}>
+              <Stat label="Drive"
+                    value={`${GB(inv.totals.driveBytes).toFixed(1)} GB`} />
+            </Grid>
+            <Grid item xs={6} sm={3}>
+              <Stat label="Email" value={inv.totals.emails.toLocaleString()} />
+            </Grid>
+            <Grid item xs={6} sm={3}>
+              <Stat label="Measured from"
+                    value={`${inv.totals.covered}/${inv.accounts}`} />
+            </Grid>
+          </Grid>
+          <Typography variant="caption" color="text.secondary"
+                      sx={{ fontWeight: 600 }}>
+            Licences (assigned)
+          </Typography>
+          {inv.licenseError ? (
+            <Typography variant="body2" color="text.secondary">
+              Couldn&apos;t read licences — the licensing scope isn&apos;t granted.
+            </Typography>
+          ) : licences.length ? (
+            <Stack direction="row" sx={{ flexWrap: 'wrap', gap: 0.75, mt: 0.5 }}>
+              {licences.map(([sku, n]) => (
+                <Chip key={sku} size="small" variant="outlined"
+                      label={`${sku} · ${n.toLocaleString()}`} />
+              ))}
+            </Stack>
+          ) : (
+            <Typography variant="body2" color="text.secondary">
+              No licences assigned.
+            </Typography>
+          )}
+          <Typography variant="caption" color="text.secondary"
+                      sx={{ display: 'block', mt: 1.5 }}>
+            Google only reports licences <em>in use</em> per SKU; free seats
+            need a Reseller scope this tool doesn&apos;t request, so those
+            counts are what is assigned, not what remains.
+          </Typography>
+          {inv.truncated && (
+            <Typography variant="caption" color="warning.main"
+                        sx={{ display: 'block', mt: 1 }}>
+              Showing the first {inv.users.length} of {inv.accounts} accounts.
+            </Typography>
+          )}
+        </>
+      ) : null}
+    </Box>
+  )
+}
+
 const DomainCard: React.FC<{ d: VerifiedDomain }> = ({ d }) => {
   const st = DOMAIN_STATUS[d.status] ?? DOMAIN_STATUS.error
   const frac = d.total > 0 ? d.live / d.total : 0
   const setUp = d.total > 0 && !d.error
   const [open, setOpen] = useState(false)
-  const [inv, setInv] = useState<TenantInventory | null>(null)
-  const [busy, setBusy] = useState(false)
-  const [invErr, setInvErr] = useState('')
-
-  const toggle = () => {
-    const next = !open
-    setOpen(next)
-    // Fetched on first open, not on render: this is two live Google calls
-    // per account, so it must never ride a poll or a page load -- a click
-    // is the explicit trigger it needs.
-    if (next && setUp && !inv && !busy) {
-      setBusy(true); setInvErr('')
-      fetchTenantInventory(d.side)
-        .then(setInv)
-        .catch((e) => setInvErr(e instanceof Error ? e.message : String(e)))
-        .finally(() => setBusy(false))
-    }
-  }
-
-  const licences = Object.entries(inv?.licenseCounts || {})
 
   return (
     <Card elevation={0} data-testid={`domain-card-${d.side}`}
           sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider',
                 height: '100%' }}>
-      <CardActionArea onClick={toggle} data-testid={`domain-card-open-${d.side}`}
+      <CardActionArea onClick={() => setOpen((v) => !v)} data-testid={`domain-card-open-${d.side}`}
                       sx={{ p: 0 }}>
         <CardContent>
           <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.5 }}>
@@ -129,75 +202,49 @@ const DomainCard: React.FC<{ d: VerifiedDomain }> = ({ d }) => {
 
       <Collapse in={open} unmountOnExit>
         <Divider />
-        <Box sx={{ p: 2 }} data-testid={`domain-stats-${d.side}`}>
-          {!setUp ? (
-            <Typography variant="body2" color="text.secondary">
-              This tenant is not set up yet, so there is nothing to read.
-              Finish it in the Setup Wizard, then its stats appear here.
-            </Typography>
-          ) : busy ? (
-            <Stack direction="row" spacing={1} alignItems="center">
-              <CircularProgress size={16} />
-              <Typography variant="body2" color="text.secondary">
-                Reading the tenant live…
-              </Typography>
-            </Stack>
-          ) : invErr ? (
-            <Alert severity="warning">{invErr}</Alert>
-          ) : inv ? (
-            <>
-              <Grid container spacing={2} sx={{ mb: licences.length ? 1.5 : 0 }}>
-                <Grid item xs={6} sm={3}>
-                  <Stat label="Users" value={inv.accounts.toLocaleString()} />
-                </Grid>
-                <Grid item xs={6} sm={3}>
-                  <Stat label="Drive"
-                        value={`${GB(inv.totals.driveBytes).toFixed(1)} GB`} />
-                </Grid>
-                <Grid item xs={6} sm={3}>
-                  <Stat label="Email" value={inv.totals.emails.toLocaleString()} />
-                </Grid>
-                <Grid item xs={6} sm={3}>
-                  <Stat label="Measured from"
-                        value={`${inv.totals.covered}/${inv.accounts}`} />
-                </Grid>
-              </Grid>
+        <TenantStats side={d.side} canRead={setUp}
+                     testId={`domain-stats-${d.side}`} />
+      </Collapse>
+    </Card>
+  )
+}
 
-              <Typography variant="caption" color="text.secondary"
-                          sx={{ fontWeight: 600 }}>
-                Licences (assigned)
-              </Typography>
-              {inv.licenseError ? (
-                <Typography variant="body2" color="text.secondary">
-                  Couldn&apos;t read licences — the licensing scope isn&apos;t granted.
-                </Typography>
-              ) : licences.length ? (
-                <Stack direction="row" sx={{ flexWrap: 'wrap', gap: 0.75, mt: 0.5 }}>
-                  {licences.map(([sku, n]) => (
-                    <Chip key={sku} size="small" variant="outlined"
-                          label={`${sku} · ${n.toLocaleString()}`} />
-                  ))}
-                </Stack>
-              ) : (
-                <Typography variant="body2" color="text.secondary">
-                  No licences assigned.
-                </Typography>
-              )}
-              <Typography variant="caption" color="text.secondary"
-                          sx={{ display: 'block', mt: 1.5 }}>
-                Google only reports licences <em>in use</em> per SKU; free seats
-                need a Reseller scope this tool doesn&apos;t request, so those
-                counts are what is assigned, not what remains.
-              </Typography>
-              {inv.truncated && (
-                <Typography variant="caption" color="warning.main"
-                            sx={{ display: 'block', mt: 1 }}>
-                  Showing the first {inv.users.length} of {inv.accounts} accounts.
-                </Typography>
-              )}
-            </>
-          ) : null}
-        </Box>
+/** A configured domain in the "all configured domains" list, clickable to
+ *  its live stats. accountId is passed through so a superadmin reads the
+ *  right tenant, not the caller's own. */
+const ConfigDomainCard: React.FC<{ d: ConfiguredDomain }> = ({ d }) => {
+  const [open, setOpen] = useState(false)
+  return (
+    <Card elevation={0} data-testid={`config-${d.accountId}-${d.side}`}
+          sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider',
+                height: '100%' }}>
+      <CardActionArea onClick={() => setOpen((v) => !v)}
+                      data-testid={`config-open-${d.accountId}-${d.side}`}>
+        <CardContent sx={{ py: 1.5 }}>
+          <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.5 }}>
+            <Chip size="small" label={d.side} variant="outlined"
+                  sx={{ textTransform: 'capitalize' }} />
+            <Box sx={{ flexGrow: 1 }} />
+            <Chip size="small" label={d.hasKey ? 'Key on file' : 'No key'}
+                  color={d.hasKey ? 'success' : 'default'}
+                  variant={d.hasKey ? 'filled' : 'outlined'} />
+            <ExpandIcon fontSize="small" color="action"
+                        sx={{ transform: open ? 'rotate(180deg)' : 'none',
+                              transition: '0.2s' }} />
+          </Stack>
+          <Typography sx={{ fontWeight: 700, wordBreak: 'break-all' }}>
+            {d.domain}
+          </Typography>
+          <Typography variant="body2" color="text.secondary"
+                      sx={{ wordBreak: 'break-all' }}>
+            {d.adminEmail}
+          </Typography>
+        </CardContent>
+      </CardActionArea>
+      <Collapse in={open} unmountOnExit>
+        <Divider />
+        <TenantStats side={d.side} accountId={d.accountId} canRead={d.hasKey}
+                     testId={`config-stats-${d.accountId}-${d.side}`} />
       </Collapse>
     </Card>
   )
@@ -324,29 +371,7 @@ const Identities: React.FC = () => {
               <Grid container spacing={1.5} sx={{ mt: 0 }}>
                 {list.map((d) => (
                   <Grid item xs={12} sm={6} md={4} key={`${d.accountId}-${d.side}`}>
-                    <Card elevation={0} data-testid={`config-${d.accountId}-${d.side}`}
-                          sx={{ borderRadius: 2, border: '1px solid',
-                                borderColor: 'divider', height: '100%' }}>
-                      <CardContent sx={{ py: 1.5 }}>
-                        <Stack direction="row" alignItems="center" spacing={1}
-                               sx={{ mb: 0.5 }}>
-                          <Chip size="small" label={d.side} variant="outlined"
-                                sx={{ textTransform: 'capitalize' }} />
-                          <Box sx={{ flexGrow: 1 }} />
-                          <Chip size="small"
-                                label={d.hasKey ? 'Key on file' : 'No key'}
-                                color={d.hasKey ? 'success' : 'default'}
-                                variant={d.hasKey ? 'filled' : 'outlined'} />
-                        </Stack>
-                        <Typography sx={{ fontWeight: 700, wordBreak: 'break-all' }}>
-                          {d.domain}
-                        </Typography>
-                        <Typography variant="body2" color="text.secondary"
-                                    sx={{ wordBreak: 'break-all' }}>
-                          {d.adminEmail}
-                        </Typography>
-                      </CardContent>
-                    </Card>
+                    <ConfigDomainCard d={d} />
                   </Grid>
                 ))}
               </Grid>

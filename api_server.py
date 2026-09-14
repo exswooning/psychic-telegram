@@ -4326,6 +4326,7 @@ async def get_scope_options(side: str, op: Operator = Depends(operator)):
 
 @app.get("/api/v2/setup/tenant-inventory")
 async def get_tenant_inventory(side: str, limit: int = 250, deep: bool = False,
+                               account_id: int | None = None,
                                op: Operator = Depends(operator)):
     """How many accounts this tenant has, and the data each one holds.
 
@@ -4337,10 +4338,20 @@ async def get_tenant_inventory(side: str, limit: int = 250, deep: bool = False,
     `limit` bounds the per-account probing, not the account count -- the
     headcount is always the true one, and `truncated` says when the rows
     below it are a subset.
+
+    account_id lets a superadmin read ANOTHER account's tenant -- the "all
+    configured domains" list spans accounts, so opening one of those cards
+    has to reach the tenant it belongs to, not the caller's. Omitted, it is
+    the caller's own; given, _require_account_access refuses it unless the
+    caller is that account or a superadmin, the same gate every other
+    cross-account read here uses.
     """
     if side not in ("source", "target"):
         raise HTTPException(400, "side must be source or target")
     require_login(op)
+    who = op.account_id if account_id is None else account_id
+    if account_id is not None:
+        _require_account_access(account_id, op)
 
     def _read() -> dict:
         import tenant_inventory
@@ -4350,7 +4361,7 @@ async def get_tenant_inventory(side: str, limit: int = 250, deep: bool = False,
         # env.sh tenant and would report a different customer's headcount
         # back to this caller. Enforced by tests/test_account_scoping.py.
         return tenant_inventory.snapshot(
-            Settings(account_id=op.account_id), side, limit=limit, deep=deep)
+            Settings(account_id=who), side, limit=limit, deep=deep)
 
     return await _off_loop(_read)
 

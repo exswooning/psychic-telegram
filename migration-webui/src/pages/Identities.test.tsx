@@ -100,7 +100,7 @@ describe('clicking a domain shows its stats', () => {
     render(<Identities />)
     fireEvent.click(await screen.findByTestId('domain-card-open-source'))
     const stats = await screen.findByTestId('domain-stats-source')
-    await waitFor(() => expect(tenantInventory).toHaveBeenCalledWith('source'))
+    await waitFor(() => expect(tenantInventory.mock.calls[0][0]).toBe('source'))
     expect(stats).toHaveTextContent('200')            // users
     expect(stats).toHaveTextContent('14.0 GB')        // drive
     expect(stats).toHaveTextContent('53,211')         // email
@@ -185,5 +185,35 @@ describe('the live delegation check has a spinner', () => {
     render(<Identities />)
     expect(await screen.findByTestId('scoped-domains-loading'))
       .toHaveTextContent(/verifies each scope/i)
+  })
+})
+
+
+describe('the all-configured cards are clickable too', () => {
+  it('reads the stats for the card\'s own account, not the caller\'s', async () => {
+    tenantInventory.mockResolvedValue({
+      side: 'target', domain: 'target.rohit.com.np', accounts: 42,
+      users: new Array(42),
+      totals: { emails: 10, threads: 0, driveBytes: 2e9, covered: 42 },
+      truncated: false, error: '', deep: false, deepSampled: 0,
+      licenseCounts: { 'Business Standard': 42 }, licenseError: '',
+    })
+    render(<Identities />)
+    // account 66's target card
+    fireEvent.click(await screen.findByTestId('config-open-66-target'))
+    await screen.findByTestId('config-stats-66-target')
+    // fetched for account 66 (4th arg), not the caller's own
+    await waitFor(() => expect(tenantInventory)
+      .toHaveBeenCalledWith('target', 250, false, 66))
+    expect(screen.getByTestId('config-stats-66-target')).toHaveTextContent('42')
+  })
+
+  it('does not read a card with no key', async () => {
+    render(<Identities />)
+    // account 68 target has hasKey:false in the fixture
+    fireEvent.click(await screen.findByTestId('config-open-68-target'))
+    expect(await screen.findByTestId('config-stats-68-target'))
+      .toHaveTextContent(/not set up/i)
+    expect(tenantInventory).not.toHaveBeenCalled()
   })
 })

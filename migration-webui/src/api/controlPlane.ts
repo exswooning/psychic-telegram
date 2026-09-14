@@ -989,10 +989,11 @@ export const fetchTenantScan = (side: 'source' | 'target') =>
     `/api/v2/setup/tenant-inventory/scan?side=${side}`)
 
 export const fetchTenantInventory = (
-  side: 'source' | 'target', limit = 250, deep = false,
+  side: 'source' | 'target', limit = 250, deep = false, accountId?: number,
 ) =>
   cpFetch<TenantInventory>(
-    `/api/v2/setup/tenant-inventory?side=${side}&limit=${limit}&deep=${deep}`)
+    `/api/v2/setup/tenant-inventory?side=${side}&limit=${limit}&deep=${deep}`
+    + (accountId === undefined ? '' : `&account_id=${accountId}`))
 
 export const uploadCredentials = (
   reason: string, side: 'source' | 'target', domain: string,

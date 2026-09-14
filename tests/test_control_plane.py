@@ -1817,6 +1817,47 @@ class TestScanReportsProgress:
         assert snap["totals"]["shared"] == 7
 
 
+class TestTenantInventoryAcrossAccounts:
+    """The "all configured domains" cards span accounts, so opening one has
+    to read the tenant it belongs to, not the caller's. A superadmin may;
+    anyone else is refused another account's tenant."""
+
+    def _signed_in(self, cp, email):
+        cp.post("/api/v2/auth/signup",
+                json={"email": email, "password": "hunter22222", "name": "User"})
+        return cp.get("/api/v2/auth/me", headers=ADMIN).json()["id"]
+
+    def test_a_superadmin_reads_the_named_accounts_tenant(self, cp, monkeypatch):
+        import tenant_inventory, accounts_auth
+        seen = {}
+
+        def fake(settings, side, limit=250, deep=False):
+            seen["account_id"] = settings.account_id
+            return {"side": side, "domain": "x", "accounts": 3, "users": [],
+                    "totals": {}}
+        monkeypatch.setattr(tenant_inventory, "snapshot", fake)
+
+        a = self._signed_in(cp, "a@ex.com")
+        cp.post("/api/v2/auth/logout")
+        self._signed_in(cp, "boss@ex.com")
+        accounts_auth.promote_to_superadmin("boss@ex.com")
+        r = cp.get(f"/api/v2/setup/tenant-inventory?side=source&account_id={a}",
+                   headers=ADMIN)
+        assert r.status_code == 200
+        assert seen["account_id"] == a   # read a's tenant, not boss's
+
+    def test_a_regular_account_cannot_read_anothers(self, cp, monkeypatch):
+        import tenant_inventory
+        monkeypatch.setattr(tenant_inventory, "snapshot",
+                            lambda *a, **k: {"accounts": 0})
+        a = self._signed_in(cp, "solo@ex.com")
+        cp.post("/api/v2/auth/logout")
+        self._signed_in(cp, "nosey@ex.com")
+        r = cp.get(f"/api/v2/setup/tenant-inventory?side=source&account_id={a}",
+                   headers=ADMIN)
+        assert r.status_code == 403
+
+
 class TestAllConfiguredDomains:
     """verified_domains answers "the CURRENT source+target for one account".
     A setup overwrites the role it targets, and a tenant can be configured
