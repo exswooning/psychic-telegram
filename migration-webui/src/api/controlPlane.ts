@@ -1054,6 +1054,20 @@ export const fetchAllDomains = () =>
   cpFetch<{ domains: ConfiguredDomain[]; superadmin: boolean }>(
     '/api/v2/setup/all-domains')
 
+/** Form a migration pair from two already-configured domains, reusing their
+ *  existing keys -- delegation is tied to the key's client id, not the
+ *  account, so no re-setup or re-granting. The pair lands on the caller's
+ *  account; any key it overwrites there is backed up first. */
+export const linkDomains = (reason: string, source: { accountId: number; side: 'source' | 'target' }, target: { accountId: number; side: 'source' | 'target' }) =>
+  cpFetch<{ ok: boolean; detail: string }>('/api/v2/setup/link-domains', {
+    method: 'POST',
+    body: JSON.stringify({
+      reason,
+      source_account_id: source.accountId, source_side: source.side,
+      target_account_id: target.accountId, target_side: target.side,
+    }),
+  })
+
 export const revertPublicShares = (reason: string, tenant = 'target') =>
   cpFetch<ActionResult>('/api/v2/emergency/revert-public', {
     method: 'POST',

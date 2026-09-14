@@ -1858,6 +1858,103 @@ class TestTenantInventoryAcrossAccounts:
         assert r.status_code == 403
 
 
+class TestLinkingTwoSetUpDomains:
+    """Connect two already-set-up domains into a migration pair, reusing
+    their keys. Delegation is granted for a key's CLIENT ID, not the account
+    holding the file, so copying an existing key carries its live delegation
+    -- no re-setup. The pair lands on the caller's account."""
+
+    def _signed_in(self, cp, email):
+        cp.post("/api/v2/auth/signup",
+                json={"email": email, "password": "hunter22222", "name": "User"})
+        return cp.get("/api/v2/auth/me", headers=ADMIN).json()["id"]
+
+    def _donor(self, tmp_path, accounts_auth, acct, role, domain, cid):
+        import os as _os
+        kd = tmp_path / "keys" / str(acct)
+        kd.mkdir(parents=True, exist_ok=True)
+        (kd / f"{role}-sa.json").write_text(
+            json.dumps({"client_id": cid, "project_id": "p"}))
+        accounts_auth.update_tenant_config(
+            acct, role, domain=domain, admin_email=f"admin@{domain}",
+            sa_key_path=f"keys/{acct}/{role}-sa.json")
+
+    def test_it_forms_a_pair_and_copies_the_keys(self, cp, tmp_path, monkeypatch):
+        import api_server, accounts_auth
+        a = self._signed_in(cp, "donorA@ex.com")
+        cp.post("/api/v2/auth/logout")
+        b = self._signed_in(cp, "donorB@ex.com")
+        cp.post("/api/v2/auth/logout")
+        boss = self._signed_in(cp, "linkboss@ex.com")
+        accounts_auth.promote_to_superadmin("linkboss@ex.com")
+        monkeypatch.setattr(api_server, "HERE", str(tmp_path))
+        self._donor(tmp_path, accounts_auth, a, "source", "srcdom.com", "111")
+        self._donor(tmp_path, accounts_auth, b, "target", "tgtdom.com", "222")
+
+        r = cp.post("/api/v2/setup/link-domains", headers=ADMIN, json={
+            "reason": "connect two set-up domains",
+            "source_account_id": a, "source_side": "source",
+            "target_account_id": b, "target_side": "target"})
+        assert r.status_code == 200 and r.json()["ok"] is True
+
+        scfg = accounts_auth.get_tenant_config(boss, "source")
+        tcfg = accounts_auth.get_tenant_config(boss, "target")
+        assert scfg["domain"] == "srcdom.com"
+        assert tcfg["domain"] == "tgtdom.com"
+        dest = tmp_path / "keys" / str(boss) / "source-sa.json"
+        assert dest.is_file()
+        assert json.loads(dest.read_text())["client_id"] == "111"
+
+    def test_it_backs_up_a_key_it_overwrites(self, cp, tmp_path, monkeypatch):
+        """The caller may already have a key in that slot -- it must never be
+        lost, so the link is reversible."""
+        import api_server, accounts_auth
+        a = self._signed_in(cp, "donorC@ex.com")
+        cp.post("/api/v2/auth/logout")
+        boss = self._signed_in(cp, "linkboss2@ex.com")
+        accounts_auth.promote_to_superadmin("linkboss2@ex.com")
+        monkeypatch.setattr(api_server, "HERE", str(tmp_path))
+        self._donor(tmp_path, accounts_auth, a, "source", "new-src.com", "999")
+        # boss already has a source key
+        bd = tmp_path / "keys" / str(boss)
+        bd.mkdir(parents=True, exist_ok=True)
+        (bd / "source-sa.json").write_text(json.dumps({"client_id": "OLD"}))
+        self._donor(tmp_path, accounts_auth, a, "target", "new-tgt.com", "888")
+
+        cp.post("/api/v2/setup/link-domains", headers=ADMIN, json={
+            "reason": "relink", "source_account_id": a, "source_side": "source",
+            "target_account_id": a, "target_side": "target"})
+        baks = list(bd.glob("source-sa.json.bak-*"))
+        assert baks, "the overwritten key was not backed up"
+        assert json.loads(baks[0].read_text())["client_id"] == "OLD"
+
+    def test_a_regular_account_cannot_pull_anothers_key(self, cp, tmp_path, monkeypatch):
+        import api_server
+        a = self._signed_in(cp, "victim@ex.com")
+        cp.post("/api/v2/auth/logout")
+        self._signed_in(cp, "attacker@ex.com")     # not a superadmin
+        monkeypatch.setattr(api_server, "HERE", str(tmp_path))
+        r = cp.post("/api/v2/setup/link-domains", headers=ADMIN, json={
+            "reason": "sneaky", "source_account_id": a, "source_side": "source",
+            "target_account_id": a, "target_side": "target"})
+        assert r.status_code == 403
+
+    def test_it_refuses_a_domain_with_no_key(self, cp, tmp_path, monkeypatch):
+        import api_server, accounts_auth
+        boss = self._signed_in(cp, "linkboss3@ex.com")
+        accounts_auth.promote_to_superadmin("linkboss3@ex.com")
+        monkeypatch.setattr(api_server, "HERE", str(tmp_path))
+        accounts_auth.update_tenant_config(
+            boss, "source", domain="nokey.com", admin_email="a@nokey.com",
+            sa_key_path="keys/x/source-sa.json")   # file does not exist
+        r = cp.post("/api/v2/setup/link-domains", headers=ADMIN, json={
+            "reason": "linking a keyless domain",
+            "source_account_id": boss, "source_side": "source",
+            "target_account_id": boss, "target_side": "source"})
+        assert r.json()["ok"] is False
+        assert "no key on file" in r.json()["detail"]
+
+
 class TestAllConfiguredDomains:
     """verified_domains answers "the CURRENT source+target for one account".
     A setup overwrites the role it targets, and a tenant can be configured

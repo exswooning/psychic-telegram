@@ -4524,6 +4524,82 @@ async def all_configured_domains(op: Operator = Depends(operator)):
     return await _off_loop(_read)
 
 
+class LinkDomains(WriteAction):
+    source_account_id: int
+    source_side: str
+    target_account_id: int
+    target_side: str
+
+
+@app.post("/api/v2/setup/link-domains")
+async def link_domains(body: LinkDomains, op: Operator = Depends(operator)):
+    """Form a migration pair from two ALREADY-configured domains, reusing
+    their existing keys -- no re-running setup.
+
+    Delegation is granted on a tenant for a service account's CLIENT ID, not
+    for whichever Bitport account happens to hold the key file. So copying an
+    existing key into this account's source/target slot carries its live
+    delegation with it -- which is what lets "connect two set-up domains"
+    work without re-granting anything in any Admin Console.
+
+    Superadmin to pull a key from another account (the domains are set up
+    under different accounts); _require_account_access enforces it. The pair
+    lands on the CALLER's account -- that is the account the migration then
+    runs under -- and any key already in the caller's own slot is backed up
+    first, so the link is reversible and never loses a key.
+    """
+    require_login(op)
+    for side in (body.source_side, body.target_side):
+        if side not in ("source", "target"):
+            raise HTTPException(400, "side must be source or target")
+    _require_account_access(body.source_account_id, op)
+    _require_account_access(body.target_account_id, op)
+    target = (f"{body.source_account_id}:{body.source_side} -> "
+              f"{body.target_account_id}:{body.target_side}")
+
+    def _link() -> tuple[bool, str]:
+        import shutil
+        scfg = accounts_auth.get_tenant_config(
+            body.source_account_id, body.source_side) or {}
+        tcfg = accounts_auth.get_tenant_config(
+            body.target_account_id, body.target_side) or {}
+        if not scfg.get("domain"):
+            return False, "the chosen source is not configured"
+        if not tcfg.get("domain"):
+            return False, "the chosen target is not configured"
+
+        def _abs(k: str) -> str:
+            return os.path.join(HERE, k) if k and not os.path.isabs(k) else k
+        s_src = _abs(scfg.get("sa_key_path") or "")
+        s_tgt = _abs(tcfg.get("sa_key_path") or "")
+        if not (s_src and os.path.isfile(s_src)):
+            return False, f"source {scfg['domain']} has no key on file"
+        if not (s_tgt and os.path.isfile(s_tgt)):
+            return False, f"target {tcfg['domain']} has no key on file"
+
+        dest_dir = os.path.join(HERE, "keys", str(op.account_id))
+        os.makedirs(dest_dir, exist_ok=True)
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        for role, src_file in (("source", s_src), ("target", s_tgt)):
+            dest = os.path.join(dest_dir, f"{role}-sa.json")
+            # Back up anything already in this slot -- never lose a key the
+            # caller's account already had, so the link is reversible.
+            if os.path.isfile(dest):
+                shutil.copy2(dest, f"{dest}.bak-{stamp}")
+            shutil.copy2(src_file, dest)
+        accounts_auth.update_tenant_config(
+            op.account_id, "source", domain=scfg["domain"],
+            admin_email=scfg.get("admin_email") or "",
+            sa_key_path=f"keys/{op.account_id}/source-sa.json")
+        accounts_auth.update_tenant_config(
+            op.account_id, "target", domain=tcfg["domain"],
+            admin_email=tcfg.get("admin_email") or "",
+            sa_key_path=f"keys/{op.account_id}/target-sa.json")
+        return True, f"{scfg['domain']} -> {tcfg['domain']}"
+
+    return await _gated(op, "setup.link_domains", body, target, _link)
+
+
 class ConnectRequest(BaseModel):
     """Either a code plus where to redeem it, or the whole command line."""
     coordinator: str = ""

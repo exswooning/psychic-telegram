@@ -1,11 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import Migrations from './Migrations'
 
 const fetchMigrations = vi.fn()
+const fetchAllDomains = vi.fn()
+const linkDomains = vi.fn()
 vi.mock('@/api/controlPlane', () => ({
   fetchMigrations: (...a: unknown[]) => fetchMigrations(...a),
+  fetchAllDomains: (...a: unknown[]) => fetchAllDomains(...a),
+  linkDomains: (...a: unknown[]) => linkDomains(...a),
 }))
 
 /**
@@ -34,7 +38,21 @@ const show = (migrations: unknown[], extra = {}) => {
 }
 
 describe('Migrations', () => {
-  beforeEach(() => { vi.clearAllMocks() })
+  beforeEach(() => {
+    vi.clearAllMocks()
+    fetchAllDomains.mockResolvedValue({ superadmin: true, domains: [
+      { accountId: 66, accountEmail: 'a@x', side: 'source',
+        domain: 'source.rohit.com', adminEmail: 'i@source.rohit.com',
+        hasKey: true, clientId: '1' },
+      { accountId: 66, accountEmail: 'a@x', side: 'target',
+        domain: 'target.rohit.com', adminEmail: 'i@target.rohit.com',
+        hasKey: true, clientId: '2' },
+      { accountId: 68, accountEmail: 'b@x', side: 'target',
+        domain: 'target.saraf.com', adminEmail: 'i@target.saraf.com',
+        hasKey: false, clientId: '' },
+    ] })
+    linkDomains.mockResolvedValue({ ok: true, detail: 'source.rohit.com -> target.rohit.com' })
+  })
 
   it('shows the tenant pair as source -> target', async () => {
     show([row()])
@@ -122,5 +140,61 @@ describe('Migrations', () => {
     show([row({ targetDomain: '' })])
     await waitFor(() => expect(screen.getByTestId('migration-7')).toBeTruthy())
     expect(screen.getByTestId('migration-7')).toHaveTextContent('source.example.com')
+  })
+})
+
+
+describe('connecting two set-up domains', () => {
+  const open = async () => {
+    fetchMigrations.mockResolvedValue({ migrations: [], maxConcurrent: 2, activeTotal: 0 })
+    render(<MemoryRouter><Migrations /></MemoryRouter>)
+    fireEvent.click(await screen.findByTestId('new-migration'))
+    await screen.findByTestId('link-connect')
+  }
+
+  it('offers a picker of already-set-up domains, key-bearing only', async () => {
+    await open()
+    await waitFor(() => expect(fetchAllDomains).toHaveBeenCalled())
+    // the keyless target.saraf.com must not be selectable
+    // native select: the keyless target.saraf.com is not among the options
+    const src = screen.getByTestId('link-source') as HTMLSelectElement
+    const values = Array.from(src.options).map((o) => o.textContent || '')
+    expect(values.some((v) => v.includes('source.rohit.com'))).toBe(true)
+    expect(values.some((v) => v.includes('target.saraf.com'))).toBe(false)
+  })
+
+  it('links the two chosen domains, reusing their keys', async () => {
+    await open()
+    await waitFor(() => expect(fetchAllDomains).toHaveBeenCalled())
+    // pick source
+    fireEvent.change(screen.getByTestId('link-source'), { target: { value: '66:source' } })
+    fireEvent.change(screen.getByTestId('link-target'), { target: { value: '66:target' } })
+    fireEvent.change(screen.getByTestId('link-reason'),
+                     { target: { value: 'rehearsal into the new tenant' } })
+    fireEvent.click(screen.getByTestId('link-connect'))
+    await waitFor(() => expect(linkDomains).toHaveBeenCalledWith(
+      'rehearsal into the new tenant',
+      { accountId: 66, side: 'source' },
+      { accountId: 66, side: 'target' }))
+  })
+
+  it('will not connect without a reason', async () => {
+    await open()
+    await waitFor(() => expect(fetchAllDomains).toHaveBeenCalled())
+    fireEvent.change(screen.getByTestId('link-source'), { target: { value: '66:source' } })
+    fireEvent.change(screen.getByTestId('link-target'), { target: { value: '66:target' } })
+    expect(screen.getByTestId('link-connect')).toBeDisabled()
+  })
+
+  it('surfaces a link failure instead of silently closing', async () => {
+    linkDomains.mockResolvedValue({ ok: false, detail: 'source has no key on file' })
+    await open()
+    await waitFor(() => expect(fetchAllDomains).toHaveBeenCalled())
+    fireEvent.change(screen.getByTestId('link-source'), { target: { value: '66:source' } })
+    fireEvent.change(screen.getByTestId('link-target'), { target: { value: '66:target' } })
+    fireEvent.change(screen.getByTestId('link-reason'),
+                     { target: { value: 'trying this out' } })
+    fireEvent.click(screen.getByTestId('link-connect'))
+    expect(await screen.findByTestId('link-error')).toHaveTextContent('no key on file')
   })
 })
