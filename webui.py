@@ -5298,10 +5298,10 @@ class Handler(BaseHTTPRequestHandler):
             # caller has to say which -- an unrecognised value is refused
             # rather than defaulting to the destructive one.
             mode = (body.get("mode") or "remove").strip()
-            if mode not in ("wipe", "remove", "delete_users"):
+            if mode not in ("wipe", "remove", "remove_setup", "delete_users"):
                 self._json({"ok": False, "error":
-                            f"mode must be 'wipe', 'remove' or "
-                            f"'delete_users', got {mode!r}"})
+                            f"mode must be 'wipe', 'remove', 'remove_setup' "
+                            f"or 'delete_users', got {mode!r}"})
                 return
             if mode == "delete_users":
                 # A different script entirely: wipe and remove empty a
@@ -5321,6 +5321,14 @@ class Handler(BaseHTTPRequestHandler):
                         "--confirm-domain", configured, "--apply"]
             elif mode == "wipe":
                 argv.append("--keep-setup")
+            elif mode == "remove_setup":
+                # Undo the Setup Wizard and NOTHING else: revoke the DWD
+                # grant, delete the Cloud project, forget the config and the
+                # key -- but leave the tenant's data alone. The wizard never
+                # created data, so removing "what the wizard did" must not
+                # wipe a tenant. --keep-data skips step 1 (the data wipe) and
+                # runs only the teardown + config-forget.
+                argv.append("--keep-data")
             # Deliberately NOT --account-id, exactly as wipe_target_argv
             # explains: _account_env has already set MIGRATION_DB to this
             # account's ledger, and a child told to resolve an account
@@ -5334,6 +5342,7 @@ class Handler(BaseHTTPRequestHandler):
             # domain, admin and key, which is everything the child needs.
             label = {"wipe": "wipe tenant data",
                      "delete_users": "delete all users",
+                     "remove_setup": "remove tenant setup (keep data)",
                      "remove": "remove tenant setup"}[mode]
             ok, msg = get_job(account_id).start(label, argv, env=env)
             self._json({"ok": ok, "error": "" if ok else msg})

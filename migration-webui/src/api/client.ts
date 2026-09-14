@@ -1015,16 +1015,22 @@ export const fetchCompletedJobs = () =>
  *  why it is not adjustable. */
 export async function removeTenantSetup(
   side: 'source' | 'target', domain: string, password: string,
-  // "wipe" empties the tenant and leaves it usable; "remove" also takes the
-  // project, the grant and the configuration. Sent explicitly rather than
-  // defaulted, so the destructive one is never the fallback.
-  mode: 'wipe' | 'remove' | 'delete_users',
+  // "wipe" empties the tenant and leaves it usable; "remove_setup" undoes
+  // ONLY the wizard (project, grant, config, key) and keeps the data;
+  // "remove" takes both the setup AND the data. Sent explicitly, so the most
+  // destructive one is never the fallback.
+  mode: 'wipe' | 'remove' | 'remove_setup' | 'delete_users',
+  // Which account's tenant to act on. Omitted = the caller's own; a
+  // superadmin may name another (the "all configured domains" cards span
+  // accounts). The server gates it the same way every cross-account write is.
+  accountId?: number,
 ): Promise<SeedResult> {
   const res = await fetch('/api/remove_tenant_setup', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ side, mode, confirm_domain: domain,
-                           admin_password: password }),
+                           admin_password: password,
+                           account_id: accountId }),
   })
   return res.json()
 }

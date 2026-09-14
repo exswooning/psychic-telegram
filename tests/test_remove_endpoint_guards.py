@@ -62,10 +62,10 @@ class TestItRunsTheRightThing:
 
 class TestTheModeIsExplicit:
     def test_an_unrecognised_mode_is_refused(self):
-        """Three very different intentions behind one dialog. Defaulting an
+        """Four very different intentions behind one dialog. Defaulting an
         unknown value would make a destructive one the fallback."""
         blk = _block()
-        assert 'mode not in ("wipe", "remove", "delete_users")' in blk
+        assert 'mode not in ("wipe", "remove", "remove_setup", "delete_users")' in blk
 
     def test_a_wipe_keeps_the_setup(self):
         blk = _block()
@@ -116,3 +116,34 @@ class TestTheChildIsNotToldToResolveAnAccount:
     def test_the_environment_carries_the_tenant_instead(self):
         blk = _block()
         assert "_account_env(account_id" in blk
+
+
+class TestTheRemoveSetupMode:
+    """"Delete a domain" undoes ONLY the wizard -- project, grant, config,
+    key -- and keeps the tenant's data. The wizard never made data, so
+    removing "what the wizard did" must not wipe a tenant. That is
+    --keep-data: skip the wipe, run the teardown and forget the config."""
+
+    def test_remove_setup_is_an_accepted_mode(self):
+        assert "remove_setup" in _block()
+
+    def test_it_keeps_the_data(self):
+        blk = _block()
+        i = blk.index('mode == "remove_setup"')
+        assert "--keep-data" in blk[i:i + 700]
+
+    def test_it_still_removes_the_setup(self):
+        """--keep-data skips only the wipe; the teardown + config-forget
+        still run, so the project, grant and config are gone."""
+        import inspect
+        import remove_tenant_setup as rts
+        src = inspect.getsource(rts.remove)
+        # forget_tenant_config is gated on delete_setup, not wipe_data.
+        i = src.index("if delete_setup and account_id:")
+        assert "forget_tenant_config" in src[i:i + 400]
+
+    def test_the_wipe_is_the_thing_keep_data_turns_off(self):
+        import inspect
+        import remove_tenant_setup as rts
+        src = inspect.getsource(rts.main)
+        assert "wipe_data=not args.keep_data" in src

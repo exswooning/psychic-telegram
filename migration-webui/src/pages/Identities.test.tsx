@@ -16,15 +16,18 @@ vi.mock('@/api/controlPlane', () => ({
   fetchTenantInventory: (...a: unknown[]) => tenantInventory(...a),
   fetchAllDomains: () => allDomains(),
 }))
+const removeTenantSetup = vi.fn()
 vi.mock('@/api/client', () => ({
   fetchActions: () => Promise.resolve({}),
   fetchIdentities: () => Promise.resolve([]),
   saveIdentityPair: () => Promise.resolve({ ok: true, total: 1 }),
+  removeTenantSetup: (...a: unknown[]) => removeTenantSetup(...a),
 }))
 vi.mock('@/components/JobRunner', () => ({ default: () => null }))
 
 beforeEach(() => {
   verifiedDomains.mockReset(); tenantInventory.mockReset(); allDomains.mockReset()
+  removeTenantSetup.mockReset(); removeTenantSetup.mockResolvedValue({ ok: true })
   verifiedDomains.mockResolvedValue({ domains: [
     { side: 'source', domain: 'src.example', adminEmail: 'admin@src.example',
       status: 'verified', live: 17, total: 17 },
@@ -237,5 +240,73 @@ describe('overwritten (superseded) domains', () => {
     expect(stats).toHaveTextContent('source.saraf.com')
     // the inventory endpoint reads the ACTIVE slot, so it must not be called
     expect(tenantInventory).not.toHaveBeenCalled()
+  })
+})
+
+
+describe('deleting a domain setup', () => {
+  it('tears down what the wizard made, keeping the data, for the right account', async () => {
+    render(<Identities />)
+    // account 66 target card (from the default allDomains fixture)
+    fireEvent.click(await screen.findByTestId('config-open-66-target'))
+    fireEvent.click(await screen.findByTestId('delete-config-66-target'))
+    fireEvent.change(await screen.findByTestId('delete-confirm-domain'),
+                     { target: { value: 'target.rohit.com.np' } })
+    fireEvent.change(screen.getByTestId('delete-password'),
+                     { target: { value: 'pw' } })
+    fireEvent.change(screen.getByTestId('delete-reason'),
+                     { target: { value: 'tearing down the test tenant' } })
+    fireEvent.click(screen.getByTestId('delete-go'))
+    await waitFor(() => expect(removeTenantSetup)
+      .toHaveBeenCalledWith('target', 'target.rohit.com.np', 'pw', 'remove_setup', 66))
+    expect(await screen.findByTestId('delete-started')).toBeInTheDocument()
+  })
+
+  it('will not delete until the domain is typed back exactly', async () => {
+    render(<Identities />)
+    fireEvent.click(await screen.findByTestId('config-open-66-target'))
+    fireEvent.click(await screen.findByTestId('delete-config-66-target'))
+    fireEvent.change(await screen.findByTestId('delete-confirm-domain'),
+                     { target: { value: 'wrong.com' } })
+    fireEvent.change(screen.getByTestId('delete-password'), { target: { value: 'pw' } })
+    fireEvent.change(screen.getByTestId('delete-reason'), { target: { value: 'a reason here' } })
+    expect(screen.getByTestId('delete-go')).toBeDisabled()
+  })
+
+  it('reports a failure instead of claiming it started', async () => {
+    removeTenantSetup.mockResolvedValue({ ok: false, error: 'wrong password' })
+    render(<Identities />)
+    fireEvent.click(await screen.findByTestId('config-open-66-target'))
+    fireEvent.click(await screen.findByTestId('delete-config-66-target'))
+    fireEvent.change(await screen.findByTestId('delete-confirm-domain'),
+                     { target: { value: 'target.rohit.com.np' } })
+    fireEvent.change(screen.getByTestId('delete-password'), { target: { value: 'x' } })
+    fireEvent.change(screen.getByTestId('delete-reason'), { target: { value: 'a reason here' } })
+    fireEvent.click(screen.getByTestId('delete-go'))
+    expect(await screen.findByTestId('delete-error')).toHaveTextContent('wrong password')
+  })
+
+  it('is not offered on a superseded card', async () => {
+    allDomains.mockResolvedValue({ superadmin: true, domains: [
+      { accountId: 68, accountEmail: 'b@x', side: 'source', domain: 'old.com',
+        adminEmail: 'i@old.com', hasKey: true, clientId: '1', superseded: true,
+        replacedBy: 'new.com' },
+    ] })
+    render(<Identities />)
+    fireEvent.click(await screen.findByTestId('config-open-68-source'))
+    await screen.findByTestId('config-stats-68-source')
+    expect(screen.queryByTestId('delete-config-68-source')).toBeNull()
+  })
+})
+
+describe('a dead delegation reads as an explanation, not a raw error', () => {
+  it('explains that delegation is not live', async () => {
+    tenantInventory.mockRejectedValue(
+      new Error("invalid_grant: No valid verifier for issuer: source-sa@x"))
+    render(<Identities />)
+    fireEvent.click(await screen.findByTestId('domain-card-open-source'))
+    const stats = await screen.findByTestId('domain-stats-source')
+    expect(stats).toHaveTextContent(/delegation is not live/i)
+    expect(stats).not.toHaveTextContent('invalid_grant')
   })
 })

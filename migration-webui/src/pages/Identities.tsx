@@ -3,12 +3,17 @@ import {
   Box, Typography, Card, CardContent, CardActionArea, Stack, TextField, Button, Alert,
   Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Chip,
   IconButton, Tooltip, Grid, LinearProgress, Collapse, CircularProgress, Divider,
+  Dialog, DialogTitle, DialogContent, DialogActions,
 } from '@mui/material'
 import {
   Refresh as RefreshIcon, People as IdentitiesIcon,
   Language as DomainIcon, ExpandMore as ExpandIcon,
+  DeleteOutline as DeleteIcon,
 } from '@mui/icons-material'
-import { fetchActions, fetchIdentities, saveIdentityPair, IdentityRow, ActionSpec } from '@/api/client'
+import {
+  fetchActions, fetchIdentities, saveIdentityPair, IdentityRow, ActionSpec,
+  removeTenantSetup,
+} from '@/api/client'
 import {
   fetchVerifiedDomains, VerifiedDomain,
   fetchTenantInventory, TenantInventory,
@@ -85,7 +90,15 @@ const TenantStats: React.FC<{
           </Typography>
         </Stack>
       ) : err ? (
-        <Alert severity="warning">{err}</Alert>
+        <Alert severity="warning">
+          {/(invalid_grant|unauthorized_client|no valid verifier)/i.test(err)
+            ? 'Its stats cannot be read because the domain-wide delegation '
+              + 'is not live — the service account has a key here, but its '
+              + 'client ID was never granted (or was revoked) in this '
+              + "tenant's Admin Console. Re-run setup, or grant delegation "
+              + 'for the client ID, and the stats will appear.'
+            : err}
+        </Alert>
       ) : inv ? (
         <>
           <Grid container spacing={2} sx={{ mb: licences.length ? 1.5 : 0 }}>
@@ -147,6 +160,7 @@ const DomainCard: React.FC<{ d: VerifiedDomain }> = ({ d }) => {
   const frac = d.total > 0 ? d.live / d.total : 0
   const setUp = d.total > 0 && !d.error
   const [open, setOpen] = useState(false)
+  const [delOpen, setDelOpen] = useState(false)
 
   return (
     <Card elevation={0} data-testid={`domain-card-${d.side}`}
@@ -204,7 +218,16 @@ const DomainCard: React.FC<{ d: VerifiedDomain }> = ({ d }) => {
         <Divider />
         <TenantStats side={d.side} canRead={setUp}
                      testId={`domain-stats-${d.side}`} />
+        <Box sx={{ px: 2, pb: 2 }}>
+          <Button size="small" color="error" startIcon={<DeleteIcon />}
+                  data-testid={`delete-domain-${d.side}`}
+                  onClick={() => setDelOpen(true)}>
+            Delete this setup
+          </Button>
+        </Box>
       </Collapse>
+      <DeleteSetupDialog open={delOpen} onClose={() => setDelOpen(false)}
+                         side={d.side} domain={d.domain} />
     </Card>
   )
 }
@@ -214,6 +237,7 @@ const DomainCard: React.FC<{ d: VerifiedDomain }> = ({ d }) => {
  *  right tenant, not the caller's own. */
 const ConfigDomainCard: React.FC<{ d: ConfiguredDomain }> = ({ d }) => {
   const [open, setOpen] = useState(false)
+  const [delOpen, setDelOpen] = useState(false)
   // A superseded domain's live stats can't be read: the inventory endpoint
   // reads the slot's ACTIVE domain, which is the one that replaced this. So
   // its card explains what happened instead of fetching a stranger's numbers.
@@ -266,8 +290,111 @@ const ConfigDomainCard: React.FC<{ d: ConfiguredDomain }> = ({ d }) => {
           <TenantStats side={d.side} accountId={d.accountId} canRead={d.hasKey}
                        testId={`config-stats-${d.accountId}-${d.side}`} />
         )}
+        {!d.superseded && (
+          <Box sx={{ px: 2, pb: 2 }}>
+            <Button size="small" color="error" startIcon={<DeleteIcon />}
+                    data-testid={`delete-config-${d.accountId}-${d.side}`}
+                    onClick={() => setDelOpen(true)}>
+              Delete this setup
+            </Button>
+          </Box>
+        )}
       </Collapse>
+      <DeleteSetupDialog open={delOpen} onClose={() => setDelOpen(false)}
+                         side={d.side} domain={d.domain} accountId={d.accountId} />
     </Card>
+  )
+}
+
+/** Delete a domain's setup: undo exactly what the Setup Wizard created --
+ *  the Cloud project, the delegation grant, the config and the key -- and
+ *  nothing else. The tenant's own data is left untouched (the wizard never
+ *  made any). Irreversible; you re-run the wizard to set it up again. */
+const DeleteSetupDialog: React.FC<{
+  open: boolean; onClose: () => void
+  side: 'source' | 'target'; domain: string; accountId?: number
+}> = ({ open, onClose, side, domain, accountId }) => {
+  const [typed, setTyped] = useState('')
+  const [password, setPassword] = useState('')
+  const [reason, setReason] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const [started, setStarted] = useState(false)
+
+  useEffect(() => {
+    if (open) {
+      setTyped(''); setPassword(''); setReason(''); setErr(''); setStarted(false)
+    }
+  }, [open])
+
+  const ready = typed.trim().toLowerCase() === domain.toLowerCase()
+    && password.length > 0 && reason.trim().length >= 3
+
+  const remove = async () => {
+    setBusy(true); setErr('')
+    try {
+      const r = await removeTenantSetup(side, domain, password, 'remove_setup', accountId)
+      if (!r.ok) throw new Error(r.error || 'could not remove the setup')
+      setStarted(true)
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Dialog open={open} onClose={busy ? undefined : onClose} fullWidth maxWidth="sm">
+      <DialogTitle>Delete {domain}</DialogTitle>
+      <DialogContent>
+        {started ? (
+          <Alert severity="success" data-testid="delete-started">
+            Removal started. Deleting the Cloud project and revoking delegation
+            run in the background and take a few minutes — this domain
+            disappears from the list here once it finishes. Watch progress on
+            the Jobs page.
+          </Alert>
+        ) : (
+          <>
+            <Alert severity="error" sx={{ mb: 2 }}>
+              This revokes the delegation, deletes the Cloud project, and forgets
+              the config and key for <strong>{domain}</strong> — everything the
+              Setup Wizard created. The tenant&apos;s own Workspace data is NOT
+              touched. It cannot be undone; you would re-run the wizard to set it
+              up again.
+            </Alert>
+            {err && <Alert severity="warning" sx={{ mb: 2 }} data-testid="delete-error">{err}</Alert>}
+            <Stack spacing={2}>
+              <TextField fullWidth label="Type the domain to confirm" value={typed}
+                         onChange={(e) => setTyped(e.target.value)}
+                         placeholder={domain}
+                         inputProps={{ 'data-testid': 'delete-confirm-domain' }} />
+              <TextField fullWidth type="password" label="Admin password" value={password}
+                         onChange={(e) => setPassword(e.target.value)}
+                         helperText="needed to delete the Cloud project and revoke delegation"
+                         inputProps={{ 'data-testid': 'delete-password',
+                                       autoComplete: 'off' }} />
+              <TextField fullWidth label="Reason" value={reason}
+                         onChange={(e) => setReason(e.target.value)}
+                         inputProps={{ 'data-testid': 'delete-reason' }} />
+            </Stack>
+          </>
+        )}
+      </DialogContent>
+      <DialogActions>
+        {started ? (
+          <Button onClick={onClose} variant="contained">Close</Button>
+        ) : (
+          <>
+            <Button onClick={onClose} disabled={busy}>Cancel</Button>
+            <Button color="error" variant="contained" onClick={remove}
+                    disabled={!ready || busy} data-testid="delete-go">
+              {busy ? 'Removing…' : 'Delete setup'}
+            </Button>
+          </>
+        )}
+      </DialogActions>
+    </Dialog>
   )
 }
 
