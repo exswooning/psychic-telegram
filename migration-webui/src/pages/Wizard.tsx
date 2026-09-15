@@ -300,7 +300,12 @@ const Wizard: React.FC = () => {
   const [otherDomain, setOtherDomain] = useState('')
   const [role, setRole] = useState<'source' | 'target'>('source')
   const [purpose, setPurpose] = useState<Purpose | null>(null)
-  const [picked, setPicked] = useState<Purpose | ''>('')
+  // Defaults to the grant that covers BOTH, because narrowing is the
+  // unusual choice and was costing a whole setup run to discover: picking
+  // "seed" runs a narrow-scopes pass that can fail on its own, and the
+  // tenant is then left with neither grant. 'later' already grants what
+  // seeding and migrating both need, so it is the default answer.
+  const [picked, setPicked] = useState<Purpose | ''>('later')
   const [autoBusy, setAutoBusy] = useState(false)
   const [autoErr, setAutoErr] = useState('')
   // Live setup progress. full_setup writes a checkpoint the API already
@@ -488,14 +493,14 @@ const Wizard: React.FC = () => {
             label={
               <Box sx={{ py: 0.5 }}>
                 <Typography variant="body1" sx={{ fontWeight: 500 }}>
-                  Set it up and decide later
+                  Set it up for both — seeding and migrating
                 </Typography>
                 <Typography variant="body2" color="text.secondary">
                   Builds the Cloud project, the service account and the
                   delegation grant, then counts what is in the tenant.
                   {' '}<strong>Grants what BOTH need</strong>, so the tenant
-                  can seed or migrate immediately — choosing later narrows
-                  it rather than setting anything up again.
+                  can seed or migrate immediately. The two choices above
+                  narrow that grant; they set nothing up that this does not.
                 </Typography>
               </Box>
             } />

@@ -333,12 +333,16 @@ describe('it reads like the Google Workspace signup it sits beside', () => {
     expect(screen.getByTestId('role-target')).toBeInTheDocument()
   })
 
-  it('will not continue until one is picked', async () => {
+  it('starts on the grant that covers both, ready to continue', async () => {
+    /* Narrowing is the unusual choice and cost a whole setup run to
+       discover: picking "seed" runs a narrow-scopes pass that can fail on
+       its own, leaving the tenant with neither grant. The answer that
+       grants what seeding AND migrating need is preselected. */
     view()
     await signIn('admin@acme.com')
-    expect(await screen.findByTestId('purpose-next')).toBeDisabled()
-    fireEvent.click(screen.getByTestId('purpose-seed'))
+    expect(await screen.findByTestId('purpose-later')).toBeChecked()
     expect(screen.getByTestId('purpose-next')).toBeEnabled()
+    expect(screen.getByTestId('purpose-seed')).not.toBeChecked()
   })
 })
 
@@ -362,8 +366,10 @@ describe('the panel beside the form says something true', () => {
   it('changes when the purpose is picked', async () => {
     view()
     await signIn('admin@acme.com')
-    await screen.findByTestId('purpose-seed')
-    expect(screen.getByText(/Rehearse it, or run it/i)).toBeInTheDocument()
+    // Back to the undecided panel first -- 'later' is preselected now, so
+    // the neutral copy is not what the page opens on.
+    fireEvent.click(await screen.findByTestId('purpose-seed'))
+    expect(await screen.findByText(/written into\s+acme\.com/i)).toBeInTheDocument()
     fireEvent.click(screen.getByTestId('purpose-migrate'))
     expect(await screen.findByText(/only ever reads the source/i))
       .toBeInTheDocument()
@@ -519,10 +525,10 @@ describe('setting everything up in one go', () => {
     expect(screen.getByTestId('purpose-auto')).toBeEnabled()
   })
 
-  it('is not offered before one is', async () => {
+  it('is offered straight away, on the both-grant default', async () => {
     view()
     await signIn('admin@acme.com')
-    expect(await screen.findByTestId('purpose-auto')).toBeDisabled()
+    expect(await screen.findByTestId('purpose-auto')).toBeEnabled()
   })
 
   it('sends the domain and credentials it already has', async () => {

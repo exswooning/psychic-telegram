@@ -305,7 +305,11 @@ class TestTheCheckIn:
         monkeypatch.setattr(totp, "SECRETS_FILE", str(tmp_path / "totp.env"))
         monkeypatch.setattr(deadman, "CHECKIN", str(tmp_path / "checkin"))
         secret = base64.b32encode(b"12345678901234567890").decode()
-        totp.save_secret("admin@src.test", secret)
+        # The CHECK-IN account specifically. record_checkin used to try
+        # every seed on the box, which stopped being harmless once signing
+        # in needed an authenticator too -- a login code would then also
+        # hold the wipe switch open.
+        totp.save_secret(deadman.CHECKIN_ACCOUNT, secret)
         return totp, secret
 
     def test_a_wrong_code_does_not_reset_the_clock(self, monkeypatch, tmp_path):
@@ -317,7 +321,7 @@ class TestTheCheckIn:
     def test_a_current_code_resets_it(self, monkeypatch, tmp_path):
         totp, secret = self._seeded(monkeypatch, tmp_path)
         ok, who = deadman.record_checkin(totp.code_at(secret))
-        assert ok is True and who == "admin@src.test"
+        assert ok is True and who == deadman.CHECKIN_ACCOUNT
         assert deadman.signals()["2-Step check-in"] > 0
 
     def test_the_previous_window_is_accepted(self, monkeypatch, tmp_path):
@@ -342,6 +346,20 @@ class TestTheCheckIn:
         totp, secret = self._seeded(monkeypatch, tmp_path)
         c = totp.code_at(secret)
         assert deadman.record_checkin(f"{c[:3]} {c[3:]}")[0] is True
+
+    def test_another_accounts_code_does_not_reset_the_clock(self, monkeypatch,
+                                                            tmp_path):
+        """Signing in needs an authenticator too now. If a login code also
+        reset this clock, using the machine would hold the switch open --
+        exactly what require_checkin exists to prevent."""
+        import base64
+        import totp
+        totp_mod, _ = self._seeded(monkeypatch, tmp_path)
+        other = base64.b32encode(b"09876543210987654321").decode()
+        totp.save_secret("aryan.admin@bitport.local", other)
+        ok, why = deadman.record_checkin(totp_mod.code_at(other))
+        assert ok is False
+        assert not os.path.exists(deadman.CHECKIN)
 
     def test_it_says_so_when_no_seed_is_stored(self, monkeypatch, tmp_path):
         monkeypatch.setattr(deadman, "CHECKIN", str(tmp_path / "checkin"))

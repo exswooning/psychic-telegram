@@ -111,6 +111,16 @@ def _sandbox_is_unprotected(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _signup_open_for_tests(monkeypatch):
+    """Self-service signup is CLOSED by default on a real install (see
+    api_server._signup_open) -- signing up mints a session, so an open form
+    bypasses the sign-in check and its second factor entirely. Most fixtures
+    here build their accounts through that endpoint, so the suite opts in
+    explicitly rather than the production default being the weaker one."""
+    monkeypatch.setenv("BITPORT_SIGNUP_OPEN", "1")
+
+
+@pytest.fixture(autouse=True)
 def _cleanup_account_dirs():
     """accounts_auth.create_account() writes real directories under
     data/accounts/{id}/ and keys/{id}/, relative to the actual repo

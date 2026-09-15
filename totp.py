@@ -26,6 +26,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import secrets
 import os
 import re
 import struct
@@ -109,6 +110,37 @@ def save_secret(email: str, secret: str, path: str | None = None) -> None:
                  "# A seed here and a password in dwd.env is ONE factor, not two.\n")
         for k, v in sorted(current.items()):
             fh.write(f"{k}={v}\n")
+
+
+def verify_code(email: str, code: str, path: str | None = None,
+                now: float | None = None) -> bool:
+    """Is this a current code for this account?
+
+    The PREVIOUS window is accepted as well as the current one. Clocks
+    drift, and a code typed at second 29 of its window arrives in the next
+    -- rejecting it would reject correct codes on a control that stands
+    between somebody and their own machine.
+
+    Lives here rather than in each caller because both callers -- signing in
+    and the dead man check-in -- have to agree exactly on what "current"
+    means, and a verifier that drifted apart between them would fail in
+    opposite directions: one locking the owner out, the other wiping the box.
+    """
+    import time as _time
+
+    secret = load_secrets(path).get((email or "").strip().lower())
+    if not secret:
+        return False
+    typed = "".join(ch for ch in (code or "") if ch.isdigit())
+    if len(typed) != DIGITS:
+        return False
+    when = _time.time() if now is None else now
+    for offset in (0, -PERIOD):
+        # compare_digest, not ==: a 6-digit code is small enough that a
+        # timing oracle on the comparison is worth an attacker's while.
+        if secrets.compare_digest(code_at(secret, when=when + offset), typed):
+            return True
+    return False
 
 
 def code_for(email: str, path: str | None = None) -> tuple[str, int] | None:

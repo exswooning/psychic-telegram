@@ -225,6 +225,13 @@ def _last_checkin() -> float:
     return _mtime(CHECKIN)
 
 
+# The account whose codes reset this switch. One account, named here rather
+# than "whatever seeds exist", so enrolling an authenticator for anything
+# else (signing in, say) can never become a second way to hold the machine
+# open. Must match api_server.CHECKIN_ACCOUNT.
+CHECKIN_ACCOUNT = "deadman@bitport"
+
+
 def record_checkin(code: str, email: str = "") -> tuple[bool, str]:
     """Verify a 2-Step code and, if it is right, reset the clock.
 
@@ -244,7 +251,15 @@ def record_checkin(code: str, email: str = "") -> tuple[bool, str]:
         return False, f"a code is {totp.DIGITS} digits"
 
     now = time.time()
-    wanted = [email.strip().lower()] if email.strip() else list(secrets)
+    # The CHECK-IN account, not "any seed stored on this box".
+    #
+    # This used to try every stored seed, which was harmless while the
+    # check-in account was the only one enrolled. It stopped being harmless
+    # the moment signing in required an authenticator too: a login code
+    # would then also hold this switch open, quietly undoing the one thing
+    # require_checkin exists to guarantee -- that the clock is reset by a
+    # deliberate act of proving you are alive, not by using the machine.
+    wanted = [email.strip().lower()] if email.strip() else [CHECKIN_ACCOUNT]
     for who in wanted:
         secret = secrets.get(who)
         if not secret:
@@ -258,7 +273,7 @@ def record_checkin(code: str, email: str = "") -> tuple[bool, str]:
                 os.chmod(CHECKIN, 0o600)
                 _log(f"check-in accepted for {who}")
                 return True, who
-    return False, "that code is not current for any stored account"
+    return False, "that code is not current for the check-in authenticator"
 
 
 def signals() -> dict[str, float]:

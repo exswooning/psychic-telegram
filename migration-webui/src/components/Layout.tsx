@@ -36,6 +36,7 @@ import {
   ErrorOutline as ErrorsIconNav,
   HelpOutline as HelpIconNav,
   School as WizardIconNav,
+  Grass as SeedIconNav,
   Dns as HostIcon,
   Hub as MissionIcon,
   WorkHistory as JobsIconNav,
@@ -62,8 +63,10 @@ import Logout from '@mui/icons-material/Logout'
 // Overview (legacy)/Command Center (legacy)/Drive Migration are gone --
 // MissionControl is a strict superset of the first two, and the third had
 // no distinct real backend of its own (its numbers were 100% fabricated;
-// see git history). Seed Wizard merged into Setup Wizard as one doorway
-// with a Seed/Migrate choice (see Wizard.tsx) -- one nav entry, not two.
+// see git history). Seed Wizard shares the Setup Wizard's doorway (it is
+// /wizard?mode=seed, not a second page) but is listed again below for
+// accounts that may seed -- merging it away made the seeder reachable only
+// by knowing to pick a radio button partway through setup.
 // Role-aware entries (operator/superadmin-only pages) are appended in
 // Layout below, not listed here.
 // Grouped by what an operator is doing, not alphabetically or by when the
@@ -157,11 +160,18 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   // must not even see these exist. The backend refuses the underlying
   // calls regardless (require_superadmin), but there is no reason to
   // advertise pages that will just 403.
+  // Seeding is per-account (accounts_auth.set_seed_enabled), so the entry
+  // follows that flag rather than being listed statically: an account that
+  // may not seed would otherwise get a nav item leading to a refusal.
+  const seedItem = account?.seed_enabled
+    ? [{ path: '/seed-wizard', label: 'Seed Wizard',
+         icon: <SeedIconNav />, group: 'Set up' }]
+    : []
   const navItems = account?.is_superadmin
-    ? [...NAV_ITEMS, ...OPERATOR_NAV_ITEMS,
+    ? [...NAV_ITEMS, ...seedItem, ...OPERATOR_NAV_ITEMS,
        { path: '/admin/accounts', label: 'Accounts (admin)',
          icon: <AdminIconNav />, group: 'Admin' }]
-    : NAV_ITEMS
+    : [...NAV_ITEMS, ...seedItem]
   const [notifAnchor, setNotifAnchor] = useState<null | HTMLElement>(null)
   const [profileAnchor, setProfileAnchor] = useState<null | HTMLElement>(null)
 

@@ -120,10 +120,12 @@ export const signup = (email: string, password: string, name: string, plan = 'tr
     body: JSON.stringify({ email, password, name, plan }),
   })
 
-export const login = (email: string, password: string) =>
+/** Bitport does not accept a password on its own: every account needs an
+ *  enrolled authenticator, and an account without one cannot sign in. */
+export const login = (email: string, password: string, code: string) =>
   cpFetch<{ ok: boolean; accountId: number }>('/api/v2/auth/login', {
     method: 'POST',
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email, password, code }),
   })
 
 // -- Admin (superadmin only -- see require_superadmin in api_server.py) -----
