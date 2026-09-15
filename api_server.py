@@ -4541,6 +4541,11 @@ async def all_configured_domains(op: Operator = Depends(operator)):
                 "clientId": (provision_gcp.client_id_of(abspath)
                              if has_key else ""),
                 "superseded": True,
+                # Addressable, not just displayable. (account_id, side) names
+                # the LIVE occupant of a slot, so it cannot identify a row
+                # this one was evicted from -- without the id, picking a
+                # superseded domain would silently link whatever replaced it.
+                "supersededId": sup["id"],
                 "replacedBy": sup.get("replaced_by") or "",
                 "supersededAt": sup.get("superseded_at") or "",
             })
@@ -4553,6 +4558,12 @@ class LinkDomains(WriteAction):
     source_side: str
     target_account_id: int
     target_side: str
+    # Set to re-link a domain that was evicted from its slot rather than the
+    # one that currently holds it. 009_superseded_configs.sql kept the old
+    # domain, admin and a backup of its key precisely so it "can be seen (and
+    # later re-linked)" -- this is that re-link.
+    source_superseded_id: int | None = None
+    target_superseded_id: int | None = None
 
 
 @app.post("/api/v2/setup/link-domains")
@@ -4581,12 +4592,31 @@ async def link_domains(body: LinkDomains, op: Operator = Depends(operator)):
     target = (f"{body.source_account_id}:{body.source_side} -> "
               f"{body.target_account_id}:{body.target_side}")
 
+    def _cfg(account_id: int, side: str, sup_id: int | None) -> dict:
+        """The live occupant of a slot, or the superseded row named by id.
+
+        Normalised to get_tenant_config's shape so the copy below does not
+        care which it got -- the superseded table spells the key `key_path`
+        and the live one `sa_key_path`, and mixing those up would copy an
+        empty path and report success.
+        """
+        if sup_id is None:
+            return accounts_auth.get_tenant_config(account_id, side) or {}
+        # Scoped to the account already checked above, so an id belonging to
+        # someone else's account cannot be reached by guessing a number.
+        for row in accounts_auth.list_superseded(account_id):
+            if row["id"] == sup_id and row["side"] == side:
+                return {"domain": row["domain"],
+                        "admin_email": row.get("admin_email") or "",
+                        "sa_key_path": row.get("key_path") or ""}
+        return {}
+
     def _link() -> tuple[bool, str]:
         import shutil
-        scfg = accounts_auth.get_tenant_config(
-            body.source_account_id, body.source_side) or {}
-        tcfg = accounts_auth.get_tenant_config(
-            body.target_account_id, body.target_side) or {}
+        scfg = _cfg(body.source_account_id, body.source_side,
+                    body.source_superseded_id)
+        tcfg = _cfg(body.target_account_id, body.target_side,
+                    body.target_superseded_id)
         if not scfg.get("domain"):
             return False, "the chosen source is not configured"
         if not tcfg.get("domain"):

@@ -167,22 +167,22 @@ describe('connecting two set-up domains', () => {
     await open()
     await waitFor(() => expect(fetchAllDomains).toHaveBeenCalled())
     // pick source
-    fireEvent.change(screen.getByTestId('link-source'), { target: { value: '66:source' } })
-    fireEvent.change(screen.getByTestId('link-target'), { target: { value: '66:target' } })
+    fireEvent.change(screen.getByTestId('link-source'), { target: { value: '66:source:' } })
+    fireEvent.change(screen.getByTestId('link-target'), { target: { value: '66:target:' } })
     fireEvent.change(screen.getByTestId('link-reason'),
                      { target: { value: 'rehearsal into the new tenant' } })
     fireEvent.click(screen.getByTestId('link-connect'))
     await waitFor(() => expect(linkDomains).toHaveBeenCalledWith(
       'rehearsal into the new tenant',
-      { accountId: 66, side: 'source' },
-      { accountId: 66, side: 'target' }))
+      { accountId: 66, side: 'source', supersededId: undefined },
+      { accountId: 66, side: 'target', supersededId: undefined }))
   })
 
   it('will not connect without a reason', async () => {
     await open()
     await waitFor(() => expect(fetchAllDomains).toHaveBeenCalled())
-    fireEvent.change(screen.getByTestId('link-source'), { target: { value: '66:source' } })
-    fireEvent.change(screen.getByTestId('link-target'), { target: { value: '66:target' } })
+    fireEvent.change(screen.getByTestId('link-source'), { target: { value: '66:source:' } })
+    fireEvent.change(screen.getByTestId('link-target'), { target: { value: '66:target:' } })
     expect(screen.getByTestId('link-connect')).toBeDisabled()
   })
 
@@ -190,8 +190,8 @@ describe('connecting two set-up domains', () => {
     linkDomains.mockResolvedValue({ ok: false, detail: 'source has no key on file' })
     await open()
     await waitFor(() => expect(fetchAllDomains).toHaveBeenCalled())
-    fireEvent.change(screen.getByTestId('link-source'), { target: { value: '66:source' } })
-    fireEvent.change(screen.getByTestId('link-target'), { target: { value: '66:target' } })
+    fireEvent.change(screen.getByTestId('link-source'), { target: { value: '66:source:' } })
+    fireEvent.change(screen.getByTestId('link-target'), { target: { value: '66:target:' } })
     fireEvent.change(screen.getByTestId('link-reason'),
                      { target: { value: 'trying this out' } })
     fireEvent.click(screen.getByTestId('link-connect'))
@@ -200,15 +200,22 @@ describe('connecting two set-up domains', () => {
 })
 
 
-describe('the picker excludes overwritten domains', () => {
-  it('does not offer a superseded domain to link', async () => {
+describe('the picker offers overwritten domains too', () => {
+  /* 009_superseded_configs.sql keeps an evicted domain so it "can be seen
+     (and later re-linked)" -- the picker filtered exactly that out, so a
+     pair whose source had since been replaced could not be expressed at
+     all and the domain read as gone. It is selectable, marked, and carries
+     its row id: (accountId, side) names the slot's CURRENT holder, so
+     without the id this option would link whatever replaced it. */
+  it('offers a superseded domain, marked, and links it by its own id', async () => {
     fetchAllDomains.mockResolvedValue({ superadmin: true, domains: [
       { accountId: 66, accountEmail: 'a@x', side: 'source',
         domain: 'source.rohit.com', adminEmail: 'i@source.rohit.com',
         hasKey: true, clientId: '1', superseded: false },
       { accountId: 68, accountEmail: 'b@x', side: 'source',
         domain: 'gone.saraf.com', adminEmail: 'i@gone.saraf.com',
-        hasKey: true, clientId: '9', superseded: true, replacedBy: 'now.saraf.com' },
+        hasKey: true, clientId: '9', superseded: true, supersededId: 5,
+        replacedBy: 'now.saraf.com' },
     ] })
     fetchMigrations.mockResolvedValue({ migrations: [], maxConcurrent: 2, activeTotal: 0 })
     render(<MemoryRouter><Migrations /></MemoryRouter>)
@@ -218,6 +225,19 @@ describe('the picker excludes overwritten domains', () => {
     const src = screen.getByTestId('link-source') as HTMLSelectElement
     const texts = Array.from(src.options).map((o) => o.textContent || '')
     expect(texts.some((t) => t.includes('source.rohit.com'))).toBe(true)
-    expect(texts.some((t) => t.includes('gone.saraf.com'))).toBe(false)
+    expect(texts.some((t) => t.includes('gone.saraf.com')
+                             && t.includes('(replaced)'))).toBe(true)
+
+    // And picking it sends the row id, not just the slot it was evicted from.
+    fireEvent.change(src, { target: { value: '68:source:5' } })
+    fireEvent.change(screen.getByTestId('link-target'),
+                     { target: { value: '66:source:' } })
+    fireEvent.change(screen.getByTestId('link-reason'),
+                     { target: { value: 'put the replaced domain back' } })
+    fireEvent.click(screen.getByTestId('link-connect'))
+    await waitFor(() => expect(linkDomains).toHaveBeenCalledWith(
+      'put the replaced domain back',
+      { accountId: 68, side: 'source', supersededId: 5 },
+      { accountId: 66, side: 'source', supersededId: undefined }))
   })
 })

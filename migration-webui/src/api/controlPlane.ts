@@ -1051,6 +1051,9 @@ export interface ConfiguredDomain {
   /** A domain a later setup overwrote in its slot. Kept so nothing set up
    *  ever disappears; shown as history, not an active pair. */
   superseded: boolean
+  /** Identifies THIS evicted row. (accountId, side) names the slot's current
+   *  occupant, so it cannot address a superseded entry on its own. */
+  supersededId?: number
   replacedBy?: string
   supersededAt?: string
 }
@@ -1063,13 +1066,22 @@ export const fetchAllDomains = () =>
  *  existing keys -- delegation is tied to the key's client id, not the
  *  account, so no re-setup or re-granting. The pair lands on the caller's
  *  account; any key it overwrites there is backed up first. */
-export const linkDomains = (reason: string, source: { accountId: number; side: 'source' | 'target' }, target: { accountId: number; side: 'source' | 'target' }) =>
+export type LinkEnd = {
+  accountId: number
+  side: 'source' | 'target'
+  /** Re-link a domain evicted from that slot instead of its current holder. */
+  supersededId?: number
+}
+
+export const linkDomains = (reason: string, source: LinkEnd, target: LinkEnd) =>
   cpFetch<{ ok: boolean; detail: string }>('/api/v2/setup/link-domains', {
     method: 'POST',
     body: JSON.stringify({
       reason,
       source_account_id: source.accountId, source_side: source.side,
       target_account_id: target.accountId, target_side: target.side,
+      source_superseded_id: source.supersededId ?? null,
+      target_superseded_id: target.supersededId ?? null,
     }),
   })
 

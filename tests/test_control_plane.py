@@ -1905,6 +1905,77 @@ class TestLinkingTwoSetUpDomains:
         assert dest.is_file()
         assert json.loads(dest.read_text())["client_id"] == "111"
 
+    def test_a_superseded_domain_can_be_linked_back_in(self, cp, tmp_path,
+                                                       monkeypatch):
+        """The whole reason 009_superseded_configs.sql keeps an evicted
+        domain (its own comment: "can be seen (and later re-linked)").
+
+        The trap this guards: (account_id, side) names the slot's CURRENT
+        occupant, so without the row id a pick of the evicted domain
+        silently links whatever replaced it -- the opposite of what was
+        chosen, reported as success.
+        """
+        import api_server, accounts_auth
+        a = self._signed_in(cp, "donorSup@ex.com")
+        cp.post("/api/v2/auth/logout")
+        b = self._signed_in(cp, "donorSup2@ex.com")
+        cp.post("/api/v2/auth/logout")
+        boss = self._signed_in(cp, "supboss@ex.com")
+        accounts_auth.promote_to_superadmin("supboss@ex.com")
+        monkeypatch.setattr(api_server, "HERE", str(tmp_path))
+        monkeypatch.setattr(accounts_auth, "HERE", str(tmp_path))
+
+        # old.com holds the slot, then new.com evicts it.
+        self._donor(tmp_path, accounts_auth, a, "source", "old.com", "111")
+        accounts_auth.snapshot_superseded(a, "source", "new.com")
+        self._donor(tmp_path, accounts_auth, a, "source", "new.com", "999")
+        self._donor(tmp_path, accounts_auth, b, "target", "tgtdom.com", "222")
+
+        sup = [r for r in accounts_auth.list_superseded(a)
+               if r["domain"] == "old.com"]
+        assert len(sup) == 1, "the evicted domain was not kept"
+
+        r = cp.post("/api/v2/setup/link-domains", headers=ADMIN, json={
+            "reason": "re-link the domain that was replaced",
+            "source_account_id": a, "source_side": "source",
+            "source_superseded_id": sup[0]["id"],
+            "target_account_id": b, "target_side": "target"})
+        assert r.status_code == 200 and r.json()["ok"] is True
+
+        scfg = accounts_auth.get_tenant_config(boss, "source")
+        assert scfg["domain"] == "old.com"      # not new.com, which holds it
+        dest = tmp_path / "keys" / str(boss) / "source-sa.json"
+        assert json.loads(dest.read_text())["client_id"] == "111"
+
+    def test_a_superseded_id_from_another_account_is_not_reachable(
+            self, cp, tmp_path, monkeypatch):
+        """The id is scoped to the account already access-checked -- guessing
+        a number must not reach another tenant's evicted key."""
+        import api_server, accounts_auth
+        a = self._signed_in(cp, "donorSup3@ex.com")
+        cp.post("/api/v2/auth/logout")
+        boss = self._signed_in(cp, "supboss2@ex.com")
+        accounts_auth.promote_to_superadmin("supboss2@ex.com")
+        monkeypatch.setattr(api_server, "HERE", str(tmp_path))
+        monkeypatch.setattr(accounts_auth, "HERE", str(tmp_path))
+
+        self._donor(tmp_path, accounts_auth, a, "source", "old2.com", "111")
+        accounts_auth.snapshot_superseded(a, "source", "new2.com")
+        self._donor(tmp_path, accounts_auth, a, "source", "new2.com", "999")
+        sup = [r for r in accounts_auth.list_superseded(a)
+               if r["domain"] == "old2.com"][0]
+        self._donor(tmp_path, accounts_auth, boss, "target", "t2.com", "222")
+
+        # Same id, but claimed against the CALLER's own account, which never
+        # superseded anything.
+        r = cp.post("/api/v2/setup/link-domains", headers=ADMIN, json={
+            "reason": "reach across accounts",
+            "source_account_id": boss, "source_side": "source",
+            "source_superseded_id": sup["id"],
+            "target_account_id": boss, "target_side": "target"})
+        assert r.status_code == 200
+        assert r.json()["ok"] is False
+
     def test_it_backs_up_a_key_it_overwrites(self, cp, tmp_path, monkeypatch):
         """The caller may already have a key in that slot -- it must never be
         lost, so the link is reversible."""

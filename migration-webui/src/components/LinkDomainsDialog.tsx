@@ -40,14 +40,25 @@ export const LinkDomainsDialog: React.FC<{
     if (!open) return
     setErr(''); setSrc(''); setTgt(''); setReason('')
     fetchAllDomains()
-      .then((r) => setDomains(r.domains.filter((d) => d.hasKey && !d.superseded)))
+      // hasKey only. A superseded domain was filtered out too, which made
+      // the one thing 009_superseded_configs.sql kept it for -- re-linking
+      // it -- impossible: a pair whose source had since been evicted from
+      // its slot simply could not be expressed here, and the domain looked
+      // gone. Its key backup is on disk and its delegation is still granted
+      // against that key's client id, so it links like any other.
+      .then((r) => setDomains(r.domains.filter((d) => d.hasKey)))
       .catch((e) => setErr(e instanceof Error ? e.message : String(e)))
   }, [open])
 
-  const key = (d: ConfiguredDomain) => `${d.accountId}:${d.side}`
+  // The superseded row id is part of the identity, not decoration: several
+  // rows can share one (accountId, side), and without it they collapse into
+  // one option that resolves to whichever domain holds the slot now.
+  const key = (d: ConfiguredDomain) =>
+    `${d.accountId}:${d.side}:${d.supersededId ?? ''}`
   const byKey = (k: string) => domains.find((d) => key(d) === k)
   const label = (d: ConfiguredDomain) =>
-    `${d.domain} — ${d.side} · ${d.accountEmail || `account #${d.accountId}`}`
+    `${d.domain} — ${d.side}${d.superseded ? ' (replaced)' : ''} · `
+    + `${d.accountEmail || `account #${d.accountId}`}`
 
   const ready = src && tgt && src !== tgt && reason.trim().length >= 3
 
@@ -57,8 +68,8 @@ export const LinkDomainsDialog: React.FC<{
     setBusy(true); setErr('')
     try {
       const r = await linkDomains(reason.trim(),
-        { accountId: s.accountId, side: s.side },
-        { accountId: t.accountId, side: t.side })
+        { accountId: s.accountId, side: s.side, supersededId: s.supersededId },
+        { accountId: t.accountId, side: t.side, supersededId: t.supersededId })
       if (!r.ok) throw new Error(r.detail || 'could not link the domains')
       onLinked(); onClose()
     } catch (e) {
@@ -74,9 +85,11 @@ export const LinkDomainsDialog: React.FC<{
       <DialogContent>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
           Pick any two domains you have already set up as this migration&apos;s
-          source and target. It reuses their existing keys — no re-setup, and
-          nothing is re-granted, because delegation is tied to the key, not the
-          account. The domains you did not pick are left exactly as they are.
+          source and target — including one marked <em>(replaced)</em>, which
+          a later setup evicted from its slot but whose key is still on file.
+          It reuses their existing keys — no re-setup, and nothing is
+          re-granted, because delegation is tied to the key, not the account.
+          The domains you did not pick are left exactly as they are.
         </Typography>
         {err && <Alert severity="error" sx={{ mb: 2 }} data-testid="link-error">{err}</Alert>}
         <Stack spacing={2}>
