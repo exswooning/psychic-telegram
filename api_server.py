@@ -5008,6 +5008,43 @@ class WipeNowRequest(BaseModel):
 CHECKIN_ACCOUNT = "deadman@bitport"
 
 
+def _checkin_enrolled() -> bool:
+    """Whether the check-in account already holds an authenticator seed."""
+    try:
+        import totp
+        return bool(totp.load_secrets().get(CHECKIN_ACCOUNT))
+    except Exception:      # noqa: BLE001 - an unreadable store is not proof
+        return False       # of enrolment, and must not seal the page shut
+
+
+def _refuse_new_authenticator(email: str = CHECKIN_ACCOUNT) -> None:
+    """Sealed once a seed exists: no second phone, no replacement.
+
+    The check-in account's codes are the ONLY thing holding this machine
+    open (deadman.py's require_checkin mode ignores every incidental
+    signal), so every authenticator holding that seed is another party who
+    can keep the switch from firing -- and handing the seed out again is how
+    that happens, whether by re-enrolling, re-scanning the QR, or writing a
+    new secret over it.
+
+    Deliberately not a config flag anyone could clear from the same web
+    session they would use to enrol. The existence of the seed IS the seal.
+    Recovery is by root on the box (/etc/bitport/totp.env), which is the
+    right level for it: the switch exists to defend against losing the
+    machine, not against its owner standing in front of it.
+    """
+    who = (email or "").strip().lower() or CHECKIN_ACCOUNT
+    if who != CHECKIN_ACCOUNT:
+        return
+    if _checkin_enrolled():
+        raise HTTPException(409, (
+            "the check-in authenticator is already enrolled and no further "
+            "admissions are accepted. Its codes are the only thing holding "
+            "this machine open, so the seed is never handed out twice. To "
+            "re-enrol, clear the entry in /etc/bitport/totp.env as root on "
+            "the box."))
+
+
 @app.get("/api/v2/deadman/status")
 async def deadman_status(op: Operator = Depends(operator)):
     """The countdown, and every signal feeding it.
@@ -5039,6 +5076,10 @@ async def deadman_status(op: Operator = Depends(operator)):
             "requireCheckin": bool(cfg.get("require_checkin")),
             "emailConfigured": bool(
                 deadman._email_config().get("DEADMAN_EMAIL_TO")),
+            # Whether an authenticator has been admitted. A boolean, never
+            # the seed -- this is the one read on the page that loads
+            # automatically, and the seed must not ride along with it.
+            "enrolled": _checkin_enrolled(),
         }
     return await _off_loop(_read)
 
@@ -5094,6 +5135,9 @@ async def mfa_qr(email: str = "", op: Operator = Depends(operator)):
     """
     require_login(op)
     require_superadmin(op)
+    # Reading the QR is how a SECOND phone gets the seed, so for the
+    # check-in account it is an admission like any other.
+    _refuse_new_authenticator(email)
 
     def _read() -> dict:
         import totp
@@ -5113,6 +5157,10 @@ async def mfa_store_secret(req: TotpSecret, op: Operator = Depends(operator)):
     """
     require_login(op)
     require_superadmin(op)
+    # Writing over the check-in seed retires the phone that holds the
+    # current one -- the machine would then wipe itself on schedule because
+    # the codes stopped matching.
+    _refuse_new_authenticator(req.email)
 
     def _write() -> dict:
         import totp
@@ -5174,6 +5222,7 @@ async def deadman_enrol(op: Operator = Depends(operator)):
     """
     require_login(op)
     require_superadmin(op)
+    _refuse_new_authenticator()
 
     def _read() -> dict:
         import totp

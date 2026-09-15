@@ -2863,3 +2863,76 @@ class TestMigrateTargetsTheMigrationOnScreen:
                         json={"email": "full-b@example.com",
                               "password": "hunter22222", "name": "Full B"})
             assert self._start(client, account_id=other).status_code == 403
+
+
+class TestTheCheckinAuthenticatorIsSealed:
+    """The check-in account's codes are the ONLY thing holding this machine
+    open (deadman.py ignores every incidental signal under require_checkin),
+    so every phone holding that seed is another party who can stop the wipe.
+    Once one authenticator is admitted, the seed is never handed out again
+    -- by enrolling, by re-scanning the QR, or by writing over it."""
+
+    CHECKIN = "deadman@bitport"
+
+    def _boss(self, cp, email="sealboss@example.com"):
+        import accounts_auth
+        cp.post("/api/v2/auth/signup",
+                json={"email": email, "password": "hunter22222", "name": "Boss"})
+        accounts_auth.promote_to_superadmin(email)
+
+    def _seeded(self, monkeypatch, tmp_path, seeds):
+        import totp
+        store = tmp_path / "totp.env"
+        store.write_text("".join(f"{k}={v}\n" for k, v in seeds.items()))
+        monkeypatch.setattr(totp, "SECRETS_FILE", str(store))
+
+    def test_enrolling_again_is_refused(self, cp, monkeypatch, tmp_path):
+        self._boss(cp)
+        self._seeded(monkeypatch, tmp_path, {self.CHECKIN: "JBSWY3DPEHPK3PXP"})
+        r = cp.get("/api/v2/deadman/enrol", headers=ADMIN)
+        assert r.status_code == 409
+        assert "no further admissions" in r.json()["detail"]
+
+    def test_the_qr_for_the_checkin_account_is_refused(self, cp, monkeypatch,
+                                                      tmp_path):
+        """Reading the QR is how a SECOND phone gets the seed."""
+        self._boss(cp, "sealboss2@example.com")
+        self._seeded(monkeypatch, tmp_path, {self.CHECKIN: "JBSWY3DPEHPK3PXP"})
+        r = cp.get(f"/api/v2/mfa/qr?email={self.CHECKIN}", headers=ADMIN)
+        assert r.status_code == 409
+
+    def test_writing_over_the_checkin_seed_is_refused(self, cp, monkeypatch,
+                                                     tmp_path):
+        """Replacing it retires the phone holding the current one, and the
+        machine would then wipe itself because the codes stopped matching."""
+        self._boss(cp, "sealboss3@example.com")
+        self._seeded(monkeypatch, tmp_path, {self.CHECKIN: "JBSWY3DPEHPK3PXP"})
+        r = cp.post("/api/v2/mfa/secret", headers=ADMIN,
+                    json={"email": self.CHECKIN, "secret": "KRSXG5CTMVRXEZLU"})
+        assert r.status_code == 409
+
+    def test_a_first_enrolment_is_still_allowed(self, cp, monkeypatch, tmp_path):
+        """The seal is the EXISTENCE of a seed -- with none, setup must
+        still work, or the switch could never be armed at all."""
+        self._boss(cp, "sealboss4@example.com")
+        self._seeded(monkeypatch, tmp_path, {})
+        r = cp.get("/api/v2/deadman/enrol", headers=ADMIN)
+        assert r.status_code == 200, r.text
+        assert r.json()["setupKey"]
+
+    def test_another_account_is_unaffected(self, cp, monkeypatch, tmp_path):
+        """Only the check-in account is sealed; ordinary MFA still works."""
+        self._boss(cp, "sealboss5@example.com")
+        self._seeded(monkeypatch, tmp_path, {self.CHECKIN: "JBSWY3DPEHPK3PXP"})
+        r = cp.post("/api/v2/mfa/secret", headers=ADMIN,
+                    json={"email": "someone@example.com",
+                          "secret": "KRSXG5CTMVRXEZLU"})
+        assert r.status_code == 200, r.text
+
+    def test_status_reports_enrolment_without_the_seed(self, cp, monkeypatch,
+                                                       tmp_path):
+        self._boss(cp, "sealboss6@example.com")
+        self._seeded(monkeypatch, tmp_path, {self.CHECKIN: "JBSWY3DPEHPK3PXP"})
+        body = cp.get("/api/v2/deadman/status", headers=ADMIN).json()
+        assert body["enrolled"] is True
+        assert "JBSWY3DPEHPK3PXP" not in json.dumps(body)

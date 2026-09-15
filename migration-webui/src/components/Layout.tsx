@@ -122,7 +122,6 @@ const OPERATOR_NAV_ITEMS = [
   { path: '/scope', label: 'Scope', icon: <ScopeIconNav /> , group: 'Check' },
   { path: '/logs', label: 'Logs', icon: <LogsIconNav /> , group: 'Operate' },
   { path: '/gcp-teardown', label: 'GCP Teardown', icon: <TeardownIconNav /> , group: 'Operate' },
-  { path: '/deadman', label: 'Dead man switch', icon: <TeardownIconNav />, group: 'Operate' },
   // Superadmin, matching the join endpoint it reads: the node token is one
   // shared secret for the whole control plane today, so anything holding it
   // can claim users for any account. Until that token is per-account, the

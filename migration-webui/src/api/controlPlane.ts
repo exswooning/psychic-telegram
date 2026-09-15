@@ -761,6 +761,10 @@ export interface DeadmanStatus {
   /** When set, the 2-Step check-in is the ONLY signal that resets the
    *  clock -- a deploy or an ssh login no longer counts. */
   requireCheckin: boolean
+  /** An authenticator has been admitted. No further admissions are
+   *  accepted: the seed is never handed out a second time, so no other
+   *  phone can hold the machine open. A boolean, never the seed itself. */
+  enrolled: boolean
 }
 
 export const fetchDeadman = () =>

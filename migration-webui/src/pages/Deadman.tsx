@@ -85,10 +85,14 @@ export const Deadman: React.FC = () => {
         <TimerIcon color="action" />
         <Typography variant="h5" sx={{ fontWeight: 700 }}>Dead man switch</Typography>
       </Stack>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}
+                  data-testid="deadman-intro">
         Destroys this machine&apos;s credentials and tenant data if nobody has
-        been here for too long. Any sign of life resets it — signing in here
-        counts.
+        been here for too long.{' '}
+        {st?.requireCheckin
+          ? 'Only a current code from the enrolled authenticator resets it — '
+            + 'signing in, deploying and ssh do not count.'
+          : 'Any sign of life resets it — signing in here counts.'}
       </Typography>
 
       {err && <Alert severity="error" sx={{ mb: 2 }} data-testid="deadman-error">{err}</Alert>}
@@ -155,16 +159,30 @@ export const Deadman: React.FC = () => {
                   I&apos;m here — reset the timer
                 </Button>
               </Stack>
-              {/* Not loaded on mount: it returns the SEED, and a page that
-                  fetches it automatically leaves the second factor for the
-                  wipe switch sitting on any screen left open. */}
-              <Button size="small" variant="text" sx={{ mt: 0.5 }}
-                      data-testid="show-qr"
-                      onClick={() => (enrol ? setEnrol(null)
-                        : fetchDeadmanEnrolment().then(setEnrol).catch(
-                          (e) => setErr(e instanceof Error ? e.message : String(e))))}>
-                {enrol ? 'hide' : 'set up'} Google Authenticator
-              </Button>
+              {/* Offered only while no authenticator has been admitted yet.
+                  Once one has, the seed is never handed out again -- every
+                  phone holding it is another party who can keep this
+                  machine from wiping, so a "show QR" button would be the
+                  one control on the page that weakens the switch. The
+                  server refuses it too; this just stops offering a button
+                  that can only fail. */}
+              {st.enrolled ? (
+                <Typography variant="body2" color="text.secondary"
+                            sx={{ mt: 0.5 }} data-testid="enrolment-sealed">
+                  Authenticator enrolled — no further admissions. The seed is
+                  not handed out again, so no second phone can hold this
+                  machine open. To re-enrol, clear the entry in
+                  /etc/bitport/totp.env as root on the box.
+                </Typography>
+              ) : (
+                <Button size="small" variant="text" sx={{ mt: 0.5 }}
+                        data-testid="show-qr"
+                        onClick={() => (enrol ? setEnrol(null)
+                          : fetchDeadmanEnrolment().then(setEnrol).catch(
+                            (e) => setErr(e instanceof Error ? e.message : String(e))))}>
+                  {enrol ? 'hide' : 'set up'} Google Authenticator
+                </Button>
+              )}
 
               {enrol && (
                 <Paper variant="outlined" sx={{ p: 2, mt: 1 }} data-testid="enrolment">
@@ -227,13 +245,21 @@ export const Deadman: React.FC = () => {
       {st && (
         <Paper variant="outlined" sx={{ p: 2, mb: 3 }}>
           <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>
-            What counts as a sign of life
+            {st.requireCheckin ? 'Activity on this machine'
+                               : 'What counts as a sign of life'}
           </Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
-            The newest of these wins. Keyed on all of them because
-            <code> last</code> alone misses every deploy — an SSH command with
-            no terminal leaves no login record, and this host has a measured
-            13-day gap in logins during weeks it was worked on daily.
+          {/* Under requireCheckin these are NOT inputs to the countdown --
+              deadman.last_seen() reads the check-in alone. A heading that
+              still called them signs of life was the page contradicting the
+              switch, on the one screen where believing the wrong thing gets
+              the machine wiped. */}
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}
+                      data-testid="signals-caption">
+            {st.requireCheckin
+              ? 'None of these reset the countdown. They are shown because '
+                + 'they say whether the machine is in use; only the 2-Step '
+                + 'check-in says whether you are.'
+              : 'The newest of these wins.'}
           </Typography>
           <Stack spacing={0.5}>
             {Object.entries(st.signals)

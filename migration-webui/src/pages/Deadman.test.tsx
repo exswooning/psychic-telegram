@@ -27,7 +27,7 @@ const st = (over = {}) => ({
   newestSignal: 'sshd auth', secondsSinceSeen: 120,
   secondsRemaining: 7 * 86400 - 120,
   targets: ['/root/migration/keys', '/etc/bitport'],
-  emailConfigured: true, requireCheckin: false, ...over,
+  emailConfigured: true, requireCheckin: false, enrolled: false, ...over,
 })
 
 beforeEach(() => {
@@ -255,6 +255,45 @@ describe('enrolling a phone', () => {
     await screen.findByTestId('qr')
     fireEvent.click(screen.getByTestId('show-qr'))
     expect(screen.queryByTestId('qr')).toBeNull()
+  })
+
+  it('does not call the other signals signs of life when only check-in counts', async () => {
+    /* deadman.last_seen() reads the check-in ALONE under requireCheckin, so
+       a page still calling ssh and deploys "signs of life" was contradicting
+       the switch on the one screen where believing the wrong thing gets the
+       machine wiped. */
+    status.mockResolvedValue(st({ requireCheckin: true }))
+    render(<Deadman />)
+    expect(await screen.findByTestId('signals-caption')).toHaveTextContent(
+      /none of these reset the countdown/i)
+    expect(screen.getByTestId('deadman-intro')).toHaveTextContent(
+      /only a current code from the enrolled authenticator/i)
+  })
+
+  it('still says any signal counts when check-in is not required', async () => {
+    status.mockResolvedValue(st({ requireCheckin: false }))
+    render(<Deadman />)
+    expect(await screen.findByTestId('signals-caption')).toHaveTextContent(
+      /newest of these wins/i)
+  })
+
+  it('stops offering the seed once an authenticator is admitted', async () => {
+    /* Every phone holding the seed is another party who can keep this
+       machine from wiping, so it is never handed out twice -- the server
+       refuses it, and the page must not offer a button that can only
+       fail. */
+    status.mockResolvedValue(st({ enrolled: true }))
+    render(<Deadman />)
+    expect(await screen.findByTestId('enrolment-sealed')).toHaveTextContent(
+      /no further admissions/i)
+    expect(screen.queryByTestId('show-qr')).toBeNull()
+  })
+
+  it('still offers a FIRST enrolment, or the switch could never be armed', async () => {
+    status.mockResolvedValue(st({ enrolled: false }))
+    render(<Deadman />)
+    expect(await screen.findByTestId('show-qr')).toBeInTheDocument()
+    expect(screen.queryByTestId('enrolment-sealed')).toBeNull()
   })
 
   it('still enrols when the QR encoder is unavailable', async () => {
