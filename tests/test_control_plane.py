@@ -1999,6 +1999,33 @@ class TestLinkingTwoSetUpDomains:
         assert baks, "the overwritten key was not backed up"
         assert json.loads(baks[0].read_text())["client_id"] == "OLD"
 
+    def test_relinking_the_pair_already_in_place_is_a_no_op(self, cp, tmp_path,
+                                                            monkeypatch):
+        """Confirmed live: picking the same pair twice failed with
+        "'keys/68/target-sa.json' and 'keys/68/target-sa.json' are the same
+        file" -- shutil.copy2 refuses a copy onto itself, so a pair could be
+        set once and never re-confirmed."""
+        import api_server, accounts_auth
+        boss = self._signed_in(cp, "samefile@ex.com")
+        accounts_auth.promote_to_superadmin("samefile@ex.com")
+        monkeypatch.setattr(api_server, "HERE", str(tmp_path))
+        self._donor(tmp_path, accounts_auth, boss, "source", "s.com", "111")
+        self._donor(tmp_path, accounts_auth, boss, "target", "t.com", "222")
+
+        payload = {"reason": "link my own two slots",
+                   "source_account_id": boss, "source_side": "source",
+                   "target_account_id": boss, "target_side": "target"}
+        for _ in range(2):
+            r = cp.post("/api/v2/setup/link-domains", headers=ADMIN, json=payload)
+            assert r.status_code == 200, r.text
+            assert r.json()["ok"] is True, r.json()
+
+        # And the keys are still the right ones, not emptied by the skip.
+        src = tmp_path / "keys" / str(boss) / "source-sa.json"
+        tgt = tmp_path / "keys" / str(boss) / "target-sa.json"
+        assert json.loads(src.read_text())["client_id"] == "111"
+        assert json.loads(tgt.read_text())["client_id"] == "222"
+
     def test_a_regular_account_cannot_pull_anothers_key(self, cp, tmp_path, monkeypatch):
         import api_server
         a = self._signed_in(cp, "victim@ex.com")

@@ -4636,6 +4636,17 @@ async def link_domains(body: LinkDomains, op: Operator = Depends(operator)):
         stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         for role, src_file in (("source", s_src), ("target", s_tgt)):
             dest = os.path.join(dest_dir, f"{role}-sa.json")
+            # Linking a domain that ALREADY occupies this slot on this
+            # account points the copy at its own destination, and
+            # shutil.copy2 raises SameFileError -- which failed the whole
+            # link, so a pair could be set once and never re-confirmed or
+            # half-changed afterwards. Confirmed live: re-running the same
+            # pick returned "'keys/68/target-sa.json' and
+            # 'keys/68/target-sa.json' are the same file". Nothing to copy
+            # and nothing to back up; the slot is already what was asked
+            # for.
+            if os.path.isfile(dest) and os.path.samefile(src_file, dest):
+                continue
             # Back up anything already in this slot -- never lose a key the
             # caller's account already had, so the link is reversible.
             if os.path.isfile(dest):
