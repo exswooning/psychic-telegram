@@ -18,6 +18,7 @@ import Wizard, { looksLikeDomain, domainOf } from './Wizard'
 const seedEnabled = vi.fn()
 const fullSetup = vi.fn()
 const setupStatus = vi.fn().mockResolvedValue({ running: false, result: null })
+const allDomains = vi.fn(() => Promise.resolve({ superadmin: true, domains: [] }))
 vi.mock('@/api/controlPlane', () => ({
   fetchMe: () => seedEnabled(),
   startFullSetup: (...a: unknown[]) => fullSetup(...a),
@@ -29,6 +30,9 @@ vi.mock('@/api/controlPlane', () => ({
   fetchMfaCode: () => Promise.resolve({
     accounts: [], email: '', code: '', secondsRemaining: 0 }),
   storeMfaSecret: () => Promise.resolve({ ok: true }),
+  // SeedDomainPicker reads this to list the tenants already set up, so the
+  // seed path renders cards instead of a sign-in form.
+  fetchAllDomains: () => allDomains(),
 }))
 vi.mock('@/pages/SeedWizard', () => ({
   default: ({ sourceDomain }: { sourceDomain?: string }) =>

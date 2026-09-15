@@ -9,6 +9,7 @@ import {
   fetchStatus, checkStep, fetchActions, fetchDwd, runSeed, runResetTarget,
   ActionSpec, StatusPayload, DwdPayload,
 } from '@/api/client'
+import { SERVICES as SEEDABLE } from '@/components/SeedOneService'
 import JobRunner from '@/components/JobRunner'
 import JobProgress from '@/components/JobProgress'
 import CloudSetup from '@/components/CloudSetup'
@@ -44,7 +45,14 @@ const SeedWizard: React.FC<{
    *  for the same credential a second time. Never persisted. */
   adminEmail?: string
   adminPassword?: string
-}> = ({ sourceDomain, adminEmail, adminPassword }) => {
+  /** The tenant was chosen from the seeder's domain cards, so it is already
+   *  set up and has a key on file. Then the seed controls ARE the page --
+   *  they used to live only under Manual, beside the Cloud-project and
+   *  delegation steps, so picking a set-up tenant landed on a panel
+   *  offering to set it up again and the seeder was two clicks into a tab
+   *  named for doing things by hand. */
+  configured?: boolean
+}> = ({ sourceDomain, adminEmail, adminPassword, configured }) => {
   const [route, setRoute] = useState<'automated' | 'manual'>('automated')
   const [status, setStatus] = useState<StatusPayload | null>(null)
   const [actions, setActions] = useState<Record<string, ActionSpec>>({})
@@ -106,11 +114,17 @@ const SeedWizard: React.FC<{
         <Button size="small" startIcon={<RefreshIcon />} onClick={refresh}>Refresh</Button>
       </Box>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-        Sandbox rehearsal tools for test tenants only -- none of this touches
-        a production tenant's own data. Automated signs in and handles the
-        Cloud project, delegation, and (optionally) seeding in one step;
-        Manual walks through each part by hand -- use it if the automated
-        sign-in stalls on 2FA or a captcha.
+        {configured
+          ? `Fabricated rehearsal data for ${sourceDomain} -- everything, or one
+             service across the users already there. Nothing here touches a
+             production tenant's own data. Manual has the Cloud project and
+             delegation steps, if this tenant needs repairing rather than
+             seeding.`
+          : `Sandbox rehearsal tools for test tenants only -- none of this touches
+             a production tenant's own data. Automated signs in and handles the
+             Cloud project, delegation, and (optionally) seeding in one step;
+             Manual walks through each part by hand -- use it if the automated
+             sign-in stalls on 2FA or a captcha.`}
       </Typography>
 
       <Tabs value={route} onChange={(_, v) => setRoute(v)} sx={{ mb: 3, borderBottom: '1px solid', borderColor: 'divider' }}>
@@ -118,13 +132,40 @@ const SeedWizard: React.FC<{
         <Tab value="manual" label="Manual" />
       </Tabs>
 
-      <Box sx={{ maxWidth: route === 'automated' ? 480 : undefined }}>
-        <QuickTenantSetup side="source" view={route} showSeedOptions
-                          initialDomain={sourceDomain}
-                          initialEmail={adminEmail}
-                          initialPassword={adminPassword}
-                           onRequestManual={() => setRoute('manual')} />
-      </Box>
+      {configured && route === 'automated' && (
+        <>
+          <DelegationGate>
+            <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid',
+                                      borderColor: 'divider', mb: 2 }}>
+              <CardContent sx={{ p: 3 }}>
+                <Typography variant="h6" sx={{ fontWeight: 600, mb: 1.5 }}>
+                  Seed {sourceDomain}
+                </Typography>
+                <SeedStep domain={sourceDomain} />
+              </CardContent>
+            </Card>
+          </DelegationGate>
+          <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid',
+                                    borderColor: 'divider' }}>
+            <CardContent sx={{ p: 3 }}>
+              <Typography variant="h6" sx={{ fontWeight: 600, mb: 1.5 }}>
+                Reset the target tenant
+              </Typography>
+              <ResetTargetStep />
+            </CardContent>
+          </Card>
+        </>
+      )}
+
+      {!configured && (
+        <Box sx={{ maxWidth: route === 'automated' ? 480 : undefined }}>
+          <QuickTenantSetup side="source" view={route} showSeedOptions
+                            initialDomain={sourceDomain}
+                            initialEmail={adminEmail}
+                            initialPassword={adminPassword}
+                            onRequestManual={() => setRoute('manual')} />
+        </Box>
+      )}
 
       {route === 'manual' && (
         <>
@@ -190,7 +231,7 @@ const SeedWizard: React.FC<{
             <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 2 }}>
               <CardContent sx={{ p: 3 }}>
                 <Typography variant="h6" sx={{ fontWeight: 600, mb: 1.5 }}>Seed the source tenant</Typography>
-                <SeedStep />
+                <SeedStep domain={sourceDomain} />
               </CardContent>
             </Card>
           </DelegationGate>
@@ -356,9 +397,14 @@ const SeedScopesCard: React.FC<{ dwd: DwdPayload | null }> = ({ dwd }) => {
   )
 }
 
-const SeedStep: React.FC = () => {
+const SeedStep: React.FC<{ domain?: string }> = ({ domain }) => {
   const [confirmDomain, setConfirmDomain] = useState('')
   const [scale, setScale] = useState('small')
+  // '' = every service. One service instead is the cheap repair for a
+  // corpus that is good apart from one thing: a twelve-hour seed produced
+  // 126 users with no chat because the Chat app was misconfigured, and
+  // without this the only fix was seeding all of it again.
+  const [only, setOnly] = useState('')
   const [workers, setWorkers] = useState('')
   const [prefix, setPrefix] = useState('')
   const [createUntilFull, setCreateUntilFull] = useState(false)
@@ -377,7 +423,7 @@ const SeedStep: React.FC = () => {
     setJobActive(false)
     const r = await runSeed(confirmDomain, scale, createUsers, reset, {
       allUsers, createUntilFull, workers, localpartPrefix: prefix,
-      sharedDrives, users,
+      sharedDrives, users, only: only || undefined,
     })
     // A queued run has no live output to watch yet -- turning JobProgress
     // on for one shows an empty transcript that reads as a stalled job.
@@ -397,7 +443,27 @@ const SeedStep: React.FC = () => {
           <TextField
             fullWidth size="small" label="Type the source domain to confirm"
             value={confirmDomain} onChange={(e) => setConfirmDomain(e.target.value)}
+            inputProps={{ 'data-testid': 'seed-form-domain' }}
+            /* Shown, never prefilled. Typing it back is the only thing
+               gating a job that writes into a tenant, and a gate that
+               arrives pre-satisfied is not a gate. */
+            helperText={domain || undefined}
           />
+        </Grid>
+        <Grid item xs={12} sm={3}>
+          {/* Everything, or one service across the users already there. */}
+          <TextField
+            fullWidth size="small" select label="What to seed" value={only}
+            inputProps={{ 'data-testid': 'seed-form-only' }}
+            onChange={(e) => setOnly(e.target.value)}
+            helperText={only ? `just ${only}, on the existing users`
+                             : 'every service'}
+          >
+            <MenuItem value="">Everything</MenuItem>
+            {SEEDABLE.map((sv) => (
+              <MenuItem key={sv} value={sv}>{sv}</MenuItem>
+            ))}
+          </TextField>
         </Grid>
         <Grid item xs={12} sm={3}>
           <TextField

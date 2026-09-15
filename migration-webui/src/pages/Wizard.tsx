@@ -20,6 +20,7 @@ import {
 import { fetchMe, startFullSetup, fetchFullSetupStatus } from '@/api/controlPlane'
 import type { FullSetupStatus } from '@/api/controlPlane'
 import MfaBanner from '@/components/MfaBanner'
+import SeedDomainPicker from '@/components/SeedDomainPicker'
 import AuthenticatorCode from '@/components/AuthenticatorCode'
 import { repairConsoleSetup } from '@/api/client'
 import JobRunner from '@/components/JobRunner'
@@ -322,6 +323,18 @@ const Wizard: React.FC = () => {
     return () => clearInterval(id)
   }, [autoBusy, setup?.running, role])
   const [seedEnabled, setSeedEnabled] = useState(false)
+  // Set when the seeder's domain picker is bypassed for a brand-new tenant,
+  // which is the one seed path that really does need the Google sign-in.
+  const [seedNewDomain, setSeedNewDomain] = useState(false)
+  // Arrived via the Seed Wizard entry (?mode=seed), rather than by signing
+  // in and then picking "seed" as a purpose. Only the first opens on the
+  // domain cards -- the second already has a signed-in tenant, and going
+  // Back from it must return to the form it came from, not to a picker it
+  // never saw.
+  const [seedDirect, setSeedDirect] = useState(false)
+  // A tenant chosen from the cards is already set up, so the seed page
+  // shows the seed controls rather than an offer to set it up again.
+  const [seedFromPicker, setSeedFromPicker] = useState(false)
 
   useEffect(() => {
     fetchMe().then((a) => setSeedEnabled(a.seed_enabled)).catch(() => {})
@@ -331,8 +344,27 @@ const Wizard: React.FC = () => {
   // still only takes effect once seed_enabled is confirmed -- the URL is
   // client-controlled and the entitlement is not known on first render.
   useEffect(() => {
-    if (seedEnabled && params.get('mode') === 'seed') setPurpose('seed')
+    if (seedEnabled && params.get('mode') === 'seed') {
+      setPurpose('seed')
+      setSeedDirect(true)
+    }
   }, [seedEnabled, params])
+
+  // Seeding opens on the tenants already set up, not on a sign-in form.
+  // The seed runs on the service-account key on file; the admin password
+  // exists to CREATE that key, so asking for it again to seed a tenant set
+  // up weeks ago is a credential prompt with nothing behind it.
+  if (step === 'domain' && purpose === 'seed' && seedEnabled && seedDirect
+      && !seedNewDomain) {
+    return (
+      <SeedDomainPicker
+        onPick={(d, email) => {
+          setDomain(d); setAdminEmail(email)
+          setSeedFromPicker(true); setStep('run')
+        }}
+        onNew={() => setSeedNewDomain(true)} />
+    )
+  }
 
   if (step === 'domain') {
     return (
@@ -683,7 +715,8 @@ const Wizard: React.FC = () => {
                             adminPassword={adminPassword} />
         : purpose === 'seed'
         ? <SeedWizard sourceDomain={domain} adminEmail={adminEmail}
-                      adminPassword={adminPassword} />
+                      adminPassword={adminPassword}
+                      configured={seedFromPicker} />
         : <MigrateWizard sourceDomain={domain} targetDomain={otherDomain}
                          adminEmail={adminEmail} adminPassword={adminPassword} />}
     </Box>
