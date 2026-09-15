@@ -262,7 +262,7 @@ def assert_sandbox(settings: Settings, confirm_domain: str) -> None:
     _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     import domain_guard
 
-    refusal = domain_guard.refuse_reason(domain)
+    refusal = domain_guard.refuse_reason(domain, "Seeding")
     if refusal:
         sys.exit("REFUSING: " + refusal)
     print(f"Sandbox guard passed for {domain}.")

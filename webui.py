@@ -2478,7 +2478,7 @@ def seed_argv(body: dict, account_id: int | None = None) -> tuple[list[str], dic
 
     import domain_guard
 
-    refusal = domain_guard.refuse_reason(domain)
+    refusal = domain_guard.refuse_reason(domain, "Seeding")
     if refusal:
         return [], {}, refusal
 

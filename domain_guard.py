@@ -112,12 +112,20 @@ def is_protected(domain: str) -> bool:
     return _norm(domain) in protected_domains()
 
 
-def refuse_reason(domain: str) -> str:
-    """Why a caller may not empty this domain, or "" if it may.
+def refuse_reason(domain: str, action: str = "Emptying") -> str:
+    """Why a caller may not do this to the domain, or "" if it may.
 
     One sentence, naming the domain and the way out, because the caller
     prints it straight to an operator who is about to wonder whether the
     tool is broken.
+
+    `action` is the gerund that goes in that sentence, because this guards
+    two different things. It reads "Emptying it is refused" by default, for
+    reset_target and wipe_target -- but the seeder is guarded too, and it
+    does not empty anything: it WRITES fabricated data into a tenant, which
+    on a client's tenant is its own kind of ruin. Reported as "Emptying",
+    a refused seed read as the tool having misidentified what was asked of
+    it, on the one screen where the operator most needs to believe it.
     """
     d = _norm(domain)
     if not is_protected(d):
@@ -125,10 +133,10 @@ def refuse_reason(domain: str) -> str:
     if d in env_domains():
         # No --revoke hint here: a revocation cannot lift this one, and
         # offering a way out that does not work is worse than none.
-        return (f"{d} is listed in {ENV_NAME}. Emptying it is refused. "
+        return (f"{d} is listed in {ENV_NAME}. {action} it is refused. "
                 f"Remove it from {ENV_NAME} if that is genuinely intended.")
     return (f"{d} is protected because it is configured on this deployment. "
-            f"Emptying it is refused. An operator can revoke that with:  "
+            f"{action} it is refused. An operator can revoke that with:  "
             f"python domain_guard.py --revoke {d} --reason '...'")
 
 

@@ -114,6 +114,26 @@ class TestTheRefusalTellsYouWhatToDo:
     def test_an_unprotected_domain_gives_no_reason(self, store):
         assert G.refuse_reason("someone-elses.example") == ""
 
+    def test_it_names_the_action_it_actually_refused(self, store):
+        """This guards two different things. A refused SEED reported as
+        "Emptying it is refused" read as the tool having misidentified what
+        was asked of it -- the seeder does not empty anything, it writes
+        fabricated data in."""
+        assert "Emptying it is refused" in G.refuse_reason("client.example")
+        seeded = G.refuse_reason("client.example", "Seeding")
+        assert "Seeding it is refused" in seeded
+        assert "Emptying" not in seeded
+        # And the way out still travels with it.
+        assert "--revoke" in seeded
+
+    def test_the_env_listed_refusal_names_the_action_too(self, store,
+                                                         monkeypatch):
+        monkeypatch.setenv(G.ENV_NAME, "envdom.example")
+        why = G.refuse_reason("envdom.example", "Seeding")
+        assert "Seeding it is refused" in why
+        # No --revoke hint: a revocation cannot lift an env-listed domain.
+        assert "--revoke" not in why
+
 
 class TestTheBannerOnlyShoutsAboutRevocations:
     def test_a_clean_deployment_prints_nothing(self, store):
