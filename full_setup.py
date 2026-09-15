@@ -332,16 +332,16 @@ def run_full_setup(
     # exactly as it always was before this branch existed.
     existing = (accounts_auth.get_tenant_config(account_id, side)
                 if account_id is not None else None)
-    # Before anything is written: if this slot already holds a DIFFERENT
-    # domain, preserve it (its key is still intact at this point). A slot
-    # keeps one row, so without this the previous domain -- one somebody set
-    # up -- would just vanish when this run overwrites it. A re-run on the
-    # SAME domain is a refresh, not a supersession, and records nothing.
-    if account_id is not None:
-        try:
-            accounts_auth.snapshot_superseded(account_id, side, domain)
-        except Exception as exc:      # noqa: BLE001 - never block a setup
-            log(f"  (could not snapshot the previous {side} domain: {exc})")
+    # The eviction of whatever this slot already holds is NOT recorded here.
+    #
+    # It used to be, so that the old key was still intact to back up. But
+    # nothing is written yet at this point, and a run that fails before it
+    # saves has evicted nothing -- confirmed live, three attempts at the
+    # same swap all bailed at delegation and left three rows claiming
+    # rohitrokaya had been replaced, while rohitrokaya was still sitting in
+    # the slot. Every attempt "bumped" the incumbent and added nothing.
+    # accounts_auth.update_tenant_config records it instead, at the moment
+    # the slot's domain actually changes.
     uploaded_key = existing["sa_key_path"] if existing else None
     key_path = uploaded_key or os.path.join(keys_dir, f"{side}-sa.json")
 
@@ -363,6 +363,16 @@ def run_full_setup(
     if reprovision and uploaded_key:
         log(f"  re-provisioning {side}: ignoring the uploaded key at "
             f"{uploaded_key} and creating a new project")
+        # The one place the old key really is about to be destroyed: this
+        # branch provisions over it in place. Record the eviction now, while
+        # there is still something to back up -- the later save would copy
+        # the NEW key and file it under the OLD domain. A no-op when the
+        # domain is not changing, and the save below will not duplicate it.
+        if account_id is not None:
+            try:
+                accounts_auth.snapshot_superseded(account_id, side, domain)
+            except Exception as exc:      # noqa: BLE001 - never block a setup
+                log(f"  (could not snapshot the previous {side} domain: {exc})")
         uploaded_key = None
         key_path = os.path.join(keys_dir, f"{side}-sa.json")
 

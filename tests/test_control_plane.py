@@ -1999,6 +1999,53 @@ class TestLinkingTwoSetUpDomains:
         assert baks, "the overwritten key was not backed up"
         assert json.loads(baks[0].read_text())["client_id"] == "OLD"
 
+    def test_it_refuses_a_pair_that_would_share_one_service_account(
+            self, cp, tmp_path, monkeypatch):
+        """Confirmed live on account 68: linking a domain recorded on the
+        source side into the target slot put client 118368418221303140838 in
+        BOTH slots. The pair rendered green and worked, but the source
+        credential was the target credential -- the read-only source
+        guarantee could no longer be restored on either side."""
+        import api_server, accounts_auth
+        a = self._signed_in(cp, "sharedkeyA@ex.com")
+        cp.post("/api/v2/auth/logout")
+        boss = self._signed_in(cp, "sharedkeyboss@ex.com")
+        accounts_auth.promote_to_superadmin("sharedkeyboss@ex.com")
+        monkeypatch.setattr(api_server, "HERE", str(tmp_path))
+        # Same client id on both sides -- one service account, two domains.
+        self._donor(tmp_path, accounts_auth, a, "source", "s.com", "SAME")
+        self._donor(tmp_path, accounts_auth, a, "target", "t.com", "SAME")
+
+        r = cp.post("/api/v2/setup/link-domains", headers=ADMIN, json={
+            "reason": "pair two domains on one service account",
+            "source_account_id": a, "source_side": "source",
+            "target_account_id": a, "target_side": "target"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is False
+        assert "SAME" in body["detail"]
+        # And nothing was written: the caller keeps whatever it had.
+        assert not (tmp_path / "keys" / str(boss) / "source-sa.json").exists()
+
+    def test_distinct_service_accounts_still_link(self, cp, tmp_path, monkeypatch):
+        """The guard must only catch the shared-credential case."""
+        import api_server, accounts_auth
+        a = self._signed_in(cp, "distinctkeyA@ex.com")
+        cp.post("/api/v2/auth/logout")
+        boss = self._signed_in(cp, "distinctboss@ex.com")
+        accounts_auth.promote_to_superadmin("distinctboss@ex.com")
+        monkeypatch.setattr(api_server, "HERE", str(tmp_path))
+        self._donor(tmp_path, accounts_auth, a, "source", "s2.com", "AAA")
+        self._donor(tmp_path, accounts_auth, a, "target", "t2.com", "BBB")
+
+        r = cp.post("/api/v2/setup/link-domains", headers=ADMIN, json={
+            "reason": "two real service accounts",
+            "source_account_id": a, "source_side": "source",
+            "target_account_id": a, "target_side": "target"})
+        assert r.status_code == 200 and r.json()["ok"] is True
+        assert json.loads((tmp_path / "keys" / str(boss)
+                           / "target-sa.json").read_text())["client_id"] == "BBB"
+
     def test_relinking_the_pair_already_in_place_is_a_no_op(self, cp, tmp_path,
                                                             monkeypatch):
         """Confirmed live: picking the same pair twice failed with
@@ -2094,6 +2141,32 @@ class TestAllConfiguredDomains:
         assert by[(a, "source")]["hasKey"] is True
         assert by[(a, "source")]["clientId"] == "111"
         assert by[(b, "target")]["hasKey"] is False
+
+    def test_an_eviction_that_was_undone_is_not_listed_as_history(
+            self, cp, tmp_path, monkeypatch):
+        """Re-linking an evicted domain leaves its eviction row standing, and
+        the page then showed the same domain twice under one account -- once
+        live, once struck through. That reads as "it bumped my domain" even
+        though the domain is right there."""
+        import api_server, accounts_auth
+
+        a = self._signed_in(cp, "undone@example.com")
+        accounts_auth.promote_to_superadmin("undone@example.com")
+        monkeypatch.setattr(api_server, "HERE", str(tmp_path))
+        monkeypatch.setattr(accounts_auth, "HERE", str(tmp_path))
+        accounts_auth.update_tenant_config(
+            a, "source", domain="back.example", admin_email="x@back.example")
+        accounts_auth.update_tenant_config(a, "source", domain="other.example")
+        accounts_auth.update_tenant_config(a, "source", domain="back.example")
+
+        # Both evictions really happened and stay in the table...
+        assert len(accounts_auth.list_superseded(a)) == 2
+        # ...but only the one still in effect is shown.
+        body = cp.get("/api/v2/setup/all-domains", headers=ADMIN).json()
+        shown = {(d["domain"], d["superseded"]) for d in body["domains"]}
+        assert ("back.example", False) in shown
+        assert ("back.example", True) not in shown
+        assert ("other.example", True) in shown
 
     def test_a_regular_account_sees_only_its_own(self, cp, tmp_path, monkeypatch):
         import api_server, accounts_auth

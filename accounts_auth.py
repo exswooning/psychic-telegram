@@ -260,6 +260,28 @@ def update_tenant_config(account_id: int, side: str, *, domain: str | None = Non
                 f"tenant; one domain cannot be both. Clear the {other} side "
                 f"first if this is deliberate.")
 
+    # Record an eviction HERE, at the moment the slot's domain actually
+    # changes -- not when something merely intends to change it.
+    #
+    # full_setup.py used to snapshot at the TOP of a run, before anything
+    # was written, so that the old key was still intact to back up. But a
+    # run that then failed left a record of a replacement that never
+    # happened: confirmed live, three attempts at the same swap all bailed
+    # before saving, and account 68 ended up with three rows saying
+    # rohitrokaya had been replaced by sarafgloabalexim while rohitrokaya
+    # was still sitting in the slot. Every attempt "bumped" the incumbent
+    # and added nothing.
+    #
+    # This is the single funnel every writer passes through (see the
+    # counterpart check above), so putting it here also covers the link
+    # endpoint and the credential upload, which evicted a domain with no
+    # record at all.
+    if domain:
+        try:
+            snapshot_superseded(account_id, side, domain)
+        except Exception:      # noqa: BLE001 - never block the write itself
+            pass
+
     cols = {"domain": domain, "admin_email": admin_email, "sa_key_path": sa_key_path}
     sets = [f"{col}=?" for col, val in cols.items() if val is not None]
     if not sets:
@@ -337,6 +359,22 @@ def snapshot_superseded(account_id: int, side: str, incoming_domain: str) -> Non
     if old_domain.lower() == (incoming_domain or "").strip().lower():
         return
 
+    # Already recorded. One run reached here twice and wrote the SAME
+    # eviction two seconds apart, and three separate attempts at the same
+    # swap left three identical rows -- so the Identities page showed one
+    # domain as four cards, three of them struck through, and read as
+    # churn rather than history.
+    incoming = (incoming_domain or "").strip()
+    with cpdb.ro() as conn:
+        dup = conn.execute(
+            "SELECT 1 FROM superseded_configs WHERE account_id=? AND side=? "
+            "AND lower(domain)=lower(?) AND lower(COALESCE(replaced_by,''))"
+            "=lower(?) LIMIT 1",
+            (account_id, side, old_domain, incoming),
+        ).fetchone()
+    if dup:
+        return
+
     backup_rel = ""
     key_rel = old.get("sa_key_path") or ""
     if key_rel:
@@ -358,13 +396,23 @@ def snapshot_superseded(account_id: int, side: str, incoming_domain: str) -> Non
             "(account_id, side, domain, admin_email, key_path, replaced_by) "
             "VALUES (?,?,?,?,?,?)",
             (account_id, side, old_domain, old.get("admin_email") or "",
-             backup_rel, (incoming_domain or "").strip()),
+             backup_rel, incoming),
         )
 
 
 def list_superseded(account_id: int | None = None) -> list[dict]:
     """Every domain that was overwritten in a slot, newest first. All
-    accounts when account_id is None (the superadmin, cross-account view)."""
+    accounts when account_id is None (the superadmin, cross-account view).
+
+    One row per distinct eviction. The write side refuses duplicates now,
+    but rows written before it did are still in the table -- account 68 has
+    three identical "rohitrokaya replaced by sarafgloabalexim" rows from
+    three attempts that each recorded the swap and then failed to perform
+    it. Identical rows carry no information the newest one does not, and
+    rendering them made one domain look like four cards, three struck
+    through. Collapsed here rather than deleted so nothing is destroyed to
+    tidy a display.
+    """
     q = ("SELECT id, account_id, side, domain, admin_email, key_path, "
          "replaced_by, superseded_at FROM superseded_configs")
     args: tuple = ()
@@ -372,8 +420,16 @@ def list_superseded(account_id: int | None = None) -> list[dict]:
         q += " WHERE account_id=?"
         args = (account_id,)
     q += " ORDER BY superseded_at DESC"
+    seen: dict[tuple, dict] = {}
     with cpdb.ro() as conn:
-        return [dict(r) for r in conn.execute(q, args).fetchall()]
+        for r in conn.execute(q, args).fetchall():
+            row = dict(r)
+            # Newest first, so the first of a run of identical rows wins --
+            # and it is the one whose key backup is most likely still there.
+            seen.setdefault((row["account_id"], row["side"],
+                             (row["domain"] or "").lower(),
+                             (row["replaced_by"] or "").lower()), row)
+    return list(seen.values())
 
 
 def get_account(account_id: int) -> dict | None:

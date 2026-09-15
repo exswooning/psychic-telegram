@@ -396,6 +396,84 @@ class TestSupersededConfigs:
         assert backup.is_file()
         assert "KEEP" in backup.read_text()
 
+    def test_a_setup_that_never_lands_does_not_evict_the_incumbent(
+            self, db, monkeypatch, tmp_path):
+        """Confirmed live: three attempts at the same swap each bailed
+        before saving, and each still recorded that the incumbent had been
+        replaced -- so one domain rendered as four cards, three struck
+        through, while it was in fact still the live one. Intending to
+        replace a domain is not replacing it."""
+        monkeypatch.setattr(aa, "HERE", str(tmp_path))
+        acct = self._acct(aa)
+        aa.update_tenant_config(acct, "source", domain="incumbent.com",
+                                admin_email="a@incumbent.com")
+        assert aa.list_superseded(acct) == []
+
+        # Three runs that got as far as intending the swap and then failed
+        # write nothing at all, because nothing was ever written to the slot.
+        assert aa.get_tenant_config(acct, "source")["domain"] == "incumbent.com"
+        assert aa.list_superseded(acct) == []
+
+        # The run that actually saves is the one that records the eviction.
+        aa.update_tenant_config(acct, "source", domain="replacement.com",
+                                admin_email="a@replacement.com")
+        rows = aa.list_superseded(acct)
+        assert len(rows) == 1
+        assert rows[0]["domain"] == "incumbent.com"
+        assert rows[0]["replaced_by"] == "replacement.com"
+
+    def test_the_same_eviction_is_never_recorded_twice(self, db, monkeypatch,
+                                                       tmp_path):
+        """One run reached the snapshot twice, two seconds apart, and wrote
+        the same eviction both times."""
+        monkeypatch.setattr(aa, "HERE", str(tmp_path))
+        acct = self._acct(aa)
+        aa.update_tenant_config(acct, "source", domain="first.com",
+                                admin_email="a@first.com")
+        for _ in range(3):
+            aa.snapshot_superseded(acct, "source", "second.com")
+        assert len(aa.list_superseded(acct)) == 1
+
+    def test_a_second_distinct_eviction_is_still_recorded(self, db, monkeypatch,
+                                                          tmp_path):
+        """Deduping must not swallow real history: a domain evicted, put
+        back, and evicted again by something else is two evictions."""
+        monkeypatch.setattr(aa, "HERE", str(tmp_path))
+        acct = self._acct(aa)
+        aa.update_tenant_config(acct, "source", domain="first.com",
+                                admin_email="a@first.com")
+        aa.update_tenant_config(acct, "source", domain="second.com")
+        aa.update_tenant_config(acct, "source", domain="first.com")
+        aa.update_tenant_config(acct, "source", domain="third.com")
+        rows = aa.list_superseded(acct)
+        assert sorted((r["domain"], r["replaced_by"]) for r in rows) == [
+            ("first.com", "second.com"),
+            ("first.com", "third.com"),
+            ("second.com", "first.com"),
+        ]
+
+    def test_rows_written_before_the_dedupe_guard_collapse_on_read(
+            self, db, monkeypatch, tmp_path):
+        """Three identical rows already exist on a real account. Reading
+        must show one eviction, without deleting history to tidy a display.
+        """
+        import control_plane_db as cpdb
+        monkeypatch.setattr(aa, "HERE", str(tmp_path))
+        acct = self._acct(aa)
+        with cpdb.rw() as conn:
+            for _ in range(3):
+                conn.execute(
+                    "INSERT INTO superseded_configs (account_id, side, domain,"
+                    " admin_email, key_path, replaced_by) VALUES (?,?,?,?,?,?)",
+                    (acct, "target", "old.com", "a@old.com", "", "new.com"))
+            # A different eviction in the same slot is NOT a duplicate.
+            conn.execute(
+                "INSERT INTO superseded_configs (account_id, side, domain,"
+                " admin_email, key_path, replaced_by) VALUES (?,?,?,?,?,?)",
+                (acct, "target", "old.com", "a@old.com", "", "other.com"))
+        rows = aa.list_superseded(acct)
+        assert sorted(r["replaced_by"] for r in rows) == ["new.com", "other.com"]
+
     def test_list_superseded_can_span_accounts(self, db, monkeypatch, tmp_path):
         monkeypatch.setattr(aa, "HERE", str(tmp_path))
         a = aa.create_account("a@ex.com", "hunter22222", "Aa")

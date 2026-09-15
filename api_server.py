@@ -4527,8 +4527,20 @@ async def all_configured_domains(op: Operator = Depends(operator)):
         # domain a person set up never vanishes; marked so the UI can show it
         # as history rather than an active pair. Same account scoping.
         emails = {r["account_id"]: r["account_email"] for r in db_rows}
+        # A domain that is back in the slot it was evicted from is not
+        # history any more. Re-linking one leaves its old eviction row
+        # standing, and the page then showed the SAME domain twice under one
+        # account -- once live, once struck through -- which is exactly the
+        # "it bumped my domain" reading the row exists to prevent. The live
+        # card already represents it; the row stays in the table because the
+        # eviction did happen, it just no longer holds.
+        live = {(r["account_id"], r["side"], (r["domain"] or "").lower())
+                for r in db_rows}
         for sup in accounts_auth.list_superseded(
                 None if is_super else op.account_id):
+            if (sup["account_id"], sup["side"],
+                    (sup["domain"] or "").lower()) in live:
+                continue
             abspath = _abs(sup.get("key_path") or "")
             has_key = bool(abspath) and os.path.isfile(abspath)
             rows.append({
@@ -4630,6 +4642,32 @@ async def link_domains(body: LinkDomains, op: Operator = Depends(operator)):
             return False, f"source {scfg['domain']} has no key on file"
         if not (s_tgt and os.path.isfile(s_tgt)):
             return False, f"target {tcfg['domain']} has no key on file"
+
+        # Refuse a pair that would run both sides on ONE service account.
+        #
+        # Delegation is per client id, so a single service account CAN be
+        # granted on both tenants and the pair would appear to work. What
+        # it destroys is the separation the design rests on: the source
+        # credential is then literally the target credential, and the
+        # read-only source guarantee can never be restored, because
+        # narrowing one side narrows the other.
+        #
+        # Confirmed live on account 68: linking a domain recorded on the
+        # source side into the target slot copied source-sa.json over
+        # target-sa.json, and both slots ended up on client
+        # 118368418221303140838. It read as a healthy green pair, and only
+        # a key-by-key comparison showed it.
+        import provision_gcp
+        s_cid = provision_gcp.client_id_of(s_src)
+        t_cid = provision_gcp.client_id_of(s_tgt)
+        if s_cid and t_cid and s_cid == t_cid:
+            return False, (
+                f"{scfg['domain']} and {tcfg['domain']} would both run on "
+                f"service account {s_cid}, so the source credential would BE "
+                "the target credential -- the source could write to the "
+                "tenant it is supposed to only read. Set one of the two up "
+                "in the Setup Wizard so it gets a service account of its "
+                "own, then link them.")
 
         dest_dir = os.path.join(HERE, "keys", str(op.account_id))
         os.makedirs(dest_dir, exist_ok=True)
