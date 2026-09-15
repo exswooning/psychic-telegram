@@ -616,7 +616,7 @@ const Wizard: React.FC = () => {
                   {phases.map((p) => (
                     <li key={p.name}>
                       {/ok|done|success/i.test(p.status) ? '✓' :
-                        /skip/i.test(p.status) ? '–' : '✗'}{' '}
+                        /skip|wait|pending/i.test(p.status) ? '–' : '✗'}{' '}
                       {p.name}
                       {p.detail && !/ok|done|success/i.test(p.status)
                         ? ` — ${p.detail}` : ''}
@@ -624,12 +624,13 @@ const Wizard: React.FC = () => {
                   ))}
                 </Box>
               )}
-              {!ok && setup.result.missingScopes?.length ? (
+              {setup.result.missingScopes?.length ? (
                 <Typography variant="body2" sx={{ mt: 1 }}
                             data-testid="setup-missing-scopes">
-                  {setup.result.missingScopes.length} scope(s) not granted yet —
-                  the credentials exist, so re-running finishes from here
-                  rather than starting over.
+                  {setup.result.missingScopes.length} scope(s) had not gone
+                  live when setup finished. The grant is in — Google can take
+                  up to an hour to propagate it, and Identities re-checks it.
+                  Nothing needs re-running.
                 </Typography>
               ) : null}
             </Alert>

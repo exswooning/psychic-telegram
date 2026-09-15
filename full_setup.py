@@ -812,30 +812,55 @@ def run_full_setup(
         missing_optional = [sc for sc in not_live if sc in optional]
         if not missing or attempt == len(backoffs):
             break
-        _progress(90, f"delegation granted -- waiting for it to propagate "
-                      f"({len(rows) - len(missing)}/{len(rows)} scopes live so far)")
+        # The bar moves across the wait, and the label says how much of it
+        # is left. Both were static at 90% for the full ~15 minutes, and a
+        # step that shows no change for that long is indistinguishable from
+        # a hang -- it was reported as one.
+        left = sum(backoffs[attempt:])
+        _progress(90 + (6 * (attempt + 1)) // len(backoffs),
+                  f"delegation granted -- waiting for Google to propagate it "
+                  f"({len(rows) - len(missing)}/{len(rows)} scopes live, "
+                  f"up to {left // 60}m{left % 60:02d}s left)")
         time.sleep(backoffs[attempt])
     if missing:
+        # Not "failed", and emphatically not a return.
+        #
         # By this point the grant has had ~15 minutes to propagate and
-        # still has not -- rare (Google's own docs say this step can
-        # occasionally take longer still), but the Admin Console entry
-        # itself was already confirmed accepted back in phase 2, so this
-        # is "still settling," not "never happened." Re-verifying costs
-        # nothing (no browser, just a token probe per scope) -- point at
-        # that instead of implying the whole setup needs to be redone.
-        p.status, p.detail = "failed", (
-            f"{len(missing)} scope(s) still not live after ~15 minutes of "
-            "waiting -- the delegation itself was accepted by Admin Console "
-            "(see the phase above); this is Google still propagating it. "
-            f"Wait a few more minutes and re-run `python3 verify_scopes.py "
-            f"--tenant {side}` -- no need to redo delegation itself.")
-        return {"side": side, "ok": False, "phases": [x.as_dict() for x in phases],
-                "clientId": client_id, "missingScopes": missing}
-    live = len(rows) - len(missing_optional)
-    p.status = "ok"
-    p.detail = f"{live}/{len(rows)} scopes confirmed live"
-    if missing_optional:
-        p.detail += optional_missing_detail(missing_optional)
+        # still has not -- but the Admin Console entry itself was already
+        # confirmed accepted in the phase above, so this is "still
+        # settling," not "never happened." Confirmed live: a target run
+        # gave up here at 21:25 with 11 scopes short, and all 11 probed
+        # live later with nothing done to them in between.
+        #
+        # Returning made that far worse than a slow step. It skipped
+        # phase 3b below, and phase 1's early save only covers the branch
+        # that freshly provisions a key -- so a RETRY, which by design
+        # reuses the existing key and skips that branch, had no path to
+        # saving the tenant config at all. The cheap retry this failure
+        # tells you to run could therefore never record its own success.
+        # Meanwhile the wizard, which only reads progress while the
+        # process lives, sat frozen on this phase's 90% and then showed a
+        # red failure on a setup that was fine. Waiting longer would only
+        # move the same cliff; the honest report is that the grant is in
+        # and Google has not caught up yet.
+        #
+        # Nothing downstream is put at risk by continuing: a scope that is
+        # genuinely missing (rather than slow) is caught by scope_guard at
+        # the start of every migration, which refuses to move any data and
+        # names the gap.
+        p.status, p.detail = "waiting", (
+            f"{len(missing)} scope(s) not live yet after ~15 minutes -- the "
+            "delegation itself was accepted by Admin Console (see the phase "
+            "above), so Google is still propagating it and this usually "
+            "clears on its own within the hour. Nothing needs redoing: "
+            "Identities re-checks it, and a migration refuses to start "
+            "until every scope is live.")
+    else:
+        live = len(rows) - len(missing_optional)
+        p.status = "ok"
+        p.detail = f"{live}/{len(rows)} scopes confirmed live"
+        if missing_optional:
+            p.detail += optional_missing_detail(missing_optional)
     _progress(97, "saving tenant configuration")
 
     # -- 3b. Point the REST of the tool at what was just built ---------------
@@ -993,7 +1018,8 @@ def run_full_setup(
 
     _progress(100, "done")
     return {"side": side, "ok": all(x.status != "failed" for x in phases),
-            "phases": [x.as_dict() for x in phases], "clientId": client_id}
+            "phases": [x.as_dict() for x in phases], "clientId": client_id,
+            "missingScopes": missing}
 
 
 def main(argv: list[str] | None = None) -> int:

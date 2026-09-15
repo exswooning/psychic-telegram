@@ -413,7 +413,13 @@ class TestFailureModes:
         """dwd_helper can exit 0 (submitted) while a scope still fails to
         verify -- propagation lag, or a partial grant. That must surface,
         not be swallowed into a plain success, once the retry budget below
-        (see TestScopeVerificationRetriesThroughPropagation) is exhausted."""
+        (see TestScopeVerificationRetriesThroughPropagation) is exhausted.
+
+        Surfaced as "waiting", not "failed": the two are indistinguishable
+        from here (both probe as unauthorized_client), the console already
+        accepted the grant, and a genuinely missing scope is caught again
+        by scope_guard before any migration moves data. Calling it a
+        failure stopped the run before it saved its own tenant config."""
         monkeypatch.setattr(fs.provision_gcp, "gcloud_ready", lambda: (True, "me"))
         monkeypatch.setattr(fs.provision_gcp, "detect_org", lambda env=None: "")
         monkeypatch.setattr(fs.provision_gcp, "provision_side",
@@ -432,8 +438,10 @@ class TestFailureModes:
 
         res = fs.run_full_setup("source", "c.example.com",
                                 "admin@c.example.com", "pw")
-        assert res["ok"] is False
         assert res["missingScopes"] == ["scope-b"]
+        verify = [p for p in res["phases"] if p["name"].startswith("verify ")]
+        assert [p["status"] for p in verify] == ["waiting"]
+        assert "still propagating" in verify[0]["detail"]
 
 
 class TestScopeVerificationRetriesThroughPropagation:
@@ -507,11 +515,13 @@ class TestScopeVerificationRetriesThroughPropagation:
 
         res = fs.run_full_setup("source", "c.example.com", "admin@c.example.com", "pw")
 
-        assert res["ok"] is False
         # 10 backoffs -> 11 verify_scopes.verify() calls (one before each
         # sleep, plus the final check after the last sleep).
         assert attempts["n"] == 11
         assert res["missingScopes"] == ["scope-a", "scope-b"]
+        # The budget running out does not end the run -- the phases after
+        # verification (saving the tenant config) still have to happen.
+        assert [p["name"] for p in res["phases"]][-1] != "verify delegation (source)"
 
     def test_a_clean_first_pass_does_not_retry_at_all(self, monkeypatch):
         """The overwhelming common case (propagation already finished by
@@ -576,7 +586,7 @@ class TestKeySavedEarlyEvenIfVerificationLaterFails:
                                 "admin@c.example.com", "pw", account_id=7,
                                 keys_dir=str(tmp_path))
 
-        assert res["ok"] is False  # verification never clears in this test
+        assert res["missingScopes"] == ["scope-a"]  # never clears in this test
         assert saved["account_id"] == 7
         assert saved["sa_key_path"] == os.path.join(str(tmp_path), "source-sa.json")
 
