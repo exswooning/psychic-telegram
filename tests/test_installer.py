@@ -311,3 +311,22 @@ def test_it_does_not_claim_to_defeat_root():
         harden = fh.read()
     assert "CANNOT" in harden
     assert "root" in harden
+
+
+def test_requirements_declares_playwright():
+    """dwd_helper.py and gcloud_browser_auth.py both import it lazily,
+    only inside the functions that launch a browser, which is exactly why
+    it went undeclared for so long: `import dwd_helper` alone never
+    surfaces a missing install."""
+    req = open(os.path.join(ROOT, "requirements.txt"), encoding="utf-8").read()
+    assert re.search(r"^playwright\b", req, re.M)
+
+
+def test_installer_verifies_playwright_actually_imports():
+    """A broken/missing install here surfaces days later as the Setup
+    Wizard's first click failing, not as an install-time error, unless
+    checked explicitly at install time."""
+    assert 'import playwright.sync_api' in SH
+    # After pip install, before "venv ready" is declared.
+    assert SH.index("requirements.txt'\"") < SH.index("import playwright.sync_api") \
+        < SH.index('ok "venv ready"')

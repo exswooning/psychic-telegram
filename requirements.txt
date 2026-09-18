@@ -14,3 +14,15 @@ tqdm>=4.66.0
 # TUI dashboard: `curses` ships with CPython on Linux/macOS. Windows needs this.
 windows-curses>=2.3.2; sys_platform == "win32"
 qrcode
+
+# Browser automation for the Setup Wizard's own sign-in and
+# domain-wide-delegation grants (dwd_helper.py, gcloud_browser_auth.py --
+# both import it lazily, only inside the functions that actually launch a
+# browser). Confirmed load-bearing, not optional: a fresh install with this
+# missing fails the Setup Wizard's first click with "ModuleNotFoundError:
+# No module named playwright" -- it had been pip-installed by hand once and
+# was never declared here, so the venv a fresh install builds from
+# requirements.txt alone silently lacked it. The browser itself is
+# apt-installed system Chrome (install.sh), not `playwright install`'s own
+# bundled Chromium -- this line is the Python package only.
+playwright

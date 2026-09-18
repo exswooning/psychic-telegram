@@ -91,6 +91,35 @@ else
   echo "  no local frontend build -- left the remote's dist/ untouched"
 fi
 
+# Keep the venv in step with requirements.txt on EVERY deploy, not just the
+# one install.sh ran once.
+#
+# playwright was a real, load-bearing dependency of dwd_helper.py and
+# gcloud_browser_auth.py -- imported lazily inside the functions that
+# actually drive a browser, which is why `import dwd_helper` alone never
+# surfaces a missing install -- and it was never listed in requirements.txt.
+# It had been pip-installed by hand at some point and just sat there working
+# until the box was rebuilt from scratch, at which point the Setup Wizard
+# failed with "ModuleNotFoundError: No module named playwright" on its very
+# first click. sync_vps.sh only ever rsyncs code and restarts services; it
+# never touched the venv, so fixing requirements.txt alone would not have
+# fixed a box already running -- and would not stop the NEXT undeclared
+# dependency from doing the same thing on the box after that.
+#
+# `pip install -r` is idempotent and fast once everything is already
+# satisfied, so this costs a few seconds on the common case rather than a
+# real install. Failure aborts the deploy the same way a syntax error does
+# below -- restarting services against a venv that just failed to update is
+# how a "successful" deploy quietly leaves a broken dependency running.
+if [[ -f "$(dirname "$0")/requirements.txt" ]]; then
+  if ! "${SSH[@]}" "$TARGET" "cd $DEST && .venv/bin/pip install -q -r requirements.txt           $([[ -f requirements-control-plane.txt ]] && echo '-r requirements-control-plane.txt')"; then
+    echo "  DEPLOY ABORTED: pip install failed on the target -- the venv may be" >&2
+    echo "  half-updated. Nothing was restarted; the previous version is still running." >&2
+    exit 1
+  fi
+  echo "  venv matches requirements.txt"
+fi
+
 # The remote is an rsync of the tree, not a git checkout, so anything there
 # that asks git what it is running gets no answer -- benchmark_run.py
 # recorded every VPS run as commit "unknown", which makes those runs

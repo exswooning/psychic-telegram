@@ -78,3 +78,33 @@ class TestTheStampStillHappens:
         # The warning is additional to the marker, not a replacement: the
         # stamp is what a later reader on the box sees.
         assert 'COMMIT="$COMMIT-dirty"' in _src()
+
+
+class TestTheVenvStaysInStepWithRequirements:
+    """playwright was pip-installed by hand once, never declared in
+    requirements.txt, and a box rebuilt from scratch after the dead man
+    switch fired had a venv silently missing it -- the Setup Wizard's very
+    first click failed with ModuleNotFoundError. sync_vps.sh only ever
+    rsyncs code and restarts services; it never touched the venv, so fixing
+    requirements.txt alone would not have fixed a box already running, and
+    would not stop the NEXT undeclared dependency doing the same thing."""
+
+    def test_it_installs_from_requirements_on_every_deploy(self):
+        src = _src()
+        assert "pip install -q -r requirements.txt" in src
+
+    def test_it_runs_before_the_syntax_check_and_restart(self):
+        src = _src()
+        assert src.index("pip install -q -r requirements.txt") \
+            < src.index("compileall")
+
+    def test_a_failed_install_aborts_the_deploy(self):
+        # Unlike the dirty-tree warning, this one must block: restarting
+        # services against a venv that just failed to update silently ships
+        # a broken dependency.
+        block = src_between = _src().split(
+            "pip install -q -r requirements.txt", 1)[-1][:500]
+        assert "exit 1" in block
+
+    def test_it_survives_a_repo_with_no_requirements_file(self):
+        assert 'if [[ -f "$(dirname "$0")/requirements.txt" ]]; then' in _src()

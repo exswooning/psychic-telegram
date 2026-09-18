@@ -345,6 +345,16 @@ run "'$INSTALL_DIR/.venv/bin/pip' install -q --upgrade pip"
 run "'$INSTALL_DIR/.venv/bin/pip' install -q -r '$INSTALL_DIR/requirements.txt'"
 [ -f "$INSTALL_DIR/requirements-control-plane.txt" ] && \
   run "'$INSTALL_DIR/.venv/bin/pip' install -q -r '$INSTALL_DIR/requirements-control-plane.txt'"
+# playwright drives every browser-automation step the Setup Wizard offers
+# (sign-in, domain-wide delegation), imported lazily inside the functions
+# that actually launch a browser -- so a broken install here surfaces days
+# later as a wizard click failing, not as an install-time error, unless
+# checked explicitly. Confirmed live: it was pip-installed by hand once,
+# never in requirements.txt, and a from-scratch install silently lacked it.
+if [ "$DRY_RUN" != 1 ]; then
+  "$INSTALL_DIR/.venv/bin/python" -c "import playwright.sync_api" \
+    || die "playwright failed to import after install -- the Setup Wizard's automated sign-in and delegation steps will not work. Check requirements.txt and pip's own output above."
+fi
 ok "venv ready"
 
 step "Database"
