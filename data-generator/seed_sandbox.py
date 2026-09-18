@@ -221,6 +221,14 @@ REPORTS_SCOPE = "https://www.googleapis.com/auth/admin.reports.usage.readonly"
 # folded into SEED_SCOPES or DIRECTORY_WRITE_SCOPE.
 DIRECTORY_READONLY_SCOPE = "https://www.googleapis.com/auth/admin.directory.user.readonly"
 
+# Same isolation reasoning as GROUP_WRITE_SCOPE: `--gmail-settings` is
+# opt-in, so vacation/POP/IMAP/forwarding/delegates get a client of their
+# own rather than widening SEED_SCOPES for every tenant regardless of
+# whether it has granted either. gmail_engine.py's _migrate_delegates()
+# needs SHARING specifically -- BASIC alone 403s on delegates().list().
+GMAIL_SETTINGS_SCOPE = "https://www.googleapis.com/auth/gmail.settings.basic"
+GMAIL_SHARING_SCOPE = "https://www.googleapis.com/auth/gmail.settings.sharing"
+
 # customerUsageReports `accounts:` parameters, one (total, used) pair per
 # edition. Google has kept these legacy edition names for current Google
 # Workspace editions, and an org holds exactly one edition -- so only one pair
@@ -777,6 +785,94 @@ def seed_drafts(gmail, settings: Settings, user: str, peers: list[str],
             m["drafts"] += 1
         except Exception as exc:  # noqa: BLE001
             print(f"  ! draft {i}: {exc}")
+    return m
+
+
+# ======================================================================
+# Gmail — settings (92b82a9 migrates these; nothing ever seeded them)
+# ======================================================================
+def seed_gmail_settings(gmail, settings: Settings, user: str,
+                        peers: list[str]) -> dict:
+    """Vacation, POP, IMAP, a forwarding address, and a delegate.
+
+    gmail_engine.py migrates all four (`_migrate_vacation`,
+    `_migrate_imap_pop`, `_migrate_forwarding`, `_migrate_delegates`) but
+    the corpus never put anything on the source for those passes to find --
+    coverage_audit.py reports them UNPROBED for exactly that reason.
+
+    Each is independent and best-effort, like seed_groups: a tenant that
+    has not granted gmail.settings.basic/sharing (`gmail` is None, from
+    build_gmail_settings() below) must still finish the rest of the user's
+    seed, and one setting failing must not take out the others.
+
+    Auto-forwarding is deliberately NOT enabled here. Google requires the
+    target to verify a forwarding address before mail actually follows it
+    -- gmail_engine.py's own comment calls this the correct outcome, not a
+    gap -- and there is no way to click that confirmation link
+    programmatically. Creating the address still exercises the half of
+    _migrate_forwarding that copies without needing verification.
+    """
+    m = {"vacation": 0, "pop": 0, "imap": 0, "forwarding_addresses": 0,
+         "delegates": 0, "note": ""}
+    if gmail is None:
+        m["note"] = ("gmail.settings.basic/sharing not granted to the seed "
+                     "service account -- skipped")
+        return m
+    retry = _retry_factory(settings)
+    notes = []
+
+    try:
+        retry(lambda: gmail.users().settings().updateVacation(
+            userId="me", body={
+                "enableAutoReply": True,
+                "responseSubject": "Out of office (seeded test data)",
+                "responseBodyPlainText": "Away and back soon. Seeded by "
+                                        "seed_sandbox.py for migration testing.",
+            }).execute())()
+        m["vacation"] = 1
+    except Exception as exc:  # noqa: BLE001
+        notes.append(f"vacation: {str(exc)[:80]}")
+
+    try:
+        retry(lambda: gmail.users().settings().updatePop(
+            userId="me", body={"accessWindow": "allMail",
+                               "disposition": "leaveInInbox"}).execute())()
+        m["pop"] = 1
+    except Exception as exc:  # noqa: BLE001
+        notes.append(f"pop: {str(exc)[:80]}")
+
+    try:
+        retry(lambda: gmail.users().settings().updateImap(
+            userId="me", body={"enabled": True}).execute())()
+        m["imap"] = 1
+    except Exception as exc:  # noqa: BLE001
+        notes.append(f"imap: {str(exc)[:80]}")
+
+    # Needs a real peer address: Google validates the syntax and the domain
+    # even for a forwarding address that will sit unverified.
+    fwd_to = peers[0] if peers else None
+    if fwd_to:
+        try:
+            retry(lambda: gmail.users().settings().forwardingAddresses()
+                  .create(userId="me",
+                          body={"forwardingEmail": fwd_to}).execute())()
+            m["forwarding_addresses"] = 1
+        except Exception as exc:  # noqa: BLE001
+            notes.append(f"forwarding: {str(exc)[:80]}")
+
+    # A delegate inside the same Workspace domain is accepted immediately --
+    # unlike a personal Gmail delegate, which needs an invite clicked --
+    # so this one setting is fully exercised, not just address-copied.
+    delegate = peers[1] if len(peers) > 1 else (peers[0] if peers else None)
+    if delegate:
+        try:
+            retry(lambda: gmail.users().settings().delegates().create(
+                userId="me", body={"delegateEmail": delegate}).execute())()
+            m["delegates"] = 1
+        except Exception as exc:  # noqa: BLE001
+            notes.append(f"delegate: {str(exc)[:80]}")
+
+    m["note"] = "; ".join(notes)
     return m
 
 
@@ -1821,6 +1917,31 @@ def build_gmail_purge(settings: Settings, user: str):
         return None
 
 
+def build_gmail_settings(settings: Settings, user: str):
+    """A delegated Gmail client that can read and write mailbox settings.
+
+    Isolated to GMAIL_SETTINGS_SCOPE + GMAIL_SHARING_SCOPE alone, like every
+    other opt-in scope here. Returns None when the grant is missing, so a
+    tenant that has not authorised settings still gets the rest of the seed
+    -- an ungranted scope costs --gmail-settings, not the run.
+    """
+    import google_auth_httplib2
+    import httplib2
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+
+    try:
+        creds = service_account.Credentials.from_service_account_file(
+            _resolve_key_path(settings),
+            scopes=[GMAIL_SETTINGS_SCOPE, GMAIL_SHARING_SCOPE]
+        ).with_subject(user)
+        http = google_auth_httplib2.AuthorizedHttp(
+            creds, http=httplib2.Http(timeout=120))
+        return build("gmail", "v1", http=http, cache_discovery=False)
+    except Exception:      # noqa: BLE001 - absence is an answer, not an error
+        return None
+
+
 def _build_directory_readwrite(settings: Settings, user: str):
     """A delegated Directory client that can create accounts -- for
     --create-users and --create-until-full. Needs
@@ -2032,7 +2153,8 @@ def fit_entries(entries: list[dict], available: int,
 # The per-user services this seeder writes, in the order it writes them.
 # Named here so --only can be validated against the real list rather than a
 # second copy of it that drifts.
-SEEDABLE = ("drive", "gmail", "calendar", "chat", "contacts", "tasks")
+SEEDABLE = ("drive", "gmail", "calendar", "chat", "contacts", "tasks",
+           "gmail_settings")
 
 # Shared drives on by default.
 #
@@ -2120,6 +2242,10 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
     else:
         gmail_m = dict(empty)
 
+    if want("gmail_settings"):
+        gmail_settings = build_gmail_settings(settings, user)
+        gmail_m.update(seed_gmail_settings(gmail_settings, settings, user, peers))
+
     if want("calendar"):
         cal_m = seed_calendar(cal, settings, user, peers, external, event_count,
                               drive_items=items)
@@ -2176,6 +2302,13 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
           + (f" ({contacts_m['note']})" if contacts_m.get("note") else "")
           + f", {tasks_m.get('tasks', 0)} tasks"
           + (f" ({tasks_m['note']})" if tasks_m.get("note") else "")
+          + (f", vacation/pop/imap/fwd/delegate: "
+             f"{gmail_m.get('vacation', 0)}/{gmail_m.get('pop', 0)}/"
+             f"{gmail_m.get('imap', 0)}/{gmail_m.get('forwarding_addresses', 0)}/"
+             f"{gmail_m.get('delegates', 0)}"
+             if want("gmail_settings") else "")
+          + (f" ({gmail_m['note']})"
+             if want("gmail_settings") and gmail_m.get("note") else "")
           + (f", {fill_m['filler_files']} filler file(s) "
              f"({fill_m.get('usage_before_gb', 0):.1f}GB -> "
              f"{fill_m.get('usage_after_gb', 0):.1f}GB)"
@@ -2853,6 +2986,11 @@ def main(argv: list[str] | None = None) -> int:
         "shortcuts": _sum("drive", "shortcuts"),
         "messages": _sum("gmail", "messages"),
         "drafts": _sum("gmail", "drafts"),
+        "vacation_responders": _sum("gmail", "vacation"),
+        "pop_enabled": _sum("gmail", "pop"),
+        "imap_enabled": _sum("gmail", "imap"),
+        "forwarding_addresses": _sum("gmail", "forwarding_addresses"),
+        "delegates": _sum("gmail", "delegates"),
         "comments": _sum("drive", "comments"),
         "events": _sum("calendar", "events"),
         "secondary_calendars": _sum("calendar", "calendars"),

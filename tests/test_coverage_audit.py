@@ -222,3 +222,89 @@ class TestExternalSharedWithMeIsARisk:
             source_domain = "src.com"
 
         assert cov._count_external_shared_with_me(_Auth(), _S(), "a@src.com") == 1
+
+
+class TestGmailSettingsProbes:
+    """Migrated by 92b82a9, never counted before now -- see that commit's
+    own bug: AttributeError on a client whose discovery document lacks a
+    method must read the same as a scope that was never granted (an
+    HttpError), not crash the whole report."""
+
+    class _Settings:
+        def __init__(self, **methods):
+            for name, value in methods.items():
+                setattr(self, name, value)
+
+    class _Gmail:
+        def __init__(self, settings):
+            self._settings = settings
+        def users(self): return self
+        def settings(self): return self._settings
+
+    class _Auth:
+        def __init__(self, gmail=None, groups=None, group_error=False):
+            self._gmail = gmail
+            self._groups = groups or []
+            self._group_error = group_error
+            self.settings = type("S", (), {"source_domain": "src.com"})()
+        def source_gmail(self, user): return self._gmail
+        def source_directory(self):
+            outer = self
+            class _Dir:
+                def groups(self): return self
+                def list(self, **kw): return self
+                def execute(self):
+                    if outer._group_error:
+                        raise RuntimeError("unauthorized_client")
+                    return {"groups": [{"id": g} for g in outer._groups]}
+            return _Dir()
+
+    def test_vacation_enabled_is_counted(self):
+        gmail = self._Gmail(self._Settings(
+            getVacation=lambda userId: type(
+                "R", (), {"execute": lambda s=None: {"enableAutoReply": True}})()))
+        assert cov._count_vacation_enabled(self._Auth(gmail), "a@src.com") == 1
+
+    def test_vacation_off_is_zero_not_unprobed(self):
+        gmail = self._Gmail(self._Settings(
+            getVacation=lambda userId: type(
+                "R", (), {"execute": lambda s=None: {"enableAutoReply": False}})()))
+        assert cov._count_vacation_enabled(self._Auth(gmail), "a@src.com") == 0
+
+    def test_a_client_missing_the_method_is_unprobed_not_a_crash(self):
+        """The exact bug 92b82a9 fixed in the migration code, mirrored here:
+        an AttributeError from an old discovery doc must not blow up the
+        whole coverage run."""
+        gmail = self._Gmail(self._Settings())  # no getVacation attribute
+        assert cov._count_vacation_enabled(self._Auth(gmail), "a@src.com") is None
+
+    def test_pop_disabled_access_window_is_zero(self):
+        gmail = self._Gmail(self._Settings(
+            getPop=lambda userId: type(
+                "R", (), {"execute": lambda s=None: {"accessWindow": "disabled"}})()))
+        assert cov._count_pop_enabled(self._Auth(gmail), "a@src.com") == 0
+
+    def test_delegates_are_counted(self):
+        gmail = self._Gmail(self._Settings(delegates=lambda: type("D", (), {
+            "list": lambda s, userId: type("R", (), {
+                "execute": lambda s=None: {"delegates": [{"delegateEmail": "x@src.com"}]}})()})()))
+        assert cov._count_delegates(self._Auth(gmail), "a@src.com") == 1
+
+    def test_groups_are_counted_once_tenant_wide(self):
+        auth = self._Auth(groups=["all-staff", "leads"])
+        assert cov._count_groups(auth) == 2
+
+    def test_an_ungranted_group_scope_is_unprobed_not_absent(self):
+        """Sending an operator to seed groups when the real fix is a scope
+        grant is the same mistake _count_contacts already guards against."""
+        auth = self._Auth(group_error=True)
+        assert cov._count_groups(auth) is None
+
+    def test_pop_and_imap_fold_into_one_scope_row_without_masking(self):
+        """One probe failing (old client, no getImap) must not hide the
+        other succeeding at a real zero."""
+        assert cov._none_if_both_unmeasured(
+            {"pop_enabled": 0, "imap_enabled": None}, "pop_enabled", "imap_enabled") == 0
+        assert cov._none_if_both_unmeasured(
+            {"pop_enabled": None, "imap_enabled": None},
+            "pop_enabled", "imap_enabled") is None

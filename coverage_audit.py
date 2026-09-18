@@ -130,7 +130,34 @@ PROBES = {
         lambda t: t.get("contacts", 0),
     "Google Tasks":
         lambda t: t.get("tasks", 0),
+
+    # -- gmail settings (92b82a9) ---------------------------------------
+    # Migrated since that commit but never counted here until now, so a
+    # green migration could not tell you whether any of this ever existed
+    # on the source -- exactly the gap this module exists to close.
+    "Vacation responder":
+        lambda t: t.get("vacation_responders"),
+    "POP / IMAP settings":
+        lambda t: _none_if_both_unmeasured(t, "pop_enabled", "imap_enabled"),
+    "Delegates and forwarding addresses":
+        lambda t: _none_if_both_unmeasured(t, "delegates", "forwarding_addresses"),
+
+    # -- identity -------------------------------------------------------
+    "Groups and group membership":
+        lambda t: t.get("groups"),
 }
+
+
+def _none_if_both_unmeasured(t: dict, *keys: str) -> int | None:
+    """Two independently-fallible probes folded into one scope row.
+
+    UNPROBED only when NEITHER answered -- one real zero (settings scope
+    granted, feature just off) must not be masked by the other probe
+    failing on an older client that lacks it.
+    """
+    if all(t.get(k) is None for k in keys):
+        return None
+    return sum(t.get(k) or 0 for k in keys)
 
 
 # ======================================================================
@@ -231,6 +258,67 @@ def _count_tasks(auth: AuthManager, user: str) -> int | None:
         return None
 
 
+# -- gmail settings (92b82a9 migrated these; nothing ever counted them) ----
+# Each is independent: an older googleapiclient discovery doc missing one
+# method (AttributeError) is exactly as "could not measure" as a scope that
+# was never granted (HttpError) -- both mean UNPROBED, not zero.
+def _count_vacation_enabled(auth: AuthManager, user: str) -> int | None:
+    try:
+        v = auth.source_gmail(user).users().settings().getVacation(
+            userId="me").execute()
+        return 1 if v.get("enableAutoReply") else 0
+    except Exception:      # noqa: BLE001
+        return None
+
+
+def _count_pop_enabled(auth: AuthManager, user: str) -> int | None:
+    try:
+        p = auth.source_gmail(user).users().settings().getPop(
+            userId="me").execute()
+        return 0 if p.get("accessWindow", "disabled") == "disabled" else 1
+    except Exception:      # noqa: BLE001
+        return None
+
+
+def _count_imap_enabled(auth: AuthManager, user: str) -> int | None:
+    try:
+        i = auth.source_gmail(user).users().settings().getImap(
+            userId="me").execute()
+        return 1 if i.get("enabled") else 0
+    except Exception:      # noqa: BLE001
+        return None
+
+
+def _count_delegates(auth: AuthManager, user: str) -> int | None:
+    try:
+        d = auth.source_gmail(user).users().settings().delegates().list(
+            userId="me").execute()
+        return len(d.get("delegates", []))
+    except Exception:      # noqa: BLE001
+        return None
+
+
+def _count_forwarding_addresses(auth: AuthManager, user: str) -> int | None:
+    try:
+        f = auth.source_gmail(user).users().settings() \
+            .forwardingAddresses().list(userId="me").execute()
+        return len(f.get("forwardingAddresses", []))
+    except Exception:      # noqa: BLE001
+        return None
+
+
+def _count_groups(auth: AuthManager) -> int | None:
+    """Tenant-level, like shared drives: every member's directory sees the
+    same groups, so this is one call, not a per-user sum."""
+    try:
+        groups = auth.source_directory().groups().list(
+            domain=auth.settings.source_domain, maxResults=200
+        ).execute().get("groups", [])
+        return len(groups)
+    except Exception:      # noqa: BLE001
+        return None
+
+
 def collect(auth: AuthManager, settings: Settings, users: list[str]) -> dict:
     """Merge per-user counts into one tenant-wide total."""
     totals: dict = {
@@ -249,6 +337,12 @@ def collect(auth: AuthManager, settings: Settings, users: list[str]) -> dict:
         # None until something actually counts it. Chat is only scanned when
         # MIGRATE_CHAT is on, and "off" means unmeasured, not empty.
         "chat": None,
+        "vacation_responders": None,
+        "pop_enabled": None,
+        "imap_enabled": None,
+        "delegates": None,
+        "forwarding_addresses": None,
+        "groups": None,
         "perUser": {},
         "errors": {},
         # Recorded so the report can tell "there are none" apart from "there
@@ -293,12 +387,23 @@ def collect(auth: AuthManager, settings: Settings, users: list[str]) -> dict:
         totals["_shared_drive_ids"] |= _shared_drive_ids(auth, settings, user)
         totals["external_shared_with_me"] += _count_external_shared_with_me(
             auth, settings, user)
-        for key, fn in (("contacts", _count_contacts), ("tasks", _count_tasks)):
+        for key, fn in (
+            ("contacts", _count_contacts), ("tasks", _count_tasks),
+            ("vacation_responders", _count_vacation_enabled),
+            ("pop_enabled", _count_pop_enabled),
+            ("imap_enabled", _count_imap_enabled),
+            ("delegates", _count_delegates),
+            ("forwarding_addresses", _count_forwarding_addresses),
+        ):
             n = fn(auth, user)
             if n is not None:
                 totals[key] = (totals[key] or 0) + n
 
         totals["perUser"][user] = row
+
+    # Tenant-level, like shared drives -- every member's directory sees the
+    # same groups, so one call rather than a per-user sum.
+    totals["groups"] = _count_groups(auth)
 
     # Collapse the deduplicated set into the count the probes read. A set is
     # also not JSON-serialisable, so it must not survive into --json output.

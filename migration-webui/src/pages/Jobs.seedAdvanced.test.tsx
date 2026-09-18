@@ -128,7 +128,7 @@ describe('the advanced options reach runSeed', () => {
     fireEvent.click(screen.getByTestId('seed-svc-chat'))   // uncheck chat
     fireEvent.click(screen.getByTestId('seed-svc-tasks'))  // uncheck tasks
     const opts = await seed()
-    expect(opts.only).toBe('drive,gmail,calendar,contacts')
+    expect(opts.only).toBe('drive,gmail,calendar,contacts,gmail_settings')
   })
 
   it('omits only when every service stays selected', async () => {

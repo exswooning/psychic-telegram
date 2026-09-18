@@ -25,7 +25,13 @@ import { runSeed } from '@/api/client'
  *  list and refuses anything else by name, so a drift here is a rejected
  *  request rather than a job that starts and dies. */
 export const SERVICES = ['drive', 'gmail', 'calendar', 'chat',
-                         'contacts', 'tasks'] as const
+                         'contacts', 'tasks', 'gmail_settings'] as const
+
+/** Cosmetic only -- the value sent to the API is always the raw SEEDABLE
+ *  string. Anything not named here just renders as-is. */
+const LABELS: Partial<Record<typeof SERVICES[number], string>> = {
+  gmail_settings: 'Gmail settings (vacation, POP/IMAP, delegates, forwarding)',
+}
 
 export const SeedOneService: React.FC<{
   domain: string
@@ -86,7 +92,7 @@ export const SeedOneService: React.FC<{
                        onChange={(e) => setService(e.target.value)}
                        inputProps={{ 'data-testid': 'seed-one-service' }}>
               {SERVICES.map((s) => (
-                <MenuItem key={s} value={s}>{s}</MenuItem>
+                <MenuItem key={s} value={s}>{LABELS[s] ?? s}</MenuItem>
               ))}
             </TextField>
             {service === 'drive' && (

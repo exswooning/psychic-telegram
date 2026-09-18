@@ -11,6 +11,11 @@ Every gap here was measured against the real tool, not imagined:
   cross-references  A Doc linking to a Sheet rots like a link in mail, and
                     nothing rewrites it. With no seeded example that was an
                     argument rather than a finding.
+  gmail settings    Vacation, POP/IMAP, delegates and forwarding addresses
+                    have been migrated since 92b82a9, and coverage_audit.py
+                    reported all four UNPROBED because nothing on the source
+                    ever had any -- the exact "green run proves nothing"
+                    failure this module exists to catch.
 """
 import os
 import sys
@@ -199,3 +204,82 @@ class TestMemberFailuresAreNotSwallowed:
         monkeypatch.setattr(seed.time, "sleep", lambda *_: None)
         m = seed.seed_groups(_Dup(), seed.Settings(), ["a@x.test"], "e@e.test")
         assert m["member_failures"] == 0
+
+
+class _FakeSettings:
+    """One switch per method: `fail` names which calls 403, everything else
+    succeeds -- the same shape gmail_engine.py's own OPTIONAL_PASS_ERRORS
+    handling assumes (one setting failing must not take the others down)."""
+    def __init__(self, fail=()):
+        self.fail = set(fail)
+        self.calls = []
+
+    def _ok_or_raise(self, name, **kw):
+        self.calls.append((name, kw))
+        if name in self.fail:
+            raise RuntimeError(f"403 insufficientPermissions: {name}")
+        return type("R", (), {"execute": lambda s=None: {}})()
+
+    def updateVacation(self, userId, body): return self._ok_or_raise("vacation", body=body)
+    def updatePop(self, userId, body): return self._ok_or_raise("pop", body=body)
+    def updateImap(self, userId, body): return self._ok_or_raise("imap", body=body)
+    def forwardingAddresses(self): return self
+    def delegates(self): return self
+    def create(self, userId, body):
+        # forwardingAddresses().create and delegates().create share this
+        # name; the body shape tells them apart.
+        name = "forwarding" if "forwardingEmail" in body else "delegate"
+        return self._ok_or_raise(name, body=body)
+
+
+class _FakeGmail:
+    def __init__(self, fail=()):
+        self._settings = _FakeSettings(fail)
+    def users(self): return self
+    def settings(self): return self._settings
+
+
+class TestGmailSettingsAreSeeded:
+    def test_every_setting_is_attempted_and_counted(self):
+        gmail = _FakeGmail()
+        m = seed.seed_gmail_settings(gmail, seed.Settings(), "a@x.test",
+                                     ["b@x.test", "c@x.test"])
+        assert m["vacation"] == m["pop"] == m["imap"] == 1
+        assert m["forwarding_addresses"] == 1
+        assert m["delegates"] == 1
+        assert m["note"] == ""
+
+    def test_no_grant_skips_everything_without_touching_the_run(self):
+        """build_gmail_settings() returns None when the DWD grant is
+        missing -- the same contract build_gmail_purge() already has."""
+        m = seed.seed_gmail_settings(None, seed.Settings(), "a@x.test",
+                                     ["b@x.test"])
+        assert m["vacation"] == m["pop"] == m["imap"] == 0
+        assert m["forwarding_addresses"] == m["delegates"] == 0
+        assert "not granted" in m["note"]
+
+    def test_one_failing_setting_does_not_take_out_the_others(self):
+        """The exact robustness property 92b82a9's own commit message
+        names: each setting is independent and best-effort."""
+        gmail = _FakeGmail(fail={"delegate"})
+        m = seed.seed_gmail_settings(gmail, seed.Settings(), "a@x.test",
+                                     ["b@x.test", "c@x.test"])
+        assert m["vacation"] == m["pop"] == m["imap"] == 1
+        assert m["forwarding_addresses"] == 1
+        assert m["delegates"] == 0
+        assert "delegate" in m["note"]
+
+    def test_no_peers_still_seeds_the_solo_settings(self):
+        """A one-user run (--users alice) has nobody to forward to or
+        delegate to -- vacation/pop/imap must not be held hostage by that."""
+        gmail = _FakeGmail()
+        m = seed.seed_gmail_settings(gmail, seed.Settings(), "a@x.test", [])
+        assert m["vacation"] == m["pop"] == m["imap"] == 1
+        assert m["forwarding_addresses"] == 0
+        assert m["delegates"] == 0
+
+    def test_gmail_settings_is_a_selectable_only_service(self):
+        """The whole point of adding it to SEEDABLE rather than a top-level
+        flag like --groups: `--only gmail_settings` backfills this on an
+        already-seeded tenant without re-seeding a single file or message."""
+        assert "gmail_settings" in seed.SEEDABLE

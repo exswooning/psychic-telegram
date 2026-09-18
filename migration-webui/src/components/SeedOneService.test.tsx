@@ -89,7 +89,8 @@ describe('it seeds only what was asked for', () => {
 
   it('offers every service the seeder actually writes', () => {
     expect([...SERVICES]).toEqual(
-      ['drive', 'gmail', 'calendar', 'chat', 'contacts', 'tasks'])
+      ['drive', 'gmail', 'calendar', 'chat', 'contacts', 'tasks',
+       'gmail_settings'])
   })
 })
 

@@ -211,13 +211,21 @@ GMAIL_SCOPE = [
               "it can be used, which a migration cannot do on their behalf. "
               "Recreate aliases in the target tenant, then re-run with "
               "MIGRATE_GMAIL_SETTINGS=true to attach their signatures"),
-    ScopeItem("gmail", "Vacation responder", NONE,
-              "settings.vacation pass not implemented; the scope it needs "
-              "(gmail.settings.basic) is already covered by "
-              "MIGRATE_GMAIL_SETTINGS if this is added later"),
-    ScopeItem("gmail", "Delegates and forwarding addresses", NONE,
-              "Must be reconfigured in the target tenant"),
-    ScopeItem("gmail", "POP / IMAP settings", NONE, "Not implemented"),
+    ScopeItem("gmail", "Vacation responder", FULL,
+              "Migrated when MIGRATE_GMAIL_SETTINGS=true, including its "
+              "schedule. Off is the default on a new mailbox, so a "
+              "responder that was never enabled copies nothing"),
+    ScopeItem("gmail", "Delegates and forwarding addresses", PARTIAL,
+              "Migrated when MIGRATE_GMAIL_SETTINGS=true. Delegate addresses "
+              "go through the same identity map as signatures; one with no "
+              "target mapping is dropped and counted rather than invented. "
+              "Forwarding addresses are recreated but arrive UNVERIFIED by "
+              "Google's own design — auto-forwarding to one only turns on "
+              "target-side once the target confirms it, which a migration "
+              "cannot do on the owner's behalf. Needs gmail.settings.sharing "
+              "for delegates specifically, on both tenants"),
+    ScopeItem("gmail", "POP / IMAP settings", FULL,
+              "Migrated verbatim when MIGRATE_GMAIL_SETTINGS=true"),
 ]
 
 # ======================================================================

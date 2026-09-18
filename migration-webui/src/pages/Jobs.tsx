@@ -38,7 +38,10 @@ import { formatPct } from '@/utils/formatPct'
 import DomainSandboxToggle from '@/components/DomainSandboxToggle'
 
 const SEED_SCALES = ['tiny', 'small', 'medium', 'large', 'huge']
-const SEEDABLE_SERVICES = ['drive', 'gmail', 'calendar', 'chat', 'contacts', 'tasks']
+const SEEDABLE_SERVICES = ['drive', 'gmail', 'calendar', 'chat', 'contacts',
+                          'tasks', 'gmail_settings']
+// Cosmetic only -- the value sent to --only is always the raw name above.
+const SERVICE_LABELS: Record<string, string> = { gmail_settings: 'gmail settings' }
 // main.py migrate --services help text is the source of truth: "drive,
 // gmail,calendar,chat,contacts,tasks -- or 'all' for every per-user
 // service." CLI default is drive,gmail,calendar.
@@ -957,7 +960,7 @@ const SeedPanel: React.FC<{ domain: string; onStarted: () => void }> = ({ domain
                   control={<Checkbox size="small" checked={services[svc]}
                     onChange={(e) => setServices((s) => ({ ...s, [svc]: e.target.checked }))}
                     inputProps={{ 'data-testid': `seed-svc-${svc}` } as never} />}
-                  label={<Typography variant="body2">{svc}</Typography>} />
+                  label={<Typography variant="body2">{SERVICE_LABELS[svc] ?? svc}</Typography>} />
               ))}
             </FormGroup>
           </Box>
