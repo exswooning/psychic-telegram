@@ -240,12 +240,17 @@ if "${SSH[@]}" "$TARGET" "systemctl list-unit-files bitport-webui.service >/dev/
   # Warn, never block -- same reasoning as the dirty-tree warning above: a
   # fix that cannot wait is a legitimate thing to ship anyway. This is
   # what makes that a CHOICE instead of an accident.
-  RUNNING_SETUP="$("${SSH[@]}" "$TARGET" "ps -eo args= | grep -F 'full_setup.py' | grep -v grep" 2>/dev/null || true)"
+  # seed_sandbox.py is at least as exposed as full_setup.py, and possibly
+  # more: webui.py's own Job launcher does not even pass
+  # start_new_session=True (full_setup.py's does), so a seed/reset child
+  # sits in the SAME process group as api_server.py/webui.py and has no
+  # protection of its own from a restart at all.
+  RUNNING_SETUP="$("${SSH[@]}" "$TARGET" "ps -eo args= | grep -E 'full_setup\.py|seed_sandbox\.py' | grep -v grep" 2>/dev/null || true)"
   if [[ -n "$RUNNING_SETUP" ]]; then
-    echo "  WARNING: a full_setup.py run is IN PROGRESS on the target -- this" >&2
-    echo "           restart will kill it (gcloud/DWD automation does not" >&2
-    echo "           survive bitport-api restarting). It will show as" >&2
-    echo "           \"interrupted\" and need a full re-run, not a resume." >&2
+    echo "  WARNING: a full_setup.py or seed_sandbox.py run is IN PROGRESS on" >&2
+    echo "           the target -- this restart will kill it (neither" >&2
+    echo "           survives bitport-webui/bitport-api restarting). It will" >&2
+    echo "           need a full re-run, not a resume." >&2
     echo "$RUNNING_SETUP" | sed 's/^/           /' >&2
   fi
 

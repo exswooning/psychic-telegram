@@ -121,10 +121,19 @@ class TestItWarnsBeforeKillingAnInProgressSetup:
     def test_it_checks_for_a_live_run_before_restarting(self):
         src = _src()
         assert "full_setup.py" in src
+        assert "seed_sandbox.py" in src
         assert src.index("RUNNING_SETUP=") < src.index("systemctl restart bitport-webui bitport-api")
 
+    def test_it_covers_seed_jobs_too(self):
+        """webui.py's own Job launcher does not pass start_new_session=True
+        (full_setup.py's does) -- a seed/reset child sits in the SAME
+        process group as api_server.py/webui.py and has no protection of
+        its own from a restart. At least as exposed, not less."""
+        assert re.search(r"full_setup\\?\.py\|seed_sandbox\\?\.py", _src())
+
     def test_it_warns_rather_than_silently_restarting(self):
-        assert re.search(r"WARNING: a full_setup\.py run is IN PROGRESS", _src())
+        assert re.search(r"WARNING: a full_setup\.py or seed_sandbox\.py run "
+                         r"is IN PROGRESS", _src())
 
     def test_it_goes_to_stderr(self):
         for line in _src().splitlines():

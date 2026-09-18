@@ -158,6 +158,25 @@ class TestCreateUntilFull:
         assert pulled == ["ok1@x.com", "blocked@x.com"]
         assert res["stopped_reason"]
 
+    def test_progress_is_printed_live_not_only_logged(self, capsys):
+        """This runs as a webui.py Job subprocess, whose live view is built
+        entirely from captured STDOUT -- nothing here ever configures a
+        logging handler, so log.info() at the default level is silently
+        dropped, not merely quiet. Confirmed live: a create-until-full run
+        showed its opening line and then nothing else for the whole phase,
+        however long it took, while accounts were genuinely being created
+        underneath it."""
+        d = FakeDirectory()
+        provision.create_until_full(d, iter(["a@x.com", "b@x.com"]))
+        out = capsys.readouterr().out
+        assert "a@x.com" in out
+        assert "b@x.com" in out
+
+    def test_a_stop_is_printed_too(self, capsys):
+        d = FakeDirectory(fail_on="blocked")
+        provision.create_until_full(d, iter(["ok1@x.com", "blocked@x.com"]))
+        assert "blocked@x.com" in capsys.readouterr().out
+
     def test_existing_accounts_are_recorded_not_recreated(self):
         d = FakeDirectory(existing=["alice@x.com"])
         res = provision.create_until_full(d, iter(["alice@x.com", "bob@x.com"]))

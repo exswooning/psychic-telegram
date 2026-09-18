@@ -253,10 +253,22 @@ def create_until_full(directory, candidates, dry_run: bool = False,
                 lambda: directory.users().insert(body=body).execute(),
                 max_retries, retry_delay, sleep)
             result["created"].append(email)
-            log.info("create_until_full: created %s", email)
+            # print(), not log.info(): this runs as a webui.py Job
+            # subprocess, whose live view is built entirely from captured
+            # STDOUT (see Job.snapshot()/_job_progress()) -- nothing here
+            # ever configures a logging handler, so log.info() at the
+            # default level is silently dropped, not merely quiet. Confirmed
+            # live: a create-until-full run showed its opening line and then
+            # nothing else for the rest of the phase, however long it took,
+            # while accounts were genuinely being created underneath it.
+            # A running count, not a percentage -- the whole point of this
+            # function is that the total is NOT known in advance (see the
+            # module docstring above); a fabricated denominator would be
+            # exactly the thing this design avoids.
+            print(f"  created {len(result['created'])}: {email}")
         except HttpError as exc:
             result["stopped_reason"] = str(exc)
-            log.info("create_until_full: stopped at %s: %s", email, exc)
+            print(f"  stopped at {email}: {exc}")
             break
     else:
         result["stopped_reason"] = "ran out of candidate names before hitting a limit"
