@@ -10,6 +10,7 @@ import {
   ActionSpec, StatusPayload, DwdPayload,
 } from '@/api/client'
 import { SERVICES as SEEDABLE } from '@/components/SeedOneService'
+import DomainSandboxToggle from '@/components/DomainSandboxToggle'
 import JobRunner from '@/components/JobRunner'
 import JobProgress from '@/components/JobProgress'
 import CloudSetup from '@/components/CloudSetup'
@@ -151,7 +152,7 @@ const SeedWizard: React.FC<{
               <Typography variant="h6" sx={{ fontWeight: 600, mb: 1.5 }}>
                 Reset the target tenant
               </Typography>
-              <ResetTargetStep />
+              <ResetTargetStep domain={status?.env?.TARGET_DOMAIN} />
             </CardContent>
           </Card>
         </>
@@ -239,7 +240,7 @@ const SeedWizard: React.FC<{
           <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>
             <CardContent sx={{ p: 3 }}>
               <Typography variant="h6" sx={{ fontWeight: 600, mb: 1.5 }}>Reset the target tenant</Typography>
-              <ResetTargetStep />
+              <ResetTargetStep domain={status?.env?.TARGET_DOMAIN} />
             </CardContent>
           </Card>
         </>
@@ -434,6 +435,7 @@ const SeedStep: React.FC<{ domain?: string }> = ({ domain }) => {
 
   return (
     <Box>
+      {domain && <DomainSandboxToggle domain={domain} />}
       <Alert severity="warning" sx={{ mb: 2 }}>
         Writes fabricated data into the SOURCE tenant. Type the domain back to
         confirm -- this is the only thing that gates it.
@@ -603,7 +605,7 @@ const SeedStep: React.FC<{ domain?: string }> = ({ domain }) => {
  * re-checks it before building the command, and reset_target.py's own guard
  * checks a third time regardless.
  */
-const ResetTargetStep: React.FC = () => {
+const ResetTargetStep: React.FC<{ domain?: string }> = ({ domain }) => {
   const [confirmDomain, setConfirmDomain] = useState('')
   const [err, setErr] = useState<string | null>(null)
   const [queued, setQueued] = useState<string | null>(null)
@@ -625,6 +627,7 @@ const ResetTargetStep: React.FC = () => {
 
   return (
     <Box>
+      {domain && <DomainSandboxToggle domain={domain} />}
       <Alert severity="error" sx={{ mb: 2 }}>
         Empties the TARGET tenant's seeded Drive/Gmail/Calendar/Chat data --
         not the ledger, and never the source. Do this before a clean re-test,

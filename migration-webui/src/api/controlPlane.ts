@@ -1079,6 +1079,39 @@ export type LinkEnd = {
   supersededId?: number
 }
 
+export interface DomainGuardStatus {
+  domain: string
+  protected: boolean
+  revokedBy?: string | null
+  revokedReason?: string | null
+  revokedAt?: string | null
+}
+
+/** Is this domain protected from the seeder/reset tooling, and if not, who
+ *  turned that off and why. Every domain a setup wizard has ever configured
+ *  is protected the moment it is, so this is what decides whether "declare
+ *  a sandbox" is offered at all. */
+export const fetchDomainGuardStatus = (domain: string) =>
+  cpFetch<DomainGuardStatus>(
+    `/api/v2/domain-guard/status?domain=${encodeURIComponent(domain)}`)
+
+/** Turns a protected domain into one the seeder and reset/wipe tooling may
+ *  empty or overwrite. Superadmin-only, typed-domain gated like every other
+ *  action that can do the same thing to a tenant. */
+export const revokeDomainGuard = (domain: string, reason: string) =>
+  cpFetch<ActionResult>('/api/v2/domain-guard/revoke', {
+    method: 'POST',
+    body: JSON.stringify({ domain, confirm_domain: domain, reason }),
+  })
+
+/** Puts a domain back under protection -- the safe direction, no typed
+ *  confirm needed. */
+export const restoreDomainGuard = (domain: string, reason: string) =>
+  cpFetch<ActionResult>('/api/v2/domain-guard/restore', {
+    method: 'POST',
+    body: JSON.stringify({ domain, reason }),
+  })
+
 export const linkDomains = (reason: string, source: LinkEnd, target: LinkEnd) =>
   cpFetch<{ ok: boolean; detail: string }>('/api/v2/setup/link-domains', {
     method: 'POST',

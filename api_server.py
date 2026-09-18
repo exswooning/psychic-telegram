@@ -4645,6 +4645,88 @@ class LinkDomains(WriteAction):
     target_superseded_id: int | None = None
 
 
+class DomainGuardRevoke(WriteAction):
+    domain: str
+    # The same "type it back" gate every other action that can empty or
+    # write fabricated data into a tenant already uses (see StartMigration's
+    # confirm_domain). Turning OFF the one thing standing between a typo
+    # and a client's tenant deserves the identical friction as the actions
+    # it unblocks -- a reason field alone is a text box, not a gate.
+    confirm_domain: str = Field(description="must match domain")
+
+
+class DomainGuardRestore(WriteAction):
+    domain: str
+
+
+@app.get("/api/v2/domain-guard/status")
+async def domain_guard_status(domain: str, op: Operator = Depends(operator)):
+    """Is this domain protected, and if not, who turned that off and why.
+
+    Read-only and available to any signed-in caller (require_login, not
+    require_superadmin) -- it names no secret, and the seed/reset forms
+    need it to decide whether to offer "declare a sandbox" at all. Only
+    the write side (revoke/restore) is superadmin-gated.
+    """
+    require_login(op)
+
+    def _read() -> dict:
+        import domain_guard
+        d = domain.strip().lower()
+        protected = domain_guard.is_protected(d)
+        rec = domain_guard.revocations().get(d)
+        return {
+            "domain": d, "protected": protected,
+            "revokedBy": (rec or {}).get("by"),
+            "revokedReason": (rec or {}).get("reason"),
+            "revokedAt": (rec or {}).get("at"),
+        }
+    return await _off_loop(_read)
+
+
+@app.post("/api/v2/domain-guard/revoke")
+async def domain_guard_revoke(body: DomainGuardRevoke,
+                              op: Operator = Depends(operator)):
+    """Declare a domain a sandbox: the seeder and reset/wipe tooling may
+    empty or overwrite it from here on.
+
+    This is the ONE control that turns a client tenant into something the
+    seeding and reset tooling is allowed to destroy, so it gets everything
+    the destructive actions it unblocks already get -- a typed-domain
+    match, a required reason, and the same audit trail (_gated) -- plus
+    domain_guard's own on-the-record revocation, which the startup banner
+    reads back every boot so a forgotten revocation cannot stay silent.
+    """
+    domain = body.domain.strip().lower()
+    if body.confirm_domain.strip().lower() != domain:
+        raise HTTPException(
+            400, f"typed {body.confirm_domain!r} does not match {domain!r}")
+
+    def _revoke() -> tuple[bool, str]:
+        import domain_guard
+        rec = domain_guard.revoke(domain, op.name, body.reason)
+        return True, f"protection off since {rec['at']}"
+    return await _gated(op, "domain_guard.revoke", body, domain, _revoke,
+                        extra_check=require_superadmin)
+
+
+@app.post("/api/v2/domain-guard/restore")
+async def domain_guard_restore(body: DomainGuardRestore,
+                               op: Operator = Depends(operator)):
+    """Put a domain back under protection. No typed-confirm gate -- this is
+    the SAFE direction, the one that stops something being destroyed rather
+    than the one that allows it."""
+    domain = body.domain.strip().lower()
+
+    def _restore() -> tuple[bool, str]:
+        import domain_guard
+        was_off = domain_guard.restore(domain)
+        return True, ("protection restored" if was_off
+                      else "was already protected")
+    return await _gated(op, "domain_guard.restore", body, domain, _restore,
+                        extra_check=require_superadmin)
+
+
 @app.post("/api/v2/setup/link-domains")
 async def link_domains(body: LinkDomains, op: Operator = Depends(operator)):
     """Form a migration pair from two ALREADY-configured domains, reusing

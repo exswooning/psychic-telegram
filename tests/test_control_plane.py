@@ -3090,3 +3090,105 @@ class TestSignupIsClosedOnceThereIsAnAccount:
                     json={"email": "selfserve2@example.com",
                           "password": "hunter22222", "name": "Two"})
         assert r.status_code == 200, r.text
+
+
+class TestDomainGuardControls:
+    """The ONLY way to seed or reset a protected domain used to be SSH and
+    `python domain_guard.py --revoke`. These endpoints back the web toggle
+    that replaces it -- superadmin-gated and typed-domain confirmed like
+    every other action that can empty or overwrite a tenant."""
+
+    def _boss(self, cp, email="guardboss@example.com"):
+        import accounts_auth
+        cp.post("/api/v2/auth/signup",
+                json={"email": email, "password": "hunter22222", "name": "Boss"})
+        accounts_auth.promote_to_superadmin(email)
+
+    def _configure(self, monkeypatch, tmp_path, domain):
+        import domain_guard
+        monkeypatch.setattr(domain_guard, "HERE", str(tmp_path))
+        monkeypatch.setattr(domain_guard, "REVOCATIONS_PATH",
+                            str(tmp_path / "unprotected.json"))
+        monkeypatch.setattr(domain_guard, "configured_domains",
+                            lambda: {domain})
+        monkeypatch.setattr(domain_guard, "env_domains", lambda: set())
+
+    def test_status_reports_a_freshly_configured_domain_as_protected(
+            self, cp, monkeypatch, tmp_path):
+        self._boss(cp)
+        self._configure(monkeypatch, tmp_path, "client.example")
+        r = cp.get("/api/v2/domain-guard/status?domain=client.example",
+                   headers=ADMIN)
+        assert r.status_code == 200
+        assert r.json()["protected"] is True
+        assert r.json()["revokedBy"] is None
+
+    def test_a_regular_account_cannot_revoke_protection(self, cp, monkeypatch,
+                                                        tmp_path):
+        import accounts_auth
+        cp.post("/api/v2/auth/signup",
+                json={"email": "notboss@example.com", "password": "hunter22222",
+                      "name": "Not Boss"})
+        self._configure(monkeypatch, tmp_path, "client.example")
+        r = cp.post("/api/v2/domain-guard/revoke", headers=ADMIN, json={
+            "reason": "trying anyway", "domain": "client.example",
+            "confirm_domain": "client.example"})
+        # _gated reports a refused gate as a 403, matching every other
+        # superadmin-only write here (see admin.set_subscription).
+        assert r.status_code == 403
+
+    def test_a_mistyped_confirmation_is_refused_before_anything_runs(
+            self, cp, monkeypatch, tmp_path):
+        self._boss(cp)
+        self._configure(monkeypatch, tmp_path, "client.example")
+        r = cp.post("/api/v2/domain-guard/revoke", headers=ADMIN, json={
+            "reason": "rehearsal", "domain": "client.example",
+            "confirm_domain": "clientt.example"})
+        assert r.status_code == 400
+
+    def test_a_superadmin_can_declare_a_sandbox_and_it_takes(
+            self, cp, monkeypatch, tmp_path):
+        import domain_guard
+        self._boss(cp)
+        self._configure(monkeypatch, tmp_path, "client.example")
+        r = cp.post("/api/v2/domain-guard/revoke", headers=ADMIN, json={
+            "reason": "rehearsal tenant, never real data",
+            "domain": "client.example", "confirm_domain": "client.example"})
+        assert r.status_code == 200, r.text
+        assert r.json()["ok"] is True
+        assert domain_guard.is_protected("client.example") is False
+
+        status = cp.get("/api/v2/domain-guard/status?domain=client.example",
+                        headers=ADMIN).json()
+        assert status["protected"] is False
+        # op.name, not the bare email -- "Name <email>", same as every
+        # other actor recorded through _gated.
+        assert "guardboss@example.com" in status["revokedBy"]
+        assert status["revokedReason"] == "rehearsal tenant, never real data"
+
+    def test_restoring_needs_no_typed_confirm(self, cp, monkeypatch, tmp_path):
+        import domain_guard
+        self._boss(cp)
+        self._configure(monkeypatch, tmp_path, "client.example")
+        domain_guard.revoke("client.example", "someone", "prior rehearsal")
+        assert domain_guard.is_protected("client.example") is False
+
+        r = cp.post("/api/v2/domain-guard/restore", headers=ADMIN, json={
+            "reason": "done rehearsing", "domain": "client.example"})
+        assert r.status_code == 200, r.text
+        assert r.json()["ok"] is True
+        assert domain_guard.is_protected("client.example") is True
+
+    def test_a_seed_attempt_on_a_declared_sandbox_is_no_longer_refused(
+            self, cp, monkeypatch, tmp_path):
+        """The point of the whole control: revoke through the API, and the
+        gate seed/reset already pass through sees it lifted."""
+        import domain_guard
+        self._boss(cp)
+        self._configure(monkeypatch, tmp_path, "client.example")
+        assert domain_guard.refuse_reason("client.example", "Seeding")
+
+        cp.post("/api/v2/domain-guard/revoke", headers=ADMIN, json={
+            "reason": "rehearsal tenant", "domain": "client.example",
+            "confirm_domain": "client.example"})
+        assert domain_guard.refuse_reason("client.example", "Seeding") == ""
