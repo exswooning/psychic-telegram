@@ -225,6 +225,30 @@ if "${SSH[@]}" "$TARGET" "systemctl list-unit-files bitport-webui.service >/dev/
   # every time rather than once, because "once" is only true until the next
   # deploy.
   "${SSH[@]}" "$TARGET" "cd '$DEST' && [ -f harden.sh ] && bash harden.sh '$DEST' >/dev/null 2>&1 || true"
+
+  # Warn before the restart that is about to kill it, not just clean up the
+  # wreckage after. api_server.py's own _reconcile_full_setup_state() already
+  # explains the mechanism: full_setup.py drives a real browser through a
+  # 15+ minute gcloud/DWD flow, and restarting bitport-api kills it mid-run
+  # -- KillMode=process does not save it, because a run interrupted at the
+  # gcloud phase is not "genuinely still working" in the sense that
+  # survives its parent restarting. Confirmed live, more than once: a
+  # deploy shipped mid-run, the operator's Quick Setup died silently at
+  # whatever phase it was in, and the only trace was a stale progress file
+  # someone had to notice and go diagnose from scratch.
+  #
+  # Warn, never block -- same reasoning as the dirty-tree warning above: a
+  # fix that cannot wait is a legitimate thing to ship anyway. This is
+  # what makes that a CHOICE instead of an accident.
+  RUNNING_SETUP="$("${SSH[@]}" "$TARGET" "ps -eo args= | grep -F 'full_setup.py' | grep -v grep" 2>/dev/null || true)"
+  if [[ -n "$RUNNING_SETUP" ]]; then
+    echo "  WARNING: a full_setup.py run is IN PROGRESS on the target -- this" >&2
+    echo "           restart will kill it (gcloud/DWD automation does not" >&2
+    echo "           survive bitport-api restarting). It will show as" >&2
+    echo "           \"interrupted\" and need a full re-run, not a resume." >&2
+    echo "$RUNNING_SETUP" | sed 's/^/           /' >&2
+  fi
+
   "${SSH[@]}" "$TARGET" "systemctl restart bitport-webui bitport-api; \
     systemctl restart bitport-fleet 2>/dev/null || true; sleep 2; \
     if systemctl is-active --quiet bitport-webui && systemctl is-active --quiet bitport-api; then \

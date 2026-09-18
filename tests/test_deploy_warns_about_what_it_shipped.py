@@ -108,3 +108,33 @@ class TestTheVenvStaysInStepWithRequirements:
 
     def test_it_survives_a_repo_with_no_requirements_file(self):
         assert 'if [[ -f "$(dirname "$0")/requirements.txt" ]]; then' in _src()
+
+
+class TestItWarnsBeforeKillingAnInProgressSetup:
+    """api_server.py's own _reconcile_full_setup_state() already documents
+    the mechanism: restarting bitport-api kills a full_setup.py run mid-
+    flight, KillMode=process does not save it, and the only prior trace was
+    a stale progress file someone had to notice and diagnose from scratch.
+    Confirmed live, more than once, in one session: a deploy shipped while
+    a 15+ minute gcloud/DWD run was in progress and killed it silently."""
+
+    def test_it_checks_for_a_live_run_before_restarting(self):
+        src = _src()
+        assert "full_setup.py" in src
+        assert src.index("RUNNING_SETUP=") < src.index("systemctl restart bitport-webui bitport-api")
+
+    def test_it_warns_rather_than_silently_restarting(self):
+        assert re.search(r"WARNING: a full_setup\.py run is IN PROGRESS", _src())
+
+    def test_it_goes_to_stderr(self):
+        for line in _src().splitlines():
+            if "IN PROGRESS on the target" in line:
+                assert ">&2" in line
+
+    def test_it_does_not_block_the_restart(self):
+        """Same reasoning as the dirty-tree warning: a fix that cannot wait
+        is a legitimate thing to ship anyway. This makes it a choice, not
+        an accident -- not a gate."""
+        block = _src().split("RUNNING_SETUP=", 1)[-1][:900]
+        assert "exit 1" not in block
+        assert "systemctl restart bitport-webui bitport-api" in block
