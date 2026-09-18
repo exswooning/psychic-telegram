@@ -576,6 +576,10 @@ const Wizard: React.FC = () => {
           </Box>
         ) : null}
 
+        {/* No narration -- see QuickTenantSetup.tsx's own comment on
+            this: the bar and percentage already say a real job is
+            running, and full_setup.py's step-by-step sentences added
+            noise no decision depends on. */}
         {(autoBusy || setup?.running) && (
           <Box sx={{ mt: 3 }} data-testid="setup-progress">
             {typeof setup?.progressPct === 'number' ? (
@@ -583,10 +587,7 @@ const Wizard: React.FC = () => {
             ) : (
               <LinearProgress />
             )}
-            <Stack direction="row" justifyContent="space-between" sx={{ mt: 0.75 }}>
-              <Typography variant="body2" color="text.secondary">
-                {setup?.progressLabel || 'starting…'}
-              </Typography>
+            <Stack direction="row" justifyContent="flex-end" sx={{ mt: 0.75 }}>
               {typeof setup?.progressPct === 'number' && (
                 <Typography variant="body2" color="text.secondary"
                             sx={{ fontVariantNumeric: 'tabular-nums' }}>

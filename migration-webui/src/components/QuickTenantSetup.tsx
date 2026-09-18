@@ -771,6 +771,11 @@ const QuickTenantSetup: React.FC<{
           back. */}
       <MfaBanner challenge={status?.challenge} />
 
+      {/* No narration: full_setup.py's own step text ("signing in to
+          Google Cloud as ...") used to render here verbatim. The bar and
+          percentage already say a real, ticking job is in progress --
+          the sentence-by-sentence account of what it is doing right now
+          added noise without adding a decision anyone makes differently. */}
       {view === 'automated' && status?.running && (
         <Box sx={{ mb: 2 }}>
           {typeof status.progressPct === 'number' ? (
@@ -778,17 +783,13 @@ const QuickTenantSetup: React.FC<{
           ) : (
             <LinearProgress />
           )}
-          <Stack direction="row" justifyContent="space-between" sx={{ mt: 0.5 }}>
-            <Typography variant="caption" color="text.secondary">
-              {status.progressLabel || 'working…'}
+          {typeof status.progressPct === 'number' && (
+            <Typography variant="caption" color="text.secondary"
+                        sx={{ display: 'block', textAlign: 'right', mt: 0.5,
+                              fontVariantNumeric: 'tabular-nums' }}>
+              {status.progressPct}%
             </Typography>
-            {typeof status.progressPct === 'number' && (
-              <Typography variant="caption" color="text.secondary"
-                          sx={{ fontVariantNumeric: 'tabular-nums' }}>
-                {status.progressPct}%
-              </Typography>
-            )}
-          </Stack>
+          )}
         </Box>
       )}
 

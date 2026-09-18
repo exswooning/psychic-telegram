@@ -776,7 +776,13 @@ describe('the setup reports itself while it runs', () => {
     expect(await screen.findByTestId('setup-progress')).toBeInTheDocument()
   })
 
-  it('says which phase it is in, not just that it is busy', async () => {
+  it('shows the percent while it runs, not the step-by-step narration',
+     async () => {
+    /* full_setup.py's own step sentences ("signing in to Google Cloud as
+       ...") used to render verbatim here. The bar and percentage already
+       say a real job is running; the sentence-by-sentence account added
+       noise no decision depended on, and it named the admin email on
+       screen for no reason a viewer needed. */
     setupStatus.mockResolvedValue({
       running: true, result: null, progressPct: 42,
       progressLabel: 'enabling APIs' })
@@ -784,8 +790,8 @@ describe('the setup reports itself while it runs', () => {
     await signIn('admin@acme.com')
     fireEvent.click(await screen.findByTestId('purpose-seed'))
     fireEvent.click(screen.getByTestId('purpose-auto'))
-    expect(await screen.findByText(/enabling APIs/)).toBeInTheDocument()
-    expect(screen.getByText('42%')).toBeInTheDocument()
+    expect(await screen.findByText('42%')).toBeInTheDocument()
+    expect(screen.queryByText(/enabling APIs/)).toBeNull()
   })
 
   it('stays on the step instead of jumping away', async () => {

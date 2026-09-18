@@ -173,10 +173,9 @@ const GcpTeardown: React.FC = () => {
               ) : (
                 <LinearProgress />
               )}
-              <Stack direction="row" justifyContent="space-between" sx={{ mt: 0.5 }}>
-                <Typography variant="caption" color="text.secondary">
-                  {status.progressLabel || 'working…'}
-                </Typography>
+              {/* No narration -- see QuickTenantSetup.tsx's own comment
+                  on this pattern. */}
+              <Stack direction="row" justifyContent="flex-end" sx={{ mt: 0.5 }}>
                 {typeof status.progressPct === 'number' && (
                   <Typography variant="caption" color="text.secondary"
                               sx={{ fontVariantNumeric: 'tabular-nums' }}>
