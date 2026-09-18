@@ -995,27 +995,14 @@ class TestAccountAuth:
                           "name": "Short Pw"})
         assert r.status_code == 422
 
-    def test_login_with_correct_credentials_succeeds(self, cp, monkeypatch,
-                                                      tmp_path):
-        """Correct credentials now means password AND a current 2-Step code
-        -- see TestSigningInNeedsAnAuthenticator for why a password on its
-        own is no longer accepted."""
-        import time
-
-        import totp
-        secret = "JBSWY3DPEHPK3PXP"
-        store = tmp_path / "totp.env"
-        store.write_text(f"login@example.com={secret}\n")
-        monkeypatch.setattr(totp, "SECRETS_FILE", str(store))
-
+    def test_login_with_correct_credentials_succeeds(self, cp):
         cp.post("/api/v2/auth/signup",
                 json={"email": "login@example.com", "password": "hunter22222",
                       "name": "Login User"})
         cp.post("/api/v2/auth/logout")
         r = cp.post("/api/v2/auth/login",
-                    json={"email": "login@example.com", "password": "hunter22222",
-                          "code": totp.code_at(secret, when=time.time())})
-        assert r.status_code == 200, r.text
+                    json={"email": "login@example.com", "password": "hunter22222"})
+        assert r.status_code == 200
         assert cp.get("/api/v2/auth/me", headers=ADMIN).json()["email"] == "login@example.com"
 
     def test_login_with_wrong_password_fails(self, cp):
@@ -1416,7 +1403,7 @@ class TestSuperadminAdminEndpoints:
         assert r.status_code == 200
         assert accounts_auth.get_account(target_id)["seed_enabled"] == 1
 
-    def test_auth_me_reflects_seed_enabled(self, cp, monkeypatch, tmp_path):
+    def test_auth_me_reflects_seed_enabled(self, cp):
         import accounts_auth
 
         target_id = self._signed_in(cp, "seedme@example.com")
@@ -1426,19 +1413,8 @@ class TestSuperadminAdminEndpoints:
         cp.post(f"/api/v2/admin/accounts/{target_id}/seed",
                json={"reason": "demo", "enabled": True})
         cp.post("/api/v2/auth/logout")
-        # Signing in needs an enrolled authenticator now -- see
-        # TestSigningInNeedsAnAuthenticator.
-        import time
-
-        import totp
-        secret = "JBSWY3DPEHPK3PXP"
-        store = tmp_path / "totp.env"
-        store.write_text(f"seedme@example.com={secret}\n")
-        monkeypatch.setattr(totp, "SECRETS_FILE", str(store))
-        r = cp.post("/api/v2/auth/login",
-                    json={"email": "seedme@example.com", "password": "hunter22222",
-                          "code": totp.code_at(secret, when=time.time())})
-        assert r.status_code == 200, r.text
+        cp.post("/api/v2/auth/login",
+               json={"email": "seedme@example.com", "password": "hunter22222"})
         assert cp.get("/api/v2/auth/me", headers=ADMIN).json()["seed_enabled"] is True
 
 
@@ -2960,104 +2936,6 @@ class TestTheCheckinAuthenticatorIsSealed:
         body = cp.get("/api/v2/deadman/status", headers=ADMIN).json()
         assert body["enrolled"] is True
         assert "JBSWY3DPEHPK3PXP" not in json.dumps(body)
-
-
-class TestSigningInNeedsAnAuthenticator:
-    """Bitport does not accept a password on its own, and an account with no
-    authenticator enrolled cannot sign in at all.
-
-    The second half is what makes "only these credentials open this install"
-    true: enrolling is superadmin-only, so a password belonging to somebody
-    else -- or to a row created before this rule existed -- is no longer a
-    way in."""
-
-    SECRET = "JBSWY3DPEHPK3PXP"
-
-    def _account(self, cp, email="mfa@example.com"):
-        cp.post("/api/v2/auth/signup",
-                json={"email": email, "password": "hunter22222", "name": "Mfa User"})
-        cp.post("/api/v2/auth/logout")
-        return email
-
-    def _seed(self, monkeypatch, tmp_path, seeds):
-        import totp
-        store = tmp_path / "totp.env"
-        store.write_text("".join(f"{k}={v}\n" for k, v in seeds.items()))
-        monkeypatch.setattr(totp, "SECRETS_FILE", str(store))
-
-    def _code(self, offset=0):
-        import time
-        import totp
-        return totp.code_at(self.SECRET, when=time.time() + offset)
-
-    def test_a_correct_password_alone_is_refused(self, cp, monkeypatch, tmp_path):
-        email = self._account(cp)
-        self._seed(monkeypatch, tmp_path, {email: self.SECRET})
-        r = cp.post("/api/v2/auth/login",
-                    json={"email": email, "password": "hunter22222"})
-        assert r.status_code == 401
-        assert "2-Step" in r.json()["detail"]
-
-    def test_the_right_code_signs_in(self, cp, monkeypatch, tmp_path):
-        email = self._account(cp, "mfa2@example.com")
-        self._seed(monkeypatch, tmp_path, {email: self.SECRET})
-        r = cp.post("/api/v2/auth/login",
-                    json={"email": email, "password": "hunter22222",
-                          "code": self._code()})
-        assert r.status_code == 200, r.text
-        assert r.json()["ok"] is True
-
-    def test_the_previous_window_is_accepted(self, cp, monkeypatch, tmp_path):
-        """A code typed at second 29 arrives in the next window."""
-        email = self._account(cp, "mfa3@example.com")
-        self._seed(monkeypatch, tmp_path, {email: self.SECRET})
-        r = cp.post("/api/v2/auth/login",
-                    json={"email": email, "password": "hunter22222",
-                          "code": self._code(-30)})
-        assert r.status_code == 200, r.text
-
-    def test_an_account_with_no_authenticator_cannot_sign_in(self, cp, monkeypatch,
-                                                             tmp_path):
-        """Even with the correct password. This is the half that locks every
-        other account out of the install."""
-        email = self._account(cp, "noseed@example.com")
-        self._seed(monkeypatch, tmp_path, {})
-        r = cp.post("/api/v2/auth/login",
-                    json={"email": email, "password": "hunter22222",
-                          "code": "123456"})
-        assert r.status_code == 403
-        assert "no authenticator enrolled" in r.json()["detail"]
-
-    def test_a_wrong_password_still_says_nothing_about_enrolment(
-            self, cp, monkeypatch, tmp_path):
-        """The second factor is checked AFTER the password, or the form
-        could enumerate which accounts exist."""
-        self._account(cp, "enum@example.com")
-        self._seed(monkeypatch, tmp_path, {})
-        r = cp.post("/api/v2/auth/login",
-                    json={"email": "enum@example.com", "password": "wrong-one",
-                          "code": "123456"})
-        assert r.status_code == 401
-        assert r.json()["detail"] == "wrong email or password"
-
-    def test_a_wrong_code_counts_toward_the_lockout(self, cp, monkeypatch,
-                                                    tmp_path):
-        """Otherwise six digits is a million free guesses to somebody who
-        already has the password -- and the password check just cleared the
-        failure counter."""
-        import accounts_auth
-        email = self._account(cp, "brute@example.com")
-        self._seed(monkeypatch, tmp_path, {email: self.SECRET})
-        for _ in range(accounts_auth.MAX_LOGIN_ATTEMPTS):
-            cp.post("/api/v2/auth/login",
-                    json={"email": email, "password": "hunter22222",
-                          "code": "000000"})
-        assert accounts_auth.login_locked_for(email) > 0
-        # And the lock holds even against the RIGHT code.
-        r = cp.post("/api/v2/auth/login",
-                    json={"email": email, "password": "hunter22222",
-                          "code": self._code()})
-        assert r.status_code == 401
 
 
 class TestSignupIsClosedOnceThereIsAnAccount:

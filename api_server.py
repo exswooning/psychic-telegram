@@ -899,9 +899,6 @@ class SignupRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: str = Field(min_length=3)
     password: str = Field(min_length=1, exclude=True)
-    # exclude, like the password: a 2-Step code is a credential for its
-    # window, and this model is what the audit log serialises.
-    code: str = Field(default="", exclude=True)
 
 
 # Env-gated, not hardcoded: this same process still runs two genuinely
@@ -960,10 +957,7 @@ async def auth_signup(body: SignupRequest, response: Response):
 
 @app.post("/api/v2/auth/login")
 async def auth_login(body: LoginRequest, response: Response):
-    # clear_failures=False: a correct password is not a complete sign-in
-    # while a second factor is still to come. See accounts_auth.authenticate.
-    account_id = await _off_loop(accounts_auth.authenticate, body.email,
-                                 body.password, clear_failures=False)
+    account_id = await _off_loop(accounts_auth.authenticate, body.email, body.password)
     if account_id is None:
         # Same message for "no such email", "wrong password" AND "locked" --
         # a distinguishing error lets a login form enumerate registered
@@ -981,44 +975,6 @@ async def auth_login(body: LoginRequest, response: Response):
         except Exception:      # noqa: BLE001 - never fail a login on logging
             pass
         raise HTTPException(401, "wrong email or password")
-
-    # Second factor, required -- and an account with no authenticator
-    # enrolled cannot sign in at all.
-    #
-    # That second half is deliberate and is what makes "only these
-    # credentials open this install" true: enrolling a seed is
-    # superadmin-only (POST /api/v2/mfa/secret), so a password alone --
-    # including one belonging to an account somebody else still holds, or a
-    # row created before this rule existed -- is no longer a way in.
-    #
-    # After the password check, never before it: answering "that account has
-    # no second factor" to an unauthenticated guess would let the form
-    # enumerate accounts, which is the whole reason the message above is
-    # deliberately vague.
-    #
-    # Locked out by a lost phone? The seeds are a root-owned file on the box
-    # (/etc/bitport/totp.env). That is the intended recovery, and the right
-    # level for it.
-    def _second_factor() -> tuple[bool, bool]:
-        import totp
-        enrolled = bool(totp.load_secrets().get(body.email.strip().lower()))
-        return enrolled, (enrolled and totp.verify_code(body.email, body.code))
-
-    enrolled, code_ok = await _off_loop(_second_factor)
-    if not enrolled:
-        raise HTTPException(403, (
-            "this account has no authenticator enrolled, and Bitport does "
-            "not accept a password on its own. A superadmin enrols one."))
-    if not code_ok:
-        # Counts toward the SAME lockout the password uses. Without this a
-        # six-digit code is a million guesses against an attacker who
-        # already has the password -- and the password check above has just
-        # cleared that account's failure counter.
-        await _off_loop(accounts_auth.record_login_failure, body.email)
-        raise HTTPException(401, "that 2-Step code is not right")
-
-    # Both factors passed -- only now is the slate wiped.
-    await _off_loop(accounts_auth.clear_login_failures, body.email)
     token = await _off_loop(accounts_auth.create_session, account_id)
     _set_session_cookie(response, token)
     return {"ok": True, "accountId": account_id}

@@ -190,14 +190,6 @@ def _record_failure(email: str) -> None:
             (email, count, first_at, locked))
 
 
-def record_login_failure(email: str) -> None:
-    """Count a failed SECOND factor against the same lockout the password
-    uses. A six-digit code is a million guesses to somebody who already has
-    the password -- and authenticate() has just cleared that account's
-    failure counter, because the password it checked was correct."""
-    _record_failure((email or "").strip().lower())
-
-
 def count_accounts() -> int:
     """How many accounts exist. Signup is open only while this is zero --
     see api_server.auth_signup."""
@@ -214,8 +206,7 @@ def clear_login_failures(email: str) -> None:
                      (email.strip().lower(),))
 
 
-def authenticate(email: str, password: str, *,
-                 clear_failures: bool = True) -> int | None:
+def authenticate(email: str, password: str) -> int | None:
     """Returns the account id on success, None on any failure -- deliberately
     the same None for 'no such email' and 'wrong password' so a login form
     can't be used to enumerate registered emails.
@@ -240,14 +231,7 @@ def authenticate(email: str, password: str, *,
     if row is None or not ok:
         _record_failure(email)
         return None
-    # clear_failures=False where a correct password is not yet a complete
-    # sign-in. api_server's login still has a second factor to check, and
-    # wiping the counter here would hand a code brute-forcer a fresh
-    # allowance on every single attempt -- the lockout would never trip
-    # against the one attacker it exists to stop, somebody who already has
-    # the password. That caller clears it once BOTH factors pass.
-    if clear_failures:
-        clear_login_failures(email)
+    clear_login_failures(email)
     return int(row["id"])
 
 

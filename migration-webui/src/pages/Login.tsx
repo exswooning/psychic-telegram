@@ -9,7 +9,6 @@ import { login } from '@/api/controlPlane'
 const Login: React.FC = () => {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
-  const [code, setCode] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
@@ -18,7 +17,7 @@ const Login: React.FC = () => {
     setError('')
     setBusy(true)
     try {
-      await login(email.trim(), password, code.replace(/\D/g, ''))
+      await login(email.trim(), password)
       // A hard navigation, not react-router's navigate(): App.tsx's own
       // `account` state is only fetched once, on mount -- a client-side
       // route change to /mission-control leaves it still null, so its own
@@ -39,7 +38,6 @@ const Login: React.FC = () => {
       // Cleared on every path, success or failure -- the field never holds
       // a password that has already been sent.
       setPassword('')
-      setCode('')
       setBusy(false)
     }
   }
@@ -120,16 +118,8 @@ const Login: React.FC = () => {
               onChange={(e) => setPassword(e.target.value)} fullWidth
               autoComplete="current-password"
             />
-            <TextField
-              label="2-Step code" value={code}
-              onChange={(e) => setCode(e.target.value)} fullWidth
-              helperText="the 6-digit code from your authenticator"
-              inputProps={{ inputMode: 'numeric', autoComplete: 'one-time-code',
-                            maxLength: 7, 'data-testid': 'login-code' }}
-            />
             <Button type="submit" variant="contained" size="large" sx={{ py: 1.25 }}
-                    disabled={busy || !email.trim() || !password
-                              || code.replace(/\D/g, '').length < 6}>
+                    disabled={busy || !email.trim() || !password}>
               {busy ? 'Signing in…' : 'Sign in'}
             </Button>
           </Box>
@@ -137,8 +127,7 @@ const Login: React.FC = () => {
           {/* No "create an account": signup is closed once this install has
               one, so the link led to a form that can only be refused. */}
           <Typography variant="body2" color="text.secondary">
-            Accounts are created by an administrator, and every one needs an
-            authenticator enrolled — a password on its own is not accepted.
+            Accounts are created by an administrator.
             {' · '}
             <Link component={RouterLink} to="/pricing" underline="hover">View pricing</Link>
           </Typography>
