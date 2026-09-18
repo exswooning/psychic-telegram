@@ -55,8 +55,13 @@ export async function checkConnection(base: string): Promise<{ ok: true; role: R
     if (!res.ok) return { ok: false, error: `HTTP ${res.status}` }
     const op = (await res.json()) as Operator
     return { ok: true, role: op.role, ms }
-  } catch (e: any) {
-    return { ok: false, error: e.name === 'TimeoutError' ? 'timed out after 5s' : e.message }
+  } catch (e: unknown) {
+    const timeout = e instanceof Error && e.name === 'TimeoutError'
+    return {
+      ok: false,
+      error: timeout ? 'timed out after 5s'
+        : e instanceof Error ? e.message : String(e),
+    }
   }
 }
 
@@ -1133,7 +1138,22 @@ export type CPEventType =
   | 'SNAPSHOT' | 'JOB_PROGRESS' | 'NODE_HEARTBEAT'
   | 'CRITICAL_ALERT' | 'ACTION_COMPLETE' | 'TAILER_ERROR'
 
-export interface CPEvent<T = any> { type: CPEventType; ts: string; data: T }
+export interface CPEvent<T = unknown> { type: CPEventType; ts: string; data: T }
+
+/** The union of fields any CPEvent.data has actually carried, across every
+ *  event type the hub sends -- SNAPSHOT/JOB_PROGRESS/NODE_HEARTBEAT/
+ *  CRITICAL_ALERT/ACTION_COMPLETE. All optional because which fields are
+ *  present depends on `type`, and MissionControl (the one consumer) already
+ *  branches on that before reading any of them. */
+export interface CPEventData {
+  users?: UserProgress[]
+  nodes?: FleetNode[]
+  publicShares?: number
+  message?: string
+  actor?: string
+  action?: string
+  outcome?: string
+}
 
 /**
  * Auto-reconnecting socket. Returns a close function.
@@ -1144,7 +1164,7 @@ export interface CPEvent<T = any> { type: CPEventType; ts: string; data: T }
  * spike on a host that is already busy moving terabytes.
  */
 export function connectCP(
-  onEvent: (e: CPEvent) => void,
+  onEvent: (e: CPEvent<CPEventData>) => void,
   onStatus?: (connected: boolean) => void,
 ): () => void {
   let ws: WebSocket | null = null
@@ -1163,7 +1183,7 @@ export function connectCP(
       keepalive = setInterval(() => ws?.readyState === 1 && ws.send('ping'), 25_000)
     }
     ws.onmessage = (ev) => {
-      try { onEvent(JSON.parse(ev.data) as CPEvent) } catch { /* ignore junk */ }
+      try { onEvent(JSON.parse(ev.data) as CPEvent<CPEventData>) } catch { /* ignore junk */ }
     }
     ws.onclose = () => {
       if (keepalive) clearInterval(keepalive)

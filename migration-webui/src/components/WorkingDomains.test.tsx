@@ -1,10 +1,13 @@
 import React from 'react'
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import type { RunningJob } from '@/hooks/useRunningJobs'
 // The hook reaches @/api/controlPlane, which reads localStorage at module
 // load. Mocked at the hook rather than the api module so a test can also
-// say what is running.
-const runningJobs = vi.hoisted(() => ({ current: [] as any[] }))
+// say what is running. Type-only import, so it does not disturb vi.hoisted's
+// own hoisting -- only vi.mock/vi.hoisted calls need to run before other
+// imports, and a `import type` is erased entirely at compile time.
+const runningJobs = vi.hoisted(() => ({ current: [] as RunningJob[] }))
 vi.mock('@/hooks/useRunningJobs', () => ({
   useRunningJobs: () => ({ jobs: runningJobs.current, loading: false,
                            refresh: vi.fn() }),

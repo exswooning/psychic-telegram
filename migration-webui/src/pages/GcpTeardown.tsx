@@ -65,8 +65,8 @@ const GcpTeardown: React.FC = () => {
       if (!r.ok) throw new Error(r.detail || 'could not start')
       setAsk(false)
       await poll()
-    } catch (e: any) {
-      setError(e.message)
+    } catch (e: unknown) {
+      setError((e instanceof Error ? e.message : String(e)))
     } finally {
       setPassword('')
       setBusy(false)

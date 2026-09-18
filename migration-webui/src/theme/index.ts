@@ -1,4 +1,4 @@
-import { createTheme, ThemeOptions } from '@mui/material/styles'
+import { createTheme, Shadows, ThemeOptions } from '@mui/material/styles'
 
 // Google's own tokens, not a generic Material palette -- the exact blue,
 // grays, and type pairing Workspace Admin Console, Gmail, and Search
@@ -45,7 +45,12 @@ const baseOptions: ThemeOptions = {
   // single low, wide shadow stands in for MUI's 25-step scale so anything
   // that still asks for elevation (menus, popovers) gets one consistent,
   // barely-there shadow instead of the default's much heavier one.
-  shadows: Array(25).fill('0 1px 3px 0 rgba(60,64,67,0.15), 0 1px 2px 0 rgba(60,64,67,0.10)') as any,
+  // MUI's Shadows type is a 25-element tuple; Array(25).fill(...) is
+  // only known to TypeScript as string[], so this still needs a cast --
+  // through unknown, to the real type, rather than to any.
+  shadows: Array(25).fill(
+    '0 1px 3px 0 rgba(60,64,67,0.15), 0 1px 2px 0 rgba(60,64,67,0.10)',
+  ) as unknown as Shadows,
   components: {
     MuiCssBaseline: {
       styleOverrides: {

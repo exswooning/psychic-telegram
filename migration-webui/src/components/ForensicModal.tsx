@@ -29,7 +29,7 @@ interface Props {
   onRetried?: () => void
 }
 
-const statusColor = (s: string) =>
+const statusColor = (s: string): 'success' | 'error' | 'default' =>
   s === 'SUCCESS' ? 'success' : s === 'FAILED' ? 'error' : 'default'
 
 /** Google's errors arrive as one long line with a JSON blob inline. Pulling
@@ -71,8 +71,8 @@ const ForensicModal: React.FC<Props> = ({ open, sourceUser, itemId, onClose, onR
       setAskReason(false)
       onRetried?.()
       onClose()
-    } catch (e: any) {
-      setActionError(e.message)
+    } catch (e: unknown) {
+      setActionError((e instanceof Error ? e.message : String(e)))
     } finally {
       setBusy(false)
     }
@@ -155,7 +155,7 @@ const ForensicModal: React.FC<Props> = ({ open, sourceUser, itemId, onClose, onR
                         <TableCell>{a.item_type}</TableCell>
                         <TableCell>
                           <Chip size="small" label={a.status}
-                                color={statusColor(a.status) as any} variant="outlined" />
+                                color={statusColor(a.status)} variant="outlined" />
                         </TableCell>
                         <TableCell align="right" sx={{ fontVariantNumeric: 'tabular-nums' }}>
                           {a.bytes_moved?.toLocaleString() ?? 0}

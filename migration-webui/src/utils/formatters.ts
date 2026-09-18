@@ -47,8 +47,8 @@ export function statusLabel(status: string): string {
   return labels[status] || status
 }
 
-export function statusColor(status: string): string {
-  const colors: Record<string, string> = {
+export function statusColor(status: string): 'default' | 'primary' | 'success' | 'warning' | 'error' {
+  const colors: Record<string, 'default' | 'primary' | 'success' | 'warning' | 'error'> = {
     not_started: 'default',
     waiting: 'warning',
     in_progress: 'primary',

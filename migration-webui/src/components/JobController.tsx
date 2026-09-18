@@ -101,8 +101,8 @@ const JobController: React.FC<Props> = ({ users, nodes, onChanged }) => {
     try {
       await pending.run(reason)
       setPending(null); setSelected(new Set()); onChanged?.()
-    } catch (e: any) {
-      setError(e.message)
+    } catch (e: unknown) {
+      setError((e instanceof Error ? e.message : String(e)))
     } finally {
       setBusy(false)
     }

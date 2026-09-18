@@ -42,7 +42,7 @@ const UserDetail: React.FC = () => {
     )
   }
 
-  const config = { color: statusColor(user.status) as string, label: statusLabel(user.status) }
+  const config = { color: statusColor(user.status), label: statusLabel(user.status) }
 
   const serviceEntries = user.details ? Object.entries(user.details) : []
 
@@ -67,7 +67,7 @@ const UserDetail: React.FC = () => {
               <Typography variant="body2" color="text.secondary">{user.email}</Typography>
             </Grid>
             <Grid item>
-              <Chip label={config.label} color={config.color as any} variant="filled" />
+              <Chip label={config.label} color={config.color} variant="filled" />
             </Grid>
             <Grid item>
               <Typography variant="h3" sx={{ fontWeight: 700 }}>{user.progress}%</Typography>
@@ -92,15 +92,15 @@ const UserDetail: React.FC = () => {
       <Typography variant="h6" sx={{ fontWeight: 600, mb: 2 }}>Service Progress</Typography>
       <Grid container spacing={2}>
         {serviceEntries.map(([key, service]) => {
-          const s = service as any
-          const sConfig = { color: statusColor(s.status) as string, label: statusLabel(s.status) }
+          const s = service
+          const sConfig = { color: statusColor(s.status), label: statusLabel(s.status) }
           return (
             <Grid item xs={12} sm={6} md={4} key={key}>
               <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', height: '100%' }}>
                 <CardContent>
                   <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
                     <Typography variant="subtitle2" fontWeight={600} sx={{ textTransform: 'capitalize' }}>{key}</Typography>
-                    <Chip label={sConfig.label} size="small" color={sConfig.color as any} variant="outlined" />
+                    <Chip label={sConfig.label} size="small" color={sConfig.color} variant="outlined" />
                   </Box>
                   <LinearProgress variant="determinate" value={s.progress} sx={{ height: 8, borderRadius: 4, mb: 1 }} />
                   <Typography variant="caption" color="text.secondary">

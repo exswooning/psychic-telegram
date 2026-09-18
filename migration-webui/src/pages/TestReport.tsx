@@ -230,8 +230,8 @@ export const TestReport: React.FC = () => {
             setAsk(false)
             setStarted(res.detail || 'test run started')
             refresh()
-          } catch (e: any) {
-            setRunError(e.message)
+          } catch (e: unknown) {
+            setRunError((e instanceof Error ? e.message : String(e)))
           } finally {
             setBusy(false)
           }

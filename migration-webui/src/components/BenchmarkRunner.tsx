@@ -163,8 +163,8 @@ const BenchmarkRunner: React.FC<Props> = ({ targetDomain }) => {
         drive_file_workers: workers, drive_write_qps: writeQps, skip_wipe: skipWipe,
       })
       setMsg(r.detail); setAsk(false); refresh()
-    } catch (e: any) {
-      setError(e.message)
+    } catch (e: unknown) {
+      setError((e instanceof Error ? e.message : String(e)))
     } finally {
       setBusy(false)
     }

@@ -10,7 +10,7 @@ import {
   Contacts as ContactsIcon, Chat as ChatIcon, VpnKey as PermissionsIcon,
 } from '@mui/icons-material'
 import {
-  CPEvent, FleetNode, UserProgress, PublicShare, FailureRow,
+  CPEvent, CPEventData, FleetNode, UserProgress, PublicShare, FailureRow,
   connectCP, fetchFleet, fetchUsers, fetchPublicShares, fetchFailures,
 } from '@/api/controlPlane'
 import { useMigrationStore } from '@/store'
@@ -85,7 +85,8 @@ function aggregateService(services: (ServiceProgress | undefined)[]) {
 }
 
 const pct = (v: number | null) => (v == null ? '—' : `${Math.round(v)}%`)
-const barColor = (v: number | null) => v == null ? 'inherit' : v >= 90 ? 'error' : v >= 70 ? 'warning' : 'primary'
+const barColor = (v: number | null): 'inherit' | 'error' | 'warning' | 'primary' =>
+  v == null ? 'inherit' : v >= 90 ? 'error' : v >= 70 ? 'warning' : 'primary'
 
 const NodeCard: React.FC<{ node: FleetNode }> = ({ node }) => (
   <Paper variant="outlined" sx={{
@@ -109,7 +110,7 @@ const NodeCard: React.FC<{ node: FleetNode }> = ({ node }) => (
             <Typography variant="caption" color="text.secondary">{label}</Typography>
             <Typography variant="caption" sx={{ fontVariantNumeric: 'tabular-nums' }}>{pct(v)}</Typography>
           </Stack>
-          <LinearProgress variant="determinate" value={v ?? 0} color={barColor(v) as any} sx={{ height: 4 }} />
+          <LinearProgress variant="determinate" value={v ?? 0} color={barColor(v)} sx={{ height: 4 }} />
         </Box>
       ))}
     </Stack>
@@ -162,7 +163,7 @@ const MissionControl: React.FC = () => {
 
   useEffect(() => {
     refreshLists()
-    return connectCP((e: CPEvent) => {
+    return connectCP((e: CPEvent<CPEventData>) => {
       if (e.type === 'SNAPSHOT' || e.type === 'JOB_PROGRESS') {
         setCpUsers(e.data.users ?? []); setNodes(e.data.nodes ?? [])
         setShareCount(e.data.publicShares ?? 0)

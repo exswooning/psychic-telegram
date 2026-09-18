@@ -43,8 +43,8 @@ const AdminAccounts: React.FC = () => {
       if (!r.ok) throw new Error(r.detail || 'could not update')
       setPending(null)
       refresh()
-    } catch (e: any) {
-      setActionError(e.message)
+    } catch (e: unknown) {
+      setActionError((e instanceof Error ? e.message : String(e)))
     } finally {
       setBusy(false)
     }

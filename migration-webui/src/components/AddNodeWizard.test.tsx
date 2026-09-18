@@ -12,7 +12,8 @@
 import React from 'react'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import AddNodeWizard, { joinCommand, removeCommand, codeCommand } from './AddNodeWizard'
+import AddNodeWizard from './AddNodeWizard'
+import { joinCommand, removeCommand, codeCommand } from './AddNodeWizard.utils'
 import type { NodeJoinDetails } from '@/api/controlPlane'
 
 // The component calls createJoinCode for real now; without this the module

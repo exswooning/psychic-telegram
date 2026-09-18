@@ -47,8 +47,8 @@ const EmergencyBrake: React.FC<Props> = ({ shares, liveCount, onReverted }) => {
       setResult(r.detail)
       setAskReason(false)
       onReverted?.()
-    } catch (e: any) {
-      setError(e.message)
+    } catch (e: unknown) {
+      setError((e instanceof Error ? e.message : String(e)))
     } finally {
       setBusy(false)
     }

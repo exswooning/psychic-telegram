@@ -31,7 +31,7 @@ export interface ServiceProgress {
   currentItem?: string
   speed?: string
   eta?: string
-  details?: Record<string, any>
+  details?: Record<string, unknown>
 }
 
 export type MigrationStatus = 

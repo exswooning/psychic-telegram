@@ -160,8 +160,8 @@ const AiDiagnostics: React.FC = () => {
     try {
       await saveAiKey(reason, keyInput.trim())
       setKeyInput(''); setAskReason(false); refresh()
-    } catch (e: any) {
-      setSaveErr(e.message)
+    } catch (e: unknown) {
+      setSaveErr((e instanceof Error ? e.message : String(e)))
     } finally {
       setSaving(false)
     }
@@ -173,8 +173,8 @@ const AiDiagnostics: React.FC = () => {
       const r = await runAiAnalysis(prompt)
       if (r.error) setError(r.error)
       else setResult(r)
-    } catch (e: any) {
-      setError(e.message)
+    } catch (e: unknown) {
+      setError((e instanceof Error ? e.message : String(e)))
     } finally {
       setBusy(false)
     }
@@ -185,8 +185,8 @@ const AiDiagnostics: React.FC = () => {
     try {
       const r = await fetchAiContext(prompt)
       setPeek(r.context)
-    } catch (e: any) {
-      setError(e.message)
+    } catch (e: unknown) {
+      setError((e instanceof Error ? e.message : String(e)))
     }
   }
 

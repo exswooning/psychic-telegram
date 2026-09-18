@@ -32,8 +32,8 @@ const Login: React.FC = () => {
       // top-level routing only serves the SPA under /app and /app/*, so
       // the bare path 404s at the server before React ever sees it.
       window.location.href = '/app/mission-control'
-    } catch (err: any) {
-      setError(err.message || 'sign in failed')
+    } catch (err: unknown) {
+      setError((err instanceof Error ? err.message : String(err)) || 'sign in failed')
     } finally {
       // Cleared on every path, success or failure -- the field never holds
       // a password that has already been sent.

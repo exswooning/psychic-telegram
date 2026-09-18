@@ -4,7 +4,8 @@
  */
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import QueuePanel, { ago } from './QueuePanel'
+import QueuePanel from './QueuePanel'
+import { ago } from './QueuePanel.utils'
 import * as client from '@/api/client'
 
 vi.mock('@/api/client', async () => {

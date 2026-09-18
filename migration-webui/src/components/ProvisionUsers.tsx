@@ -60,8 +60,8 @@ const ProvisionUsers: React.FC = () => {
       await startProvision(reason, tenant, dryRun)
       setAsk(false)
       poll(tenant)
-    } catch (e: any) {
-      setError(e.message)
+    } catch (e: unknown) {
+      setError((e instanceof Error ? e.message : String(e)))
     } finally {
       setBusy(false)
     }

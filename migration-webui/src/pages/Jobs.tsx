@@ -574,8 +574,8 @@ const SideJobCard: React.FC<{
         await active.stop(reason)
         setStopAsk(false)
         onStarted()
-      } catch (e: any) {
-        setStopError(e.message)
+      } catch (e: unknown) {
+        setStopError((e instanceof Error ? e.message : String(e)))
       } finally {
         setStopBusy(false)
       }
@@ -792,8 +792,8 @@ const SeedPanel: React.FC<{ domain: string; onStarted: () => void }> = ({ domain
         : 'Seed started -- see "Seed source tenant" below for live output.')
       setAsk(false)
       onStarted()
-    } catch (e: any) {
-      setError(e.message)
+    } catch (e: unknown) {
+      setError((e instanceof Error ? e.message : String(e)))
     } finally {
       setBusy(false)
     }
@@ -865,19 +865,19 @@ const SeedPanel: React.FC<{ domain: string; onStarted: () => void }> = ({ domain
             <Tooltip title="Discover every user via the Directory API, and fail loudly with the scope to grant if it cannot.">
               <FormControlLabel control={<Switch size="small" checked={allUsers}
                 onChange={(e) => setAllUsers(e.target.checked)}
-                inputProps={{ 'data-testid': 'seed-all-users' } as any} />}
+                inputProps={{ 'data-testid': 'seed-all-users' } as never} />}
                 label={<Typography variant="body2">All users</Typography>} />
             </Tooltip>
             <Tooltip title="Seed up to the tenant's available Workspace seats — the requested set, capped at the licences free.">
               <FormControlLabel control={<Switch size="small" checked={fitToLicenses}
                 onChange={(e) => setFitToLicenses(e.target.checked)}
-                inputProps={{ 'data-testid': 'seed-fit' } as any} />}
+                inputProps={{ 'data-testid': 'seed-fit' } as never} />}
                 label={<Typography variant="body2">Fit to licences</Typography>} />
             </Tooltip>
             <Tooltip title="Ignore the user list and create accounts one at a time until the tenant's licences run out.">
               <FormControlLabel control={<Switch size="small" checked={createUntilFull}
                 onChange={(e) => setCreateUntilFull(e.target.checked)}
-                inputProps={{ 'data-testid': 'seed-until-full' } as any} />}
+                inputProps={{ 'data-testid': 'seed-until-full' } as never} />}
                 label={<Typography variant="body2">Create until full</Typography>} />
             </Tooltip>
           </FormGroup>
@@ -923,7 +923,7 @@ const SeedPanel: React.FC<{ domain: string; onStarted: () => void }> = ({ domain
               <FormControlLabel control={<Switch size="small" checked={topUpOnly}
                 disabled={!targetGb.trim()}
                 onChange={(e) => setTopUpOnly(e.target.checked)}
-                inputProps={{ 'data-testid': 'seed-topup' } as any} />}
+                inputProps={{ 'data-testid': 'seed-topup' } as never} />}
                 label={<Typography variant="body2">Top up only</Typography>} />
             </Tooltip>
           </Stack>
@@ -956,7 +956,7 @@ const SeedPanel: React.FC<{ domain: string; onStarted: () => void }> = ({ domain
                 <FormControlLabel key={svc}
                   control={<Checkbox size="small" checked={services[svc]}
                     onChange={(e) => setServices((s) => ({ ...s, [svc]: e.target.checked }))}
-                    inputProps={{ 'data-testid': `seed-svc-${svc}` } as any} />}
+                    inputProps={{ 'data-testid': `seed-svc-${svc}` } as never} />}
                   label={<Typography variant="body2">{svc}</Typography>} />
               ))}
             </FormGroup>
@@ -1010,8 +1010,8 @@ const MigratePanel: React.FC<{ domain: string; targetReady: boolean; onStarted: 
           : `${ask ? 'Dry run' : 'Migration'} started -- track live per-user progress on Mission Control.`)
         setAsk(null)
         onStarted()
-      } catch (e: any) {
-        setError(e.message)
+      } catch (e: unknown) {
+        setError((e instanceof Error ? e.message : String(e)))
       } finally {
         setBusy(false)
       }
@@ -1073,7 +1073,8 @@ const SeedJobCard: React.FC<{
   const running = !!job?.running
   const rc = job?.rc ?? history?.rc ?? null
   const label = running ? 'Running' : rc === 0 ? 'ok' : rc === null ? 'Unknown' : `exit ${rc}`
-  const color = running ? 'info' : rc === 0 ? 'success' : rc === null ? 'default' : 'error'
+  const color: 'info' | 'success' | 'default' | 'error' =
+    running ? 'info' : rc === 0 ? 'success' : rc === null ? 'default' : 'error'
   const lines = (running ? job?.lines : history?.lines) ?? []
   // "exit 2" on its own is a number, not a finding. seed_sandbox.py states
   // its own outcome on the way out ("PARTIAL: 200 of 201 users seeded; 1
@@ -1092,8 +1093,8 @@ const SeedJobCard: React.FC<{
       await stopSeedJob()
       setStopAsk(false)
       onStopped()
-    } catch (e: any) {
-      setStopError(e.message)
+    } catch (e: unknown) {
+      setStopError((e instanceof Error ? e.message : String(e)))
     } finally {
       setStopBusy(false)
     }
@@ -1125,7 +1126,7 @@ const SeedJobCard: React.FC<{
             Stop
           </Button>
         )}
-        <Chip size="small" label={label} color={color as any}
+        <Chip size="small" label={label} color={color}
              variant={label === 'ok' ? 'filled' : 'outlined'} />
         <ExpandIcon sx={{ transform: open ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }} />
       </Box>

@@ -13,7 +13,8 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import Wizard, { looksLikeDomain, domainOf } from './Wizard'
+import Wizard from './Wizard'
+import { looksLikeDomain, domainOf } from './Wizard.utils'
 
 const seedEnabled = vi.fn()
 const fullSetup = vi.fn()

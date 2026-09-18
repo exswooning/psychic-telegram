@@ -150,7 +150,7 @@ const ActivityFeed: React.FC = () => {
                   }
                 />
                 <ListItemSecondaryAction>
-                  <Chip label={statusLabel(activity.status)} size="small" color={statusColor(activity.status) as any} variant="outlined" />
+                  <Chip label={statusLabel(activity.status)} size="small" color={statusColor(activity.status)} variant="outlined" />
                 </ListItemSecondaryAction>
               </ListItem>
               {index < filtered.length - 1 && <Divider variant="inset" component="li" />}

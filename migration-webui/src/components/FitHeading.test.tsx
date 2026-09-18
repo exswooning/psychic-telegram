@@ -10,7 +10,8 @@
  */
 import { render, screen } from '@testing-library/react'
 import { describe, it, expect } from 'vitest'
-import FitHeading, { fitFontRem } from './FitHeading'
+import FitHeading from './FitHeading'
+import { fitFontRem } from './FitHeading.utils'
 
 const MAX = 3.25
 const MIN = 1.375

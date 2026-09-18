@@ -211,7 +211,7 @@ const Users: React.FC = () => {
                       </Box>
                     </TableCell>
                     <TableCell>
-                      <Chip label={statusLabel(user.status)} size="small" color={color as any} variant="outlined" />
+                      <Chip label={statusLabel(user.status)} size="small" color={color} variant="outlined" />
                     </TableCell>
                     <TableCell sx={{ minWidth: 120 }}>
                       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>

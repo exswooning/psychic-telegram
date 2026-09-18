@@ -22,7 +22,7 @@ import type { TenantInventory } from '@/api/controlPlane'
 
 /** Bytes at human scale. Binary units (1024), matching what the Admin
  * console and Drive itself report, so the two agree. */
-export const fmtBytes = (n: number): string => {
+const fmtBytes = (n: number): string => {
   if (!n) return '0'
   const units = ['B', 'KB', 'MB', 'GB', 'TB']
   let v = n
@@ -60,7 +60,7 @@ const Stat: React.FC<{
   </Box>
 )
 
-export interface TenantInventoryPanelProps {
+interface TenantInventoryPanelProps {
   inv: TenantInventory | null
   busy: boolean
   error: string
@@ -93,7 +93,7 @@ const describeAge = (sec: number): string => {
 
 /** Past this, the panel stops presenting the number as current fact. A
  *  reset or a migration can empty a tenant in far less. */
-export const SCAN_LOOKS_STALE_AFTER_S = 30 * 60
+const SCAN_LOOKS_STALE_AFTER_S = 30 * 60
 
 export const TenantInventoryPanel: React.FC<TenantInventoryPanelProps> = ({
   inv, busy, error, domain, scanProgress, onRefresh, onDeepScan, ageSeconds,

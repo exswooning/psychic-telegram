@@ -30,6 +30,7 @@ import WizardArt from '@/components/WizardArt'
 import DecideLaterPanel from '@/components/DecideLaterPanel'
 import FitHeading from '@/components/FitHeading'
 import type { ArtKind } from '@/components/WizardArt'
+import { looksLikeDomain, domainOf } from './Wizard.utils'
 
 /**
  * One doorway for both "I need a real migration set up" and "I need a test
@@ -57,14 +58,6 @@ const SEED_STEP_TITLE_MARKER = 'seeded'
 
 type Purpose = 'seed' | 'migrate' | 'later'
 type Step = 'domain' | 'purpose' | 'counterpart' | 'run'
-
-/** Enough to catch a typo, not enough to argue with a real domain.
- *  Deliberately not a strict RFC pattern: this gates a form, and every
- *  over-tight domain regex eventually rejects somebody's valid TLD. */
-export function looksLikeDomain(v: string): boolean {
-  const d = v.trim().toLowerCase()
-  return /^[a-z0-9.-]+\.[a-z]{2,}$/.test(d) && !d.startsWith('.') && !d.endsWith('.')
-}
 
 /**
  * The shell every setup step sits in.
@@ -162,13 +155,6 @@ const Aside: React.FC<{
     )}
   </>
 )
-
-/** The domain is in the email. Asking for both is asking someone to type
- *  the same fact twice and then handling the case where they disagree. */
-export function domainOf(email: string): string {
-  const at = email.trim().toLowerCase().lastIndexOf('@')
-  return at === -1 ? '' : email.trim().toLowerCase().slice(at + 1)
-}
 
 const AdminSignInStep: React.FC<{
   heading: string

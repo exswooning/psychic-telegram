@@ -1,7 +1,8 @@
 import React from 'react'
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
-import RunningJobDetail, { projectedEta } from './RunningJobDetail'
+import RunningJobDetail from './RunningJobDetail'
+import { projectedEta } from './RunningJobDetail.utils'
 import RunningJobCard from './RunningJobCard'
 import type { RunningJob } from '@/hooks/useRunningJobs'
 

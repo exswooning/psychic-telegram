@@ -372,8 +372,8 @@ const QuickTenantSetup: React.FC<{
             + 'make sure you picked the key provision_gcp.py produced')
         }
         setPendingKey(parsed)
-      } catch (e: any) {
-        setUploadError(e.message || 'could not read that file as a service-account key')
+      } catch (e: unknown) {
+        setUploadError((e instanceof Error ? e.message : String(e)) || 'could not read that file as a service-account key')
       }
     })
   }
@@ -385,8 +385,8 @@ const QuickTenantSetup: React.FC<{
       await uploadCredentials(reason, side, domain.trim(), pendingKey)
       setPendingKey(null)
       refreshTenantCfg()
-    } catch (e: any) {
-      setUploadError(e.message)
+    } catch (e: unknown) {
+      setUploadError((e instanceof Error ? e.message : String(e)))
     } finally {
       setUploadBusy(false)
     }
@@ -470,8 +470,8 @@ const QuickTenantSetup: React.FC<{
       // fallback indicator below stays up) until status genuinely reflects
       // this run one way or the other.
       await poll()
-    } catch (e: any) {
-      setError(e.message)
+    } catch (e: unknown) {
+      setError((e instanceof Error ? e.message : String(e)))
     } finally {
       // Cleared on every path, success or failure -- the field never holds
       // a password that has already been sent.
@@ -606,7 +606,7 @@ const QuickTenantSetup: React.FC<{
         }
       })
       .catch(() => { /* the quick figures already loaded; leave it at that */ })
-  }, [setUpOk, side, result?.clientId, loadInventory, pollScan, runDeepScan])
+  }, [setUpOk, side, result?.clientId, loadInventory, pollScan, runDeepScan, applyInv])
 
   const [identityStatus, setIdentityStatus] = useState<IdentityMapStatus | null>(null)
   // Transitions, not levels: a flag alone re-fires on every remount.
@@ -740,8 +740,8 @@ const QuickTenantSetup: React.FC<{
         fetchProvisionStatus('target').then(setProvisionStatus).catch(() => {})
       }
       setPostAction(null)
-    } catch (e: any) {
-      setPostError(e.message)
+    } catch (e: unknown) {
+      setPostError((e instanceof Error ? e.message : String(e)))
     } finally {
       setPostBusy(false)
     }

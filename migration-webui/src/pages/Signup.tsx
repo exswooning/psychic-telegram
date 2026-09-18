@@ -36,8 +36,8 @@ const Signup: React.FC = () => {
       // /app prefix required -- see Login.tsx's comment: this is a raw
       // browser navigation, not routed through react-router's basename.
       window.location.href = '/app/mission-control'
-    } catch (err: any) {
-      setError(err.message || 'could not create account')
+    } catch (err: unknown) {
+      setError((err instanceof Error ? err.message : String(err)) || 'could not create account')
     } finally {
       setPassword('')
       setBusy(false)

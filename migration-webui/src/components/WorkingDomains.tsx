@@ -22,7 +22,7 @@ import {
   LinearProgress, Stack, Typography,
 } from '@mui/material'
 import TenantActionDialog from '@/components/TenantActionDialog'
-import type { Mode } from '@/components/TenantActionDialog'
+import type { Mode } from '@/components/TenantActionDialog.utils'
 import { useRunningJobs } from '@/hooks/useRunningJobs'
 import {
   DeleteForever as RemoveIcon, DeleteSweep as WipeIcon,

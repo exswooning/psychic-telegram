@@ -71,8 +71,8 @@ const CloudSetup: React.FC = () => {
       const r = await startGcpProvision(reason, sourceDomain.trim(),
                                         targetDomain.trim(), orgId.trim(), dryRun)
       setMsg(r.detail); setAsk(null); setExpanded(true); poll()
-    } catch (e: any) {
-      setError(e.message)
+    } catch (e: unknown) {
+      setError((e instanceof Error ? e.message : String(e)))
     } finally {
       setBusy(false)
     }
@@ -83,8 +83,8 @@ const CloudSetup: React.FC = () => {
     try {
       const r = await enableApis(reason)
       setMsg(r.detail); setAsk(null)
-    } catch (e: any) {
-      setError(e.message)
+    } catch (e: unknown) {
+      setError((e instanceof Error ? e.message : String(e)))
     } finally {
       setBusy(false)
     }

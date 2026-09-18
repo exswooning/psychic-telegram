@@ -235,7 +235,7 @@ const Verification: React.FC = () => {
                   <Typography variant="caption" color="text.secondary">Target: {item.targetCount}</Typography>
                 </Box>
                 <Box sx={{ display: 'flex', gap: 0.5, mt: 1, flexWrap: 'wrap' }}>
-                  <Chip label={statusLabel(item.status)} size="small" color={statusColor(item.status) as any} variant="outlined" />
+                  <Chip label={statusLabel(item.status)} size="small" color={statusColor(item.status)} variant="outlined" />
                   {isStale(item.ageSeconds) && (
                     <Chip label={`stale · ${formatAge(item.ageSeconds!)}`} size="small" color="warning" variant="outlined" />
                   )}
@@ -264,7 +264,7 @@ const Verification: React.FC = () => {
                 {verification.map((item) => (
                   <TableRow key={item.type}>
                     <TableCell sx={{ fontWeight: 500 }}>{item.type}</TableCell>
-                    <TableCell><Chip label={statusLabel(item.status)} size="small" color={statusColor(item.status) as any} variant="outlined" /></TableCell>
+                    <TableCell><Chip label={statusLabel(item.status)} size="small" color={statusColor(item.status)} variant="outlined" /></TableCell>
                     <TableCell>{item.sourceCount}</TableCell>
                     <TableCell>{item.targetCount}</TableCell>
                     <TableCell>

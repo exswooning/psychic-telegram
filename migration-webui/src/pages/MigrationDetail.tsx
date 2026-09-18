@@ -566,8 +566,8 @@ export const MigrationDetail: React.FC = () => {
             setAskRepair(false)
             setStarted(r.detail || 'repair started')
             refresh()
-          } catch (e: any) {
-            setRepairError(e.message)
+          } catch (e: unknown) {
+            setRepairError((e instanceof Error ? e.message : String(e)))
           } finally {
             setRepairBusy(false)
           }
@@ -643,8 +643,8 @@ export const MigrationDetail: React.FC = () => {
             setAskFull(false)
             setStarted(r.detail || 'migration started')
             refresh()
-          } catch (e: any) {
-            setFullError(e.message)
+          } catch (e: unknown) {
+            setFullError((e instanceof Error ? e.message : String(e)))
           } finally {
             setFullBusy(false)
           }
@@ -676,8 +676,8 @@ export const MigrationDetail: React.FC = () => {
             setAskDelta(false)
             setStarted(r.detail || 'delta pass started')
             refresh()
-          } catch (e: any) {
-            setDeltaError(e.message)
+          } catch (e: unknown) {
+            setDeltaError((e instanceof Error ? e.message : String(e)))
           } finally {
             setDeltaBusy(false)
           }
