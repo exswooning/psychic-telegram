@@ -121,3 +121,26 @@ class TestMissingSubjectOrKeyFailsClearly:
             assert "SOURCE_ADMIN" in str(exc)
         except SystemExit:
             assert False, "must be ValueError, not SystemExit"
+
+
+class TestFitToLicensesRidesTheGrantLine:
+    """The Quick Setup panel showed "Fit the seed to free licences
+    (--fit-to-licenses)" as not granted, with no way to grant it short of a
+    second hand-pasted line -- exactly the breakage OPTIONAL_SCOPES exists
+    to prevent for apps.licensing/groups/mail.google.com already."""
+
+    def test_the_reports_scope_is_in_the_always_granted_set(self):
+        assert ("https://www.googleapis.com/auth/admin.reports.usage.readonly"
+                in vs.OPTIONAL_SCOPES)
+
+    def test_grant_scopes_includes_it_regardless_of_configuration(self):
+        import dataclasses
+
+        from config import Settings
+
+        st = Settings()
+        # Any tenant, any toggle combination -- OPTIONAL_SCOPES is unioned
+        # in unconditionally, which is the whole point: it rides the line
+        # without depending on what this run happens to be configured for.
+        assert ("https://www.googleapis.com/auth/admin.reports.usage.readonly"
+                in vs.grant_scopes(st, "source"))

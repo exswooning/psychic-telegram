@@ -35,6 +35,7 @@ import TenantActionDialog from '@/components/TenantActionDialog'
 import SeedOneService from '@/components/SeedOneService'
 import { removeTenantSetup } from '@/api/client'
 import { formatPct } from '@/utils/formatPct'
+import DomainSandboxToggle from '@/components/DomainSandboxToggle'
 
 const SEED_SCALES = ['tiny', 'small', 'medium', 'large', 'huge']
 const SEEDABLE_SERVICES = ['drive', 'gmail', 'calendar', 'chat', 'contacts', 'tasks']
@@ -804,6 +805,7 @@ const SeedPanel: React.FC<{ domain: string; onStarted: () => void }> = ({ domain
         <SeedIcon fontSize="small" color="action" />
         <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>Seed this tenant</Typography>
       </Stack>
+      <DomainSandboxToggle domain={domain} />
       <Stack direction="row" spacing={2} sx={{ flexWrap: 'wrap', gap: 1, alignItems: 'center' }}>
         <TextField select size="small" label="Scale" value={scale}
                    onChange={(e) => setScale(e.target.value)} sx={{ width: 110 }}>

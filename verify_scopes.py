@@ -147,6 +147,14 @@ OPTIONAL_SCOPES = {
     # without a second hand-pasted grant, and the reset degrades to trash()
     # by name when it is absent rather than failing.
     "https://mail.google.com/",
+    # --fit-to-licenses: reads current seat usage via the Reports API so the
+    # seeder can size itself to whatever the tenant actually has free,
+    # instead of a fixed user count that may not fit. Read-only, and rides
+    # the line for the identical reason as the rest of this set -- the
+    # Quick Setup panel showed this one "not granted" with no way to grant
+    # it short of a second hand-pasted line, which is exactly the breakage
+    # this set exists to prevent.
+    "https://www.googleapis.com/auth/admin.reports.usage.readonly",
 }
 
 

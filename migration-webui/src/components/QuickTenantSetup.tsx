@@ -25,6 +25,7 @@ import ReasonCodeDialog from './ReasonCodeDialog'
 import JobProgress from './JobProgress'
 import TenantInventoryPanel from './TenantInventoryPanel'
 import ReprovisionPanel from './ReprovisionPanel'
+import DomainSandboxToggle from './DomainSandboxToggle'
 
 const REPO_CLONE_CMD =
   'git clone https://github.com/exswooning/psychic-telegram -b workspace-migrator && cd psychic-telegram'
@@ -958,7 +959,16 @@ const QuickTenantSetup: React.FC<{
        * automated path with no way to opt into seeding in the same run,
        * silently seeding nothing. */}
       {showSeedOptions && (
-        <Stack direction="row" spacing={2} sx={{ mt: 1.5, flexWrap: 'wrap', gap: 1, alignItems: 'center' }}>
+        <>
+          {/* Seeding writes fabricated data, and domain_guard refuses that
+              on any domain a setup wizard has configured -- which this one
+              already is, the moment it has a tenant_configs row. Surfaced
+              HERE rather than only inside the Seed Wizard's own forms:
+              turning this switch on and running is how a Quick Setup's
+              embedded seed hit that exact refusal with no control on
+              screen to fix it. */}
+          {domain && <Box sx={{ mt: 1.5 }}><DomainSandboxToggle domain={domain} /></Box>}
+      <Stack direction="row" spacing={2} sx={{ mt: 1.5, flexWrap: 'wrap', gap: 1, alignItems: 'center' }}>
           <FormControlLabel
             control={<Switch checked={seed} onChange={(e) => setSeed(e.target.checked)} />}
             label={<Typography variant="body2">Also seed this tenant</Typography>}
@@ -1011,6 +1021,7 @@ const QuickTenantSetup: React.FC<{
             </Stack>
           </Collapse>
         </Stack>
+        </>
       )}
 
       {showProvisionUsers && (

@@ -11,6 +11,7 @@ import {
 } from '@/api/client'
 import { SERVICES as SEEDABLE } from '@/components/SeedOneService'
 import DomainSandboxToggle from '@/components/DomainSandboxToggle'
+import SeedTopUp from '@/components/SeedTopUp'
 import JobRunner from '@/components/JobRunner'
 import JobProgress from '@/components/JobProgress'
 import CloudSetup from '@/components/CloudSetup'
@@ -54,7 +55,13 @@ const SeedWizard: React.FC<{
    *  named for doing things by hand. */
   configured?: boolean
 }> = ({ sourceDomain, adminEmail, adminPassword, configured }) => {
-  const [route, setRoute] = useState<'automated' | 'manual'>('automated')
+  // 'topup' only exists once a domain is already set up (came from the
+  // picker) -- there is nothing to top up on a tenant that has not been
+  // seeded yet, and it is the friendliest landing spot once one has: most
+  // visits to an already-configured tenant are "add more", not "start
+  // over" or "repair the delegation".
+  const [route, setRoute] = useState<'automated' | 'manual' | 'topup'>(
+    configured ? 'topup' : 'automated')
   const [status, setStatus] = useState<StatusPayload | null>(null)
   const [actions, setActions] = useState<Record<string, ActionSpec>>({})
   const [dwd, setDwd] = useState<DwdPayload | null>(null)
@@ -116,11 +123,11 @@ const SeedWizard: React.FC<{
       </Box>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
         {configured
-          ? `Fabricated rehearsal data for ${sourceDomain} -- everything, or one
-             service across the users already there. Nothing here touches a
-             production tenant's own data. Manual has the Cloud project and
-             delegation steps, if this tenant needs repairing rather than
-             seeding.`
+          ? `Fabricated rehearsal data for ${sourceDomain}. Top up adds more
+             on top of what is already there; Automated is the full seed or
+             a reset. Nothing here touches a production tenant's own data.
+             Manual has the Cloud project and delegation steps, if this
+             tenant needs repairing rather than seeding.`
           : `Sandbox rehearsal tools for test tenants only -- none of this touches
              a production tenant's own data. Automated signs in and handles the
              Cloud project, delegation, and (optionally) seeding in one step;
@@ -129,9 +136,24 @@ const SeedWizard: React.FC<{
       </Typography>
 
       <Tabs value={route} onChange={(_, v) => setRoute(v)} sx={{ mb: 3, borderBottom: '1px solid', borderColor: 'divider' }}>
+        {/* Only once a domain is already set up: there is nothing to top
+            up on a tenant that has not been seeded yet. */}
+        {configured && <Tab value="topup" label="Top up" data-testid="tab-topup" />}
         <Tab value="automated" label="Automated" />
         <Tab value="manual" label="Manual" />
       </Tabs>
+
+      {configured && route === 'topup' && (
+        <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid',
+                                  borderColor: 'divider' }}>
+          <CardContent sx={{ p: 3 }}>
+            <Typography variant="h6" sx={{ fontWeight: 600, mb: 1.5 }}>
+              Add more to {sourceDomain}
+            </Typography>
+            <SeedTopUp domain={sourceDomain} />
+          </CardContent>
+        </Card>
+      )}
 
       {configured && route === 'automated' && (
         <>
@@ -160,7 +182,10 @@ const SeedWizard: React.FC<{
 
       {!configured && (
         <Box sx={{ maxWidth: route === 'automated' ? 480 : undefined }}>
-          <QuickTenantSetup side="source" view={route} showSeedOptions
+          {/* 'topup' cannot reach here: its tab only renders, and route
+              only ever becomes 'topup', when configured is true. */}
+          <QuickTenantSetup side="source"
+                            view={route as 'automated' | 'manual'} showSeedOptions
                             initialDomain={sourceDomain}
                             initialEmail={adminEmail}
                             initialPassword={adminPassword}

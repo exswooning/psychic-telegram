@@ -27,6 +27,7 @@ vi.mock('@/api/client', async () => {
 })
 
 vi.mock('@/api/controlPlane', () => ({
+  fetchDomainGuardStatus: () => Promise.resolve({ domain: 'x', protected: false }),
   fetchTenantConfigStatus: (side: 'source' | 'target') => Promise.resolve({
     side, domain: side === 'source' ? 'src.example' : 'tgt.example',
     adminEmail: `admin@${side}.example`, hasKey: true, clientId: '1', scopes: [],
@@ -60,6 +61,17 @@ const openAdvanced = async () => {
 }
 
 beforeEach(() => { vi.mocked(client.runSeed).mockClear() })
+
+describe('a protected domain can be declared a sandbox from this page', () => {
+  /* This is the page the "seed didn't show" question pointed at -- a seed
+     refused by domain_guard here has no explanation and no way forward
+     without leaving the page, which is exactly what happened live. */
+  it('shows the sandbox toggle next to the seed controls', async () => {
+    view()
+    fireEvent.click(await screen.findByTestId('tenant-card-source'))
+    expect(await screen.findByTestId('sandbox-toggle')).toBeInTheDocument()
+  })
+})
 
 describe('the advanced seed options are all present', () => {
   it('exposes every ability the seeder has', async () => {

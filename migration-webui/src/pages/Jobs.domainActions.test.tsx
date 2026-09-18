@@ -33,6 +33,7 @@ vi.mock('@/api/client', async () => {
 // anything it reaches for that is not here is a real coupling this test
 // should be told about.
 vi.mock('@/api/controlPlane', () => ({
+  fetchDomainGuardStatus: () => Promise.resolve({ domain: 'x', protected: false }),
   fetchTenantConfigStatus: (side: 'source' | 'target') => Promise.resolve({
     side, domain: side === 'source' ? 'src.example' : 'tgt.example',
     adminEmail: `admin@${side}.example`, hasKey: true, clientId: '1', scopes: [],
