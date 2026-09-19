@@ -185,6 +185,10 @@ export interface FleetNode {
   seed_in_flight?: number | null
   seed_req_per_sec?: number | null
   seed_retried_pct?: number | null
+  /** A user that never produced a result at all -- distinct from the
+   *  per-item warnings a FINISHED user can still carry. "<email>: <reason>",
+   *  truncated at the source. */
+  seed_last_failure?: string | null
   /** Derived server-side from last_seen, not stored -- a node that dies
    *  cannot mark itself down, so liveness has to be computed on read. */
   healthy: boolean

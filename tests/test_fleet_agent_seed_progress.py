@@ -72,6 +72,48 @@ def test_build_payload_labels_the_job_from_the_seed_domain(tmp_path, monkeypatch
     assert payload["seed_users_done"] == 2
 
 
+def test_parses_a_user_failure_line(tmp_path):
+    """A failure means the user never produced a result at all -- distinct
+    from the per-item warnings the dashboard already groups, which are
+    about a user that finished but had some items rejected."""
+    log = tmp_path / "seed.log"
+    log.write_text(
+        "  ... still seeding: 19/20 users done after 130m00s (1 in flight), "
+        "13.2 req/s, 2,107 retried (2.0%)\n"
+        "  ! seeduser300@source.example.com FAILED: exhausted 6 retries on "
+        "HTTP 401 (authError): <HttpError 401 ...>\n"
+    )
+    got = fleet_agent._seed_progress(str(log))
+    assert got["seed_last_failure"].startswith("seeduser300@source.example.com: ")
+    assert "HTTP 401" in got["seed_last_failure"]
+    # Progress is independent of the failure -- both are read from the
+    # same tail, neither one's absence should hide the other.
+    assert got["seed_users_done"] == 19
+
+
+def test_no_failure_line_means_no_failure_field(tmp_path):
+    log = tmp_path / "seed.log"
+    log.write_text(
+        "  ... still seeding: 5/20 users done after 30m00s (14 in flight), "
+        "10.0 req/s, 0 retried (0.0%)\n"
+    )
+    got = fleet_agent._seed_progress(str(log))
+    assert "seed_last_failure" not in got
+
+
+def test_a_failure_before_any_progress_line_is_still_caught(tmp_path):
+    """A run whose very first user fails has no heartbeat line yet at
+    all -- the failure must not be hidden behind requiring one."""
+    log = tmp_path / "seed.log"
+    log.write_text(
+        "Seeding 5 users in source.example.com at scale 'huge'\n"
+        "  [seeduser1@source.example.com] starting (Engineering, PRJ-001)\n"
+        "  ! seeduser1@source.example.com FAILED: connection refused\n"
+    )
+    got = fleet_agent._seed_progress(str(log))
+    assert got["seed_last_failure"] == "seeduser1@source.example.com: connection refused"
+
+
 def test_a_real_main_py_job_is_not_overwritten_by_seed_fields(tmp_path, monkeypatch):
     """If this node is somehow running a real main.py job too, that name
     wins -- seed progress is additive, never a relabel of real work."""

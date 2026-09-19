@@ -225,6 +225,22 @@ describe('helper nodes seeding the same domain', () => {
     expect(getComputedStyle(retried).color).not.toBe('')
   })
 
+  it('flags a user that never produced a result at all', () => {
+    render(<SeedRunDashboard lines={[...banner(), doneUser(1)]} elapsedSec={5400}
+                            nodes={[fleetNode({
+                              seed_last_failure: 'seeduser300@source.example.com: '
+                                + 'exhausted 6 retries on HTTP 401 (authError)',
+                            })]} />)
+    expect(screen.getByText('failed')).toBeInTheDocument()
+    expect(screen.getByText(/seeduser300@source\.example\.com/)).toBeInTheDocument()
+  })
+
+  it('shows no failure chip when the node has not failed anyone', () => {
+    render(<SeedRunDashboard lines={[...banner(), doneUser(1)]} elapsedSec={5400}
+                            nodes={[fleetNode()]} />)
+    expect(screen.queryByText('failed')).not.toBeInTheDocument()
+  })
+
   it('renders nothing extra when no helper nodes are seeding this domain', () => {
     render(<SeedRunDashboard lines={[...banner(), doneUser(1)]} elapsedSec={5400} nodes={[]} />)
     expect(screen.queryByText(/Helper nodes/)).not.toBeInTheDocument()

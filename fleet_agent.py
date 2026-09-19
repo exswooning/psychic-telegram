@@ -158,8 +158,17 @@ def _commit() -> str:
 # working exactly as before; this only ever watches from outside.
 _SEED_LINE = re.compile(
     r"still seeding:\s*(\d+)/(\d+) users done.*?\((\d+) in flight\),\s*"
-    r"([\d.]+) req/s,\s*\d+ retried \(([\d.]+)%\)"
+    # Retry counts print with thousands separators once a run runs long
+    # enough to have any -- exactly the runs most worth watching.
+    r"([\d.]+) req/s,\s*[\d,]+ retried \(([\d.]+)%\)"
 )
+
+# seed_one_user's own failure line: "  ! seeduser300@example.com FAILED:
+# exhausted 6 retries on HTTP 401 (authError): <HttpError ...>". A failure
+# here means the user never produced a result at all -- distinct from the
+# per-item warnings SeedRunDashboard already groups, which are about a
+# user that finished but had some items rejected.
+_SEED_FAILURE = re.compile(r"!\s+(\S+)\s+FAILED:\s*(.+)")
 
 
 def _seed_progress(log_path: str | None) -> dict:
@@ -183,14 +192,25 @@ def _seed_progress(log_path: str | None) -> dict:
     last = None
     for m in _SEED_LINE.finditer(tail):
         last = m
-    if not last:
-        return {}
-    done, total, in_flight, req_s, retried_pct = last.groups()
-    return {
-        "seed_users_done": int(done), "seed_users_total": int(total),
-        "seed_in_flight": int(in_flight), "seed_req_per_sec": float(req_s),
-        "seed_retried_pct": float(retried_pct),
-    }
+    out = {}
+    if last:
+        done, total, in_flight, req_s, retried_pct = last.groups()
+        out = {
+            "seed_users_done": int(done), "seed_users_total": int(total),
+            "seed_in_flight": int(in_flight), "seed_req_per_sec": float(req_s),
+            "seed_retried_pct": float(retried_pct),
+        }
+    # Independent of whether a progress line was also found: a run that
+    # finished (no more heartbeats) still has a last failure worth showing,
+    # and one that never got past its first user has no progress line yet
+    # but may already have failed one.
+    last_failure = None
+    for fm in _SEED_FAILURE.finditer(tail):
+        last_failure = fm
+    if last_failure:
+        user, reason = last_failure.groups()
+        out["seed_last_failure"] = f"{user}: {reason[:160]}"
+    return out
 
 
 def build_payload(node_id: str, seed_log: str | None = None,

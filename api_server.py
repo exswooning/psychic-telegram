@@ -1487,6 +1487,7 @@ class Heartbeat(BaseModel):
     seed_in_flight: int | None = None
     seed_req_per_sec: float | None = None
     seed_retried_pct: float | None = None
+    seed_last_failure: str | None = None
 
 
 def _provision_log_path(tenant: str, account_id: int | None) -> str:

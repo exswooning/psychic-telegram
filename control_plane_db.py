@@ -134,6 +134,12 @@ def _apply_column_upgrades(conn: sqlite3.Connection) -> None:
             ("seed_in_flight", "INTEGER"),
             ("seed_req_per_sec", "REAL"),
             ("seed_retried_pct", "REAL"),
+            # The last "! <user> FAILED: ..." line seen in the node's own
+            # log -- a user that never produced a result at all, distinct
+            # from the per-item warnings a FINISHED user can still carry.
+            # Found live: seeduser300 failing on an expired DWD session had
+            # no visibility anywhere outside SSH-ing to the node that ran it.
+            ("seed_last_failure", "TEXT"),
         ],
         "accounts": [
             ("subscription_active", "INTEGER NOT NULL DEFAULT 1"),

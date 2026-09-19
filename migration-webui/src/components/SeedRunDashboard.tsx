@@ -285,6 +285,21 @@ const SeedRunDashboard: React.FC<{
                     <LinearProgress variant="determinate" value={nodePct}
                                     sx={{ height: 4, borderRadius: 2, mt: 0.75 }} />
                   )}
+                  {/* A user that never produced a result at all -- distinct
+                      from the per-item warnings above, which are about a
+                      user that finished but had some items rejected. Found
+                      live with no visibility anywhere outside SSH-ing to
+                      the node that hit it. */}
+                  {n.seed_last_failure && (
+                    <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 0.75 }}>
+                      <Chip size="small" label="failed" color="error" variant="outlined" />
+                      <Typography variant="caption" color="text.secondary" sx={{
+                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      }}>
+                        {n.seed_last_failure}
+                      </Typography>
+                    </Stack>
+                  )}
                 </Box>
               )
             })}
