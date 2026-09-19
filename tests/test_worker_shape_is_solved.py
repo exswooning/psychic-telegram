@@ -150,8 +150,15 @@ class TestRecommendUsesIt:
         assert "quota" in rec["seed_reason"]
 
     def test_the_migration_pool_is_derived_not_frozen(self, monkeypatch):
-        """It still answers 4 -- that one was correctly derived -- but it is
-        a division now, so a measured latency moves it."""
-        assert R.migrate_file_workers() == 4
+        """Used to answer 4 at the default MIGRATE_FILE_SECONDS (1.33) --
+        but that only ever matched DRIVE_WRITES_PER_SEC x 1.33 because both
+        were unmeasured guesses that happened to multiply out to 4. The
+        ceiling is no longer a guess (see its own comment: corrected
+        against a real, hour-long single-user seed run), so the product
+        moves with it. MIGRATE_FILE_SECONDS remains its own stand-in until
+        a real migration gets the same measurement -- the property this
+        pins is the division relationship, not that any particular pair of
+        unmeasured numbers should keep landing on 4."""
+        assert R.migrate_file_workers() == 1
         monkeypatch.setattr(R, "MIGRATE_FILE_SECONDS", 4.0)
-        assert R.migrate_file_workers() == 12
+        assert R.migrate_file_workers() == 4

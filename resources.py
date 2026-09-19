@@ -179,7 +179,19 @@ def mb_per_seed_worker(mail_workers: int | None = None,
 
 # Drive's sustained per-account write ceiling. Not ours to raise; the only
 # question is how much of it we use.
-DRIVE_WRITES_PER_SEC = 3.0
+#
+# Was 3.0, an assumed figure never actually measured against a live
+# account. Corrected against a real, isolated, single-user `huge` Drive
+# pass (source.sarafgloabalexim.com, seeduser200, --only drive, 22-23
+# threads, nothing else running): the observed rate climbed to 2.2/sec by
+# minute 13, then the very fact that real 429s started arriving there and
+# the AdaptiveRateLimiter backed off is the measurement -- it settled at
+# 0.9/sec and held for the rest of an hour-plus run once it found the
+# real floor. 3.0 was never reachable; every run that auto-sized enough
+# threads to aim for it was paying for an overshoot-then-backoff cycle
+# that finished SLOWER than the 11-thread runs that stayed under it by
+# accident.
+DRIVE_WRITES_PER_SEC = 0.9
 
 # How long one leaf file actually takes, end to end.
 #

@@ -60,10 +60,15 @@ class TestLeafWorkersFollowTheMeasuredLatency:
         assert slow > fast, "latency went up 4.6x and the pool did not move"
 
     def test_the_original_derivation_still_gives_the_original_answer(self, monkeypatch):
-        """At the 1.18s this was first derived from, 4 is still the answer --
-        the arithmetic was never wrong, only its input."""
+        """Used to answer 4 at this latency -- but only because the ceiling
+        was still the unmeasured 3.0 guess (round(3.0*1.18)=4). The ceiling
+        is now the measured 0.9 (see its own comment: a real, hour-long
+        single-user run that showed 3.0 was never reachable), so the same
+        1.18s latency now saturates at round(0.9*1.18)=1. The arithmetic
+        was never wrong -- both inputs were guesses that happened to
+        agree, and only one of them has been corrected so far."""
         monkeypatch.setattr(resources, "SEED_LEAF_SECONDS", 1.18)
-        assert resources.saturating_leaf_workers() == 4
+        assert resources.saturating_leaf_workers() == 1
 
     def test_the_budget_caps_it_where_threads_stop_paying(self, monkeypatch):
         """Threads and concurrent USERS come out of the same memory, so an
