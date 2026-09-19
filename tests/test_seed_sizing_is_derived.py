@@ -99,3 +99,25 @@ class TestTheSeederActuallyUsesIt:
         monkeypatch.setenv("SEED_LEAF_WORKERS", "3")
         b = CorpusBuilder.__new__(CorpusBuilder)
         assert b._leaf_workers() == 3
+
+
+class TestTheLatencyWasStaleAgain:
+    """The third correction to the same number, this time from a real
+    manifest rather than a stopwatch: a 299-user `huge` seed's own
+    per-user elapsed_sec averaged 3734s at the 11 threads that run
+    actually used. Backed out against SEED_FIXED_SECONDS and
+    SEED_PACED_ITEMS, that implies ~15.0s per leaf, not 5.4s -- the same
+    kind of miss the 5.4 correction itself was measuring against 1.18s."""
+
+    def test_the_default_reflects_the_latest_measurement(self):
+        assert resources.SEED_LEAF_SECONDS == 15.0
+
+    def test_backing_out_the_constant_from_the_real_run_reproduces_it(self):
+        """The arithmetic that produced 15.0, run forward: this is what
+        makes it a derived number rather than a guess with a good story."""
+        observed_mean_sec = 3734.1
+        threads_used = 11
+        rate = resources.SEED_PACED_ITEMS / (
+            observed_mean_sec - resources.SEED_FIXED_SECONDS)
+        implied_latency = threads_used / rate
+        assert round(implied_latency, 1) == 15.0

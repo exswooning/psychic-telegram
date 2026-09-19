@@ -190,9 +190,22 @@ DRIVE_WRITES_PER_SEC = 3.0
 # At 5.4s the same 4 threads deliver 0.74 writes/sec -- a quarter of the
 # ceiling the number was chosen to saturate.
 #
-# Overridable because it is a property of the corpus and the day, not of
-# this code: a corpus of plain binaries converts nothing and is far faster.
-SEED_LEAF_SECONDS = float(os.getenv("SEED_LEAF_SECONDS", "5.4"))
+# Measured a third time against a real 299-user `huge` seed (the manifest's
+# own per-user elapsed_sec, not a stopwatch): mean 3734s/user at the 11
+# threads that run actually used, against SEED_FIXED_SECONDS + 2273 items
+# implying 15.0s -- not 5.4s. Backing out the number the same way each
+# time is the point: 5.4 was itself a correction, not a ceiling on how
+# wrong this can be.
+#
+# Overridable because it is also a property of the MACHINE, which this
+# round surfaced for the first time: a helper node seeding the same tenant
+# over a home connection through Tailscale, rather than from the
+# coordinator's own datacenter link, measured 4272s/user on the identical
+# corpus -- slower despite more threads. That is a different network path
+# to Google, not evidence this constant is wrong for the box it was
+# measured on. A node with materially different reach to Google should set
+# its own SEED_LEAF_SECONDS rather than share this one.
+SEED_LEAF_SECONDS = float(os.getenv("SEED_LEAF_SECONDS", "15.0"))
 
 # The same question on the migration side, and the honest answer is that
 # nobody has measured it. drive_file_workers has been 4 since "~3
