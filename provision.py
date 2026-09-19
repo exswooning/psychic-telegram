@@ -167,6 +167,39 @@ def _undelete(directory, email: str) -> bool:
         return False
 
 
+def mailbox_is_provisioned(directory, email: str, attempts: int = 3,
+                           wait_s: float = 15.0, sleep=time.sleep) -> bool:
+    """Has Google actually finished setting up this account's mailbox?
+
+    isMailboxSetup starts False on every account and normally flips to
+    True within seconds -- but a create that lands right as the tenant's
+    last available license is claimed produces a user object with no
+    mailbox behind it at all, and that flag never flips. Confirmed live:
+    the 300th account of a --create-until-full run (immediately followed
+    by the API refusing a 301st for "Insufficient licenses") sat at
+    isMailboxSetup: False for the rest of an 18-hour seed, and every
+    domain-wide-delegation call against it failed with "Active session is
+    invalid" -- the diagnostic Google gives instead of naming the licence
+    shortfall directly, which is why this checks the flag rather than
+    trying to parse that message.
+
+    Retried rather than checked once: a genuinely fine account can still
+    read False for the first several seconds after creation, and treating
+    that as failure would delete accounts that only needed to wait.
+    """
+    for attempt in range(attempts):
+        try:
+            u = directory.users().get(
+                userKey=email, fields="isMailboxSetup").execute()
+            if u.get("isMailboxSetup"):
+                return True
+        except HttpError:
+            pass
+        if attempt < attempts - 1:
+            sleep(wait_s)
+    return False
+
+
 _TRANSIENT_STATUSES = (500, 502, 503, 504)
 
 
@@ -221,7 +254,8 @@ def create_until_full(directory, candidates, dry_run: bool = False,
     signal this is built to reach is a 4xx (403/quotaExceeded and
     similar) on the *insert* call itself.
     """
-    result: dict = {"created": [], "existing": [], "stopped_reason": ""}
+    result: dict = {"created": [], "existing": [], "stopped_reason": "",
+                    "unlicensed_removed": []}
     for email in candidates:
         try:
             exists = _call_with_retry(
@@ -272,6 +306,25 @@ def create_until_full(directory, candidates, dry_run: bool = False,
             break
     else:
         result["stopped_reason"] = "ran out of candidate names before hitting a limit"
+
+    # The account most likely to have lost the licence race is the very
+    # last one created -- the next candidate is what got the actual
+    # refusal, so any shortfall landed on the create immediately before
+    # it. Checking every account here would cost one API call each for no
+    # reason; this is the one position where the failure is known to land.
+    if result["created"] and not dry_run:
+        last = result["created"][-1]
+        if not mailbox_is_provisioned(directory, last, sleep=sleep):
+            print(f"  {last} was created but never got a mailbox (no "
+                  f"licence left to assign) -- removing it")
+            try:
+                _call_with_retry(
+                    lambda: directory.users().delete(userKey=last).execute(),
+                    max_retries, retry_delay, sleep)
+                result["created"].remove(last)
+                result["unlicensed_removed"].append(last)
+            except HttpError as exc:
+                print(f"  ! could not remove {last}: {exc}")
     return result
 
 

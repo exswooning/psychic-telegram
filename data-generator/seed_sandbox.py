@@ -2616,6 +2616,10 @@ def main(argv: list[str] | None = None) -> int:
         res = provision.create_until_full(directory, _candidates())
         print(f"\nCreated {len(res['created'])} new account(s).")
         print(f"Stopped: {res['stopped_reason']}")
+        if res.get("unlicensed_removed"):
+            print(f"Removed {len(res['unlicensed_removed'])} account(s) that "
+                  f"never got a mailbox (lost the licence race at the "
+                  f"boundary): {', '.join(res['unlicensed_removed'])}")
         if not res["created"]:
             sys.exit("No new accounts were created; nothing to seed.")
         entries = []

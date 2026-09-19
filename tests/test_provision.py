@@ -36,13 +36,20 @@ class FakeDirectory:
                  fail_on: str | None = None,
                  transient_get_on: dict[str, int] | None = None,
                  transient_insert_on: dict[str, int] | None = None,
-                 transient_status: int = 503):
-        self.users_db = {e.lower(): {"primaryEmail": e} for e in (existing or [])}
+                 transient_status: int = 503,
+                 unlicensed: set[str] | None = None):
+        # isMailboxSetup True by default: every existing test creates or
+        # names accounts that are meant to behave normally, and only the
+        # licence-race tests below opt a specific email into staying False.
+        self.users_db = {e.lower(): {"primaryEmail": e, "isMailboxSetup": True}
+                         for e in (existing or [])}
         self.inserted: list[dict] = []
+        self.deleted: list[str] = []
         self.fail_on = fail_on
         self.transient_get_on = dict(transient_get_on or {})
         self.transient_insert_on = dict(transient_insert_on or {})
         self.transient_status = transient_status
+        self.unlicensed = {e.lower() for e in (unlicensed or [])}
         self.get_attempts: dict[str, int] = {}
         self.insert_attempts: dict[str, int] = {}
 
@@ -81,9 +88,24 @@ class FakeDirectory:
                 outer._maybe_transient(outer.transient_insert_on, key)
                 if outer.fail_on and outer.fail_on in email:
                     raise HttpError(FakeResp(403), b'{"error":{"code":403}}')
-                outer.users_db[key] = {"primaryEmail": email}
+                outer.users_db[key] = {"primaryEmail": email,
+                                       "isMailboxSetup": key not in outer.unlicensed}
                 outer.inserted.append(body)
                 return body
+
+        return _Req()
+
+    def delete(self, userKey: str = "", **kw):
+        outer = self
+
+        class _Req:
+            def execute(self, num_retries: int = 0):
+                key = userKey.lower()
+                if key not in outer.users_db:
+                    raise HttpError(FakeResp(404), b'{"error":{"code":404}}')
+                del outer.users_db[key]
+                outer.deleted.append(userKey)
+                return {}
 
         return _Req()
 
@@ -200,6 +222,92 @@ class TestCreateUntilFull:
         assert "ran out" in res["stopped_reason"]
 
 
+class TestUnlicensedAccountAtTheBoundaryIsRemoved:
+    """A create that lands right as the tenant's last licence is claimed
+    produces a user object with no mailbox behind it -- isMailboxSetup
+    never flips to True, and every domain-wide-delegation call against it
+    fails with "Active session is invalid" forever after. Confirmed live:
+    the 300th account of a real --create-until-full run was exactly this,
+    and sat broken for the rest of an 18-hour seed before anyone noticed.
+    """
+
+    def test_the_unprovisioned_last_account_is_removed(self):
+        d = FakeDirectory(fail_on="blocked", unlicensed={"ok2@x.com"})
+        res = provision.create_until_full(
+            d, iter(["ok1@x.com", "ok2@x.com", "blocked@x.com"]),
+            sleep=lambda _: None)
+        assert res["created"] == ["ok1@x.com"]
+        assert res["unlicensed_removed"] == ["ok2@x.com"]
+        assert d.deleted == ["ok2@x.com"]
+
+    def test_a_properly_provisioned_last_account_is_left_alone(self):
+        d = FakeDirectory(fail_on="blocked")
+        res = provision.create_until_full(
+            d, iter(["ok1@x.com", "blocked@x.com"]), sleep=lambda _: None)
+        assert res["created"] == ["ok1@x.com"]
+        assert res["unlicensed_removed"] == []
+        assert d.deleted == []
+
+    def test_the_removal_is_printed(self, capsys):
+        d = FakeDirectory(fail_on="blocked", unlicensed={"ok2@x.com"})
+        provision.create_until_full(
+            d, iter(["ok1@x.com", "ok2@x.com", "blocked@x.com"]),
+            sleep=lambda _: None)
+        assert "ok2@x.com" in capsys.readouterr().out
+
+    def test_a_flag_that_only_needed_a_moment_is_not_treated_as_unlicensed(self):
+        """isMailboxSetup can legitimately still read False for the first
+        few seconds after a normal, licensed creation -- flipping to True
+        on a later attempt must not be mistaken for the permanent case."""
+        d = FakeDirectory(fail_on="blocked", unlicensed={"ok2@x.com"})
+        calls = []
+
+        def flips_true_on_second_check(*a, **kw):
+            calls.append(1)
+            if len(calls) >= 2:
+                d.users_db["ok2@x.com"]["isMailboxSetup"] = True
+
+        res = provision.create_until_full(
+            d, iter(["ok1@x.com", "ok2@x.com", "blocked@x.com"]),
+            sleep=flips_true_on_second_check)
+        assert res["unlicensed_removed"] == []
+        assert "ok2@x.com" in res["created"]
+
+    def test_dry_run_never_checks_or_removes_anything(self):
+        d = FakeDirectory(unlicensed={"a@x.com"})
+        res = provision.create_until_full(
+            d, iter(["a@x.com"]), dry_run=True, sleep=lambda _: None)
+        assert res["unlicensed_removed"] == []
+        assert d.deleted == []
+
+
+class TestMailboxIsProvisioned:
+    def test_true_immediately_when_set_up(self):
+        d = FakeDirectory(existing=["a@x.com"])
+        assert provision.mailbox_is_provisioned(d, "a@x.com", sleep=lambda _: None)
+
+    def test_false_when_it_never_flips(self):
+        d = FakeDirectory(unlicensed={"a@x.com"})
+        d.users_db["a@x.com"] = {"primaryEmail": "a@x.com", "isMailboxSetup": False}
+        assert not provision.mailbox_is_provisioned(
+            d, "a@x.com", attempts=2, sleep=lambda _: None)
+
+    def test_retries_before_giving_up(self):
+        """A genuinely fine account can still read False for the first
+        several seconds -- one look is not enough to call it broken."""
+        d = FakeDirectory()
+        d.users_db["a@x.com"] = {"primaryEmail": "a@x.com", "isMailboxSetup": False}
+        seen = []
+
+        def flip_after_first_check(*a, **kw):
+            seen.append(1)
+            d.users_db["a@x.com"]["isMailboxSetup"] = True
+
+        assert provision.mailbox_is_provisioned(
+            d, "a@x.com", attempts=3, sleep=flip_after_first_check)
+        assert len(seen) == 1
+
+
 class TestCreateUntilFullRetriesTransientErrors:
     """Live on source.rohitrokaya.com.np, a single 503 'backendError' on an
     existence check ended a create_until_full run at 122 accounts -- a
@@ -220,7 +328,9 @@ class TestCreateUntilFullRetriesTransientErrors:
         delays, sleep = self._quiet_sleep()
         res = provision.create_until_full(d, iter(["new@x.com"]), sleep=sleep)
         assert res["created"] == ["new@x.com"]
-        assert d.get_attempts["new@x.com"] == 3, "2 failures then a success"
+        # 2 failures then a success, plus the one mailbox_is_provisioned()
+        # check that now runs against the last created account afterward.
+        assert d.get_attempts["new@x.com"] == 4
         assert len(delays) == 2, "one sleep per retry, none after the final success"
 
     def test_a_transient_503_on_insert_is_retried_and_recovers(self):
@@ -228,7 +338,9 @@ class TestCreateUntilFullRetriesTransientErrors:
         delays, sleep = self._quiet_sleep()
         res = provision.create_until_full(d, iter(["new@x.com"]), sleep=sleep)
         assert res["created"] == ["new@x.com"]
-        assert d.get_attempts["new@x.com"] == 1, "the existence check itself was clean"
+        # The existence check itself was clean (1); the second get() is
+        # mailbox_is_provisioned() checking the newly-created account.
+        assert d.get_attempts["new@x.com"] == 2
         assert d.insert_attempts["new@x.com"] == 2, "1 failure then a success"
         assert len(delays) == 1
 
