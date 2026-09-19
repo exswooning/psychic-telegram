@@ -4,6 +4,7 @@ import {
   TableRow, Tooltip, Typography, TableContainer, Paper,
 } from '@mui/material'
 import { parseSeedRun, SeedRun } from '@/utils/seedLog'
+import type { FleetNode } from '@/api/controlPlane'
 
 /**
  * Everything a seed run actually measures, in one place.
@@ -94,7 +95,12 @@ const Stat: React.FC<{
 
 const SeedRunDashboard: React.FC<{
   lines: string[]; elapsedSec?: number; running?: boolean
-}> = ({ lines, elapsedSec, running }) => {
+  /** Helper machines seeding this SAME domain from outside main.py/webui.py
+   *  entirely (a raw seed_sandbox.py process on another box) -- their own
+   *  progress, reported over fleet_agent.py's normal heartbeat rather than
+   *  the log this component otherwise reads. Undefined/empty when none are. */
+  nodes?: FleetNode[]
+}> = ({ lines, elapsedSec, running, nodes }) => {
   const run: SeedRun = React.useMemo(() => parseSeedRun(lines), [lines])
 
   if (run.users.length === 0 && run.totalUsers === undefined) return null
@@ -224,6 +230,64 @@ const SeedRunDashboard: React.FC<{
                 </Stack>
               </Tooltip>
             ))}
+          </Stack>
+        </>
+      )}
+
+      {/* Helper nodes seeding this same domain from outside this run
+          entirely -- their own progress, not this run's. Shown as its own
+          section rather than folded into "Users" above, since a node's
+          count is a SEPARATE total (its own --users slice), not more of
+          this one. */}
+      {nodes && nodes.length > 0 && (
+        <>
+          <Typography variant="caption" color="text.secondary" sx={{
+            display: 'block', mb: 0.5, fontWeight: 600,
+          }}>
+            Helper nodes ({nodes.length})
+          </Typography>
+          <Stack spacing={0.75} sx={{ mb: 1.5 }}>
+            {nodes.map((n) => {
+              const done = n.seed_users_done ?? null
+              const total = n.seed_users_total ?? null
+              const nodePct = done != null && total ? Math.round((done / total) * 100) : null
+              return (
+                <Box key={n.node_id} sx={{
+                  px: 1.5, py: 1, borderRadius: 1, bgcolor: 'action.hover',
+                }}>
+                  <Stack direction="row" spacing={1.5} alignItems="center"
+                         sx={{ flexWrap: 'wrap', gap: 1 }}>
+                    <Typography variant="body2" sx={{ fontWeight: 700, minWidth: 120 }}>
+                      {n.hostname || n.node_id}
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary"
+                                sx={{ fontVariantNumeric: 'tabular-nums' }}>
+                      {done != null && total != null ? `${fmt(done)} / ${fmt(total)} users` : 'starting…'}
+                    </Typography>
+                    {n.seed_in_flight != null && (
+                      <Typography variant="caption" color="text.secondary">
+                        {fmt(n.seed_in_flight)} in flight
+                      </Typography>
+                    )}
+                    {n.seed_req_per_sec != null && (
+                      <Typography variant="caption" color="text.secondary">
+                        {n.seed_req_per_sec.toFixed(1)} req/s
+                      </Typography>
+                    )}
+                    {n.seed_retried_pct != null && (
+                      <Typography variant="caption"
+                                  color={n.seed_retried_pct > 5 ? 'warning.main' : 'text.secondary'}>
+                        {n.seed_retried_pct.toFixed(1)}% retried
+                      </Typography>
+                    )}
+                  </Stack>
+                  {nodePct != null && (
+                    <LinearProgress variant="determinate" value={nodePct}
+                                    sx={{ height: 4, borderRadius: 2, mt: 0.75 }} />
+                  )}
+                </Box>
+              )
+            })}
           </Stack>
         </>
       )}

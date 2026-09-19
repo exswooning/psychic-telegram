@@ -1478,6 +1478,15 @@ class Heartbeat(BaseModel):
     active_job: str | None = None
     job_pid: int | None = None
     transfer_mode: str | None = None
+    # A helper node running seed_sandbox.py directly (outside main.py, so
+    # active_job alone cannot describe it) -- parsed from its own "still
+    # seeding: X/Y users done ... (Z in flight), R req/s, N retried" line.
+    seed_domain: str | None = None
+    seed_users_done: int | None = None
+    seed_users_total: int | None = None
+    seed_in_flight: int | None = None
+    seed_req_per_sec: float | None = None
+    seed_retried_pct: float | None = None
 
 
 def _provision_log_path(tenant: str, account_id: int | None) -> str:

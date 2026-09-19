@@ -103,7 +103,8 @@ export const RunningJobDetail: React.FC<{
             {job.kind === 'seed' && (
               <SeedRunDashboard lines={job.lines}
                                 elapsedSec={job.elapsedSec ?? 0}
-                                running={!job.done} />
+                                running={!job.done}
+                                nodes={job.nodes} />
             )}
             <Box component="pre" sx={{
               fontSize: 11, p: 1.5, bgcolor: 'action.hover', borderRadius: 1,

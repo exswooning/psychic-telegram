@@ -45,6 +45,11 @@ export interface RunningJob {
   /** Epoch seconds this run ended, and its exit code, when known. */
   finishedAt?: number
   rc?: number | null
+  /** Helper machines seeding the SAME domain from outside main.py/webui.py
+   *  entirely -- SeedRunDashboard's own Nodes section, so a helper's
+   *  progress sits on the same page as the run it is helping with, not as
+   *  an unrelated-looking idle row on /nodes. */
+  nodes?: FleetNode[]
   // Absent for a job admitted under a DIFFERENT account -- job_admission.py
   // never records a stoppable pid for seed/reset-target/full-setup (only
   // this account's own rich sources below know that), and stopping
@@ -165,6 +170,15 @@ export function useRunningJobs() {
       // this page exists to answer. It is labelled for what it is instead.
       const jobIsMine = !!job?.running && !!job.name
       if (jobIsMine && job) {
+        const jobDomain = (jobKind(job.name) === 'reset' && job.name.includes('target'))
+          ? tgtCfg?.domain : srcCfg?.domain
+        // A helper node running seed_sandbox.py directly reports its own
+        // seed_domain via fleet_agent.py's --seed-log flag -- matched here
+        // by domain, not job name, since the helper's own label is
+        // whatever --seed-domain was given it, not this job's name.
+        const seedNodes = jobKind(job.name) === 'seed' && jobDomain
+          ? nodes.filter((n) => n.seed_domain === jobDomain && n.healthy)
+          : undefined
         found.push({
           key: `webui-${job.name}`,
           kind: jobKind(job.name),
@@ -172,8 +186,7 @@ export function useRunningJobs() {
           // side is only touched by reset target. Naming the tenant is the
           // difference between "a job is running" and "something is
           // happening to this domain".
-          domain: (jobKind(job.name) === 'reset' && job.name.includes('target'))
-            ? tgtCfg?.domain : srcCfg?.domain,
+          domain: jobDomain,
           label: job.name,
           // "1928s elapsed" was the whole description of a 32-minute run.
           // The job's own newest line says what it is doing right now --
@@ -188,6 +201,7 @@ export function useRunningJobs() {
             latestLine(job.lines),
           ].filter(Boolean).join(' · '),
           pct: job.progressPct ?? null, lines: job.lines, elapsedSec: job.elapsed,
+          nodes: seedNodes,
           stop: async () => { await stopSeedJob() },
         })
       }

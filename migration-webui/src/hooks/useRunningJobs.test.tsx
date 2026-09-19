@@ -125,3 +125,58 @@ describe('Running Now', () => {
     await waitFor(() => expect(screen.getByText('migrate')).toBeTruthy())
   })
 })
+
+/**
+ * A helper node runs seed_sandbox.py directly, entirely outside the job
+ * this hook otherwise assembles from webui.py's own Job -- the only thing
+ * connecting the two is the domain they both name. Matched here, not in
+ * SeedRunDashboard, because the dashboard has no fleet data of its own.
+ */
+const NodesOnJob: React.FC = () => {
+  const { jobs } = useRunningJobs()
+  const seed = jobs.find((j) => j.kind === 'seed')
+  return <div>nodes: {seed?.nodes?.length ?? 'none'}</div>
+}
+
+describe("a seed job's helper nodes", () => {
+  beforeEach(() => {
+    Object.values(cp).forEach((f) => f.mockReset())
+    client.fetchJob.mockReset()
+    cp.fetchTenantConfigStatus.mockImplementation((t: string) =>
+      Promise.resolve(t === 'source' ? { domain: 'source.example.com' } : null))
+    cp.fetchFullSetupStatus.mockResolvedValue(null)
+    cp.fetchProvisionStatus.mockResolvedValue(null)
+    cp.fetchMe.mockResolvedValue({ id: 66 })
+    cp.fetchActiveJobs.mockResolvedValue([])
+    client.fetchJob.mockResolvedValue({
+      running: true, name: 'seed', elapsed: 60, lines: ['starting'],
+    })
+  })
+
+  it('attaches a healthy node seeding the same domain', async () => {
+    cp.fetchFleet.mockResolvedValue([
+      node({ node_id: 'n1', active_job: null, seed_domain: 'source.example.com' } as never),
+    ])
+    render(<NodesOnJob />)
+    await waitFor(() => expect(screen.getByText('nodes: 1')).toBeTruthy())
+  })
+
+  it('does not attach a node seeding a DIFFERENT domain', async () => {
+    cp.fetchFleet.mockResolvedValue([
+      node({ node_id: 'n1', active_job: null, seed_domain: 'other.example.com' } as never),
+    ])
+    render(<NodesOnJob />)
+    await waitFor(() => expect(screen.getByText('nodes: none')).toBeTruthy())
+  })
+
+  it('does not attach a node that stopped heartbeating', async () => {
+    cp.fetchFleet.mockResolvedValue([
+      node({
+        node_id: 'n1', active_job: null, seed_domain: 'source.example.com',
+        healthy: false,
+      } as never),
+    ])
+    render(<NodesOnJob />)
+    await waitFor(() => expect(screen.getByText('nodes: none')).toBeTruthy())
+  })
+})

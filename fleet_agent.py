@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -149,7 +150,51 @@ def _commit() -> str:
         return ""
 
 
-def build_payload(node_id: str) -> dict:
+# seed_sandbox.py's own heartbeat line, unchanged since it was written for a
+# human tailing a log: "  ... still seeding: 3/20 users done after 62m00s
+# (14 in flight), 16.3 req/s, 287 retried (0.5%)". Read here rather than
+# taught to seed_sandbox.py itself, because a seed run started before this
+# existed -- or on a box that never got fleet_agent.py at all -- must keep
+# working exactly as before; this only ever watches from outside.
+_SEED_LINE = re.compile(
+    r"still seeding:\s*(\d+)/(\d+) users done.*?\((\d+) in flight\),\s*"
+    r"([\d.]+) req/s,\s*\d+ retried \(([\d.]+)%\)"
+)
+
+
+def _seed_progress(log_path: str | None) -> dict:
+    """The last seed heartbeat line in `log_path`, or {} if there isn't one.
+
+    Reads only the tail: a multi-day huge seed's log can run to tens of MB,
+    and every field wanted here is in the last matching line, not the first.
+    Never raises -- a log that has rotated, or a node started before the
+    seed wrote its first line, must not take down the whole heartbeat.
+    """
+    if not log_path:
+        return {}
+    try:
+        with open(log_path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - 8192))
+            tail = fh.read().decode("utf-8", errors="ignore")
+    except OSError:
+        return {}
+    last = None
+    for m in _SEED_LINE.finditer(tail):
+        last = m
+    if not last:
+        return {}
+    done, total, in_flight, req_s, retried_pct = last.groups()
+    return {
+        "seed_users_done": int(done), "seed_users_total": int(total),
+        "seed_in_flight": int(in_flight), "seed_req_per_sec": float(req_s),
+        "seed_retried_pct": float(retried_pct),
+    }
+
+
+def build_payload(node_id: str, seed_log: str | None = None,
+                  seed_domain: str | None = None) -> dict:
     cpu, ram, disk = _pct_cpu_ram_disk()
     specs = _specs()
     job, pid = _active_job()
@@ -160,6 +205,13 @@ def build_payload(node_id: str) -> dict:
         mode = Settings().transfer_mode
     except Exception:  # noqa: BLE001
         pass
+    seed = _seed_progress(seed_log)
+    if seed:
+        # seed_sandbox.py runs outside main.py entirely, so _active_job()
+        # above found nothing -- without this a node doing real, visible
+        # work reports idle.
+        job = job or (f"seed {seed_domain}" if seed_domain else "seed")
+        seed["seed_domain"] = seed_domain
     return {
         "node_id": node_id,
         "hostname": socket.gethostname(),
@@ -170,6 +222,7 @@ def build_payload(node_id: str) -> dict:
         "transfer_mode": mode or None,
         # The denominators the three percentages above are fractions of.
         **specs,
+        **seed,
     }
 
 
@@ -224,10 +277,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--node-id", default=os.getenv("NODE_ID", socket.gethostname()))
     ap.add_argument("--interval", type=int, default=30)
     ap.add_argument("--once", action="store_true")
+    ap.add_argument("--seed-log", default=os.getenv("SEED_LOG"),
+                    help="tail this seed_sandbox.py log and report its "
+                         "progress -- for a node running the seeder "
+                         "directly, outside main.py")
+    ap.add_argument("--seed-domain", default=os.getenv("SEED_DOMAIN"))
     args = ap.parse_args(argv)
 
     while True:
-        ok, why = send(args.api, build_payload(args.node_id))
+        ok, why = send(args.api, build_payload(
+            args.node_id, seed_log=args.seed_log, seed_domain=args.seed_domain))
         status = "sent" if ok else f"REFUSED ({why})"
         print(f"{status}: {args.node_id} -> {args.api}", flush=True)
         if args.once:

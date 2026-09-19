@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { render, screen, within } from '@testing-library/react'
 import SeedRunDashboard from './SeedRunDashboard'
+import type { FleetNode } from '@/api/controlPlane'
 
 /**
  * These pin the two honesty rules, not the layout. Both exist because the
@@ -179,5 +180,53 @@ describe('the per-user table stays readable', () => {
     const maxW = getComputedStyle(header).maxWidth
     expect(maxW).toMatch(/^\d+px$/)
     expect(parseInt(maxW, 10)).toBeLessThanOrEqual(400)
+  })
+})
+
+/**
+ * A helper machine running seed_sandbox.py directly seeds a DISJOINT slice
+ * of the same domain, entirely outside this run -- its own total, own
+ * in-flight count, own retry rate. Folding it into this run's own "Users"
+ * figure would report a denominator this run never had.
+ */
+const fleetNode = (over: Partial<FleetNode> = {}): FleetNode => ({
+  node_id: 'node-1', hostname: 'windows-box', location: null, code_commit: null,
+  last_seen: new Date().toISOString(), cpu_pct: null, ram_pct: null, disk_pct: null,
+  active_job: 'seed source.example.com', job_pid: 123, transfer_mode: null,
+  users_done: 0, users_running: 0, users_failed: 0, error_rate: 0,
+  healthy: true, secondsSinceHeartbeat: 5,
+  ...over,
+})
+
+describe('helper nodes seeding the same domain', () => {
+  it('shows a node with no seed fields yet as starting, not zero', () => {
+    render(<SeedRunDashboard lines={[...banner(), doneUser(1)]} elapsedSec={5400}
+                            nodes={[fleetNode()]} />)
+    expect(screen.getByText('windows-box')).toBeInTheDocument()
+    expect(screen.getByText('starting…')).toBeInTheDocument()
+  })
+
+  it("shows a node's own progress, separate from this run's", () => {
+    render(<SeedRunDashboard lines={[...banner(), doneUser(1)]} elapsedSec={5400}
+                            nodes={[fleetNode({
+                              seed_users_done: 3, seed_users_total: 20,
+                              seed_in_flight: 14, seed_req_per_sec: 16.3,
+                              seed_retried_pct: 0.5,
+                            })]} />)
+    expect(screen.getByText('3 / 20 users')).toBeInTheDocument()
+    expect(screen.getByText('14 in flight')).toBeInTheDocument()
+    expect(screen.getByText('16.3 req/s')).toBeInTheDocument()
+  })
+
+  it('flags a high retry rate rather than rendering it identically to a healthy one', () => {
+    render(<SeedRunDashboard lines={[...banner(), doneUser(1)]} elapsedSec={5400}
+                            nodes={[fleetNode({ seed_retried_pct: 12.4 })]} />)
+    const retried = screen.getByText('12.4% retried')
+    expect(getComputedStyle(retried).color).not.toBe('')
+  })
+
+  it('renders nothing extra when no helper nodes are seeding this domain', () => {
+    render(<SeedRunDashboard lines={[...banner(), doneUser(1)]} elapsedSec={5400} nodes={[]} />)
+    expect(screen.queryByText(/Helper nodes/)).not.toBeInTheDocument()
   })
 })

@@ -175,6 +175,16 @@ export interface FleetNode {
   ram_gb?: number | null
   disk_gb?: number | null
   platform?: string | null
+  /** A node running seed_sandbox.py directly, outside main.py -- parsed
+   *  from its own "still seeding: X/Y users done ... (Z in flight)" line,
+   *  so it shows up on the seed job's own page rather than as an idle row
+   *  on /nodes. Null/undefined on a node that isn't seeding. */
+  seed_domain?: string | null
+  seed_users_done?: number | null
+  seed_users_total?: number | null
+  seed_in_flight?: number | null
+  seed_req_per_sec?: number | null
+  seed_retried_pct?: number | null
   /** Derived server-side from last_seen, not stored -- a node that dies
    *  cannot mark itself down, so liveness has to be computed on read. */
   healthy: boolean

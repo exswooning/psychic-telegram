@@ -121,6 +121,19 @@ def _apply_column_upgrades(conn: sqlite3.Connection) -> None:
             ("ram_gb", "REAL"),
             ("disk_gb", "REAL"),
             ("platform", "TEXT"),
+            # A node running seed_sandbox.py stands outside main.py's own
+            # MAIN_COMMANDS, so active_job alone cannot say what it is doing
+            # -- these carry the same numbers its own "still seeding: X/Y
+            # users done ... (Z in flight), R req/s, N retried" heartbeat
+            # line already prints, so a helper node seeding a tenant is
+            # visible on the SAME job's page an operator is already looking
+            # at, not just as an idle-looking row on /nodes.
+            ("seed_domain", "TEXT"),
+            ("seed_users_done", "INTEGER"),
+            ("seed_users_total", "INTEGER"),
+            ("seed_in_flight", "INTEGER"),
+            ("seed_req_per_sec", "REAL"),
+            ("seed_retried_pct", "REAL"),
         ],
         "accounts": [
             ("subscription_active", "INTEGER NOT NULL DEFAULT 1"),
