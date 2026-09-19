@@ -619,6 +619,14 @@ def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
         log.warning("no users to process — check identity_map")
         return []
 
+    try:
+        _ensure_target_accounts(auth, settings, pairs)
+    except Exception as exc:      # noqa: BLE001 - a provisioning hiccup must
+        # not cancel a run that would otherwise migrate the accounts that
+        # DO already exist; the ones still missing simply fail as before,
+        # with a real error instead of a silent skip.
+        log.warning("could not auto-provision missing target accounts: %s", exc)
+
     _warn_if_ledger_is_stale(db, auth, pairs)
 
     log.info("dispatching %d users across %d workers (services=%s, delta=%s)",
@@ -1017,6 +1025,51 @@ def _registered(job_name: str, account_id):
                 log.debug("could not release the job slot: %s", exc)
 
 
+def _ensure_target_accounts(auth: AuthManager, settings: Settings,
+                            pairs: list[tuple[str, str]]) -> None:
+    """Create whatever target account this run is about to write into but
+    that does not exist yet.
+
+    Most target tenants start with nothing but the admin. Without this, a
+    fresh migration discovered that the hard way: every one of 299 mapped
+    users failed on every service with `invalid_grant: Invalid email or
+    User ID`, which reads as a broken migration rather than the missing
+    provisioning step it actually was -- `provision-users` existed but
+    nothing ran it first.
+
+    Reuses provision.py's own creation path rather than a second one; see
+    its module docstring for the rules it holds to (only creates, never a
+    typo'd domain, one audit trail, one place license cost is incurred).
+    `auth.directory("target", writable=True)` used to have exactly one
+    caller (cmd_provision_users) by design -- this is now a second,
+    deliberate one, not a bypass of it.
+
+    settings.auto_provision_users is the escape hatch for a tenant that
+    provisions target accounts through its own IdP and wants an
+    unexpected gap in identity_map to fail loudly instead of an account
+    being created for it.
+    """
+    if settings.dry_run or not settings.auto_provision_users:
+        return
+    import provision
+
+    domain_suffix = "@" + settings.target_domain
+    targets = sorted({tgt for _, tgt in pairs if tgt.endswith(domain_suffix)})
+    if not targets:
+        return
+    directory = auth.directory("target", writable=True)
+    result = provision.ensure_users(directory, targets)
+    created = [e for e, _ in result["created"]]
+    if created:
+        more = f", +{len(created) - 10} more" if len(created) > 10 else ""
+        log.info("auto-provisioned %d target account(s) that did not "
+                 "exist yet: %s%s", len(created), ", ".join(created[:10]), more)
+    if result["failed"]:
+        log.warning("%d target account(s) could not be auto-provisioned "
+                    "and will fail migration: %s", len(result["failed"]),
+                    ", ".join(e for e, _ in result["failed"][:10]))
+
+
 def _warn_if_ledger_is_stale(db, auth, pairs) -> None:
     """Refuse to start a run that would skip everything and call it success.
 
@@ -1213,10 +1266,13 @@ def cmd_provision_users(args, settings: Settings, db: MigrationDB,
     """
     Create missing accounts for the identities already in identity_map.
 
-    Separate from `migrate` on purpose. This is the only command that can
-    create licensed accounts, so it must be something you run deliberately,
-    never a side effect of copying files. It only ever creates -- an address
-    that already exists is left exactly as it is.
+    `migrate` now does this too, automatically, but only for the target
+    side and only as a side effect of a run that is about to write into
+    those accounts anyway (see _ensure_target_accounts). This command
+    remains the deliberate, standalone way to do it: it can provision
+    either side, previews with --dry-run before spending a licence on
+    anything, and works with no migration in flight at all. It only ever
+    creates -- an address that already exists is left exactly as it is.
     """
     import provision
 

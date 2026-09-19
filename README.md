@@ -393,22 +393,34 @@ than left as a `FAILED` row implying something is still recoverable.
 
 ## 2.4 Creating accounts
 
-The engine **maps** identities; it does not create them as part of migrating.
-Account creation lives in its own command so that copying files can never be
-the thing that provisions a licensed user:
+`migrate` auto-provisions a target account it is about to write into if it
+does not exist yet — most target tenants start with nothing but the admin,
+and every fresh migration otherwise learned that the hard way, one
+`invalid_grant: Invalid email or User ID` per user. It only ever creates
+addresses already in `identity_map`, on the target side, and only when
+`AUTO_PROVISION_USERS` is not explicitly turned off (default on).
+
+For a deliberate, standalone pass — either side, previewable before it
+spends a licence on anything, with no migration in flight — use the same
+underlying command directly:
 
 ```bash
 python main.py provision-users --tenant target --dry-run   # report only
 python main.py provision-users --tenant target             # create
 ```
 
-It only ever **creates**. An address that already exists is left exactly as it
-is — never renamed, never given a new password — because overwriting a real
-account because a CSV disagreed with it is not recoverable. The set is bounded
-by `identity_map`, and it refuses outright if any address is not in the tenant
-you named, so a typo cannot create an account in a domain nobody meant to
-touch. Needs `https://www.googleapis.com/auth/admin.directory.user` and
+Either way it only ever **creates**. An address that already exists is left
+exactly as it is — never renamed, never given a new password — because
+overwriting a real account because a CSV disagreed with it is not
+recoverable. The set is bounded by `identity_map`, and the standalone command
+refuses outright if any address is not in the tenant you named, so a typo
+cannot create an account in a domain nobody meant to touch. Needs
+`https://www.googleapis.com/auth/admin.directory.user` and
 `SOURCE_ADMIN`/`TARGET_ADMIN` set to a super admin.
+
+Set `AUTO_PROVISION_USERS=0` for a tenant that provisions target accounts
+through its own IdP and wants a gap in `identity_map` to fail loudly instead
+of quietly getting an account created for it.
 
 Accounts are created with `changePasswordAtNextLogin=False`, and that is
 load-bearing rather than a convenience: **a pending password change silently

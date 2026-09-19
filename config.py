@@ -526,6 +526,17 @@ class Settings:
     migrate_external_shares: bool = field(
         default_factory=lambda: _env_bool("MIGRATE_EXTERNAL_SHARES", False))
 
+    # Most target tenants start with nothing but the admin account. Without
+    # this, migrate discovers that the hard way: every user fails with
+    # invalid_grant against a target address nobody ever created, which
+    # reads as a broken migration rather than the missing provisioning step
+    # it actually is. On by default -- the common case is a freshly stood
+    # up target -- with an escape hatch for a tenant that provisions target
+    # accounts through its own IdP and wants a gap in identity_map to fail
+    # loudly instead of quietly getting an account created for it.
+    auto_provision_users: bool = field(
+        default_factory=lambda: _env_bool("AUTO_PROVISION_USERS", True))
+
     # -- transfer mode ---------------------------------------------------------
     # download_upload : stream every file through this host. Works with a
     #                   strictly read-only source service account, which is

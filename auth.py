@@ -243,8 +243,11 @@ class AuthManager:
         Directory API for either tenant.
 
         `writable` swaps in admin.directory.user (create) in place of the
-        read-only scope. Only the provision-users command passes it; nothing
-        in the migration path can reach this with writable=True.
+        read-only scope. Two deliberate callers pass it: the provision-users
+        command, and migrate's own _ensure_target_accounts (main.py) --
+        which auto-creates a target account it is about to write into,
+        gated by settings.auto_provision_users. No other code path reaches
+        this with writable=True.
 
         `groups` adds admin.directory.group, for the group migration. Kept
         separate from `writable` so a run that creates groups cannot also

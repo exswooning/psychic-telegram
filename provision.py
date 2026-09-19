@@ -3,13 +3,15 @@ provision.py
 ============
 Create user accounts via the Admin SDK Directory API.
 
-This is deliberately separate from the migration itself and never runs as
-part of `migrate`. Provisioning and data migration are different jobs with
-different blast radii: a bug in a migration costs a re-run, a bug in
-provisioning creates licensed accounts that cost money and collide with
-whatever your IdP or HR system thinks it owns. Keeping it behind its own
-command means nobody creates fifty accounts by passing the wrong flag to a
-copy job.
+The functions here are the one place account creation happens, used by two
+callers: the standalone `provision-users` command, and `migrate` itself
+(main.py's _ensure_target_accounts), which auto-creates a target account it
+is about to write into rather than failing every service against one that
+was never provisioned -- most target tenants start with nothing but the
+admin. `migrate`'s use is deliberately narrow: target side only, only
+addresses already in identity_map, off entirely via
+settings.auto_provision_users for a tenant that provisions through its own
+IdP and wants a gap in identity_map to fail loudly instead.
 
 Rules this module holds to:
 
