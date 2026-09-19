@@ -30,6 +30,12 @@ identities*.csv
 keys/
 *.json.key
 client_secret*.json
+source-sa.json
+target-sa.json
+
+# export_node_config.py's output: a helper node's tenant_configs rows,
+# meant to be copied to that node as its migration.db -- not committed here.
+node-config*.db
 
 # OAuth refresh tokens are long-lived and carry every consented scope --
 # exactly as sensitive as a key, and easier to overlook because the directory
