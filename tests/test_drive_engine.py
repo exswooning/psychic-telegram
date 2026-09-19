@@ -1754,3 +1754,106 @@ def test_a_failed_batched_grant_is_recorded_not_fatal(
         f"item_id should identify the file/grantee, got {row['item_id']!r}")
     # The file itself still copied -- an ACL failure is not a file failure.
     assert db.get_audit(SRC_USER, fid, "file")["status"] == "SUCCESS"
+
+
+def test_a_batched_grant_against_a_not_yet_propagated_grantee_is_retried(
+        migrator, auth, db, settings, monkeypatch):
+    """A grant that fails inside a batch is delivered through Google's
+    callback, never raised, so self._retry() around batch.execute() itself
+    never sees it and a freshly created grantee got no retry window at
+    all -- live, on a target where 299 accounts had just been created,
+    that turned an ordinary propagation lag into 15,000+ immediate,
+    permanent-looking FAILED rows within minutes. The unbatched path
+    (_create_permission) already retries this exact message with backoff
+    before giving up; a batched failure now gets that same second chance,
+    one call at a time, instead of failing on the very first look.
+    """
+    from db import bulk_seed_identities
+
+    bulk_seed_identities(db, [("bob@tenanta.com", "bob@tenantb.com"),
+                              ("carol@tenanta.com", "carol@tenantb.com")])
+    src = auth.source_drive(SRC_USER)
+    fid = src.add_binary("shared-with-team.pdf")
+    src.add_permission(fid, "user", "reader", email="bob@tenanta.com")
+    src.add_permission(fid, "user", "writer", email="carol@tenanta.com")
+
+    tgt = auth.target_drive(TGT_USER)
+    tgt._http = object()
+    # Only the FIRST permissions.create call (inside the batch) fails; the
+    # retry's own call is a fresh one and finds no fault queued.
+    tgt.fail_next("permissions.create", status=400,
+                 reason="no Google accounts associated with bob@tenantb.com")
+
+    class FakeBatch:
+        def __init__(self, callback=None, batch_uri=None, http=None):
+            self._requests = []
+
+        def add(self, request, request_id=None, callback=None):
+            self._requests.append((request, request_id, callback))
+
+        def execute(self, **kw):
+            for request, request_id, callback in self._requests:
+                try:
+                    resp = request.execute()
+                except Exception as exc:
+                    callback(request_id, None, exc)
+                else:
+                    callback(request_id, resp, None)
+
+    monkeypatch.setattr("googleapiclient.http.BatchHttpRequest", FakeBatch)
+    settings.acl_batch_size = 20
+
+    migrator.run()
+
+    # Both grants land -- the one that failed once inside the batch, retried
+    # alone and succeeded the second time.
+    copied = tgt.by_name("shared-with-team.pdf")[0]
+    emails = {p["emailAddress"] for p in tgt.perms[copied["id"]]}
+    assert emails == {"bob@tenantb.com", "carol@tenantb.com"}
+    rows = db.conn.execute(
+        "SELECT status FROM audit_log WHERE source_user=? AND item_type='acl'",
+        (SRC_USER,)).fetchall()
+    assert [r["status"] for r in rows] == ["SUCCESS", "SUCCESS"]
+
+
+def test_a_batched_grant_for_a_real_permanent_reason_is_not_retried(
+        migrator, auth, db, settings, monkeypatch):
+    """Only the propagation-lag wording gets the second chance -- a batch
+    failure for any other reason (quota, a genuine permission denial) is
+    exactly as costly to retry serially as it always was, for no benefit,
+    so it must still fail immediately like before this fix."""
+    from db import bulk_seed_identities
+
+    bulk_seed_identities(db, [("bob@tenanta.com", "bob@tenantb.com"),
+                              ("carol@tenanta.com", "carol@tenantb.com")])
+    src = auth.source_drive(SRC_USER)
+    fid = src.add_binary("policy-blocked.pdf")
+    # Two grants, so the chunk is not size 1 -- a chunk of one takes the
+    # per-call path directly and never exercises the batch code at all.
+    src.add_permission(fid, "user", "reader", email="bob@tenanta.com")
+    src.add_permission(fid, "user", "writer", email="carol@tenanta.com")
+
+    tgt = auth.target_drive(TGT_USER)
+    tgt._http = object()
+
+    class RejectingBatch:
+        def __init__(self, callback=None, batch_uri=None, http=None):
+            self._requests = []
+
+        def add(self, request, request_id=None, callback=None):
+            self._requests.append((request_id, callback))
+
+        def execute(self, **kw):
+            for request_id, callback in self._requests:
+                callback(request_id, None,
+                         Exception("403 insufficientPermissions"))
+
+    monkeypatch.setattr("googleapiclient.http.BatchHttpRequest", RejectingBatch)
+    settings.acl_batch_size = 20
+
+    migrator.run()
+
+    row = db.conn.execute(
+        "SELECT status FROM audit_log WHERE source_user=? AND item_type='acl'",
+        (SRC_USER,)).fetchone()
+    assert row["status"] == "FAILED"

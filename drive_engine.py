@@ -2014,6 +2014,21 @@ class DriveMigrator:
         for idx, (audit_key, _req) in enumerate(requests):
             exc = outcomes.get(str(idx))
             if exc is not None:
+                if _is_unreachable_grantee(exc):
+                    # A batch's per-grant failure arrives through Google's
+                    # callback, never raised -- so self._retry() above,
+                    # which wraps only batch.execute() itself, never sees
+                    # it. A freshly created grantee that would have earned
+                    # a real retry-with-backoff window on the unbatched
+                    # path (long enough, live, for Drive to catch up with
+                    # an account the Directory API had created moments
+                    # earlier) instead failed on the very first look, with
+                    # no chance to propagate. Give it that same chance,
+                    # alone, through the path that already knows how to
+                    # tell "not propagated yet" from "never will be".
+                    body, _ = chunk[idx]
+                    applied += self._create_permission(target_id, body, audit_key)
+                    continue
                 self.db.log_audit(self.source_user, audit_key, "acl", "FAILED", str(exc))
                 self._bump("acl_failed")
             else:
