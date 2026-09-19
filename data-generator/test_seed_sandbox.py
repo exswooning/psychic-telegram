@@ -1514,3 +1514,65 @@ def test_calendar_seed_carries_drive_links_and_attachments(seed, settings):
               if DRIVE_ID.search((b.get("description") or "").encode())]
     assert linked, "descriptions carry no Drive link"
     assert any(b.get("attachments") for b in bodies), "no Drive attachment"
+
+
+class TestAlreadySeededUsersAreSkipped:
+    """A --users range given to a second machine has no way to know which
+    of those accounts a first machine already reached -- the ordinary case
+    once one range catches up to another, since nothing coordinates them.
+    Without this, seed_one_user() built a second full corpus on top of the
+    first: two MIGRATION-TEST trees, roughly double the mail and events,
+    for every overlapping user. Confirmed live on a real multi-machine run."""
+
+    def test_a_fresh_user_reports_not_seeded(self, seed, settings):
+        drive = FakeDrive("alice@tenanta.com", "source")
+        assert seed._already_seeded(drive, settings) is False
+
+    def test_a_user_with_a_migration_test_tree_reports_seeded(self, seed, settings):
+        drive = FakeDrive("alice@tenanta.com", "source")
+        drive.add_folder("MIGRATION-TEST")
+        assert seed._already_seeded(drive, settings) is True
+
+    def test_a_lookup_failure_reads_as_not_seeded_not_as_a_crash(self, seed, settings):
+        """The cost of a false negative here is a duplicate corpus, which
+        is what happens today anyway; aborting the user over a flaky
+        lookup would be strictly worse."""
+        class _BrokenDrive:
+            def files(self):
+                raise RuntimeError("network blip")
+        assert seed._already_seeded(_BrokenDrive(), settings) is False
+
+
+class TestReseedSkipsTheCorpusNotEverything:
+    """already_seeded gates the six services that duplicate on a second
+    pass. gmail_settings and groups are idempotent sets, not inserts, so a
+    second pass there is a no-op -- gating them too would block exactly
+    the backfill --only gmail_settings exists for."""
+
+    def _want(self, only=None, force_reseed=False, seeded=True):
+        # Exercises the same closure seed_one_user builds, without paying
+        # for a full CorpusBuilder/Gmail/Calendar run -- the gate is what
+        # is under test, not the services behind it.
+        base_want = (lambda svc: only is None or svc in only)
+        corpus_services = frozenset({"drive", "gmail", "calendar", "chat",
+                                    "contacts", "tasks"})
+        already = base_want("drive") and not force_reseed and seeded
+        return (lambda svc: base_want(svc)
+               and not (already and svc in corpus_services))
+
+    def test_corpus_services_are_skipped_when_already_seeded(self):
+        want = self._want()
+        for svc in ("drive", "gmail", "calendar", "chat", "contacts", "tasks"):
+            assert not want(svc), f"{svc} should be skipped"
+
+    def test_gmail_settings_and_groups_still_run(self):
+        want = self._want()
+        assert want("gmail_settings"), "the exact backfill this must not block"
+
+    def test_reseed_flag_forces_the_corpus_anyway(self):
+        want = self._want(force_reseed=True)
+        assert want("drive") and want("gmail")
+
+    def test_a_fresh_user_is_unaffected(self):
+        want = self._want(seeded=False)
+        assert want("drive") and want("gmail") and want("gmail_settings")

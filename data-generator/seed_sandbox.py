@@ -2203,12 +2203,42 @@ def _existing_drive_items(drive, settings: Settings, limit: int = 6) -> dict:
         return {}
 
 
+def _already_seeded(drive, settings: Settings) -> bool:
+    """Has this user already been through the corpus builder?
+
+    One cheap Drive lookup, so a run whose --users list overlaps a PRIOR
+    run's -- the ordinary case once a second machine's range catches up to
+    the first, since nothing here coordinates between them -- adds a
+    second full corpus on top of the first instead of skipping. Nothing in
+    seed_gmail/seed_calendar/CorpusBuilder checks for existing content
+    before creating more; this is the one check that stands in for all of
+    them, since drive, gmail, calendar, contacts and tasks are always
+    seeded together in the same pass.
+
+    Best-effort: a lookup that fails (network blip, scope not yet
+    propagated) reads as "not seeded" rather than aborting the user --
+    the cost of a false negative is a duplicate corpus, which is what
+    happens today anyway; the cost of a false positive would be silently
+    seeding nothing at all.
+    """
+    retry = _retry_factory(settings)
+    try:
+        found = retry(lambda: drive.files().list(
+            q=("'root' in parents and 'me' in owners and trashed = false "
+               "and name = 'MIGRATION-TEST'"),
+            pageSize=1, fields="files(id)", spaces="drive").execute())()
+        return bool(found.get("files"))
+    except Exception:      # noqa: BLE001 - see docstring
+        return False
+
+
 def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
                   external: str, scale: str, mail_count: int,
                   event_count: int, edge_cases: bool,
                   target_gb_per_user: float | None = None,
                   groups: list[str] | None = None,
-                  only: frozenset | None = None) -> dict:
+                  only: frozenset | None = None,
+                  force_reseed: bool = False) -> dict:
     user = entry["email"]
     peers = [u for u in all_users if u != user]
     t0 = time.time()
@@ -2221,8 +2251,23 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
     # `only` narrows the run to one or more services -- everything not named
     # is skipped and reports zeroes, so a partial pass is visibly partial
     # rather than looking like a service that produced nothing.
-    want = (lambda svc: only is None or svc in only)
+    base_want = (lambda svc: only is None or svc in only)
     empty = {"note": "not requested"}
+
+    # Corpus-building services duplicate on a second pass (see
+    # _already_seeded's docstring); gmail_settings and the tenant-level
+    # groups pass do not -- updateVacation/updatePop/etc. are idempotent
+    # sets, not inserts, so a second pass there is a no-op, not a mess.
+    # Only these six are worth the one extra Drive lookup to guard.
+    corpus_services = frozenset({"drive", "gmail", "calendar", "chat",
+                                "contacts", "tasks"})
+    already = (base_want("drive") and not force_reseed
+              and _already_seeded(drive, settings))
+    if already:
+        print(f"  [{user}] already seeded (MIGRATION-TEST exists) -- "
+              f"skipping corpus, re-run with --reseed to force a second one")
+    want = (lambda svc: base_want(svc)
+           and not (already and svc in corpus_services))
 
     if want("drive"):
         builder = CorpusBuilder(drive, settings, user, peers, external, scale,
@@ -2432,6 +2477,13 @@ def main(argv: list[str] | None = None) -> int:
                          "admin.directory.group granted. Off by default "
                          "because it is a tenant-level write that the other "
                          "seeding scopes do not cover.")
+    ap.add_argument("--reseed", action="store_true",
+                    help="seed a user's corpus again even if MIGRATION-TEST "
+                         "already exists. Off by default: a --users range "
+                         "that overlaps a prior run adds a second full "
+                         "corpus on top of the first rather than skipping, "
+                         "which is what this flag is for when that is "
+                         "actually wanted.")
     ap.add_argument("--big-file-mb", type=int, default=0, metavar="MB",
                     help="seed one file of MB megabytes per user and a mail "
                          "linking to it the way Gmail links an attachment it "
@@ -2935,6 +2987,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.target_gb_per_user,
                 group_emails,
                 only,
+                args.reseed,
             ): e["email"]
             for i, e in enumerate(entries)
         }
