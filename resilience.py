@@ -287,6 +287,28 @@ def _ask_hook(before_retry):
         return None
 
 
+def shutdown_requested() -> bool:
+    """True once main.py's SHUTDOWN flag has been set, by SIGINT/SIGTERM or
+    the memory watchdog.
+
+    migrate_user() already checks this BETWEEN services, but a service's own
+    per-item loop (every space, every file, every event) does not -- so an
+    operator's Stop only took effect once whatever service happened to be
+    running had walked its entire list. Live, that meant a Stop against a
+    user with a large Chat history sat unresponsive for minutes after two
+    separate SIGINTs, because ChatMigrator.run() had no checkpoint of its
+    own between spaces. Every engine's run() should call this inside its
+    own per-item loop and break, not just rely on the coarser check above it.
+
+    Imported lazily to avoid a resilience<->main circular import: main.py
+    imports every engine, which imports resilience, at module load time --
+    by the time any engine's run() actually executes, main has always
+    finished importing, so this is a cheap sys.modules lookup, not a
+    re-execution."""
+    import main
+    return main.SHUTDOWN.is_set()
+
+
 def retry_on_google_error(
     max_retries: int = 6, base_delay: float = 1.0, max_delay: float = 60.0,
     before_retry: Callable[[], T | None] | None = None,

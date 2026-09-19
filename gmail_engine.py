@@ -31,7 +31,7 @@ from googleapiclient.http import MediaFileUpload  # noqa: F401
 from config import Settings
 from link_rewrite import has_drive_link, rewrite_raw
 from resilience import (PermanentAPIError, RateLimiter, TransportExhausted,
-                        retry_on_google_error)
+                        retry_on_google_error, shutdown_requested)
 
 # An un-granted scope surfaces as a RefreshError at token-mint time, not as an
 # HttpError, so the retry decorator never sees it. Optional passes catch it so
@@ -581,15 +581,28 @@ class GmailMigrator:
         # same gap measured on the seeder, where fixing it cut per-user wall
         # time by 2.3x. Pagination stays serial: it is inherently sequential
         # and cheap next to the per-message work.
+        # migrate_user() only checks SHUTDOWN between whole services, so a
+        # mailbox with many messages would otherwise run to the end
+        # regardless of how long ago Stop was pressed. A message not yet
+        # reached is simply not in the ledger, same as any other
+        # not-yet-run one, and a delta/re-run picks it up.
         workers = max(1, int(getattr(self.settings, "mail_workers", 1) or 1))
         if workers == 1:
             for ref in self._iter_messages(query):
+                if shutdown_requested():
+                    log.warning("[%s] stopping mail migration early -- "
+                               "signal received", self.source_user)
+                    break
                 self._migrate_one_message(ref)
         else:
             with futures.ThreadPoolExecutor(max_workers=workers,
                                             thread_name_prefix="gmail") as pool:
                 pending: set = set()
                 for ref in self._iter_messages(query):
+                    if shutdown_requested():
+                        log.warning("[%s] stopping mail migration early -- "
+                                   "signal received", self.source_user)
+                        break
                     # Bounded: a mailbox can be hundreds of thousands of
                     # messages, and submitting them all up front would hold
                     # every ref (and its futures) in memory at once.

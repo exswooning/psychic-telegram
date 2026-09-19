@@ -34,7 +34,8 @@ import metrics
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload  # noqa: F401
 
 from config import EXPORT_MIME_MAP, FOLDER_MIME, SHORTCUT_MIME, Settings
-from resilience import AdaptiveRateLimiter, PermanentAPIError, QuotaExhausted, RateLimiter, retry_on_google_error
+from resilience import (AdaptiveRateLimiter, PermanentAPIError, QuotaExhausted,
+                        RateLimiter, retry_on_google_error, shutdown_requested)
 
 log = logging.getLogger(__name__)
 
@@ -798,6 +799,14 @@ class DriveMigrator:
         # ordering the mirror depends on.
         files: list[dict] = []
         for item in self._list_children(src_parent):
+            # migrate_user() only checks SHUTDOWN between whole services, so
+            # a large tree would otherwise be walked to the end regardless
+            # of how long ago Stop was pressed. An item not yet reached is
+            # simply not in the ledger, same as any other not-yet-run one --
+            # same reasoning as the QuotaExhausted check in _sync_files
+            # below, which this mirrors.
+            if shutdown_requested():
+                break
             mime = item.get("mimeType")
             if mime == FOLDER_MIME:
                 tgt_id = self._sync_folder(item, tgt_parent)

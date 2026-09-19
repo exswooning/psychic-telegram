@@ -24,7 +24,8 @@ import logging
 from google.auth.exceptions import RefreshError
 
 from config import Settings
-from resilience import PermanentAPIError, RateLimiter, retry_on_google_error
+from resilience import (PermanentAPIError, RateLimiter, retry_on_google_error,
+                        shutdown_requested)
 
 # See gmail_engine: an un-granted scope fails at token-mint time as a
 # RefreshError, which the retry decorator never sees.
@@ -344,7 +345,16 @@ class CalendarMigrator:
 
     def _migrate_calendar(self, src_cal_id: str, tgt_cal_id: str,
                           updated_min: str | None) -> None:
+        # migrate_user() only checks SHUTDOWN between whole services, so a
+        # calendar with many events would otherwise run to the end of the
+        # list regardless of how long ago Stop was pressed. Safe to break
+        # here: an event not yet reached is simply not in the ledger, same
+        # as any other not-yet-run event, and a delta/re-run picks it up.
         for item in self._iter_events(updated_min, calendar_id=src_cal_id):
+            if shutdown_requested():
+                log.warning("[%s] stopping calendar migration early -- "
+                           "signal received", self.source_user)
+                break
             self.migrate_event(item, tgt_cal_id, src_cal_id)
 
     def migrate_event(self, item: dict, tgt_cal_id: str = "primary",

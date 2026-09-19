@@ -55,7 +55,8 @@ import uuid
 from google.auth.exceptions import RefreshError
 
 from config import Settings
-from resilience import PermanentAPIError, RateLimiter, retry_on_google_error
+from resilience import (PermanentAPIError, RateLimiter, retry_on_google_error,
+                        shutdown_requested)
 
 log = logging.getLogger(__name__)
 
@@ -155,7 +156,20 @@ class ChatMigrator:
             )
             return dict(self.stats)
 
-        for space in spaces:
+        for i, space in enumerate(spaces):
+            # migrate_user() only checks SHUTDOWN between whole services, so
+            # a user with many spaces (real accounts have far more than the
+            # sandbox ones this was found against) could otherwise run to
+            # the end of the list regardless of how long ago Stop was
+            # pressed -- live, that left a Stop unresponsive for minutes
+            # after two separate SIGINTs. Safe to break here: a space not
+            # yet reached is simply not in the ledger, same as any other
+            # not-yet-run space, and the next pass resumes normally.
+            if shutdown_requested():
+                log.warning("[%s] stopping chat migration early (%d/%d "
+                           "spaces done) -- signal received",
+                           self.source_user, i, len(spaces))
+                break
             name = space.get("name")
             if space.get("spaceType") != "SPACE":
                 # A DM is its participants, not a name; recreating it as a

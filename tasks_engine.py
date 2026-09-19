@@ -26,7 +26,8 @@ from __future__ import annotations
 
 import logging
 
-from resilience import PermanentAPIError, RateLimiter, retry_on_google_error
+from resilience import (PermanentAPIError, RateLimiter, retry_on_google_error,
+                        shutdown_requested)
 
 log = logging.getLogger(__name__)
 
@@ -113,7 +114,14 @@ class TasksMigrator:
             self.stats["skipped"] += len(lists)
             return dict(self.stats)
 
+        # migrate_user() only checks SHUTDOWN between whole services, so
+        # someone with many lists would otherwise run to the end of them
+        # regardless of how long ago Stop was pressed.
         for tl in lists:
+            if shutdown_requested():
+                log.warning("[%s] stopping tasks migration early -- "
+                           "signal received", self.source_user)
+                break
             self._migrate_list(tl)
         return dict(self.stats)
 
@@ -177,6 +185,8 @@ class TasksMigrator:
 
         def emit(parent_src: str, parent_tgt: str | None) -> None:
             for t in by_parent.get(parent_src, []):
+                if shutdown_requested():
+                    return
                 new_id = self._create_task(t, tgt_list, parent_tgt)
                 if new_id:
                     emit(t["id"], new_id)

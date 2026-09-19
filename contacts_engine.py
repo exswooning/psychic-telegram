@@ -32,7 +32,8 @@ from __future__ import annotations
 
 import logging
 
-from resilience import PermanentAPIError, RateLimiter, retry_on_google_error
+from resilience import (PermanentAPIError, RateLimiter, retry_on_google_error,
+                        shutdown_requested)
 
 log = logging.getLogger(__name__)
 
@@ -149,7 +150,15 @@ class ContactsMigrator:
     # -- entry point ---------------------------------------------------------
     def run(self) -> dict:
         group_map = self._migrate_groups()
+        # migrate_user() only checks SHUTDOWN between whole services, so a
+        # large contact list would otherwise run to the end regardless of
+        # how long ago Stop was pressed. A contact not yet reached is
+        # simply not in the ledger, same as any other not-yet-run one.
         for person in self._iter_contacts():
+            if shutdown_requested():
+                log.warning("[%s] stopping contacts migration early -- "
+                           "signal received", self.source_user)
+                break
             self._migrate_contact(person, group_map)
         return dict(self.stats)
 
