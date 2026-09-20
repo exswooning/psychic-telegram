@@ -89,7 +89,7 @@ const enterDomain = async (d: string) => {
 
 /** Radio, then Continue -- the same two beats as Google Workspace signup's
  *  "Number of employees" step, which this flow is modelled on. */
-const choose = async (purpose: 'seed' | 'migrate' | 'later') => {
+const choose = async (purpose: 'seed' | 'migrate') => {
   fireEvent.click(await screen.findByTestId(`purpose-${purpose}`))
   fireEvent.click(screen.getByTestId('purpose-next'))
 }
@@ -322,18 +322,29 @@ describe('it reads like the Google Workspace signup it sits beside', () => {
     expect(screen.getAllByRole('textbox')).toHaveLength(1)
   })
 
-  it('offers the choice as radios, the way the signup does', async () => {
+  it('offers exactly two purposes, because there are two', async () => {
+    /* A third option ("set it up for both") used to sit here and be the
+       DEFAULT, so the page opened having already answered its own question
+       with the one answer that is not a purpose. */
     view()
     await signIn('admin@acme.com')
-    // 3 purpose radios; the 2 source/target role radios are a separate group.
     expect(await screen.findByTestId('purpose-seed')).toBeInTheDocument()
     expect(screen.getByTestId('purpose-migrate')).toBeInTheDocument()
-    expect(screen.getByTestId('purpose-later')).toBeInTheDocument()
+    expect(screen.queryByTestId('purpose-later')).toBeNull()
+  })
+
+  it('preselects neither, so the operator actually chooses', async () => {
+    view()
+    await signIn('admin@acme.com')
+    expect(await screen.findByTestId('purpose-seed')).not.toBeChecked()
+    expect(screen.getByTestId('purpose-migrate')).not.toBeChecked()
+    expect(screen.getByTestId('purpose-next')).toBeDisabled()
   })
 
   it('lets the domain be set up as source or target', async () => {
     view()
     await signIn('admin@acme.com')
+    fireEvent.click(await screen.findByTestId('purpose-migrate'))
     expect(await screen.findByTestId('role-source')).toBeChecked()
     expect(screen.getByTestId('role-target')).toBeInTheDocument()
   })
@@ -357,16 +368,23 @@ describe('it reads like the Google Workspace signup it sits beside', () => {
     expect(screen.getByTestId('role-source')).toBeInTheDocument()
   })
 
-  it('starts on the grant that covers both, ready to continue', async () => {
-    /* Narrowing is the unusual choice and cost a whole setup run to
-       discover: picking "seed" runs a narrow-scopes pass that can fail on
-       its own, leaving the tenant with neither grant. The answer that
-       grants what seeding AND migrating need is preselected. */
+  it('says a SOURCE is granted read-only, and names no write scope', async () => {
     view()
     await signIn('admin@acme.com')
-    expect(await screen.findByTestId('purpose-later')).toBeChecked()
-    expect(screen.getByTestId('purpose-next')).toBeEnabled()
-    expect(screen.getByTestId('purpose-seed')).not.toBeChecked()
+    fireEvent.click(await screen.findByTestId('purpose-migrate'))
+    fireEvent.click(screen.getByTestId('role-source'))
+    const box = await screen.findByTestId('role-scopes')
+    expect(box).toHaveTextContent(/read-only/i)
+    expect(box).not.toHaveTextContent(/read and write/i)
+  })
+
+  it('says a TARGET is granted read AND write', async () => {
+    view()
+    await signIn('admin@acme.com')
+    fireEvent.click(await screen.findByTestId('purpose-migrate'))
+    fireEvent.click(screen.getByTestId('role-target'))
+    expect(await screen.findByTestId('role-scopes'))
+      .toHaveTextContent(/read and write/i)
   })
 })
 
@@ -549,10 +567,15 @@ describe('setting everything up in one go', () => {
     expect(screen.getByTestId('purpose-auto')).toBeEnabled()
   })
 
-  it('is offered straight away, on the both-grant default', async () => {
+  it('waits for a purpose, because the grant depends on it', async () => {
+    /* It used to be enabled on arrival, because a third option granting
+       BOTH scope sets was preselected. Running the whole setup before
+       anyone said what the tenant was for is what made that grant wide. */
     view()
     await signIn('admin@acme.com')
-    expect(await screen.findByTestId('purpose-auto')).toBeEnabled()
+    expect(await screen.findByTestId('purpose-auto')).toBeDisabled()
+    fireEvent.click(screen.getByTestId('purpose-migrate'))
+    expect(screen.getByTestId('purpose-auto')).toBeEnabled()
   })
 
   it('sends the domain and credentials it already has', async () => {
@@ -616,117 +639,6 @@ describe('setting everything up in one go', () => {
 })
 
 
-describe('setting up without committing to a purpose', () => {
-  /* Setting a tenant up and deciding what to do with it are two decisions,
-     and the wizard forced them together. The thing you most want before
-     deciding is a count of what is in the tenant -- and counting needs the
-     very setup the decision was gating. */
-  it('is offered as a third choice', async () => {
-    view()
-    await signIn('admin@acme.com')
-    expect(await screen.findByTestId('purpose-later')).toBeInTheDocument()
-  })
-
-  it('does not ask for a second domain', async () => {
-    view()
-    await signIn('admin@acme.com')
-    await choose('later')
-    await waitFor(() => expect(screen.queryByTestId('wizard-domain')).toBeNull())
-  })
-
-  it('asks which side the tenant is before setting it up', async () => {
-    /* It used to assume source. Live, somebody set up their DESTINATION
-       through this and the source row was overwritten with the target's
-       domain -- which disarms the typed-domain gate that stops a seed being
-       aimed at production. */
-    view()
-    await signIn('admin@acme.com')
-    await choose('later')
-    expect(await screen.findByTestId('side-unset')).toBeInTheDocument()
-    expect(screen.queryByTestId('qts-source')).toBeNull()
-  })
-
-  it('sets it up once a side is chosen', async () => {
-    view()
-    await signIn('admin@acme.com')
-    await choose('later')
-    fireEvent.click(await screen.findByTestId('side-source'))
-    await waitFor(() =>
-      expect(screen.getByTestId('qts-source')).toHaveTextContent('acme.com'))
-  })
-
-  it('can set a tenant up as the destination, which it previously could not',
-     async () => {
-    view()
-    await signIn('admin@acme.com')
-    await choose('later')
-    fireEvent.click(await screen.findByTestId('side-target'))
-    await waitFor(() =>
-      expect(screen.getByTestId('qts-target')).toHaveTextContent('acme.com'))
-  })
-
-  it('says the decision is still open', async () => {
-    view()
-    await signIn('admin@acme.com')
-    await choose('later')
-    expect(await screen.findByText(/Nothing here commits it to a seed or a migration/i))
-      .toBeInTheDocument()
-  })
-
-  it('explains that a later choice reuses this setup', async () => {
-    view()
-    await signIn('admin@acme.com')
-    fireEvent.click(await screen.findByTestId('purpose-later'))
-    expect(await screen.findByText(/reuses all of it/i)).toBeInTheDocument()
-  })
-})
-
-describe('emptying a tenant you have not committed to', () => {
-  const reach = async () => {
-    view()
-    await signIn('admin@acme.com')
-    await choose('later')
-    fireEvent.click(await screen.findByTestId('side-source'))
-    return screen.findByTestId('later-wipe')
-  }
-
-  it('is refused until a side is named', async () => {
-    /* Wipe and delete-users both take a side. Defaulting it is the same
-       mistake in a more expensive place. */
-    view()
-    await signIn('admin@acme.com')
-    await choose('later')
-    expect(await screen.findByTestId('later-wipe')).toBeDisabled()
-    expect(screen.getByTestId('later-delete-users')).toBeDisabled()
-  })
-
-  it('offers a wipe', async () => {
-    expect(await reach()).toBeInTheDocument()
-  })
-
-  it('offers deleting all users', async () => {
-    await reach()
-    expect(screen.getByTestId('later-delete-users')).toBeInTheDocument()
-  })
-
-  it('gates both on typing the domain', async () => {
-    await reach()
-    fireEvent.click(screen.getByTestId('later-delete-users'))
-    expect(await screen.findByTestId('confirm-domain')).toBeInTheDocument()
-    expect(screen.getByTestId('confirm-act')).toBeDisabled()
-  })
-
-  it('promises no administrator is removed', async () => {
-    /* The one deletion with no cheap undo -- a Workspace address stays
-       reserved for 20 days and there would be no credential left to undo
-       it with. */
-    await reach()
-    expect(screen.getByText(/every super-admin and delegated admin is kept/i))
-      .toBeInTheDocument()
-  })
-})
-
-
 describe('choosing a purpose narrows the delegation', () => {
   /* Setup grants the union so the tenant works either way immediately.
      Choosing migrate has to REMOVE the source's write scopes: the
@@ -753,14 +665,19 @@ describe('choosing a purpose narrows the delegation', () => {
     expect(narrowScopes.mock.calls[0][2]).toMatchObject({ purpose: 'seed' })
   })
 
-  it('does not narrow when the decision is deferred', async () => {
-    /* "later" means no purpose has been chosen, and the union is what
-       keeps the tenant usable either way. */
+  it('narrows the side being SET UP, not always the source', async () => {
+    /* This passed a literal 'source' whatever slot had just been chosen,
+       so setting a domain up as the TARGET re-granted the delegation on a
+       different tenant and left the target's own grant untouched. The
+       scopes were right; the domain they landed on was not, which is why
+       nothing failed loudly. */
     view()
     await signIn('admin@acme.com', 'pw123456')
-    await choose('later')
-    await waitFor(() => expect(screen.getByTestId('side-unset')).toBeTruthy())
-    expect(narrowScopes).not.toHaveBeenCalled()
+    fireEvent.click(await screen.findByTestId('purpose-migrate'))
+    fireEvent.click(screen.getByTestId('role-target'))
+    fireEvent.click(screen.getByTestId('purpose-next'))
+    await waitFor(() => expect(narrowScopes).toHaveBeenCalled())
+    expect(narrowScopes.mock.calls[0][0]).toBe('target')
   })
 
   it('does not touch the Chat app while narrowing', async () => {

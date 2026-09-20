@@ -27,7 +27,6 @@ import JobRunner from '@/components/JobRunner'
 import SeedWizard from '@/pages/SeedWizard'
 import QuickTenantSetup from '@/components/QuickTenantSetup'
 import WizardArt from '@/components/WizardArt'
-import DecideLaterPanel from '@/components/DecideLaterPanel'
 import FitHeading from '@/components/FitHeading'
 import type { ArtKind } from '@/components/WizardArt'
 import { looksLikeDomain, domainOf } from './Wizard.utils'
@@ -56,8 +55,16 @@ import { looksLikeDomain, domainOf } from './Wizard.utils'
 // -- SeedWizard.tsx owns that step's real UI.
 const SEED_STEP_TITLE_MARKER = 'seeded'
 
-type Purpose = 'seed' | 'migrate' | 'later'
+type Purpose = 'seed' | 'migrate'
 type Step = 'domain' | 'purpose' | 'counterpart' | 'run'
+
+// Two purposes, because there are two. A third option ("set it up for
+// both") used to sit here and be the DEFAULT, which meant the page opened
+// having already answered its own question with the one answer that is not
+// a purpose -- and it granted the union of both scope sets to avoid a
+// narrowing pass that might fail. That traded the source's read-only
+// guarantee for a saved retry: a tenant set up "for both" holds Drive WRITE
+// on the side the tool promises never to write to.
 
 /**
  * The shell every setup step sits in.
@@ -287,12 +294,8 @@ const Wizard: React.FC = () => {
   const [otherDomain, setOtherDomain] = useState('')
   const [role, setRole] = useState<'source' | 'target'>('source')
   const [purpose, setPurpose] = useState<Purpose | null>(null)
-  // Defaults to the grant that covers BOTH, because narrowing is the
-  // unusual choice and was costing a whole setup run to discover: picking
-  // "seed" runs a narrow-scopes pass that can fail on its own, and the
-  // tenant is then left with neither grant. 'later' already grants what
-  // seeding and migrating both need, so it is the default answer.
-  const [picked, setPicked] = useState<Purpose | ''>('later')
+  // Nothing preselected: the operator says what the domain is for.
+  const [picked, setPicked] = useState<Purpose | ''>('')
   const [autoBusy, setAutoBusy] = useState(false)
   const [autoErr, setAutoErr] = useState('')
   // Live setup progress. full_setup writes a checkpoint the API already
@@ -392,10 +395,15 @@ const Wizard: React.FC = () => {
       // Jobs page like any other job. A failure there leaves the grant
       // WIDER than intended, never narrower, so nothing downstream breaks
       // for want of a scope.
-      // 'later' deliberately does not narrow: it means no purpose has been
-      // chosen, and the union is what keeps the tenant usable either way.
-      if (adminPassword && (picked === 'seed' || picked === 'migrate')) {
-        repairConsoleSetup('source', adminPassword,
+      //
+      // It must narrow the side being SET UP, not always the source. This
+      // passed a literal 'source' regardless of the slot just chosen, so
+      // setting a domain up as the TARGET re-granted the delegation on a
+      // different tenant -- the source -- and left the target's own grant
+      // untouched. The scopes it wrote were the right ones for the wrong
+      // domain, which is why nothing failed loudly.
+      if (adminPassword) {
+        repairConsoleSetup(picked === 'seed' ? 'source' : role, adminPassword,
                            { purpose: picked, chat: false })
           .catch(() => {})
       }
@@ -433,24 +441,24 @@ const Wizard: React.FC = () => {
         onBack={() => setStep('domain')}
         aside={picked === 'migrate' ? (
           <Aside art="migrate"
-            title="It only ever reads the source"
-            body={`${domain} is opened with a read-only credential — the tool
-                   physically cannot write to it. Everything lands in the
-                   destination tenant you name next.`} />
+            title={role === 'source' ? 'It only ever reads the source'
+                                     : 'The target is the written side'}
+            body={role === 'source'
+              ? `${domain} is opened with a read-only credential — the tool
+                 physically cannot write to it. Everything lands in the
+                 destination tenant you name next.`
+              : `${domain} is opened with a credential that can read AND
+                 write, because a migration has to create files, insert mail
+                 and add events here. The source it reads stays read-only.`} />
         ) : picked === 'seed' ? (
           <Aside art="seed"
             title="A tenant full of convincing fiction"
             body={`Fabricated users, files, mail and events are written into
-                   ${domain} so a migration can be rehearsed end to end. Wipe
-                   and reseed as often as you like.`}
+                   ${domain} so a migration can be rehearsed end to end. Next
+                   you choose how much data, which edge cases to include, and
+                   whether to keep creating accounts until the tenant is
+                   full.`}
             note="Seeding writes data, so it is only offered on accounts opted in to it." />
-        ) : picked === 'later' ? (
-          <Aside art="setup"
-            title="Count first, commit after"
-            body={`Creates what is needed to READ ${domain}, then counts it —
-                   accounts, mail, Drive. Choosing a seed or a migration
-                   later reuses all of it, so nothing here is wasted.`}
-            note="Includes emptying the tenant, for one you are evaluating rather than keeping." />
         ) : (
           <Aside art="setup"
             title="Rehearse it, or run it"
@@ -487,30 +495,13 @@ const Wizard: React.FC = () => {
                 </Typography>
               </Box>
             } />
-          <FormControlLabel value="later" sx={{ mt: 1, alignItems: 'flex-start' }}
-            control={<Radio inputProps={{ 'data-testid': 'purpose-later' } as never}
-                            sx={{ pt: 0.5 }} />}
-            label={
-              <Box sx={{ py: 0.5 }}>
-                <Typography variant="body1" sx={{ fontWeight: 500 }}>
-                  Set it up for both — seeding and migrating
-                </Typography>
-                <Typography variant="body2" color="text.secondary">
-                  Builds the Cloud project, the service account and the
-                  delegation grant, then counts what is in the tenant.
-                  {' '}<strong>Grants what BOTH need</strong>, so the tenant
-                  can seed or migrate immediately. The two choices above
-                  narrow that grant; they set nothing up that this does not.
-                </Typography>
-              </Box>
-            } />
         </RadioGroup>
         {/* Only a migration fills a slot. Seeding writes fabricated data
             INTO this tenant and has no counterpart, so asking which side it
             sits on is a question with no answer -- it was asked of every
             purpose, above the choice that decides whether it means
             anything, which is the wrong way round. */}
-        {(picked === 'migrate' || picked === 'later') && (
+        {picked === 'migrate' && (
           <Box sx={{ mt: 2.5 }} data-testid="role-toggle">
             <Typography variant="body2" sx={{ fontWeight: 600, mb: 0.5 }}>
               Set {domain} up as your:
@@ -524,9 +515,29 @@ const Wizard: React.FC = () => {
                 control={<Radio size="small" inputProps={{ 'data-testid': 'role-target' } as never} />}
                 label="Target (written to)" />
             </RadioGroup>
+            {/* What the slot COSTS, named on the step that picks it. The
+                delegation this grants is the whole security story and it
+                was described only as "read-only" / "written to" -- true,
+                but it never said a grant was being written at all. */}
+            <Alert severity="info" icon={false} sx={{ mt: 1, py: 0.5 }}
+                   data-testid="role-scopes">
+              <Typography variant="caption" sx={{ display: 'block' }}>
+                {role === 'source' ? (
+                  <>Delegation granted on {domain || 'this domain'}:{' '}
+                  <strong>read-only</strong>. Drive, Gmail, Calendar and the
+                  directory are all granted at their <code>.readonly</code>{' '}
+                  scope — no write scope is requested, so the tool cannot
+                  alter the tenant it is reading.</>
+                ) : (
+                  <>Delegation granted on {domain || 'this domain'}:{' '}
+                  <strong>read and write</strong>. Drive, Gmail insert/labels
+                  /modify and Calendar are writable, because a migration
+                  creates the copy here; the directory stays read-only.</>
+                )}
+              </Typography>
+            </Alert>
             <Typography variant="caption" color="text.secondary">
-              Source is read-only; target is written to. This is which slot it
-              fills — not the domain name.
+              This is which slot it fills — not the domain name.
             </Typography>
           </Box>
         )}
@@ -611,11 +622,6 @@ const Wizard: React.FC = () => {
                    action={
                      <Button size="small" onClick={() => {
                        setPurpose(picked || null)
-                       // 'later' means no purpose has been chosen, so
-                       // pushing it into seed or migrate would be choosing
-                       // one on the operator's behalf -- which is what the
-                       // option exists to avoid. It lands on the run step's
-                       // own decide-later view instead.
                        setStep(picked === 'migrate' ? 'counterpart' : 'run')
                      }}>
                        Continue
@@ -625,13 +631,12 @@ const Wizard: React.FC = () => {
                 {ok ? `${domain} is set up.`
                     : `${domain}: ${done.length} of ${phases.length} steps finished.`}
               </Typography>
-              {ok && picked === 'later' && (
+              {ok && picked === 'migrate' && (
                 <Typography variant="body2" sx={{ mt: 0.5 }}
-                            data-testid="setup-both-ready">
-                  The project, service account and delegation are in place
-                  with the scopes for <strong>both</strong> seeding and
-                  migrating. Nothing else needs setting up for either —
-                  picking one later only narrows the grant.
+                            data-testid="setup-scopes-ready">
+                  The project, service account and delegation are in place,
+                  granted <strong>{role === 'source'
+                    ? 'read-only' : 'read and write'}</strong> on {domain}.
                 </Typography>
               )}
               {!ok && failed.length > 0 && (
@@ -704,10 +709,7 @@ const Wizard: React.FC = () => {
           </>
         )}
       </Stack>
-      {purpose === 'later'
-        ? <DecideLaterPanel domain={domain} adminEmail={adminEmail}
-                            adminPassword={adminPassword} />
-        : purpose === 'seed'
+      {purpose === 'seed'
         ? <SeedWizard sourceDomain={domain} adminEmail={adminEmail}
                       adminPassword={adminPassword}
                       configured={seedFromPicker} />
