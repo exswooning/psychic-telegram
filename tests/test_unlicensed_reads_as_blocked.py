@@ -33,6 +33,14 @@ GMAIL_NO_MAILBOX = RuntimeError(
 TRANSIENT = RuntimeError(
     'HTTP 401 (authError): Active session is invalid. Error code: 4')
 
+# The real text captured live: 99 of 300 target accounts on one tenant hit
+# "Domain user limit reached" during auto-provisioning, and every one of
+# them then failed migration with exactly this, reported as a generic
+# FAILED with no connection to the licence ceiling that actually caused it.
+NO_TARGET_ACCOUNT = Exception(
+    "('invalid_grant: Invalid email or User ID', {'error': 'invalid_grant', "
+    "'error_description': 'Invalid email or User ID'})")
+
 
 class _S:
     """Stand-in Settings; only identity matters to the code under test."""
@@ -45,6 +53,9 @@ class TestWhatCountsAsBlocked:
     def test_the_gmail_symptom_still_is(self):
         assert main.is_blocked_externally(GMAIL_NO_MAILBOX)
 
+    def test_a_target_account_that_was_never_created_is_too(self):
+        assert main.is_blocked_externally(NO_TARGET_ACCOUNT)
+
     def test_a_transient_401_that_never_exhausted_is_not(self):
         """The freshly-provisioned case resilience.py retries. Marking it
         blocked would park a user that was about to succeed."""
@@ -52,6 +63,30 @@ class TestWhatCountsAsBlocked:
 
     def test_an_unrelated_error_is_not(self):
         assert not main.is_blocked_externally(RuntimeError("HTTP 500 backendError"))
+
+
+class TestTheMissingTargetAccountMessage:
+    def test_names_the_target_and_points_at_provisioning(self):
+        out = main.explain_user_failure(
+            NO_TARGET_ACCOUNT, "a@src", "a@tgt", _S())
+        assert "a@tgt does not exist on the target" in out
+        assert "could not create a@tgt" in out
+        assert "licensed seats" in out
+        assert "provision-users" in out
+
+    def test_takes_priority_over_the_licence_probe(self, monkeypatch):
+        """invalid_grant fires before Drive or Gmail are ever reached, so
+        there is no licence to check yet -- _licence_of must never even be
+        called for this signature."""
+        def boom(*a, **k):
+            raise AssertionError("should not be called for this signature")
+        monkeypatch.setattr(main, "_licence_of", boom)
+        main.explain_user_failure(NO_TARGET_ACCOUNT, "a@src", "a@tgt", _S())
+
+    def test_the_original_error_is_kept(self):
+        out = main.explain_user_failure(
+            NO_TARGET_ACCOUNT, "a@src", "a@tgt", _S())
+        assert str(NO_TARGET_ACCOUNT) in out
 
 
 class TestTheMessageStatesAFactOrSaysItCannot:

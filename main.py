@@ -140,6 +140,20 @@ _NO_MAILBOX = ("mail service not enabled", "failedprecondition")
 # which is why the licence is checked rather than assumed.
 _MAYBE_UNLICENSED = ("exhausted", "retries", "active session is invalid")
 
+# A third signature for the same root cause, one step earlier: an account
+# that was never created at all. _ensure_target_accounts auto-provisions a
+# missing target user before migrating into it, but that can itself fail --
+# most often because the target's Workspace plan is out of licensed seats,
+# which Google refuses with "Domain user limit reached" during creation.
+# Whatever tries to impersonate that address afterwards gets invalid_grant
+# from Google's OAuth layer before Drive or Gmail are ever reached: the
+# subject itself does not exist, so no scope, retry or code change here
+# reaches it. Confirmed live: 99 of 300 target accounts on one tenant hit
+# the licence ceiling during auto-provisioning, and every one of them then
+# failed migration with exactly this message, reported as a generic FAILED
+# with nothing connecting it back to the licence problem that caused it.
+_NO_TARGET_ACCOUNT = ("invalid_grant", "invalid email or user id")
+
 
 def _licence_of(settings, source_user: str) -> tuple[str | None, str]:
     """That user's licence SKU, or None if they have none. ("", reason) when
@@ -276,7 +290,8 @@ def is_blocked_externally(exc: Exception) -> bool:
     """
     low = str(exc).lower()
     return (all(k in low for k in _NO_MAILBOX)
-            or all(k in low for k in _MAYBE_UNLICENSED))
+            or all(k in low for k in _MAYBE_UNLICENSED)
+            or all(k in low for k in _NO_TARGET_ACCOUNT))
 
 
 def explain_user_failure(exc: Exception, source_user: str,
@@ -290,6 +305,16 @@ def explain_user_failure(exc: Exception, source_user: str,
     """
     raw = str(exc)
     low = raw.lower()
+    if all(k in low for k in _NO_TARGET_ACCOUNT):
+        return (f"{raw}\n\nThis means {target_user} does not exist on the "
+                f"target at all -- Google refuses to mint a token for a "
+                f"subject it does not recognise. Check this run's own log "
+                f"for \"could not create {target_user}\": most often the "
+                f"target's Workspace plan is out of licensed seats. Buy "
+                f"more seats and re-run `provision-users` (or just this "
+                f"migration -- it auto-provisions), or accept that this "
+                f"user stays on the source until there is room. Nothing "
+                f"was migrated for them.")
     if all(k in low for k in _NO_MAILBOX):
         return (f"{raw}\n\nThis almost always means the account has no "
                 f"Workspace licence, so Gmail does not exist for it -- the "
