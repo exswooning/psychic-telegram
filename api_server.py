@@ -4598,6 +4598,52 @@ async def all_configured_domains(op: Operator = Depends(operator)):
     return await _off_loop(_read)
 
 
+def _license_headroom_warning(account_id: int) -> str:
+    """Empty, or a warning appended to a just-linked pair's own success
+    message.
+
+    Live: a migration auto-provisioned 299 missing target accounts, hit
+    "Domain user limit reached. Start paid subscription." 99 users in, and
+    nobody found out until three hours into a run that had already started
+    writing data -- a wall of invalid_grant failures that read as a broken
+    migration when it was really a target tenant with too few licences for
+    the source it was about to receive.
+
+    Google exposes assigned-seat counts (Licensing API) but not remaining
+    capacity without a Reseller scope this tool does not request, so the
+    real ceiling still cannot be known ahead of time -- what can be checked
+    for free, with the Directory access every setup already grants, is
+    whether the target's CURRENT user count already looks too small to
+    hold the source's. Not a proof either way: a target can rightfully
+    have fewer users today and still have room to grow. But it is the one
+    signal available before the first account gets created, so it is
+    surfaced the moment both tenants are actually linked -- the earliest
+    point a comparison is even possible -- rather than only discovered by
+    hitting the wall itself.
+    """
+    try:
+        from config import Settings
+        from auth import AuthManager
+        import tenant_inventory
+
+        settings = Settings(account_id=account_id)
+        auth = AuthManager(settings)
+        src_n = len(tenant_inventory.list_accounts(
+            auth, "source", settings.source_domain))
+        tgt_n = len(tenant_inventory.list_accounts(
+            auth, "target", settings.target_domain))
+    except Exception:      # noqa: BLE001 - advisory only, never blocks linking
+        return ""
+    if tgt_n < src_n:
+        return (f"  ⚠ {settings.source_domain} has {src_n} user(s); "
+                f"{settings.target_domain} currently has only {tgt_n}. "
+                "If the target's Workspace plan does not have at least "
+                f"{src_n} licensed seats, provisioning will fail partway "
+                "through migration with \"Domain user limit reached\" -- "
+                "check its subscription before migrating.")
+    return ""
+
+
 class LinkDomains(WriteAction):
     source_account_id: int
     source_side: str
@@ -4813,7 +4859,8 @@ async def link_domains(body: LinkDomains, op: Operator = Depends(operator)):
             op.account_id, "target", domain=tcfg["domain"],
             admin_email=tcfg.get("admin_email") or "",
             sa_key_path=f"keys/{op.account_id}/target-sa.json")
-        return True, f"{scfg['domain']} -> {tcfg['domain']}"
+        detail = f"{scfg['domain']} -> {tcfg['domain']}"
+        return True, detail + _license_headroom_warning(op.account_id)
 
     return await _gated(op, "setup.link_domains", body, target, _link)
 

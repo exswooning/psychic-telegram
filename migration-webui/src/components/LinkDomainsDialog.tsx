@@ -35,10 +35,17 @@ export const LinkDomainsDialog: React.FC<{
   const [reason, setReason] = useState('')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
+  // Set only when linking itself succeeded but the pair looks under-licensed
+  // -- distinct from err, which means the link did not happen at all. Kept
+  // open rather than auto-closed like a clean success, because the whole
+  // point is that this is easy to miss: live, a target that hit its
+  // licence ceiling was not discovered until three hours into a migration
+  // that had already started writing data.
+  const [warning, setWarning] = useState('')
 
   useEffect(() => {
     if (!open) return
-    setErr(''); setSrc(''); setTgt(''); setReason('')
+    setErr(''); setWarning(''); setSrc(''); setTgt(''); setReason('')
     fetchAllDomains()
       // hasKey only. A superseded domain was filtered out too, which made
       // the one thing 009_superseded_configs.sql kept it for -- re-linking
@@ -65,13 +72,19 @@ export const LinkDomainsDialog: React.FC<{
   const connect = async () => {
     const s = byKey(src); const t = byKey(tgt)
     if (!s || !t) return
-    setBusy(true); setErr('')
+    setBusy(true); setErr(''); setWarning('')
     try {
       const r = await linkDomains(reason.trim(),
         { accountId: s.accountId, side: s.side, supersededId: s.supersededId },
         { accountId: t.accountId, side: t.side, supersededId: t.supersededId })
       if (!r.ok) throw new Error(r.detail || 'could not link the domains')
-      onLinked(); onClose()
+      onLinked()
+      // The pair is live either way -- onLinked() already reflects it.
+      // A warning just means "stay open, make sure this was seen" instead
+      // of closing on a clean run.
+      const idx = r.detail.indexOf('⚠')
+      if (idx === -1) { onClose(); return }
+      setWarning(r.detail.slice(idx))
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
     } finally {
@@ -92,6 +105,11 @@ export const LinkDomainsDialog: React.FC<{
           The domains you did not pick are left exactly as they are.
         </Typography>
         {err && <Alert severity="error" sx={{ mb: 2 }} data-testid="link-error">{err}</Alert>}
+        {warning && (
+          <Alert severity="warning" sx={{ mb: 2 }} data-testid="link-warning">
+            {warning}
+          </Alert>
+        )}
         <Stack spacing={2}>
           <TextField select fullWidth label="Source (read from)" value={src}
                      onChange={(e) => setSrc(e.target.value)}
@@ -134,11 +152,19 @@ export const LinkDomainsDialog: React.FC<{
         </Typography>
       </DialogContent>
       <DialogActions>
-        <Button onClick={onClose} disabled={busy}>Cancel</Button>
-        <Button variant="contained" onClick={connect} disabled={!ready || busy}
-                data-testid="link-connect">
-          {busy ? 'Saving…' : 'Set as active pair'}
-        </Button>
+        {warning ? (
+          <Button variant="contained" onClick={onClose} data-testid="link-close">
+            Close
+          </Button>
+        ) : (
+          <>
+            <Button onClick={onClose} disabled={busy}>Cancel</Button>
+            <Button variant="contained" onClick={connect} disabled={!ready || busy}
+                    data-testid="link-connect">
+              {busy ? 'Saving…' : 'Set as active pair'}
+            </Button>
+          </>
+        )}
       </DialogActions>
     </Dialog>
   )

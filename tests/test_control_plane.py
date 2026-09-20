@@ -2100,6 +2100,87 @@ class TestLinkingTwoSetUpDomains:
         assert "no key on file" in r.json()["detail"]
 
 
+class TestLicenseHeadroomWarningOnLink:
+    """A migration auto-provisioned 299 missing target accounts live, hit
+    "Domain user limit reached" 99 users in, and nobody found out until
+    three hours into a run that had already started writing data. Google
+    will not say how many seats are left without a Reseller scope this
+    tool does not request, but comparing current user counts is free with
+    the Directory access every setup already grants -- not proof either
+    way, but the one signal available before the first account is even
+    created, so it is surfaced the moment the pair is linked."""
+
+    def _signed_in(self, cp, email):
+        cp.post("/api/v2/auth/signup",
+                json={"email": email, "password": "hunter22222", "name": "User"})
+        return cp.get("/api/v2/auth/me", headers=ADMIN).json()["id"]
+
+    def _donor(self, tmp_path, accounts_auth, acct, role, domain, cid):
+        kd = tmp_path / "keys" / str(acct)
+        kd.mkdir(parents=True, exist_ok=True)
+        (kd / f"{role}-sa.json").write_text(
+            json.dumps({"client_id": cid, "project_id": "p"}))
+        accounts_auth.update_tenant_config(
+            acct, role, domain=domain, admin_email=f"admin@{domain}",
+            sa_key_path=f"keys/{acct}/{role}-sa.json")
+
+    def _link(self, cp, tmp_path, monkeypatch, src_n, tgt_n):
+        import api_server, accounts_auth, tenant_inventory
+        a = self._signed_in(cp, f"headroomA{src_n}{tgt_n}@ex.com")
+        cp.post("/api/v2/auth/logout")
+        boss = self._signed_in(cp, f"headroomboss{src_n}{tgt_n}@ex.com")
+        accounts_auth.promote_to_superadmin(f"headroomboss{src_n}{tgt_n}@ex.com")
+        monkeypatch.setattr(api_server, "HERE", str(tmp_path))
+        self._donor(tmp_path, accounts_auth, boss, "source", "hsrc.com", "S1")
+        self._donor(tmp_path, accounts_auth, a, "target", "htgt.com", "T1")
+
+        def fake_list_accounts(auth, side, domain):
+            n = src_n if side == "source" else tgt_n
+            return [f"u{i}@{domain}" for i in range(n)]
+        monkeypatch.setattr(tenant_inventory, "list_accounts", fake_list_accounts)
+
+        return cp.post("/api/v2/setup/link-domains", headers=ADMIN, json={
+            "reason": "checking licence headroom",
+            "source_account_id": boss, "source_side": "source",
+            "target_account_id": a, "target_side": "target"})
+
+    def test_warns_when_the_target_has_fewer_users_than_the_source(
+            self, cp, tmp_path, monkeypatch):
+        r = self._link(cp, tmp_path, monkeypatch, src_n=300, tgt_n=5)
+        body = r.json()
+        assert body["ok"] is True   # the link itself must still succeed
+        assert "⚠" in body["detail"]
+        assert "300" in body["detail"] and "5" in body["detail"]
+
+    def test_no_warning_when_the_target_has_enough_users(
+            self, cp, tmp_path, monkeypatch):
+        r = self._link(cp, tmp_path, monkeypatch, src_n=50, tgt_n=200)
+        body = r.json()
+        assert body["ok"] is True
+        assert "⚠" not in body["detail"]
+
+    def test_a_probe_failure_never_blocks_linking(self, cp, tmp_path, monkeypatch):
+        import api_server, accounts_auth, tenant_inventory
+        a = self._signed_in(cp, "headroomprobefailA@ex.com")
+        cp.post("/api/v2/auth/logout")
+        boss = self._signed_in(cp, "headroomprobefailboss@ex.com")
+        accounts_auth.promote_to_superadmin("headroomprobefailboss@ex.com")
+        monkeypatch.setattr(api_server, "HERE", str(tmp_path))
+        self._donor(tmp_path, accounts_auth, boss, "source", "psrc.com", "S2")
+        self._donor(tmp_path, accounts_auth, a, "target", "ptgt.com", "T2")
+
+        def boom(auth, side, domain):
+            raise RuntimeError("Directory API unreachable")
+        monkeypatch.setattr(tenant_inventory, "list_accounts", boom)
+
+        r = cp.post("/api/v2/setup/link-domains", headers=ADMIN, json={
+            "reason": "probe fails, link must not",
+            "source_account_id": boss, "source_side": "source",
+            "target_account_id": a, "target_side": "target"})
+        assert r.json()["ok"] is True
+        assert "⚠" not in r.json()["detail"]
+
+
 class TestAllConfiguredDomains:
     """verified_domains answers "the CURRENT source+target for one account".
     A setup overwrites the role it targets, and a tenant can be configured
