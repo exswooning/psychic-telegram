@@ -524,12 +524,15 @@ const Wizard: React.FC = () => {
               <Typography variant="caption" sx={{ display: 'block' }}>
                 {role === 'source' ? (
                   <>Delegation granted on {domain || 'this domain'}:{' '}
-                  <strong>read-only</strong>. Drive, Gmail, Calendar and the
-                  directory are all granted at their <code>.readonly</code>{' '}
-                  scope. The one exception is a server-side or link-flip
-                  transfer, which copies and re-shares files in place and so
-                  needs Drive <strong>write</strong> here — which is why
-                  neither is the default.</>
+                  <strong>read-only</strong> by default — Drive, Gmail,
+                  Calendar and the directory at their <code>.readonly</code>{' '}
+                  scope. Five optional features do widen it, because Google
+                  publishes no read-only scope for them: a{' '}
+                  <strong>server-side</strong> or <strong>link-flip</strong>{' '}
+                  transfer (Drive write), <strong>Gmail settings</strong>,{' '}
+                  <strong>Chat</strong>, <strong>calendar ACLs</strong>{' '}
+                  (full Calendar write) and <strong>SSO</strong>. None is on
+                  by default.</>
                 ) : (
                   <>Delegation granted on {domain || 'this domain'}:{' '}
                   <strong>read and write</strong>. Drive, Gmail insert/labels

@@ -1516,7 +1516,7 @@ def cmd_migrate(args, settings: Settings, db: MigrationDB, auth: AuthManager):
         results = _run_with_memory_pause(
             auth, db, settings, services, delta=False, delta_days=0,
             only=args.user)
-    _print_batch_summary(results)
+    _print_batch_summary(results, services)
     _auto_repair(db, auth, settings)
 
 
@@ -1539,7 +1539,7 @@ def cmd_delta(args, settings: Settings, db: MigrationDB, auth: AuthManager):
     results = _run_with_memory_pause(
         auth, db, settings, services, delta=True, delta_days=args.days,
         only=args.user)
-    _print_batch_summary(results)
+    _print_batch_summary(results, services)
 
 
 def cmd_syncacls(args, settings: Settings, db: MigrationDB,
@@ -1811,7 +1811,53 @@ def _print_licence_shortfall(results: list[dict]) -> None:
           + (f", +{len(names) - 5} more" if len(names) > 5 else ""))
 
 
-def _print_batch_summary(results: list[dict]) -> None:
+def _productive_total(counters) -> int:
+    """How many items a service actually MOVED.
+
+    Every counter a service reports is work done except the ones that name
+    work not done, so those two suffixes are the whole rule -- a new counter
+    is counted without anyone remembering to add it here.
+    """
+    if not isinstance(counters, dict):
+        return 0
+    return sum(
+        v for k, v in counters.items()
+        if isinstance(v, (int, float))
+        and not k.endswith("failed") and not k.endswith("skipped")
+    )
+
+
+def warn_services_that_moved_nothing(results: list[dict],
+                                     services) -> list[str]:
+    """Name every requested service that migrated nothing at all.
+
+    A delta run asked for all six services against 265 users and inserted
+    ZERO mail -- `--days` filters on message date, so a mailbox with no
+    recent traffic yields nothing -- and the batch summary reported the run
+    as a success, because every individual user had indeed succeeded. The
+    per-user view cannot show this: it is only visible once the whole run is
+    added up. Returns the names so a caller can test it without parsing
+    stdout.
+    """
+    if not results or not services:
+        return []
+    silent = []
+    for svc in sorted(services):
+        moved = sum(_productive_total((r.get("services") or {}).get(svc))
+                    for r in results)
+        if moved == 0:
+            silent.append(svc)
+    if silent:
+        print("\n=== Services that migrated NOTHING ===")
+        for svc in silent:
+            print(f"  {svc}: 0 items across {len(results)} user(s)")
+        print("  These were asked for and moved nothing. On a delta run the"
+              "\n  usual cause is --days: it filters on the item's own date,"
+              "\n  not on when it was last migrated.")
+    return silent
+
+
+def _print_batch_summary(results: list[dict], services=None) -> None:
     print("\n=== Batch summary ===")
     for r in sorted(results, key=lambda x: x["source"]):
         print(f"  {r['source']:<38}{r.get('status', '?'):<14}"
@@ -1819,6 +1865,7 @@ def _print_batch_summary(results: list[dict]) -> None:
         for svc, st in (r.get("services") or {}).items():
             print(f"      {svc}: {st}")
 
+    warn_services_that_moved_nothing(results, services)
     _print_licence_shortfall(results)
 
     # Latency and throughput, from the run that just happened. Printed
