@@ -150,15 +150,26 @@ class TestRecommendUsesIt:
         assert "quota" in rec["seed_reason"]
 
     def test_the_migration_pool_is_derived_not_frozen(self, monkeypatch):
-        """Used to answer 4 at the default MIGRATE_FILE_SECONDS (1.33) --
-        but that only ever matched DRIVE_WRITES_PER_SEC x 1.33 because both
-        were unmeasured guesses that happened to multiply out to 4. The
-        ceiling is no longer a guess (see its own comment: corrected
-        against a real, hour-long single-user seed run), so the product
-        moves with it. MIGRATE_FILE_SECONDS remains its own stand-in until
-        a real migration gets the same measurement -- the property this
-        pins is the division relationship, not that any particular pair of
-        unmeasured numbers should keep landing on 4."""
-        assert R.migrate_file_workers() == 1
-        monkeypatch.setattr(R, "MIGRATE_FILE_SECONDS", 4.0)
+        """4 at the default 1.33s, and it moves with a measured latency."""
         assert R.migrate_file_workers() == 4
+        monkeypatch.setattr(R, "MIGRATE_FILE_SECONDS", 2.0)
+        assert R.migrate_file_workers() == 6
+
+    def test_the_seed_ceiling_cannot_reach_the_migration_pool(self, monkeypatch):
+        """These were one constant, and it cost a live run hours.
+
+        Correcting the SEED ceiling 3.0 -> 0.9 against a real seed run also
+        divided migration's per-user file pool by four, so a migration in
+        flight copied files one at a time -- and no log line could have
+        explained it, because the number that moved was measured on a
+        different service. Seeding CREATES each file (an upload per leaf);
+        migration COPIES server-side. Different work, different ceiling."""
+        monkeypatch.setattr(R, "DRIVE_WRITES_PER_SEC", 0.1)
+        assert R.migrate_file_workers() == 4, (
+            "the seed ceiling still drives the migration pool")
+
+    def test_the_migration_ceiling_does_reach_it(self, monkeypatch):
+        """The other half: migration's own constant must still be live, or
+        the split traded one frozen number for another."""
+        monkeypatch.setattr(R, "MIGRATE_WRITES_PER_SEC", 6.0)
+        assert R.migrate_file_workers() == 8

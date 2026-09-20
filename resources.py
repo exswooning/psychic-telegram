@@ -193,6 +193,29 @@ def mb_per_seed_worker(mail_workers: int | None = None,
 # accident.
 DRIVE_WRITES_PER_SEC = 0.9
 
+# Migration's own ceiling, kept SEPARATE from the seeding one above.
+#
+# They are not the same workload and must not share a number. Seeding
+# CREATES each file from nothing -- an upload per leaf, which is what the
+# 0.9 above was measured against. Migration COPIES, server-side, where the
+# bytes never touch this host; drive_engine's own note puts that at ~5.7
+# API calls per file against a per-account ceiling of 3.
+#
+# They were briefly the same constant, and it did real damage: correcting
+# the seed ceiling 3.0 -> 0.9 silently cut migration's per-user file pool
+# from 4 to 1, so a live run copied files one at a time. It surfaced as a
+# long tail crawling at 115 rows/min with 24 large users in flight -- and
+# nothing in the run pointed at the cause, because the number that moved
+# was measured on a different service entirely.
+#
+# Still a stand-in, not a measurement: 3.0 is what migration ran at before
+# the collision. What this run DOES establish is that it is nowhere near
+# the ceiling -- 34 rate-limit errors in 680,000 ledger rows (0.005%), and
+# the project limiter climbed to 1,200/s without Google pushing back. It
+# gets the same treatment the seed constant got once a migration is
+# profiled on purpose rather than in passing.
+MIGRATE_WRITES_PER_SEC = float(os.getenv("MIGRATE_WRITES_PER_SEC", "3.0"))
+
 # How long one leaf file actually takes, end to end.
 #
 # The leaf pool was frozen at 4 threads, derived in corpus.py from a round
@@ -303,11 +326,17 @@ def migrate_file_workers() -> int:
     """Concurrent file copies inside one migrated user.
 
     The same division as seed_leaf_workers, against the migration's own
-    latency. It lands on 4, which is what this has always been -- but as an
-    answer rather than a constant, so a measured MIGRATE_FILE_SECONDS moves
-    it instead of contradicting the comment beside it.
+    latency AND its own ceiling. It lands on 4, which is what this has
+    always been -- but as an answer rather than a constant, so a measured
+    MIGRATE_FILE_SECONDS moves it instead of contradicting the comment
+    beside it.
+
+    MIGRATE_WRITES_PER_SEC, never the seeding ceiling: sharing that one
+    number meant a seed measurement silently rewrote migration's file
+    concurrency, and a live run spent hours copying files serially for a
+    reason no log line could have explained.
     """
-    return max(1, min(12, round(DRIVE_WRITES_PER_SEC * MIGRATE_FILE_SECONDS)))
+    return max(1, min(12, round(MIGRATE_WRITES_PER_SEC * MIGRATE_FILE_SECONDS)))
 
 
 def saturating_leaf_workers() -> int:
