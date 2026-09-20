@@ -48,6 +48,7 @@ from auth import AuthManager, list_domain_users
 from calendar_engine import CalendarMigrator
 from chat_engine import ChatMigrator
 from contacts_engine import ContactsMigrator
+import memtrace
 import user_claims
 from config import Settings
 from db import MigrationDB
@@ -670,8 +671,14 @@ def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
         did not do that work and must not report on it.
         """
         if not coordinated:
-            return migrate_user(auth, db, settings, src, tgt,
-                                services, delta, delta_days)
+            try:
+                return migrate_user(auth, db, settings, src, tgt,
+                                    services, delta, delta_days)
+            finally:
+                # The user boundary is the only place RSS distinguishes a
+                # leak from ordinary concurrency cost: per-user state should
+                # be gone by now, so anything still held is held wrongly.
+                memtrace.user_finished(src)
 
         claimed, why = user_claims.acquire(account_id, src, services=svc_label)
         if not claimed:
@@ -687,6 +694,7 @@ def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
             out = migrate_user(auth, db, settings, src, tgt,
                                services, delta, delta_days)
             user_claims.finish(account_id, src, status="DONE")
+            memtrace.user_finished(src)
             return out
         except BaseException as exc:
             # Record the failure against the claim before re-raising, so the
@@ -874,6 +882,7 @@ def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
             log.warning("... and %d more re-opened", len(reopened) - 20)
     except Exception as exc:      # noqa: BLE001 - advisory, never blocking
         log.warning("could not reconcile service markers: %s", exc)
+    memtrace.start()
     MEMORY_PAUSE.clear()
     stop = threading.Event()
     watchdog = threading.Thread(target=_memory_watchdog, args=(stop,),
