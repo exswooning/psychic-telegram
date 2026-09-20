@@ -91,6 +91,18 @@ DRIVE_SCOPE = [
               "copies instead, which is destructive and opt-in. Links held by "
               "external parties -- their mailbox, their bookmarks -- cannot be "
               "reached; external_shares.py reports who to tell"),
+    ScopeItem("drive", "Drive links inside migrated Drive files", FULL,
+              "A Doc whose text says 'the numbers are in <link to the Sheet>' "
+              "names that Sheet by id, and files.copy mints a new one -- so "
+              "the copied link points at the source file and dies with the "
+              "source tenant, while resolving perfectly until then. "
+              "drive_engine repoints them after the walk, once every id in "
+              "the user's own tree is known (a link cannot be rewritten to a "
+              "file that has not been copied yet). Verified end to end on a "
+              "live 300-user tenant: 25 of 25 migrated documents named the "
+              "TARGET file, none the source -- check_link_rewrite.py is that "
+              "check, and it reads the migrated document's own body rather "
+              "than trusting a counter"),
     ScopeItem("drive", "Domain-wide ACLs", FULL,
               "@tenantA.com rewritten to @tenantB.com; other domains pass through"),
     ScopeItem("drive", "'Anyone with the link' ACLs", FULL,

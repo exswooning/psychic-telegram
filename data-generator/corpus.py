@@ -725,11 +725,14 @@ class CorpusBuilder:
     def _build_cross_references(self, root: str) -> None:
         """Documents that link to OTHER Drive files.
 
-        The surface nothing rewrites. link_rewrite is wired into mail and,
-        as of today, calendar -- a Doc whose text says "the numbers are in
-        <link to the Sheet>" rots exactly the same way and no pass touches
-        it. Until this existed the corpus could not show that, so the gap
-        was an argument rather than a finding.
+        Written when this was the surface nothing rewrote: link_rewrite was
+        wired into mail and calendar, and a Doc whose text said "the numbers
+        are in <link to the Sheet>" rotted the same way untouched. The
+        fixture existed to turn that argument into a finding, and it did --
+        drive_engine._rewrite_pending_links now repoints these after the
+        walk, and the fixture is what proves it rather than a counter
+        claiming so (see check_link_rewrite.py; 25 of 25 migrated documents
+        named the target file on a live tenant).
 
         Deliberately a real link to a real file created moments earlier, so
         the id resolves through id_mapping after a migration and a checker
