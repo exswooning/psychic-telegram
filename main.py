@@ -1774,6 +1774,43 @@ def cmd_ui(args, settings: Settings, db: MigrationDB, auth: AuthManager):
     sys.exit(tui.main(["--db", settings.db_path, "--refresh", str(args.refresh)]))
 
 
+def _print_licence_shortfall(results: list[dict]) -> None:
+    """Say out loud, at the end, that the target ran out of licences.
+
+    A BLOCKED user is one the target cannot receive at all -- no account,
+    or an account with no licence -- and is not a failure of this run:
+    everything reachable still migrated. But buried in a per-user list 300
+    lines long, that distinction is invisible. Live, a tenant exactly 100
+    licences short finished a ten-hour migration whose only trace of the
+    cause was a single warning line near the top of the log, and the
+    headline number people actually read said "165 failed".
+
+    Counted from BLOCKED rather than from the provisioning step, so it also
+    covers an account that exists but holds no licence -- which is a
+    different Google error, reported the same way, and was one of the 100.
+    """
+    blocked = [r for r in results if r.get("status") == "BLOCKED"]
+    if not blocked:
+        return
+    domain = next((r["target"].split("@")[-1] for r in blocked
+                   if "@" in (r.get("target") or "")), "")
+    where = f" on {domain}" if domain else ""
+    names = sorted(r["source"] for r in blocked)
+
+    print("\n=== Licences needed ===")
+    print(f"  {len(blocked)} user(s) did not migrate: "
+          f"{domain or 'the target'} has no account, or no licence, for "
+          f"them.")
+    print("  This is not a failure of the run -- every user the target "
+          "could receive has been migrated.")
+    print(f"  Add {len(blocked)} licence(s){where} (through your reseller "
+          "if the tenant is reseller-managed), then re-run: BLOCKED users "
+          "are picked up")
+    print("  automatically, and nothing already migrated is touched again.")
+    print(f"  Affected: {', '.join(names[:5])}"
+          + (f", +{len(names) - 5} more" if len(names) > 5 else ""))
+
+
 def _print_batch_summary(results: list[dict]) -> None:
     print("\n=== Batch summary ===")
     for r in sorted(results, key=lambda x: x["source"]):
@@ -1781,6 +1818,8 @@ def _print_batch_summary(results: list[dict]) -> None:
               f"{r.get('elapsed_sec', 0):>8.1f}s")
         for svc, st in (r.get("services") or {}).items():
             print(f"      {svc}: {st}")
+
+    _print_licence_shortfall(results)
 
     # Latency and throughput, from the run that just happened. Printed
     # unconditionally because it is the first thing anyone asks when a
