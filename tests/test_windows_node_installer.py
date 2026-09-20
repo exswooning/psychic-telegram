@@ -208,3 +208,62 @@ class TestHardeningTheTokenFileCannotKillTheInstall:
         by throwing -- so a try/catch alone would call every failure a
         success."""
         assert "$LASTEXITCODE -eq 0" in CODE
+
+
+class TestTheAgentStaysUp:
+    """A node that stops heartbeating is indistinguishable from one that was
+    switched off, and the machine least likely to be watched is exactly the
+    laptop this installer targets.
+
+    The agents themselves already survive a network outage -- both treat an
+    unreachable coordinator as one bad cycle and keep polling, so wifi
+    coming back is enough to rejoin. What they could not survive was
+    anything that ended the PROCESS, and all three of those were live on
+    this install: a reboot nobody logged in after, a crash past the restart
+    budget, and Task Scheduler's own default execution limit.
+    """
+
+    def test_the_execution_limit_is_removed(self):
+        """Windows stops a task after three days by default. On a
+        long-lived agent that reads as a node that went offline for no
+        reason, three days after anyone last looked at it."""
+        assert "-ExecutionTimeLimit" in CODE
+        assert "TimeSpan]::Zero" in CODE, "0 is the value that means no limit"
+
+    def test_a_repeating_trigger_backs_up_the_logon_one(self):
+        """AtLogOn alone never fires on a machine that rebooted and sat at
+        the lock screen, and never re-fires if the agent dies while the
+        user stays logged in."""
+        assert "-RepetitionInterval" in CODE
+        assert "-AtLogOn" in CODE, "the logon trigger is still wanted too"
+
+    def test_restarts_are_not_given_up_after_three_tries(self):
+        m = re.search(r"-RestartCount\s+(\d+)", CODE)
+        assert m, "no RestartCount at all"
+        assert int(m.group(1)) > 3, (
+            f"RestartCount {m.group(1)} gives up while the cause may still clear")
+
+    def test_a_second_agent_is_ignored_rather_than_started(self):
+        """Not hypothetical: this machine ran two agents heartbeating under
+        one node id, which doubles the traffic and races on one record."""
+        assert "-MultipleInstances IgnoreNew" in CODE
+
+
+class TestTheAgentCanActuallyStart:
+    def test_node_env_carries_the_account(self):
+        """node_agent.py exits immediately without BITPORT_ACCOUNT -- "a
+        node works on one tenant and has to be told which". The installer
+        took an -Account parameter and then never wrote it, so the join
+        looked complete, the scheduled task registered, and the agent died
+        on every start. Confirmed live on a node that had never once run
+        it."""
+        assert "BITPORT_ACCOUNT=$Account" in CODE
+
+    def test_every_key_the_agent_reads_is_written(self):
+        """Read off node_agent.py itself rather than pinned by hand, so a
+        new required key cannot be added there and silently omitted here."""
+        agent = open(os.path.join(ROOT, "node_agent.py"), encoding="utf-8").read()
+        required = set(re.findall(r'os\.getenv\("(BITPORT_[A-Z_]+)"', agent))
+        required.discard("BITPORT_DIR")
+        written = set(re.findall(r'"(BITPORT_[A-Z_]+)=', CODE))
+        assert required <= written, f"node.env is missing {required - written}"

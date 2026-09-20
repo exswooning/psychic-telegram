@@ -25,7 +25,7 @@ class TestDeltaExpandsAll:
             return []
 
         monkeypatch.setattr(main, "_run_with_memory_pause", fake_run)
-        monkeypatch.setattr(main, "_print_batch_summary", lambda r: None)
+        monkeypatch.setattr(main, "_print_batch_summary", lambda r, s=None: None)
         st = MagicMock()
         main.cmd_delta(self._args(), st, MagicMock(), MagicMock())
         assert seen["services"] == set(main.PER_USER_SERVICES)
@@ -38,7 +38,7 @@ class TestDeltaExpandsAll:
         monkeypatch.setattr(main, "_run_with_memory_pause",
                             lambda a, d, s, services, **k: seen.update(
                                 services=set(services)) or [])
-        monkeypatch.setattr(main, "_print_batch_summary", lambda r: None)
+        monkeypatch.setattr(main, "_print_batch_summary", lambda r, s=None: None)
         main.cmd_delta(self._args("drive,gmail"), MagicMock(), MagicMock(),
                        MagicMock())
         assert seen["services"] == {"drive", "gmail"}
@@ -48,7 +48,7 @@ class TestDeltaExpandsAll:
         # Splitting the string by hand also skipped this check.
         monkeypatch.setattr(main, "_run_with_memory_pause",
                             lambda *a, **k: [])
-        monkeypatch.setattr(main, "_print_batch_summary", lambda r: None)
+        monkeypatch.setattr(main, "_print_batch_summary", lambda r, s=None: None)
         try:
             main.cmd_delta(self._args("drivve"), MagicMock(), MagicMock(),
                            MagicMock())

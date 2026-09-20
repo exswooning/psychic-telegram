@@ -180,7 +180,7 @@ def test_selecting_chat_opts_the_run_in(monkeypatch):
         return []
 
     monkeypatch.setattr(main, "run_batch", fake_run_batch)
-    monkeypatch.setattr(main, "_print_batch_summary", lambda r: None)
+    monkeypatch.setattr(main, "_print_batch_summary", lambda r, s=None: None)
     main.cmd_migrate(args, settings, None, None)
     assert ran["services"] == {"drive", "chat"}
     assert ran["migrate_chat"] is True

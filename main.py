@@ -845,7 +845,18 @@ def demote_stale_running(db) -> int:
 
 def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
                            only=None) -> list[dict]:
-    """run_batch under the memory watchdog; exits PAUSED if it fires."""
+    """run_batch under the memory watchdog; exits PAUSED if it fires.
+
+    Registration lives HERE rather than at the call sites, because putting
+    it at one of them is what went wrong: cmd_migrate wrapped itself in
+    _registered and cmd_delta did not, so every delta run was invisible to
+    the admission ledger. All three consequences in _registered's docstring
+    were live for deltas -- the dashboard drew a running tenant as idle,
+    MAX_CONCURRENT_TENANT_JOBS could not see the run so a second one could
+    start on top of it, and the worker pool sized itself as though it owned
+    the machine alone. Every path into run_batch goes through this function,
+    so no future command can forget.
+    """
     _gate_on_delegation(settings)
     try:
         stale = demote_stale_running(db)
@@ -872,8 +883,10 @@ def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
                                name="metrics", daemon=True)
     flusher.start()
     try:
-        results = run_batch(auth, db, settings, services, delta=delta,
-                            delta_days=delta_days, only=only)
+        with _registered("delta" if delta else "migrate",
+                         getattr(settings, "account_id", None)):
+            results = run_batch(auth, db, settings, services, delta=delta,
+                                delta_days=delta_days, only=only)
     finally:
         stop.set()
         watchdog.join(timeout=WATCHDOG_POLL_SEC * 2 + 1)
@@ -1512,10 +1525,9 @@ def _enable_selected_services(settings: Settings, services: set[str]) -> None:
 def cmd_migrate(args, settings: Settings, db: MigrationDB, auth: AuthManager):
     services = resolve_services(args.services)
     _enable_selected_services(settings, services)
-    with _registered("migrate", settings.account_id):
-        results = _run_with_memory_pause(
-            auth, db, settings, services, delta=False, delta_days=0,
-            only=args.user)
+    results = _run_with_memory_pause(
+        auth, db, settings, services, delta=False, delta_days=0,
+        only=args.user)
     _print_batch_summary(results, services)
     _auto_repair(db, auth, settings)
 
@@ -1593,6 +1605,18 @@ def cmd_syncacls(args, settings: Settings, db: MigrationDB,
         print(f"  {src:<14} {len(mapped):>5} items, {per} grants applied")
     print(f"\nApplied {applied} grants across {synced} mapped items.")
     return 0
+
+
+def cmd_status(args, settings: Settings, db: MigrationDB, auth: AuthManager):
+    """Is anything running, how far has it got, and is the box coping?
+
+    Deliberately NOT cmd_report: that prints every user and every failure,
+    which answers a different question and buries this one.
+    """
+    import run_status
+
+    print(run_status.render(
+        run_status.snapshot(db, account_id=settings.account_id)))
 
 
 def cmd_report(args, settings: Settings, db: MigrationDB, auth: AuthManager):
@@ -1977,6 +2001,10 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("syncacls", help="recreate per-file ACLs on migrated items")
     s.add_argument("--user", action="append")
     s.set_defaults(func=cmd_syncacls)
+
+    s = sub.add_parser("status",
+                       help="is anything running, how far, is memory coping")
+    s.set_defaults(func=cmd_status)
 
     s = sub.add_parser("report", help="print migration status and failures")
     s.add_argument("--max-failures", type=int, default=20)
