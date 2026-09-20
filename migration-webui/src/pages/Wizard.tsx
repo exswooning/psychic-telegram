@@ -458,24 +458,6 @@ const Wizard: React.FC = () => {
                   whole migration can be practised. Migrating moves a real
                   tenant into another one." />
         )}>
-        <Box sx={{ mb: 2 }} data-testid="role-toggle">
-          <Typography variant="body2" sx={{ fontWeight: 600, mb: 0.5 }}>
-            Set {domain} up as your:
-          </Typography>
-          <RadioGroup row value={role}
-                      onChange={(e) => setRole(e.target.value as 'source' | 'target')}>
-            <FormControlLabel value="source"
-              control={<Radio size="small" inputProps={{ 'data-testid': 'role-source' } as never} />}
-              label="Source (read from)" />
-            <FormControlLabel value="target"
-              control={<Radio size="small" inputProps={{ 'data-testid': 'role-target' } as never} />}
-              label="Target (written to)" />
-          </RadioGroup>
-          <Typography variant="caption" color="text.secondary">
-            Source is read-only; target is written to. This is which slot it
-            fills — not the domain name.
-          </Typography>
-        </Box>
         <RadioGroup value={picked} onChange={(e) => setPicked(e.target.value as Purpose)}>
           {seedEnabled && (
             <FormControlLabel value="seed" sx={{ mb: 1, alignItems: 'flex-start' }}
@@ -523,6 +505,31 @@ const Wizard: React.FC = () => {
               </Box>
             } />
         </RadioGroup>
+        {/* Only a migration fills a slot. Seeding writes fabricated data
+            INTO this tenant and has no counterpart, so asking which side it
+            sits on is a question with no answer -- it was asked of every
+            purpose, above the choice that decides whether it means
+            anything, which is the wrong way round. */}
+        {(picked === 'migrate' || picked === 'later') && (
+          <Box sx={{ mt: 2.5 }} data-testid="role-toggle">
+            <Typography variant="body2" sx={{ fontWeight: 600, mb: 0.5 }}>
+              Set {domain} up as your:
+            </Typography>
+            <RadioGroup row value={role}
+                        onChange={(e) => setRole(e.target.value as 'source' | 'target')}>
+              <FormControlLabel value="source"
+                control={<Radio size="small" inputProps={{ 'data-testid': 'role-source' } as never} />}
+                label="Source (read from)" />
+              <FormControlLabel value="target"
+                control={<Radio size="small" inputProps={{ 'data-testid': 'role-target' } as never} />}
+                label="Target (written to)" />
+            </RadioGroup>
+            <Typography variant="caption" color="text.secondary">
+              Source is read-only; target is written to. This is which slot it
+              fills — not the domain name.
+            </Typography>
+          </Box>
+        )}
         <Stack direction="row" spacing={1.5} sx={{ mt: 3, flexWrap: 'wrap' }}>
           <Button variant="contained" size="large" sx={{ px: 4 }}
                   data-testid="purpose-next" disabled={!picked || autoBusy}

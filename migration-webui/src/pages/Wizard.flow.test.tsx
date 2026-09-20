@@ -338,6 +338,25 @@ describe('it reads like the Google Workspace signup it sits beside', () => {
     expect(screen.getByTestId('role-target')).toBeInTheDocument()
   })
 
+  it('stops asking which slot a SEED fills', async () => {
+    // Seeding writes fabricated data into this tenant and has no
+    // counterpart, so "source or target" is a question with no answer.
+    // It used to be asked of every purpose, and asked ABOVE the choice
+    // that decides whether it means anything.
+    view()
+    await signIn('admin@acme.com')
+    fireEvent.click(await screen.findByTestId('purpose-seed'))
+    expect(screen.queryByTestId('role-toggle')).toBeNull()
+  })
+
+  it('still asks which slot a MIGRATION fills', async () => {
+    view()
+    await signIn('admin@acme.com')
+    fireEvent.click(await screen.findByTestId('purpose-migrate'))
+    expect(await screen.findByTestId('role-toggle')).toBeInTheDocument()
+    expect(screen.getByTestId('role-source')).toBeInTheDocument()
+  })
+
   it('starts on the grant that covers both, ready to continue', async () => {
     /* Narrowing is the unusual choice and cost a whole setup run to
        discover: picking "seed" runs a narrow-scopes pass that can fail on

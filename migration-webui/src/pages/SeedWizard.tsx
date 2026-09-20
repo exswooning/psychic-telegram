@@ -426,6 +426,7 @@ const SeedScopesCard: React.FC<{ dwd: DwdPayload | null }> = ({ dwd }) => {
 const SeedStep: React.FC<{ domain?: string }> = ({ domain }) => {
   const [confirmDomain, setConfirmDomain] = useState('')
   const [scale, setScale] = useState('small')
+  const [edgeCases, setEdgeCases] = useState('first')
   // '' = every service. One service instead is the cheap repair for a
   // corpus that is good apart from one thing: a twelve-hour seed produced
   // 126 users with no chat because the Chat app was misconfigured, and
@@ -450,6 +451,7 @@ const SeedStep: React.FC<{ domain?: string }> = ({ domain }) => {
     const r = await runSeed(confirmDomain, scale, createUsers, reset, {
       allUsers, createUntilFull, workers, localpartPrefix: prefix,
       sharedDrives, users, only: only || undefined,
+      edgeCases: edgeCases !== 'first' ? edgeCases : undefined,
     })
     // A queued run has no live output to watch yet -- turning JobProgress
     // on for one shows an empty transcript that reads as a stalled job.
@@ -501,6 +503,28 @@ const SeedStep: React.FC<{ domain?: string }> = ({ domain }) => {
             {['tiny', 'small', 'medium', 'large', 'huge'].map((s) => (
               <MenuItem key={s} value={s}>{s}</MenuItem>
             ))}
+          </TextField>
+        </Grid>
+        <Grid item xs={12} sm={3}>
+          {/* The awkward shapes a migration has to survive: a file larger
+              than the export ceiling, a shortcut, a second-owner ACL, a
+              Doc that links to another Doc. The seeder has always built
+              them and the API has always taken the flag -- nothing ever
+              offered it, so every seed from this page quietly got the
+              default and the corpus could not exercise what it was for.
+              "first" keeps them on one user, which is enough to test them
+              without paying for them 300 times. */}
+          <TextField
+            fullWidth size="small" select label="Edge cases" value={edgeCases}
+            inputProps={{ 'data-testid': 'seed-form-edge-cases' }}
+            onChange={(e) => setEdgeCases(e.target.value)}
+            helperText={edgeCases === 'first' ? 'on user 1 only'
+                        : edgeCases === 'all' ? 'on every user — slow'
+                        : 'none — a plain corpus'}
+          >
+            <MenuItem value="first">first user</MenuItem>
+            <MenuItem value="all">every user</MenuItem>
+            <MenuItem value="none">none</MenuItem>
           </TextField>
         </Grid>
         <Grid item xs={12} sm={2}>
