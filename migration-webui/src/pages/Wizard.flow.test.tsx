@@ -368,14 +368,18 @@ describe('it reads like the Google Workspace signup it sits beside', () => {
     expect(screen.getByTestId('role-source')).toBeInTheDocument()
   })
 
-  it('says a SOURCE is granted read-only, and names no write scope', async () => {
+  it('says a SOURCE is read-only, and owns up to the one exception', async () => {
+    /* "No write scope is requested" is what this said first, and it is not
+       true: source_scopes() swaps drive.readonly for the WRITE scope under
+       server_side and link_flip, because files.copy is a create call. A
+       promise the config contradicts is worse than no promise. */
     view()
     await signIn('admin@acme.com')
     fireEvent.click(await screen.findByTestId('purpose-migrate'))
     fireEvent.click(screen.getByTestId('role-source'))
     const box = await screen.findByTestId('role-scopes')
     expect(box).toHaveTextContent(/read-only/i)
-    expect(box).not.toHaveTextContent(/read and write/i)
+    expect(box).toHaveTextContent(/server-side or link-flip/i)
   })
 
   it('says a TARGET is granted read AND write', async () => {

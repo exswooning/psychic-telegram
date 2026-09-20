@@ -526,8 +526,10 @@ const Wizard: React.FC = () => {
                   <>Delegation granted on {domain || 'this domain'}:{' '}
                   <strong>read-only</strong>. Drive, Gmail, Calendar and the
                   directory are all granted at their <code>.readonly</code>{' '}
-                  scope — no write scope is requested, so the tool cannot
-                  alter the tenant it is reading.</>
+                  scope. The one exception is a server-side or link-flip
+                  transfer, which copies and re-shares files in place and so
+                  needs Drive <strong>write</strong> here — which is why
+                  neither is the default.</>
                 ) : (
                   <>Delegation granted on {domain || 'this domain'}:{' '}
                   <strong>read and write</strong>. Drive, Gmail insert/labels
