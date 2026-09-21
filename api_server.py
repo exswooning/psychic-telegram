@@ -2097,7 +2097,8 @@ async def coverage_status(op: Operator = Depends(operator)):
 # needed at all.
 # ======================================================================
 @app.get("/api/v2/dwd/status")
-async def dwd_status(tenant: str = "source", op: Operator = Depends(operator)):
+async def dwd_status(tenant: str = "source", account_id: int | None = None,
+                     op: Operator = Depends(operator)):
     # require_admin, not require_login: these keep the documented
     # X-Operator path working for an SSH-tunnel operator with no
     # SaaS account, while still refusing a caller presenting nothing
@@ -2106,23 +2107,28 @@ async def dwd_status(tenant: str = "source", op: Operator = Depends(operator)):
     require_reader(op)
     if tenant not in ("source", "target"):
         raise HTTPException(400, "tenant must be source or target")
+    # Explicit account_id, not just op.account_id: a superadmin reading this
+    # while looking at a domain SeedDomainPicker surfaced from a DIFFERENT
+    # account (that picker lists every account's, by design) got THEIR OWN
+    # key path back -- one layer short of the bug already fixed once below,
+    # which only covered a lone SaaS tenant reading its own delegation.
+    target_account = account_id if account_id is not None else op.account_id
+    _require_account_access(target_account, op)
 
     def _check() -> dict:
         try:
             import verify_scopes
             from config import Settings
 
-            # Scoped to the CALLER's account. This read bare Settings(), so
-            # every SaaS account was shown the legacy env.sh tenant's
-            # delegation instead of its own -- and since those are different
-            # tenants, the answer was a confident "0/N scopes live, all
-            # missing" for delegation that was demonstrably working.
-            # Confirmed live: this endpoint reported 0/14 for account 7's
-            # source while that same key impersonated two of its users and
-            # read their mailboxes in the same minute. The caveats block
-            # below shares the object, so the Chat warning was computed
-            # against the wrong tenant too.
-            s = Settings(account_id=op.account_id)
+            # Scoped to the CALLER's account by default. This read bare
+            # Settings(), so every SaaS account was shown the legacy env.sh
+            # tenant's delegation instead of its own -- and since those are
+            # different tenants, the answer was a confident "0/N scopes
+            # live, all missing" for delegation that was demonstrably
+            # working. Confirmed live: this endpoint reported 0/14 for
+            # account 7's source while that same key impersonated two of
+            # its users and read their mailboxes in the same minute.
+            s = Settings(account_id=target_account)
             key, subject = verify_scopes._key_and_subject(s, tenant)
             if not os.path.isfile(key):
                 return {"tenant": tenant, "checked": False,

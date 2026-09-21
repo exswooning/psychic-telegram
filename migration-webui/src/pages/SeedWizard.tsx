@@ -166,7 +166,7 @@ const SeedWizard: React.FC<{
 
       {configured && route === 'automated' && (
         <>
-          <DelegationGate>
+          <DelegationGate accountId={accountId}>
             <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid',
                                       borderColor: 'divider', mb: 2 }}>
               <CardContent sx={{ p: 3 }}>
@@ -262,7 +262,7 @@ const SeedWizard: React.FC<{
             </Card>
           )}
 
-          <DelegationGate>
+          <DelegationGate accountId={accountId}>
             <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 2 }}>
               <CardContent sx={{ p: 3 }}>
                 <Typography variant="h6" sx={{ fontWeight: 600, mb: 1.5 }}>Seed the source tenant</Typography>
@@ -318,16 +318,17 @@ const StepHeading: React.FC<{ n: number; title: string; note: string }> =
  * That shape cost this project several full seeding runs before anyone
  * noticed the two zeroes in the totals.
  */
-const DelegationGate: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+const DelegationGate: React.FC<{ children: React.ReactNode; accountId?: number }> =
+    ({ children, accountId }) => {
   const [source, setSource] = useState<DwdStatus | null>(null)
   const [checked, setChecked] = useState(false)
 
   useEffect(() => {
-    fetchDwdStatus('source')
+    fetchDwdStatus('source', accountId)
       .then(setSource)
       .catch(() => {})
       .finally(() => setChecked(true))
-  }, [])
+  }, [accountId])
 
   const missing = source?.checked ? (source.missing?.length ?? 0) : 0
   // Only block on a *confirmed* gap. If the control plane is unreachable or

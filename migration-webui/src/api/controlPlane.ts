@@ -1055,8 +1055,9 @@ export interface DwdStatus {
   caveats?: { api: string; note: string }[]
 }
 
-export const fetchDwdStatus = (tenant: 'source' | 'target') =>
-  cpFetch<DwdStatus>(`/api/v2/dwd/status?tenant=${tenant}`)
+export const fetchDwdStatus = (tenant: 'source' | 'target', accountId?: number) =>
+  cpFetch<DwdStatus>(`/api/v2/dwd/status?tenant=${tenant}`
+    + (accountId !== undefined ? `&account_id=${accountId}` : ''))
 
 // -- Verified domains ---------------------------------------------------------
 // Which domain(s) this account has actually finished setting up and can use
