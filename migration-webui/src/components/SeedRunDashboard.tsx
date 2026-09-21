@@ -1,9 +1,13 @@
 import React from 'react'
 import {
   Box, Chip, LinearProgress, Stack, Table, TableBody, TableCell, TableHead,
-  TableRow, Tooltip, Typography, TableContainer, Paper,
+  TableRow, Tooltip, Typography, TableContainer, Paper, useTheme,
 } from '@mui/material'
-import { parseSeedRun, SeedRun } from '@/utils/seedLog'
+import {
+  AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as ChartTooltip,
+  ResponsiveContainer, Cell,
+} from 'recharts'
+import { parseSeedRun, SeedRun, SeedUser } from '@/utils/seedLog'
 import type { FleetNode } from '@/api/controlPlane'
 
 /**
@@ -92,6 +96,96 @@ const Stat: React.FC<{
     </Tooltip>
   </Box>
 )
+
+/** Users finished, against the wall clock they actually finished at --
+ *  built from each user's own "done in Ns" line (SeedUser.elapsedSec), so
+ *  every point is a real recorded finish, not an interpolation. Workers run
+ *  in parallel (see the "Observed rate" hint above), so this is a STEP
+ *  curve in clumps by design -- a flat stretch means a batch is still in
+ *  flight, not that the run stalled, which is exactly the shape a single
+ *  "X/min" figure cannot show. */
+const CompletionCurve: React.FC<{ users: SeedUser[] }> = ({ users }) => {
+  const theme = useTheme()
+  const finished = users
+    .filter((u): u is SeedUser & { elapsedSec: number } =>
+      u.status !== 'running' && typeof u.elapsedSec === 'number')
+    .sort((a, b) => a.elapsedSec - b.elapsedSec)
+  if (finished.length < 2) return null
+
+  const data = [{ t: 0, done: 0 },
+    ...finished.map((u, i) => ({ t: u.elapsedSec, done: i + 1 }))]
+
+  return (
+    <Box sx={{ mb: 1.5 }}>
+      <Typography variant="caption" color="text.secondary" sx={{
+        display: 'block', mb: 0.5, fontWeight: 600,
+      }}>
+        Users finished over time (observed)
+      </Typography>
+      <ResponsiveContainer width="100%" height={120}>
+        <AreaChart data={data} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+          <defs>
+            <linearGradient id="completionFill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={theme.palette.primary.main} stopOpacity={0.3} />
+              <stop offset="100%" stopColor={theme.palette.primary.main} stopOpacity={0} />
+            </linearGradient>
+          </defs>
+          <CartesianGrid strokeDasharray="3 3" stroke={theme.palette.divider} vertical={false} />
+          <XAxis dataKey="t" tickFormatter={dur} stroke={theme.palette.text.secondary}
+                fontSize={10} tickLine={false} axisLine={false} />
+          <YAxis allowDecimals={false} stroke={theme.palette.text.secondary}
+                fontSize={10} tickLine={false} axisLine={false} width={28} />
+          <ChartTooltip
+            contentStyle={{ background: theme.palette.background.paper,
+                            border: `1px solid ${theme.palette.divider}`, fontSize: 12 }}
+            labelFormatter={(t) => `at ${dur(Number(t))}`}
+            formatter={(v: number) => [`${v} done`, '']} />
+          <Area type="stepAfter" dataKey="done" stroke={theme.palette.primary.main}
+                strokeWidth={1.5} fill="url(#completionFill)" isAnimationActive={false} />
+        </AreaChart>
+      </ResponsiveContainer>
+    </Box>
+  )
+}
+
+// One accent per item type, cycling -- distinguishes adjacent bars without
+// pretending each category means the same thing a fixed severity scale
+// would (this is a breakdown, not a health signal).
+const BAR_COLORS = ['primary', 'success', 'warning', 'info', 'secondary'] as const
+
+/** The same totals as the Stat tiles above, as a shape rather than a row of
+ *  numbers -- which item type actually dominates a run is easier to see
+ *  than to compute from seven tiles side by side. The tiles keep the exact
+ *  counts; this is only the relative sizes. */
+const TotalsBar: React.FC<{ totals: Record<string, number>; order: string[] }> = ({
+  totals, order,
+}) => {
+  const theme = useTheme()
+  const data = order.map((k) => ({ name: COUNT_LABEL[k] || k, value: totals[k] }))
+  if (data.length < 2) return null
+  const colorFor = (i: number) => theme.palette[BAR_COLORS[i % BAR_COLORS.length]].main
+
+  return (
+    <Box sx={{ mb: 1.5 }}>
+      <ResponsiveContainer width="100%" height={Math.max(120, data.length * 26)}>
+        <BarChart data={data} layout="vertical"
+                 margin={{ top: 0, right: 16, bottom: 0, left: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke={theme.palette.divider} horizontal={false} />
+          <XAxis type="number" hide />
+          <YAxis type="category" dataKey="name" width={96} fontSize={11}
+                stroke={theme.palette.text.secondary} tickLine={false} axisLine={false} />
+          <ChartTooltip
+            contentStyle={{ background: theme.palette.background.paper,
+                            border: `1px solid ${theme.palette.divider}`, fontSize: 12 }}
+            formatter={(v: number) => [fmt(v), '']} cursor={{ fill: theme.palette.action.hover }} />
+          <Bar dataKey="value" radius={[0, 4, 4, 0]} isAnimationActive={false}>
+            {data.map((_, i) => <Cell key={i} fill={colorFor(i)} />)}
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
+    </Box>
+  )
+}
 
 const SeedRunDashboard: React.FC<{
   lines: string[]; elapsedSec?: number; running?: boolean
@@ -186,6 +280,8 @@ const SeedRunDashboard: React.FC<{
         </Box>
       )}
 
+      <CompletionCurve users={run.users} />
+
       {/* What has actually been created so far, itemised. */}
       {counts.length > 0 && (
         <>
@@ -204,6 +300,7 @@ const SeedRunDashboard: React.FC<{
                     value={fmt(run.totals[k])} />
             ))}
           </Stack>
+          <TotalsBar totals={run.totals} order={counts} />
         </>
       )}
 

@@ -21,6 +21,8 @@ import {
 } from '@mui/icons-material'
 import type { JobKind, RunningJob } from '@/hooks/useRunningJobs'
 import { describeElapsed } from '@/hooks/useRunningJobs'
+import { useProgressHistory } from '@/hooks/useProgressHistory'
+import ProgressSparkline from '@/components/ProgressSparkline'
 import { formatPct } from '@/utils/formatPct'
 
 const KIND: Record<JobKind, { label: string; icon: React.ReactElement;
@@ -48,6 +50,9 @@ export const RunningJobCard: React.FC<{
 }> = ({ job, action, onOpen, finished }) => {
   const k = KIND[job.kind] ?? KIND.other
   const elapsed = job.elapsedSec ? describeElapsed(job.elapsedSec) : ''
+  // Only tracked for a job actually in flight -- a finished run's card
+  // shows an outcome, not a trend line for work that has already stopped.
+  const history = useProgressHistory(job.key, finished ? null : job.pct)
   return (
     <Card variant="outlined"
           onClick={onOpen}
@@ -94,6 +99,8 @@ export const RunningJobCard: React.FC<{
         {!finished && (typeof job.pct === 'number'
           ? <LinearProgress variant="determinate" value={job.pct} />
           : <LinearProgress />)}
+
+        {!finished && <ProgressSparkline samples={history} />}
 
         <Stack direction="row" justifyContent="space-between" sx={{ mt: 0.5 }}>
           {/* Only when the detail line does not already lead with it. The
