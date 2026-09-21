@@ -20,7 +20,12 @@ import { Grass as SeedIcon, Add as NewIcon } from '@mui/icons-material'
 import { fetchAllDomains, ConfiguredDomain } from '@/api/controlPlane'
 
 export const SeedDomainPicker: React.FC<{
-  onPick: (domain: string, adminEmail: string) => void
+  // accountId, not just domain+email: this list spans every account a
+  // superadmin can see, and a seed request resolves against the SIGNED-IN
+  // operator's own account unless told otherwise -- omitting this is what
+  // made picking another account's domain fail with "set the source domain
+  // in step 2 first", pointing at the picker's OWN account instead.
+  onPick: (domain: string, adminEmail: string, accountId: number) => void
   onNew: () => void
 }> = ({ onPick, onNew }) => {
   const [domains, setDomains] = useState<ConfiguredDomain[] | null>(null)
@@ -80,7 +85,7 @@ export const SeedDomainPicker: React.FC<{
                  gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))' }}>
         {unique.map((d) => (
           <Paper key={d.domain} variant="outlined" data-testid={`seed-domain-${d.domain}`}
-                 onClick={() => onPick(d.domain, d.adminEmail)}
+                 onClick={() => onPick(d.domain, d.adminEmail, d.accountId)}
                  sx={{ p: 2, cursor: 'pointer',
                        '&:hover': { borderColor: 'primary.main' } }}>
             <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>

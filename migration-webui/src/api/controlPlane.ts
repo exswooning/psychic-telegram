@@ -851,10 +851,10 @@ export const setNodeDirective = (accountId: number, run: boolean,
  *  send -- confirm_domain, scale, users, ... -- validated with the SAME
  *  webui.seed_argv() before anything is written, so a bad request fails
  *  here, not silently on a machine with no log access. */
-export const startSeedOnNode = (seed: Record<string, unknown>) =>
+export const startSeedOnNode = (seed: Record<string, unknown>, accountId?: number) =>
   cpFetch<NodeDirective>('/api/v2/nodes/directive', {
     method: 'POST',
-    body: JSON.stringify({ run: true, kind: 'seed', seed }),
+    body: JSON.stringify({ account_id: accountId, run: true, kind: 'seed', seed }),
   })
 
 export const stopNodeSeed = () =>

@@ -324,6 +324,10 @@ const Wizard: React.FC = () => {
   // A tenant chosen from the cards is already set up, so the seed page
   // shows the seed controls rather than an offer to set it up again.
   const [seedFromPicker, setSeedFromPicker] = useState(false)
+  // Set only when the domain came from the cross-account picker below --
+  // undefined means "seed as whoever is signed in", which is right for
+  // every OTHER path onto this page (a tenant seeding its own domain).
+  const [seedAccountId, setSeedAccountId] = useState<number | undefined>(undefined)
 
   useEffect(() => {
     fetchMe().then((a) => setSeedEnabled(a.seed_enabled)).catch(() => {})
@@ -347,8 +351,8 @@ const Wizard: React.FC = () => {
       && !seedNewDomain) {
     return (
       <SeedDomainPicker
-        onPick={(d, email) => {
-          setDomain(d); setAdminEmail(email)
+        onPick={(d, email, accountId) => {
+          setDomain(d); setAdminEmail(email); setSeedAccountId(accountId)
           setSeedFromPicker(true); setStep('run')
         }}
         onNew={() => setSeedNewDomain(true)} />
@@ -717,7 +721,8 @@ const Wizard: React.FC = () => {
       {purpose === 'seed'
         ? <SeedWizard sourceDomain={domain} adminEmail={adminEmail}
                       adminPassword={adminPassword}
-                      configured={seedFromPicker} />
+                      configured={seedFromPicker}
+                      accountId={seedAccountId} />
         : <MigrateWizard sourceDomain={domain} targetDomain={otherDomain}
                          adminEmail={adminEmail} adminPassword={adminPassword} />}
     </Box>

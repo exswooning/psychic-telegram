@@ -38,6 +38,20 @@ describe('gated like every other action that writes to a tenant', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Add more' }))
     await waitFor(() => expect(client.runSeed).toHaveBeenCalled())
   })
+
+  it('carries the account id through when the domain came from a picker', async () => {
+    /* Omitting it resolves the request against whoever is SIGNED IN, not
+       the domain topped up -- "set the source domain in step 2 first"
+       against the wrong tenant, for a superadmin working someone else's
+       account. */
+    render(<SeedTopUp domain="src.example" accountId={68} />)
+    fireEvent.change(screen.getByTestId('topup-domain'),
+                     { target: { value: 'src.example' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add more' }))
+    await waitFor(() => expect(client.runSeed).toHaveBeenCalled())
+    const [, , , , opts] = vi.mocked(client.runSeed).mock.calls[0]
+    expect(opts).toMatchObject({ accountId: 68 })
+  })
 })
 
 describe('never creates accounts and never deletes anything', () => {

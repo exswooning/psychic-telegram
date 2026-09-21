@@ -56,7 +56,14 @@ const SeedWizard: React.FC<{
    *  offering to set it up again and the seeder was two clicks into a tab
    *  named for doing things by hand. */
   configured?: boolean
-}> = ({ sourceDomain, adminEmail, adminPassword, configured }) => {
+  /** Set only when sourceDomain came from the cross-account picker (a
+   *  superadmin browsing every account's domains). A seed request resolves
+   *  against the SIGNED-IN operator's own account unless told otherwise --
+   *  omitting this is what made seeding another account's domain fail with
+   *  "set the source domain in step 2 first", naming the picker's own
+   *  account rather than the domain's actual owner. */
+  accountId?: number
+}> = ({ sourceDomain, adminEmail, adminPassword, configured, accountId }) => {
   // 'topup' only exists once a domain is already set up (came from the
   // picker) -- there is nothing to top up on a tenant that has not been
   // seeded yet, and it is the friendliest landing spot once one has: most
@@ -152,7 +159,7 @@ const SeedWizard: React.FC<{
             <Typography variant="h6" sx={{ fontWeight: 600, mb: 1.5 }}>
               Add more to {sourceDomain}
             </Typography>
-            <SeedTopUp domain={sourceDomain} />
+            <SeedTopUp domain={sourceDomain} accountId={accountId} />
           </CardContent>
         </Card>
       )}
@@ -166,7 +173,7 @@ const SeedWizard: React.FC<{
                 <Typography variant="h6" sx={{ fontWeight: 600, mb: 1.5 }}>
                   Seed {sourceDomain}
                 </Typography>
-                <SeedStep domain={sourceDomain} />
+                <SeedStep domain={sourceDomain} accountId={accountId} />
               </CardContent>
             </Card>
           </DelegationGate>
@@ -259,7 +266,7 @@ const SeedWizard: React.FC<{
             <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 2 }}>
               <CardContent sx={{ p: 3 }}>
                 <Typography variant="h6" sx={{ fontWeight: 600, mb: 1.5 }}>Seed the source tenant</Typography>
-                <SeedStep domain={sourceDomain} />
+                <SeedStep domain={sourceDomain} accountId={accountId} />
               </CardContent>
             </Card>
           </DelegationGate>
@@ -425,7 +432,8 @@ const SeedScopesCard: React.FC<{ dwd: DwdPayload | null }> = ({ dwd }) => {
   )
 }
 
-const SeedStep: React.FC<{ domain?: string }> = ({ domain }) => {
+const SeedStep: React.FC<{ domain?: string; accountId?: number }> =
+    ({ domain, accountId }) => {
   const [confirmDomain, setConfirmDomain] = useState('')
   const [scale, setScale] = useState('small')
   const [edgeCases, setEdgeCases] = useState('first')
@@ -484,7 +492,7 @@ const SeedStep: React.FC<{ domain?: string }> = ({ domain }) => {
       // webui.py's own always-200 shape. Two backends, two error shapes;
       // this is the seam between them.
       try {
-        await startSeedOnNode(body)
+        await startSeedOnNode(body, accountId)
         setNodeMsg(
           `Sent to ${runOn}. It picks this up within its poll interval — `
           + 'watch it on the Nodes page, not here: this page only ran on a '
@@ -498,6 +506,7 @@ const SeedStep: React.FC<{ domain?: string }> = ({ domain }) => {
       allUsers, createUntilFull, workers, localpartPrefix: prefix,
       sharedDrives, users, only: only || undefined,
       edgeCases: edgeCases !== 'first' ? edgeCases : undefined,
+      accountId,
     })
     // A queued run has no live output to watch yet -- turning JobProgress
     // on for one shows an empty transcript that reads as a stalled job.

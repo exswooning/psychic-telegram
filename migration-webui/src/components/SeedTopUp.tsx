@@ -26,7 +26,8 @@ import { SERVICES as SEEDABLE } from '@/components/SeedOneService'
 import JobProgress from '@/components/JobProgress'
 import DomainSandboxToggle from '@/components/DomainSandboxToggle'
 
-export const SeedTopUp: React.FC<{ domain?: string }> = ({ domain }) => {
+export const SeedTopUp: React.FC<{ domain?: string; accountId?: number }> =
+    ({ domain, accountId }) => {
   const [confirmDomain, setConfirmDomain] = useState('')
   const [only, setOnly] = useState('')
   const [scale, setScale] = useState('small')
@@ -45,7 +46,7 @@ export const SeedTopUp: React.FC<{ domain?: string }> = ({ domain }) => {
     // createUntilFull are about the user ROSTER, not content volume, and
     // have no place in "add more to who is already here".
     const r = await runSeed(confirmDomain, scale, false, false, {
-      sharedDrives, users, only: only || undefined,
+      sharedDrives, users, only: only || undefined, accountId,
     })
     if (r.ok && !r.queued) setJobActive(true)
     setQueued(r.ok && r.queued ? (r.msg || 'queued — it will start on its own') : null)

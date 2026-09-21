@@ -5108,7 +5108,15 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if self.path == "/api/seed":
-            account_id = self._account_id()
+            # Same bug resolve_target_account's docstring names: a
+            # superadmin picking another account's domain (SeedDomainPicker
+            # lists every account's) got "set the source domain in step 2
+            # first" back -- silently resolved to the OPERATOR's account.
+            account_id, scope_err = resolve_target_account(
+                self._account_id(), body.get("account_id"))
+            if scope_err:
+                self._json({"ok": False, "error": scope_err}, 403)
+                return
             if not _subscription_ok(account_id):
                 self._json({"ok": False, "error": "subscription inactive"}, 402)
                 return

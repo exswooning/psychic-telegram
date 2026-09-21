@@ -82,6 +82,19 @@ describe('choosing a machine to seed on', () => {
     expect(startSeedOnNode).not.toHaveBeenCalled()
   })
 
+  it('carries accountId when the domain came from the cross-account picker', async () => {
+    /* Without it the request resolves against whoever is SIGNED IN --
+       "set the source domain in step 2 first" against the WRONG tenant,
+       for a superadmin acting on a domain a different account owns. */
+    render(<SeedStep domain="source.example.com" accountId={68} />)
+    fireEvent.change(screen.getByLabelText(/domain to confirm/i) ??
+                     screen.getAllByRole('textbox')[0], { target: { value: 'source.example.com' } })
+    fireEvent.click(screen.getByRole('button', { name: /start seeding/i }))
+    await waitFor(() => expect(runSeed).toHaveBeenCalled())
+    const [, , , , opts] = runSeed.mock.calls[0]
+    expect(opts).toMatchObject({ accountId: 68 })
+  })
+
   it('starting on a chosen node calls startSeedOnNode, not the local run', async () => {
     render(<SeedStep domain="source.example.com" />)
     await waitFor(() => expect(fetchFleet).toHaveBeenCalled())

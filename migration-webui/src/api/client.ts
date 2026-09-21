@@ -727,6 +727,12 @@ export interface SeedOptions {
   /** The full awkward-corpus set on user 1 (\'first\'), on everyone
    *  (\'all\'), or nobody (\'none\'). */
   edgeCases?: string
+  /** Set only when confirmDomain came from a superadmin's cross-account
+   *  picker. Omitted, the request resolves against whoever is signed in --
+   *  right for a tenant seeding itself, wrong for a superadmin acting on a
+   *  domain a DIFFERENT account owns (see resolve_target_account in
+   *  webui.py, and /api/seed's own comment on the bug this fixes). */
+  accountId?: number
 }
 
 export async function runSeed(
@@ -739,11 +745,12 @@ export async function runSeed(
   const { allUsers, createUntilFull, workers, localpartPrefix,
           sharedDrives, users, groups, only, fitToLicenses,
           externalEmail, mail, events, bigFileMb, targetGbPerUser,
-          topUpOnly, edgeCases } = opts
+          topUpOnly, edgeCases, accountId } = opts
   const res = await fetch('/api/seed', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
+      account_id: accountId,
       confirm_domain: confirmDomain,
       scale,
       create_users: createUsers,
@@ -778,12 +785,13 @@ export async function runSeed(
  * the server compares against comes from Settings(), never from this body.
  */
 export async function runResetTarget(
-  confirmDomain: string
+  confirmDomain: string,
+  accountId?: number,
 ): Promise<SeedResult> {
   const res = await fetch('/api/reset_target', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ confirm_domain: confirmDomain }),
+    body: JSON.stringify({ confirm_domain: confirmDomain, account_id: accountId }),
   })
   return res.json()
 }

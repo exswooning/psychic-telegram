@@ -41,12 +41,18 @@ describe('picking a tenant to seed', () => {
     expect(document.querySelector('input[type="password"]')).toBeNull()
   })
 
-  it('hands back the domain and its admin when one is clicked', async () => {
+  it('hands back the domain, its admin, and which account owns it', async () => {
+    /* The account id matters as much as the domain: a seed request that
+       omits it resolves against whoever is SIGNED IN, not the domain just
+       picked -- which is exactly the bug this card exists to make
+       possible in the first place (a superadmin browsing every account's
+       domains). Dropping it here reintroduces "set the source domain in
+       step 2 first" against the wrong tenant. */
     all.mockResolvedValue({ superadmin: true, domains: [dom()] })
     const onPick = vi.fn()
     render(<SeedDomainPicker onPick={onPick} onNew={() => {}} />)
     fireEvent.click(await screen.findByTestId('seed-domain-source.saraf.com'))
-    expect(onPick).toHaveBeenCalledWith('source.saraf.com', 'info@source.saraf.com')
+    expect(onPick).toHaveBeenCalledWith('source.saraf.com', 'info@source.saraf.com', 68)
   })
 
   it('never offers a domain with no key -- the key is what seeds', async () => {
