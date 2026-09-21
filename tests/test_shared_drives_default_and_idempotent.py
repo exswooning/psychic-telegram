@@ -111,6 +111,48 @@ class TestItDoesNotDuplicate:
         assert d.created == []
 
 
+class TestANewDriveIsNotAskedForItsOwnMembers:
+    """permissions().list() on a drive create() just returned is a Drive API
+    call that has not finished propagating what it was just told to create
+    -- live, every freshly created drive logged "could not list members
+    (HTTP 404 notFound)". The only answer that call could ever give a
+    brand-new drive is empty, which is already what skipping it produces,
+    so there is no reason to make it."""
+
+    class _CountingList(FakeDrives):
+        def __init__(self, existing):
+            super().__init__(existing)
+            self.permissions_list_calls = 0
+
+        def list(self, **kw):
+            if "fileId" in kw:
+                self.permissions_list_calls += 1
+                self._resp = {"permissions": []}
+                return self
+            return FakeDrives.list(self, **kw)
+
+    def test_a_freshly_created_drive_skips_the_membership_call(self, monkeypatch):
+        d = self._CountingList([])          # nothing exists -- both created
+        monkeypatch.setattr(ssd, "_drive_client", lambda *a, **k: d)
+        monkeypatch.setattr(ssd, "_retry", lambda s: retry)
+        monkeypatch.setattr(ssd, "ROLES", ())
+        ssd.seed(object(), "admin@x.test", [], n_drives=2)
+        assert d.created == ["SEEDED-SD-1", "SEEDED-SD-2"]
+        assert d.permissions_list_calls == 0
+
+    def test_a_reused_drive_still_checks_who_is_already_on_it(self, monkeypatch):
+        """The skip is specific to a drive this call just created -- an
+        EXISTING one genuinely might have members, and re-adding one is a
+        logged failure at every member, not a silent no-op."""
+        d = self._CountingList([{"id": "d1", "name": "SEEDED-SD-1"}])
+        monkeypatch.setattr(ssd, "_drive_client", lambda *a, **k: d)
+        monkeypatch.setattr(ssd, "_retry", lambda s: retry)
+        monkeypatch.setattr(ssd, "ROLES", ())
+        ssd.seed(object(), "admin@x.test", [], n_drives=1)
+        assert d.created == []
+        assert d.permissions_list_calls == 1
+
+
 class TestADefaultSeedIncludesThem:
     def test_the_seeder_defaults_to_some(self):
         assert ss.DEFAULT_SHARED_DRIVES >= 1

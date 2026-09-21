@@ -174,7 +174,8 @@ def seed(settings: Settings, admin: str, members: list[str],
 
     for d in range(n_drives):
         name = f"{PREFIX}-{d + 1}"
-        if name in have:
+        just_created = name not in have
+        if not just_created:
             did = have[name]
             made["reused"] += 1
             made["drives"].append({"id": did, "name": name, "reused": True})
@@ -199,7 +200,14 @@ def seed(settings: Settings, admin: str, members: list[str],
         # still created first: shared_drives.py restores organizer-first
         # because a drive whose organizer never landed cannot be
         # administered afterwards.
-        already = _existing_members(drive, retry, did)
+        # A drive this call just created has no members yet -- that is
+        # exactly the answer _existing_members would give anyway, so
+        # skip the call rather than ask a Drive API that has not finished
+        # propagating the drive it created a moment ago. Live: every
+        # freshly created drive logged "could not list members (HTTP 404
+        # notFound)", scary-looking noise for a fact already known, on an
+        # API call whose only possible correct answer was empty.
+        already: set = set() if just_created else _existing_members(drive, retry, did)
         for i, member in enumerate(members):
             role = ROLES[i % len(ROLES)]
             if member.lower() in already:
