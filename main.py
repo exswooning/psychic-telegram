@@ -1584,8 +1584,21 @@ def cmd_syncacls(args, settings: Settings, db: MigrationDB,
 
     print("Recreating per-file share access on the target "
           f"(recreate_inherited_acls={settings.recreate_inherited_acls})")
-    applied = synced = 0
+    applied = synced = users_done = 0
     for r in rows:
+        # main.py installs the SIGINT/SIGTERM handler for every subcommand
+        # (see _install_signal_handlers), so a Stop against this run DOES
+        # reach the process and DOES log "signal received" -- but nothing
+        # here ever looked at the flag it sets. Live: three separate stop
+        # attempts against a running syncacls each landed (the log proved
+        # it), and the loop kept walking users regardless, because this
+        # was the one command in main.py never wired to SHUTDOWN. Every
+        # migrate/delta engine already checks this per item; a maintenance
+        # command that walks 300 users for hours needs it just as much.
+        if SHUTDOWN.is_set():
+            print(f"\nStopping early -- {users_done} of {len(rows)} user(s) synced. "
+                  "Re-run to pick up where this left off.")
+            break
         src, tgt = r["source_email"], r["target_email"]
         mapped = db.conn.execute(
             "SELECT source_id, target_id FROM id_mapping "
@@ -1603,6 +1616,15 @@ def cmd_syncacls(args, settings: Settings, db: MigrationDB,
         migrator = DriveMigrator(auth, db, settings, src, tgt, quota)
         per = 0
         for i, row in enumerate(mapped, start=1):
+            # Per-item, not just per-user: a single user's mapped set can be
+            # thousands of files, and a Stop that only takes effect at the
+            # next USER boundary is the exact "sat unresponsive for minutes"
+            # failure shutdown_requested()'s own docstring describes for
+            # ChatMigrator, one level up.
+            if SHUTDOWN.is_set():
+                print(f"    stopping mid-user ({i - 1}/{len(mapped)} items "
+                      f"done for {src})")
+                break
             try:
                 per += migrator._sync_acls(row["source_id"], row["target_id"])
             except Exception as exc:  # noqa: BLE001
@@ -1611,6 +1633,7 @@ def cmd_syncacls(args, settings: Settings, db: MigrationDB,
                 print(f"    {src} {i}/{len(mapped)} items ...", flush=True)
         applied += per
         synced += len(mapped)
+        users_done += 1
         print(f"  {src:<14} {len(mapped):>5} items, {per} grants applied")
     print(f"\nApplied {applied} grants across {synced} mapped items.")
     return 0
