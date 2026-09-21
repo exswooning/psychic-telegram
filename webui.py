@@ -2646,18 +2646,25 @@ def seed_argv(body: dict, account_id: int | None = None) -> tuple[list[str], dic
         argv += ["--localpart-prefix", prefix]
 
     target_gb = body.get("target_gb_per_user")
+    fill_until_full = bool(body.get("fill_until_full"))
+    if fill_until_full and target_gb:
+        return [], {}, ("fill_until_full and target_gb_per_user are two "
+                        "different targets -- pick one")
     if target_gb:
         try:
             argv += ["--target-gb-per-user", str(float(target_gb))]
         except (TypeError, ValueError):
             return [], {}, "target_gb_per_user must be a number"
+    if fill_until_full:
+        argv.append("--fill-until-full")
 
     # top-up-only: skip every seeding step, just check/top up storage toward
-    # target_gb_per_user. Only meaningful with a target, so it is rejected
-    # without one rather than silently doing nothing.
+    # target_gb_per_user or fill_until_full. Only meaningful with a target,
+    # so it is rejected without one rather than silently doing nothing.
     if body.get("top_up_only"):
-        if not target_gb:
-            return [], {}, "top_up_only needs target_gb_per_user to top up toward"
+        if not (target_gb or fill_until_full):
+            return [], {}, ("top_up_only needs target_gb_per_user or "
+                            "fill_until_full to top up toward")
         argv.append("--top-up-only")
 
     # fit-to-licenses: seed up to the tenant's available Workspace seats.

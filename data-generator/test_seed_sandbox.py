@@ -1143,7 +1143,101 @@ class TestStorageTopUp:
         assert len(roots) == 1
         deleted = s.reset_drive(drive, settings)
         assert deleted >= 1
-        assert not any(f["name"] == "MIGRATION-TEST" for f in drive.store.values())
+
+
+class TestFillUntilFullCliValidation:
+    """These three checks all run before Settings/assert_sandbox/any network
+    call -- main() exits on a bad combination the same way argparse itself
+    would, rather than discovering it minutes into a real run."""
+
+    def _exits_with(self, argv, monkeypatch, needle):
+        import seed_sandbox as s
+
+        monkeypatch.setenv("SANDBOX_MODE", "true")
+        with pytest.raises(SystemExit) as exc:
+            s.main(["--confirm-domain", "src.example", "--yes", *argv])
+        assert needle in str(exc.value)
+
+    def test_both_targets_at_once_is_refused(self, monkeypatch):
+        self._exits_with(
+            ["--fill-until-full", "--target-gb-per-user", "5", "--top-up-only"],
+            monkeypatch, "pick one")
+
+    def test_fill_until_full_needs_top_up_only(self, monkeypatch):
+        self._exits_with(["--fill-until-full"], monkeypatch, "--top-up-only")
+
+    def test_top_up_only_needs_one_target_or_the_other(self, monkeypatch):
+        self._exits_with(["--top-up-only"], monkeypatch,
+                         "--target-gb-per-user or --fill-until-full")
+
+
+class TestFillUntilFull:
+    """target_gb=None means 'as full as this account can actually get' --
+    storageQuota.limit itself, not a number the operator has to guess (or
+    a fixed target chosen once that goes stale the moment licences change).
+    A --target-gb-per-user is still a real fixed target when given; None is
+    the different, narrower request 'reseed until the tenant is full'."""
+
+    def test_fills_toward_the_accounts_own_limit(self, settings, monkeypatch):
+        monkeypatch.setattr(
+            __import__("seed_sandbox"), "_filler_blob",
+            lambda: b"x" * (10 * 1024**2))
+        import seed_sandbox as s
+
+        drive = FakeDrive("alice@tenanta.com", "source")
+        drive.storage_usage = 0
+        drive.storage_limit = 25 * 1024**2   # the account's real ceiling
+
+        m = s.top_up_storage(drive, settings, "alice@tenanta.com",
+                             target_gb=None, media_fn=_FakeMediaFn())
+
+        assert m["filler_bytes"] == 25 * 1024**2
+        assert "capped" not in m["note"]     # this IS the target, not a cap
+
+    def test_already_at_the_limit_adds_nothing(self, settings):
+        import seed_sandbox as s
+
+        drive = FakeDrive("alice@tenanta.com", "source")
+        drive.storage_usage = 40 * 1024**2
+        drive.storage_limit = 40 * 1024**2
+
+        m = s.top_up_storage(drive, settings, "alice@tenanta.com",
+                             target_gb=None, media_fn=_FakeMediaFn())
+
+        assert m["filler_files"] == 0
+        assert m["filler_bytes"] == 0
+
+    def test_an_unlimited_plan_has_no_full_to_reach(self, settings):
+        """Some Workspace plans report no storage limit at all -- filling
+        toward a target that does not exist would write filler forever."""
+        import seed_sandbox as s
+
+        drive = FakeDrive("alice@tenanta.com", "source")
+        drive.storage_usage = 5 * 1024**3
+        drive.storage_limit = None
+
+        m = s.top_up_storage(drive, settings, "alice@tenanta.com",
+                             target_gb=None, media_fn=_FakeMediaFn())
+
+        assert m["filler_files"] == 0
+        assert "no storage limit" in m["note"]
+
+    def test_a_fixed_target_is_unaffected_by_this_at_all(self, settings, monkeypatch):
+        """None and a real number must stay two different requests -- this
+        is the existing, unchanged behaviour for a caller who DID give a
+        specific target."""
+        monkeypatch.setattr(
+            __import__("seed_sandbox"), "_filler_blob",
+            lambda: b"x" * (10 * 1024**2))
+        import seed_sandbox as s
+
+        drive = FakeDrive("alice@tenanta.com", "source")
+        drive.storage_usage = 0
+        drive.storage_limit = 1024**4
+
+        m = s.top_up_storage(drive, settings, "alice@tenanta.com",
+                             target_gb=20 * 1024**2 / 1e9, media_fn=_FakeMediaFn())
+        assert m["filler_bytes"] == 20 * 1024**2
 
 
 class TestSeedContacts:

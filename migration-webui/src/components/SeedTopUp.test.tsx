@@ -106,3 +106,45 @@ describe('what it adds', () => {
     expect(screen.getByText(/left alone/i)).toBeInTheDocument()
   })
 })
+
+describe('filling storage until full', () => {
+  it('is off by default -- an ordinary top-up is unaffected', async () => {
+    render(<SeedTopUp domain="src.example" />)
+    fireEvent.change(screen.getByTestId('topup-domain'),
+                     { target: { value: 'src.example' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add more' }))
+    await waitFor(() => expect(client.runSeed).toHaveBeenCalled())
+    const [, , , , opts] = vi.mocked(client.runSeed).mock.calls[0]
+    expect(opts?.fillUntilFull).toBeUndefined()
+    expect(opts?.topUpOnly).toBeUndefined()
+  })
+
+  it('sends topUpOnly and fillUntilFull together when checked', async () => {
+    render(<SeedTopUp domain="src.example" />)
+    fireEvent.change(screen.getByTestId('topup-domain'),
+                     { target: { value: 'src.example' } })
+    fireEvent.click(screen.getByTestId('topup-fill-until-full'))
+    fireEvent.click(screen.getByRole('button', { name: 'Fill until full' }))
+    await waitFor(() => expect(client.runSeed).toHaveBeenCalled())
+    const [, , , , opts] = vi.mocked(client.runSeed).mock.calls[0]
+    expect(opts?.fillUntilFull).toBe(true)
+    expect(opts?.topUpOnly).toBe(true)
+  })
+
+  it('disables the content-volume controls while checked', () => {
+    /* seed_sandbox.py's --top-up-only skips every other seeding step, so
+       leaving these editable would suggest they still do something. */
+    render(<SeedTopUp domain="src.example" />)
+    fireEvent.click(screen.getByTestId('topup-fill-until-full'))
+    expect(screen.getByTestId('topup-only')).toBeDisabled()
+    expect(screen.getByTestId('topup-scale')).toBeDisabled()
+    expect(screen.getByTestId('topup-shared-drives')).toBeDisabled()
+  })
+
+  it('relabels the button so it says what pressing it will do', () => {
+    render(<SeedTopUp domain="src.example" />)
+    fireEvent.click(screen.getByTestId('topup-fill-until-full'))
+    expect(screen.getByRole('button', { name: 'Fill until full' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Add more' })).toBeNull()
+  })
+})

@@ -907,6 +907,29 @@ class TestSeedFromTheUI:
              "target_gb_per_user": 30})
         assert "--top-up-only" in argv
 
+    def test_fill_until_full_is_opt_in_and_needs_top_up_only(self):
+        """'Reseed until the tenant is full' -- --fill-until-full instead of
+        a fixed GB number, but still gated by the same top_up_only switch
+        every top-up path is."""
+        argv, _, _ = webui.seed_argv({"confirm_domain": "sandbox-src.example"})
+        assert "--fill-until-full" not in argv
+
+        _, _, err = webui.seed_argv(
+            {"confirm_domain": "sandbox-src.example", "top_up_only": True})
+        assert "fill_until_full" in err
+
+        argv, _, _ = webui.seed_argv(
+            {"confirm_domain": "sandbox-src.example", "top_up_only": True,
+             "fill_until_full": True})
+        assert "--top-up-only" in argv and "--fill-until-full" in argv
+        assert "--target-gb-per-user" not in argv
+
+    def test_fill_until_full_and_a_fixed_target_are_two_different_asks(self):
+        _, _, err = webui.seed_argv(
+            {"confirm_domain": "sandbox-src.example", "top_up_only": True,
+             "fill_until_full": True, "target_gb_per_user": 30})
+        assert "pick one" in err
+
     def test_seeding_still_targets_only_the_source(self):
         """There is no code path that points the seeder at the target: the
         domain is read from SOURCE_DOMAIN, never from the request body."""

@@ -729,9 +729,15 @@ class _DriveAbout:
         return _Call(self.s, "about.get", self._get, kw)
 
     def _get(self, **_):
-        return {"user": {"emailAddress": self.s.owner},
-                "storageQuota": {"limit": str(self.s.storage_limit),
-                                 "usage": str(self.s.storage_usage)}}
+        quota = {"usage": str(self.s.storage_usage)}
+        # Real Google API responses OMIT the key entirely for an
+        # unlimited-storage plan, rather than sending a null -- str(None)
+        # would otherwise become the literal string "None", which is
+        # truthy and does not round-trip through int() the way a real
+        # absent key does.
+        if self.s.storage_limit is not None:
+            quota["limit"] = str(self.s.storage_limit)
+        return {"user": {"emailAddress": self.s.owner}, "storageQuota": quota}
 
 
 # ======================================================================

@@ -722,8 +722,13 @@ export interface SeedOptions {
    *  storage reaches this many GB. */
   targetGbPerUser?: string
   /** Skip every seeding step and only top up storage toward
-   *  targetGbPerUser. Needs a target to top up toward. */
+   *  targetGbPerUser (or fillUntilFull). Needs one of the two. */
   topUpOnly?: boolean
+  /** Top up storage to each account's OWN Workspace limit instead of a
+   *  fixed targetGbPerUser you have to guess -- "reseed until the tenant
+   *  is full", read fresh per user rather than assumed from a plan name.
+   *  Needs topUpOnly; conflicts with targetGbPerUser. */
+  fillUntilFull?: boolean
   /** The full awkward-corpus set on user 1 (\'first\'), on everyone
    *  (\'all\'), or nobody (\'none\'). */
   edgeCases?: string
@@ -745,7 +750,7 @@ export async function runSeed(
   const { allUsers, createUntilFull, workers, localpartPrefix,
           sharedDrives, users, groups, only, fitToLicenses,
           externalEmail, mail, events, bigFileMb, targetGbPerUser,
-          topUpOnly, edgeCases, accountId } = opts
+          topUpOnly, fillUntilFull, edgeCases, accountId } = opts
   const res = await fetch('/api/seed', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -770,6 +775,7 @@ export async function runSeed(
       big_file_mb: bigFileMb || undefined,
       target_gb_per_user: targetGbPerUser || undefined,
       top_up_only: topUpOnly || undefined,
+      fill_until_full: fillUntilFull || undefined,
       edge_cases: edgeCases || undefined,
     }),
   })

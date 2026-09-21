@@ -346,11 +346,19 @@ def _filler_blob() -> bytes:
     return _filler_blob_cache
 
 
-def top_up_storage(drive, settings: Settings, user: str, target_gb: float,
+def top_up_storage(drive, settings: Settings, user: str, target_gb: float | None,
                    media_fn=None) -> dict:
     """
     Adds large filler files until this user's total Workspace storage
     (Gmail + Drive + Photos, pooled -- storageQuota.usage) reaches target_gb.
+
+    target_gb=None means "as full as this account can actually get" --
+    storageQuota.limit itself, read fresh per user rather than guessed at
+    from a plan name (a licence tier is not a promise every account on it
+    has the identical byte ceiling; unlimited-storage plans report no limit
+    at all, in which case there IS no "full" and this reports so rather than
+    filling forever). A fixed target_gb is still honoured when given, for
+    "at least N GB", which is a different, narrower request than "full".
 
     Filler lives inside a folder named exactly "MIGRATION-TEST" -- the same
     name reset_drive() already matches on -- so resetting the seeded corpus
@@ -379,14 +387,26 @@ def top_up_storage(drive, settings: Settings, user: str, target_gb: float,
         limit = quota.get("limit")
         m["usage_before_gb"] = round(usage / 1e9, 2)
 
-        target_bytes = int(target_gb * 1e9)
-        if limit and int(limit) < target_bytes:
-            # The account's own licence ceiling is lower than what was asked
-            # for. Filling further would just fail partway through with
-            # storageQuotaExceeded once the real limit is hit.
+        if target_gb is None:
+            if not limit:
+                # Google itself reports no ceiling for this account (some
+                # unlimited-storage plans genuinely don't have one) -- there
+                # is no "full" to fill toward, and treating that as
+                # "unlimited target" would write filler files forever.
+                m["note"] = ("this account reports no storage limit -- "
+                            "nothing to fill toward")
+                m["usage_after_gb"] = m["usage_before_gb"]
+                return m
             target_bytes = int(limit)
-            m["note"] = (f"target capped at the account's own licence limit "
-                        f"({int(limit) / 1e9:.1f} GB)")
+        else:
+            target_bytes = int(target_gb * 1e9)
+            if limit and int(limit) < target_bytes:
+                # The account's own licence ceiling is lower than what was
+                # asked for. Filling further would just fail partway through
+                # with storageQuotaExceeded once the real limit is hit.
+                target_bytes = int(limit)
+                m["note"] = (f"target capped at the account's own licence limit "
+                            f"({int(limit) / 1e9:.1f} GB)")
 
         remaining = target_bytes - usage
         if remaining <= 0:
@@ -2238,7 +2258,8 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
                   target_gb_per_user: float | None = None,
                   groups: list[str] | None = None,
                   only: frozenset | None = None,
-                  force_reseed: bool = False) -> dict:
+                  force_reseed: bool = False,
+                  fill_until_full: bool = False) -> dict:
     user = entry["email"]
     peers = [u for u in all_users if u != user]
     t0 = time.time()
@@ -2317,7 +2338,7 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
     # Last: every other pass has to finish first so storageQuota.usage
     # reflects everything they wrote, not just some of it.
     fill_m = {"filler_files": 0, "filler_bytes": 0, "note": ""}
-    if target_gb_per_user:
+    if target_gb_per_user or fill_until_full:
         # A fresh client, not the `drive` object above: that one has by now
         # handled hundreds of small requests over several minutes on the
         # same httplib2 connection, and a large (100MB+) resumable upload
@@ -2329,7 +2350,8 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
         # httplib2's connection reuse is the documented culprit for this
         # class of failure; a new connection sidesteps it entirely.
         fresh_drive, _, _ = build_services(settings, user)
-        fill_m = top_up_storage(fresh_drive, settings, user, target_gb_per_user)
+        fill_m = top_up_storage(fresh_drive, settings, user,
+                                None if fill_until_full else target_gb_per_user)
 
     elapsed = round(time.time() - t0, 1)
     # .get() throughout, not [] -- a service that was skipped (--only) or
@@ -2371,7 +2393,8 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
             "storage": fill_m, "elapsed_sec": elapsed}
 
 
-def top_up_one_user(settings: Settings, user: str, target_gb_per_user: float) -> dict:
+def top_up_one_user(settings: Settings, user: str,
+                    target_gb_per_user: float | None) -> dict:
     """The --top-up-only path: check and fill storage only, safe to re-run
     any number of times without duplicating mail, drive content, contacts or
     tasks -- see top_up_storage()'s docstring for why a second pass is
@@ -2517,9 +2540,18 @@ def main(argv: list[str] | None = None) -> int:
                          "the Chat app is configured and the 404s stop.")
     ap.add_argument("--top-up-only", action="store_true",
                     help="skip every seeding step and only check/top up "
-                         "storage toward --target-gb-per-user. Safe to run "
-                         "repeatedly -- it never touches mail, Drive "
-                         "documents, contacts or tasks.")
+                         "storage toward --target-gb-per-user or "
+                         "--fill-until-full. Safe to run repeatedly -- it "
+                         "never touches mail, Drive documents, contacts or "
+                         "tasks.")
+    ap.add_argument("--fill-until-full", action="store_true",
+                    help="top up storage to each account's OWN Workspace "
+                         "limit (storageQuota.limit, read fresh per user) "
+                         "instead of a fixed --target-gb-per-user you have "
+                         "to guess. Reports rather than filling forever on "
+                         "an unlimited-storage plan, which has no 'full' to "
+                         "reach. Requires --top-up-only; conflicts with "
+                         "--target-gb-per-user.")
     args = ap.parse_args(argv)
 
     only = None
@@ -2532,8 +2564,18 @@ def main(argv: list[str] | None = None) -> int:
         if not only:
             sys.exit("--only was given with no services")
 
-    if args.top_up_only and not args.target_gb_per_user:
-        sys.exit("--top-up-only needs --target-gb-per-user")
+    if args.fill_until_full and args.target_gb_per_user:
+        sys.exit("--fill-until-full and --target-gb-per-user are two "
+                 "different targets -- pick one.")
+    if args.top_up_only and not (args.target_gb_per_user or args.fill_until_full):
+        sys.exit("--top-up-only needs --target-gb-per-user or --fill-until-full")
+    if args.fill_until_full and not args.top_up_only:
+        sys.exit("--fill-until-full needs --top-up-only")
+    # None means "the account's own limit" from here on -- top_up_storage()
+    # and top_up_one_user() both already treat that as the signal to read
+    # storageQuota.limit fresh per user rather than a fixed number.
+    fill_target: float | None = (None if args.fill_until_full
+                                 else args.target_gb_per_user)
     # corpus.py reads this from the environment rather than taking it as a
     # parameter: CorpusBuilder is constructed per user inside a worker, and
     # threading one more argument through every call site to carry an
@@ -2544,7 +2586,7 @@ def main(argv: list[str] | None = None) -> int:
     # when it sizes the pool below: _media() copies its buffer into a
     # BytesIO, so a filler chunk is resident once per user in flight. Left
     # unset when there is no top-up, because then nothing pays for it.
-    if args.target_gb_per_user:
+    if args.target_gb_per_user or args.fill_until_full:
         os.environ["SEED_FILLER_MB"] = str(_FILLER_CHUNK_BYTES // (1024 * 1024))
 
     if args.top_up_only and args.reset:
@@ -2743,11 +2785,13 @@ def main(argv: list[str] | None = None) -> int:
 
     # --- Top-up only -------------------------------------------------------
     if args.top_up_only:
+        target_desc = ("each account's own storage limit" if fill_target is None
+                       else f"{fill_target:.1f} GB each")
         print(f"\nTopping up storage for {len(all_users)} user(s) toward "
-             f"{args.target_gb_per_user:.1f} GB each ...")
+             f"{target_desc} ...")
         with futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
             list(pool.map(
-                lambda u: top_up_one_user(settings, u, args.target_gb_per_user),
+                lambda u: top_up_one_user(settings, u, fill_target),
                 all_users))
         return 0
 
@@ -2992,6 +3036,7 @@ def main(argv: list[str] | None = None) -> int:
                 group_emails,
                 only,
                 args.reseed,
+                args.fill_until_full,
             ): e["email"]
             for i, e in enumerate(entries)
         }
@@ -3146,10 +3191,11 @@ def main(argv: list[str] | None = None) -> int:
                   f"{sd_made.get('folders', 0):,} folder(s), "
                   f"{sd_made.get('files', 0):,} file(s), "
                   f"{sd_made.get('members', 0):,} membership(s)")
-    if args.target_gb_per_user:
+    if args.target_gb_per_user or args.fill_until_full:
+        target_desc = ("each account's own limit" if args.fill_until_full
+                       else f"{args.target_gb_per_user:.1f} GB/user")
         print(f"  Filler      : {totals['filler_files']:,} file(s), "
-              f"{totals['filler_gb']:.2f} GB added toward "
-              f"{args.target_gb_per_user:.1f} GB/user")
+              f"{totals['filler_gb']:.2f} GB added toward {target_desc}")
     print(f"{'='*66}")
     print(f"Manifest   -> {args.manifest}")
     print(f"Identities -> {args.identities_out}")

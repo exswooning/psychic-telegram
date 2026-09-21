@@ -19,7 +19,8 @@
  */
 import React, { useState } from 'react'
 import {
-  Alert, Box, Button, Grid, MenuItem, TextField,
+  Alert, Box, Button, Checkbox, FormControlLabel, Grid, MenuItem, TextField,
+  Typography,
 } from '@mui/material'
 import { runSeed } from '@/api/client'
 import { SERVICES as SEEDABLE } from '@/components/SeedOneService'
@@ -33,6 +34,13 @@ export const SeedTopUp: React.FC<{ domain?: string; accountId?: number }> =
   const [scale, setScale] = useState('small')
   const [sharedDrives, setSharedDrives] = useState('')
   const [users, setUsers] = useState('')
+  // Storage, not content: fills each account toward its OWN Workspace
+  // limit (read fresh per user, never a guessed number) rather than
+  // creating more files/mail/events. Mutually exclusive with the controls
+  // above in practice, not just in the request -- seed_sandbox.py's
+  // --top-up-only skips every other seeding step entirely, so "what to
+  // add"/"how much more" would silently do nothing while this is checked.
+  const [fillUntilFull, setFillUntilFull] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [queued, setQueued] = useState<string | null>(null)
   const [jobActive, setJobActive] = useState(false)
@@ -47,6 +55,8 @@ export const SeedTopUp: React.FC<{ domain?: string; accountId?: number }> =
     // have no place in "add more to who is already here".
     const r = await runSeed(confirmDomain, scale, false, false, {
       sharedDrives, users, only: only || undefined, accountId,
+      topUpOnly: fillUntilFull || undefined,
+      fillUntilFull: fillUntilFull || undefined,
     })
     if (r.ok && !r.queued) setJobActive(true)
     setQueued(r.ok && r.queued ? (r.msg || 'queued — it will start on its own') : null)
@@ -73,6 +83,7 @@ export const SeedTopUp: React.FC<{ domain?: string; accountId?: number }> =
         <Grid item xs={12} sm={3}>
           <TextField
             fullWidth size="small" select label="What to add" value={only}
+            disabled={fillUntilFull}
             inputProps={{ 'data-testid': 'topup-only' }}
             onChange={(e) => setOnly(e.target.value)}
             helperText={only ? `just ${only}` : 'every service'}
@@ -86,6 +97,7 @@ export const SeedTopUp: React.FC<{ domain?: string; accountId?: number }> =
         <Grid item xs={12} sm={3}>
           <TextField
             fullWidth size="small" select label="How much more" value={scale}
+            disabled={fillUntilFull}
             inputProps={{ 'data-testid': 'topup-scale' }}
             onChange={(e) => setScale(e.target.value)}
           >
@@ -97,7 +109,8 @@ export const SeedTopUp: React.FC<{ domain?: string; accountId?: number }> =
         <Grid item xs={12} sm={2}>
           <TextField
             fullWidth size="small" label="More shared drives" placeholder="0"
-            value={sharedDrives} inputProps={{ 'data-testid': 'topup-shared-drives' }}
+            value={sharedDrives} disabled={fillUntilFull}
+            inputProps={{ 'data-testid': 'topup-shared-drives' }}
             onChange={(e) => setSharedDrives(e.target.value.replace(/[^0-9]/g, ''))}
             helperText="on top of what exists"
           />
@@ -111,10 +124,31 @@ export const SeedTopUp: React.FC<{ domain?: string; accountId?: number }> =
             helperText="Comma-separated localparts, no @domain. Blank tops up every user the tenant already has."
           />
         </Grid>
+        <Grid item xs={12}>
+          <FormControlLabel
+            control={<Checkbox checked={fillUntilFull}
+                              inputProps={{ 'data-testid': 'topup-fill-until-full' } as never}
+                              onChange={(e) => setFillUntilFull(e.target.checked)} />}
+            label={
+              <Box>
+                <Typography variant="body2">
+                  Fill storage until full, instead
+                </Typography>
+                <Typography variant="caption" color="text.secondary">
+                  Adds large filler files toward each account&apos;s OWN Workspace
+                  storage limit (read fresh per user, never guessed) rather than
+                  more mail, Drive documents, events, contacts or tasks. Skips
+                  every other seeding step above while checked — safe to run
+                  repeatedly, it only ever tops up, never re-adds what is
+                  already there.
+                </Typography>
+              </Box>
+            } />
+        </Grid>
       </Grid>
       <Button sx={{ mt: 1 }} size="small" variant="contained" onClick={start}
               disabled={jobRunning || !confirmDomain.trim()}>
-        Add more
+        {fillUntilFull ? 'Fill until full' : 'Add more'}
       </Button>
       {err && <Alert severity="error" sx={{ mt: 1 }}>{err}</Alert>}
       {queued && <Alert severity="info" sx={{ mt: 1 }}>{queued}</Alert>}
