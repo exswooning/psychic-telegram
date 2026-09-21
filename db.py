@@ -444,6 +444,17 @@ class MigrationDB:
                 "UPDATE identity_map SET services_done=? WHERE source_email=?",
                 (",".join(sorted(have)), source_email))
 
+    def set_services_done(self, source_email: str, services) -> None:
+        """Replace, not union -- for main.py's reopen-service, which REMOVES
+        a service reconcile_service_markers deliberately leaves alone: zero
+        items and zero failures is indistinguishable, from the ledger's own
+        point of view, from a mailbox that is genuinely empty. mark_services_
+        done can only add; this is the other direction."""
+        with self.write() as conn:
+            conn.execute(
+                "UPDATE identity_map SET services_done=? WHERE source_email=?",
+                (",".join(sorted({s for s in services if s})), source_email))
+
     def services_done(self, source_email: str) -> set:
         row = self.conn.execute(
             "SELECT services_done FROM identity_map WHERE source_email=?",

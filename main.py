@@ -1701,6 +1701,40 @@ def cmd_backfill_services(args, settings: Settings, db: MigrationDB,
     print(f"\nBackfilled {changed} user(s); {skipped} had gaps left alone.")
 
 
+def cmd_reopen_service(args, settings: Settings, db: MigrationDB,
+                       auth: AuthManager):
+    """Clear a service from services_done so the next migrate genuinely
+    reattempts it -- the gap reconcile_service_markers deliberately leaves
+    alone.
+
+    That function only reopens a service with zero items AND at least one
+    FAILURE, on purpose: zero items alone is the ordinary shape of a user
+    with nothing to migrate, and clearing that would re-walk every empty
+    mailbox forever. But zero items and zero failures is also exactly what
+    a delta's --days filter produces against a mailbox that has plenty of
+    mail, just none inside the window -- indistinguishable from "empty" by
+    the ledger alone, and reconcile_service_markers will never touch it.
+    This is the operator saying "no, that one really has more."
+    """
+    rows = [r for r in db.all_identities() if r["entity_type"] == "user"]
+    if args.user:
+        want = {u.lower() for u in args.user}
+        rows = [r for r in rows if r["source_email"] in want]
+    elif not args.all_users:
+        sys.exit("pass --user <source_email> (repeatable) or --all-users")
+    services = set(args.services)
+    changed = 0
+    for r in rows:
+        done = db.services_done(r["source_email"])
+        keep = done - services
+        if keep == done:
+            continue
+        db.set_services_done(r["source_email"], keep)
+        changed += 1
+    print(f"reopened {','.join(sorted(services))} for {changed} of "
+          f"{len(rows)} user(s)")
+
+
 def cmd_coverage(args, settings: Settings, db: MigrationDB, auth: AuthManager):
     """Which supported data types does the source actually contain?
 
@@ -2025,6 +2059,18 @@ def build_parser() -> argparse.ArgumentParser:
                    type=lambda v: [x.strip() for x in v.split(",") if x.strip()],
                    help="comma-separated, e.g. drive")
     s.set_defaults(func=cmd_backfill_services)
+
+    s = sub.add_parser("reopen-service",
+                       help="undo a service's completion marker so the "
+                            "next migrate genuinely reattempts it")
+    s.add_argument("--services", required=True,
+                   type=lambda v: [x.strip() for x in v.split(",") if x.strip()],
+                   help="comma-separated, e.g. gmail")
+    s.add_argument("--user", action="append",
+                   help="limit to specific source user(s); repeatable")
+    s.add_argument("--all-users", action="store_true",
+                   help="apply to every user -- required if --user is omitted")
+    s.set_defaults(func=cmd_reopen_service)
 
     s = sub.add_parser("coverage",
                        help="which supported data types the source actually has")

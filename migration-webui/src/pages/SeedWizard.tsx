@@ -480,7 +480,7 @@ const SeedStep: React.FC<{ domain?: string }> = ({ domain }) => {
     }
     if (runOn) {
       // cpFetch throws on a non-2xx response (FastAPI's `detail`, not an
-      // {ok:false} envelope) -- unlike runSeed()/client.ts below, which is
+      // {ok:false} envelope) -- unlike the local seed call below, which is
       // webui.py's own always-200 shape. Two backends, two error shapes;
       // this is the seam between them.
       try {
