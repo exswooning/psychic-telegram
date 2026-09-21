@@ -170,10 +170,18 @@ Say "3/6  creating the virtualenv"
 
 Say "4/6  writing node configuration"
 $envFile = "$Dir\node.env"
+# BITPORT_ACCOUNT is not optional, whatever the parameter default suggests.
+# node_agent.py reads this file and exits immediately without it -- "a node
+# works on one tenant and has to be told which" -- so omitting it produced
+# an install that looked complete, registered its scheduled task, and had
+# an agent that died on every single start. Live: a joined, healthy-looking
+# Windows node had never once run node_agent, and the reason was one
+# missing line in this file.
 @(
   "BITPORT_COORDINATOR=$Coordinator",
   "BITPORT_NODE_TOKEN=$Token",
-  "BITPORT_NODE_ID=$env:COMPUTERNAME"
+  "BITPORT_NODE_ID=$env:COMPUTERNAME",
+  "BITPORT_ACCOUNT=$Account"
 ) | Set-Content -Path $envFile -Encoding ASCII
 # Owner-only, the NTFS equivalent of chmod 600: a token in a world-readable
 # file is a token anyone on the machine has.
@@ -252,7 +260,7 @@ Pop-Location
 Write-Host ""
 if ($rc -eq 0) { Write-Host "Node is ready." }
 else { Write-Host "Node installed, but it could NOT reach the coordinator." }
-Say "6/6  starting the agent at logon"
+Say "6/6  keeping the agent running"
 # One-time setup, so nothing has to be started by hand again -- including
 # after a reboot, which a laptop does often.
 #
@@ -268,13 +276,38 @@ $taskName = "Bitport node agent"
 try {
   $action = New-ScheduledTaskAction -Execute "$Dir\.venv\Scripts\python.exe" `
                                     -Argument "node_agent.py" -WorkingDirectory $Dir
-  $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+  # Two triggers, because AtLogOn alone leaves real gaps on a laptop.
+  #
+  # The agent already survives a network outage on its own -- both agents
+  # treat an unreachable coordinator as one bad cycle and keep polling, so
+  # a machine that loses wifi rejoins by itself when it comes back. What it
+  # could NOT survive was anything that ended the PROCESS: a reboot nobody
+  # logged in after, a crash past the restart budget, or Task Scheduler's
+  # own default three-day execution limit quietly killing a long-lived
+  # agent. The repeating trigger covers all three -- every five minutes it
+  # tries to start the agent, and IgnoreNew makes that a no-op whenever one
+  # is already running.
+  $trigger = @(
+    (New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"),
+    (New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
+       -RepetitionInterval (New-TimeSpan -Minutes 5))
+  )
+  # ExecutionTimeLimit 0 is "no limit". Without it Windows stops the task
+  # after three days, which reads as a node that silently went offline for
+  # no reason -- on the machine least likely to be watched.
+  #
+  # IgnoreNew, because duplicates are not hypothetical: this machine ran
+  # two agents heartbeating under one node id, which doubles the traffic
+  # and makes the pair race on the same record.
   $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
-                -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+                -DontStopIfGoingOnBatteries -RestartCount 99 `
+                -RestartInterval (New-TimeSpan -Minutes 1) `
+                -ExecutionTimeLimit ([TimeSpan]::Zero) `
+                -MultipleInstances IgnoreNew
   Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
       -Settings $settings -Force -ErrorAction Stop | Out-Null
   Start-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-  Write-Host "  registered '$taskName' -- it starts at logon and is running now"
+  Write-Host "  registered '$taskName' -- starts at logon, re-checked every 5 min, running now"
   $agentStarted = $true
 } catch {
   Write-Host "  ! could not register the scheduled task ($($_.Exception.GetType().Name))"
