@@ -846,6 +846,23 @@ export const setNodeDirective = (accountId: number, run: boolean,
     body: JSON.stringify({ account_id: accountId, run, services }),
   })
 
+/** Same endpoint, the other kind of work: run a seed on a node instead of
+ *  this server. `seed` is the exact body a local `/api/seed` call would
+ *  send -- confirm_domain, scale, users, ... -- validated with the SAME
+ *  webui.seed_argv() before anything is written, so a bad request fails
+ *  here, not silently on a machine with no log access. */
+export const startSeedOnNode = (seed: Record<string, unknown>) =>
+  cpFetch<NodeDirective>('/api/v2/nodes/directive', {
+    method: 'POST',
+    body: JSON.stringify({ run: true, kind: 'seed', seed }),
+  })
+
+export const stopNodeSeed = () =>
+  cpFetch<NodeDirective>('/api/v2/nodes/directive', {
+    method: 'POST',
+    body: JSON.stringify({ run: false, kind: 'seed' }),
+  })
+
 export const fetchNodeJoin = (reveal = false) =>
   cpFetch<NodeJoinDetails>(`/api/v2/nodes/join?reveal=${reveal}`)
 

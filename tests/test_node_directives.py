@@ -75,7 +75,7 @@ class TestTheCoordinatorNeverReachesIn:
         import api_server
         src = inspect.getsource(api_server.set_node_directive)
         assert "cpdb.begin_action" in src
-        assert "start node work" in src
+        assert "start node {kind}" in src
 
     def test_only_a_superadmin_may_set_it(self):
         import api_server
@@ -117,7 +117,10 @@ class TestTheAgentActsOnWhatItIsTold:
         assert agent.proc is None
 
     def test_the_child_outlives_an_agent_restart_where_it_can(self):
-        src = inspect.getsource(node_agent.Agent.start)
+        # Shared by every kind of job a node can run (migrate, seed) since
+        # this moved into _launch() -- one child-spawning path, not one per
+        # kind that could drift.
+        src = inspect.getsource(node_agent.Agent._launch)
         assert "start_new_session" in src
         # Guarded, because Windows has no setsid and ignoring that silently
         # is how a migration there dies with its parent unannounced.

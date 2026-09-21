@@ -68,6 +68,11 @@ class Agent:
         self.account_id, self.python, self.workdir = account_id, python, workdir
         self.proc: subprocess.Popen | None = None
         self.services = ""
+        # What the current/last child IS. Heartbeat's active_job label and
+        # _reap's backoff both need to say "seed" rather than "migrate all"
+        # for a job that is not a migration.
+        self.kind = "migrate"
+        self.seed_domain = ""
         self._specs: dict | None = None
         # Crashloop state. Without it a child that dies instantly is
         # restarted every poll forever: observed live, 15 processes in five
@@ -151,12 +156,13 @@ class Agent:
         stop migrating -- the claim calls are what must not be guessed at,
         and main.py already stops on its own if those fail."""
         running = self.proc is not None and self.proc.poll() is None
+        label = (f"seed {self.seed_domain or 'sandbox'}"
+                 if self.kind == "seed" else f"migrate {self.services or 'all'}")
         try:
             body = {
                 "node_id": self.node_id,
                 "hostname": self.node_id,
-                "active_job": (f"migrate {self.services or 'all'}"
-                               if running else None),
+                "active_job": (label if running else None),
                 "job_pid": self.proc.pid if running else None,
             }
             body.update(self.specs())
@@ -171,18 +177,55 @@ class Agent:
                 "migrate"]
         if services:
             argv += ["--services", services]
-        log = os.path.join(self.workdir, "node_agent_run.log")
+        self.kind = "migrate"
         self.services = services
+        self._launch(argv, cwd=self.workdir)
+
+    def start_seed(self, body: dict) -> None:
+        """The same seed a local run would launch, built the same way.
+
+        Reuses webui.seed_argv() rather than re-deriving the command here:
+        domain_guard, the typed-domain confirmation, scale, users and the
+        worker ceiling all live in that one function, and set_node_directive
+        already ran the same body through it before this was ever written
+        to the directive -- re-validating costs nothing and a directive row
+        edited by hand still gets the real check.
+        """
+        sys.path.insert(0, self.workdir)
+        import webui       # noqa: PLC0415 - heavy-ish, and most nodes never seed
+
+        argv, env, err = webui.seed_argv(body, self.account_id)
+        if err:
+            # Not an exception: a directive that fails validation is a
+            # normal outcome (a stale row, a domain no longer a sandbox),
+            # not a crash. tick() logs this string same as any other.
+            raise RuntimeError(err)
+        self.kind = "seed"
+        self.seed_domain = (body.get("confirm_domain") or "").strip()
+        # ponytail: heartbeat only carries active_job + pid for a node-run
+        # seed, not the seed_domain/seed_users_done/... columns fleet_agent.py
+        # already knows how to tail a log for. Upgrade path: parse this
+        # child's own stdout the same way, and post those fields too.
+        full_env = dict(os.environ)
+        full_env.update(env)
+        self._launch(argv, cwd=os.path.join(self.workdir, "data-generator"),
+                     env=full_env)
+
+    def _launch(self, argv: list[str], *, cwd: str,
+               env: dict | None = None) -> None:
+        log = os.path.join(self.workdir, "node_agent_run.log")
         self.started_at = time.time()
         # start_new_session so a restart of this agent does not take the
-        # migration with it. POSIX only; on Windows it is ignored, and a
-        # migration there does not survive the agent, which is worth knowing
-        # before running a long one on a laptop.
+        # job with it. POSIX only; on Windows it is ignored, and a job
+        # there does not survive the agent, which is worth knowing before
+        # running a long one on a laptop.
         kwargs = {}
         if hasattr(os, "setsid"):
             kwargs["start_new_session"] = True
+        if env is not None:
+            kwargs["env"] = env
         with open(log, "a", encoding="utf-8") as fh:
-            self.proc = subprocess.Popen(argv, cwd=self.workdir, stdout=fh,
+            self.proc = subprocess.Popen(argv, cwd=cwd, stdout=fh,
                                          stderr=subprocess.STDOUT, **kwargs)
         print(f"  started pid {self.proc.pid}: {' '.join(argv)}", flush=True)
 
@@ -269,6 +312,9 @@ class Agent:
                 return (f"holding off {wait:.0f}s after {self.fails} failed "
                         f"start(s), last exit {self.last_exit}")
             try:
+                if (d.get("kind") or "migrate") == "seed":
+                    self.start_seed(d.get("seed") or {})
+                    return "started seed"
                 self.start(str(d.get("services") or ""))
                 return "started"
             except Exception as exc:      # noqa: BLE001

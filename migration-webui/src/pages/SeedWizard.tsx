@@ -18,7 +18,9 @@ import CloudSetup from '@/components/CloudSetup'
 import OAuthConnect from '@/components/OAuthConnect'
 import DwdSetup from '@/components/DwdSetup'
 import QuickTenantSetup from '@/components/QuickTenantSetup'
-import { DwdStatus, fetchDwdStatus } from '@/api/controlPlane'
+import {
+  DwdStatus, fetchDwdStatus, fetchFleet, startSeedOnNode, FleetNode,
+} from '@/api/controlPlane'
 
 /**
  * Sandbox rehearsal tools: seed a throwaway source tenant with test data,
@@ -444,10 +446,54 @@ const SeedStep: React.FC<{ domain?: string }> = ({ domain }) => {
   const [queued, setQueued] = useState<string | null>(null)
   const [jobActive, setJobActive] = useState(false)
   const [jobRunning, setJobRunning] = useState(false)
+  // Which machine runs this. '' = this server, unchanged from before nodes
+  // could seed at all. Anything else is a fleet node_id, and the job
+  // becomes a directive the coordinator only WRITES -- see NodeWorkSwitch's
+  // own comment for why nothing here reaches into a machine directly.
+  const [runOn, setRunOn] = useState('')
+  const [nodes, setNodes] = useState<FleetNode[]>([])
+  const [nodeMsg, setNodeMsg] = useState<string | null>(null)
+
+  useEffect(() => {
+    fetchFleet().then(setNodes).catch(() => setNodes([]))
+  }, [])
 
   const start = async () => {
     setErr(null)
     setJobActive(false)
+    setNodeMsg(null)
+    // Exactly the body /api/seed already builds an argv from -- one seed
+    // request shape, whichever machine runs it.
+    const body = {
+      confirm_domain: confirmDomain,
+      scale,
+      create_users: createUsers,
+      reset,
+      all_users: allUsers,
+      create_until_full: createUntilFull,
+      workers: workers || undefined,
+      localpart_prefix: prefix || undefined,
+      shared_drives: sharedDrives || undefined,
+      users: users || undefined,
+      only: only || undefined,
+      edge_cases: edgeCases !== 'first' ? edgeCases : undefined,
+    }
+    if (runOn) {
+      // cpFetch throws on a non-2xx response (FastAPI's `detail`, not an
+      // {ok:false} envelope) -- unlike runSeed()/client.ts below, which is
+      // webui.py's own always-200 shape. Two backends, two error shapes;
+      // this is the seam between them.
+      try {
+        await startSeedOnNode(body)
+        setNodeMsg(
+          `Sent to ${runOn}. It picks this up within its poll interval — `
+          + 'watch it on the Nodes page, not here: this page only ran on a '
+          + 'node when it started, it has no route to that node’s log.')
+      } catch (e) {
+        setErr(e instanceof Error ? e.message : String(e))
+      }
+      return
+    }
     const r = await runSeed(confirmDomain, scale, createUsers, reset, {
       allUsers, createUntilFull, workers, localpartPrefix: prefix,
       sharedDrives, users, only: only || undefined,
@@ -624,9 +670,35 @@ const SeedStep: React.FC<{ domain?: string }> = ({ domain }) => {
             helperText="Comma-separated localparts, no @domain. Blank seeds every user the tenant has — on a real tenant that is days, not hours, so name a few when you are checking a change rather than rehearsing a migration."
           />
         </Grid>
+        <Grid item xs={12} sm={6}>
+          <TextField
+            fullWidth size="small" select label="Run on" value={runOn}
+            SelectProps={{
+              // Without this, MUI shows a blank box for the empty-string
+              // value rather than the "This server" MenuItem it belongs
+              // to -- a select that LOOKS unset is indistinguishable from
+              // one that has not loaded yet.
+              displayEmpty: true,
+              SelectDisplayProps: { 'data-testid': 'seed-run-on' } as never,
+            }}
+            onChange={(e) => setRunOn(e.target.value)}
+            helperText={runOn
+              ? 'A directive is written; the node runs it on its own next '
+                + 'poll — this page never reaches into a machine directly.'
+              : 'This server runs it as a local process, same as always.'}
+          >
+            <MenuItem value="">This server</MenuItem>
+            {nodes.map((n) => (
+              <MenuItem key={n.node_id} value={n.node_id}
+                       data-testid={`seed-run-on-${n.node_id}`}>
+                {n.node_id}{n.active_job ? ` (busy: ${n.active_job})` : ''}
+              </MenuItem>
+            ))}
+          </TextField>
+        </Grid>
       </Grid>
       <Button sx={{ mt: 1 }} size="small" variant="contained" onClick={start} disabled={jobRunning}>
-        {reset ? 'Delete seeded data' : 'Start seeding'}
+        {reset ? 'Delete seeded data' : runOn ? `Start seeding on ${runOn}` : 'Start seeding'}
       </Button>
       {reset && (
         <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
@@ -635,9 +707,14 @@ const SeedStep: React.FC<{ domain?: string }> = ({ domain }) => {
           data back.
         </Typography>
       )}
-      {err && <Alert severity="error" sx={{ mt: 1 }}>{err}</Alert>}
+      {err && <Alert severity="error" sx={{ mt: 1 }} data-testid="seed-node-error">{err}</Alert>}
       {queued && <Alert severity="info" sx={{ mt: 1 }}>{queued}</Alert>}
-      <JobProgress active={jobActive} expectedName="seed" onRunningChange={setJobRunning} />
+      {nodeMsg && <Alert severity="success" sx={{ mt: 1 }} data-testid="seed-node-sent">{nodeMsg}</Alert>}
+      {/* A node's own log is not reachable from this page (see NodeWorkSwitch's
+          comment: nothing here connects to a machine), so JobProgress -- which
+          tails THIS server's process -- would show nothing for a node run and
+          read as a stalled job. Local runs only. */}
+      {!runOn && <JobProgress active={jobActive} expectedName="seed" onRunningChange={setJobRunning} />}
     </Box>
   )
 }
@@ -725,3 +802,6 @@ const ResetTargetStep: React.FC<{ domain?: string }> = ({ domain }) => {
 }
 
 export default SeedWizard
+// For SeedWizard.nodeRun.test.tsx: exercising the node-run branch directly
+// is a much smaller test than driving the tab-switching shell around it.
+export { SeedStep as SeedStepForTests }

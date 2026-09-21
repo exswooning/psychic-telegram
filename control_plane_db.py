@@ -163,6 +163,22 @@ def _apply_column_upgrades(conn: sqlite3.Connection) -> None:
             # for ever and burns the tenant's quota doing nothing.
             ("resumes", "INTEGER NOT NULL DEFAULT 0"),
         ],
+        # node_directives started life meaning exactly one thing --
+        # "migrate this tenant" -- so its two columns (run, services) had
+        # nothing that needed to say so. A node can be told to seed too now
+        # (Nodes/SeedWizard: run a rehearsal corpus on a machine other than
+        # this one), which is different work with different arguments, not
+        # a different service list. DEFAULT 'migrate' keeps every directive
+        # ever written meaning exactly what it always meant.
+        "node_directives": [
+            ("kind", "TEXT NOT NULL DEFAULT 'migrate'"),
+            # webui.seed_argv()'s own request body, JSON-encoded, so the
+            # SAME function builds the child's argv on the node as builds
+            # it for a local run -- one seed-request validator, not two
+            # copies that can drift (domain_guard, scale, users, workers
+            # ceiling all live in that one place).
+            ("seed_body", "TEXT"),
+        ],
     }
     for table, cols in upgrades.items():
         # Positional index, not row_factory["name"]: this connection (from

@@ -5026,6 +5026,14 @@ class DirectiveRequest(BaseModel):
     account_id: int | None = None
     run: bool = False
     services: str = ""
+    # 'migrate' (default, unchanged) or 'seed'. A node polls ONE directive
+    # per account -- this says which kind of work it names, not a second
+    # independent switch.
+    kind: str = "migrate"
+    # webui.seed_argv()'s own request body (confirm_domain, scale, users,
+    # ...), required when kind == 'seed'. Validated the same way a local
+    # seed is, before anything is written -- see set_node_directive.
+    seed: dict | None = None
 
 
 @app.get("/api/v2/nodes/join-code/status")
@@ -5065,8 +5073,9 @@ async def get_node_directive(account_id: int, node_id: str = "",
         # the `with` had closed it, which every caller saw as a 500.
         with cpdb.ro() as conn:
             row = conn.execute(
-                "SELECT run, services, updated_at FROM node_directives "
-                "WHERE account_id=?", (account_id,)).fetchone()
+                "SELECT run, services, kind, seed_body, updated_at "
+                "FROM node_directives WHERE account_id=?",
+                (account_id,)).fetchone()
             # AND the tenant's directive with this machine's own switch, so
             # a laptop can be excluded from a run without stopping the run.
             # An unknown node_id is treated as allowed: a node that has not
@@ -5078,10 +5087,21 @@ async def get_node_directive(account_id: int, node_id: str = "",
                                  "WHERE node_id=?", (node_id,)).fetchone()
                 takes = bool(n["takes_work"]) if n else True
         run = bool(row["run"]) if row else False
+        seed_body = None
+        if row and row["seed_body"]:
+            try:
+                seed_body = json.loads(row["seed_body"])
+            except (TypeError, ValueError):
+                # A row a future column shape cannot parse must not take the
+                # whole poll down -- the node just sees no seed body and
+                # logs a refusal, the same as any other bad request.
+                seed_body = None
         return {"accountId": account_id,
                 "run": run and takes,
                 "tenantRun": run,
                 "takesWork": takes,
+                "kind": (row["kind"] if row else "migrate") or "migrate",
+                "seed": seed_body,
                 "services": (row["services"] if row else "") or "",
                 "updatedAt": row["updated_at"] if row else ""}
     return await _off_loop(_read)
@@ -5101,6 +5121,21 @@ async def set_node_directive(req: DirectiveRequest,
     _require_account_access(account_id, op)
     if account_id is None:
         raise HTTPException(400, "no account to set a directive for")
+    kind = (req.kind or "migrate").strip().lower()
+    if kind not in ("migrate", "seed"):
+        raise HTTPException(400, f"kind must be 'migrate' or 'seed', got {kind!r}")
+    seed_body_json = ""
+    if kind == "seed" and req.run:
+        # Validated with the SAME function a local seed uses -- domain_guard,
+        # the typed-domain confirmation, scale, users, the worker ceiling --
+        # before a single byte is written. A directive that fails this can
+        # never reach a node to fail there instead, silently, in a log an
+        # operator has no route to.
+        import webui
+        argv, _env, err = webui.seed_argv(req.seed or {}, account_id)
+        if err:
+            raise HTTPException(400, err)
+        seed_body_json = json.dumps(req.seed or {})
 
     def _write() -> dict:
         # Audited: this starts writes against a live tenant from a machine
@@ -5108,22 +5143,25 @@ async def set_node_directive(req: DirectiveRequest,
         # question after a surprise.
         action = cpdb.begin_action(
             actor=str(op.name or "") or "operator", actor_role="superadmin",
-            action="start node work" if req.run else "stop node work",
-            reason=f"services={req.services or 'all'}",
-            target=f"account {account_id}", params={"run": req.run},
+            action=f"start node {kind}" if req.run else "stop node work",
+            reason=(f"services={req.services or 'all'}" if kind == "migrate"
+                    else f"seed domain={(req.seed or {}).get('confirm_domain', '')}"),
+            target=f"account {account_id}", params={"run": req.run, "kind": kind},
             account_id=account_id)
         with cpdb.rw() as conn:
             conn.execute(
                 "INSERT INTO node_directives (account_id, run, services, "
-                "updated_at, updated_by) VALUES (?,?,?,?,?) "
+                "kind, seed_body, updated_at, updated_by) VALUES (?,?,?,?,?,?,?) "
                 "ON CONFLICT(account_id) DO UPDATE SET run=excluded.run, "
-                "services=excluded.services, updated_at=excluded.updated_at, "
+                "services=excluded.services, kind=excluded.kind, "
+                "seed_body=excluded.seed_body, updated_at=excluded.updated_at, "
                 "updated_by=excluded.updated_by",
-                (account_id, 1 if req.run else 0, req.services[:200],
+                (account_id, 1 if req.run else 0, req.services[:200], kind,
+                 seed_body_json,
                  time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                  str(op.name or "")[:200]))
         cpdb.finish_action(action, "ok", "")
-        return {"accountId": account_id, "run": req.run,
+        return {"accountId": account_id, "run": req.run, "kind": kind,
                 "services": req.services}
     return await _off_loop(_write)
 
