@@ -691,6 +691,11 @@ const SeedStep: React.FC<{ domain?: string; accountId?: number }> =
               displayEmpty: true,
               SelectDisplayProps: { 'data-testid': 'seed-run-on' } as never,
             }}
+            // MUI's label only shrinks to the border automatically when it
+            // sees a truthy value; displayEmpty renders text for "" without
+            // telling the label that happened, so the floating "Run on"
+            // label sat on TOP of "This server" instead of above it.
+            InputLabelProps={{ shrink: true }}
             onChange={(e) => setRunOn(e.target.value)}
             helperText={runOn
               ? 'A directive is written; the node runs it on its own next '
