@@ -17,6 +17,7 @@ import {
   MigrationDetail as Detail, RepairSurvey,
 } from '@/api/controlPlane'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
+import RunReports from '@/components/RunReports'
 
 /**
  * One migration in full: what moved, what failed, and why.
@@ -158,6 +159,10 @@ export const MigrationDetail: React.FC = () => {
       )}
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
       {d?.error && <Alert severity="warning" sx={{ mb: 2 }}>{d.error}</Alert>}
+
+      {/* Outside the `d &&` block on purpose: the saved reports are the answer
+          to "how did it go" and must not depend on the live detail loading. */}
+      {Number.isFinite(id) && id > 0 && <RunReports accountId={id} />}
 
       {d && (
         <>

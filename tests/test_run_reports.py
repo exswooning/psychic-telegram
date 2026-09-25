@@ -215,6 +215,13 @@ class TestPersistence:
         assert meta["files"] == ["json"]
         assert any(e["section"] == "pdf" for e in RR.load_report(7, meta["id"])["facts"]["errors"])
 
+    def test_the_operator_listing_spans_accounts_and_labels_each(self, settings, db, reports_home):
+        a = RR.generate(db, settings, 7)
+        b = RR.generate(db, settings, 8)
+        got = RR.list_all_reports()
+        assert {(r["id"], r["accountId"]) for r in got} == {(a["id"], 7), (b["id"], 8)}
+        assert RR.list_all_reports() == sorted(got, key=lambda r: r["generatedAt"], reverse=True)
+
     def test_the_newest_report_lists_first(self, settings, db, reports_home):
         import datetime as dt
         a = RR.build_report(RR.collect_facts(db, settings), account_id=7,
@@ -324,6 +331,30 @@ class TestReportApi:
         assert cp.get("/api/v2/reports/migration-20260925T195855Z/pdf", params={"audience": "robot"}).status_code == 400
         assert cp.get("/api/v2/reports/..%2F..%2Fetc%2Fpasswd/pdf").status_code == 404
         assert cp.get("/api/v2/reports/not-an-id").status_code == 404
+
+    def test_an_ordinary_account_lists_only_its_own(self, cp, settings, db, reports_home, monkeypatch):
+        import api_server
+        aid = _signup(cp, "a@example.com")
+        monkeypatch.setattr(api_server, "_report_settings", lambda a: settings)
+        cp.post("/api/v2/reports/generate", json={})
+        RR.generate(db, settings, aid + 1000)          # someone else's report
+        got = cp.get("/api/v2/reports").json()
+        assert got["scope"] == "account" and {r["accountId"] for r in got["reports"]} == {aid}
+
+    def test_a_superadmin_lists_every_accounts_reports(self, cp, settings, db, reports_home, monkeypatch):
+        import accounts_auth
+        import api_server
+        aid = _signup(cp, "boss@example.com")
+        monkeypatch.setattr(accounts_auth, "get_account", lambda a: {
+            "name": "Boss", "email": "boss@example.com", "subscription_active": 1,
+            "is_superadmin": 1, "seed_enabled": 1})
+        RR.generate(db, settings, aid)
+        RR.generate(db, settings, 4242)
+        got = cp.get("/api/v2/reports").json()
+        assert got["scope"] == "all" and {r["accountId"] for r in got["reports"]} == {aid, 4242}
+        # ... and can fetch a file from an account that is not their own.
+        rid = next(r["id"] for r in got["reports"] if r["accountId"] == 4242)
+        assert cp.get(f"/api/v2/reports/{rid}/pdf", params={"account_id": 4242}).status_code == 200
 
     def test_seed_reports_are_not_pretended(self, cp):
         _signup(cp, "a@example.com")

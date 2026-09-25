@@ -32,23 +32,27 @@ const when = (iso: string) => {
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString()
 }
 
-export const RunReports: React.FC = () => {
+export const RunReports: React.FC<{
+  /** Show this account's reports and generate for it. Omitted, the caller's
+   *  own -- or every account's, for a superadmin. */
+  accountId?: number
+}> = ({ accountId }) => {
   const [reports, setReports] = useState<ReportSummary[] | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
   const load = useCallback(() => {
-    fetchReports()
+    fetchReports(accountId)
       .then((r) => { setReports(r.reports); setError(r.error) })
       .catch((e) => { setReports((v) => v ?? []); setError(e instanceof Error ? e.message : String(e)) })
-  }, [])
+  }, [accountId])
   useEffect(load, [load])
 
   const make = async () => {
     setBusy(true)
     setError('')
     try {
-      await generateReport()
+      await generateReport(accountId)
       load()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -95,6 +99,9 @@ export const RunReports: React.FC = () => {
               <Typography variant="body2" sx={{ fontWeight: 600 }}>
                 {r.kind} · {when(r.generatedAt)}
                 {r.tenants?.source && ` · ${r.tenants.source} → ${r.tenants.target ?? '?'}`}
+                {/* Only when looking across accounts: on one account's own
+                    page it would just repeat the header. */}
+                {!accountId && r.accountId ? ` · account #${r.accountId}` : ''}
               </Typography>
               <Typography variant="caption" color="text.secondary">
                 {r.counts.pass} passed · {r.counts.warn} warning{r.counts.warn === 1 ? '' : 's'} ·{' '}
@@ -104,13 +111,13 @@ export const RunReports: React.FC = () => {
             </Box>
             <Stack direction="row" spacing={0.75}>
               <Button size="small" variant="outlined" startIcon={<PdfIcon />} component="a"
-                      href={reportUrl(r.id, 'human')} download disabled={!r.files.includes('human.pdf')}
+                      href={reportUrl(r.id, 'human', r.accountId ?? accountId)} download disabled={!r.files.includes('human.pdf')}
                       data-testid={`pdf-human-${r.id}`}>Human PDF</Button>
               <Button size="small" variant="outlined" startIcon={<ClaudeIcon />} component="a"
-                      href={reportUrl(r.id, 'claude')} download disabled={!r.files.includes('claude.pdf')}
+                      href={reportUrl(r.id, 'claude', r.accountId ?? accountId)} download disabled={!r.files.includes('claude.pdf')}
                       data-testid={`pdf-claude-${r.id}`}>Claude PDF</Button>
               <Button size="small" startIcon={<JsonIcon />} component="a"
-                      href={reportUrl(r.id, 'json')} target="_blank" rel="noreferrer">JSON</Button>
+                      href={reportUrl(r.id, 'json', r.accountId ?? accountId)} target="_blank" rel="noreferrer">JSON</Button>
             </Stack>
           </Stack>
         ))}

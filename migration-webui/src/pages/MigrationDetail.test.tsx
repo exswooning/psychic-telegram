@@ -5,6 +5,9 @@ import MigrationDetail from './MigrationDetail'
 
 const fetchMigrationDetail = vi.fn()
 const startDelta = vi.fn()
+vi.mock('@/components/RunReports', () => ({
+  default: ({ accountId }: { accountId?: number }) => <div data-testid="reports-panel">{accountId}</div>,
+}))
 vi.mock('@/api/controlPlane', () => ({
   fetchMigrationDetail: (...a: unknown[]) => fetchMigrationDetail(...a),
   startDelta: (...a: unknown[]) => startDelta(...a),
@@ -68,6 +71,18 @@ const show = (d: unknown) => {
 
 describe('MigrationDetail', () => {
   beforeEach(() => { vi.clearAllMocks() })
+
+  it('carries the run reports for this account, even before the detail has loaded', async () => {
+    // The saved reports are the answer to "how did it go", so they must not
+    // wait on (or depend on) the live detail.
+    fetchMigrationDetail.mockReturnValue(new Promise(() => {}))     // never loads
+    render(
+      <MemoryRouter initialEntries={['/migrations/7']}>
+        <Routes><Route path="/migrations/:accountId" element={<MigrationDetail />} /></Routes>
+      </MemoryRouter>,
+    )
+    expect(await screen.findByTestId('reports-panel')).toHaveTextContent('7')
+  })
 
   it('reports errors grouped by cause with a count', async () => {
     show(detail())

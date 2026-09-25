@@ -4,6 +4,7 @@ import MigrationDetail from './MigrationDetail'
 
 const fetchMigrationDetail = vi.fn()
 
+vi.mock('@/components/RunReports', () => ({ default: () => null }))
 vi.mock('@/api/controlPlane', () => ({
   fetchMigrationDetail: (...a: unknown[]) => fetchMigrationDetail(...a),
   startDelta: vi.fn(),

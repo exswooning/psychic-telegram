@@ -10,8 +10,11 @@ import RunReports from './RunReports'
 const api = vi.hoisted(() => ({ fetchReports: vi.fn(), generateReport: vi.fn() }))
 vi.mock('@/api/controlPlane', () => ({
   fetchReports: api.fetchReports, generateReport: api.generateReport,
-  reportUrl: (id: string, what: string) =>
-    what === 'json' ? `/api/v2/reports/${id}` : `/api/v2/reports/${id}/pdf?audience=${what}`,
+  reportUrl: (id: string, what: string, account?: number | null) => {
+    const a = account ? `account_id=${account}` : ''
+    return what === 'json' ? `/api/v2/reports/${id}${a ? `?${a}` : ''}`
+      : `/api/v2/reports/${id}/pdf?audience=${what}${a ? `&${a}` : ''}`
+  },
 }))
 
 const rep = (over = {}) => ({
@@ -101,5 +104,32 @@ describe('RunReports', () => {
     render(<RunReports />)
     expect(await screen.findByText('HTTP 500')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Generate report now' })).toBeEnabled()
+  })
+
+  describe('for one account, or across accounts', () => {
+    it('asks for and generates for the account it was given', async () => {
+      api.generateReport.mockResolvedValue(rep())
+      render(<RunReports accountId={7} />)
+      await screen.findByTestId('no-reports')
+      expect(api.fetchReports).toHaveBeenCalledWith(7)
+      fireEvent.click(screen.getByRole('button', { name: 'Generate report now' }))
+      await waitFor(() => expect(api.generateReport).toHaveBeenCalledWith(7))
+    })
+
+    it('labels each report with its account when looking across accounts, and links to that account\'s file', async () => {
+      api.fetchReports.mockResolvedValue({ accountId: 1, scope: 'all', error: '',
+                                            reports: [rep({ accountId: 2 })] })
+      render(<RunReports />)
+      const row = await screen.findByTestId('report-migration-20260925T195855Z')
+      expect(row).toHaveTextContent('account #2')
+      expect(screen.getByTestId('pdf-human-migration-20260925T195855Z'))
+        .toHaveAttribute('href', '/api/v2/reports/migration-20260925T195855Z/pdf?audience=human&account_id=2')
+    })
+
+    it('does not repeat the account on that account\'s own page', async () => {
+      api.fetchReports.mockResolvedValue({ accountId: 2, error: '', reports: [rep({ accountId: 2 })] })
+      render(<RunReports accountId={2} />)
+      expect(await screen.findByTestId('report-migration-20260925T195855Z')).not.toHaveTextContent('account #')
+    })
   })
 })

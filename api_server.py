@@ -3629,13 +3629,18 @@ def _job_log_tail(account_id: int, names=("migrate", "delta")) -> list[str]:
 
 @app.get("/api/v2/reports")
 async def run_reports(account_id: int | None = None, op: Operator = Depends(operator)):
-    """Every saved report for the account in context, newest first."""
+    """Saved reports, newest first: the account's own, or -- for a superadmin
+    who has not named one -- every account's, each labelled with its accountId."""
     require_login(op)
+    import run_report
+    if op.is_superadmin and not account_id:
+        return {"accountId": _account_in_context(op) or 0, "scope": "all",
+                "reports": await _off_loop(run_report.list_all_reports), "error": ""}
     aid = _reports_account(op, account_id)
     if not aid:
-        return {"accountId": 0, "reports": [], "error": "no account in context"}
-    import run_report
-    return {"accountId": aid, "reports": await _off_loop(run_report.list_reports, aid), "error": ""}
+        return {"accountId": 0, "scope": "account", "reports": [], "error": "no account in context"}
+    return {"accountId": aid, "scope": "account",
+            "reports": await _off_loop(run_report.list_reports, aid), "error": ""}
 
 
 @app.post("/api/v2/reports/generate")
@@ -3657,7 +3662,8 @@ async def generate_run_report(body: GenerateReportRequest, op: Operator = Depend
         st = _report_settings(aid)
         path = st.db_path
         if not path or not os.path.isfile(path):
-            raise HTTPException(404, "this account has no migration ledger yet")
+            raise HTTPException(404, "this account has no migration ledger yet -- open its "
+                                    "migration under Migrations and generate the report there")
         with cpdb.ro(path) as conn:
             class _D:
                 pass

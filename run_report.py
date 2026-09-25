@@ -390,7 +390,7 @@ def save_report(report: dict, account_id) -> dict:
 def summarise(report: dict, files: list[str] | None = None) -> dict:
     run = (report.get("facts") or {}).get("run") or {}
     return {"id": report["id"], "kind": report["kind"], "generatedAt": report["generatedAt"],
-            "verdict": report["verdict"], "counts": report["benchmarks"]["counts"],
+            "accountId": report.get("accountId"), "verdict": report["verdict"], "counts": report["benchmarks"]["counts"],
             "tenants": report.get("tenants"), "returnCode": run.get("returnCode"),
             "startedAt": run.get("startedAt"), "finishedAt": run.get("finishedAt"),
             "files": files or []}
@@ -422,6 +422,29 @@ def list_reports(account_id) -> list[dict]:
             out.append(summarise(rep, files))
         except (OSError, ValueError, KeyError):
             continue
+    return sorted(out, key=lambda r: r["generatedAt"], reverse=True)
+
+
+def list_all_reports() -> list[dict]:
+    """Every account's reports, newest first, each carrying its accountId.
+
+    For an operator: a report belongs to an account, but the person who needs
+    it -- to hand to Claude Code, say -- is usually signed in as themselves,
+    not as the tenant it is about. Without this the report exists and cannot
+    be found.
+    """
+    base = os.path.dirname(reports_dir(0))
+    try:
+        names = os.listdir(base)
+    except OSError:
+        return []
+    out = []
+    for n in names:
+        if not (n.isdigit() or n == "legacy"):
+            continue
+        aid = int(n) if n.isdigit() else None
+        for r in list_reports(aid):
+            out.append({**r, "accountId": r.get("accountId", aid) if r.get("accountId") is not None else aid})
     return sorted(out, key=lambda r: r["generatedAt"], reverse=True)
 
 

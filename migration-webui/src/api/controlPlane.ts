@@ -1374,6 +1374,9 @@ export const fetchMyMetrics = (history = 60) =>
 export type Verdict = 'PASS' | 'FAIL' | 'UNVERIFIED'
 export interface ReportSummary {
   id: string
+  /** Whose report. Present for every report; shown when an operator is
+   *  looking at several accounts' at once. */
+  accountId?: number | null
   kind: string
   generatedAt: string
   verdict: Verdict
@@ -1386,19 +1389,24 @@ export interface ReportSummary {
   files: string[]
 }
 
-export const fetchReports = () =>
-  cpFetch<{ accountId: number; reports: ReportSummary[]; error: string }>('/api/v2/reports')
+/** With no account, the caller's own -- or, for a superadmin, every account's. */
+export const fetchReports = (accountId?: number) =>
+  cpFetch<{ accountId: number; scope?: 'all' | 'account'; reports: ReportSummary[]; error: string }>(
+    `/api/v2/reports${accountId ? `?account_id=${accountId}` : ''}`)
 
-export const generateReport = () =>
+export const generateReport = (accountId?: number) =>
   cpFetch<ReportSummary>('/api/v2/reports/generate', {
-    method: 'POST', body: JSON.stringify({ kind: 'migration' }),
+    method: 'POST', body: JSON.stringify({ kind: 'migration', account_id: accountId }),
   })
 
 /** Where a report file is downloaded from. A plain link, so the browser's own
  *  download handling (and the session cookie) does the work. */
-export const reportUrl = (id: string, what: 'human' | 'claude' | 'json') =>
-  what === 'json' ? `${CP_BASE}/api/v2/reports/${id}`
-    : `${CP_BASE}/api/v2/reports/${id}/pdf?audience=${what}`
+export const reportUrl = (id: string, what: 'human' | 'claude' | 'json', accountId?: number | null) => {
+  const acct = accountId ? `account_id=${accountId}` : ''
+  return what === 'json'
+    ? `${CP_BASE}/api/v2/reports/${id}${acct ? `?${acct}` : ''}`
+    : `${CP_BASE}/api/v2/reports/${id}/pdf?audience=${what}${acct ? `&${acct}` : ''}`
+}
 
 export const fetchTestReport = () => cpFetch<TestReport>('/api/v2/tests')
 

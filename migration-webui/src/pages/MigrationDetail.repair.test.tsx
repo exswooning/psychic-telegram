@@ -5,6 +5,7 @@ import MigrationDetail from './MigrationDetail'
 const fetchMigrationDetail = vi.fn()
 const runRepair = vi.fn()
 
+vi.mock('@/components/RunReports', () => ({ default: () => null }))
 vi.mock('@/api/controlPlane', () => ({
   fetchMigrationDetail: (...a: unknown[]) => fetchMigrationDetail(...a),
   runRepair: (...a: unknown[]) => runRepair(...a),
