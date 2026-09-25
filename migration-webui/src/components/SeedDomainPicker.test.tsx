@@ -52,7 +52,27 @@ describe('picking a tenant to seed', () => {
     const onPick = vi.fn()
     render(<SeedDomainPicker onPick={onPick} onNew={() => {}} />)
     fireEvent.click(await screen.findByTestId('seed-domain-source.saraf.com'))
-    expect(onPick).toHaveBeenCalledWith('source.saraf.com', 'info@source.saraf.com', 68)
+    expect(onPick).toHaveBeenCalledWith('source.saraf.com', 'info@source.saraf.com', 68, 'source')
+  })
+
+  it('marks a target-only domain, and hands its side back so top up is not offered', async () => {
+    all.mockResolvedValue({ superadmin: true, domains: [
+      dom({ side: 'target' as const, domain: 'target2.saraf.com', accountId: 3 })] })
+    const onPick = vi.fn()
+    render(<SeedDomainPicker onPick={onPick} onNew={() => {}} />)
+    const card = await screen.findByTestId('seed-domain-target2.saraf.com')
+    expect(card).toHaveTextContent(/target only/i)
+    fireEvent.click(card)
+    expect(onPick.mock.calls[0][3]).toBe('target')
+  })
+
+  it('shows the source row when a domain is set up in both slots', async () => {
+    all.mockResolvedValue({ superadmin: true, domains: [
+      dom({ side: 'target' as const, accountId: 9 }), dom({ accountId: 68 })] })
+    const onPick = vi.fn()
+    render(<SeedDomainPicker onPick={onPick} onNew={() => {}} />)
+    fireEvent.click(await screen.findByTestId('seed-domain-source.saraf.com'))
+    expect(onPick).toHaveBeenCalledWith('source.saraf.com', 'info@source.saraf.com', 68, 'source')
   })
 
   it('never offers a domain with no key -- the key is what seeds', async () => {

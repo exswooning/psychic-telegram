@@ -351,9 +351,10 @@ const Wizard: React.FC = () => {
       && !seedNewDomain) {
     return (
       <SeedDomainPicker
-        onPick={(d, email, accountId) => {
+        onPick={(d, email, accountId, side) => {
           setDomain(d); setAdminEmail(email); setSeedAccountId(accountId)
-          setSeedFromPicker(true); setStep('run')
+          // Top up needs a SOURCE key; a target-only pick opens on setup.
+          setSeedFromPicker(side === 'source'); setStep('run')
         }}
         onNew={() => setSeedNewDomain(true)} />
     )

@@ -25,7 +25,8 @@ export const SeedDomainPicker: React.FC<{
   // operator's own account unless told otherwise -- omitting this is what
   // made picking another account's domain fail with "set the source domain
   // in step 2 first", pointing at the picker's OWN account instead.
-  onPick: (domain: string, adminEmail: string, accountId: number) => void
+  onPick: (domain: string, adminEmail: string, accountId: number,
+           side: 'source' | 'target') => void
   onNew: () => void
 }> = ({ onPick, onNew }) => {
   const [domains, setDomains] = useState<ConfiguredDomain[] | null>(null)
@@ -43,8 +44,14 @@ export const SeedDomainPicker: React.FC<{
   // One card per DOMAIN, not per configured row. The same tenant is often
   // set up under more than one account (and in both slots), which rendered
   // as three identical cards that all did exactly the same thing.
+  // Source rows first: seeding and top-up only ever write to the SOURCE
+  // side, so when a domain is set up in both slots the source row is the
+  // one that can be seeded. A target-only domain still shows, marked, so
+  // the way to make it seedable is visible instead of a dead-end.
   const unique: ConfiguredDomain[] = []
-  for (const d of domains || []) {
+  const bySide = [...(domains || [])].sort(
+    (a, b) => Number(b.side === 'source') - Number(a.side === 'source'))
+  for (const d of bySide) {
     if (!unique.some((u) => u.domain.toLowerCase() === d.domain.toLowerCase())) {
       unique.push(d)
     }
@@ -85,7 +92,7 @@ export const SeedDomainPicker: React.FC<{
                  gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))' }}>
         {unique.map((d) => (
           <Paper key={d.domain} variant="outlined" data-testid={`seed-domain-${d.domain}`}
-                 onClick={() => onPick(d.domain, d.adminEmail, d.accountId)}
+                 onClick={() => onPick(d.domain, d.adminEmail, d.accountId, d.side)}
                  sx={{ p: 2, cursor: 'pointer',
                        '&:hover': { borderColor: 'primary.main' } }}>
             <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
@@ -99,6 +106,11 @@ export const SeedDomainPicker: React.FC<{
                         sx={{ wordBreak: 'break-all' }}>
               {d.adminEmail}
             </Typography>
+            {d.side === 'target' && (
+              <Typography variant="caption" color="warning.main" sx={{ display: 'block' }}>
+                Target only — set it up as a source before it can be seeded.
+              </Typography>
+            )}
           </Paper>
         ))}
       </Box>

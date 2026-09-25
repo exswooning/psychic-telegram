@@ -165,7 +165,7 @@ export const SeedTopUp: React.FC<{ domain?: string; accountId?: number }> =
             <TextField size="small" type="number" label="Fill to % of each account's limit"
               value={fillPercent} onChange={(e) => setFillPercent(e.target.value)}
               inputProps={{ min: 1, max: 100, 'data-testid': 'topup-fill-percent' }}
-              error={!pctOk} helperText={pctOk ? ' ' : 'between 1 and 100'} sx={{ mb: 1 }} />
+              error={!pctOk} helperText={pctOk ? ' ' : 'between 1 and 100'} sx={{ mb: 1, minWidth: 240 }} />
             {skuErr && <Alert severity="warning">{skuErr}</Alert>}
             {!skus && !skuErr && <Typography variant="caption">Reading licences…</Typography>}
             {skus?.map((s) => (
