@@ -37,8 +37,9 @@ export const ChartFrame: React.FC<{
 
 export interface Series {
   key: string; name: string; color: string
-  /** Series-only: how to draw it. Bars ignore this. */
-  type?: 'area' | 'line' | 'bar'
+  /** How to draw it. "step" holds each value until the next change, joined
+   *  across gaps; "dots" marks points only (events on top of a line). */
+  type?: 'area' | 'line' | 'bar' | 'step' | 'dots'
   /** Series-only: put it on the right-hand axis (a second unit). */
   right?: boolean
   stackId?: string
@@ -50,28 +51,50 @@ type Row = Record<string, string | number>
 export const SeriesChart: React.FC<{
   data: Row[]; xKey: string; series: Series[]
   fmt?: (v: number) => string; fmtRight?: (v: number) => string
+  /** Put the x values on a true time scale (points spaced by when they
+   *  happened, not by how many there are), formatted by this. */
+  timeFmt?: (epochSec: number) => string
+  noLegend?: boolean
   /** Injected by ResponsiveContainer, which sizes its DIRECT child -- and
    *  this wrapper is that child, so it has to hand them on to the chart. */
   width?: number; height?: number
-}> = ({ data, xKey, series, fmt, fmtRight, width, height }) => {
+}> = ({ data, xKey, series, fmt, fmtRight, timeFmt, noLegend, width, height }) => {
   const s = useChartStyle()
   const hasRight = series.some((x) => x.right)
   return (
     <ComposedChart width={width} height={height} data={data}
                    margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
       <CartesianGrid strokeDasharray="3 3" stroke={s.grid} vertical={false} />
-      <XAxis dataKey={xKey} stroke={s.axis} fontSize={10} tickLine={false} axisLine={false}
-             minTickGap={24} />
+      {timeFmt
+        ? <XAxis type="number" scale="time" dataKey={xKey} domain={['dataMin', 'dataMax']}
+                 tickFormatter={timeFmt} stroke={s.axis} fontSize={10} tickLine={false}
+                 axisLine={false} minTickGap={40} />
+        : <XAxis dataKey={xKey} stroke={s.axis} fontSize={10} tickLine={false} axisLine={false}
+                 minTickGap={24} />}
       <YAxis yAxisId="l" stroke={s.axis} fontSize={10} tickLine={false} axisLine={false}
              width={44} tickFormatter={fmt} allowDecimals />
       {hasRight && (
         <YAxis yAxisId="r" orientation="right" stroke={s.axis} fontSize={10} tickLine={false}
                axisLine={false} width={62} tickFormatter={fmtRight} />
       )}
-      <Tooltip contentStyle={s.tooltip} />
-      {series.length > 1 && <Legend wrapperStyle={{ fontSize: 11 }} />}
+      <Tooltip contentStyle={s.tooltip}
+               labelFormatter={timeFmt ? (v) => timeFmt(Number(v)) : undefined} />
+      {series.length > 1 && !noLegend && <Legend wrapperStyle={{ fontSize: 11 }} />}
       {series.map((x) => {
         const yAxisId = x.right ? 'r' : 'l'
+        if (x.type === 'step') {
+          // Held until the next change, and joined across the rows that
+          // belong to other series -- the shape of a rate that only moves
+          // when the controller moves it.
+          return <Line key={x.key} yAxisId={yAxisId} type="stepAfter" connectNulls dataKey={x.key}
+                       name={x.name} stroke={x.color} strokeWidth={2} dot={false}
+                       isAnimationActive={false} />
+        }
+        if (x.type === 'dots') {
+          return <Line key={x.key} yAxisId={yAxisId} dataKey={x.key} name={x.name} stroke="none"
+                       dot={{ r: 3.5, fill: x.color, stroke: x.color }} activeDot={false}
+                       isAnimationActive={false} />
+        }
         if (x.type === 'line') {
           return <Line key={x.key} yAxisId={yAxisId} type="monotone" dataKey={x.key} name={x.name}
                        stroke={x.color} strokeWidth={2} dot={false} isAnimationActive={false} />

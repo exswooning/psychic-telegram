@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
-  dayRows, historyRows, limiterRows, operationRows, progressRow, transferRow, volumeRows,
+  dayRows, historyRows, limiterRows, operationRows, progressRow, sawtoothRows, transferRow,
+  volumeRows,
 } from './metricsSeries'
 
 describe('history', () => {
@@ -67,5 +68,44 @@ describe('days and limiters', () => {
   it('sorts limiters by name', () => {
     const s = { rate: 1, floor: 0, ceiling: 2, rejections: 0, backoffs: 0 }
     expect(limiterRows({ drive: s, chat: s }).map((x) => x.name)).toEqual(['chat', 'drive'])
+  })
+})
+
+describe('the limiter sawtooth', () => {
+  const P = (t: number, rate: number, kind: 'probe' | 'backoff' | 'sample') => ({ t, rate, kind })
+
+  it('counts pushbacks and the spacing between them from the limiter\'s own events', () => {
+    const { stats, rows } = sawtoothRows({ target: [
+      P(0, 40, 'probe'), P(20, 44, 'probe'), P(40, 30, 'backoff'),
+      P(60, 33, 'probe'), P(140, 23, 'backoff'), P(200, 25, 'probe')] })
+    expect(stats[0]).toMatchObject({ name: 'target', pushbacks: 2, everySec: 100, low: 23, high: 44 })
+    // A pushback also fills its own key, so the chart can mark it.
+    expect(rows.filter((r) => 'target pushback' in r).map((r) => r.ts)).toEqual([40, 140])
+  })
+
+  it('infers pushbacks from drops between snapshots only when there are no events', () => {
+    const { stats } = sawtoothRows({ target: [
+      P(0, 50, 'sample'), P(15, 60, 'sample'), P(30, 42, 'sample'), P(45, 47, 'sample')] })
+    expect(stats[0].pushbacks).toBe(1)                     // 60 -> 42
+    // With real events present, a snapshot lower than the one before it is
+    // not a second pushback -- the event already said so.
+    const both = sawtoothRows({ target: [
+      P(0, 60, 'sample'), P(10, 42, 'backoff'), P(15, 42, 'sample')] })
+    expect(both.stats[0].pushbacks).toBe(1)
+  })
+
+  it('has no spacing to report for fewer than two pushbacks', () => {
+    expect(sawtoothRows({ t: [P(0, 10, 'backoff')] }).stats[0].everySec).toBeNull()
+  })
+
+  it('orders every limiter\'s points by time, each row carrying only its own limiter', () => {
+    const { rows } = sawtoothRows({ source: [P(5, 1200, 'sample')], target: [P(1, 40, 'probe')] })
+    expect(rows.map((r) => r.ts)).toEqual([1, 5])
+    expect(rows[0]).toEqual({ ts: 1, target: 40 })
+  })
+
+  it('is empty without history, rather than a line at zero', () => {
+    expect(sawtoothRows(undefined)).toEqual({ rows: [], stats: [] })
+    expect(sawtoothRows({ target: [] }).rows).toEqual([])
   })
 })

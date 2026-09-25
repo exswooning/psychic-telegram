@@ -3543,6 +3543,40 @@ def _progress_since(conn, started_at: str | None) -> dict | None:
     return {"moved": row["moved"] or 0, "failed": row["failed"] or 0,
             "skipped": row["skipped"] or 0, "since": bound}
 
+def _limiter_history(samples: list[dict]) -> dict:
+    """{limiter: [{t, rate, kind}]}, oldest first -- the rate limiters'
+    sawtooth over the window the snapshots cover.
+
+    Two sources, merged. Each snapshot holds every limiter's rate AT THAT
+    MOMENT (kind "sample") -- coarse, but present in history recorded before
+    events existed. Runs since also record each probe and backoff as it
+    happens, which is what shows the actual shape: a climb by probes, then a
+    sharp drop at each quota pushback. `samples` is newest first.
+    """
+    by: dict[str, list[dict]] = {}
+    for s in reversed(samples):
+        try:
+            when = _dt.datetime.fromisoformat(
+                str(s.get("recordedAt")).replace("Z", "+00:00"))
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=_dt.timezone.utc)
+            t = when.timestamp()
+        except ValueError:
+            t = None
+        for name, st in (s.get("limiters") or {}).items():
+            if t is not None and isinstance(st, dict) and "rate" in st:
+                by.setdefault(name, []).append(
+                    {"t": t, "rate": st["rate"], "kind": "sample"})
+        for name, events in (s.get("limiter_events") or {}).items():
+            for e in events:
+                if isinstance(e, (list, tuple)) and len(e) == 3:
+                    by.setdefault(name, []).append(
+                        {"t": e[0], "rate": e[1], "kind": e[2]})
+    for points in by.values():
+        points.sort(key=lambda p: p["t"])
+    return by
+
+
 @app.get("/api/v2/metrics")
 async def metrics_for_me(history: int = 60, op: Operator = Depends(operator)):
     """Metrics without having to name an account.
@@ -3769,6 +3803,7 @@ async def migration_metrics(account_id: int, history: int = 60,
              "p95": s.get("p95", 0),
              "failures": s.get("failures", 0)}
             for s in reversed(samples)]
+        out["limiterHistory"] = _limiter_history(samples)
         return out
 
     return await _off_loop(

@@ -28,6 +28,7 @@ import random
 import re
 import threading
 import time
+from collections import deque
 from typing import Callable, TypeVar
 
 import http.client
@@ -580,6 +581,18 @@ class AdaptiveRateLimiter(RateLimiter):
         self._last_change = time.monotonic()
         self._rejections = 0
         self._backoffs = 0
+        # Every rate change, (wall clock, rate after, "probe"|"backoff"), until
+        # someone drains it. This is what draws the sawtooth: the climb is
+        # probes, each drop is a pushback, and a snapshot every 15 s cannot
+        # resolve either. Bounded, so a reader that never comes cannot grow it.
+        self._events: deque = deque(maxlen=2000)
+
+    def drain_events(self) -> list[tuple[float, float, str]]:
+        """The rate changes since the last call, oldest first, then forgotten."""
+        with self._lock:
+            out = list(self._events)
+            self._events.clear()
+        return out
 
     def penalise(self) -> float:
         """Called when the service rejected a call for quota.
@@ -612,6 +625,8 @@ class AdaptiveRateLimiter(RateLimiter):
             if self.rate < before:
                 self._backoffs += 1
             changed = self.rate != before
+            if changed:
+                self._events.append((time.time(), self.rate, "backoff"))
         if changed and self._on_change:
             self._on_change("backoff", before, self.rate)
         return self.rate
@@ -628,6 +643,7 @@ class AdaptiveRateLimiter(RateLimiter):
                 self.rate = min(self.ceiling, self.rate + inc)
                 self._last_change = time.monotonic()
                 grew = (before, self.rate)
+                self._events.append((time.time(), self.rate, "probe"))
             else:
                 grew = None
         if grew and self._on_change:

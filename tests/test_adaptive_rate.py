@@ -363,3 +363,44 @@ class TestBackoffIsGentlerThanHalving:
         from resilience import AdaptiveRateLimiter
         assert "decrease" in AdaptiveRateLimiter(10, floor=1,
                                                  ceiling=100).stats()
+
+
+class TestItRecordsTheSawtooth:
+    """The climb is probes and each drop is a pushback; a snapshot every 15 s
+    cannot resolve either, so the limiter keeps its own change log."""
+
+    def test_probes_and_backoffs_are_recorded_in_order(self):
+        lim = AdaptiveRateLimiter(40, floor=5, ceiling=200, step=5, probe_after=0)
+        lim.acquire()                 # 40 -> 45
+        lim.acquire()                 # 45 -> 50
+        lim.penalise()                # drop
+        kinds = [k for _, _, k in lim.drain_events()]
+        assert kinds == ["probe", "probe", "backoff"]
+
+    def test_the_recorded_rate_is_the_rate_after_the_change(self):
+        lim = AdaptiveRateLimiter(40, floor=5, ceiling=200, step=5, probe_after=0)
+        lim.acquire()
+        (t, rate, kind), = lim.drain_events()
+        assert (rate, kind) == (45.0, "probe") and t > 1_600_000_000
+
+    def test_draining_hands_each_event_over_exactly_once(self):
+        lim = AdaptiveRateLimiter(40, floor=5, ceiling=200)
+        lim.penalise()
+        assert len(lim.drain_events()) == 1
+        assert lim.drain_events() == []
+
+    def test_a_pushback_at_the_floor_changes_nothing_so_records_nothing(self):
+        lim = AdaptiveRateLimiter(5, floor=5, ceiling=200)
+        lim.penalise()
+        assert lim.drain_events() == []
+
+    def test_the_log_is_bounded(self):
+        """A reader that never comes must not let the log grow for the length
+        of a multi-day run. (Filled directly: acquire() really sleeps to pace
+        calls, which is the point of it and no use to a test.)"""
+        lim = AdaptiveRateLimiter(40, floor=5, ceiling=200)
+        for i in range(5000):
+            lim._events.append((float(i), 40.0, "probe"))
+        drained = lim.drain_events()
+        assert len(drained) == 2000
+        assert drained[-1][0] == 4999.0        # the newest survive

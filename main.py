@@ -1012,6 +1012,7 @@ def _metrics_flusher(stop_event: threading.Event, db,
             try:
                 import drive_engine
                 payload["limiters"] = drive_engine.limiter_stats()
+                payload["limiter_events"] = drive_engine.limiter_events()
                 # A run that quietly changed what it preserves has to be able
                 # to say so. When the corpus shares at folder level the engine
                 # stops recreating inherited grants per file -- correct, and

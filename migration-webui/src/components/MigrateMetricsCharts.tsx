@@ -13,7 +13,8 @@ import type { MetricsSnapshot } from '@/api/controlPlane'
 import { useChartStyle } from '@/hooks/useChartStyle'
 import { BarsChart, ChartFrame, SeriesChart } from '@/components/Charts'
 import {
-  dayRows, historyRows, limiterRows, operationRows, progressRow, transferRow, volumeRows,
+  clockAt, dayRows, historyRows, limiterRows, operationRows, progressRow, sawtoothRows,
+  transferRow, volumeRows,
 } from '@/utils/metricsSeries'
 
 const n = (v: number) => v.toLocaleString()
@@ -25,6 +26,12 @@ export const MigrateMetricsCharts: React.FC<{ m: MetricsSnapshot }> = ({ m }) =>
   const hist = historyRows(m.history)
   const ops = operationRows(m.operations)
   const lim = limiterRows(m.limiters)
+  // One entry per limiter, each shaped on its own.
+  const saw = Object.keys(m.limiterHistory ?? {}).sort().map((name) => {
+    const { rows, stats } = sawtoothRows({ [name]: m.limiterHistory![name] })
+    return { name, rows, stat: stats[0] }
+  }).filter((x) => x.stat)
+  const sawColors = [c.primary, c.info, c.success, c.warning]
   const vol = volumeRows(m.volume)
   const days = dayRows(m.throughput)
   const prog = progressRow(m.throughput)
@@ -72,6 +79,32 @@ export const MigrateMetricsCharts: React.FC<{ m: MetricsSnapshot }> = ({ m }) =>
                               { key: 'failures', name: 'failures', color: c.error }]} />
         </ChartFrame>
 
+        {/* One chart PER limiter, full width. They differ by orders of
+            magnitude (a source bucket pinned at 1,200/s beside a target one
+            sawtoothing 45-85/s), so sharing an axis flattens exactly the
+            shape this exists to show. */}
+        {saw.length === 0 && (
+          <Box sx={{ gridColumn: '1 / -1' }}>
+            <ChartFrame title="Rate limiter sawtooth" empty="Needs limiter snapshots from the running migration.">
+              <SeriesChart data={[]} xKey="ts" series={[]} />
+            </ChartFrame>
+          </Box>
+        )}
+        {saw.map(({ name, rows, stat }, i) => (
+          <Box key={name} sx={{ gridColumn: '1 / -1' }}>
+            <ChartFrame title={`Sawtooth · ${name}`} height={170}
+                        hint={`${stat.pushbacks.toLocaleString()} pushback${stat.pushbacks === 1 ? '' : 's'}`
+                          + `${stat.everySec != null ? `, one every ${Math.round(stat.everySec)}s` : ''}`
+                          + ` · ${Math.round(stat.low)}–${Math.round(stat.high)} calls/s — climbs are the limiter probing for headroom, red dots are quota pushbacks from Google`}
+                        empty={rows.length < 2 ? 'Needs two limiter snapshots.' : null}>
+              <SeriesChart data={rows} xKey="ts" timeFmt={clockAt} noLegend
+                           series={[
+                             { key: name, name, color: sawColors[i % sawColors.length], type: 'step' },
+                             { key: `${name} pushback`, name: 'pushback', color: c.error, type: 'dots' },
+                           ]} />
+            </ChartFrame>
+          </Box>
+        ))}
         <ChartFrame title="Rate limiters" hint="current rate between its floor and ceiling (calls/s)"
                     empty={none(lim, 'No limiter state recorded.')}>
           <BarsChart data={lim} xKey="name" horizontal labelWidth={90}

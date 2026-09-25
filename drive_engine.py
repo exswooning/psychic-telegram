@@ -182,6 +182,19 @@ def limiter_stats() -> dict:
                 for tenant, lim in _PROJECT_LIMITERS.items()}
 
 
+def limiter_events() -> dict:
+    """Each project bucket's rate changes since this was last called.
+
+    Drains, so whoever calls it owns the events: the metrics flusher, once
+    per snapshot. limiter_stats() is the settled state; this is the path it
+    took to get there -- the sawtooth.
+    """
+    with _PROJECT_LIMITER_LOCK:
+        return {tenant: [[round(t, 3), round(r, 2), k]
+                         for t, r, k in lim.drain_events()]
+                for tenant, lim in _PROJECT_LIMITERS.items()}
+
+
 def _log_rate_change(kind: str, before: float, after: float,
                      tenant: str = "target") -> None:
     """Say it out loud. A limiter that silently retunes itself is a limiter

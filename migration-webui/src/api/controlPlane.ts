@@ -1272,6 +1272,11 @@ export interface HostMetrics {
   reason: string
 }
 
+/** One point on a limiter's rate over time. "probe" and "backoff" are the
+ *  limiter's own changes (a step up; a drop at a quota pushback); "sample" is
+ *  its rate at a snapshot, the only kind in history recorded before events. */
+export interface LimiterPoint { t: number; rate: number; kind: 'probe' | 'backoff' | 'sample' }
+
 export interface MetricsSnapshot {
   accountId: number
   error: string
@@ -1328,6 +1333,8 @@ export interface MetricsSnapshot {
     density?: number
   }
   history: { recordedAt: string; requestsPerSec: number; p95: number; failures: number }[]
+  /** Each limiter's rate over the same window, oldest first -- the sawtooth. */
+  limiterHistory?: Record<string, LimiterPoint[]>
 }
 
 export interface TestFileRow {

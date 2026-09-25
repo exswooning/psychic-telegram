@@ -29,6 +29,9 @@ const RICH = {
                 remainingItems: 11 },
   transfer: { bytesToday: 1024, dailyCapBytes: 4096 },
   mappings: [{ type: 'file', count: 9 }],
+  limiterHistory: { target: [
+    { t: 1000, rate: 40, kind: 'probe' }, { t: 1020, rate: 44, kind: 'probe' },
+    { t: 1040, rate: 31, kind: 'backoff' }, { t: 1160, rate: 34, kind: 'backoff' }] },
   host: { cores: 4, userWorkers: 3, seedWorkers: 2 },
 } as unknown as MetricsSnapshot
 
@@ -40,10 +43,19 @@ describe('migrate charts', () => {
   it('says why a series is empty instead of drawing it as zero', () => {
     render(<MigrateMetricsCharts m={EMPTY as unknown as MetricsSnapshot} />)
     expect(within(frame('Requests per second')).getByText(/Needs two snapshots/)).toBeInTheDocument()
+    expect(within(frame('Rate limiter sawtooth')).getByText(/Needs limiter snapshots/)).toBeInTheDocument()
     expect(within(frame('Latency by operation')).getByText('No calls recorded yet.')).toBeInTheDocument()
     expect(within(frame('Items done and remaining')).getByText(/No expected total/)).toBeInTheDocument()
     expect(within(frame('Uploaded today against the daily cap')).getByText('No daily cap configured.'))
       .toBeInTheDocument()
+  })
+
+  it('gives each limiter its own sawtooth, so a 1,200/s bucket cannot flatten a 45/s one', () => {
+    render(<MigrateMetricsCharts m={{ ...RICH, limiterHistory: {
+      source: [{ t: 1, rate: 1200, kind: 'sample' }, { t: 2, rate: 1200, kind: 'sample' }],
+      target: [{ t: 1, rate: 40, kind: 'probe' }, { t: 2, rate: 30, kind: 'backoff' }] } } as MetricsSnapshot} />)
+    expect(frame('Sawtooth · source')).toHaveTextContent('0 pushbacks')
+    expect(frame('Sawtooth · target')).toHaveTextContent('1 pushback · 30–40 calls/s')
   })
 
   it('draws every series it has data for', () => {
@@ -53,6 +65,11 @@ describe('migrate charts', () => {
                      'Live mappings on the target', 'Workers against cores']) {
       expect(frame(t).textContent).not.toMatch(/Needs two|No calls|Nothing recorded|No expected|No mappings/)
     }
+    // The sawtooth names what it shows: pushbacks, their spacing, the range.
+    // Each limiter gets its own chart, and the frame names what it shows:
+    // pushbacks, their spacing, the range.
+    expect(frame('Sawtooth · target')).toHaveTextContent('2 pushbacks, one every 120s · 31–44 calls/s')
+    expect(screen.queryByTestId('chart-Rate limiter sawtooth')).toBeNull()
     // Retries exist, so that chart is not the "clean run" placeholder.
     expect(frame('Retries and failures by operation').textContent).not.toMatch(/clean run/)
   })
