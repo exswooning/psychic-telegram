@@ -9,6 +9,7 @@ import {
   DeleteSweep as WipeIcon, PersonRemove as UsersIcon,
   Grass as SeedIcon, Key as KeyIcon, VpnKey as ScopeIcon,
   RocketLaunch as MigrateIcon, Science as DryRunIcon, Stop as StopIcon,
+  Replay as RetryIcon,
 } from '@mui/icons-material'
 import {
   fetchTenantConfigStatus, TenantConfigStatus,
@@ -20,7 +21,7 @@ import {
 import {
   fetchJob, fetchJobHistory, fetchCompletedJobs, runSeed, fetchSeedScopes,
   JobStatus, JobResult,
-  stopJob as stopSeedJob,
+  stopJob as stopSeedJob, retryJob,
 } from '@/api/client'
 import type { CompletedJob } from '@/api/client'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
@@ -30,7 +31,7 @@ import RunningJobDetail from '@/components/RunningJobDetail'
 import { useRunningJobs, jobKind } from '@/hooks/useRunningJobs'
 import type { RunningJob } from '@/hooks/useRunningJobs'
 import SeedRunDashboard from '@/components/SeedRunDashboard'
-import { groupRunsByDomain } from '@/utils/groupRuns'
+import { groupRunsByDomain, needsAttention } from '@/utils/groupRuns'
 import TenantActionDialog from '@/components/TenantActionDialog'
 import SeedOneService from '@/components/SeedOneService'
 import { removeTenantSetup } from '@/api/client'
@@ -123,6 +124,9 @@ const Jobs: React.FC = () => {
     fetchCompletedJobs().then(setDone).catch(() => setDone([]))
   }, [running.length])
   const [openDone, setOpenDone] = useState<RunningJob | null>(null)
+  // Which finished run a retry is in flight for, and what came back.
+  const [retrying, setRetrying] = useState<string | null>(null)
+  const [retryMsg, setRetryMsg] = useState<{ ok: boolean; text: string } | null>(null)
   const [rawSides, setSides] = useState<RawSide[] | null>(null)
   const [seedJob, setSeedJob] = useState<JobStatus | null>(null)
   const [seedHistory, setSeedHistory] = useState<JobResult | null>(null)
@@ -268,10 +272,27 @@ const Jobs: React.FC = () => {
     sides?.find((x) => x.side === 'target')?.cfg?.domain,
   ), [done, sides])
 
+  const retry = async (d: CompletedJob, key: string) => {
+    setRetrying(key)
+    setRetryMsg(null)
+    try {
+      const r = await retryJob(d.name, d.runId)
+      setRetryMsg({ ok: r.ok, text: r.ok
+        ? (r.queued ? (r.msg || 'queued — it will start on its own') : `${d.name} started again`)
+        : (r.error || 'could not start') })
+      if (r.ok) refresh()
+    } catch (e) {
+      setRetryMsg({ ok: false, text: e instanceof Error ? e.message : String(e) })
+    } finally {
+      setRetrying(null)
+    }
+  }
+  const attention = useMemo(() => needsAttention(done).slice(0, 6), [done])
+
   // One finished run as a card. Extracted because it is rendered from
   // inside a per-domain group now, and inlining it there put the whole
   // thing three levels deep in a map inside a map.
-  const renderDoneCard = (d: CompletedJob) => {
+  const renderDoneCard = (d: CompletedJob, where = 'runs') => {
     // The id, when there is one: two wipes of the same tenant are two runs,
     // and keying on the name alone made React render one and silently drop
     // the other.
@@ -286,6 +307,19 @@ const Jobs: React.FC = () => {
           pct: null, elapsedSec: d.elapsed,
         }}
         finished={{ rc: d.rc, when: d.finished }}
+        action={d.rc != null && d.rc !== 0 ? (
+          <Tooltip title={d.retryable ? 'Start this run again, exactly as before'
+            : 'Started before retries were recorded — start it again from the Seed Wizard'}>
+            <span>
+              <Button size="small" variant="outlined" startIcon={<RetryIcon />}
+                      data-testid={`retry-${where}-${key}`}
+                      disabled={!d.retryable || retrying !== null}
+                      onClick={() => retry(d, key)}>
+                Retry
+              </Button>
+            </span>
+          </Tooltip>
+        ) : undefined}
         onOpen={async () => {
           // The lines are fetched only when one is opened: most never are,
           // and a finished seed carries thousands.
@@ -397,6 +431,24 @@ const Jobs: React.FC = () => {
           if (j?.stop) await j.stop(reason)
         }}
       />
+
+      {retryMsg && (
+        <Alert severity={retryMsg.ok ? 'success' : 'error'} sx={{ mb: 2 }}
+               onClose={() => setRetryMsg(null)}>{retryMsg.text}</Alert>
+      )}
+
+      {/* Killed and failed runs used to sit inside the collapsed tenant rows
+          below, so a stopped job simply was not on the page. */}
+      {attention.length > 0 && (
+        <Box sx={{ mb: 3 }} data-testid="attention-jobs">
+          <Typography variant="overline" color="text.secondary">
+            Stopped or failed
+          </Typography>
+          <Stack direction="row" flexWrap="wrap" gap={1.5} sx={{ mt: 0.5 }}>
+            {attention.map((d) => renderDoneCard(d, 'attention'))}
+          </Stack>
+        </Box>
+      )}
 
       {done.length > 0 && (
         <Box sx={{ mb: 3 }} data-testid="completed-jobs">

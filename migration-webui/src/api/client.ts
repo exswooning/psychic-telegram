@@ -205,6 +205,8 @@ export interface JobResult {
   finished: number
   elapsed: number
   lines: string[]
+  /** How this run was started: the request to send again to redo it. */
+  retry?: { path: string; body: Record<string, unknown> } | null
 }
 
 // The last COMPLETED run of `name`, read back from disk -- covers what
@@ -223,6 +225,23 @@ export async function fetchJobHistory(
   const { result } = await getJSON<{ result: JobResult | null }>(
     `/api/job_history?${q}`)
   return result
+}
+
+/** Start a finished run again by replaying the request it came from, so every
+ *  check the original went through (confirmation, domain guard, admission,
+ *  which account) runs again. Seeds only: they are additive, so doing one
+ *  twice is safe, and nothing else has recorded a request. */
+export async function retryJob(name: string, runId: string | null):
+    Promise<{ ok: boolean; queued?: boolean; msg?: string; error?: string }> {
+  const spec = (await fetchJobHistory(name, runId).catch(() => null))?.retry
+  if (!spec || spec.path !== '/api/seed') {
+    return { ok: false, error: 'this run did not record how it was started' }
+  }
+  const res = await fetch(spec.path, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    credentials: 'include', body: JSON.stringify(spec.body),
+  })
+  return res.json()
 }
 
 export interface LicencePreflight {
@@ -1030,6 +1049,9 @@ export interface CompletedJob {
   elapsed?: number
   lineCount: number
   fromTranscript: boolean
+  /** The request that started this run was recorded, so it can be replayed.
+   *  False for runs saved before that was recorded. */
+  retryable?: boolean
 }
 
 export const fetchCompletedJobs = () =>

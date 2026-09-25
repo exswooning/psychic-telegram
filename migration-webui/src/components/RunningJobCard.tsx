@@ -35,6 +35,23 @@ const KIND: Record<JobKind, { label: string; icon: React.ReactElement;
   other:     { label: 'Job',       icon: <RunningIcon fontSize="small" />,   color: 'default' },
 }
 
+// A negative exit code is Python's way of saying "killed by signal N".
+const SIGNALS: Record<number, string> = { 1: 'SIGHUP', 2: 'SIGINT', 9: 'SIGKILL', 15: 'SIGTERM' }
+
+const OutcomeChip: React.FC<{ rc: number | null }> = ({ rc }) => {
+  if (rc != null && rc < 0) {
+    return (
+      <Tooltip title={`Killed by ${SIGNALS[-rc] ?? `signal ${-rc}`} — stopped, not failed`}>
+        <Chip size="small" label="stopped" color="warning" />
+      </Tooltip>
+    )
+  }
+  return (
+    <Chip size="small" label={rc === 0 ? 'completed' : rc == null ? 'ended' : `exit ${rc}`}
+          color={rc === 0 ? 'success' : 'error'} />
+  )
+}
+
 export const RunningJobCard: React.FC<{
   job: RunningJob
   /** Rendered by the parent so this stays presentational. */
@@ -65,10 +82,7 @@ export const RunningJobCard: React.FC<{
           <Chip size="small" icon={k.icon} label={k.label} color={k.color}
                 variant="outlined" />
           {finished
-            ? <Chip size="small"
-                    label={finished.rc === 0 ? 'completed'
-                      : finished.rc == null ? 'ended' : `exit ${finished.rc}`}
-                    color={finished.rc === 0 ? 'success' : 'error'} />
+            ? <OutcomeChip rc={finished.rc} />
             /* The label, not a page. Same icon Running Now used. */
             : <Chip size="small" icon={<RunningIcon fontSize="small" />}
                     label="Running now" color="info" />}

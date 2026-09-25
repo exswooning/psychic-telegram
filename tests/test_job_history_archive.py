@@ -29,10 +29,10 @@ def account_id():
                   ignore_errors=True)
 
 
-def _finish(account_id, name, rc, finished, lines):
+def _finish(account_id, name, rc, finished, lines, retry=None):
     """One completed run, saved the way Job._save_result saves it."""
     job = webui.Job(account_id)
-    job.name, job.rc = name, rc
+    job.name, job.rc, job.retry = name, rc, retry
     job.started, job.finished = finished - 5, finished
     job.lines = list(lines)
     job._save_result()
@@ -61,6 +61,23 @@ class TestEveryRunIsKept:
         plain file as its own row showed every job twice."""
         _finish(account_id, "seed", 0, 1_700_000_000, ["x"])
         assert len(webui.completed_jobs(account_id)) == 1
+
+
+class TestRetry:
+    """A retry is the original request replayed, so the archive has to carry
+    that request -- and say plainly when it does not (runs saved before it
+    was recorded), rather than offering a button that cannot work."""
+
+    def test_the_launching_request_survives_in_the_archive(self, account_id):
+        req = {"path": "/api/seed", "body": {"confirm_domain": "a.example"}}
+        _finish(account_id, "seed", -15, 1_700_000_000, ["x"], retry=req)
+        row = webui.completed_jobs(account_id)[0]
+        assert row["rc"] == -15 and row["retryable"] is True
+        assert webui.load_job_archive(account_id, row["runId"])["retry"] == req
+
+    def test_an_older_run_with_no_recorded_request_is_not_retryable(self, account_id):
+        _finish(account_id, "seed", 1, 1_700_000_000, ["x"])
+        assert webui.completed_jobs(account_id)[0]["retryable"] is False
 
 
 class TestArchivesArePruned:

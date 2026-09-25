@@ -664,6 +664,10 @@ class Job:
         self.finished = 0.0
         self.rc: int | None = None
         self._on_finish: Callable[[int | None], None] | None = None
+        # The HTTP request that launched this run ({"path", "body"}), kept so
+        # the Jobs page can replay it: a retry is the same request again, so
+        # every check the original went through runs again too.
+        self.retry: dict | None = None
         # Set per run by start(); the on-disk transcript this job's output
         # is written to, and the thing that makes its output survive a
         # restart of this process. See start()'s own comment.
@@ -686,12 +690,13 @@ class Job:
 
     def start(self, name: str, argv: list[str],
               env: dict | None = None, cwd: str | None = None,
-              on_finish: Callable[[int | None], None] | None = None
-              ) -> tuple[bool, str]:
+              on_finish: Callable[[int | None], None] | None = None,
+              retry: dict | None = None) -> tuple[bool, str]:
         with self.lock:
             if self.running:
                 return False, f"{self.name} is still running"
             self.name, self.lines, self.rc = name, [], None
+            self.retry = retry
             self.started, self.finished = time.time(), 0.0
             # Only deploy_remote.py's caller passes this today -- it is how
             # deploy history learns the outcome of a job that runs detached
@@ -947,6 +952,7 @@ class Job:
                     # this file is read back in one GET, not streamed, so it
                     # stays well under what a browser tab wants to render.
                     "lines": self.lines[-2000:],
+                    "retry": self.retry,
                 }
             path = job_result_path(self.account_id, self.name)
             os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -1056,6 +1062,9 @@ def completed_jobs(account_id: int | None) -> list[dict]:
             "elapsed": res.get("elapsed"),
             "lineCount": res.get("line_count") or len(res.get("lines") or []),
             "fromTranscript": bool(res.get("from_transcript")),
+            # Whether the request behind this run was recorded. Runs from
+            # before that shipped have none, and cannot be replayed.
+            "retryable": bool(res.get("retry")),
         }
 
     archived: set[str] = set()
@@ -1313,12 +1322,14 @@ def _queue_starter(account_id: int | None, label: str,
     env = dict(os.environ, **payload.get("env", {})) or None
     return get_job(account_id).start(
         label, list(payload["argv"]), env=env, cwd=payload.get("cwd") or None,
-        on_finish=lambda rc: _job_finished(account_id, label))
+        on_finish=lambda rc: _job_finished(account_id, label),
+        retry=payload.get("retry"))
 
 
 def launch_or_queue(account_id: int | None, label: str, argv: list[str],
                     env: dict | None = None, cwd: str | None = None,
-                    requested_by: str = "") -> tuple[str, str]:
+                    requested_by: str = "",
+                    retry: dict | None = None) -> tuple[str, str]:
     """Run it now if the box has room, otherwise stand it in line.
 
     Returns (state, message) where state is "started", "queued" or "error".
@@ -1329,7 +1340,8 @@ def launch_or_queue(account_id: int | None, label: str, argv: list[str],
     if admitted:
         ok, msg = get_job(account_id).start(
             label, argv, env=env, cwd=cwd,
-            on_finish=lambda rc: _job_finished(account_id, label))
+            on_finish=lambda rc: _job_finished(account_id, label),
+            retry=retry)
         if not ok:
             # Job.start() refused (e.g. this account's job is already
             # running) before ever spawning -- _drain(), and so on_finish,
@@ -1340,7 +1352,8 @@ def launch_or_queue(account_id: int | None, label: str, argv: list[str],
     try:
         row = job_queue.enqueue(
             account_id, label,
-            {"argv": list(argv), "env": _env_overlay(env), "cwd": cwd or ""},
+            {"argv": list(argv), "env": _env_overlay(env), "cwd": cwd or "",
+             "retry": retry},
             requested_by=requested_by, reason=why,
             runner=job_queue.RUNNER_WEBUI)
     except job_queue.QueueFull as exc:
@@ -5214,7 +5227,8 @@ class Handler(BaseHTTPRequestHandler):
                 account_id, "seed", argv, env=env,
                 cwd=os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                  "data-generator"),
-                requested_by=_account_email(account_id))
+                requested_by=_account_email(account_id),
+                retry={"path": "/api/seed", "body": body})
             self._json({"ok": state != "error", "queued": state == "queued",
                         "msg": msg, "error": msg if state == "error" else ""})
             return

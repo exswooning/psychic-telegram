@@ -42,11 +42,11 @@ class FakeJob:
         self.calls = []
         self.refuse = ""
 
-    def start(self, name, argv, env=None, cwd=None, on_finish=None):
+    def start(self, name, argv, env=None, cwd=None, on_finish=None, retry=None):
         if self.refuse:
             return False, self.refuse
         self.calls.append({"name": name, "argv": argv, "env": env, "cwd": cwd,
-                           "on_finish": on_finish})
+                           "on_finish": on_finish, "retry": retry})
         return True, "started"
 
 

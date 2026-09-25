@@ -55,3 +55,21 @@ export function groupRunsByDomain(done: CompletedJob[], source?: string,
     }))
     .sort((a, b) => (b.runs[0]?.finished ?? 0) - (a.runs[0]?.finished ?? 0))
 }
+
+/**
+ * Runs that ended badly and were not followed by a good one -- the ones
+ * still needing a decision. Only the newest run of each name counts: a seed
+ * that was killed and then run again cleanly is history, not a problem, and
+ * listing every old failure would bury the current ones. An unknown outcome
+ * (no exit code) is left out rather than called a failure.
+ */
+export function needsAttention(done: CompletedJob[]): CompletedJob[] {
+  const newest = new Map<string, CompletedJob>()
+  for (const d of done) {
+    const seen = newest.get(d.name)
+    if (!seen || (d.finished ?? 0) > (seen.finished ?? 0)) newest.set(d.name, d)
+  }
+  return [...newest.values()]
+    .filter((d) => d.rc != null && d.rc !== 0)
+    .sort((a, b) => (b.finished ?? 0) - (a.finished ?? 0))
+}
