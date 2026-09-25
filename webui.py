@@ -3878,6 +3878,10 @@ def storage_summary_payload(account_id: int | None = None) -> dict:
 
     st = _S(account_id=account_id) if account_id else _S()
     by_email, err = tenant_inventory.licenses(st, "source")
+    if err == "tenant not configured":
+        err = ("this account has no SOURCE tenant set up (only a target), "
+               "so there is nothing here to seed or fill -- top-up only "
+               "ever writes to the source side")
     if err:
         return {"error": err, "skus": []}
 
