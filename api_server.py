@@ -74,7 +74,7 @@ try:
     from fastapi import (Cookie, Depends, FastAPI, Header, HTTPException,
                          Request, Response, WebSocket, WebSocketDisconnect)
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import JSONResponse
+    from fastapi.responses import FileResponse, JSONResponse
     from pydantic import BaseModel, Field
 except ImportError:  # pragma: no cover - import guard, not logic
     sys.exit("control plane needs: pip install -r requirements-control-plane.txt")
@@ -3575,6 +3575,136 @@ def _limiter_history(samples: list[dict]) -> dict:
     for points in by.values():
         points.sort(key=lambda p: p["t"])
     return by
+
+
+# ---------------------------------------------------------------------------
+# Run reports: one saved, judged document per run (run_report.py), reachable
+# whether or not anything is running -- the point of the Final Report tab is
+# that the answer to "how did it go" is still there tomorrow.
+# ---------------------------------------------------------------------------
+class GenerateReportRequest(BaseModel):
+    kind: str = "migration"
+    account_id: int | None = None
+
+
+def _reports_account(op: Operator, account_id: int | None) -> int | None:
+    """The account a report request is about, and a refusal if the caller may
+    not see it. Login itself is enforced in each route, where the
+    endpoint-auth audit can see it."""
+    aid = account_id or _account_in_context(op)
+    if aid:
+        _require_account_access(aid, op)
+    return aid
+
+
+def _report_settings(account_id: int):
+    """The account's tenant settings, for a report. Its own seam so a test can
+    stand in a ledger without redirecting every other use of Settings (the
+    session lookup included)."""
+    from config import Settings
+    return Settings(account_id=account_id)
+
+
+def _job_log_tail(account_id: int, names=("migrate", "delta")) -> list[str]:
+    """The end of the newest migration log for an account. Read from the end:
+    these files are appended to across every run and can be large."""
+    from webui import job_log_path
+    best, best_m = None, -1.0
+    for n in names:
+        try:
+            p = job_log_path(account_id, n)
+            m = os.path.getmtime(p)
+        except OSError:
+            continue
+        if m > best_m:
+            best, best_m = p, m
+    if not best:
+        return []
+    with open(best, "rb") as fh:
+        fh.seek(0, os.SEEK_END)
+        fh.seek(max(0, fh.tell() - 65536))
+        raw = fh.read().decode("utf-8", "replace")
+    return raw.splitlines()[-200:]
+
+
+@app.get("/api/v2/reports")
+async def run_reports(account_id: int | None = None, op: Operator = Depends(operator)):
+    """Every saved report for the account in context, newest first."""
+    require_login(op)
+    aid = _reports_account(op, account_id)
+    if not aid:
+        return {"accountId": 0, "reports": [], "error": "no account in context"}
+    import run_report
+    return {"accountId": aid, "reports": await _off_loop(run_report.list_reports, aid), "error": ""}
+
+
+@app.post("/api/v2/reports/generate")
+async def generate_run_report(body: GenerateReportRequest, op: Operator = Depends(operator)):
+    """Build, judge and save a report from the ledger as it stands now.
+
+    Read-only against the ledger (a migration may be writing to it), so it is
+    safe to press mid-run: the report says what the ledger holds at this moment.
+    """
+    require_login(op)
+    aid = _reports_account(op, body.account_id)
+    if not aid:
+        raise HTTPException(400, "no account in context")
+    if body.kind != "migration":
+        raise HTTPException(400, "only migration reports exist so far")
+
+    def _go() -> dict:
+        import run_report
+        st = _report_settings(aid)
+        path = st.db_path
+        if not path or not os.path.isfile(path):
+            raise HTTPException(404, "this account has no migration ledger yet")
+        with cpdb.ro(path) as conn:
+            class _D:
+                pass
+            d = _D()
+            d.conn = conn
+            return run_report.generate(d, st, aid, kind=body.kind,
+                                       transcript=_job_log_tail(aid))
+    return await _off_loop(_go)
+
+
+def _report_or_404(op: Operator, account_id: int | None, run_id: str):
+    aid = _reports_account(op, account_id)
+    import run_report
+    try:
+        return aid, run_report, run_report.report_file(aid, run_id, "json")
+    except ValueError:
+        raise HTTPException(404, "no such report")
+
+
+@app.get("/api/v2/reports/{run_id}")
+async def run_report_json(run_id: str, account_id: int | None = None,
+                          op: Operator = Depends(operator)):
+    require_login(op)
+    aid, rr, _ = _report_or_404(op, account_id, run_id)
+    rep = await _off_loop(rr.load_report, aid, run_id)
+    if rep is None:
+        raise HTTPException(404, "no such report")
+    return rep
+
+
+@app.get("/api/v2/reports/{run_id}/pdf")
+async def run_report_pdf(run_id: str, audience: str = "human", account_id: int | None = None,
+                         op: Operator = Depends(operator)):
+    """The report as a PDF, for a person (`human`) or for Claude Code (`claude`)."""
+    require_login(op)
+    if audience not in ("human", "claude"):
+        raise HTTPException(400, "audience must be human or claude")
+    aid = _reports_account(op, account_id)
+    import run_report
+    try:
+        path = run_report.report_file(aid, run_id, f"{audience}.pdf")
+    except ValueError:
+        raise HTTPException(404, "no such report")
+    if not os.path.isfile(path):
+        raise HTTPException(404, "that report has no PDF (regenerate it)")
+    return FileResponse(path, media_type="application/pdf",
+                        filename=f"{run_id}-{audience}.pdf", content_disposition_type="attachment")
 
 
 @app.get("/api/v2/metrics")

@@ -2,11 +2,9 @@ import React from 'react'
 import {
   Box,
   Typography,
-  Button,
   Card,
   CardContent,
   Grid,
-  LinearProgress,
   Chip,
   Stack,
   Avatar,
@@ -15,12 +13,6 @@ import {
   AlertTitle,
 } from '@mui/material'
 import {
-  Download as DownloadIcon,
-  PictureAsPdf as PdfIcon,
-  TableChart as CsvIcon,
-  Assessment as DetailedIcon,
-  GetApp as ExportIcon,
-  PlayArrow as DeltaIcon,
   CheckCircle as SuccessIcon,
   Error as ErrorIcon,
   People as PeopleIcon,
@@ -31,6 +23,7 @@ import {
   Storage as StorageIcon,
 } from '@mui/icons-material'
 import { useMigrationStore } from '@/store'
+import RunReports from '@/components/RunReports'
 
 const FinalReport: React.FC = () => {
   const { report } = useMigrationStore()
@@ -46,8 +39,11 @@ const FinalReport: React.FC = () => {
   if (!report || report.totalUsers === 0) {
     return (
       <Box>
-        <Typography variant="h4" sx={{ fontWeight: 700, mb: 0.5 }}>Final Report</Typography>
-        <Alert severity="info" sx={{ mt: 2 }}>No report available yet. Run a migration to generate the final report.</Alert>
+        <Typography variant="h4" sx={{ fontWeight: 700, mb: 2 }}>Final Report</Typography>
+        {/* Saved reports do not depend on anything running, so they are here
+            even when the live summary below has nothing to say. */}
+        <RunReports />
+        <Alert severity="info" sx={{ mt: 2 }}>No live summary yet. Run a migration, then generate a report above.</Alert>
       </Box>
     )
   }
@@ -72,7 +68,9 @@ const FinalReport: React.FC = () => {
   return (
     <Box>
       <Typography variant="h4" sx={{ fontWeight: 700, mb: 0.5 }}>Final Report</Typography>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>Migration completion summary and exports</Typography>
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>Migration completion summary and downloadable reports</Typography>
+
+      <RunReports />
 
       <Alert severity={clean ? 'success' : 'warning'} sx={{ mb: 3 }}>
         <AlertTitle>{clean ? 'Migration Complete' : 'Migration finished with failures'}</AlertTitle>
@@ -129,33 +127,24 @@ const FinalReport: React.FC = () => {
               <Typography variant="h5" sx={{ fontWeight: 700 }}>{report.averageSpeed}</Typography>
             </Grid>
             <Grid item xs={12}>
-              <Typography variant="caption" color="text.secondary">Verification Success Rate</Typography>
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mt: 0.5 }}>
-                <LinearProgress variant="determinate" value={report.verificationSuccessRate} sx={{ flexGrow: 1, height: 10, borderRadius: 5 }} />
-                <Typography variant="h5" sx={{ fontWeight: 700, minWidth: 60 }}>{report.verificationSuccessRate}%</Typography>
-              </Box>
+              {/* Not "verification": this is the share of users the ledger has
+                  not marked FAILED, and nothing was compared against the
+                  target to get it. Shown as a count, like the rest of the
+                  tool; the checks that do compare the tenants are the
+                  fidelity benchmarks in the report above. */}
+              <Typography variant="caption" color="text.secondary">Users finished without a failure</Typography>
+              <Typography variant="h5" sx={{ fontWeight: 700 }} data-testid="users-clean">
+                {report.totalUsers - report.failedUsers} of {report.totalUsers}
+              </Typography>
+              <Typography variant="caption" color="text.secondary">
+                Taken from the ledger. Whether the target actually holds the data is what the fidelity
+                benchmarks in a report check.
+              </Typography>
             </Grid>
           </Grid>
         </CardContent>
       </Card>
 
-      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
-        <Button variant="contained" startIcon={<PdfIcon />} size="large" sx={{ borderRadius: 2 }}>
-          Download PDF Report
-        </Button>
-        <Button variant="outlined" startIcon={<CsvIcon />} size="large" sx={{ borderRadius: 2 }}>
-          Download CSV
-        </Button>
-        <Button variant="outlined" startIcon={<DetailedIcon />} size="large" sx={{ borderRadius: 2 }}>
-          View Detailed Report
-        </Button>
-        <Button variant="outlined" startIcon={<ExportIcon />} size="large" sx={{ borderRadius: 2 }}>
-          Export Logs
-        </Button>
-        <Button variant="contained" color="secondary" startIcon={<DeltaIcon />} size="large" sx={{ borderRadius: 2 }}>
-          Start Delta Sync
-        </Button>
-      </Stack>
     </Box>
   )
 }

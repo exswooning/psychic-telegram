@@ -1370,6 +1370,36 @@ export const fetchMetrics = (accountId: number, history = 60) =>
 export const fetchMyMetrics = (history = 60) =>
   cpFetch<MetricsSnapshot>(`/api/v2/metrics?history=${history}`)
 
+/* Run reports: one saved, judged document per run (run_report.py). */
+export type Verdict = 'PASS' | 'FAIL' | 'UNVERIFIED'
+export interface ReportSummary {
+  id: string
+  kind: string
+  generatedAt: string
+  verdict: Verdict
+  counts: { pass: number; warn: number; fail: number; unknown: number }
+  tenants?: { source?: string | null; target?: string | null } | null
+  returnCode: number | null
+  startedAt: string | null
+  finishedAt: string | null
+  /** Which files exist for this report: json, human.pdf, claude.pdf. */
+  files: string[]
+}
+
+export const fetchReports = () =>
+  cpFetch<{ accountId: number; reports: ReportSummary[]; error: string }>('/api/v2/reports')
+
+export const generateReport = () =>
+  cpFetch<ReportSummary>('/api/v2/reports/generate', {
+    method: 'POST', body: JSON.stringify({ kind: 'migration' }),
+  })
+
+/** Where a report file is downloaded from. A plain link, so the browser's own
+ *  download handling (and the session cookie) does the work. */
+export const reportUrl = (id: string, what: 'human' | 'claude' | 'json') =>
+  what === 'json' ? `${CP_BASE}/api/v2/reports/${id}`
+    : `${CP_BASE}/api/v2/reports/${id}/pdf?audience=${what}`
+
 export const fetchTestReport = () => cpFetch<TestReport>('/api/v2/tests')
 
 export const runTests = (reason: string) =>

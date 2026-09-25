@@ -26,3 +26,4 @@ qrcode
 # apt-installed system Chrome (install.sh), not `playwright install`'s own
 # bundled Chromium -- this line is the Python package only.
 playwright
+reportlab
