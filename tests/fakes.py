@@ -729,7 +729,14 @@ class _DriveAbout:
         return _Call(self.s, "about.get", self._get, kw)
 
     def _get(self, **_):
-        quota = {"usage": str(self.s.storage_usage)}
+        # storage_usage is THIS user's own Drive usage. On a pooled tenant
+        # Google reports the tenant's total as `usage` (the same for every
+        # user) and the user's own as `usageInDrive`; pool_usage stands in
+        # for the former and, unset, keeps the old one-number behaviour.
+        pool = getattr(self.s, "pool_usage", None)
+        quota = {"usage": str(self.s.storage_usage if pool is None else pool),
+                 "usageInDrive": str(self.s.storage_usage),
+                 "usageInDriveTrash": "0"}
         # Real Google API responses OMIT the key entirely for an
         # unlimited-storage plan, rather than sending a null -- str(None)
         # would otherwise become the literal string "None", which is

@@ -373,8 +373,15 @@ def top_up_storage(drive, settings: Settings, user: str, target_gb: float | None
                    media_fn=None, fill_percent: float = 100.0,
                    account_limit_bytes: int | None = None) -> dict:
     """
-    Adds large filler files until this user's total Workspace storage
-    (Gmail + Drive + Photos, pooled -- storageQuota.usage) reaches target_gb.
+    Adds large filler files until this user's OWN Drive storage
+    (storageQuota.usageInDrive, plus trash) reaches its target.
+
+    Not storageQuota.usage, and not .limit: on a pooled tenant BOTH are the
+    whole tenant's figures, identical for every user (2,362 GiB used of
+    9,000 GiB, read from four different accounts). Compared against one
+    account's 30 GB share, the pool's usage made every account look already
+    over target, so a "fill to 100%" wrote nothing at all. usageInDrive is the
+    one that differs per user (0.28, 0.27, 0.55 GiB in the same reads).
 
     target_gb=None means "a percentage of this ACCOUNT'S share" --
     fill_percent of account_limit_bytes, which the caller reads from the
@@ -393,13 +400,12 @@ def top_up_storage(drive, settings: Settings, user: str, target_gb: float | None
     name reset_drive() already matches on -- so resetting the seeded corpus
     removes the filler too, with no separate reset path to write or maintain.
 
-    The one caveat worth stating rather than discovering later: Gmail's
-    contribution to storageQuota.usage does not update in real time (Google's
-    own accounting can lag by hours), so a target computed immediately after
-    seeding a large mailbox will overshoot how much filler is actually needed
-    once Gmail's count catches up. Re-run with --top-up-only once it has --
-    that flag skips every other seeding step and only checks and tops up
-    storage, so it is safe to run repeatedly without duplicating mail, drive
+    The one caveat worth stating rather than discovering later: a user's
+    mailbox is not counted here at all (the Drive API has no per-user Gmail
+    figure on a pooled tenant), so an account with a large mailbox ends up
+    over its share by about that much. Re-running with --top-up-only is
+    safe -- that flag skips every other seeding step and only checks and tops
+    up storage, so it never duplicates mail, drive
     content, or anything else.
     """
     from config import FOLDER_MIME
@@ -412,7 +418,9 @@ def top_up_storage(drive, settings: Settings, user: str, target_gb: float | None
         about = retry(lambda: drive.about().get(
             fields="storageQuota").execute())()
         quota = about.get("storageQuota", {})
-        usage = int(quota.get("usage") or 0)
+        own = quota.get("usageInDrive")
+        usage = (int(own) + int(quota.get("usageInDriveTrash") or 0)
+                 if own is not None else int(quota.get("usage") or 0))
         limit = quota.get("limit")
         m["usage_before_gb"] = round(usage / 1e9, 2)
 

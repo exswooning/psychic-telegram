@@ -1288,6 +1288,39 @@ class TestFillUntilFull:
 
         assert m["filler_bytes"] == share             # NOT the pool
 
+    def test_a_pooled_tenants_usage_is_not_mistaken_for_the_accounts_own(
+        self, settings, monkeypatch,
+    ):
+        """storageQuota.usage is the tenant's total, the same for every user
+        (2,362 GiB read from four different accounts). Compared with one
+        account's 30 GB share it made every account look already over, and a
+        100% fill wrote nothing at all. Only usageInDrive is per user."""
+        self._small(monkeypatch)
+        import seed_sandbox as s
+
+        drive = FakeDrive("alice@tenanta.com", "source")
+        drive.storage_usage = 2 * 1024**2             # Alice's own Drive usage
+        drive.pool_usage = 500 * 1024**3              # what `usage` reports for everyone
+        drive.storage_limit = 900 * 1024**3
+
+        m = s.top_up_storage(drive, settings, "alice@tenanta.com",
+                             target_gb=None, fill_percent=100.0,
+                             media_fn=_FakeMediaFn(), account_limit_bytes=30 * 1024**2)
+
+        assert m["filler_bytes"] == 28 * 1024**2      # 30 share - 2 already hers
+        assert m["usage_before_gb"] == round(2 * 1024**2 / 1e9, 2)
+
+    def test_the_fixed_target_mode_measures_the_same_way(self, settings, monkeypatch):
+        self._small(monkeypatch)
+        import seed_sandbox as s
+
+        drive = FakeDrive("alice@tenanta.com", "source")
+        drive.storage_usage = 0
+        drive.pool_usage = 500 * 1024**3
+        m = s.top_up_storage(drive, settings, "alice@tenanta.com",
+                             target_gb=20 * 1024**2 / 1e9, media_fn=_FakeMediaFn())
+        assert m["filler_bytes"] == 20 * 1024**2
+
     def test_100_percent_is_the_accounts_full_share(self, settings, monkeypatch):
         self._small(monkeypatch)
         import seed_sandbox as s
