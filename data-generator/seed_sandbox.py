@@ -335,6 +335,31 @@ def _fill_note(uploaded: int = 0, planned: int = 0) -> None:
         _fill_totals["planned"] += planned
 
 
+def _throttle_note() -> str:
+    """How much of the run is Google saying no, as a heartbeat suffix:
+    ", 12.3 req/s, 45 retried (1.2%)". Empty before any call has been made.
+
+    Every seeded call goes through resilience.retry_on_google_error, which
+    records retries per label. Nothing printed them, so "are we rate-limited
+    or is the box slow?" could only be guessed at. Live, per-user wall time
+    grew 68 -> 100 minutes while CPU sat at a third of one core and memory
+    never swapped: everything the box could say said "not me", and the one
+    thing that could answer was being collected and thrown away.
+    """
+    try:
+        import metrics
+
+        snap = metrics.METRICS.snapshot()
+        calls = snap.get("calls") or 0
+        if not calls:
+            return ""
+        retries = snap.get("retries") or 0
+        return (f", {snap['requests_per_sec']:.1f} req/s"
+                f", {retries:,} retried ({100 * retries / calls:.1f}%)")
+    except Exception:      # noqa: BLE001 - never break a heartbeat
+        return ""
+
+
 def fill_progress_line() -> str:
     """The heartbeat's suffix ("-- 690.2 GB uploaded of 106,800 GB planned"),
     or nothing before any fill has started."""
@@ -2896,7 +2921,7 @@ def main(argv: list[str] | None = None) -> int:
                      f"users done after {int(waited) // 60}m"
                      f"{int(waited) % 60:02d}s "
                      f"({min(args.workers, len(all_users) - beat_done)} in flight)"
-                     + fill_progress_line(), flush=True)
+                     + fill_progress_line() + _throttle_note(), flush=True)
 
         threading.Thread(target=_heartbeat, daemon=True).start()
         try:
@@ -3109,31 +3134,6 @@ def main(argv: list[str] | None = None) -> int:
     # how many are finished, how many are in flight, how long it has been.
     stop_beat = threading.Event()
     beat_done = 0
-
-    def _throttle_note() -> str:
-        """How much of the run is Google saying no.
-
-        Every seeded call goes through resilience.retry_on_google_error,
-        which already records retries per label -- and nothing ever printed
-        them, so "are we rate-limited or is the box slow?" could only be
-        guessed at. Live, per-user wall time grew 68 -> 100 minutes while
-        CPU sat at a third of one core, memory never swapped and the
-        per-user Drive rate barely moved: everything the box could say said
-        "not me", and the one thing that could answer was being collected
-        and thrown away.
-        """
-        try:
-            import metrics
-
-            snap = metrics.METRICS.snapshot()
-            calls = snap.get("calls") or 0
-            if not calls:
-                return ""
-            retries = snap.get("retries") or 0
-            return (f", {snap['requests_per_sec']:.1f} req/s"
-                    f", {retries:,} retried ({100 * retries / calls:.1f}%)")
-        except Exception:      # noqa: BLE001 - never break a heartbeat
-            return ""
 
     def _heartbeat() -> None:
         waited = 0.0

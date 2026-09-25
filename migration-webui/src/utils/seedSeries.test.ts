@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { parseSeedRun } from './seedLog'
 import {
-  fillRateGbPerHour, fillRows, durationBands, failedServiceRows, itemsAsUsersFinish, slowestUsers,
+  fillRateGbPerHour, fillRateRows, fillRows, throttleRows, durationBands, failedServiceRows, itemsAsUsersFinish, slowestUsers,
   storageRows, storageTotals, warningRows,
 } from './seedSeries'
 
@@ -70,3 +70,27 @@ describe('fill rate', () => {
     expect(fillRows([{ sec: 7020, uploadedGb: 1, plannedGb: 2 }])[0].t).toBe('117m')
   })
 })
+
+describe('upload rate between heartbeats', () => {
+  it('is per interval, so it moves when the run slows', () => {
+    expect(fillRateRows([
+      { sec: 0, uploadedGb: 0, plannedGb: 9 }, { sec: 30, uploadedGb: 1.5, plannedGb: 9 },
+      { sec: 60, uploadedGb: 2, plannedGb: 9 }]).map((r) => r.gbPerHour)).toEqual([180, 60])
+  })
+  it('skips an interval with no time or a decrease, rather than plotting nonsense', () => {
+    expect(fillRateRows([{ sec: 5, uploadedGb: 3, plannedGb: 9 }, { sec: 5, uploadedGb: 4, plannedGb: 9 },
+                         { sec: 35, uploadedGb: 2, plannedGb: 9 }])).toEqual([])
+    expect(fillRateRows(undefined)).toEqual([])
+  })
+})
+
+describe('retries per interval', () => {
+  it('turns the cumulative count into what each interval added', () => {
+    const r = throttleRows([
+      { sec: 30, reqPerSec: 10, retried: 5, retriedPct: 1 },
+      { sec: 60, reqPerSec: 9, retried: 5, retriedPct: 0.5 },
+      { sec: 90, reqPerSec: 8, retried: 40, retriedPct: 2 }])
+    expect(r.map((x) => x.retries)).toEqual([5, 0, 35])
+  })
+})
+

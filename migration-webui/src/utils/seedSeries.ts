@@ -3,7 +3,7 @@
  * components for the same reason as metricsSeries: the shaping is where a
  * chart quietly misleads, and it deserves a test that needs no browser.
  */
-import type { FillSample, SeedRun, SeedUser } from '@/utils/seedLog'
+import type { FillSample, SeedRun, SeedUser, ThrottleSample } from '@/utils/seedLog'
 
 const local = (email: string) => email.split('@')[0]
 const finished = (u: SeedUser) => u.status !== 'running'
@@ -91,4 +91,33 @@ export function fillRateGbPerHour(samples: FillSample[] | undefined, last = 10) 
   const dt = w[w.length - 1].sec - w[0].sec
   const dgb = w[w.length - 1].uploadedGb - w[0].uploadedGb
   return dt > 0 && dgb >= 0 ? (dgb / dt) * 3600 : null
+}
+
+const minutes = (sec: number) => `${Math.round(sec / 60)}m`
+
+/** GB/hour uploaded between each pair of heartbeats -- the fill's own rate,
+ *  which dips when Google or the box slows down. Measured per interval, so it
+ *  moves; the tile's rate is an average over the last few. */
+export function fillRateRows(samples: FillSample[] | undefined) {
+  const s = samples ?? []
+  const out: { t: string; gbPerHour: number }[] = []
+  for (let i = 1; i < s.length; i++) {
+    const dt = s[i].sec - s[i - 1].sec
+    const dgb = s[i].uploadedGb - s[i - 1].uploadedGb
+    if (dt > 0 && dgb >= 0) out.push({ t: minutes(s[i].sec), gbPerHour: Math.round((dgb / dt) * 3600) })
+  }
+  return out
+}
+
+/** Request rate, and the retries added in each interval. A retry is Google
+ *  saying no; the seeder waits and tries again rather than tuning its own
+ *  rate, so unlike the migration there is no controller to sawtooth -- bursts
+ *  of retries are the closest thing. The retry count on the heartbeat is
+ *  cumulative, so the interval's share is the difference. */
+export function throttleRows(samples: ThrottleSample[] | undefined) {
+  const s = samples ?? []
+  return s.map((x, i) => ({
+    t: minutes(x.sec), reqPerSec: x.reqPerSec,
+    retries: i === 0 ? x.retried : Math.max(0, x.retried - s[i - 1].retried),
+  }))
 }

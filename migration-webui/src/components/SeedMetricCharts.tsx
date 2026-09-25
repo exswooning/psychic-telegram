@@ -10,7 +10,8 @@ import type { SeedRun } from '@/utils/seedLog'
 import { useChartStyle } from '@/hooks/useChartStyle'
 import { BarsChart, ChartFrame, SeriesChart } from '@/components/Charts'
 import {
-  durationBands, failedServiceRows, fillRows, itemsAsUsersFinish, slowestUsers,
+  durationBands, failedServiceRows, fillRateRows, fillRows, itemsAsUsersFinish, slowestUsers,
+  throttleRows,
   storageRows, storageTotals, warningRows,
 } from '@/utils/seedSeries'
 
@@ -20,6 +21,8 @@ export const SeedMetricCharts: React.FC<{ run: SeedRun }> = ({ run }) => {
   const { c } = useChartStyle()
   const cum = itemsAsUsersFinish(run.users)
   const fill = fillRows(run.fillSamples)
+  const rate = fillRateRows(run.fillSamples)
+  const throttle = throttleRows(run.throttleSamples)
   const bands = durationBands(run.users)
   const slow = slowestUsers(run.users)
   const warn = warningRows(run)
@@ -41,11 +44,29 @@ export const SeedMetricCharts: React.FC<{ run: SeedRun }> = ({ run }) => {
                                   { key: 'planned', name: 'planned', color: c.muted, type: 'line' }]} />
           </ChartFrame>
         )}
-        <ChartFrame title="Items written as users finish" hint="cumulative, in finishing order"
-                    empty={cum.length < 2 ? 'Needs two finished users.' : null}>
-          <SeriesChart data={cum} xKey="users" fmt={n}
-                       series={[{ key: 'items', name: 'items', color: c.success, type: 'area' }]} />
+        {rate.length > 0 && (
+          <ChartFrame title="Upload rate" hint="GB per hour between heartbeats — dips are the box or Google slowing down"
+                      empty={rate.length < 2 ? 'Needs three heartbeats.' : null}>
+            <SeriesChart data={rate} xKey="t" fmt={(v) => `${v.toLocaleString()}`}
+                         series={[{ key: 'gbPerHour', name: 'GB/h', color: c.primary, type: 'step' }]} />
+          </ChartFrame>
+        )}
+        <ChartFrame title="Request rate and retries"
+                    hint="calls/s, and the retries added in each 30 s — a retry is Google saying no. The seeder backs off and retries; it has no rate controller, so there is no limiter sawtooth here"
+                    empty={throttle.length < 2 ? 'Needs two heartbeats that carry request figures (runs started after this update print them).' : null}>
+          <SeriesChart data={throttle} xKey="t" fmt={(v) => v.toLocaleString()} fmtRight={(v) => v.toLocaleString()}
+                       series={[{ key: 'reqPerSec', name: 'calls/s', color: c.primary, type: 'line' },
+                                { key: 'retries', name: 'retries', color: c.warning, right: true }]} />
         </ChartFrame>
+        {/* A fill writes filler files, not seeded items, so every finished
+            user reads zero and the line is flat -- a chart of nothing. */}
+        {!(cum.length >= 2 && cum[cum.length - 1].items === 0) && (
+          <ChartFrame title="Items written as users finish" hint="cumulative, in finishing order"
+                      empty={cum.length < 2 ? 'Needs two finished users.' : null}>
+            <SeriesChart data={cum} xKey="users" fmt={n}
+                         series={[{ key: 'items', name: 'items', color: c.success, type: 'area' }]} />
+          </ChartFrame>
+        )}
         <ChartFrame title="How long users take" hint="users per duration band"
                     empty={bands.length === 0 ? 'Needs two finished users.' : null}>
           <BarsChart data={bands} xKey="range"

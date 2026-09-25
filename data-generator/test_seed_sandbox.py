@@ -1192,6 +1192,36 @@ class TestFillUntilFullCliValidation:
         assert '"--fill-percent", type=float, default=' in src
 
 
+class TestThrottleNote:
+    """The heartbeat's "are we being rate-limited?" suffix, now shared by the
+    seeding and the fill heartbeats (the fill's printed none, so a run of hours
+    could not say whether Google was saying no)."""
+
+    def test_nothing_before_any_call(self, monkeypatch):
+        import metrics
+        import seed_sandbox as s
+
+        monkeypatch.setattr(metrics.METRICS, "snapshot", lambda: {"calls": 0})
+        assert s._throttle_note() == ""
+
+    def test_reports_rate_and_the_retried_share(self, monkeypatch):
+        import metrics
+        import seed_sandbox as s
+
+        monkeypatch.setattr(metrics.METRICS, "snapshot", lambda: {
+            "calls": 1000, "retries": 45, "requests_per_sec": 9.54})
+        assert s._throttle_note() == ", 9.5 req/s, 45 retried (4.5%)"
+
+    def test_a_broken_metrics_reader_never_breaks_a_heartbeat(self, monkeypatch):
+        import metrics
+        import seed_sandbox as s
+
+        def boom():
+            raise RuntimeError("x")
+        monkeypatch.setattr(metrics.METRICS, "snapshot", boom)
+        assert s._throttle_note() == ""
+
+
 class TestFillProgressIsReal:
     """A fill that takes days must say how far it is. The heartbeat used to
     print only users done, so a working run read "0/300" for two hours -- the

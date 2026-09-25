@@ -259,3 +259,25 @@ describe('a fill run\'s heartbeat', () => {
     expect(run.fillSamples).toEqual([])
   })
 })
+
+describe('request figures on the heartbeat', () => {
+  it('reads req/s and cumulative retries from a seeding heartbeat', () => {
+    const run = parseSeedRun([
+      '  ... still seeding: 0/200 users done after 31m00s (30 in flight), 12.3 req/s, 1,045 retried (1.2%)'])
+    expect(run.throttleSamples).toEqual([{ sec: 1860, reqPerSec: 12.3, retried: 1045, retriedPct: 1.2 }])
+  })
+
+  it('reads them from a fill heartbeat too, alongside the upload counters', () => {
+    const run = parseSeedRun([
+      '  ... still topping up: 14/300 users done after 40m00s (12 in flight) '
+      + '-- 328.6 GB uploaded of 383 GB planned, 9.5 req/s, 45 retried (0.4%)'])
+    expect(run.throttleSamples).toEqual([{ sec: 2400, reqPerSec: 9.5, retried: 45, retriedPct: 0.4 }])
+    expect(run.fillSamples).toEqual([{ sec: 2400, uploadedGb: 328.6, plannedGb: 383 }])
+  })
+
+  it('leaves both empty for a heartbeat without them', () => {
+    const run = parseSeedRun(['  ... still seeding: 0/200 users done after 31m00s (30 in flight)'])
+    expect(run.throttleSamples).toEqual([])
+  })
+})
+

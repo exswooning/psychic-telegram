@@ -40,6 +40,10 @@ export interface SeedWarningGroup {
   sample: string
 }
 
+/** One heartbeat's cumulative request figures: how fast the run is calling
+ *  Google, and how many of those calls have had to be retried. */
+export interface ThrottleSample { sec: number; reqPerSec: number; retried: number; retriedPct: number }
+
 export interface FillSample { sec: number; uploadedGb: number; plannedGb: number }
 
 export interface SeedRun {
@@ -60,6 +64,8 @@ export interface SeedRun {
    *  set out to, against the run's own clock. Real counters from the seeder,
    *  the only sign of life a fill gives before its first user finishes. */
   fillSamples?: FillSample[]
+  /** The same heartbeats' request rate and retry counts, for seed and fill alike. */
+  throttleSamples?: ThrottleSample[]
   /** Users whose "starting" line was seen but which have not finished. */
   runningCount: number
   doneCount: number
@@ -142,6 +148,7 @@ export function parseSeedRun(lines: string[]): SeedRun {
   const run: SeedRun = {
     users: [], totals: {}, warnings: [], runningCount: 0, doneCount: 0,
     fillSamples: [],
+    throttleSamples: [],
   }
 
   for (const physical of lines) {
@@ -179,6 +186,16 @@ export function parseSeedRun(lines: string[]): SeedRun {
       if (existing) existing.count += 1
       else warnings.set(key, { kind, code: label, count: 1, sample: line.trim() })
       continue
+    }
+
+    // "... still seeding|topping up: ... after 40m00s (12 in flight)[ -- ...],
+    //  12.3 req/s, 45 retried (1.2%)" -- independent of the fill match below,
+    // because a fill heartbeat carries both.
+    const th = line.match(
+      /still (?:seeding|topping up):.*?after\s+(\d+)m(\d+)s.*?,\s*([\d.]+)\s*req\/s,\s*([\d,]+)\s*retried\s*\(([\d.]+)%\)/)
+    if (th) {
+      run.throttleSamples!.push({ sec: num(th[1]) * 60 + num(th[2]), reqPerSec: Number(th[3]),
+                                  retried: num(th[4]), retriedPct: Number(th[5]) })
     }
 
     let m

@@ -86,6 +86,35 @@ describe('seed charts', () => {
     expect(frame('Slowest users')).toBeInTheDocument()
   })
 
+  it('draws upload rate and retries for a run that printed the heartbeats', () => {
+    const beat = (m: number, up: string, n: number) =>
+      `  ... still topping up: 0/300 users done after ${m}m00s (12 in flight) -- ${up} GB uploaded of 383 GB planned, 9.5 req/s, ${n} retried (0.4%)`
+    render(<SeedMetricCharts run={parseSeedRun([beat(1, '5', 2), beat(2, '11', 9), beat(3, '15', 9)])} />)
+    expect(frame('Upload rate')).not.toHaveTextContent(/Needs three/)
+    expect(frame('Request rate and retries')).not.toHaveTextContent(/Needs two heartbeats/)
+    // Said in the chart, not left to be assumed: seeds have no limiter to sawtooth.
+    expect(frame('Request rate and retries')).toHaveTextContent('no limiter sawtooth')
+  })
+
+  it('drops the items chart for a run whose finished users wrote no items', () => {
+    // A fill writes filler files only, so the cumulative line is flat at zero.
+    render(<SeedMetricCharts run={parseSeedRun([
+      '  [a@x.com] top-up in 5.0s: 1.0GB -> 2.0GB (2 filler file(s))',
+      '  [b@x.com] top-up in 6.0s: 1.0GB -> 2.0GB (2 filler file(s))'])} />)
+    expect(screen.queryByTestId('chart-Items written as users finish')).toBeNull()
+  })
+
+  it('keeps the items chart for a seed that wrote items', () => {
+    render(<SeedMetricCharts run={plain} />)
+    expect(frame('Items written as users finish')).toBeInTheDocument()
+  })
+
+  it('says why the retry chart is empty for a run that predates the figures', () => {
+    render(<SeedMetricCharts run={plain} />)
+    expect(frame('Request rate and retries')).toHaveTextContent(/runs started after this update/)
+    expect(screen.queryByTestId('chart-Upload rate')).toBeNull()
+  })
+
   it('shows the storage chart, with what was added, for a fill run', () => {
     render(<SeedMetricCharts run={fill} />)
     expect(frame('Storage filled per user')).toHaveTextContent(/1 GB added across 1 user/)
