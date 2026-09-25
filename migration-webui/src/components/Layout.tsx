@@ -39,6 +39,7 @@ import {
   Grass as SeedIconNav,
   Dns as HostIcon,
   Hub as MissionIcon,
+  AccountTree as PipelineIcon,
   WorkHistory as JobsIconNav,
   Bolt as RunningNowIconNav,
   StopCircle as InterruptIcon,
@@ -92,6 +93,7 @@ const NAV_ITEMS = [
   { path: '/metrics', label: 'Metrics', icon: <MetricsIconNav /> , group: 'Check' },
   { path: '/jobs', label: 'Jobs', icon: <JobsIconNav /> , group: 'Migrate' },
   { path: '/mission-control', label: 'Mission Control', icon: <MissionIcon /> , group: 'Migrate' },
+  { path: '/pipeline', label: 'Pipeline', icon: <PipelineIcon /> , group: 'Migrate' },
   // Users lives inside a migration's report now -- per-user state only
   // means anything against the tenant pair it belongs to, and a
   // top-level page had to guess which migration you meant.
