@@ -2657,6 +2657,15 @@ def seed_argv(body: dict, account_id: int | None = None) -> tuple[list[str], dic
             return [], {}, "target_gb_per_user must be a number"
     if fill_until_full:
         argv.append("--fill-until-full")
+        fill_percent = body.get("fill_percent")
+        if fill_percent is not None:
+            try:
+                pct = float(fill_percent)
+            except (TypeError, ValueError):
+                return [], {}, "fill_percent must be a number"
+            if not (0 < pct <= 100):
+                return [], {}, "fill_percent must be between 0 and 100"
+            argv += ["--fill-percent", str(pct)]
 
     # top-up-only: skip every seeding step, just check/top up storage toward
     # target_gb_per_user or fill_until_full. Only meaningful with a target,
@@ -3849,6 +3858,62 @@ def licences_payload(side: str = "target",
     }
 
 
+def storage_summary_payload(account_id: int | None = None) -> dict:
+    """What "full" would even mean for this tenant, before anyone fills it.
+
+    Built for the Top Up panel's "fill until full" control: an operator
+    picking a percentage deserves to see what it is a percentage OF. Per
+    licence SKU, not per account -- a domain with a mixed licence roster
+    has one real storage ceiling per SKU, and querying all 300 accounts to
+    say the same three numbers three hundred times would be the one call
+    per user this function's own sibling (licences_payload) specifically
+    avoids.
+
+    SOURCE only: seeding, and therefore topping up, only ever touches the
+    source tenant -- see SeedTopUp.tsx's own comment on why.
+    """
+    from config import Settings as _S
+    import tenant_inventory
+    from auth import AuthManager
+
+    st = _S(account_id=account_id) if account_id else _S()
+    by_email, err = tenant_inventory.licenses(st, "source")
+    if err:
+        return {"error": err, "skus": []}
+
+    # One representative email per SKU -- first occurrence, stable ordering
+    # so the same SKU does not silently point at a different sample user
+    # between two calls.
+    first_email: dict[str, str] = {}
+    for email, sku in by_email.items():
+        if sku and sku not in first_email:
+            first_email[sku] = email
+
+    try:
+        auth = AuthManager(st)
+    except Exception as exc:      # noqa: BLE001
+        return {"error": str(exc)[:200], "skus": []}
+
+    skus = []
+    for sku, email in first_email.items():
+        entry = {"skuId": sku, "name": tenant_inventory.SKU_NAMES.get(sku, sku),
+                 "accounts": sum(1 for v in by_email.values() if v == sku),
+                 "sampleUser": email, "limitBytes": None, "error": ""}
+        try:
+            drive = auth.source_drive(email)
+            about = drive.about().get(fields="storageQuota").execute()
+            limit = (about.get("storageQuota") or {}).get("limit")
+            # Absent, not 0: an unlimited-storage plan reports no limit at
+            # all, which is a different fact from "zero bytes allowed" and
+            # must not render as either.
+            entry["limitBytes"] = int(limit) if limit else None
+        except Exception as exc:      # noqa: BLE001 - one SKU's failure
+            # must not blank the panel for every other SKU in the mix.
+            entry["error"] = str(exc)[:160]
+        skus.append(entry)
+    return {"error": "", "skus": skus}
+
+
 def licence_preflight(account_id: int | None = None) -> dict:
     """Will the target run out of licences before the migration finishes?
 
@@ -4942,6 +5007,8 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/licences":
             self._json(licences_payload(
                 (query.get("side", ["target"])[0] or "target"), self._on_screen()))
+        elif path == "/api/storage_summary":
+            self._json(storage_summary_payload(self._on_screen()))
         elif path == "/api/licence_preflight":
             self._json(licence_preflight(self._on_screen()))
         elif path == "/api/identities":

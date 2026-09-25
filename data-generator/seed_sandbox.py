@@ -347,18 +347,25 @@ def _filler_blob() -> bytes:
 
 
 def top_up_storage(drive, settings: Settings, user: str, target_gb: float | None,
-                   media_fn=None) -> dict:
+                   media_fn=None, fill_percent: float = 100.0) -> dict:
     """
     Adds large filler files until this user's total Workspace storage
     (Gmail + Drive + Photos, pooled -- storageQuota.usage) reaches target_gb.
 
-    target_gb=None means "as full as this account can actually get" --
-    storageQuota.limit itself, read fresh per user rather than guessed at
-    from a plan name (a licence tier is not a promise every account on it
-    has the identical byte ceiling; unlimited-storage plans report no limit
-    at all, in which case there IS no "full" and this reports so rather than
-    filling forever). A fixed target_gb is still honoured when given, for
-    "at least N GB", which is a different, narrower request than "full".
+    target_gb=None means "a percentage of what this account can actually
+    get" -- fill_percent of storageQuota.limit, read fresh per user rather
+    than guessed at from a plan name. Not literally 100% by default on
+    purpose: a real Workspace licence commonly pools TERABYTES per account
+    (Business Plus alone is 5 TB), and "fill until full" against the
+    account's ACTUAL ceiling meant uploading petabytes across a real
+    tenant -- discovered live, mid-run, before it did. A percentage keeps
+    "reseed until full" meaningful (large-file handling, near-quota
+    behaviour) without trying to consume a production-scale licence for a
+    rehearsal corpus. An unlimited-storage plan reports no limit at all, in
+    which case there is no ceiling to take a percentage OF, and this
+    reports so rather than filling forever. A fixed target_gb is still
+    honoured when given, for "at least N GB" -- a different, narrower
+    request than either of the percentage modes.
 
     Filler lives inside a folder named exactly "MIGRATION-TEST" -- the same
     name reset_drive() already matches on -- so resetting the seeded corpus
@@ -397,7 +404,9 @@ def top_up_storage(drive, settings: Settings, user: str, target_gb: float | None
                             "nothing to fill toward")
                 m["usage_after_gb"] = m["usage_before_gb"]
                 return m
-            target_bytes = int(limit)
+            target_bytes = int(int(limit) * fill_percent / 100)
+            m["note"] = (f"{fill_percent:.0f}% of this account's "
+                        f"{int(limit) / 1e9:,.0f} GB limit")
         else:
             target_bytes = int(target_gb * 1e9)
             if limit and int(limit) < target_bytes:
@@ -2259,7 +2268,8 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
                   groups: list[str] | None = None,
                   only: frozenset | None = None,
                   force_reseed: bool = False,
-                  fill_until_full: bool = False) -> dict:
+                  fill_until_full: bool = False,
+                  fill_percent: float = 100.0) -> dict:
     user = entry["email"]
     peers = [u for u in all_users if u != user]
     t0 = time.time()
@@ -2351,7 +2361,8 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
         # class of failure; a new connection sidesteps it entirely.
         fresh_drive, _, _ = build_services(settings, user)
         fill_m = top_up_storage(fresh_drive, settings, user,
-                                None if fill_until_full else target_gb_per_user)
+                                None if fill_until_full else target_gb_per_user,
+                                fill_percent=fill_percent)
 
     elapsed = round(time.time() - t0, 1)
     # .get() throughout, not [] -- a service that was skipped (--only) or
@@ -2394,18 +2405,20 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
 
 
 def top_up_one_user(settings: Settings, user: str,
-                    target_gb_per_user: float | None) -> dict:
+                    target_gb_per_user: float | None,
+                    fill_percent: float = 100.0) -> dict:
     """The --top-up-only path: check and fill storage only, safe to re-run
     any number of times without duplicating mail, drive content, contacts or
     tasks -- see top_up_storage()'s docstring for why a second pass is
     sometimes needed (Gmail's usage accounting lags real time)."""
     drive, _gmail, _cal = build_services(settings, user)
     t0 = time.time()
-    m = top_up_storage(drive, settings, user, target_gb_per_user)
+    m = top_up_storage(drive, settings, user, target_gb_per_user,
+                       fill_percent=fill_percent)
     elapsed = round(time.time() - t0, 1)
     print(f"  [{user}] top-up in {elapsed}s: {m['usage_before_gb']:.1f}GB -> "
          f"{m['usage_after_gb']:.1f}GB ({m['filler_files']} filler file(s))"
-         + (f" -- {m['note']}" if m.get("note") else ""))
+         + (f" -- {m['note']}" if m.get("note") else ""), flush=True)
     return {"user": user, "storage": m, "elapsed_sec": elapsed}
 
 
@@ -2545,13 +2558,23 @@ def main(argv: list[str] | None = None) -> int:
                          "never touches mail, Drive documents, contacts or "
                          "tasks.")
     ap.add_argument("--fill-until-full", action="store_true",
-                    help="top up storage to each account's OWN Workspace "
-                         "limit (storageQuota.limit, read fresh per user) "
-                         "instead of a fixed --target-gb-per-user you have "
-                         "to guess. Reports rather than filling forever on "
-                         "an unlimited-storage plan, which has no 'full' to "
-                         "reach. Requires --top-up-only; conflicts with "
-                         "--target-gb-per-user.")
+                    help="top up storage to --fill-percent of each account's "
+                         "OWN Workspace limit (storageQuota.limit, read "
+                         "fresh per user) instead of a fixed "
+                         "--target-gb-per-user you have to guess. NOT "
+                         "literally 100%% by default -- a real licence "
+                         "commonly pools terabytes per account, and "
+                         "'until full' against the actual ceiling means "
+                         "uploading a comparable amount, per user. Reports "
+                         "rather than filling forever on an "
+                         "unlimited-storage plan, which has no ceiling to "
+                         "take a percentage of. Requires --top-up-only; "
+                         "conflicts with --target-gb-per-user.")
+    ap.add_argument("--fill-percent", type=float, default=80.0,
+                    help="with --fill-until-full: what percentage of each "
+                         "account's own storage limit to fill toward "
+                         "(default 80). Only meaningful together with "
+                         "--fill-until-full.")
     args = ap.parse_args(argv)
 
     only = None
@@ -2571,6 +2594,9 @@ def main(argv: list[str] | None = None) -> int:
         sys.exit("--top-up-only needs --target-gb-per-user or --fill-until-full")
     if args.fill_until_full and not args.top_up_only:
         sys.exit("--fill-until-full needs --top-up-only")
+    if args.fill_until_full and not (0 < args.fill_percent <= 100):
+        sys.exit(f"--fill-percent must be between 0 and 100, got "
+                 f"{args.fill_percent}")
     # None means "the account's own limit" from here on -- top_up_storage()
     # and top_up_one_user() both already treat that as the signal to read
     # storageQuota.limit fresh per user rather than a fixed number.
@@ -2785,14 +2811,48 @@ def main(argv: list[str] | None = None) -> int:
 
     # --- Top-up only -------------------------------------------------------
     if args.top_up_only:
-        target_desc = ("each account's own storage limit" if fill_target is None
+        target_desc = (f"{args.fill_percent:.0f}% of each account's own "
+                       "storage limit" if fill_target is None
                        else f"{fill_target:.1f} GB each")
         print(f"\nTopping up storage for {len(all_users)} user(s) toward "
              f"{target_desc} ...")
-        with futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
-            list(pool.map(
-                lambda u: top_up_one_user(settings, u, fill_target),
-                all_users))
+        # pool.map() waited for EVERY user before printing anything at all --
+        # top_up_one_user's own per-user line was real, it just never
+        # reached the log until the whole run finished. Live: "fill until
+        # full" against a real account limit is genuinely slow (each user
+        # may need tens of GB of filler upload, not the few files a fixed
+        # small target needs), and a Jobs-tab card watching this sat at
+        # "0 / 300, --" for 90 minutes of real, working CPU time with
+        # nothing to show for it. as_completed() + the same heartbeat the
+        # main seeding pass already prints gives it the same visibility.
+        stop_beat = threading.Event()
+        beat_done = 0
+
+        def _heartbeat() -> None:
+            waited = 0.0
+            while not stop_beat.wait(HEARTBEAT_EVERY_SEC):
+                waited += HEARTBEAT_EVERY_SEC
+                print(f"  ... still topping up: {beat_done}/{len(all_users)} "
+                     f"users done after {int(waited) // 60}m"
+                     f"{int(waited) % 60:02d}s "
+                     f"({min(args.workers, len(all_users) - beat_done)} in flight)",
+                     flush=True)
+
+        threading.Thread(target=_heartbeat, daemon=True).start()
+        try:
+            with futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
+                jobs = {pool.submit(top_up_one_user, settings, u, fill_target,
+                                    args.fill_percent): u
+                       for u in all_users}
+                for fut in futures.as_completed(jobs):
+                    beat_done += 1
+                    try:
+                        fut.result()
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"  ! {jobs[fut]} FAILED: {exc}", flush=True)
+        finally:
+            stop_beat.set()
+        print(f"\nTopped up {beat_done}/{len(all_users)} user(s).")
         return 0
 
     # --- Reset -----------------------------------------------------------
@@ -3037,6 +3097,7 @@ def main(argv: list[str] | None = None) -> int:
                 only,
                 args.reseed,
                 args.fill_until_full,
+                args.fill_percent,
             ): e["email"]
             for i, e in enumerate(entries)
         }
@@ -3192,7 +3253,8 @@ def main(argv: list[str] | None = None) -> int:
                   f"{sd_made.get('files', 0):,} file(s), "
                   f"{sd_made.get('members', 0):,} membership(s)")
     if args.target_gb_per_user or args.fill_until_full:
-        target_desc = ("each account's own limit" if args.fill_until_full
+        target_desc = (f"{args.fill_percent:.0f}% of each account's own limit"
+                       if args.fill_until_full
                        else f"{args.target_gb_per_user:.1f} GB/user")
         print(f"  Filler      : {totals['filler_files']:,} file(s), "
               f"{totals['filler_gb']:.2f} GB added toward {target_desc}")

@@ -17,12 +17,12 @@
  * no reset, no all-users/create-until-full (both about the user roster,
  * not content volume) -- just which service(s) and how much more.
  */
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import {
   Alert, Box, Button, Checkbox, FormControlLabel, Grid, MenuItem, TextField,
   Typography,
 } from '@mui/material'
-import { runSeed } from '@/api/client'
+import { runSeed, fetchStorageSummary, StorageSku } from '@/api/client'
 import { SERVICES as SEEDABLE } from '@/components/SeedOneService'
 import JobProgress from '@/components/JobProgress'
 import DomainSandboxToggle from '@/components/DomainSandboxToggle'
@@ -41,6 +41,20 @@ export const SeedTopUp: React.FC<{ domain?: string; accountId?: number }> =
   // --top-up-only skips every other seeding step entirely, so "what to
   // add"/"how much more" would silently do nothing while this is checked.
   const [fillUntilFull, setFillUntilFull] = useState(false)
+  // Not 100: a real licence pools terabytes per account (a live tenant
+  // reported 9 TB), and "full" against that is petabytes across a tenant.
+  const [fillPercent, setFillPercent] = useState('10')
+  const [skus, setSkus] = useState<StorageSku[] | null>(null)
+  const [skuErr, setSkuErr] = useState('')
+  useEffect(() => {
+    if (!fillUntilFull || skus) return
+    fetchStorageSummary()
+      .then((r) => { setSkus(r.skus); setSkuErr(r.error) })
+      .catch((e) => setSkuErr(String(e)))
+  }, [fillUntilFull, skus])
+  const pct = Number(fillPercent)
+  const pctOk = pct > 0 && pct <= 100
+  const gb = (b: number) => `${(b / 1e9).toLocaleString(undefined, { maximumFractionDigits: 1 })} GB`
   const [err, setErr] = useState<string | null>(null)
   const [queued, setQueued] = useState<string | null>(null)
   const [jobActive, setJobActive] = useState(false)
@@ -57,6 +71,7 @@ export const SeedTopUp: React.FC<{ domain?: string; accountId?: number }> =
       sharedDrives, users, only: only || undefined, accountId,
       topUpOnly: fillUntilFull || undefined,
       fillUntilFull: fillUntilFull || undefined,
+      fillPercent: fillUntilFull ? pct : undefined,
     })
     if (r.ok && !r.queued) setJobActive(true)
     setQueued(r.ok && r.queued ? (r.msg || 'queued — it will start on its own') : null)
@@ -145,9 +160,27 @@ export const SeedTopUp: React.FC<{ domain?: string; accountId?: number }> =
               </Box>
             } />
         </Grid>
+        {fillUntilFull && (
+          <Grid item xs={12} data-testid="topup-licences">
+            <TextField size="small" type="number" label="Fill to % of each account's limit"
+              value={fillPercent} onChange={(e) => setFillPercent(e.target.value)}
+              inputProps={{ min: 1, max: 100, 'data-testid': 'topup-fill-percent' }}
+              error={!pctOk} helperText={pctOk ? ' ' : 'between 1 and 100'} sx={{ mb: 1 }} />
+            {skuErr && <Alert severity="warning">{skuErr}</Alert>}
+            {!skus && !skuErr && <Typography variant="caption">Reading licences…</Typography>}
+            {skus?.map((s) => (
+              <Typography key={s.skuId} variant="body2" data-testid={`topup-sku-${s.skuId}`}>
+                <strong>{s.name}</strong> · {s.accounts} account(s) ·{' '}
+                {s.error ? `limit unreadable (${s.error})`
+                  : s.limitBytes == null ? 'no storage limit — nothing to fill'
+                  : <>{gb(s.limitBytes)} each → fills to <strong>{pctOk ? gb(s.limitBytes * pct / 100) : '—'}</strong> ({fillPercent}%)</>}
+              </Typography>
+            ))}
+          </Grid>
+        )}
       </Grid>
       <Button sx={{ mt: 1 }} size="small" variant="contained" onClick={start}
-              disabled={jobRunning || !confirmDomain.trim()}>
+              disabled={jobRunning || !confirmDomain.trim() || (fillUntilFull && !pctOk)}>
         {fillUntilFull ? 'Fill until full' : 'Add more'}
       </Button>
       {err && <Alert severity="error" sx={{ mt: 1 }}>{err}</Alert>}

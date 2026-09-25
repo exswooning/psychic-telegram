@@ -930,6 +930,29 @@ class TestSeedFromTheUI:
              "fill_until_full": True, "target_gb_per_user": 30})
         assert "pick one" in err
 
+    def test_fill_percent_is_passed_alongside_fill_until_full(self):
+        """Not literally 100% by default -- a real licence commonly pools
+        terabytes, so 'fill until full' needs a percentage, not the
+        account's actual ceiling."""
+        argv, _, _ = webui.seed_argv(
+            {"confirm_domain": "sandbox-src.example", "top_up_only": True,
+             "fill_until_full": True, "fill_percent": 25})
+        assert argv[argv.index("--fill-percent") + 1] == "25.0"
+
+    def test_fill_percent_out_of_range_is_refused(self):
+        _, _, err = webui.seed_argv(
+            {"confirm_domain": "sandbox-src.example", "top_up_only": True,
+             "fill_until_full": True, "fill_percent": 150})
+        assert "between 0 and 100" in err
+
+    def test_fill_percent_is_optional_the_seeder_has_its_own_default(self):
+        """Omitting it must not force a value here -- seed_sandbox.py's own
+        --fill-percent default (80) applies when this stays silent."""
+        argv, _, _ = webui.seed_argv(
+            {"confirm_domain": "sandbox-src.example", "top_up_only": True,
+             "fill_until_full": True})
+        assert "--fill-percent" not in argv
+
     def test_seeding_still_targets_only_the_source(self):
         """There is no code path that points the seeder at the target: the
         domain is read from SOURCE_DOMAIN, never from the request body."""

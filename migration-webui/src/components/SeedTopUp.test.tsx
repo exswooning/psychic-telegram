@@ -17,7 +17,9 @@ vi.mock('@/api/controlPlane', () => ({
 
 vi.mock('@/api/client', async () => {
   const actual = await vi.importActual<typeof client>('@/api/client')
-  return { ...actual, runSeed: vi.fn() }
+  return { ...actual, runSeed: vi.fn(), fetchStorageSummary: vi.fn(() => Promise.resolve({
+    error: '', skus: [{ skuId: '1010020028', name: 'Business Standard', accounts: 300,
+                        sampleUser: 'a@x', limitBytes: 2e12, error: '' }] })) }
 })
 
 beforeEach(() => {
@@ -146,5 +148,21 @@ describe('filling storage until full', () => {
     fireEvent.click(screen.getByTestId('topup-fill-until-full'))
     expect(screen.getByRole('button', { name: 'Fill until full' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Add more' })).toBeNull()
+  })
+})
+
+describe('the percentage and what it is a percentage of', () => {
+  it('shows the licence, its storage, and the fill target, and sends the %', async () => {
+    render(<SeedTopUp domain="src.example" />)
+    fireEvent.change(screen.getByTestId('topup-domain'), { target: { value: 'src.example' } })
+    fireEvent.click(screen.getByTestId('topup-fill-until-full'))
+    fireEvent.change(screen.getByTestId('topup-fill-percent'), { target: { value: '25' } })
+    const line = await screen.findByTestId('topup-sku-1010020028')
+    expect(line).toHaveTextContent('Business Standard')
+    expect(line).toHaveTextContent('2,000 GB each')
+    expect(line).toHaveTextContent('500 GB')
+    fireEvent.click(screen.getByRole('button', { name: 'Fill until full' }))
+    await waitFor(() => expect(client.runSeed).toHaveBeenCalled())
+    expect(vi.mocked(client.runSeed).mock.calls[0][4]?.fillPercent).toBe(25)
   })
 })

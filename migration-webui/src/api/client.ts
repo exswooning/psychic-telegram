@@ -729,6 +729,8 @@ export interface SeedOptions {
    *  is full", read fresh per user rather than assumed from a plan name.
    *  Needs topUpOnly; conflicts with targetGbPerUser. */
   fillUntilFull?: boolean
+  /** With fillUntilFull: % of each account's real limit to fill to. */
+  fillPercent?: number
   /** The full awkward-corpus set on user 1 (\'first\'), on everyone
    *  (\'all\'), or nobody (\'none\'). */
   edgeCases?: string
@@ -750,7 +752,7 @@ export async function runSeed(
   const { allUsers, createUntilFull, workers, localpartPrefix,
           sharedDrives, users, groups, only, fitToLicenses,
           externalEmail, mail, events, bigFileMb, targetGbPerUser,
-          topUpOnly, fillUntilFull, edgeCases, accountId } = opts
+          topUpOnly, fillUntilFull, fillPercent, edgeCases, accountId } = opts
   const res = await fetch('/api/seed', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -776,6 +778,7 @@ export async function runSeed(
       target_gb_per_user: targetGbPerUser || undefined,
       top_up_only: topUpOnly || undefined,
       fill_until_full: fillUntilFull || undefined,
+      fill_percent: fillUntilFull ? fillPercent : undefined,
       edge_cases: edgeCases || undefined,
     }),
   })
@@ -790,6 +793,14 @@ export async function runSeed(
  * what this call decides. Nothing here can point at the source: the domain
  * the server compares against comes from Settings(), never from this body.
  */
+export interface StorageSku {
+  skuId: string; name: string; accounts: number; sampleUser: string
+  /** null = the plan reports no limit (unlimited), not zero. */
+  limitBytes: number | null; error: string
+}
+export const fetchStorageSummary = () =>
+  getJSON<{ error: string; skus: StorageSku[] }>('/api/storage_summary')
+
 export async function runResetTarget(
   confirmDomain: string,
   accountId?: number,

@@ -16,6 +16,7 @@ union exactly once, not once per recipient.
 from __future__ import annotations
 
 import base64
+import inspect
 import os
 import re
 
@@ -1170,15 +1171,43 @@ class TestFillUntilFullCliValidation:
         self._exits_with(["--top-up-only"], monkeypatch,
                          "--target-gb-per-user or --fill-until-full")
 
+    def test_fill_percent_over_100_is_refused(self, monkeypatch):
+        self._exits_with(
+            ["--top-up-only", "--fill-until-full", "--fill-percent", "150"],
+            monkeypatch, "--fill-percent must be between 0 and 100")
+
+    def test_fill_percent_of_zero_is_refused(self, monkeypatch):
+        """0% fills nothing -- the honest way to ask for that is not to
+        pass --fill-until-full at all."""
+        self._exits_with(
+            ["--top-up-only", "--fill-until-full", "--fill-percent", "0"],
+            monkeypatch, "--fill-percent must be between 0 and 100")
+
+    def test_fill_percent_defaults_to_something_sane_without_being_asked(self):
+        """A bare --fill-until-full, with no --fill-percent, must still be
+        a valid, sane invocation -- not an error, and not silently 100%."""
+        import seed_sandbox as s
+
+        src = inspect.getsource(s.main)
+        assert '"--fill-percent", type=float, default=' in src
+
 
 class TestFillUntilFull:
-    """target_gb=None means 'as full as this account can actually get' --
-    storageQuota.limit itself, not a number the operator has to guess (or
-    a fixed target chosen once that goes stale the moment licences change).
-    A --target-gb-per-user is still a real fixed target when given; None is
-    the different, narrower request 'reseed until the tenant is full'."""
+    """target_gb=None means 'a percentage of what this account can actually
+    get' -- fill_percent of storageQuota.limit, not a number the operator
+    has to guess (or a fixed target chosen once that goes stale the moment
+    licences change). NOT literally 100% by default: a real Workspace
+    licence commonly pools terabytes per account (Business Plus alone is
+    5 TB), and filling to the actual ceiling meant uploading a comparable
+    amount PER USER, discovered live against a 9 TB real tenant limit
+    before the run got far enough to matter. A --target-gb-per-user is
+    still a real fixed target when given; None is the different, narrower
+    request 'reseed until the tenant is full' -- scaled to what 'full'
+    should mean for a rehearsal, not a production-scale licence."""
 
-    def test_fills_toward_the_accounts_own_limit(self, settings, monkeypatch):
+    def test_fills_toward_a_percentage_of_the_accounts_own_limit(
+        self, settings, monkeypatch,
+    ):
         monkeypatch.setattr(
             __import__("seed_sandbox"), "_filler_blob",
             lambda: b"x" * (10 * 1024**2))
@@ -1186,13 +1215,51 @@ class TestFillUntilFull:
 
         drive = FakeDrive("alice@tenanta.com", "source")
         drive.storage_usage = 0
-        drive.storage_limit = 25 * 1024**2   # the account's real ceiling
+        drive.storage_limit = 100 * 1024**2   # the account's real ceiling
+
+        m = s.top_up_storage(drive, settings, "alice@tenanta.com",
+                             target_gb=None, fill_percent=50.0,
+                             media_fn=_FakeMediaFn())
+
+        assert m["filler_bytes"] == 50 * 1024**2
+        assert "50%" in m["note"] and "capped" not in m["note"]
+
+    def test_100_percent_is_the_accounts_full_actual_limit(self, settings, monkeypatch):
+        """The old, dangerous default -- still reachable by asking for it
+        explicitly, never implied."""
+        monkeypatch.setattr(
+            __import__("seed_sandbox"), "_filler_blob",
+            lambda: b"x" * (10 * 1024**2))
+        import seed_sandbox as s
+
+        drive = FakeDrive("alice@tenanta.com", "source")
+        drive.storage_usage = 0
+        drive.storage_limit = 25 * 1024**2
+
+        m = s.top_up_storage(drive, settings, "alice@tenanta.com",
+                             target_gb=None, fill_percent=100.0,
+                             media_fn=_FakeMediaFn())
+
+        assert m["filler_bytes"] == 25 * 1024**2
+
+    def test_omitting_fill_percent_still_means_100_for_callers_that_pass_none(
+        self, settings, monkeypatch,
+    ):
+        """Backward compatible with every existing target_gb=None caller
+        that has not been told about percentages at all."""
+        monkeypatch.setattr(
+            __import__("seed_sandbox"), "_filler_blob",
+            lambda: b"x" * (10 * 1024**2))
+        import seed_sandbox as s
+
+        drive = FakeDrive("alice@tenanta.com", "source")
+        drive.storage_usage = 0
+        drive.storage_limit = 25 * 1024**2
 
         m = s.top_up_storage(drive, settings, "alice@tenanta.com",
                              target_gb=None, media_fn=_FakeMediaFn())
 
         assert m["filler_bytes"] == 25 * 1024**2
-        assert "capped" not in m["note"]     # this IS the target, not a cap
 
     def test_already_at_the_limit_adds_nothing(self, settings):
         import seed_sandbox as s
