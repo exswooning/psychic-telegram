@@ -26,6 +26,8 @@ export interface SeedUser {
   counts?: Record<string, number>
   /** Services that reported a failure inside this user's own done line. */
   failedServices: string[]
+  /** A fill run's before/after Drive usage, from "8.1GB -> 9.4GB". */
+  storage?: { beforeGb: number; afterGb: number }
 }
 
 export interface SeedWarningGroup {
@@ -122,6 +124,12 @@ function parseFailedServices(detail: string): string[] {
   return [...detail.matchAll(/(\w+) failed \(/g)].map((m) => m[1])
 }
 
+/** "8.1GB -> 9.4GB" from a top-up line; absent for every other kind of line. */
+function parseStorage(detail: string): SeedUser['storage'] {
+  const m = detail.match(/([\d.]+)\s*GB\s*->\s*([\d.]+)\s*GB/)
+  return m ? { beforeGb: Number(m[1]), afterGb: Number(m[2]) } : undefined
+}
+
 export function parseSeedRun(lines: string[]): SeedRun {
   const byUser = new Map<string, SeedUser>()
   const warnings = new Map<string, SeedWarningGroup>()
@@ -148,6 +156,7 @@ export function parseSeedRun(lines: string[]): SeedRun {
           elapsedSec: elapsed ? Number(elapsed[1]) : undefined,
           counts: parseCounts(detail),
           failedServices: parseFailedServices(detail),
+          storage: parseStorage(detail),
         })
       }
       continue

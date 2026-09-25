@@ -5,6 +5,7 @@ import {
   Table, TableBody, TableCell, TableHead, TableRow, Tooltip, Typography,
 } from '@mui/material'
 import { Refresh as RefreshIcon } from '@mui/icons-material'
+import MigrateMetricsCharts from '@/components/MigrateMetricsCharts'
 import {
   fetchMetrics, fetchMyMetrics, MetricsSnapshot, LimiterState,
 } from '@/api/controlPlane'
@@ -502,6 +503,8 @@ export const Metrics: React.FC = () => {
           )}
         </>
       )}
+
+      {m && !m.error && <Box sx={{ mt: 3 }}><MigrateMetricsCharts m={m} /></Box>}
     </Box>
   )
 }

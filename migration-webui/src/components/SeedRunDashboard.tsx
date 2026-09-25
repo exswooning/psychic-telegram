@@ -8,6 +8,7 @@ import {
   ResponsiveContainer, Cell,
 } from 'recharts'
 import { parseSeedRun, SeedRun, SeedUser } from '@/utils/seedLog'
+import SeedMetricCharts from '@/components/SeedMetricCharts'
 import type { FleetNode } from '@/api/controlPlane'
 
 /**
@@ -303,6 +304,10 @@ const SeedRunDashboard: React.FC<{
           <TotalsBar totals={run.totals} order={counts} />
         </>
       )}
+
+      {/* Health and storage charts: durations, slowest users, what failed,
+          and how much a fill run actually added. */}
+      <SeedMetricCharts run={run} />
 
       {/* Warnings, grouped -- the raw log repeats these hundreds of times. */}
       {run.warnings.length > 0 && (

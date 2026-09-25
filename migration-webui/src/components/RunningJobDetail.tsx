@@ -20,6 +20,7 @@ import { Close as CloseIcon } from '@mui/icons-material'
 import type { RunningJob } from '@/hooks/useRunningJobs'
 import { describeElapsed } from '@/hooks/useRunningJobs'
 import SeedRunDashboard from '@/components/SeedRunDashboard'
+import MigrateJobMetrics from '@/components/MigrateJobMetrics'
 import { formatPct } from '@/utils/formatPct'
 import { projectedEta } from './RunningJobDetail.utils'
 
@@ -92,6 +93,12 @@ export const RunningJobDetail: React.FC<{
           : !job.done ? <LinearProgress /> : null}
 
         <Divider sx={{ my: 2 }} />
+        {/* A migration records far more than a percentage -- rates,
+            latencies, limiter state, volume -- and all of it is on the
+            metrics endpoint. */}
+        {job.kind === 'migrate' && (
+          <Box sx={{ mb: 2 }}><MigrateJobMetrics live={!job.done} /></Box>
+        )}
         {/* A seed measures itself far better than a percentage can: observed
             writes per minute, per-user results, and an ETA from the run
             rather than from arithmetic. Every other kind of job prints
