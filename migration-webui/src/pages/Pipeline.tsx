@@ -1,159 +1,247 @@
-import React, { useEffect, useMemo, useState } from 'react'
-import { Alert, Box, Paper, Typography } from '@mui/material'
-import { fetchStages } from '@/api/client'
-import { fetchFleet, FleetNode } from '@/api/controlPlane'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
+import {
+  Alert, Box, Button, Chip, InputAdornment, Paper, Stack, TextField, Typography,
+} from '@mui/material'
+import { Search as SearchIcon, OpenInNew as OpenIcon } from '@mui/icons-material'
+import { fetchQueue, fetchStages } from '@/api/client'
+import type { QueueSnapshot } from '@/api/client'
+import { fetchDeadman, fetchFleet, fetchMyMetrics } from '@/api/controlPlane'
+import type { DeadmanStatus, FleetNode, MetricsSnapshot } from '@/api/controlPlane'
 import type { MigrationStage } from '@/types'
-import NodeGraph, { GEdge, GLive, GNode, GSock, Kind, NodeGraphLegend } from '@/components/NodeGraph'
+import NodeGraph, { NodeGraphHandle, NodeGraphLegend } from '@/components/NodeGraph'
+import { buildGraph, ROLE_COLOR, ROLE_LABEL, traceOf } from '@/pipeline/layout'
+import { liveFor } from '@/pipeline/live'
+import { EDGES, Role } from '@/pipeline/model'
 
 /**
- * Pipeline -- what feeds what, where it runs, and how far along it is.
+ * Pipeline -- the whole system: what feeds what, where each part runs, and
+ * how far along it is.
  *
- * The wiring is fixed (it is how the engine is built); the numbers on it are
- * not. Each stage node shows the ledger's own counter for that stage, taken
- * from the same /api/spa/stages the Mission Control page reads. Counts are
- * shown as counts -- never averaged into one percentage -- and a stage the
- * ledger does not track says so rather than showing a guess.
+ * The wiring is how the system is built and lives in pipeline/model.ts, one
+ * description per box, so the picture and its explanations cannot drift. The
+ * numbers on the boxes are not static: each comes from a source that really
+ * measures it (see pipeline/live.ts), and a box with no source shows none.
  */
+const graph = buildGraph()
 
-const STATUS: Record<string, [string, string]> = {   // status -> [dot colour, word]
-  completed: ['#3ddc84', 'done'], verified: ['#3ddc84', 'verified'],
-  in_progress: ['#4aa8ff', 'running'], retrying: ['#4aa8ff', 'retrying'],
-  failed: ['#ff5c5c', 'failed'], mismatch: ['#ff5c5c', 'mismatch'],
-  needs_attention: ['#ffb02e', 'attention'], paused: ['#ffb02e', 'paused'],
-  waiting: ['#777', 'waiting'], pending: ['#777', 'pending'], not_started: ['#777', 'not started'],
-}
-// Stages whose usersCompleted is a real per-user tally. Authentication,
-// validation and the report are yes/no, so they get a status word only.
-const COUNTED = new Set(['discovery', 'gmail', 'drive', 'calendar', 'contacts', 'chat', 'permissions'])
+/** A neighbour in the detail panel; clicking it selects and centres it. */
+const NodeLink: React.FC<{ id: string; label: string; onGo: (id: string) => void }> = ({ id, label, onGo }) => (
+  <Chip size="small" clickable variant="outlined" label={`${graph.byId.get(id)?.title} · ${label}`}
+        onClick={() => onGo(id)} sx={{ mr: 0.5, mb: 0.5, maxWidth: '100%' }} />
+)
 
-const HEAD = { tenant: '#83314a', keys: '#7a5f1c', ctl: '#3b5e3b', engine: '#246283',
-               store: '#6a3f8f', out: '#3c3c8f' }
-const s = (label: string, kind: Kind): GSock => ({ label, kind })
-
-const ENGINES: [string, string, string, string][] = [   // id, title, file, stage
-  ['drive', 'Drive', 'drive_engine.py', 'drive'],
-  ['gmail', 'Gmail', 'gmail_engine.py', 'gmail'],
-  ['calendar', 'Calendar', 'calendar_engine.py', 'calendar'],
-  ['contacts', 'Contacts', 'contacts_engine.py', 'contacts'],
-  ['chat', 'Chat', 'chat_engine.py', 'chat'],
-  ['perms', 'Permissions', 'main.py syncacls', 'permissions'],
-]
-
-const W = 1600, H = 660
+const settled = <T,>(r: PromiseSettledResult<T>): T | null => r.status === 'fulfilled' ? r.value : null
 
 export const Pipeline: React.FC = () => {
+  const navigate = useNavigate()
+  const canvas = useRef<NodeGraphHandle>(null)
   const [stages, setStages] = useState<MigrationStage[] | null>(null)
   const [fleet, setFleet] = useState<FleetNode[] | null>(null)
+  const [queue, setQueue] = useState<QueueSnapshot | null>(null)
+  const [deadman, setDeadman] = useState<DeadmanStatus | null>(null)
+  const [metrics, setMetrics] = useState<MetricsSnapshot | null>(null)
   const [err, setErr] = useState('')
+  const [selected, setSelected] = useState<string | null>(null)
+  const [query, setQuery] = useState('')
 
   useEffect(() => {
     let alive = true
+    let n = 0
     const load = async () => {
-      const [st, fl] = await Promise.allSettled([fetchStages(), fetchFleet()])
+      // Metrics are the heavy read; every other source every tick, that one
+      // every second tick.
+      const [st, fl, q, dm, mt] = await Promise.allSettled([
+        fetchStages(), fetchFleet(), fetchQueue(), fetchDeadman(),
+        n++ % 2 === 0 ? fetchMyMetrics(120) : Promise.resolve(null),
+      ])
       if (!alive) return
       if (st.status === 'fulfilled') { setStages(st.value); setErr('') }
       else setErr(String(st.reason instanceof Error ? st.reason.message : st.reason))
-      // Fleet is operator-only; a client without it just sees no runner line.
-      setFleet(fl.status === 'fulfilled' ? fl.value : null)
+      // Fleet and the dead-man switch are operator-only; a client without
+      // them simply sees no line on those boxes.
+      setFleet(settled(fl)); setQueue(settled(q)); setDeadman(settled(dm))
+      const m = settled(mt)
+      if (m) setMetrics(m)
     }
     load()
     const t = window.setInterval(load, 5_000)
     return () => { alive = false; window.clearInterval(t) }
   }, [])
 
-  const graph = useMemo(() => {
-    const live = (id: string): GLive | undefined => {
-      const st = stages?.find((x) => x.id === id)
-      if (!st) return undefined
-      if (id === 'user_creation') return { color: '#777', text: 'not tracked' }
-      const [color, word] = STATUS[st.status] ?? ['#777', st.status]
-      const counted = COUNTED.has(id)
-      return {
-        color, active: st.status === 'in_progress',
-        text: counted ? `${word} ${st.usersCompleted}/${st.usersTotal} users` : word,
-      }
-    }
-    const running = fleet?.reduce((n, f) => n + f.users_running, 0) ?? 0
-    const runner: GLive | undefined = fleet
-      ? { color: fleet.length ? '#3ddc84' : '#777', active: running > 0,
-          text: `${fleet.length} node(s) · ${running} running` }
-      : undefined
+  const live = useMemo(
+    () => liveFor({ stages, fleet, metrics, queue, deadman }),
+    [stages, fleet, metrics, queue, deadman])
+  const nodes = useMemo(
+    () => graph.nodes.map((n) => ({ ...n, live: live[n.id] })), [live])
 
-    const nodes: GNode[] = [
-      { id: 'src', title: 'Source tenant', sub: 'Workspace · read-only DWD', head: HEAD.tenant,
-        x: 16, y: 150, outs: [s('Users', 'items'), s('Items', 'items')] },
-      { id: 'keys', title: 'Service-account keys', sub: 'keys/<account>/*-sa.json', head: HEAD.keys,
-        x: 16, y: 430, outs: [s('Source key', 'creds'), s('Target key', 'creds')] },
-      { id: 'disc', title: 'Discovery', sub: 'main.py init-db --auto-map', head: HEAD.ctl,
-        x: 248, y: 90, live: live('discovery'), ins: [s('Users', 'items')], outs: [s('Identity map', 'map')] },
-      { id: 'dwd', title: 'Domain-wide delegation', sub: 'dwd_helper · verify_scopes', head: HEAD.keys,
-        x: 248, y: 400, live: live('authentication'),
-        ins: [s('Source key', 'creds'), s('Target key', 'creds')],
-        outs: [s('Source token', 'creds'), s('Target token', 'creds')] },
-      { id: 'run', title: 'Job runner', sub: 'webui Job · node_agent', head: HEAD.ctl,
-        x: 480, y: 200, live: runner, ins: [s('Identity map', 'map')], outs: [s('Users', 'ctl')] },
-      { id: 'prov', title: 'Provision accounts', sub: 'provision.py', head: HEAD.ctl,
-        x: 480, y: 470, live: live('user_creation'),
-        ins: [s('Target token', 'creds'), s('Identity map', 'map')], outs: [s('Accounts', 'items')] },
-      { id: 'res', title: 'Pacing & retry', sub: 'resilience.py · rate/retry', head: HEAD.ctl,
-        x: 712, y: 300,
-        ins: [s('Source token', 'creds'), s('Target token', 'creds'), s('Work', 'ctl')],
-        outs: [s('Paced work', 'ctl')] },
-      ...ENGINES.map(([id, title, file, stage], i): GNode => ({
-        id, title, sub: file, head: HEAD.engine, x: 944, y: 16 + i * 104, live: live(stage),
-        ins: [s('Source data', 'items'), s('Paced work', 'ctl')],
-        outs: [s('Writes', 'items'), s('Rows', 'map')],
-      })),
-      { id: 'ledger', title: 'Ledger', sub: 'migration.db · per account', head: HEAD.store,
-        x: 1176, y: 170, ins: [s('Identity map', 'map'), s('Rows', 'map')], outs: [s('State', 'map')] },
-      { id: 'target', title: 'Target tenant', sub: 'Workspace · read + write', head: HEAD.tenant,
-        x: 1176, y: 440, ins: [s('Writes', 'items')], outs: [s('Data', 'items')] },
-      { id: 'valid', title: 'Validation', sub: 'verification_payload', head: HEAD.out,
-        x: 1408, y: 200, live: live('validation'),
-        ins: [s('Ledger', 'map'), s('Source data', 'items'), s('Target data', 'items')] },
-      { id: 'report', title: 'Final report', sub: 'report_payload', head: HEAD.out,
-        x: 1408, y: 420, live: live('report'), ins: [s('Ledger', 'map')] },
-    ]
-    const e = (from: string, to: string): GEdge => ({ from, to })
-    const edges: GEdge[] = [
-      e('src.Users', 'disc.Users'),
-      e('keys.Source key', 'dwd.Source key'), e('keys.Target key', 'dwd.Target key'),
-      e('dwd.Source token', 'res.Source token'), e('dwd.Target token', 'res.Target token'),
-      e('dwd.Target token', 'prov.Target token'),
-      e('disc.Identity map', 'run.Identity map'), e('disc.Identity map', 'prov.Identity map'),
-      e('disc.Identity map', 'ledger.Identity map'),
-      e('run.Users', 'res.Work'),
-      e('prov.Accounts', 'target.Writes'),
-      ...ENGINES.flatMap(([id]) => [
-        e('src.Items', `${id}.Source data`), e('res.Paced work', `${id}.Paced work`),
-        e(`${id}.Writes`, 'target.Writes'), e(`${id}.Rows`, 'ledger.Rows'),
-      ]),
-      e('ledger.State', 'valid.Ledger'), e('src.Items', 'valid.Source data'),
-      e('target.Data', 'valid.Target data'),
-      e('ledger.State', 'report.Ledger'),
-    ]
-    return { nodes, edges }
-  }, [stages, fleet])
+  const q = query.trim().toLowerCase()
+  const matches = useMemo(() => {
+    if (!q) return null
+    return new Set(graph.nodes.filter((n) => {
+      const p = graph.byId.get(n.id)!
+      return [p.title, p.sub, p.about, ...p.files].some((t) => t.toLowerCase().includes(q))
+    }).map((n) => n.id))
+  }, [q])
+
+  const trace = useMemo(() => selected ? traceOf(EDGES, selected) : null, [selected])
+  const bright = useMemo(() => {
+    if (selected && trace) return new Set([selected, ...trace.up, ...trace.down])
+    return matches
+  }, [selected, trace, matches])
+
+  const go = (id: string) => { setSelected(id); canvas.current?.focus(id) }
+  const sel = selected ? graph.byId.get(selected) : undefined
+  const feeds = selected ? EDGES.filter((e) => e.from === selected) : []
+  const fedBy = selected ? EDGES.filter((e) => e.to === selected) : []
+  const liveLine = selected ? live[selected] : undefined
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setSelected(null) }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
   return (
     <Box sx={{ p: 3 }}>
       <Typography variant="h5" sx={{ fontWeight: 700 }}>Pipeline</Typography>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 2, maxWidth: 760 }}>
-        What feeds what, and which file does it. Hover a node to trace its
-        wires; a wire pulses while the stage behind it is running. The
-        wiring is how the engine is built; the counts on each node are read
-        live from the ledger.
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 2, maxWidth: 820 }}>
+        Everything in the system and how it connects, left to right in the order a migration happens.
+        Click a box to see what it is, where it runs, what feeds it and what it touches; click a
+        section title to zoom to it. Numbers on the boxes are live — a box with no number has
+        nothing measuring it.
       </Typography>
       {err && (
         <Alert severity="warning" sx={{ mb: 2 }}>
           Live counts unavailable ({err}) — showing the wiring only.
         </Alert>
       )}
-      <Paper variant="outlined" sx={{ overflowX: 'auto', bgcolor: '#1b1b1b', borderColor: '#000' }}>
-        <NodeGraph nodes={graph.nodes} edges={graph.edges} width={W} height={H}
-                   label="Migration pipeline: source tenant through delegation, pacing and six engines into the target tenant and the ledger" />
-      </Paper>
-      <Box sx={{ mt: 1.5 }}><NodeGraphLegend /></Box>
+
+      <Stack direction={{ xs: 'column', lg: 'row' }} spacing={2} alignItems="stretch">
+        <Box sx={{ flex: 1, minWidth: 0 }}>
+          <TextField id="pipeline-search" size="small" fullWidth sx={{ mb: 1 }}
+            placeholder="Find a part — by name, file, or what it does"
+            value={query} onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && matches && matches.size) go([...matches][0])
+              if (e.key === 'Escape') setQuery('')
+            }}
+            inputProps={{ 'aria-label': 'Find a part', 'data-testid': 'pipeline-search' }}
+            InputProps={{
+              startAdornment: <InputAdornment position="start"><SearchIcon fontSize="small" /></InputAdornment>,
+              endAdornment: matches ? (
+                <InputAdornment position="end">
+                  <Typography variant="caption" color="text.secondary" data-testid="pipeline-matches">
+                    {matches.size} match{matches.size === 1 ? '' : 'es'}
+                  </Typography>
+                </InputAdornment>
+              ) : undefined,
+            }} />
+          <Stack direction="row" spacing={0.5} sx={{ mb: 1, flexWrap: 'wrap', rowGap: 0.5, alignItems: 'center' }}
+                 data-testid="pipeline-jump">
+            <Typography variant="caption" color="text.secondary" sx={{ mr: 0.5 }}>Jump to</Typography>
+            {graph.frames.map((f) => (
+              <Chip key={f.id} size="small" variant="outlined" clickable label={f.title}
+                    onClick={() => canvas.current?.frame(f.id)} />
+            ))}
+            <Chip size="small" color="primary" variant="outlined" clickable label="Everything"
+                  onClick={() => canvas.current?.fit()} />
+          </Stack>
+          <Paper variant="outlined" sx={{ borderColor: '#000', overflow: 'hidden' }}>
+            <NodeGraph ref={canvas} nodes={nodes} edges={graph.edges} frames={graph.frames}
+                       size={{ w: graph.width, h: graph.height }} viewHeight="72vh"
+                       label="The whole migration system, from tenant setup to the dashboards"
+                       selected={selected} onSelect={setSelected} bright={bright} />
+          </Paper>
+          <Stack direction="row" spacing={2} sx={{ mt: 1.5, flexWrap: 'wrap', rowGap: 1, alignItems: 'center' }}>
+            <NodeGraphLegend />
+            <Typography variant="caption" color="text.secondary">
+              drag to pan · ctrl/⌘ + scroll or the buttons to zoom · esc clears
+            </Typography>
+          </Stack>
+        </Box>
+
+        <Paper variant="outlined" data-testid="pipeline-detail"
+               sx={{ width: { xs: '100%', lg: 340 }, flexShrink: 0, p: 2, maxHeight: '78vh', overflowY: 'auto' }}>
+          {!sel ? (
+            <>
+              <Typography variant="subtitle1" sx={{ fontWeight: 700, mb: 1 }}>What you are looking at</Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+                {graph.nodes.length} parts in {graph.frames.length} sections, joined by {EDGES.length} wires.
+                Select one and everything upstream and downstream of it stays lit.
+              </Typography>
+              <Stack direction="row" flexWrap="wrap" gap={0.75}>
+                {(Object.keys(ROLE_COLOR) as Role[]).map((r) => (
+                  <Chip key={r} size="small" label={ROLE_LABEL[r]}
+                        sx={{ bgcolor: ROLE_COLOR[r], color: '#fff' }} />
+                ))}
+              </Stack>
+            </>
+          ) : (
+            <Stack spacing={1.25} data-testid="pipeline-selected">
+              <Box>
+                <Typography variant="h6" sx={{ fontWeight: 700, lineHeight: 1.2 }}>{sel.title}</Typography>
+                <Typography variant="caption" color="text.secondary"
+                            sx={{ fontFamily: 'ui-monospace, Menlo, Consolas, monospace' }}>{sel.sub}</Typography>
+              </Box>
+              <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap>
+                <Chip size="small" label={ROLE_LABEL[sel.role]} sx={{ bgcolor: ROLE_COLOR[sel.role], color: '#fff' }} />
+                <Chip size="small" variant="outlined" label={`runs on: ${sel.where}`} />
+              </Stack>
+              {liveLine ? (
+                <Stack direction="row" spacing={1} alignItems="center">
+                  <Box sx={{ width: 10, height: 10, borderRadius: '50%', bgcolor: liveLine.color, flexShrink: 0 }} />
+                  <Typography variant="body2" data-testid="pipeline-live"
+                              sx={{ fontFamily: 'ui-monospace, Menlo, Consolas, monospace' }}>{liveLine.text}</Typography>
+                </Stack>
+              ) : (
+                <Typography variant="caption" color="text.disabled">
+                  {sel.live || sel.stage ? 'No live reading right now.' : 'Nothing measures this part live.'}
+                </Typography>
+              )}
+              <Typography variant="body2">{sel.about}</Typography>
+
+              {sel.files.length > 0 && (
+                <Box>
+                  <Typography variant="overline" color="text.secondary">Where it lives</Typography>
+                  {sel.files.map((f) => (
+                    <Typography key={f} variant="caption" component="div"
+                                sx={{ fontFamily: 'ui-monospace, Menlo, Consolas, monospace' }}>{f}</Typography>
+                  ))}
+                </Box>
+              )}
+              {sel.knobs && sel.knobs.length > 0 && (
+                <Box>
+                  <Typography variant="overline" color="text.secondary">Tuned by</Typography>
+                  <Box>{sel.knobs.map((k) => <Chip key={k} size="small" variant="outlined" label={k} sx={{ mr: 0.5, mb: 0.5 }} />)}</Box>
+                </Box>
+              )}
+              <Box>
+                <Typography variant="overline" color="text.secondary">
+                  Comes from · {trace?.up.size ?? 0} upstream
+                </Typography>
+                <Box>{fedBy.length ? fedBy.map((e) => <NodeLink key={`${e.from}${e.label}`} id={e.from} label={e.label} onGo={go} />)
+                  : <Typography variant="caption" color="text.disabled">Nothing — a starting point.</Typography>}</Box>
+              </Box>
+              <Box>
+                <Typography variant="overline" color="text.secondary">
+                  Feeds · {trace?.down.size ?? 0} downstream
+                </Typography>
+                <Box>{feeds.length ? feeds.map((e) => <NodeLink key={`${e.to}${e.label}`} id={e.to} label={e.label} onGo={go} />)
+                  : <Typography variant="caption" color="text.disabled">Nothing — an end point.</Typography>}</Box>
+              </Box>
+              {sel.page && (
+                <Button size="small" variant="outlined" endIcon={<OpenIcon fontSize="small" />}
+                        onClick={() => navigate(sel.page!)}>Open the page for this</Button>
+              )}
+              <Button size="small" onClick={() => canvas.current?.fitNodes(bright ?? [])}>
+                Zoom to its path
+              </Button>
+              <Button size="small" onClick={() => setSelected(null)}>Clear selection</Button>
+            </Stack>
+          )}
+        </Paper>
+      </Stack>
     </Box>
   )
 }
