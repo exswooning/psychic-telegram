@@ -3,7 +3,7 @@
  * components for the same reason as metricsSeries: the shaping is where a
  * chart quietly misleads, and it deserves a test that needs no browser.
  */
-import type { SeedRun, SeedUser } from '@/utils/seedLog'
+import type { FillSample, SeedRun, SeedUser } from '@/utils/seedLog'
 
 const local = (email: string) => email.split('@')[0]
 const finished = (u: SeedUser) => u.status !== 'running'
@@ -76,4 +76,19 @@ export function storageTotals(users: SeedUser[]) {
     addedGb: gb(s.reduce((n, u) => n + Math.max(0, u.storage!.afterGb - u.storage!.beforeGb), 0)),
     fillers: s.reduce((n, u) => n + (u.counts?.['filler file'] ?? 0), 0),
   }
+}
+
+/** Uploaded and planned gigabytes at each heartbeat, on the run's own clock. */
+export const fillRows = (samples: FillSample[] | undefined) =>
+  (samples ?? []).map((f) => ({ t: `${Math.round(f.sec / 60)}m`,
+                                uploaded: f.uploadedGb, planned: f.plannedGb }))
+
+/** GB/hour over the last few heartbeats -- measured, and null until there are
+ *  two of them rather than a rate from a single point. */
+export function fillRateGbPerHour(samples: FillSample[] | undefined, last = 10) {
+  const w = (samples ?? []).slice(-last)
+  if (w.length < 2) return null
+  const dt = w[w.length - 1].sec - w[0].sec
+  const dgb = w[w.length - 1].uploadedGb - w[0].uploadedGb
+  return dt > 0 && dgb >= 0 ? (dgb / dt) * 3600 : null
 }

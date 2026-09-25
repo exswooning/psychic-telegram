@@ -10,7 +10,7 @@ import type { SeedRun } from '@/utils/seedLog'
 import { useChartStyle } from '@/hooks/useChartStyle'
 import { BarsChart, ChartFrame, SeriesChart } from '@/components/Charts'
 import {
-  durationBands, failedServiceRows, itemsAsUsersFinish, slowestUsers,
+  durationBands, failedServiceRows, fillRows, itemsAsUsersFinish, slowestUsers,
   storageRows, storageTotals, warningRows,
 } from '@/utils/seedSeries'
 
@@ -19,6 +19,7 @@ const n = (v: number) => v.toLocaleString()
 export const SeedMetricCharts: React.FC<{ run: SeedRun }> = ({ run }) => {
   const { c } = useChartStyle()
   const cum = itemsAsUsersFinish(run.users)
+  const fill = fillRows(run.fillSamples)
   const bands = durationBands(run.users)
   const slow = slowestUsers(run.users)
   const warn = warningRows(run)
@@ -31,6 +32,15 @@ export const SeedMetricCharts: React.FC<{ run: SeedRun }> = ({ run }) => {
     <Box data-testid="seed-charts" sx={{ mb: 1.5 }}>
       <Box sx={{ display: 'grid', gap: 1.5,
                  gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', alignItems: 'start' }}>
+        {fill.length > 0 && (
+          <ChartFrame title="Uploaded to Drive over time"
+                      hint="gigabytes actually written; planned counts the users started so far"
+                      empty={fill.length < 2 ? 'Needs two heartbeats (one every 30 s).' : null}>
+            <SeriesChart data={fill} xKey="t" fmt={(v) => `${v.toLocaleString()} GB`}
+                         series={[{ key: 'uploaded', name: 'uploaded', color: c.success, type: 'area' },
+                                  { key: 'planned', name: 'planned', color: c.muted, type: 'line' }]} />
+          </ChartFrame>
+        )}
         <ChartFrame title="Items written as users finish" hint="cumulative, in finishing order"
                     empty={cum.length < 2 ? 'Needs two finished users.' : null}>
           <SeriesChart data={cum} xKey="users" fmt={n}

@@ -1192,6 +1192,42 @@ class TestFillUntilFullCliValidation:
         assert '"--fill-percent", type=float, default=' in src
 
 
+class TestFillProgressIsReal:
+    """A fill that takes days must say how far it is. The heartbeat used to
+    print only users done, so a working run read "0/300" for two hours -- the
+    same as a hung one. The counters behind the new suffix are the bytes
+    actually uploaded and the bytes the run set out to upload."""
+
+    def test_counts_what_was_planned_and_what_was_uploaded(self, settings, monkeypatch):
+        import seed_sandbox as s
+
+        monkeypatch.setattr(s, "_filler_blob", lambda: b"x" * (10 * 1024**2))
+        s._fill_totals.update(uploaded=0, planned=0)
+        assert s.fill_progress_line() == ""        # nothing before a fill starts
+
+        drive = FakeDrive("alice@tenanta.com", "source")
+        drive.storage_usage = 0
+        drive.storage_limit = 100 * 1024**2
+        m = s.top_up_storage(drive, settings, "alice@tenanta.com", target_gb=None,
+                             fill_percent=50.0, media_fn=_FakeMediaFn())
+
+        assert s._fill_totals["planned"] == 50 * 1024**2
+        assert s._fill_totals["uploaded"] == m["filler_bytes"] == 50 * 1024**2
+        assert "GB uploaded of" in s.fill_progress_line()
+        assert "GB planned" in s.fill_progress_line()
+
+    def test_an_account_already_at_target_plans_nothing(self, settings, monkeypatch):
+        import seed_sandbox as s
+
+        s._fill_totals.update(uploaded=0, planned=0)
+        drive = FakeDrive("alice@tenanta.com", "source")
+        drive.storage_usage = 100 * 1024**2
+        drive.storage_limit = 100 * 1024**2
+        s.top_up_storage(drive, settings, "alice@tenanta.com", target_gb=None,
+                         fill_percent=50.0, media_fn=_FakeMediaFn())
+        assert s._fill_totals == {"uploaded": 0, "planned": 0}
+
+
 class TestFillUntilFull:
     """target_gb=None means 'a percentage of what this account can actually
     get' -- fill_percent of storageQuota.limit, not a number the operator

@@ -54,6 +54,11 @@ export const SeedTopUp: React.FC<{ domain?: string; accountId?: number }> =
   }, [fillUntilFull, skus, accountId])
   const pct = Number(fillPercent)
   const pctOk = pct > 0 && pct <= 100
+  // Google accepts about this much into one account's Drive per day, whatever
+  // the link speed -- a floor on how long a fill can take, not an estimate.
+  const DAILY_UPLOAD_CAP = 750e9
+  const size = (b: number) => b >= 1e15 ? `${(b / 1e15).toFixed(1)} PB`
+    : b >= 1e12 ? `${(b / 1e12).toFixed(1)} TB` : `${Math.round(b / 1e9).toLocaleString()} GB`
   const gb = (b: number) => `${(b / 1e9).toLocaleString(undefined, { maximumFractionDigits: 1 })} GB`
   const [err, setErr] = useState<string | null>(null)
   const [queued, setQueued] = useState<string | null>(null)
@@ -168,6 +173,23 @@ export const SeedTopUp: React.FC<{ domain?: string; accountId?: number }> =
               error={!pctOk} helperText={pctOk ? ' ' : 'between 1 and 100'} sx={{ mb: 1, minWidth: 240 }} />
             {skuErr && <Alert severity="warning">{skuErr}</Alert>}
             {!skus && !skuErr && <Typography variant="caption">Reading licences…</Typography>}
+            {pctOk && (() => {
+              // Upper bound: every account filled from empty. Real usage only
+              // lowers it, and nothing here can know that before the run.
+              const rows = (skus ?? []).filter((x) => x.limitBytes)
+              const total = rows.reduce((n, x) => n + x.accounts * x.limitBytes! * pct / 100, 0)
+              const worst = Math.max(0, ...rows.map((x) => x.limitBytes! * pct / 100))
+              const days = Math.ceil(worst / DAILY_UPLOAD_CAP)
+              const dayPct = rows.length ? Math.floor((DAILY_UPLOAD_CAP / Math.max(...rows.map((x) => x.limitBytes!))) * 100) : 0
+              return days > 1 ? (
+                <Alert severity="warning" sx={{ mb: 1 }} data-testid="topup-volume">
+                  Up to <strong>{size(total)}</strong> in total. Google accepts about 750 GB
+                  per account per day, so this takes <strong>at least {days} days</strong>,
+                  however fast the link is. {dayPct >= 1
+                    ? `${dayPct}% or less fits in a day.` : ''}
+                </Alert>
+              ) : null
+            })()}
             {skus?.map((s) => (
               <Typography key={s.skuId} variant="body2" data-testid={`topup-sku-${s.skuId}`}>
                 <strong>{s.name}</strong> · {s.accounts} account(s) ·{' '}

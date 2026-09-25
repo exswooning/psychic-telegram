@@ -165,4 +165,21 @@ describe('the percentage and what it is a percentage of', () => {
     await waitFor(() => expect(client.runSeed).toHaveBeenCalled())
     expect(vi.mocked(client.runSeed).mock.calls[0][4]?.fillPercent).toBe(25)
   })
+
+  it('warns, before the run, how big and how slow an ambitious percentage is', async () => {
+    /* 100% of 2 TB across 300 accounts is 600 TB; at Google's ~750 GB per
+       account per day that cannot take less than 3 days. Found the hard way:
+       a 100% fill of 9 TB accounts sat at 0/300 for two hours. */
+    render(<SeedTopUp domain="src.example" />)
+    fireEvent.click(screen.getByTestId('topup-fill-until-full'))
+    await screen.findByTestId('topup-sku-1010020028')
+    fireEvent.change(screen.getByTestId('topup-fill-percent'), { target: { value: '100' } })
+    const warn = await screen.findByTestId('topup-volume')
+    expect(warn).toHaveTextContent('600.0 TB')
+    expect(warn).toHaveTextContent('at least 3 days')
+    expect(warn).toHaveTextContent('37% or less fits in a day')
+    // A percentage that fits in a day raises no warning.
+    fireEvent.change(screen.getByTestId('topup-fill-percent'), { target: { value: '25' } })
+    await waitFor(() => expect(screen.queryByTestId('topup-volume')).toBeNull())
+  })
 })

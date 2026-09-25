@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { parseSeedRun } from './seedLog'
 import {
-  durationBands, failedServiceRows, itemsAsUsersFinish, slowestUsers,
+  fillRateGbPerHour, fillRows, durationBands, failedServiceRows, itemsAsUsersFinish, slowestUsers,
   storageRows, storageTotals, warningRows,
 } from './seedSeries'
 
@@ -52,5 +52,21 @@ describe('a fill run', () => {
   it('ranks by gigabytes added and totals them, with the filler files', () => {
     expect(storageRows(run.users)[0]).toEqual({ user: 'a', before: 8.1, added: 1.3 })
     expect(storageTotals(run.users)).toEqual({ users: 2, addedGb: 1.8, fillers: 4 })
+  })
+})
+
+describe('fill rate', () => {
+  it('is measured from the heartbeats, and absent until there are two', () => {
+    expect(fillRateGbPerHour([{ sec: 0, uploadedGb: 0, plannedGb: 9 }])).toBeNull()
+    expect(fillRateGbPerHour([{ sec: 0, uploadedGb: 0, plannedGb: 9 },
+                              { sec: 1800, uploadedGb: 200, plannedGb: 9 }])).toBe(400)
+  })
+  it('never reports a negative or undefined rate', () => {
+    expect(fillRateGbPerHour(undefined)).toBeNull()
+    expect(fillRateGbPerHour([{ sec: 5, uploadedGb: 9, plannedGb: 9 },
+                              { sec: 5, uploadedGb: 9, plannedGb: 9 }])).toBeNull()
+  })
+  it('labels the time axis in minutes', () => {
+    expect(fillRows([{ sec: 7020, uploadedGb: 1, plannedGb: 2 }])[0].t).toBe('117m')
   })
 })

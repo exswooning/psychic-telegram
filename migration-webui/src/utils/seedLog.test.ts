@@ -241,3 +241,21 @@ describe('records spliced onto one line', () => {
     expect(splitRecords(beat)).toEqual([beat])
   })
 })
+
+describe('a fill run\'s heartbeat', () => {
+  const beat = (min: number, sec: number, up: string, plan: string) =>
+    `  ... still topping up: 0/300 users done after ${min}m${String(sec).padStart(2, '0')}s `
+    + `(12 in flight) -- ${up} GB uploaded of ${plan} GB planned`
+
+  it('yields real samples: time, uploaded, planned', () => {
+    const run = parseSeedRun([beat(0, 30, '9.5', '106,800'), beat(117, 0, '690.2', '106,800')])
+    expect(run.fillSamples).toEqual([
+      { sec: 30, uploadedGb: 9.5, plannedGb: 106800 },
+      { sec: 7020, uploadedGb: 690.2, plannedGb: 106800 }])
+  })
+
+  it('ignores an old-format heartbeat with no upload figures', () => {
+    const run = parseSeedRun(['  ... still topping up: 0/300 users done after 1m00s (12 in flight)'])
+    expect(run.fillSamples).toEqual([])
+  })
+})

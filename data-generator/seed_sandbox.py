@@ -321,6 +321,29 @@ def _media(data: bytes, mimetype: str):
 _FILLER_CHUNK_BYTES = 50 * 1024 * 1024   # 50 MB per filler file
 _filler_blob_cache: bytes | None = None
 
+# What a fill run has actually put into Drive, across every worker thread, and
+# how much it set out to. Real counters: the heartbeat reports them, so a run
+# that will take days reads as "690 GB of 107,000 GB" instead of "0/300" for
+# two hours -- which is indistinguishable from a hung one.
+_fill_lock = threading.Lock()
+_fill_totals = {"uploaded": 0, "planned": 0}
+
+
+def _fill_note(uploaded: int = 0, planned: int = 0) -> None:
+    with _fill_lock:
+        _fill_totals["uploaded"] += uploaded
+        _fill_totals["planned"] += planned
+
+
+def fill_progress_line() -> str:
+    """The heartbeat's suffix ("-- 690.2 GB uploaded of 106,800 GB planned"),
+    or nothing before any fill has started."""
+    with _fill_lock:
+        up, plan = _fill_totals["uploaded"], _fill_totals["planned"]
+    if not plan:
+        return ""
+    return f" -- {up / 1e9:,.1f} GB uploaded of {plan / 1e9:,.0f} GB planned"
+
 
 def _filler_blob() -> bytes:
     """
@@ -421,6 +444,7 @@ def top_up_storage(drive, settings: Settings, user: str, target_gb: float | None
         if remaining <= 0:
             m["usage_after_gb"] = m["usage_before_gb"]
             return m
+        _fill_note(planned=remaining)
 
         root = retry(lambda: drive.files().create(
             body={"name": "MIGRATION-TEST", "mimeType": FOLDER_MIME,
@@ -456,6 +480,7 @@ def top_up_storage(drive, settings: Settings, user: str, target_gb: float | None
                 fields="id").execute())()
             m["filler_files"] += 1
             m["filler_bytes"] += chunk
+            _fill_note(uploaded=chunk)
         if remainder > 1024 * 1024:      # skip a leftover under 1 MB
             retry(lambda: drive.files().create(
                 body={"name": f"filler-{i + 1:04d}.bin", "parents": [folder_id]},
@@ -463,6 +488,7 @@ def top_up_storage(drive, settings: Settings, user: str, target_gb: float | None
                 fields="id").execute())()
             m["filler_files"] += 1
             m["filler_bytes"] += int(remainder)
+            _fill_note(uploaded=int(remainder))
 
         m["usage_after_gb"] = round((usage + m["filler_bytes"]) / 1e9, 2)
     except Exception as exc:  # noqa: BLE001
@@ -2835,8 +2861,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  ... still topping up: {beat_done}/{len(all_users)} "
                      f"users done after {int(waited) // 60}m"
                      f"{int(waited) % 60:02d}s "
-                     f"({min(args.workers, len(all_users) - beat_done)} in flight)",
-                     flush=True)
+                     f"({min(args.workers, len(all_users) - beat_done)} in flight)"
+                     + fill_progress_line(), flush=True)
 
         threading.Thread(target=_heartbeat, daemon=True).start()
         try:

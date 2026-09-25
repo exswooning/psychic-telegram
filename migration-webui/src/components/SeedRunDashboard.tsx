@@ -9,6 +9,7 @@ import {
 } from 'recharts'
 import { parseSeedRun, SeedRun, SeedUser } from '@/utils/seedLog'
 import SeedMetricCharts from '@/components/SeedMetricCharts'
+import { fillRateGbPerHour } from '@/utils/seedSeries'
 import type { FleetNode } from '@/api/controlPlane'
 
 /**
@@ -231,6 +232,8 @@ const SeedRunDashboard: React.FC<{
       + `${run.workers ?? '?'} run in parallel, so they finish in batches `
       + `(${run.doneCount} done so far)`
 
+  const fillNow = run.fillSamples?.[run.fillSamples.length - 1]
+  const fillRate = fillRateGbPerHour(run.fillSamples)
   const counts = COUNT_ORDER.filter((k) => k in run.totals)
   const totalWarnings = run.warnings.reduce((s, w) => s + w.count, 0)
 
@@ -263,6 +266,16 @@ const SeedRunDashboard: React.FC<{
               hint={ended ? 'The run has finished -- there is nothing left to estimate'
                 : sampleHint
                 ?? 'Extrapolated from the observed rate above, not from the run’s up-front estimate'} />
+        {fillNow && (
+          <>
+            <Stat label="Uploaded" value={`${fillNow.uploadedGb.toLocaleString()} GB`}
+                  hint={`Written to Drive so far, of ${fillNow.plannedGb.toLocaleString()} GB `
+                    + 'planned for the users started so far -- real counters from the seeder'} />
+            <Stat label="Upload rate"
+                  value={fillRate != null ? `${Math.round(fillRate).toLocaleString()} GB/h` : '--'}
+                  hint="Measured over the last heartbeats" />
+          </>
+        )}
         <Stat label="Est. at start"
               value={run.estimatedMinutes != null ? dur(run.estimatedMinutes * 60) : '--'}
               hint={run.estimatedWrites != null

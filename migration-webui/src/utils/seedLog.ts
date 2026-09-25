@@ -40,6 +40,8 @@ export interface SeedWarningGroup {
   sample: string
 }
 
+export interface FillSample { sec: number; uploadedGb: number; plannedGb: number }
+
 export interface SeedRun {
   domain?: string
   scale?: string
@@ -54,6 +56,10 @@ export interface SeedRun {
   /** Sum of every finished user's counts, by label. */
   totals: Record<string, number>
   warnings: SeedWarningGroup[]
+  /** A fill run's heartbeats: what it has actually uploaded, and how much it
+   *  set out to, against the run's own clock. Real counters from the seeder,
+   *  the only sign of life a fill gives before its first user finishes. */
+  fillSamples?: FillSample[]
   /** Users whose "starting" line was seen but which have not finished. */
   runningCount: number
   doneCount: number
@@ -135,6 +141,7 @@ export function parseSeedRun(lines: string[]): SeedRun {
   const warnings = new Map<string, SeedWarningGroup>()
   const run: SeedRun = {
     users: [], totals: {}, warnings: [], runningCount: 0, doneCount: 0,
+    fillSamples: [],
   }
 
   for (const physical of lines) {
@@ -188,6 +195,12 @@ export function parseSeedRun(lines: string[]): SeedRun {
       /estimated\s+~?([\d,]+)\s+API writes,\s+roughly\s+(?:([\d,]+)\s*h\s*)?([\d,]+)\s*(?:m\b|minute)/))) {
       run.estimatedWrites = num(m[1])
       run.estimatedMinutes = (m[2] ? num(m[2]) * 60 : 0) + num(m[3])
+    } else if ((m = line.match(
+      // "... still topping up: 0/300 users done after 117m00s (12 in flight)
+      //  -- 690.2 GB uploaded of 106,800 GB planned"
+      /still topping up:.*?after\s+(\d+)m(\d+)s.*?--\s*([\d,.]+)\s*GB uploaded of\s*([\d,.]+)\s*GB planned/))) {
+      run.fillSamples!.push({ sec: num(m[1]) * 60 + num(m[2]),
+                              uploadedGb: num(m[3]), plannedGb: num(m[4]) })
     } else if ((m = line.match(/external collaborator:\s*(\S+)/))) {
       run.externalCollaborator = m[1]
     } else if ((m = line.match(/^\s*(~\d+\s+messages\s+and\s+~\d+\s+events\s+per\s+user)/))) {
