@@ -1209,7 +1209,8 @@ class TestFillProgressIsReal:
         drive.storage_usage = 0
         drive.storage_limit = 100 * 1024**2
         m = s.top_up_storage(drive, settings, "alice@tenanta.com", target_gb=None,
-                             fill_percent=50.0, media_fn=_FakeMediaFn())
+                             fill_percent=50.0, media_fn=_FakeMediaFn(),
+                             account_limit_bytes=100 * 1024**2)
 
         assert s._fill_totals["planned"] == 50 * 1024**2
         assert s._fill_totals["uploaded"] == m["filler_bytes"] == 50 * 1024**2
@@ -1224,7 +1225,8 @@ class TestFillProgressIsReal:
         drive.storage_usage = 100 * 1024**2
         drive.storage_limit = 100 * 1024**2
         s.top_up_storage(drive, settings, "alice@tenanta.com", target_gb=None,
-                         fill_percent=50.0, media_fn=_FakeMediaFn())
+                         fill_percent=50.0, media_fn=_FakeMediaFn(),
+                         account_limit_bytes=100 * 1024**2)
         assert s._fill_totals == {"uploaded": 0, "planned": 0}
 
 
@@ -1235,95 +1237,120 @@ class TestFillUntilFull:
     licences change). NOT literally 100% by default: a real Workspace
     licence commonly pools terabytes per account (Business Plus alone is
     5 TB), and filling to the actual ceiling meant uploading a comparable
-    amount PER USER, discovered live against a 9 TB real tenant limit
+    amount PER USER -- discovered live, and later traced to reading the tenant's pooled limit as a per-account one --
     before the run got far enough to matter. A --target-gb-per-user is
     still a real fixed target when given; None is the different, narrower
     request 'reseed until the tenant is full' -- scaled to what 'full'
     should mean for a rehearsal, not a production-scale licence."""
 
-    def test_fills_toward_a_percentage_of_the_accounts_own_limit(
-        self, settings, monkeypatch,
-    ):
+    @staticmethod
+    def _small(monkeypatch):
         monkeypatch.setattr(
             __import__("seed_sandbox"), "_filler_blob",
             lambda: b"x" * (10 * 1024**2))
+
+    def test_fills_toward_a_percentage_of_the_accounts_own_share(
+        self, settings, monkeypatch,
+    ):
+        self._small(monkeypatch)
         import seed_sandbox as s
 
         drive = FakeDrive("alice@tenanta.com", "source")
         drive.storage_usage = 0
-        drive.storage_limit = 100 * 1024**2   # the account's real ceiling
+        drive.storage_limit = 100 * 1024**2
 
         m = s.top_up_storage(drive, settings, "alice@tenanta.com",
                              target_gb=None, fill_percent=50.0,
-                             media_fn=_FakeMediaFn())
+                             media_fn=_FakeMediaFn(),
+                             account_limit_bytes=100 * 1024**2)
 
         assert m["filler_bytes"] == 50 * 1024**2
         assert "50%" in m["note"] and "capped" not in m["note"]
 
-    def test_100_percent_is_the_accounts_full_actual_limit(self, settings, monkeypatch):
-        """The old, dangerous default -- still reachable by asking for it
-        explicitly, never implied."""
-        monkeypatch.setattr(
-            __import__("seed_sandbox"), "_filler_blob",
-            lambda: b"x" * (10 * 1024**2))
+    def test_the_tenants_pooled_limit_is_never_taken_for_the_accounts_share(
+        self, settings, monkeypatch,
+    ):
+        """Drive reports the whole tenant's POOL as every user's limit (300
+        Business Starter accounts all report 300 x 30 GiB). Read as one
+        account's ceiling, a 100% fill sent each account after the entire
+        pool: ~1.4 TB written in four hours, no user anywhere near done."""
+        self._small(monkeypatch)
         import seed_sandbox as s
 
         drive = FakeDrive("alice@tenanta.com", "source")
         drive.storage_usage = 0
-        drive.storage_limit = 25 * 1024**2
+        drive.storage_limit = 300 * 30 * 1024**2      # the pool, as reported
+        share = 30 * 1024**2                          # what Alice's licence gives her
 
         m = s.top_up_storage(drive, settings, "alice@tenanta.com",
                              target_gb=None, fill_percent=100.0,
-                             media_fn=_FakeMediaFn())
+                             media_fn=_FakeMediaFn(), account_limit_bytes=share)
 
-        assert m["filler_bytes"] == 25 * 1024**2
+        assert m["filler_bytes"] == share             # NOT the pool
 
-    def test_omitting_fill_percent_still_means_100_for_callers_that_pass_none(
-        self, settings, monkeypatch,
-    ):
-        """Backward compatible with every existing target_gb=None caller
-        that has not been told about percentages at all."""
-        monkeypatch.setattr(
-            __import__("seed_sandbox"), "_filler_blob",
-            lambda: b"x" * (10 * 1024**2))
+    def test_100_percent_is_the_accounts_full_share(self, settings, monkeypatch):
+        self._small(monkeypatch)
         import seed_sandbox as s
 
         drive = FakeDrive("alice@tenanta.com", "source")
         drive.storage_usage = 0
-        drive.storage_limit = 25 * 1024**2
 
         m = s.top_up_storage(drive, settings, "alice@tenanta.com",
-                             target_gb=None, media_fn=_FakeMediaFn())
+                             target_gb=None, fill_percent=100.0,
+                             media_fn=_FakeMediaFn(),
+                             account_limit_bytes=20 * 1024**2)
 
-        assert m["filler_bytes"] == 25 * 1024**2
+        assert m["filler_bytes"] == 20 * 1024**2
 
-    def test_already_at_the_limit_adds_nothing(self, settings):
+    def test_an_account_already_at_its_share_adds_nothing(self, settings):
         import seed_sandbox as s
 
         drive = FakeDrive("alice@tenanta.com", "source")
         drive.storage_usage = 40 * 1024**2
-        drive.storage_limit = 40 * 1024**2
 
         m = s.top_up_storage(drive, settings, "alice@tenanta.com",
-                             target_gb=None, media_fn=_FakeMediaFn())
+                             target_gb=None, media_fn=_FakeMediaFn(),
+                             account_limit_bytes=40 * 1024**2)
 
         assert m["filler_files"] == 0
         assert m["filler_bytes"] == 0
 
-    def test_an_unlimited_plan_has_no_full_to_reach(self, settings):
-        """Some Workspace plans report no storage limit at all -- filling
-        toward a target that does not exist would write filler forever."""
+    def test_an_account_whose_share_is_unknown_is_skipped_and_says_why(self, settings):
+        """No licence table entry means there is nothing honest to take a
+        percentage of -- the pooled limit is not a substitute."""
         import seed_sandbox as s
 
         drive = FakeDrive("alice@tenanta.com", "source")
         drive.storage_usage = 5 * 1024**3
-        drive.storage_limit = None
+        drive.storage_limit = 1024**4                 # a pool, and a big one
 
         m = s.top_up_storage(drive, settings, "alice@tenanta.com",
                              target_gb=None, media_fn=_FakeMediaFn())
 
         assert m["filler_files"] == 0
-        assert "no storage limit" in m["note"]
+        assert "share is unknown" in m["note"]
+
+    def test_shares_come_from_the_licence_and_unlisted_ones_are_left_out(
+        self, settings, monkeypatch,
+    ):
+        import seed_sandbox as s
+        import tenant_inventory
+
+        monkeypatch.setattr(tenant_inventory, "licenses", lambda st, side: ({
+            "a@x.com": "1010020027", "b@x.com": "1010020028",
+            "c@x.com": "MYSTERY"}, ""))
+        got = s.account_shares(settings, ["A@x.com", "b@x.com", "c@x.com", "d@x.com"])
+        assert got == {"A@x.com": 30 * 1024**3, "b@x.com": 2048 * 1024**3}
+
+    def test_an_unreadable_licence_list_skips_everyone_rather_than_guessing(
+        self, settings, monkeypatch,
+    ):
+        import seed_sandbox as s
+        import tenant_inventory
+
+        monkeypatch.setattr(tenant_inventory, "licenses",
+                            lambda st, side: ({}, "needs the licensing scope"))
+        assert s.account_shares(settings, ["a@x.com"]) == {}
 
     def test_a_fixed_target_is_unaffected_by_this_at_all(self, settings, monkeypatch):
         """None and a real number must stay two different requests -- this

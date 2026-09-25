@@ -3912,10 +3912,18 @@ def storage_summary_payload(account_id: int | None = None) -> dict:
         return {"error": str(exc)[:200], "skus": []}
 
     skus = []
+    total = sum(1 for v in by_email.values() if v)
     for sku, email in first_email.items():
+        # limitBytes is ONE ACCOUNT'S share, from its licence. poolBytes is
+        # what Drive itself reports as the limit, which for a pooled tenant is
+        # the whole tenant's storage and the same number for every user --
+        # 300 Business Starter accounts report 9,000 GB, not 30. Filling to a
+        # percentage of THAT sent every account after the entire pool.
         entry = {"skuId": sku, "name": tenant_inventory.SKU_NAMES.get(sku, sku),
                  "accounts": sum(1 for v in by_email.values() if v == sku),
-                 "sampleUser": email, "limitBytes": None, "error": ""}
+                 "sampleUser": email, "limitBytes":
+                 tenant_inventory.SKU_STORAGE_BYTES.get(sku),
+                 "poolBytes": None, "error": ""}
         try:
             drive = auth.source_drive(email)
             about = drive.about().get(fields="storageQuota").execute()
@@ -3923,7 +3931,13 @@ def storage_summary_payload(account_id: int | None = None) -> dict:
             # Absent, not 0: an unlimited-storage plan reports no limit at
             # all, which is a different fact from "zero bytes allowed" and
             # must not render as either.
-            entry["limitBytes"] = int(limit) if limit else None
+            entry["poolBytes"] = int(limit) if limit else None
+            # A licence not in the table is not guessed at -- except the one
+            # case that is exact: the only licence in the tenant, so the pool
+            # divided by every account is that licence's share.
+            if entry["limitBytes"] is None and entry["poolBytes"] \
+                    and len(first_email) == 1 and total:
+                entry["limitBytes"] = entry["poolBytes"] // total
         except Exception as exc:      # noqa: BLE001 - one SKU's failure
             # must not blank the panel for every other SKU in the mix.
             entry["error"] = str(exc)[:160]

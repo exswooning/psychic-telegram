@@ -19,7 +19,8 @@ vi.mock('@/api/client', async () => {
   const actual = await vi.importActual<typeof client>('@/api/client')
   return { ...actual, runSeed: vi.fn(), fetchStorageSummary: vi.fn(() => Promise.resolve({
     error: '', skus: [{ skuId: '1010020028', name: 'Business Standard', accounts: 300,
-                        sampleUser: 'a@x', limitBytes: 2e12, error: '' }] })) }
+                        sampleUser: 'a@x', limitBytes: 2048 * 2 ** 30,
+                        poolBytes: 300 * 2048 * 2 ** 30, error: '' }] })) }
 })
 
 beforeEach(() => {
@@ -159,8 +160,8 @@ describe('the percentage and what it is a percentage of', () => {
     fireEvent.change(screen.getByTestId('topup-fill-percent'), { target: { value: '25' } })
     const line = await screen.findByTestId('topup-sku-1010020028')
     expect(line).toHaveTextContent('Business Standard')
-    expect(line).toHaveTextContent('2,000 GB each')
-    expect(line).toHaveTextContent('500 GB')
+    expect(line).toHaveTextContent('2,048 GB each')
+    expect(line).toHaveTextContent('512 GB')
     fireEvent.click(screen.getByRole('button', { name: 'Fill until full' }))
     await waitFor(() => expect(client.runSeed).toHaveBeenCalled())
     expect(vi.mocked(client.runSeed).mock.calls[0][4]?.fillPercent).toBe(25)
@@ -177,9 +178,38 @@ describe('the percentage and what it is a percentage of', () => {
     const warn = await screen.findByTestId('topup-volume')
     expect(warn).toHaveTextContent('600.0 TB')
     expect(warn).toHaveTextContent('at least 3 days')
-    expect(warn).toHaveTextContent('37% or less fits in a day')
+    expect(warn).toHaveTextContent('36% or less fits in a day')
     // A percentage that fits in a day raises no warning.
     fireEvent.change(screen.getByTestId('topup-fill-percent'), { target: { value: '25' } })
     await waitFor(() => expect(screen.queryByTestId('topup-volume')).toBeNull())
+  })
+
+  it('shows a Business Starter account as 30 GB, not the tenant\'s pooled total', async () => {
+    /* Drive reports the whole tenant's pool (300 x 30 GB) as every user's
+       limit. The panel shows the licence's per-account share, and the pool
+       only as a labelled aside. */
+    vi.mocked(client.fetchStorageSummary).mockResolvedValueOnce({
+      error: '', skus: [{ skuId: '1010020027', name: 'Business Starter', accounts: 300,
+                          sampleUser: 'a@x', limitBytes: 30 * 2 ** 30,
+                          poolBytes: 300 * 30 * 2 ** 30, error: '' }] })
+    render(<SeedTopUp domain="src.example" />)
+    fireEvent.click(screen.getByTestId('topup-fill-until-full'))
+    const line = await screen.findByTestId('topup-sku-1010020027')
+    expect(line).toHaveTextContent('Business Starter')
+    expect(line).toHaveTextContent('30 GB each')
+    expect(line).toHaveTextContent('fills to 3 GB')            // 10% default
+    expect(line).toHaveTextContent('pooled across the tenant: 9,000 GB')
+    // 30 GB per account fits any day, so there is nothing to warn about.
+    expect(screen.queryByTestId('topup-volume')).toBeNull()
+  })
+
+  it('says accounts are skipped when their licence share is unknown', async () => {
+    vi.mocked(client.fetchStorageSummary).mockResolvedValueOnce({
+      error: '', skus: [{ skuId: 'MYSTERY', name: 'MYSTERY', accounts: 4, sampleUser: 'a@x',
+                          limitBytes: null, poolBytes: 9 * 2 ** 40, error: '' }] })
+    render(<SeedTopUp domain="src.example" />)
+    fireEvent.click(screen.getByTestId('topup-fill-until-full'))
+    expect(await screen.findByTestId('topup-sku-MYSTERY'))
+      .toHaveTextContent(/share unknown.*skipped/)
   })
 })

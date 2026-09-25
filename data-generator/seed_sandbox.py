@@ -370,25 +370,24 @@ def _filler_blob() -> bytes:
 
 
 def top_up_storage(drive, settings: Settings, user: str, target_gb: float | None,
-                   media_fn=None, fill_percent: float = 100.0) -> dict:
+                   media_fn=None, fill_percent: float = 100.0,
+                   account_limit_bytes: int | None = None) -> dict:
     """
     Adds large filler files until this user's total Workspace storage
     (Gmail + Drive + Photos, pooled -- storageQuota.usage) reaches target_gb.
 
-    target_gb=None means "a percentage of what this account can actually
-    get" -- fill_percent of storageQuota.limit, read fresh per user rather
-    than guessed at from a plan name. Not literally 100% by default on
-    purpose: a real Workspace licence commonly pools TERABYTES per account
-    (Business Plus alone is 5 TB), and "fill until full" against the
-    account's ACTUAL ceiling meant uploading petabytes across a real
-    tenant -- discovered live, mid-run, before it did. A percentage keeps
-    "reseed until full" meaningful (large-file handling, near-quota
-    behaviour) without trying to consume a production-scale licence for a
-    rehearsal corpus. An unlimited-storage plan reports no limit at all, in
-    which case there is no ceiling to take a percentage OF, and this
-    reports so rather than filling forever. A fixed target_gb is still
-    honoured when given, for "at least N GB" -- a different, narrower
-    request than either of the percentage modes.
+    target_gb=None means "a percentage of this ACCOUNT'S share" --
+    fill_percent of account_limit_bytes, which the caller reads from the
+    account's licence (Business Starter 30 GB, Standard 2 TB, Plus 5 TB).
+
+    NOT storageQuota.limit. Workspace storage is pooled, and Drive reports
+    the whole TENANT's pool as every user's limit -- 300 Starter accounts
+    all report 300 x 30 GiB. Read as one account's ceiling it sent each of
+    12 concurrent workers after 9 TB, ~1.4 TB written in four hours with no
+    user anywhere near done. With no licence share known there is nothing
+    honest to take a percentage OF, so the account is skipped and says why.
+    A fixed target_gb is still honoured when given, for "at least N GB" -- a
+    different, narrower request than the percentage mode.
 
     Filler lives inside a folder named exactly "MIGRATION-TEST" -- the same
     name reset_drive() already matches on -- so resetting the seeded corpus
@@ -418,18 +417,15 @@ def top_up_storage(drive, settings: Settings, user: str, target_gb: float | None
         m["usage_before_gb"] = round(usage / 1e9, 2)
 
         if target_gb is None:
-            if not limit:
-                # Google itself reports no ceiling for this account (some
-                # unlimited-storage plans genuinely don't have one) -- there
-                # is no "full" to fill toward, and treating that as
-                # "unlimited target" would write filler files forever.
-                m["note"] = ("this account reports no storage limit -- "
-                            "nothing to fill toward")
+            if not account_limit_bytes:
+                m["note"] = ("this account's own storage share is unknown "
+                            "(licence not recognised) -- not filled; the "
+                            "tenant's pooled limit is not a per-account one")
                 m["usage_after_gb"] = m["usage_before_gb"]
                 return m
-            target_bytes = int(int(limit) * fill_percent / 100)
+            target_bytes = int(account_limit_bytes * fill_percent / 100)
             m["note"] = (f"{fill_percent:.0f}% of this account's "
-                        f"{int(limit) / 1e9:,.0f} GB limit")
+                        f"{account_limit_bytes / 2**30:,.0f} GB share")
         else:
             target_bytes = int(target_gb * 1e9)
             if limit and int(limit) < target_bytes:
@@ -2295,7 +2291,8 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
                   only: frozenset | None = None,
                   force_reseed: bool = False,
                   fill_until_full: bool = False,
-                  fill_percent: float = 100.0) -> dict:
+                  fill_percent: float = 100.0,
+                  account_limit_bytes: int | None = None) -> dict:
     user = entry["email"]
     peers = [u for u in all_users if u != user]
     t0 = time.time()
@@ -2388,7 +2385,8 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
         fresh_drive, _, _ = build_services(settings, user)
         fill_m = top_up_storage(fresh_drive, settings, user,
                                 None if fill_until_full else target_gb_per_user,
-                                fill_percent=fill_percent)
+                                fill_percent=fill_percent,
+                                account_limit_bytes=account_limit_bytes)
 
     elapsed = round(time.time() - t0, 1)
     # .get() throughout, not [] -- a service that was skipped (--only) or
@@ -2430,9 +2428,34 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
             "storage": fill_m, "elapsed_sec": elapsed}
 
 
+def account_shares(settings: Settings, users: list[str]) -> dict[str, int]:
+    """email -> that account's own storage share in bytes, from its licence.
+
+    Empty when the licences cannot be read, and an account whose licence is
+    not in the table is simply absent -- top_up_storage() skips those and says
+    so, rather than filling toward a number nobody knows.
+    """
+    import tenant_inventory
+    by_email, err = tenant_inventory.licenses(settings, "source")
+    if err:
+        print(f"  ! could not read licences ({err}) -- accounts whose storage "
+              "share is unknown will be skipped", flush=True)
+        return {}
+    shares = {u: tenant_inventory.SKU_STORAGE_BYTES[by_email[u.lower()]]
+              for u in users
+              if by_email.get(u.lower()) in tenant_inventory.SKU_STORAGE_BYTES}
+    known = sorted({v for v in shares.values()})
+    print(f"  Storage share per account (from its licence): "
+          f"{len(shares)} of {len(users)} known"
+          + (f", {', '.join(f'{v / 2**30:,.0f} GB' for v in known)}" if known else ""),
+          flush=True)
+    return shares
+
+
 def top_up_one_user(settings: Settings, user: str,
                     target_gb_per_user: float | None,
-                    fill_percent: float = 100.0) -> dict:
+                    fill_percent: float = 100.0,
+                    account_limit_bytes: int | None = None) -> dict:
     """The --top-up-only path: check and fill storage only, safe to re-run
     any number of times without duplicating mail, drive content, contacts or
     tasks -- see top_up_storage()'s docstring for why a second pass is
@@ -2440,7 +2463,8 @@ def top_up_one_user(settings: Settings, user: str,
     drive, _gmail, _cal = build_services(settings, user)
     t0 = time.time()
     m = top_up_storage(drive, settings, user, target_gb_per_user,
-                       fill_percent=fill_percent)
+                       fill_percent=fill_percent,
+                       account_limit_bytes=account_limit_bytes)
     elapsed = round(time.time() - t0, 1)
     print(f"  [{user}] top-up in {elapsed}s: {m['usage_before_gb']:.1f}GB -> "
          f"{m['usage_after_gb']:.1f}GB ({m['filler_files']} filler file(s))"
@@ -2585,20 +2609,18 @@ def main(argv: list[str] | None = None) -> int:
                          "tasks.")
     ap.add_argument("--fill-until-full", action="store_true",
                     help="top up storage to --fill-percent of each account's "
-                         "OWN Workspace limit (storageQuota.limit, read "
-                         "fresh per user) instead of a fixed "
-                         "--target-gb-per-user you have to guess. NOT "
-                         "literally 100%% by default -- a real licence "
-                         "commonly pools terabytes per account, and "
-                         "'until full' against the actual ceiling means "
-                         "uploading a comparable amount, per user. Reports "
-                         "rather than filling forever on an "
-                         "unlimited-storage plan, which has no ceiling to "
-                         "take a percentage of. Requires --top-up-only; "
+                         "OWN storage share, taken from its licence "
+                         "(Business Starter 30 GB, Standard 2 TB, Plus 5 "
+                         "TB) instead of a fixed --target-gb-per-user you "
+                         "have to guess. Not Drive's reported limit: "
+                         "Workspace storage is pooled, so that is the whole "
+                         "tenant's pool, the same for every user. An "
+                         "account whose licence is not recognised is "
+                         "skipped and says so. Requires --top-up-only; "
                          "conflicts with --target-gb-per-user.")
     ap.add_argument("--fill-percent", type=float, default=80.0,
                     help="with --fill-until-full: what percentage of each "
-                         "account's own storage limit to fill toward "
+                         "account's own storage share to fill toward "
                          "(default 80). Only meaningful together with "
                          "--fill-until-full.")
     args = ap.parse_args(argv)
@@ -2835,10 +2857,14 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:  # noqa: BLE001
             args.workers = 3
 
+    # A percentage needs something to be a percentage OF: each account's own
+    # share, read once from its licence (see top_up_storage()).
+    shares = account_shares(settings, all_users) if args.fill_until_full else {}
+
     # --- Top-up only -------------------------------------------------------
     if args.top_up_only:
         target_desc = (f"{args.fill_percent:.0f}% of each account's own "
-                       "storage limit" if fill_target is None
+                       "storage share" if fill_target is None
                        else f"{fill_target:.1f} GB each")
         print(f"\nTopping up storage for {len(all_users)} user(s) toward "
              f"{target_desc} ...")
@@ -2868,7 +2894,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             with futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
                 jobs = {pool.submit(top_up_one_user, settings, u, fill_target,
-                                    args.fill_percent): u
+                                    args.fill_percent, shares.get(u.lower())): u
                        for u in all_users}
                 for fut in futures.as_completed(jobs):
                     beat_done += 1
@@ -3124,6 +3150,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.reseed,
                 args.fill_until_full,
                 args.fill_percent,
+                shares.get(e["email"].lower()),
             ): e["email"]
             for i, e in enumerate(entries)
         }
@@ -3279,7 +3306,7 @@ def main(argv: list[str] | None = None) -> int:
                   f"{sd_made.get('files', 0):,} file(s), "
                   f"{sd_made.get('members', 0):,} membership(s)")
     if args.target_gb_per_user or args.fill_until_full:
-        target_desc = (f"{args.fill_percent:.0f}% of each account's own limit"
+        target_desc = (f"{args.fill_percent:.0f}% of each account's own share"
                        if args.fill_until_full
                        else f"{args.target_gb_per_user:.1f} GB/user")
         print(f"  Filler      : {totals['filler_files']:,} file(s), "

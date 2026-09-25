@@ -34,15 +34,15 @@ export const SeedTopUp: React.FC<{ domain?: string; accountId?: number }> =
   const [scale, setScale] = useState('small')
   const [sharedDrives, setSharedDrives] = useState('')
   const [users, setUsers] = useState('')
-  // Storage, not content: fills each account toward its OWN Workspace
-  // limit (read fresh per user, never a guessed number) rather than
+  // Storage, not content: fills each account toward its OWN share (from its
+  // licence, never Drive's pooled tenant-wide limit) rather than
   // creating more files/mail/events. Mutually exclusive with the controls
   // above in practice, not just in the request -- seed_sandbox.py's
   // --top-up-only skips every other seeding step entirely, so "what to
   // add"/"how much more" would silently do nothing while this is checked.
   const [fillUntilFull, setFillUntilFull] = useState(false)
-  // Not 100: a real licence pools terabytes per account (a live tenant
-  // reported 9 TB), and "full" against that is petabytes across a tenant.
+  // Default well under 100: a fill is real upload, and a Standard or Plus
+  // account's share is terabytes.
   const [fillPercent, setFillPercent] = useState('10')
   const [skus, setSkus] = useState<StorageSku[] | null>(null)
   const [skuErr, setSkuErr] = useState('')
@@ -56,10 +56,13 @@ export const SeedTopUp: React.FC<{ domain?: string; accountId?: number }> =
   const pctOk = pct > 0 && pct <= 100
   // Google accepts about this much into one account's Drive per day, whatever
   // the link speed -- a floor on how long a fill can take, not an estimate.
-  const DAILY_UPLOAD_CAP = 750e9
-  const size = (b: number) => b >= 1e15 ? `${(b / 1e15).toFixed(1)} PB`
-    : b >= 1e12 ? `${(b / 1e12).toFixed(1)} TB` : `${Math.round(b / 1e9).toLocaleString()} GB`
-  const gb = (b: number) => `${(b / 1e9).toLocaleString(undefined, { maximumFractionDigits: 1 })} GB`
+  // Binary units, because that is what Google means by "GB": a 30 GB plan is
+  // 30 x 2^30 bytes, and showing it as 32.2 GB reads as a different plan.
+  const GB = 2 ** 30
+  const DAILY_UPLOAD_CAP = 750 * GB
+  const size = (b: number) => b >= 2 ** 50 ? `${(b / 2 ** 50).toFixed(1)} PB`
+    : b >= 2 ** 40 ? `${(b / 2 ** 40).toFixed(1)} TB` : `${Math.round(b / GB).toLocaleString()} GB`
+  const gb = (b: number) => `${(b / GB).toLocaleString(undefined, { maximumFractionDigits: 1 })} GB`
   const [err, setErr] = useState<string | null>(null)
   const [queued, setQueued] = useState<string | null>(null)
   const [jobActive, setJobActive] = useState(false)
@@ -155,9 +158,9 @@ export const SeedTopUp: React.FC<{ domain?: string; accountId?: number }> =
                   Fill storage until full, instead
                 </Typography>
                 <Typography variant="caption" color="text.secondary">
-                  Adds large filler files toward each account&apos;s OWN Workspace
-                  storage limit (read fresh per user, never guessed) rather than
-                  more mail, Drive documents, events, contacts or tasks. Skips
+                  Adds large filler files toward each account&apos;s own storage
+                  share — what its licence gives it, such as 30 GB on Business
+                  Starter — rather than more mail, Drive documents, events, contacts or tasks. Skips
                   every other seeding step above while checked — safe to run
                   repeatedly, it only ever tops up, never re-adds what is
                   already there.
@@ -167,7 +170,7 @@ export const SeedTopUp: React.FC<{ domain?: string; accountId?: number }> =
         </Grid>
         {fillUntilFull && (
           <Grid item xs={12} data-testid="topup-licences">
-            <TextField size="small" type="number" label="Fill to % of each account's limit"
+            <TextField size="small" type="number" label="Fill to % of each account's share"
               value={fillPercent} onChange={(e) => setFillPercent(e.target.value)}
               inputProps={{ min: 1, max: 100, 'data-testid': 'topup-fill-percent' }}
               error={!pctOk} helperText={pctOk ? ' ' : 'between 1 and 100'} sx={{ mb: 1, minWidth: 240 }} />
@@ -194,8 +197,12 @@ export const SeedTopUp: React.FC<{ domain?: string; accountId?: number }> =
               <Typography key={s.skuId} variant="body2" data-testid={`topup-sku-${s.skuId}`}>
                 <strong>{s.name}</strong> · {s.accounts} account(s) ·{' '}
                 {s.error ? `limit unreadable (${s.error})`
-                  : s.limitBytes == null ? 'no storage limit — nothing to fill'
-                  : <>{gb(s.limitBytes)} each → fills to <strong>{pctOk ? gb(s.limitBytes * pct / 100) : '—'}</strong> ({fillPercent}%)</>}
+                  : s.limitBytes == null
+                    ? (s.poolBytes
+                      ? 'storage share unknown for this licence — these accounts will be skipped'
+                      : 'no storage limit — nothing to fill')
+                    : <>{gb(s.limitBytes)} each → fills to <strong>{pctOk ? gb(s.limitBytes * pct / 100) : '—'}</strong> ({fillPercent}%)
+                      {s.poolBytes ? ` · pooled across the tenant: ${gb(s.poolBytes)}` : ''}</>}
               </Typography>
             ))}
           </Grid>

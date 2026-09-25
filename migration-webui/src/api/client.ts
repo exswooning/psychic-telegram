@@ -819,8 +819,13 @@ export async function runSeed(
  */
 export interface StorageSku {
   skuId: string; name: string; accounts: number; sampleUser: string
-  /** null = the plan reports no limit (unlimited), not zero. */
-  limitBytes: number | null; error: string
+  /** ONE ACCOUNT'S share, from its licence (Starter 30 GB, Standard 2 TB).
+   *  null = not known, or an unlimited plan -- never zero. */
+  limitBytes: number | null
+  /** What Drive itself reports as the limit. For a pooled tenant that is the
+   *  whole tenant's storage, identical for every user -- not an account's. */
+  poolBytes: number | null
+  error: string
 }
 export const fetchStorageSummary = (accountId?: number) =>
   getJSON<{ error: string; skus: StorageSku[] }>(

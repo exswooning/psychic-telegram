@@ -69,6 +69,21 @@ LICENSING_SCOPE = "https://www.googleapis.com/auth/apps.licensing"
 # recognises. Unlisted ids fall back to the raw skuId rather than "unknown",
 # because a new SKU is far more likely than a bug and the raw id is still
 # actionable.
+GIB = 1024 ** 3
+
+# What one account's licence pools, in the units Google uses (a "30 GB" plan is
+# 30 GiB). Workspace storage is POOLED across the tenant, and Drive's
+# about().storageQuota.limit is the whole tenant's pool, repeated for every
+# user -- 9,663,676,416,000 bytes for 300 Business Starter accounts, which is
+# exactly 300 x 30 GiB. Reading it as one account's limit made a "fill to 100%"
+# try to put the entire pool into each account. The licence is the only honest
+# source of a per-account share; an SKU not listed here is not guessed at.
+SKU_STORAGE_BYTES = {
+    "1010020027": 30 * GIB,        # Business Starter
+    "1010020028": 2048 * GIB,      # Business Standard, 2 TB
+    "1010020025": 5120 * GIB,      # Business Plus, 5 TB
+}
+
 SKU_NAMES = {
     "1010020027": "Business Starter",
     "1010020028": "Business Standard",
