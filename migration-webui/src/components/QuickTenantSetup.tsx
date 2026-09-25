@@ -1043,11 +1043,16 @@ const QuickTenantSetup: React.FC<{
         <Box sx={{ mt: 2 }}>
           <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 0.5 }}>
             <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>Result</Typography>
-            <Chip size="small" label={result.ok ? 'ok' : 'failed'}
-                  color={result.ok ? 'success' : 'error'}
+            <Chip size="small" label={result.ok ? 'ok' : result.interrupted ? 'interrupted' : 'failed'}
+                  color={result.ok ? 'success' : result.interrupted ? 'warning' : 'error'}
                   variant={result.ok ? 'outlined' : 'filled'} />
           </Stack>
-          <Box component="pre" sx={{
+          {result.error && (
+            <Alert severity={result.interrupted ? 'warning' : 'error'} sx={{ mb: 1 }}>
+              {result.error}
+            </Alert>
+          )}
+          {result.phases.length > 0 && <Box component="pre" sx={{
             fontSize: 11, p: 1.5, bgcolor: 'action.hover', borderRadius: 1,
             overflowX: 'auto', maxHeight: 260, whiteSpace: 'pre-wrap', m: 0,
           }}>
@@ -1055,7 +1060,7 @@ const QuickTenantSetup: React.FC<{
               `${p.status === 'ok' ? 'ok  ' : p.status === 'failed' ? 'FAIL' : p.status === 'skipped' ? '--  ' : '..  '} `
               + `${p.name}${p.detail ? '  ' + p.detail : ''}`
             ).join('\n')}
-          </Box>
+          </Box>}
           {result.missingScopes && result.missingScopes.length > 0 && (
             <Alert severity="warning" sx={{ mt: 1 }}>
               Delegation ran but {result.missingScopes.length} scope(s) still

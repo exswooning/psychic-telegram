@@ -472,6 +472,9 @@ export interface FullSetupPhase { name: string; status: string; detail: string }
 export interface FullSetupResult {
   side: string; ok: boolean; phases: FullSetupPhase[]
   clientId?: string; missingScopes?: string[]
+  /** Set when the run never got to report phases -- e.g. a restart killed it
+   *  (interrupted). Without it the result rendered as a bare "failed". */
+  error?: string; interrupted?: boolean
 }
 export interface FullSetupStatus {
   running: boolean; result: FullSetupResult | null
