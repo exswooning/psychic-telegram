@@ -48,10 +48,10 @@ export const SeedTopUp: React.FC<{ domain?: string; accountId?: number }> =
   const [skuErr, setSkuErr] = useState('')
   useEffect(() => {
     if (!fillUntilFull || skus) return
-    fetchStorageSummary()
+    fetchStorageSummary(accountId)
       .then((r) => { setSkus(r.skus); setSkuErr(r.error) })
       .catch((e) => setSkuErr(String(e)))
-  }, [fillUntilFull, skus])
+  }, [fillUntilFull, skus, accountId])
   const pct = Number(fillPercent)
   const pctOk = pct > 0 && pct <= 100
   const gb = (b: number) => `${(b / 1e9).toLocaleString(undefined, { maximumFractionDigits: 1 })} GB`

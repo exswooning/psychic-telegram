@@ -5008,7 +5008,12 @@ class Handler(BaseHTTPRequestHandler):
             self._json(licences_payload(
                 (query.get("side", ["target"])[0] or "target"), self._on_screen()))
         elif path == "/api/storage_summary":
-            self._json(storage_summary_payload(self._on_screen()))
+            aid, scope_err = resolve_target_account(
+                self._account_id(), query.get("account", [""])[0] or None)
+            if scope_err:
+                self._json({"error": scope_err}, 403)
+                return
+            self._json(storage_summary_payload(aid))
         elif path == "/api/licence_preflight":
             self._json(licence_preflight(self._on_screen()))
         elif path == "/api/identities":

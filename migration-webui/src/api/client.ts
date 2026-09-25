@@ -798,8 +798,9 @@ export interface StorageSku {
   /** null = the plan reports no limit (unlimited), not zero. */
   limitBytes: number | null; error: string
 }
-export const fetchStorageSummary = () =>
-  getJSON<{ error: string; skus: StorageSku[] }>('/api/storage_summary')
+export const fetchStorageSummary = (accountId?: number) =>
+  getJSON<{ error: string; skus: StorageSku[] }>(
+    `/api/storage_summary${accountId ? `?account=${accountId}` : ''}`)
 
 export async function runResetTarget(
   confirmDomain: string,
