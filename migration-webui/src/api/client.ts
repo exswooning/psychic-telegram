@@ -147,6 +147,11 @@ export interface JobStatus {
   // render this one -- confirmed live, both rendered for the same real
   // seed job simultaneously before this flag existed.
   external: boolean
+  /** Set with `external`: the process the machine-wide scan found, and every
+   *  process it found. What lets a caller tell that the scan and an admission
+   *  row are describing the SAME process rather than two of them. */
+  pid?: number
+  pids?: number[]
   /** What this snapshot is an answer ABOUT, echoed back when the caller
    *  asked for a specific job by name. */
   requested?: string

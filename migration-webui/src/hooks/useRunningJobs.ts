@@ -160,9 +160,20 @@ export function useRunningJobs() {
       // as "already shown above" -- and saw nothing at all for a seed it
       // had started itself, which is the very failure this page exists to
       // prevent.
-      const ownAdmission = job?.name
-        ? activeJobs.find((r) => r.account_id === myAccountId && r.job_name === job.name)
-        : undefined
+      // The admission row that describes the job /api/job returned -- the
+      // same process, not merely one of the same name. For the caller's own
+      // job that is (account, name). For an external one (found by a
+      // machine-wide ps scan, so it may belong to ANY account -- an operator
+      // sees the seed of the tenant they are working on) it is the row whose
+      // pid the scan also found, or, for a row that never recorded one, the
+      // name. Matching only the caller's own account left an operator seeing
+      // one process twice: once from the scan, once from its admission row.
+      const sameJob = (r: (typeof activeJobs)[number]) =>
+        !!job?.running && r.job_name === job.name && (
+          r.account_id === myAccountId
+          || (!!job.external
+              && (r.pid == null || (job.pids ?? [job.pid]).includes(r.pid))))
+      const admission = activeJobs.find(sameJob)
       // A running job with no admission row at all is still a running job.
       // The row is gone whenever the process outlived the restart that
       // forgot it, and requiring one meant the page showed nothing for a
@@ -195,9 +206,11 @@ export function useRunningJobs() {
           detail: [
             describeElapsed(job.elapsed),
             job.etaSeconds ? `~${describeElapsed(job.etaSeconds)} left` : null,
-            job.external && !ownAdmission
+            job.external && !admission
               ? 'detached — outlived the restart that started it'
-              : null,
+              : job.external && admission && admission.account_id !== myAccountId
+                ? `account #${admission.account_id ?? 'legacy'}`
+                : null,
             latestLine(job.lines),
           ].filter(Boolean).join(' · '),
           pct: job.progressPct ?? null, lines: job.lines, elapsedSec: job.elapsed,
@@ -233,7 +246,7 @@ export function useRunningJobs() {
         if (!ACCOUNT_SCOPED_JOB_NAMES.has(row.job_name)) continue
         // Skip only what was ACTUALLY rendered above, not everything
         // belonging to this account -- see jobIsMine's own comment.
-        if (row.account_id === myAccountId && jobIsMine && row.job_name === job!.name) continue
+        if (jobIsMine && sameJob(row)) continue
         found.push({
           key: `admission-${row.account_id}-${row.job_name}`,
           kind: jobKind(row.job_name),

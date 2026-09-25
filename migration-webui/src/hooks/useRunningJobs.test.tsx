@@ -110,6 +110,58 @@ describe('Running Now', () => {
     await waitFor(() => expect(screen.getByText(/32m 08s/)).toBeTruthy())
   })
 
+  describe('one process, one card', () => {
+    /* An operator is signed in as one account and works on another's tenant.
+       /api/job finds that account's seed by a machine-wide process scan
+       (external, with its pid), and job_admission has a row for the very same
+       process under the other account. The dedupe only skipped rows of the
+       VIEWER's account, so the operator saw the seed twice. */
+    const scan = (over = {}) => ({
+      running: true, name: 'seed', external: true, elapsed: 60, lines: [],
+      pid: 100, pids: [100], ...over,
+    })
+    const row = (over = {}) => ({
+      account_id: 2, job_name: 'seed', pid: 100,
+      started_at: '2026-09-25T17:31:36Z', ...over,
+    })
+
+    it('shows the scanned seed once, naming the account it belongs to', async () => {
+      cp.fetchMe.mockResolvedValue({ id: 1 })
+      client.fetchJob.mockResolvedValue(scan())
+      cp.fetchActiveJobs.mockResolvedValue([row()])
+      const { container } = render(<RunningNow />)
+      await waitFor(() => expect(screen.getAllByTestId('running-job-seed')).toHaveLength(1))
+      expect(container.textContent).toMatch(/account #2/)
+      expect(container.textContent).not.toMatch(/detached/)
+    })
+
+    it('dedupes against a row that never recorded a pid, by name', async () => {
+      cp.fetchMe.mockResolvedValue({ id: 1 })
+      client.fetchJob.mockResolvedValue(scan())
+      cp.fetchActiveJobs.mockResolvedValue([row({ pid: null })])
+      render(<RunningNow />)
+      await waitFor(() => expect(screen.getAllByTestId('running-job-seed')).toHaveLength(1))
+    })
+
+    it('still shows a DIFFERENT process of the same name as its own card', async () => {
+      // Two accounts can each run a seed (the box has two slots). The scan
+      // only ever finds one of them, so the other must not be swallowed.
+      cp.fetchMe.mockResolvedValue({ id: 1 })
+      client.fetchJob.mockResolvedValue(scan())
+      cp.fetchActiveJobs.mockResolvedValue([row(), row({ account_id: 3, pid: 200 })])
+      render(<RunningNow />)
+      await waitFor(() => expect(screen.getAllByTestId('running-job-seed')).toHaveLength(2))
+    })
+
+    it('still dedupes the caller\'s own job by account and name', async () => {
+      cp.fetchMe.mockResolvedValue({ id: 2 })
+      client.fetchJob.mockResolvedValue(scan({ external: false }))
+      cp.fetchActiveJobs.mockResolvedValue([row()])
+      render(<RunningNow />)
+      await waitFor(() => expect(screen.getAllByTestId('running-job-seed')).toHaveLength(1))
+    })
+  })
+
   it('ignores a job claimed by a node that stopped heartbeating', async () => {
     cp.fetchFleet.mockResolvedValue([
       node({ healthy: false, secondsSinceHeartbeat: 93416 }),
