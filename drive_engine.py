@@ -248,6 +248,15 @@ def _is_unreachable_grantee(exc: Exception) -> bool:
     return any(m in text for m in _NO_ACCOUNT_MARKERS)
 
 
+def _is_server_error(exc: Exception) -> bool:
+    """Google failed, not the request: a 5xx says nothing about this grant, and retrying it is
+    right. A batch reports it per grant through a callback -- never raised, so _retry never
+    saw it -- and it was recorded as a permanent failure (found on a real run: one folder share
+    'failed' with an HTTP 500 'Internal Error' and stayed failed until someone ran Repair)."""
+    status = getattr(getattr(exc, "resp", None), "status", None)
+    return status in (500, 502, 503, 504)
+
+
 _QUOTA_MARKERS = (
     "quota exceeded", "ratelimitexceeded", "userratelimitexceeded",
     "rate limit exceeded", "too many requests",
@@ -1572,7 +1581,7 @@ class DriveMigrator:
                     supportsAllDrives=True).execute())
                 self.db.log_audit(self.source_user, item["id"], "link_rewrite",
                                   "SUCCESS", f"{hits} Drive link(s) repointed")
-                self._restore_modified_time(tgt_id, item, hits)     # re-uploading content moved it
+                self._restore_modified_time(tgt_id, item, hits, late_bump=True)     # re-uploading content moved it
                 fixed += hits
                 self._bump("links_rewritten", hits)
             except Exception as exc:      # noqa: BLE001
@@ -2052,7 +2061,7 @@ class DriveMigrator:
         for idx, (audit_key, _req) in enumerate(requests):
             exc = outcomes.get(str(idx))
             if exc is not None:
-                if _is_unreachable_grantee(exc):
+                if _is_unreachable_grantee(exc) or _is_server_error(exc):
                     # A batch's per-grant failure arrives through Google's
                     # callback, never raised -- so self._retry() above,
                     # which wraps only batch.execute() itself, never sees
@@ -2148,7 +2157,7 @@ class DriveMigrator:
         shareable = item.get("shared") is not False      # an explicit False has nothing to share
         if shareable:
             self.db.mark_acl_pending(self.source_user, item["id"])
-        touched, failed, sharing_ran = 0, False, False
+        touched, failed, sharing_ran, commented = 0, False, False, 0
         try:
             touched += self._sync_acls(item["id"], target_id, item.get("shared"), resume=resume)
             sharing_ran = True
@@ -2161,7 +2170,8 @@ class DriveMigrator:
                         self.source_user, item.get("name"), type(exc).__name__, exc)
         if comments and self.settings.migrate_comments:
             try:
-                touched += self._sync_comments(item["id"], target_id)
+                commented = self._sync_comments(item["id"], target_id)
+                touched += commented
             except QuotaExhausted:
                 raise
             except Exception as exc:      # noqa: BLE001
@@ -2170,25 +2180,39 @@ class DriveMigrator:
                             self.source_user, item.get("name"), type(exc).__name__, exc)
         # Always put the time back after ANY step that may have written -- including one
         # that raised half way through.
-        self._restore_modified_time(target_id, item, touched or (1 if failed else 0))
+        self._restore_modified_time(target_id, item, touched or (1 if failed else 0), late_bump=bool(commented))
         if shareable and sharing_ran:
             self.db.clear_acl_pending(self.source_user, item["id"])
 
     def _verify_modified_times(self) -> None:
-        """Read back the modifiedTime of every file whose time was restored, and put back any that moved.
+        """Put back the modifiedTime of files a late timestamp write moved, once it has landed.
 
-        Drive applies the timestamp bump of a grant or a comment asynchronously, and it can
-        land AFTER the restore (the repo's own measurement: 3 in 15 files in one order, and
-        a real verification found 4 of 7 commented Docs and Sheets carrying the migration's
-        time). Checking at the moment of the restore proves nothing, because the bump had
-        not happened yet; checking once the user's tree is done does. One read per touched
-        file -- reads are the cheap bucket -- and a write only for the ones that drifted.
+        Measured on a scratch tenant: a comment written to a Google Doc or Sheet moves its
+        modifiedTime about three minutes later, to the comment's own write time, overwriting
+        a restore made in the meantime. Grants, a bare restore and a bare create never did.
+        So a commented file's time is checked only after that has had time to land
+        (`mtime_settle_sec` after its last write), and put back if it moved. A real
+        migration showed exactly this: half its commented natives carried the migration's
+        time, and a single check made straight after the restore repaired only the ones that
+        had already been overwritten. Restores made after it has landed held.
+
+        One read per commented file -- reads are the cheap bucket -- and a write only for the
+        ones that moved. Files without comments are never checked.
         """
         checks, self._mtime_checks = self._mtime_checks, []
         if not checks or self.settings.dry_run:
             return
+        settle = getattr(self.settings, "mtime_settle_sec", 240)
+        ready_at = max(ts for _t, _m, ts in checks) + settle
+        while not shutdown_requested():
+            wait = ready_at - time.time()
+            if wait <= 0:
+                break
+            time.sleep(min(wait, 5))
+        if shutdown_requested():
+            return
         fixed = 0
-        for target_id, mtime in checks:
+        for target_id, mtime, _ts in checks:
             if shutdown_requested():
                 break
             try:
@@ -2204,13 +2228,13 @@ class DriveMigrator:
                 raise
             except Exception as exc:      # noqa: BLE001 - a missed correction, not a failed migration
                 log.warning("[%s] could not check modifiedTime on %s: %s", self.source_user, target_id, exc)
+        log.info("[%s] checked modifiedTime on %d commented file(s): %d had been moved and were put back",
+                 self.source_user, len(checks), fixed)
         if fixed:
-            log.warning("[%s] %d file(s) had their modifiedTime moved after it was restored; put back",
-                        self.source_user, fixed)
             self._bump("mtime_repaired", fixed)
 
     def _restore_modified_time(self, target_id: str, item: dict,
-                               writes_applied: int) -> None:
+                               writes_applied: int, late_bump: bool = False) -> None:
         """
         Re-assert modifiedTime after every post-create write.
 
@@ -2243,8 +2267,8 @@ class DriveMigrator:
                 log.warning("[%s] modifiedTime on %s did not stick: asked for %s, Drive kept %s",
                             self.source_user, target_id, mtime, got)
             checks = getattr(self, "_mtime_checks", None)
-            if checks is not None:
-                checks.append((target_id, mtime))
+            if late_bump and checks is not None:
+                checks.append((target_id, mtime, time.time()))
         except QuotaExhausted:
             raise
         except Exception as exc:      # noqa: BLE001 - was (PermanentAPIError, RuntimeError) only

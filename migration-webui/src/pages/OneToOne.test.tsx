@@ -81,6 +81,33 @@ describe('what is found', () => {
     expect(screen.getByText(/\/Projects\/a\.pdf/)).toBeInTheDocument()
   })
 
+  it('does not promise more than it can show: strays are not counted, what is listed is', async () => {
+    cp.view.mockResolvedValue(view({ users: [{
+      user: 'eve@a.com', target: 'eve@b.com', status: 'DONE', verdict: 'DIFFERENCES', verifiedAt: '2026-09-26T15:00:00Z',
+      services: [svc('drive', 'DIFFERENCES', {
+        counts: { differences: 1, extras: 9 },            // nine scratch files on the target: informational
+        differences: [{ item: 'x', path: '/a.pdf', diffs: ['modified time not preserved'] }],
+        duplicates: [], notes: [] })],
+    }] }))
+    show()
+    fireEvent.click(await screen.findByLabelText('show eve@a.com'))
+    await screen.findByText(/modified time not preserved/)
+    expect(screen.queryByText(/more; run/)).not.toBeInTheDocument()
+  })
+
+  it('lists a copy made twice, and says how many more there are', async () => {
+    cp.view.mockResolvedValue(view({ users: [{
+      user: 'eve@a.com', target: 'eve@b.com', status: 'DONE', verdict: 'DIFFERENCES', verifiedAt: '2026-09-26T15:00:00Z',
+      services: [svc('gmail', 'DIFFERENCES', {
+        counts: { duplicates: 30 },
+        duplicates: Array.from({ length: 25 }, (_, i) => ({ messageId: `<m${i}@x>` })) })],
+    }] }))
+    show()
+    fireEvent.click(await screen.findByLabelText('show eve@a.com'))
+    expect(await screen.findByText(/copied twice — <m0@x>/)).toBeInTheDocument()
+    expect(screen.getByText(/… 22 more; run/)).toBeInTheDocument()
+  })
+
   it('shows why a check could not be made', async () => {
     show()
     fireEvent.click(await screen.findByLabelText('show cy@a.com'))

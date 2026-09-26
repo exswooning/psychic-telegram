@@ -615,3 +615,25 @@ class TestTheCommandLineCanReadWhatItVerifies:
         import config
         scopes = self._scopes_for(monkeypatch, "--services", "drive")
         assert config.CONTACTS_READONLY_SCOPE not in scopes and config.TASKS_READONLY_SCOPE not in scopes
+
+
+class TestATrashedCopyIsNotACopy:
+    """Found on the rerun after a reset: reset_target trashes mail rather than deleting it, and the
+    verifier listed the trash, so every message of the first migration read as a DUPLICATE of the second."""
+
+    def _migrate_one(self, auth, db, settings):
+        auth.source_gmail(SRC_USER).add_message(MSG % (1, 1, 1), ["INBOX"])
+        gmail_engine.GmailMigrator(auth, db, settings, SRC_USER, TGT_USER).run()
+
+    def test_an_older_copy_in_the_trash_is_said_and_not_counted(self, auth, db, settings, identity):
+        self._migrate_one(auth, db, settings)
+        auth.target_gmail(TGT_USER).add_message(MSG % (1, 1, 1), ["TRASH"])      # the leftover, same Message-ID
+        g = V.run(auth, db, settings, [SRC_USER], ("gmail",), progress=lambda *_: None)["users"][SRC_USER]["gmail"]
+        assert g["duplicates"] == [] and g["extras"] == []
+        assert any("in the target's trash" in n for n in g["notes"])
+
+    def test_the_same_message_outside_the_trash_is_still_a_duplicate(self, auth, db, settings, identity):
+        self._migrate_one(auth, db, settings)
+        auth.target_gmail(TGT_USER).add_message(MSG % (1, 1, 1), ["INBOX"])
+        r = V.run(auth, db, settings, [SRC_USER], ("gmail",), progress=lambda *_: None)
+        assert len(r["users"][SRC_USER]["gmail"]["duplicates"]) == 1 and r["verdict"] == "DIFFERENCES"

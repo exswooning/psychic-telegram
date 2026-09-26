@@ -207,9 +207,12 @@ with the items it describes.
 **What happens to an item after it lands is one step, `drive_engine._finish_item`**:
 sharing, comments, then the modifiedTime those writes moved. Each stands alone (an
 exception used to be logged at DEBUG by `_sync_with_fallback` and dropped, so the
-time was never restored); the time is read back at the end of the user
-(`_verify_modified_times`) because Drive applies the bump of a grant or comment
-asynchronously and it can land after the restore. The ledger calls an item done the
+time was never restored). **A comment written to a Doc or Sheet moves its
+modifiedTime ~3 minutes later, to the comment's own write time** (measured on a
+scratch tenant; grants, a bare restore and a bare create never do), overwriting any
+restore made in between — so `_verify_modified_times` checks only files that had
+comments, and only after `MTIME_SETTLE_SEC` (240) since the last one, then puts back
+what moved. The ledger calls an item done the
 moment it lands — before its sharing runs — so an item is marked `acl_pass` PENDING
 first and cleared when the sharing has run; a resume finishes what is still pending
 and does not re-attempt grants already decided. Only an interrupted item keeps the

@@ -619,6 +619,13 @@ class Settings:
     # cuts the ACL phase's wall clock by roughly that factor. The BatchHttpRequest
     # is built and torn down per file; batch_size is per-request-in-batch, not
     # across files (cross-file batching would need a whole-engine post-pass).
+    # A comment written to a Google Doc or Sheet moves its modifiedTime about three minutes
+    # LATER, to the comment's own write time -- measured on a scratch tenant: a restore made
+    # in the meantime holds for ~180 s and is then overwritten; grants, restores alone and
+    # a bare create never did it. So the time of a commented file is put back only once that
+    # has landed (drive_engine._verify_modified_times waits this long after the last comment).
+    mtime_settle_sec: int = field(
+        default_factory=lambda: max(0, int(os.environ.get("MTIME_SETTLE_SEC") or 240)))
     acl_batch_size: int = field(
         default_factory=lambda: int(os.getenv("ACL_BATCH_SIZE", "20"))
     )

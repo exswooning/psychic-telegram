@@ -507,6 +507,7 @@ class Verifier:
             (self.src_user,))}
         from link_rewrite import rewrite_raw
         mapped_ids, mapped_msgids = {tid for _, tid, _ in self._pairs("message")}, set()
+        said: dict[str, int] = {}          # verdict -> how many messages, said once below
         for sid, tid, _ in self._pairs("message", sample=True):
             res["checked"] += 1
             try:
@@ -544,11 +545,15 @@ class Verifier:
             self.evidence.append({"service": "gmail", "name": msgid or sid, "how": verdict, "bytes": len(sraw),
                                   "sha256": sha256(sraw)[:16], "opened": True})
             if verdict in ("identical after rewrite", "equivalent"):
-                res["notes"].append(f"{msgid or sid}: {verdict} -- {'; '.join(notes)}")
+                said[verdict] = said.get(verdict, 0) + 1
             if diffs:
                 res["differences"].append({"item": msgid or sid, "source": sid, "target": tid, "diffs": diffs})
             else:
                 res["identical"] += 1
+        for verdict, n in said.items():
+            res["notes"].append(f"{n} message(s) {verdict}: " + (
+                "Drive links repointed at the copies on the target, as intended" if verdict == "identical after rewrite"
+                else "the same message, apart from headers Google adds when it inserts one"))
         try:
             mapped_ids |= self._draft_message_ids(tgt)
         except Exception as exc:      # noqa: BLE001 - only the stray check suffers; the drafts are still compared
@@ -557,7 +562,7 @@ class Verifier:
         self._note_sample(res, "message", "draft")
         # Duplicates and extras by Message-ID.
         try:
-            welcome = 0
+            welcome = trashed = 0
             for m in self._list_all(tgt):
                 if m["id"] in mapped_ids:
                     continue
@@ -565,10 +570,16 @@ class Verifier:
                     userId="me", id=i, format="metadata", metadataHeaders=["Message-ID", "From"]).execute())
                 head = {h["name"].lower(): h["value"].strip() for h in hdr.get("payload", {}).get("headers", [])}
                 mid = head.get("message-id", "")
+                if "TRASH" in (hdr.get("labelIds") or []):
+                    trashed += 1        # deleted as far as the user can tell: not a copy that exists
+                    continue
                 if mid not in mapped_msgids and "@google.com" in head.get("from", "").lower():
                     welcome += 1        # what Google puts in every new mailbox; nobody migrated it
                     continue
                 (res["duplicates"] if mid in mapped_msgids else res["extras"]).append({"target": m["id"], "messageId": mid})
+            if trashed:
+                res["notes"].append(f"{trashed} message(s) in the target's trash -- what an earlier run left before a "
+                                    f"reset or a delete; they are not counted as copies or strays")
             if welcome:
                 res["notes"].append(f"{welcome} message(s) from Google itself (new-mailbox welcome mail) sit on the "
                                     f"target; they were never on the source and are not counted as strays")
@@ -638,6 +649,7 @@ class Verifier:
         res = self._blank()
         src, tgt = self.auth.source_calendar(self.src_user), self.auth.target_calendar(self.tgt_user)
         cal_map = {s: t for s, t, _ in self._pairs("calendar")}
+        ev_notes: list[str] = []
         for key, tid, _ in self._pairs("event", sample=True):
             res["checked"] += 1
             src_cal, _, eid = key.partition("::")
@@ -653,12 +665,14 @@ class Verifier:
                 res["missing"].append({"source": eid, "target": tid, "name": sev.get("summary"),
                                        "why": f"not on the target ({str(exc)[:80]})"})
                 continue
-            diffs = compare_event(sev, tev, self._translate, self.db.target_for_source_id, res["notes"])
+            diffs = compare_event(sev, tev, self._translate, self.db.target_for_source_id, ev_notes)
             self.evidence.append({"service": "calendar", "name": sev.get("summary"), "opened": True, "how": "fields compared"})
             if diffs:
                 res["differences"].append({"item": sev.get("summary"), "source": eid, "target": tid, "diffs": diffs})
             else:
                 res["identical"] += 1
+        for text in sorted(set(ev_notes)):
+            res["notes"].append(f"{ev_notes.count(text)} time(s), {text}")
         self._note_sample(res, "event")
         res["notCopied"] = self._failed(("event", "calendar"))
         return res

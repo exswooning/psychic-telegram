@@ -53,16 +53,21 @@ const Findings: React.FC<{ s: OneToOneService }> = ({ s }) => {
   for (const m of s.missing ?? []) rows.push(`missing — ${m.name ?? ''} ${m.why ?? ''}`)
   for (const n of s.notCopied ?? []) rows.push(`failed to copy — ${n.error ?? n.id ?? ''}`)
   for (const e of s.errors ?? []) rows.push(`could not check — ${e}`)
-  const counted = Object.values(s.counts ?? {}).reduce((a, b) => a + (b ?? 0), 0)
+  for (const d of s.duplicates ?? []) rows.push(`copied twice — ${d.name ?? d.messageId ?? d.path ?? ''}`)
+  // Only the kinds listed above: strays are informational and are not among them, so counting
+  // them made the page promise "9 more" of things it had no way to show.
+  const c = s.counts ?? {}
+  const counted = (c.differences ?? 0) + (c.missing ?? 0) + (c.notCopied ?? 0) + (c.errors ?? 0) + (c.duplicates ?? 0)
+  const shown = Math.min(rows.length, 8)
   return (
     <Box sx={{ mb: 1.5 }}>
       <Typography variant="subtitle2">{s.service} · {VERDICT[s.verdict].label} · {when(s.verifiedAt)}</Typography>
       {rows.slice(0, 8).map((r, i) => (
         <Typography key={i} variant="body2" sx={{ fontFamily: 'ui-monospace, monospace', fontSize: 12, wordBreak: 'break-word' }}>{r}</Typography>
       ))}
-      {counted > rows.length && (
+      {counted > shown && (
         <Typography variant="caption" color="text.secondary">
-          … {counted - Math.min(rows.length, 8)} more; run "Verify now" on this user for the full report.
+          … {counted - shown} more; run "Verify now" on this user for the full report.
         </Typography>
       )}
       {(s.notes ?? []).map((n, i) => <Typography key={i} variant="caption" color="text.secondary" sx={{ display: 'block' }}>{n}</Typography>)}

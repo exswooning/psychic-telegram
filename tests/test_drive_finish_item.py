@@ -45,34 +45,108 @@ def _grantees(auth, name="deck.pdf"):
     return sorted(p["emailAddress"] for p in tgt.perms[f["id"]] if p.get("emailAddress"))
 
 
-class TestALateTimestampBumpIsPutBack:
-    def test_a_bump_that_lands_after_the_restore_is_repaired_by_the_end_of_the_user(self, migrator, auth, db, monkeypatch):
-        _shared_file(auth, db)
+class _Clock:
+    """A clock the engine's sweep can wait on without the test waiting: sleep advances it."""
+    def __init__(self):
+        self.now, self.slept = 1_000_000.0, []
+
+    def time(self):
+        return self.now
+
+    def sleep(self, s):
+        self.slept.append(s)
+        self.now += s
+
+    def monotonic(self):
+        return self.now
+
+
+def _commented_file(auth, db, settings, name="deck.pdf"):
+    """A shared native file with a comment: the kind Drive re-stamps minutes after the comment."""
+    settings.migrate_comments = True
+    fid = _shared_file(auth, db, name=name)
+    src = auth.source_drive(SRC_USER)
+    src.store[fid]["mimeType"] = "application/vnd.google-apps.document"
+    src.add_comment(fid, "does this still apply?", author="Bob")
+    return fid
+
+
+class TestALateTimestampWriteIsPutBack:
+    """Measured: a comment moves a Doc's or Sheet's modifiedTime ~3 minutes LATER, to the comment's own
+    write time, overwriting any restore made in between. Grants and a bare restore do not."""
+
+    def _late_stamp(self, auth, monkeypatch, when):
         real = drive_engine.DriveMigrator._restore_modified_time
 
-        def restore_then_drive_bumps_it(self, target_id, item, writes):
-            real(self, target_id, item, writes)
-            if writes:
-                auth.target_drive(TGT_USER).store[target_id]["modifiedTime"] = LATE    # Drive, a moment later
-        monkeypatch.setattr(drive_engine.DriveMigrator, "_restore_modified_time", restore_then_drive_bumps_it)
+        def restore_then_drive_stamps_it_later(self, target_id, item, writes, late_bump=False):
+            real(self, target_id, item, writes, late_bump)
+            if late_bump:
+                when.append(target_id)          # the stamp lands "later": see the clock below
+        monkeypatch.setattr(drive_engine.DriveMigrator, "_restore_modified_time", restore_then_drive_stamps_it_later)
+
+    def test_a_stamp_that_lands_after_the_restore_is_repaired(self, migrator, auth, db, settings, monkeypatch):
+        _commented_file(auth, db, settings)
+        landed = []
+        self._late_stamp(auth, monkeypatch, landed)
+        clock = _Clock()
+        monkeypatch.setattr(drive_engine, "time", clock)
+        settings.mtime_settle_sec = 240
+        real_sleep = clock.sleep
+
+        def sleep_and_let_drive_apply_it(sec):
+            real_sleep(sec)
+            for tid in landed:                  # three minutes on, Drive applies the comment's stamp
+                auth.target_drive(TGT_USER).store[tid]["modifiedTime"] = LATE
+        clock.sleep = sleep_and_let_drive_apply_it
         stats = migrator.run()
         _, f = _target(auth)
-        assert f["modifiedTime"] == OLD
-        assert stats["mtime_repaired"] == 1
+        assert f["modifiedTime"] == OLD and stats["mtime_repaired"] == 1
 
-    def test_a_file_that_held_costs_one_read_and_no_write(self, migrator, auth, db):
-        _shared_file(auth, db)
+    def test_it_waits_out_the_settle_time_after_the_last_comment_before_it_looks(self, migrator, auth, db, settings, monkeypatch):
+        _commented_file(auth, db, settings)
+        clock = _Clock()
+        monkeypatch.setattr(drive_engine, "time", clock)
+        settings.mtime_settle_sec = 240
         migrator.run()
-        calls = [n for n, kw in auth.target_drive(TGT_USER).calls]
-        assert calls.count("files.get") >= 1
-        assert len([1 for n, kw in auth.target_drive(TGT_USER).calls
-                    if n == "files.update" and "modifiedTime" in str(kw.get("body"))]) == 1
-        assert "mtime_repaired" not in migrator.stats
+        assert sum(clock.slept) >= 240 - 1, "it looked before the delayed write could have landed"
 
-    def test_an_unshared_file_is_not_checked_at_all(self, migrator, auth, db):
-        auth.source_drive(SRC_USER).add_binary("plain.txt", mtime=OLD)
+    def test_a_user_whose_files_were_all_slow_to_copy_does_not_wait_again(self, migrator, auth, db, settings, monkeypatch):
+        """The settle time counts from the LAST comment, so the wait is what is left of it."""
+        _commented_file(auth, db, settings)
+        clock = _Clock()
+        monkeypatch.setattr(drive_engine, "time", clock)
+        settings.mtime_settle_sec = 240
+        real = drive_engine.DriveMigrator._restore_modified_time
+
+        def restore_long_ago(self, *a, **k):
+            real(self, *a, **k)
+            clock.now += 500                     # the rest of the user took longer than the settle time
+        monkeypatch.setattr(drive_engine.DriveMigrator, "_restore_modified_time", restore_long_ago)
+        migrator.run()
+        assert sum(clock.slept) == 0
+
+    def test_files_without_comments_are_never_checked(self, migrator, auth, db):
+        _shared_file(auth, db)                   # shared and restored, but never commented
         migrator.run()
         assert not migrator._mtime_checks
+        assert not [n for n, _ in auth.target_drive(TGT_USER).calls if n == "files.get"][1:], "it read a file it had no reason to"
+
+    def test_a_commented_file_that_held_costs_one_read_and_no_write(self, migrator, auth, db, settings):
+        _commented_file(auth, db, settings)
+        migrator.run()
+        assert len([1 for n, kw in auth.target_drive(TGT_USER).calls      # not the staging move, which carries it too
+                    if n == "files.update" and "modifiedTime" in str(kw.get("body")) and "addParents" not in kw]) == 1
+        assert "mtime_repaired" not in migrator.stats
+
+    def test_a_stop_ends_the_wait_and_leaves_the_check_for_the_next_run(self, migrator, auth, db, settings, monkeypatch):
+        _commented_file(auth, db, settings)
+        clock = _Clock()
+        monkeypatch.setattr(drive_engine, "time", clock)
+        settings.mtime_settle_sec = 240
+        monkeypatch.setattr(drive_engine, "shutdown_requested", lambda: bool(clock.slept))
+        migrator.run()
+        assert sum(clock.slept) < 240
+        assert not [n for n, _ in auth.target_drive(TGT_USER).calls if n == "files.get"][1:]
 
 
 class TestAStepThatRaisesDoesNotCostTheTimestamp:

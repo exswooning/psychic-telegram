@@ -54,6 +54,8 @@ def settings(tmp_path) -> Settings:
     # migration test does not grow a checker thread it never asked for. The default is
     # pinned in test_verify_on_completion.py.
     s.verify_on_complete = False
+    # Real Drive takes minutes to move a commented file's time; a test must not sleep for them.
+    s.mtime_settle_sec = 0
     os.makedirs(s.scratch_dir, exist_ok=True)
     return s
 

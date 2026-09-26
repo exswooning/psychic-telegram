@@ -1857,3 +1857,61 @@ def test_a_batched_grant_for_a_real_permanent_reason_is_not_retried(
         "SELECT status FROM audit_log WHERE source_user=? AND item_type='acl'",
         (SRC_USER,)).fetchone()
     assert row["status"] == "FAILED"
+
+
+class _Http500(Exception):
+    """What a batch hands its callback for a Google 5xx: an HttpError carrying `.resp.status`."""
+    def __init__(self, status):
+        super().__init__(f"<HttpError {status} \"Internal Error\">")
+        self.resp = type("R", (), {"status": status})()
+
+
+def _batch_that_fails_the_second_grant(monkeypatch, exc):
+    class FakeBatch:
+        def __init__(self, callback=None, batch_uri=None, http=None):
+            self._requests = []
+
+        def add(self, request, request_id=None, callback=None):
+            self._requests.append((request, request_id, callback))
+
+        def execute(self, **kw):
+            for n, (request, request_id, callback) in enumerate(self._requests):
+                if n == 1:
+                    callback(request_id, None, exc)      # Google failed this one; nothing was created
+                else:
+                    callback(request_id, request.execute(), None)
+    monkeypatch.setattr("googleapiclient.http.BatchHttpRequest", FakeBatch)
+
+
+def test_a_server_error_on_one_grant_in_a_batch_is_retried_not_recorded_as_a_failure(
+        migrator, auth, db, settings, monkeypatch):
+    from db import bulk_seed_identities
+    bulk_seed_identities(db, [("bob@tenanta.com", "bob@tenantb.com"), ("carol@tenanta.com", "carol@tenantb.com")])
+    src = auth.source_drive(SRC_USER)
+    fid = src.add_binary("shared.pdf")
+    src.add_permission(fid, "user", "reader", email="bob@tenanta.com")
+    src.add_permission(fid, "user", "writer", email="carol@tenanta.com")
+    auth.target_drive(TGT_USER)._http = object()
+    _batch_that_fails_the_second_grant(monkeypatch, _Http500(500))
+    settings.acl_batch_size = 20
+    migrator.run()
+    tgt = auth.target_drive(TGT_USER)
+    assert {p["emailAddress"] for p in tgt.perms[tgt.by_name("shared.pdf")[0]["id"]]} == {"bob@tenantb.com", "carol@tenantb.com"}
+    assert not db.conn.execute("SELECT 1 FROM audit_log WHERE item_type='acl' AND status LIKE 'FAILED%'").fetchall()
+    assert migrator.stats.get("acl_failed", 0) == 0
+
+
+def test_a_refusal_in_a_batch_is_still_a_failure(migrator, auth, db, settings, monkeypatch):
+    """Only Google's own errors are retried; a 403 says this grant will not work."""
+    from db import bulk_seed_identities
+    bulk_seed_identities(db, [("bob@tenanta.com", "bob@tenantb.com"), ("carol@tenanta.com", "carol@tenantb.com")])
+    src = auth.source_drive(SRC_USER)
+    fid = src.add_binary("shared.pdf")
+    src.add_permission(fid, "user", "reader", email="bob@tenanta.com")
+    src.add_permission(fid, "user", "writer", email="carol@tenanta.com")
+    auth.target_drive(TGT_USER)._http = object()
+    _batch_that_fails_the_second_grant(monkeypatch, _Http500(403))
+    settings.acl_batch_size = 20
+    migrator.run()
+    failed = db.conn.execute("SELECT item_id FROM audit_log WHERE item_type='acl' AND status LIKE 'FAILED%'").fetchall()
+    assert len(failed) == 1 and migrator.stats["acl_failed"] == 1

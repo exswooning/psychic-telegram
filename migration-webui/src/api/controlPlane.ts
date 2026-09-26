@@ -1487,7 +1487,7 @@ export interface OneToOneService {
   counts?: Partial<Record<'differences' | 'missing' | 'duplicates' | 'extras' | 'notCopied' | 'errors', number>>
   differences?: Array<{ item?: string; path?: string; diffs?: string[] }>
   missing?: Array<{ name?: string; why?: string }>
-  duplicates?: unknown[]
+  duplicates?: Array<{ name?: string; messageId?: string; path?: string }>
   notCopied?: Array<{ id?: string; error?: string }>
   errors?: string[]
   notes?: string[]
