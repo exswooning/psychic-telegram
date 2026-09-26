@@ -26,6 +26,7 @@ import {
   People as PeopleIcon,
   BarChart as BarChartIcon,
   CheckCircle as VerifyIcon,
+  CompareArrows as OneToOneIcon,
   Assessment as ReportIcon,
   ListAlt as ActivityIcon,
   Menu as MenuIcon,
@@ -100,6 +101,9 @@ const NAV_ITEMS = [
   { path: '/activity', label: 'Activity', icon: <ActivityIcon /> , group: 'Check' },
   { path: '/system-health', label: 'System Health', icon: <BarChartIcon /> , group: 'Operate' },
   { path: '/verification', label: 'Verification', icon: <VerifyIcon /> , group: 'Check' },
+  // Each user compared against both tenants as they finish; not the same page as the
+  // domain/reconciliation checks above, which need a run and a person to press them.
+  { path: '/one-to-one', label: 'One-to-one', icon: <OneToOneIcon /> , group: 'Check' },
   { path: '/errors', label: 'Failures', icon: <ErrorsIconNav /> , group: 'Check' },
   { path: '/report', label: 'Final Report', icon: <ReportIcon /> , group: 'Check' },
   { path: '/help', label: 'Help', icon: <HelpIconNav /> , group: 'Admin' },

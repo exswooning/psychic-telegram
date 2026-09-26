@@ -214,6 +214,10 @@ export const MigrationDetail: React.FC = () => {
                 counted {ageOf(d.asOf)}
               </Typography>
             )}
+            <Button size="small" onClick={() => navigate(`/one-to-one?account=${accountId}`)}
+                    data-testid="open-one-to-one">
+              One-to-one check
+            </Button>
           </Stack>
 
           {/* What the last quick migration found when it checked its own work. Fetched

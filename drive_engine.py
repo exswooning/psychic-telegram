@@ -504,6 +504,9 @@ class DriveMigrator:
         # (item, target id, export mime) for native files that mentioned a
         # Drive id. Drained at the end of the user, when every id is known.
         self._pending_link_rewrites: list[tuple[dict, str, str]] = []
+        # (target id, the modifiedTime it was restored to) -- read back at the end of the
+        # user, see _verify_modified_times.
+        self._mtime_checks: list[tuple[str, str]] = []
         # One query instead of one per item. get_target_id runs before every
         # create -- and again for every deferred shortcut at the end of the
         # run -- so on a resume it is the most frequent query in the engine.
@@ -543,6 +546,7 @@ class DriveMigrator:
             # add mappings, and a rewrite is only correct once no more are
             # coming.
             self._rewrite_pending_links()
+            self._verify_modified_times()
         finally:
             # `_staging_drive_id`, not `self.server_side`.
             #
@@ -947,6 +951,8 @@ class DriveMigrator:
     def _sync_folder(self, item: dict, tgt_parent: str) -> str | None:
         existing = self.db.get_target_id(self.source_user, item["id"], "folder")
         if existing:
+            if self.db.acl_pending(self.source_user, item["id"]) and not self.settings.dry_run:
+                self._finish_item(item, existing, comments=False, resume=True)
             return existing
 
         if self.settings.dry_run:
@@ -972,7 +978,7 @@ class DriveMigrator:
         self.db.log_audit(self.source_user, item["id"], "folder", "SUCCESS",
                           modified_time=item.get("modifiedTime"))
         self._bump("folders")
-        self._restore_modified_time(tgt_id, item, self._sync_acls(item["id"], tgt_id, item.get("shared")))
+        self._finish_item(item, tgt_id, comments=False)
         return tgt_id
 
     # -- files -------------------------------------------------------------------
@@ -980,6 +986,8 @@ class DriveMigrator:
         is_native = str(item.get("mimeType", "")).startswith("application/vnd.google-apps.")
         existing = self.db.get_target_id(self.source_user, item["id"], "file")
         if existing:
+            if self.db.acl_pending(self.source_user, item["id"]) and not self.settings.dry_run:
+                self._finish_item(item, existing, resume=True)
             if self.delta:
                 self._maybe_delta_update(item, existing, is_native)
             else:
@@ -1085,8 +1093,7 @@ class DriveMigrator:
         self._bump("files")
         self._bump("degraded_format")
         log.info("[%s] %s %s", self.source_user, item.get("name"), note)
-        touched = self._sync_acls(item["id"], tgt_id, item.get("shared"))
-        self._restore_modified_time(tgt_id, item, touched)
+        self._finish_item(item, tgt_id, comments=False)
 
     # Skips another strategy CAN legitimately overturn: both mean "this
     # path cannot carry this file", not "this file must not be carried".
@@ -1327,10 +1334,7 @@ class DriveMigrator:
         self.db.log_audit(self.source_user, item["id"], "file", "SUCCESS",
                           modified_time=item.get("modifiedTime"), bytes_moved=size)
         self._bump("files")
-        touched = self._sync_acls(item["id"], copy_id, item.get("shared"))
-        if self.settings.migrate_comments:
-            touched += self._sync_comments(item["id"], copy_id)
-        self._restore_modified_time(copy_id, item, touched)
+        self._finish_item(item, copy_id)
 
     def _sync_binary(self, item: dict, tgt_parent: str) -> None:
         size = int(item.get("size") or 0)
@@ -1383,10 +1387,7 @@ class DriveMigrator:
         self.db.log_audit(self.source_user, item["id"], "file", "SUCCESS",
                           modified_time=item.get("modifiedTime"), bytes_moved=size)
         self._bump("files")
-        touched = self._sync_acls(item["id"], tgt_id, item.get("shared"))
-        if self.settings.migrate_comments:
-            touched += self._sync_comments(item["id"], tgt_id)
-        self._restore_modified_time(tgt_id, item, touched)
+        self._finish_item(item, tgt_id)
 
     def _export_within_ceiling(self, item: dict, export_mime: str):
         """Export in the best format that fits under Google's ceiling.
@@ -1519,10 +1520,7 @@ class DriveMigrator:
             # next week's folder is ordinary -- so the mapping it needs does
             # not exist until the whole tree is done.
             self._pending_link_rewrites.append((item, tgt_id, export_mime))
-        touched = self._sync_acls(item["id"], tgt_id, item.get("shared"))
-        if self.settings.migrate_comments:
-            touched += self._sync_comments(item["id"], tgt_id)
-        self._restore_modified_time(tgt_id, item, touched)
+        self._finish_item(item, tgt_id)
 
     def _rewrite_pending_links(self) -> None:
         """Point migrated documents at their migrated neighbours.
@@ -1574,6 +1572,7 @@ class DriveMigrator:
                     supportsAllDrives=True).execute())
                 self.db.log_audit(self.source_user, item["id"], "link_rewrite",
                                   "SUCCESS", f"{hits} Drive link(s) repointed")
+                self._restore_modified_time(tgt_id, item, hits)     # re-uploading content moved it
                 fixed += hits
                 self._bump("links_rewritten", hits)
             except Exception as exc:      # noqa: BLE001
@@ -1777,7 +1776,7 @@ class DriveMigrator:
 
     # -- ACL translation -----------------------------------------------------------
     def _sync_acls(self, source_id: str, target_id: str,
-                   shared: bool | None = None) -> int:
+                   shared: bool | None = None, resume: bool = False) -> int:
         """
         Returns the number of grants actually applied -- the caller needs that
         to know whether modifiedTime has to be re-asserted.
@@ -1943,6 +1942,13 @@ class DriveMigrator:
                         self.source_user, source_id, expires,
                         body.get("emailAddress", "?"))
 
+            if resume and audit_key:
+                # Finishing an interrupted item: a grant already created, or already
+                # decided against, is not attempted again -- attempting the ones that
+                # cannot land (a grantee with no account) is what makes sharing slow.
+                prior = self.db.get_audit(self.source_user, audit_key, "acl")
+                if prior is not None and (prior["status"] == "SUCCESS" or str(prior["status"]).startswith("SKIPPED")):
+                    continue
             batch.append((body, audit_key))
 
         return self._create_permissions_batched(target_id, batch)
@@ -2121,6 +2127,88 @@ class DriveMigrator:
                 return 0
         return 0
 
+    def _finish_item(self, item: dict, target_id: str, *, comments: bool = True,
+                     resume: bool = False) -> None:
+        """Everything done to an item after it lands -- its sharing, its comments -- and
+        then the modifiedTime those writes moved.
+
+        Each step stands alone. An exception in one used to escape into
+        _sync_with_fallback, which logged it at DEBUG and went on: the modifiedTime was
+        never put back and nothing said why. A real verification found half the commented
+        Docs and Sheets carrying the migration's timestamp with no warning in the log.
+
+        The ledger calls an item done the moment it lands, before its sharing has run, so a
+        run that died in the middle of the sharing left it looking finished with grants
+        missing -- and a resume never went back. The item is therefore marked ACL-PENDING
+        first and cleared once the sharing has run; a resume finishes what is still pending
+        (`resume`), without re-attempting grants already decided. Only an item that was
+        actually interrupted keeps the mark, so a ledger from before this existed reads as
+        finished everywhere, as it always did.
+        """
+        shareable = item.get("shared") is not False      # an explicit False has nothing to share
+        if shareable:
+            self.db.mark_acl_pending(self.source_user, item["id"])
+        touched, failed, sharing_ran = 0, False, False
+        try:
+            touched += self._sync_acls(item["id"], target_id, item.get("shared"), resume=resume)
+            sharing_ran = True
+        except QuotaExhausted:
+            raise               # stays pending: the next run finishes it
+        except Exception as exc:      # noqa: BLE001
+            failed = True
+            log.warning("[%s] sharing of %s failed after it was copied (%s: %s); it stays "
+                        "marked unfinished and the next run retries it",
+                        self.source_user, item.get("name"), type(exc).__name__, exc)
+        if comments and self.settings.migrate_comments:
+            try:
+                touched += self._sync_comments(item["id"], target_id)
+            except QuotaExhausted:
+                raise
+            except Exception as exc:      # noqa: BLE001
+                failed = True
+                log.warning("[%s] comments on %s failed after it was copied (%s: %s)",
+                            self.source_user, item.get("name"), type(exc).__name__, exc)
+        # Always put the time back after ANY step that may have written -- including one
+        # that raised half way through.
+        self._restore_modified_time(target_id, item, touched or (1 if failed else 0))
+        if shareable and sharing_ran:
+            self.db.clear_acl_pending(self.source_user, item["id"])
+
+    def _verify_modified_times(self) -> None:
+        """Read back the modifiedTime of every file whose time was restored, and put back any that moved.
+
+        Drive applies the timestamp bump of a grant or a comment asynchronously, and it can
+        land AFTER the restore (the repo's own measurement: 3 in 15 files in one order, and
+        a real verification found 4 of 7 commented Docs and Sheets carrying the migration's
+        time). Checking at the moment of the restore proves nothing, because the bump had
+        not happened yet; checking once the user's tree is done does. One read per touched
+        file -- reads are the cheap bucket -- and a write only for the ones that drifted.
+        """
+        checks, self._mtime_checks = self._mtime_checks, []
+        if not checks or self.settings.dry_run:
+            return
+        fixed = 0
+        for target_id, mtime in checks:
+            if shutdown_requested():
+                break
+            try:
+                got = self._retry(lambda t=target_id: self.tgt.files().get(
+                    fileId=t, fields="modifiedTime", supportsAllDrives=True).execute(),
+                    label="drive.files.get.mtime", write=False).get("modifiedTime")
+                if got and got[:19] != mtime[:19]:
+                    self._retry(lambda t=target_id, m=mtime: self.tgt.files().update(
+                        fileId=t, body={"modifiedTime": m}, supportsAllDrives=True,
+                        fields="id").execute(), label="drive.files.update.mtime")
+                    fixed += 1
+            except QuotaExhausted:
+                raise
+            except Exception as exc:      # noqa: BLE001 - a missed correction, not a failed migration
+                log.warning("[%s] could not check modifiedTime on %s: %s", self.source_user, target_id, exc)
+        if fixed:
+            log.warning("[%s] %d file(s) had their modifiedTime moved after it was restored; put back",
+                        self.source_user, fixed)
+            self._bump("mtime_repaired", fixed)
+
     def _restore_modified_time(self, target_id: str, item: dict,
                                writes_applied: int) -> None:
         """
@@ -2145,10 +2233,20 @@ class DriveMigrator:
         if not writes_applied or not mtime or self.settings.dry_run:
             return
         try:
-            self._retry(lambda: self.tgt.files().update(
+            done = self._retry(lambda: self.tgt.files().update(
                 fileId=target_id, body={"modifiedTime": mtime},
-                supportsAllDrives=True, fields="id",
+                supportsAllDrives=True, fields="id,modifiedTime",
             ).execute(), label="drive.files.update.mtime")
-        except (PermanentAPIError, RuntimeError) as exc:
+            got = (done or {}).get("modifiedTime")
+            # The reply names what Drive stored, so this costs no extra call.
+            if got and got[:19] != mtime[:19]:
+                log.warning("[%s] modifiedTime on %s did not stick: asked for %s, Drive kept %s",
+                            self.source_user, target_id, mtime, got)
+            checks = getattr(self, "_mtime_checks", None)
+            if checks is not None:
+                checks.append((target_id, mtime))
+        except QuotaExhausted:
+            raise
+        except Exception as exc:      # noqa: BLE001 - was (PermanentAPIError, RuntimeError) only
             log.warning("[%s] could not restore modifiedTime on %s: %s",
                        self.source_user, target_id, exc)

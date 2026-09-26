@@ -261,6 +261,10 @@ class TestSideTables:
                               # throughput samples, bounded to the last hour,
                               # and nothing consults them to decide whether an
                               # item still needs migrating
+            "user_verification",  # cleared BY SERVICE, in the same transaction as the
+                              # rows it describes: what the verifier found for
+                              # drive is stale after a drive reset, what it found
+                              # for gmail is not
             "run_fidelity",   # not per-user and not derived from the ledger: a
                               # measurement of what the TENANTS held when it
                               # was taken. A ledger reset does not change the
@@ -398,3 +402,25 @@ class TestDuplicationWarning:
         out = capsys.readouterr().out
         assert "--services drive" in out
         assert "gmail" not in out.split("reset_target.py")[1]
+
+
+class TestAVerificationDoesNotOutliveTheItemsItDescribes:
+    def _seed(self, db):
+        db.conn.execute("INSERT OR REPLACE INTO identity_map(source_email, target_email, entity_type, status, services_done) "
+                        "VALUES ('u@a.com','u@b.com','user','DONE','drive,gmail')")
+        db.conn.commit()
+        for svc in ("drive", "gmail"):
+            db.save_user_verification("u@a.com", svc, "IDENTICAL", 3, 3, None, {})
+
+    def test_resetting_drive_clears_its_verification_and_leaves_the_others(self, db):
+        import reset_drive_ledger as r
+        self._seed(db)
+        r.reset_service_ledger(db, "u@a.com", ("drive",))
+        assert [v["service"] for v in db.user_verifications()] == ["gmail"]
+
+    def test_and_a_pending_sharing_marker_goes_with_the_files(self, db):
+        import reset_drive_ledger as r
+        self._seed(db)
+        db.mark_acl_pending("u@a.com", "file1")
+        r.reset_service_ledger(db, "u@a.com", ("drive",))
+        assert not db.acl_pending("u@a.com", "file1")

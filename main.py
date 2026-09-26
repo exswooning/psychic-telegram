@@ -40,6 +40,7 @@ import contextlib
 import os
 import signal
 import sys
+import queue
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -63,6 +64,54 @@ log = logging.getLogger("migrate")
 
 # Cooperative shutdown flag, flipped by SIGINT/SIGTERM.
 SHUTDOWN = threading.Event()
+
+
+class _VerifyQueue:
+    """Users verified as they finish, on two threads of their own: a check reads both tenants
+    for minutes and must never hold a migration worker. Daemon threads -- a Stop must not wait
+    on one; a check that dies with the process just leaves that user's last verdict standing."""
+
+    def __init__(self, workers: int = 2):
+        self._q: queue.Queue = queue.Queue()
+        self._workers = workers
+        self._started = False
+        self._pending = 0
+        self._lock = threading.Lock()
+
+    def submit(self, fn, *args) -> None:
+        with self._lock:
+            self._pending += 1
+            if not self._started:
+                self._started = True
+                for i in range(self._workers):
+                    threading.Thread(target=self._loop, name=f"verify-{i}", daemon=True).start()
+        self._q.put((fn, args))
+
+    def _loop(self) -> None:
+        while True:
+            fn, args = self._q.get()
+            try:
+                fn(*args)
+            except Exception:      # noqa: BLE001 - verify_user already swallows; this is the last net
+                log.exception("verification worker")
+            finally:
+                with self._lock:
+                    self._pending -= 1
+
+    def drain(self, stopped) -> int:
+        """Wait for every check queued so far; a Stop abandons the ones not yet started.
+        Returns how many were still outstanding when it gave up (0 = all finished)."""
+        while True:
+            with self._lock:
+                left = self._pending
+            if not left:
+                return 0
+            if stopped():
+                return left
+            time.sleep(1)
+
+
+VERIFY = _VerifyQueue()
 
 # Memory watchdog's own pause flag. Distinct from SHUTDOWN so an exit caused by
 # sustained memory pressure can be reported (and code-pathed) separately from
@@ -557,6 +606,18 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
     result["elapsed_sec"] = round(time.time() - started, 1)
     log.info("[%s] finished in %.1fs: %s", source_user,
              result["elapsed_sec"], json.dumps(result.get("services", {})))
+    # A finished user is checked against both tenants straight away -- what THIS pass
+    # finished, so an ordered run verifies Drive as soon as Drive is done and mail when
+    # mail is. Never for a dry run or a sample (track_status is off for both: neither
+    # finished anything), and never able to fail the migration.
+    if track_status and result.get("status") == "DONE" and getattr(settings, "verify_on_complete", False):
+        import verify_sample
+        from resilience import retry_on_google_error
+        done = [s for s in verify_sample.ALL_SERVICES if s in _services_that_succeeded(result["services"])]
+        if done:
+            VERIFY.submit(verify_sample.verify_user, auth, db, settings, source_user, tuple(done),
+                          settings.verify_sample_per_service,
+                          retry_on_google_error(max_retries=settings.max_retries))
     return result
 
 
@@ -919,6 +980,12 @@ def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
                 # asked it to stop, is the opposite of what either means.
                 if MEMORY_PAUSE.is_set() or SHUTDOWN.is_set():
                     break
+            # The users verified as they finished are part of the run too: it is not over
+            # until they are, or the job would read as finished while checks were running.
+            left = VERIFY.drain(lambda: SHUTDOWN.is_set() or MEMORY_PAUSE.is_set())
+            if left:
+                log.warning("stopped with %d user verification(s) unfinished; re-run "
+                            "verify_sample.py for those users", left)
             # `after` (cmd_migrate --verify-after) runs INSIDE the registration: the
             # run is still the run while it checks its own work, and leaving the
             # admission table first would show it finished, hand its slot to

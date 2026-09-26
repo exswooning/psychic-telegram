@@ -32,6 +32,7 @@ import base64
 import email
 import hashlib
 import json
+import logging
 import os
 import re
 import sys
@@ -55,6 +56,8 @@ VOLATILE_HEADERS = {"received", "x-received", "x-gm-message-state", "x-google-sm
                     "return-path", "delivered-to", "authentication-results", "received-spf",
                     "arc-seal", "arc-message-signature", "arc-authentication-results"}
 PERSON_FIELDS = "names,emailAddresses,phoneNumbers,organizations,addresses,birthdays,biographies,urls,nicknames"
+log = logging.getLogger(__name__)
+
 ALL_SERVICES = ("drive", "gmail", "calendar", "contacts", "tasks")
 
 
@@ -251,12 +254,27 @@ def compare_task(src: dict, tgt: dict) -> list[str]:
 # ---------------------------------------------------------------------------
 # Reading the tenants
 # ---------------------------------------------------------------------------
+def _sample(items: list, limit: int | None) -> list:
+    """`limit` items spread evenly over the list (all of it when there are fewer), in a fixed
+    order so the same ledger is sampled the same way twice -- and a difference found once is
+    found again, not lost to a different draw."""
+    if not limit or len(items) <= limit:
+        return items
+    ordered = sorted(items, key=lambda x: str(x[0]))
+    return [ordered[int(i * len(ordered) / limit)] for i in range(limit)]
+
+
 class Verifier:
-    def __init__(self, auth, db, settings, source_user: str, target_user: str, retry=lambda f: f):
+    def __init__(self, auth, db, settings, source_user: str, target_user: str, retry=lambda f: f,
+                 limit: int | None = None):
         self.auth, self.db, self.settings = auth, db, settings
         self.src_user, self.tgt_user = source_user, target_user
         self._retry = retry
         self.evidence: list[dict] = []
+        # None checks every item the ledger pairs (a sample migration, a small user); a number
+        # checks that many of each kind, evenly spread -- see verify_user.
+        self.limit = limit
+        self._picked: dict[str, tuple[int, int]] = {}
 
     # -- plumbing ---------------------------------------------------------
     def _x(self, fn):
@@ -266,10 +284,24 @@ class Verifier:
     def _translate(self, addr: str) -> str:
         return (self.db.resolve_identity(addr) or addr).lower() if addr else addr
 
-    def _pairs(self, type_: str) -> list[tuple[str, str, str | None]]:
-        return [(r["source_id"], r["target_id"], r["source_name"]) for r in self.db.conn.execute(
+    def _pairs(self, type_: str, sample: bool = False) -> list[tuple[str, str, str | None]]:
+        """Everything the ledger paired -- or, with `sample`, the part of it to open and compare.
+        Lookups (which target ids the ledger knows, task ids, calendars) always take the whole."""
+        rows = [(r["source_id"], r["target_id"], r["source_name"]) for r in self.db.conn.execute(
             "SELECT source_id, target_id, source_name FROM id_mapping WHERE source_user=? AND type=?",
             (self.src_user, type_))]
+        if not sample:
+            return rows
+        use = _sample(rows, self.limit)
+        self._picked[type_] = (len(use), len(rows))
+        return use
+
+    def _note_sample(self, res: dict, *types: str) -> None:
+        n = sum(self._picked.get(t, (0, 0))[0] for t in types)
+        m = sum(self._picked.get(t, (0, 0))[1] for t in types)
+        if self.limit and n < m:
+            res["sampled"] = {"checked": n, "of": m}
+            res["notes"].append(f"checked {n} of {m} items -- an evenly spaced sample of up to {self.limit} of each kind")
 
     def _failed(self, types: tuple[str, ...]) -> list[dict]:
         """Items the engine tried and failed to copy -- INCLUDING a whole service that
@@ -326,11 +358,13 @@ class Verifier:
         res = self._blank()
         src, tgt = self.auth.source_drive(self.src_user), self.auth.target_drive(self.tgt_user)
         sc, tc = {}, {}
-        seen_targets, target_keys = set(), {}
+        # Every target the ledger knows -- not only the ones opened below -- so a sampled
+        # run does not mistake the rest of the migration for strays.
+        seen_targets = {tid for kind in ("folder", "file") for _, tid, _ in self._pairs(kind)}
+        target_keys = {}
         for kind in ("folder", "file"):
-            for sid, tid, _ in self._pairs(kind):
+            for sid, tid, _ in self._pairs(kind, sample=True):
                 res["checked"] += 1
-                seen_targets.add(tid)
                 try:
                     sm = self._drive_meta(src, sid)
                 except Exception as exc:      # noqa: BLE001
@@ -372,6 +406,7 @@ class Verifier:
                     res["extras"].append({"target": f["id"], "name": f.get("name"), "path": key[0]})
         except Exception as exc:      # noqa: BLE001
             res["errors"].append(f"could not list the target's Drive: {str(exc)[:120]}")
+        self._note_sample(res, "folder", "file")
         sh = res.get("sharing")
         if sh and sh["notReproduced"]:
             res["notes"].append(f"sharing: {sh['matched']} grants matched; {sh['notReproduced']} were deliberately not "
@@ -471,10 +506,9 @@ class Verifier:
             "SELECT item_id FROM audit_log WHERE source_user=? AND item_type='link_rewrite' AND status='SUCCESS'",
             (self.src_user,))}
         from link_rewrite import rewrite_raw
-        mapped_ids, mapped_msgids = set(), set()
-        for sid, tid, _ in self._pairs("message"):
+        mapped_ids, mapped_msgids = {tid for _, tid, _ in self._pairs("message")}, set()
+        for sid, tid, _ in self._pairs("message", sample=True):
             res["checked"] += 1
-            mapped_ids.add(tid)
             try:
                 sraw, sm = self._raw(src, sid)
             except Exception as exc:      # noqa: BLE001
@@ -515,7 +549,12 @@ class Verifier:
                 res["differences"].append({"item": msgid or sid, "source": sid, "target": tid, "diffs": diffs})
             else:
                 res["identical"] += 1
+        try:
+            mapped_ids |= self._draft_message_ids(tgt)
+        except Exception as exc:      # noqa: BLE001 - only the stray check suffers; the drafts are still compared
+            res["errors"].append(f"could not list the target's drafts: {str(exc)[:100]}")
         self._drafts(src, tgt, res, mapped_ids)
+        self._note_sample(res, "message", "draft")
         # Duplicates and extras by Message-ID.
         try:
             welcome = 0
@@ -538,6 +577,17 @@ class Verifier:
         res["notCopied"] = self._failed(("message", "gmail"))
         return res
 
+    def _draft_message_ids(self, svc) -> set[str]:
+        """The message behind every draft in the mailbox: messages.list returns a draft's message
+        among the rest, and it is not a stray."""
+        out, token = set(), None
+        while True:
+            r = self._x(lambda t=token: svc.users().drafts().list(userId="me", maxResults=500, pageToken=t).execute())
+            out |= {(d.get("message") or {}).get("id") for d in r.get("drafts", [])}
+            token = r.get("nextPageToken")
+            if not token:
+                return out - {None}
+
     def _draft_raw(self, svc, did) -> tuple[bytes, str]:
         d = self._x(lambda: svc.users().drafts().get(userId="me", id=did, format="raw").execute())
         m = d.get("message") or {}
@@ -548,7 +598,7 @@ class Verifier:
     def _drafts(self, src, tgt, res, mapped_ids) -> None:
         """Drafts are copied by a pass of their own, so they are opened and compared like messages.
         Their underlying message ids are recorded so a draft is never mistaken for a stray."""
-        for sid, tid, _ in self._pairs("draft"):
+        for sid, tid, _ in self._pairs("draft", sample=True):
             res["checked"] += 1
             try:
                 sraw, _m = self._draft_raw(src, sid)
@@ -588,7 +638,7 @@ class Verifier:
         res = self._blank()
         src, tgt = self.auth.source_calendar(self.src_user), self.auth.target_calendar(self.tgt_user)
         cal_map = {s: t for s, t, _ in self._pairs("calendar")}
-        for key, tid, _ in self._pairs("event"):
+        for key, tid, _ in self._pairs("event", sample=True):
             res["checked"] += 1
             src_cal, _, eid = key.partition("::")
             tgt_cal = cal_map.get(src_cal) or "primary"
@@ -609,6 +659,7 @@ class Verifier:
                 res["differences"].append({"item": sev.get("summary"), "source": eid, "target": tid, "diffs": diffs})
             else:
                 res["identical"] += 1
+        self._note_sample(res, "event")
         res["notCopied"] = self._failed(("event", "calendar"))
         return res
 
@@ -616,7 +667,7 @@ class Verifier:
     def contacts(self) -> dict:
         res = self._blank()
         src, tgt = self.auth.source_people(self.src_user), self.auth.target_people(self.tgt_user)
-        for sid, tid, _ in self._pairs("contact"):
+        for sid, tid, _ in self._pairs("contact", sample=True):
             res["checked"] += 1
             try:
                 sp = self._x(lambda: src.people().get(resourceName=sid, personFields=PERSON_FIELDS).execute())
@@ -635,6 +686,7 @@ class Verifier:
                 res["differences"].append({"item": name, "source": sid, "target": tid, "diffs": diffs})
             else:
                 res["identical"] += 1
+        self._note_sample(res, "contact")
         res["notCopied"] = self._failed(("contact", "contacts"))
         return res
 
@@ -654,6 +706,7 @@ class Verifier:
         res = self._blank()
         src, tgt = self.auth.source_tasks(self.src_user), self.auth.target_tasks(self.tgt_user)
         task_map = {s: t for s, t, _ in self._pairs("task")}
+        keep = {s for s, _, _ in self._pairs("task", sample=True)}
         for slist, tlist, title in self._pairs("task_list"):
             try:
                 sts, tts = self._tasks_of(src, slist), self._tasks_of(tgt, tlist)
@@ -662,7 +715,7 @@ class Verifier:
                 continue
             for sid, st in sts.items():
                 tid = task_map.get(sid)
-                if not tid:
+                if not tid or sid not in keep:
                     continue            # not in the sample
                 res["checked"] += 1
                 tt = tts.get(tid)
@@ -678,6 +731,7 @@ class Verifier:
                     res["differences"].append({"item": st.get("title"), "source": sid, "target": tid, "diffs": diffs})
                 else:
                     res["identical"] += 1
+        self._note_sample(res, "task")
         res["notCopied"] = self._failed(("task", "task_list", "tasks"))
         return res
 
@@ -711,18 +765,18 @@ def verdict_of(users: dict, services: tuple[str, ...]) -> tuple[str, list[str]]:
 
 
 def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICES, retry=lambda f: f,
-        progress=print) -> dict:
+        progress=print, limit: int | None = None) -> dict:
     ident = {r["source_email"]: r["target_email"] for r in db.all_identities() if r["entity_type"] == "user"}
     chosen = [u for u in (users or list(ident)) if u in ident]
     services = tuple(s for s in ALL_SERVICES if s in services)
     report = {"generatedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
               "accountId": getattr(settings, "account_id", None),
               "sourceDomain": settings.source_domain, "targetDomain": settings.target_domain,
-              "sampleLimit": getattr(settings, "sample_limit", None), "services": list(services),
+              "sampleLimit": getattr(settings, "sample_limit", None), "verifyLimit": limit, "services": list(services),
               "users": {}, "evidence": [], "notes": []}
     for u in chosen:
         progress(f"verify: {u}")
-        v = Verifier(auth, db, settings, u, ident[u], retry=retry)
+        v = Verifier(auth, db, settings, u, ident[u], retry=retry, limit=limit)
         per = {}
         for svc in services:
             try:
@@ -757,6 +811,9 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
                            "from both tenants. Items the sample did not copy are not expected on the target.")
     if report["sampleLimit"]:
         report["notes"].append(f"This was a sample: at most {report['sampleLimit']} items of each service per user.")
+    if limit:
+        report["notes"].append(f"Verified a sample: up to {limit} of each kind of item per user, evenly spread. "
+                               "A difference outside the sample would not be seen.")
     return report
 
 
@@ -765,7 +822,8 @@ def to_markdown(report: dict) -> str:
     L = [f"# One-to-one verification: {report['verdict']}", "",
          f"- {report['sourceDomain']} -> {report['targetDomain']}, account {report['accountId']}",
          f"- generated {report['generatedAt']}; services {', '.join(report['services'])}; "
-         f"users {len(report['users'])}" + (f"; sample of {report['sampleLimit']} per service" if report.get("sampleLimit") else ""),
+         f"users {len(report['users'])}" + (f"; sample of {report['sampleLimit']} per service" if report.get("sampleLimit") else "")
+         + (f"; checked up to {report['verifyLimit']} of each kind per user" if report.get("verifyLimit") else ""),
          f"- **{t['identical']:,} of {t['checked']:,}** paired items identical; {t['filesOpened']:,} Drive files opened "
          f"and compared; {t['bytesCompared']:,} bytes read from each side",
          f"- differences {t['differences']}, missing on target {t['missing']}, duplicates {t['duplicates']}, "
@@ -825,9 +883,45 @@ def latest(account_id, base: str | None = None) -> dict | None:
         return None
 
 
-def run_and_save(auth, db, settings, users=None, services=ALL_SERVICES, retry=lambda f: f, progress=print) -> dict:
-    report = run(auth, db, settings, users, services, retry, progress)
-    jp, mp = save(report)
+def verify_dir(account_id) -> str:
+    return os.path.join(HERE, "logs", "verify", "_none" if account_id is None else str(account_id))
+
+
+def save_user_results(db, report: dict) -> None:
+    """One row per (user, service) in the account's own database, so the verification page and the
+    user's row in a migration can say what was last found without reading a report file."""
+    for user, per in report["users"].items():
+        for svc, r in per.items():
+            verdict, _ = verdict_of({user: {svc: r}}, (svc,))
+            if verdict == "IDENTICAL" and r["checked"] == 0:
+                verdict = "INCOMPLETE"          # nothing checked is not a pass
+            db.save_user_verification(user, svc, verdict, r["checked"], r["identical"],
+                                      (r.get("sampled") or {}).get("of"), {
+                "counts": {k: len(r[k]) for k in ("differences", "missing", "duplicates", "extras", "notCopied", "errors")},
+                **{k: r[k][:25] for k in ("differences", "missing", "duplicates", "notCopied", "errors")},
+                "extras": r["extras"][:10], "notes": r["notes"][:10], "sampled": r.get("sampled")})
+
+
+def verify_user(auth, db, settings, source_user: str, services, limit: int | None, retry=lambda f: f) -> str | None:
+    """Verify what one user's migration just finished, and record it. Returns the verdict, or None
+    when it could not be run -- never raises: it runs on the heels of a migration worker and a
+    failed check must not become a failed migration."""
+    try:
+        report = run(auth, db, settings, [source_user], tuple(services), retry, lambda *_: None, limit)
+        save_user_results(db, report)
+        log.info("[%s] verified %s: %s (%d of %d identical)", source_user, ",".join(services), report["verdict"],
+                 report["totals"]["identical"], report["totals"]["checked"])
+        return report["verdict"]
+    except Exception:      # noqa: BLE001
+        log.exception("[%s] verification could not be run", source_user)
+        return None
+
+
+def run_and_save(auth, db, settings, users=None, services=ALL_SERVICES, retry=lambda f: f, progress=print,
+                 limit: int | None = None, base: str | None = None) -> dict:
+    report = run(auth, db, settings, users, services, retry, progress, limit)
+    jp, mp = save(report, base)
+    save_user_results(db, report)
     progress(f"verification: {report['verdict']} -- {report['totals']['identical']} of {report['totals']['checked']} "
              f"identical; report saved to {os.path.relpath(mp, HERE)}")
     return report
@@ -844,6 +938,7 @@ def main(argv=None) -> int:
     ap.add_argument("--account-id", type=int)
     ap.add_argument("--user", action="append", help="limit to these source users")
     ap.add_argument("--services", default=",".join(ALL_SERVICES))
+    ap.add_argument("--limit", type=int, help="check only this many of each kind of item per user, evenly spread")
     a = ap.parse_args(argv)
     services = tuple(s.strip() for s in a.services.split(","))
     settings = Settings(account_id=a.account_id)
@@ -853,8 +948,12 @@ def main(argv=None) -> int:
     settings.migrate_tasks = settings.migrate_tasks or "tasks" in services
     db = MigrationDB(settings.db_path)
     report = run_and_save(AuthManager(settings), db, settings, a.user, services,
-                          retry=retry_on_google_error(max_retries=settings.max_retries))
-    return 0 if report["verdict"] == "IDENTICAL" else 1
+                          retry=retry_on_google_error(max_retries=settings.max_retries),
+                          limit=a.limit, base=verify_dir(a.account_id))
+    # 0 whenever the check RAN. The verdict is in the report, not the exit code: a
+    # non-zero exit reads as a crash to everything that watches jobs (run_watch opens an
+    # incident for it), and "the migration has differences" is a finding, not a crash.
+    return 0
 
 
 if __name__ == "__main__":

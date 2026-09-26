@@ -17,6 +17,7 @@ import Users from '@/pages/Users'
 import UserDetail from '@/pages/UserDetail'
 import SystemHealth from '@/pages/SystemHealth'
 import Verification from '@/pages/Verification'
+import OneToOne from '@/pages/OneToOne'
 import FinalReport from '@/pages/FinalReport'
 import Settings from '@/pages/Settings'
 import ActivityFeed from '@/pages/ActivityFeed'
@@ -105,6 +106,7 @@ const App: React.FC = () => {
             <Route path="/users/:email" element={<UserDetail />} />
             <Route path="/system-health" element={<SystemHealth />} />
             <Route path="/verification" element={<Verification />} />
+            <Route path="/one-to-one" element={<OneToOne />} />
             <Route path="/report" element={<FinalReport />} />
             <Route path="/activity" element={<ActivityFeed />} />
             <Route path="/errors" element={<ErrorHandling />} />

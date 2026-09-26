@@ -51,7 +51,9 @@ from db import MigrationDB    # noqa: E402
 # showed up against B5 -- a run that had produced none of them. Nothing
 # reads these rows to decide what to skip (acl_audit.py compares the two
 # tenants live), so clearing them costs no resumability.
-DRIVE_TYPES = ("folder", "file", "shortcut", "acl", "comment")
+# `acl_pass` is the marker for an item whose sharing was started and not finished; it goes
+# with the items it describes.
+DRIVE_TYPES = ("folder", "file", "shortcut", "acl", "comment", "acl_pass")
 
 # The ledger row types each service owns. Everything the engine writes to
 # id_mapping/audit_log has to appear here, or a reset leaves rows behind
@@ -138,6 +140,11 @@ def reset_service_ledger(db: MigrationDB, source_email: str,
             for table, col in SERVICE_SIDE_TABLES.get(svc, ()):
                 side_deleted += conn.execute(
                     f"DELETE FROM {table} WHERE {col}=?", (source_email,)).rowcount
+        # What the verifier last found describes items this reset just declared gone. By
+        # service, unlike the tables above: another service's result is still true.
+        side_deleted += conn.execute(
+            f"DELETE FROM user_verification WHERE source_user=? AND service IN "
+            f"({','.join('?' * len(services))})", (source_email, *services)).rowcount
         row = conn.execute(
             "SELECT services_done FROM identity_map WHERE source_email=?",
             (source_email,)).fetchone()

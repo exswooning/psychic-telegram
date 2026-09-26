@@ -185,6 +185,21 @@ CREATE TABLE IF NOT EXISTS run_fidelity (
     payload     TEXT NOT NULL
 );
 
+-- verify_sample.py: what the one-to-one verifier last found for a user, one row
+-- per (user, service), newest wins. `payload` holds the counts and the first few
+-- of each kind of finding; the full report is the verifier's own file.
+CREATE TABLE IF NOT EXISTS user_verification (
+    source_user TEXT NOT NULL,
+    service     TEXT NOT NULL,
+    verified_at TEXT NOT NULL,
+    verdict     TEXT NOT NULL,
+    checked     INTEGER NOT NULL DEFAULT 0,
+    identical   INTEGER NOT NULL DEFAULT 0,
+    sampled_of  INTEGER,
+    payload     TEXT NOT NULL,
+    PRIMARY KEY (source_user, service)
+);
+
 -- Module 1: pre-scan output, one row per (user, run).
 CREATE TABLE IF NOT EXISTS discovery (
     source_user     TEXT NOT NULL,
@@ -689,6 +704,35 @@ class MigrationDB:
             conn.execute("DELETE FROM run_fidelity WHERE id NOT IN "
                          "(SELECT id FROM run_fidelity ORDER BY id DESC LIMIT ?)", (keep,))
 
+    def save_user_verification(self, source_user: str, service: str, verdict: str, checked: int,
+                               identical: int, sampled_of: Optional[int], payload: dict) -> None:
+        import json as _json
+        with self.write() as conn:
+            conn.execute(
+                """INSERT INTO user_verification
+                       (source_user, service, verified_at, verdict, checked, identical, sampled_of, payload)
+                   VALUES (?,?,?,?,?,?,?,?)
+                   ON CONFLICT(source_user, service) DO UPDATE SET
+                       verified_at=excluded.verified_at, verdict=excluded.verdict,
+                       checked=excluded.checked, identical=excluded.identical,
+                       sampled_of=excluded.sampled_of, payload=excluded.payload""",
+                (source_user, service, utc_now(), verdict, checked, identical, sampled_of,
+                 _json.dumps(payload, default=str)))
+
+    def user_verifications(self) -> list[dict]:
+        """Every stored verification, one per (user, service)."""
+        import json as _json
+        out = []
+        for r in self.conn.execute("SELECT * FROM user_verification ORDER BY source_user, service"):
+            try:
+                payload = _json.loads(r["payload"])
+            except ValueError:
+                payload = {}
+            out.append({"user": r["source_user"], "service": r["service"], "verifiedAt": r["verified_at"],
+                        "verdict": r["verdict"], "checked": r["checked"], "identical": r["identical"],
+                        "sampledOf": r["sampled_of"], **payload})
+        return out
+
     def latest_fidelity(self) -> Optional[dict]:
         import json as _json
         row = self.conn.execute("SELECT recorded_at, payload FROM run_fidelity "
@@ -834,6 +878,24 @@ class MigrationDB:
                  (error_message or "")[:4000], utc_now(),
                  modified_time, bytes_moved),
             )
+
+    # An item whose sharing was started and not finished. The ledger calls an item done as
+    # soon as it lands, and the sharing runs after -- so this row, and only this row, is
+    # what tells a resume that a file which looks finished is not. Cleared when the sharing
+    # ends, so it exists only for an item that was interrupted. audit_retention collapses
+    # SUCCESS rows only, so it never removes one.
+    def mark_acl_pending(self, source_user: str, item_id: str) -> None:
+        self.log_audit(source_user, item_id, "acl_pass", "PENDING")
+
+    def clear_acl_pending(self, source_user: str, item_id: str) -> None:
+        with self.write() as conn:
+            conn.execute("DELETE FROM audit_log WHERE source_user=? AND item_id=? AND item_type='acl_pass'",
+                         (source_user, item_id))
+
+    def acl_pending(self, source_user: str, item_id: str) -> bool:
+        return self.conn.execute(
+            "SELECT 1 FROM audit_log WHERE source_user=? AND item_id=? AND item_type='acl_pass' "
+            "AND status='PENDING'", (source_user, item_id)).fetchone() is not None
 
     def get_audit(self, source_user: str, item_id: str,
                   item_type: str) -> Optional[sqlite3.Row]:

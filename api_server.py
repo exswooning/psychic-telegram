@@ -291,6 +291,14 @@ class WriteAction(BaseModel):
     reason: str = Field(min_length=3, description="Reason Code. Logged, required.")
 
 
+class RunVerification(WriteAction):
+    account_id: int | None = None
+    users: list[str] = []
+    # None: the account's usual sample of each kind of item. A number: that many.
+    # 0: every item the ledger paired -- the honest, slow check.
+    limit: int | None = Field(default=None, ge=0)
+
+
 class StartMigration(WriteAction):
     # "all", matching main.py's own default. Defaulting to Drive alone meant
     # a caller that did not name services silently migrated one of six, and
@@ -1459,6 +1467,85 @@ async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
     launch = ((lambda: _run_admitted(argv, account_id, "migrate", env=env)) if env
               else (lambda: _run_admitted(argv, account_id, "migrate")))
     return await _gated(op, "migrate.start", body, target, launch)
+
+
+def _ledger_path(account_id: int | None) -> str:
+    from config import Settings
+    return Settings(account_id=account_id).db_path
+
+
+_VERDICT_RANK = {"DIFFERENCES": 3, "INCOMPLETE": 2, "IDENTICAL": 1}
+
+
+def _verification_view(account_id: int | None) -> dict:
+    """Every user's last one-to-one verification, from that account's own ledger.
+
+    A user the checker has never looked at is NOT_VERIFIED -- not "fine": a page that
+    showed nothing for them would read as a pass."""
+    from config import Settings
+    st = Settings(account_id=account_id)
+    out: dict = {"accountId": account_id, "onComplete": st.verify_on_complete,
+                 "perService": st.verify_sample_per_service, "users": [],
+                 "totals": {"IDENTICAL": 0, "DIFFERENCES": 0, "INCOMPLETE": 0, "NOT_VERIFIED": 0}}
+    path = _ledger_path(account_id)
+    if not os.path.isfile(path):
+        return out
+    with cpdb.ro(path) as conn:
+        users = conn.execute("SELECT source_email, target_email, status FROM identity_map "
+                             "WHERE entity_type='user' ORDER BY source_email").fetchall()
+        try:
+            rows = conn.execute("SELECT * FROM user_verification ORDER BY service").fetchall()
+        except sqlite3.OperationalError:          # a ledger from before this table existed
+            rows = []
+    by_user: dict[str, list[dict]] = {}
+    for r in rows:
+        try:
+            payload = json.loads(r["payload"])
+        except ValueError:
+            payload = {}
+        by_user.setdefault(r["source_user"], []).append({
+            "service": r["service"], "verdict": r["verdict"], "verifiedAt": r["verified_at"],
+            "checked": r["checked"], "identical": r["identical"], "sampledOf": r["sampled_of"], **payload})
+    for u in users:
+        svcs = by_user.get(u["source_email"], [])
+        verdict = (max((x["verdict"] for x in svcs), key=lambda v: _VERDICT_RANK.get(v, 0))
+                   if svcs else "NOT_VERIFIED")
+        out["totals"][verdict] = out["totals"].get(verdict, 0) + 1
+        out["users"].append({"user": u["source_email"], "target": u["target_email"], "status": u["status"],
+                             "verdict": verdict, "verifiedAt": max((x["verifiedAt"] for x in svcs), default=None),
+                             "services": svcs})
+    return out
+
+
+@app.get("/api/v2/one-to-one")
+async def one_to_one_status(account_id: int | None = None, op: Operator = Depends(operator)):
+    """What the one-to-one verifier last found for each user of this account. It runs on
+    its own as each user finishes; see main.migrate_user."""
+    require_login(op)
+    aid = account_id if account_id is not None else op.account_id
+    if not aid:
+        return {"accountId": None, "users": [], "totals": {}, "onComplete": True, "perService": 25}
+    _require_account_access(aid, op)
+    return await _off_loop(_verification_view, aid)
+
+
+@app.post("/api/v2/one-to-one/run")
+async def one_to_one_run(body: RunVerification, op: Operator = Depends(operator)):
+    """Verify again, now: opens both tenants and compares, writing nothing to either. Runs as
+    a job of its own (`verify`), so it shows on the Jobs page and counts against the cap."""
+    account_id = _resolve_account(body, op)
+    limit = body.limit
+    if limit is None:
+        from config import Settings
+        limit = Settings(account_id=account_id).verify_sample_per_service
+    argv = [PY, "verify_sample.py"] + _account_argv(account_id)
+    if limit:
+        argv += ["--limit", str(limit)]
+    for u in body.users:
+        argv += ["--user", u]
+    target = ",".join(body.users) if body.users else "ALL"
+    return await _gated(op, "one-to-one.run", body, target,
+                        lambda: _run_admitted(argv, account_id, "verify"))
 
 
 @app.get("/api/v2/quick/latest")

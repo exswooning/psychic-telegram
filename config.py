@@ -684,6 +684,14 @@ class Settings:
                                  if (os.environ.get("SAMPLE_LIMIT") or "").strip().isdigit()
                                  and int(os.environ["SAMPLE_LIMIT"]) > 0 else None)
     )
+    # Verify each user when their migration finishes (verify_sample.verify_user), on
+    # its own threads so a slow check never holds a migration worker. It reads the
+    # user's own ledger and compares a bounded, evenly spaced sample of `per_service`
+    # items of each service against both tenants -- every item of a real user would
+    # cost more API calls than the migration did. It writes nothing to either tenant.
+    verify_on_complete: bool = field(default_factory=lambda: _env_bool("VERIFY_ON_COMPLETE", True))
+    verify_sample_per_service: int = field(
+        default_factory=lambda: max(1, int(os.environ.get("VERIFY_SAMPLE_PER_SERVICE") or 25)))
     # Redo mail that was migrated before rewriting was switched on.
     #
     # Off, and destructive, so it stays opt-in. A migrated message cannot be

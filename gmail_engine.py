@@ -52,6 +52,48 @@ SYSTEM_LABELS = {
 LARGE_MESSAGE_THRESHOLD = 5 * 1024 * 1024
 
 
+def _ascii_headers(raw_b64: str) -> str:
+    """A draft's raw message with every non-ASCII header value written as an RFC 2047 encoded word.
+
+    drafts.create reads each raw 8-bit header byte as Latin-1 and stores its UTF-8, so a subject
+    with a real UTF-8 em dash comes back as mojibake -- and comes back as MORE mojibake each time
+    it is copied. Found by opening a migrated draft: its subject was one layer worse than the
+    source's, which the seeder's own draft creation had already damaged the same way. An encoded
+    word survives untouched, and reads back as the same text.
+
+    A header block that is already ASCII -- Gmail's own drafts always are -- is returned as it
+    came, byte for byte. Only the headers that are actually damaged in transit are rewritten,
+    and the body is never touched.
+    """
+    import email.message
+    import email.policy
+
+    raw = base64.urlsafe_b64decode(raw_b64 + "=" * (-len(raw_b64) % 4))
+    head, sep, body = raw.partition(b"\r\n\r\n")
+    if not sep or head.isascii():
+        return raw_b64
+    logical: list[bytes] = []
+    for line in head.split(b"\r\n"):
+        if line[:1] in (b" ", b"\t") and logical:
+            logical[-1] += b"\r\n" + line          # a folded continuation belongs to its header
+        else:
+            logical.append(line)
+    out = []
+    for h in logical:
+        name, colon, value = h.partition(b":")
+        if h.isascii() or not colon or not re.fullmatch(rb"[!-9;-~]+", name):
+            out.append(h)
+            continue
+        try:
+            text = value.decode("utf-8")
+        except UnicodeDecodeError:
+            text = value.decode("latin-1")          # never lose bytes over a guess about their encoding
+        msg = email.message.EmailMessage(policy=email.policy.SMTP)
+        msg[name.decode("ascii")] = " ".join(text.split())
+        out.append(msg.as_bytes().split(b"\r\n\r\n")[0].rstrip(b"\r\n"))
+    return base64.urlsafe_b64encode(b"\r\n".join(out) + sep + body).decode("ascii")
+
+
 class GmailMigrator:
     # Unlimited by default, and shared: an unlimited Budget never changes, so this is
     # safe for every instance -- including ones built without __init__ (tests do).
@@ -952,6 +994,7 @@ class GmailMigrator:
             raw = (full.get("message") or {}).get("raw", "")
             if not isinstance(raw, str):
                 raw = raw.decode()
+            raw = _ascii_headers(raw)
             approx_bytes = (len(raw) * 3) // 4   # see the messages path above
 
             if self.settings.dry_run:

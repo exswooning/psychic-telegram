@@ -50,6 +50,10 @@ def settings(tmp_path) -> Settings:
     # that DO ask set it True and seed a Drive mapping; the production
     # default is pinned in test_rewrite_toggle.py, not here.
     s.rewrite_drive_links = False
+    # Same again: on in production (a user is verified as they finish), off here so a
+    # migration test does not grow a checker thread it never asked for. The default is
+    # pinned in test_verify_on_completion.py.
+    s.verify_on_complete = False
     os.makedirs(s.scratch_dir, exist_ok=True)
     return s
 

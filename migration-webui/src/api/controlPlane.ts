@@ -1472,6 +1472,50 @@ export const fetchQuickLatest = (accountId?: number) =>
 export const quickReportUrl = (accountId?: number) =>
   `${CP_BASE}/api/v2/quick/latest.md${accountId ? `?account_id=${accountId}` : ''}`
 
+/* One-to-one check: each user compared against both tenants as they finish (verify_sample.py). */
+export type OneToOneVerdict = 'IDENTICAL' | 'DIFFERENCES' | 'INCOMPLETE' | 'NOT_VERIFIED'
+export interface OneToOneService {
+  service: string
+  verdict: Exclude<OneToOneVerdict, 'NOT_VERIFIED'>
+  verifiedAt: string
+  checked: number
+  identical: number
+  /** How many items the ledger paired, when only a sample of them was compared. */
+  sampledOf: number | null
+  counts?: Partial<Record<'differences' | 'missing' | 'duplicates' | 'extras' | 'notCopied' | 'errors', number>>
+  differences?: Array<{ item?: string; path?: string; diffs?: string[] }>
+  missing?: Array<{ name?: string; why?: string }>
+  duplicates?: unknown[]
+  notCopied?: Array<{ id?: string; error?: string }>
+  errors?: string[]
+  notes?: string[]
+}
+export interface OneToOneUser {
+  user: string
+  target: string | null
+  status: string | null
+  verdict: OneToOneVerdict
+  verifiedAt: string | null
+  services: OneToOneService[]
+}
+export interface OneToOneView {
+  accountId: number | null
+  onComplete: boolean
+  perService: number
+  users: OneToOneUser[]
+  totals: Partial<Record<OneToOneVerdict, number>>
+}
+export const fetchOneToOne = (accountId?: number) =>
+  cpFetch<OneToOneView>(`/api/v2/one-to-one${accountId ? `?account_id=${accountId}` : ''}`)
+
+/** limit: undefined = the account's usual sample, a number = that many, 0 = every item. */
+export const runOneToOne = (reason: string, opts: { accountId?: number; users?: string[]; limit?: number } = {}) =>
+  cpFetch<ActionResult>('/api/v2/one-to-one/run', {
+    method: 'POST',
+    body: JSON.stringify({ reason, account_id: opts.accountId ?? null, users: opts.users ?? [],
+                           ...(opts.limit !== undefined ? { limit: opts.limit } : {}) }),
+  })
+
 /* Trim filler: the reverse of a fill (seed_sandbox.py --trim-filler). */
 export interface TrimStatus {
   hasRun: boolean
