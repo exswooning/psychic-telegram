@@ -175,8 +175,53 @@ declined**: `tally`, the report and the migrations page count it apart from
 `SKIPPED%` decisions, or a split run that never reached the DMS would score mail
 parity 100%. Status is per user, not per service, so an ordered run prints `PASS
 i/n pid=…` markers and the detail page says which pass the "users done" counts
-belong to. This tool does not start the DMS itself: `dms_migrate.py` drives the
-Admin console in a browser and is not account-aware.
+belong to. **The DMS starts on its own** (`StartMigration.dms_after`, default on):
+after a *clean whole-tenant split run* it is launched as a job named `dms` by
+`api_server._follow_on` (the follow-on rides `_start_admitted`'s waiter, and the
+queue payload, so a job that waited for a slot still does it), beside a `dms` run
+straight away. It only asks the source admin to approve a connection and waits
+(`dms_migrate.py --apply --watch`); nothing moves until they do. It does **not**
+start over a failed, running or blocked user — their link mail would cross the DMS
+unrewritten — and says why as a `dms_not_started` incident. Never for a sample, a
+dry run, or a chosen few users. Its identities come from the account's own ledger
+(`_export_identities_csv`), not the repo-root `identities.csv` the seeder leaves.
+
+**Every user is verified as they finish** (`verify_sample.verify_user`, started from
+the end of `main.migrate_user`, gated by `VERIFY_ON_COMPLETE`, default on): a
+bounded, evenly spaced sample (`VERIFY_SAMPLE_PER_SERVICE`, 25) of each service that
+pass finished, compared against both tenants on two daemon threads of their own
+(`main.VERIFY`), so a check never holds a migration worker and can never fail one.
+The run drains the queue before it leaves its registration, so the job reads as
+running while it checks. Results are one row per (user, service) in the account's
+ledger (`user_verification`), served by `GET /api/v2/one-to-one` and shown on the
+**One-to-one** page, which can also run it again (`POST .../run`, a job named
+`verify`). Rules that must hold: a user nobody checked is `NOT_VERIFIED`, never a
+blank; a check that could not be made is `INCOMPLETE`, never a pass; a sample says
+how much of the user it covered; strays are only judged against the *whole* ledger,
+so sampling never turns the rest of a migration into strays. `verify_sample.py`'s
+CLI exits 0 whenever the check ran — a non-zero exit reads as a crash to
+`run_watch`. A sample migration (`SAMPLE_LIMIT`) keeps its own `--verify-after`
+report under `logs/quick/`. `reset_drive_ledger` clears a service's verification
+with the items it describes.
+
+**What happens to an item after it lands is one step, `drive_engine._finish_item`**:
+sharing, comments, then the modifiedTime those writes moved. Each stands alone (an
+exception used to be logged at DEBUG by `_sync_with_fallback` and dropped, so the
+time was never restored); the time is read back at the end of the user
+(`_verify_modified_times`) because Drive applies the bump of a grant or comment
+asynchronously and it can land after the restore. The ledger calls an item done the
+moment it lands — before its sharing runs — so an item is marked `acl_pass` PENDING
+first and cleared when the sharing has run; a resume finishes what is still pending
+and does not re-attempt grants already decided. Only an interrupted item keeps the
+mark, so a ledger from before it reads as finished, as it always did.
+`gmail_engine._ascii_headers` sends a draft's non-ASCII headers as encoded words:
+`drafts.create` reads raw 8-bit header bytes as Latin-1, one more layer of mojibake
+per copy.
+
+**Only Google is implemented** (`providers.py`). OneDrive for Business and Zoho
+WorkDrive are scaffolds that refuse by name, and `tests/test_providers_scaffold.py`
+fails if one is marked implemented while its operations are still stubs. No engine
+imports it yet; its endpoints have never been run against a real tenant.
 
 **Progress reporting must come from real state, never be simulated.**
 `full_setup.py` and the seeder write `{pct, label}` checkpoints a poller

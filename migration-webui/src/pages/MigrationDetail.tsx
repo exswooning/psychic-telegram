@@ -67,6 +67,8 @@ export const MigrationDetail: React.FC = () => {
   // Split by default: the tool moves the mail that needs its links rewritten and
   // Google's DMS moves the rest, which is most of a mailbox. See the dialog.
   const [mailBy, setMailBy] = useState<MailMode>('split')
+  // Start Google's DMS on its own (api_server._start_dms); on unless switched off.
+  const [dmsAuto, setDmsAuto] = useState(true)
   const [fullBusy, setFullBusy] = useState(false)
   // Quick migrate: a small slice of each user's data, small enough to check one to
   // one. See the dialog.
@@ -678,10 +680,11 @@ export const MigrationDetail: React.FC = () => {
                       <strong>Split (recommended)</strong> — Drive first, for every
                       user. Then this tool moves only the mail that carries a Drive
                       link and rewrites those links to the copies on the target.
-                      Google&apos;s Data Migration Service then moves all the rest
-                      — start it <em>after</em> this run finishes, from Other
-                      services. Until it has, most of the mail is not on the
-                      target, and the run will say so.
+                      Google&apos;s Data Migration Service then moves all the rest.
+                      It starts on its own after this run finishes cleanly, and
+                      only asks the source admin to approve a connection — nothing
+                      moves until they do. Until it has, most of the mail is not
+                      on the target, and the run will say so.
                     </Typography>
                   } />
                 <FormControlLabel
@@ -708,6 +711,18 @@ export const MigrationDetail: React.FC = () => {
                     </Typography>
                   } />
               </RadioGroup>
+              {mailBy !== 'engine' && (
+                <FormControlLabel
+                  sx={{ mt: 1 }}
+                  control={<Checkbox size="small" checked={dmsAuto}
+                                     onChange={(e) => setDmsAuto(e.target.checked)}
+                                     inputProps={{ 'aria-label': 'start the DMS automatically' }} />}
+                  label={<Typography variant="body2">
+                    Start the DMS automatically{mailBy === 'split'
+                      ? ' when this run finishes without a failed user'
+                      : ' alongside this run'}
+                  </Typography>} />
+              )}
             </Box>
           </>
         }
@@ -718,8 +733,10 @@ export const MigrationDetail: React.FC = () => {
             // The server decides what each mode means for the service list, the
             // ordering and the rewriting (see _mail_plan in api_server.py). Sending
             // the services here as well is what let "DMS" and "engine" drift apart.
+            // dmsAfter goes only when it was switched off; the server's default is on.
             const r = await startMigration(reason, ['all'], [], false,
-                                           Number(accountId), mailBy)
+                                           Number(accountId), mailBy, undefined,
+                                           dmsAuto ? undefined : false)
             if (!r.ok) throw new Error(r.detail || 'could not start')
             setAskFull(false)
             setStarted(r.detail || 'migration started')

@@ -330,6 +330,11 @@ class StartMigration(WriteAction):
     # migration still copies the rest. For a quick copy small enough to check one to
     # one. Always the engine, and always ordered.
     sample: int | None = Field(default=None, ge=1, le=1000)
+    # Start the DMS on its own, for the mail modes that leave mail to it: after a clean
+    # whole-tenant `split` run, alongside a `dms` run. It only asks the source admin to
+    # approve a connection and waits (dms_migrate.py --apply --watch); nothing moves
+    # until they do. Ignored for `engine`, a sample, a dry run or a chosen few users.
+    dms_after: bool = True
 
 
 class TrimFillerRequest(WriteAction):
@@ -1261,7 +1266,7 @@ def _spawn(argv: list[str], env: dict[str, str] | None = None) -> tuple[bool, st
 
 
 def _run_admitted(argv: list[str], account_id: int | None, job_name: str,
-                  env: dict[str, str] | None = None) -> tuple[bool, str]:
+                  env: dict[str, str] | None = None, then: str | None = None) -> tuple[bool, str]:
     """Like _spawn, but resource-aware -- for migrate_start and
     full_setup_start only (see job_admission.py's module docstring for why
     just these two, not every _spawn caller).
@@ -1287,13 +1292,16 @@ def _run_admitted(argv: list[str], account_id: int | None, job_name: str,
         try:
             row = job_queue.enqueue(
                 account_id, job_name,
-                {"argv": list(argv), "env": _env_overlay(env), "cwd": HERE},
+                {"argv": list(argv), "env": _env_overlay(env), "cwd": HERE,
+                 **({"then": then} if then else {})},
                 reason=msg, runner=job_queue.RUNNER_API)
         except job_queue.QueueFull as exc:
             return False, str(exc)
         return True, (f"the box is busy -- queued at position "
                       f"{row['position']}; it will start on its own")
-    return _start_admitted(argv, account_id, job_name, env)
+    # `then` only when there is one, so every caller that has none calls exactly as it always did.
+    return (_start_admitted(argv, account_id, job_name, env, then) if then
+            else _start_admitted(argv, account_id, job_name, env))
 
 
 def _env_overlay(env: dict[str, str] | None) -> dict:
@@ -1317,12 +1325,16 @@ def _queue_starter(account_id: int | None, job_name: str,
     itself, and releasing here too would free the NEXT job's slot.
     """
     env = dict(os.environ, **payload.get("env", {})) or None
-    return _start_admitted(list(payload["argv"]), account_id, job_name, env)
+    then = payload.get("then")
+    return (_start_admitted(list(payload["argv"]), account_id, job_name, env, then) if then
+            else _start_admitted(list(payload["argv"]), account_id, job_name, env))
 
 
 def _start_admitted(argv: list[str], account_id: int | None, job_name: str,
-                    env: dict[str, str] | None = None) -> tuple[bool, str]:
-    """Spawn into a slot admission has already granted."""
+                    env: dict[str, str] | None = None, then: str | None = None) -> tuple[bool, str]:
+    """Spawn into a slot admission has already granted. `then` names what to do once it
+    has exited cleanly (see _follow_on); it travels with a queued job so a job that waited
+    for a slot still does it."""
     out = _child_output(job_name, account_id)
     try:
         proc = subprocess.Popen(argv, cwd=HERE, stdout=out,
@@ -1359,6 +1371,11 @@ def _start_admitted(argv: list[str], account_id: int | None, job_name: str,
             job_queue.dispatch_one(_queue_starter, job_queue.RUNNER_API)
         except Exception as exc:      # noqa: BLE001 - never wedge the waiter
             print(f"queue dispatch after {job_name!r} failed: {exc}", flush=True)
+        if then and proc.returncode == 0:
+            try:
+                _follow_on(then, account_id)
+            except Exception as exc:      # noqa: BLE001 - a follow-on must never wedge the waiter
+                print(f"follow-on {then!r} after {job_name!r} failed: {exc}", flush=True)
     threading.Thread(target=_wait_then_release, daemon=True).start()
     return True, f"started pid {proc.pid}: {' '.join(argv[1:4])}"
 
@@ -1432,6 +1449,81 @@ def _mail_plan(services: list[str], mail_mode: str) -> tuple[list[str], dict | N
     return list(services), None, False
 
 
+def _export_identities_csv(account_id: int | None) -> tuple[str, int]:
+    """This account's user mapping as the two-column file the DMS driver turns into Google's
+    import map. Written from the account's own ledger, never the repo-root identities.csv the
+    seeder leaves behind, which describes whichever tenants were seeded last."""
+    import csv
+    from config import Settings
+    from db import MigrationDB
+    db = MigrationDB(Settings(account_id=account_id).db_path)
+    rows = [(r["source_email"], r["target_email"]) for r in db.all_identities() if r["entity_type"] == "user"]
+    d = os.path.join(HERE, "logs", "dms", "_none" if account_id is None else str(account_id))
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, "identities.csv")
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(("source_email", "target_email"))
+        w.writerows(rows)
+    return path, len(rows)
+
+
+def _start_dms(account_id: int | None, *, require_clean: bool, why: str) -> tuple[bool, str]:
+    """Ask Google's Data Migration Service to move this account's mail.
+
+    dms_migrate.py --apply drives the Admin console: it asks the SOURCE super admin to
+    approve a connection, then waits (--watch) and finishes the setup once they do. Nothing
+    is moved until a person on the source side approves, so starting it is a request, not a
+    commitment. `require_clean` is for after a split run: the mail this tool was meant to
+    move first (link mail, rewritten) must have moved, or the DMS would carry it across
+    unrewritten and the engine would then adopt that copy -- so it does not start over a
+    failed, running or blocked user, and says so where an operator looks (an incident).
+    """
+    from config import Settings
+    import run_watch
+    import webui
+
+    def decline(reason: str) -> tuple[bool, str]:
+        try:
+            run_watch.open_incident(
+                kind="dms_not_started", title="The DMS was not started",
+                summary=f"Not started automatically for account {account_id}: {reason}. Start it from the "
+                        "migration page once that is dealt with.", account_id=account_id, job_name="dms",
+                fingerprint=f"dms_not_started:{account_id}", severity="warn")
+        except Exception as exc:      # noqa: BLE001 - the refusal stands even if it cannot be recorded
+            print(f"could not record why the DMS was not started: {exc}", flush=True)
+        return False, reason
+
+    if require_clean:
+        p = _migration_progress(account_id)
+        if p["failed"] or p["running"] or p["blocked"]:
+            return decline(f"{p['failed']} user(s) failed, {p['running']} still running, "
+                           f"{p['blocked']} blocked on something outside the tool")
+        if not p["done"]:
+            return decline("no user finished")
+    st = Settings(account_id=account_id)
+    if not (st.source_domain and st.target_admin):
+        return decline("the account has no source domain or target admin set")
+    csv_path, n = _export_identities_csv(account_id)
+    if not n:
+        return decline("there are no users to map")
+    argv = [PY, "dms_migrate.py", "--apply", "--watch", "720", "--timeout", "200", "--identities", csv_path,
+            "--source-domain", st.source_domain, "--target-admin", st.target_admin]
+    if st.source_admin:
+        argv += ["--source-admin", st.source_admin]
+    action = cpdb.begin_action("auto", "system", "dms.start", why, st.target_domain, {"users": n}, None, account_id)
+    ok, detail = _run_admitted(argv, account_id, "dms", env=webui._dms_env(account_id))
+    cpdb.finish_action(action, "OK" if ok else "FAILED", detail)
+    return ok, detail
+
+
+def _follow_on(kind: str, account_id: int | None) -> None:
+    """What a job that just exited cleanly asked to have done next."""
+    if kind == "dms":
+        _start_dms(account_id, require_clean=True, why="started automatically: the split migration finished cleanly, "
+                                                       "so the mail it left for the DMS is now owed")
+
+
 @app.post("/api/v2/migrate/start")
 async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
     # The migration being looked at, not the operator's own account -- the
@@ -1464,8 +1556,21 @@ async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
     target = ",".join(body.users) if body.users else "ALL"
     # env only when there is one (split): every other mode calls exactly as it
     # always did.
-    launch = ((lambda: _run_admitted(argv, account_id, "migrate", env=env)) if env
-              else (lambda: _run_admitted(argv, account_id, "migrate")))
+    # The DMS: after a clean split run (the mail it owes is only correct once the engine has
+    # moved the link mail), beside a dms run (it moves all the mail, nothing waits on it). Only
+    # for a whole-tenant, real run -- a sample or a few users leave most mail unmoved either way.
+    dms = body.dms_after and not body.dry_run and not body.users and body.sample is None
+    then = "dms" if dms and body.mail_mode == "split" else None
+    beside = dms and body.mail_mode == "dms"
+
+    def launch() -> tuple[bool, str]:
+        kw = {"env": env} if env else {}
+        ok, detail = _run_admitted(argv, account_id, "migrate", **kw, **({"then": then} if then else {}))
+        if ok and beside:
+            d_ok, d_detail = _start_dms(account_id, require_clean=False,
+                                        why="started automatically alongside a mail_mode=dms migration")
+            detail += f"; DMS {'started' if d_ok else 'not started'}: {d_detail}"
+        return ok, detail
     return await _gated(op, "migrate.start", body, target, launch)
 
 

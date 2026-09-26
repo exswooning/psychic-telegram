@@ -322,6 +322,24 @@ describe('MigrationDetail: who moves the mail', () => {
     expect(startMigration.mock.calls[0][5]).toBe('dms')
   })
 
+  it('asks the server to start the DMS itself, unless the box is unticked', async () => {
+    await openDialog(); await confirm()
+    expect(startMigration.mock.calls[0][7]).toBeUndefined()
+  })
+
+  it('sends dms_after=false when the box is unticked', async () => {
+    await openDialog()
+    fireEvent.click(screen.getByLabelText('start the DMS automatically'))
+    await confirm()
+    expect(startMigration.mock.calls[0][7]).toBe(false)
+  })
+
+  it('offers no such box when this tool moves the mail', async () => {
+    await openDialog()
+    fireEvent.click(screen.getByTestId('mail-by-engine').querySelector('input')!)
+    expect(screen.queryByLabelText('start the DMS automatically')).not.toBeInTheDocument()
+  })
+
   it('can still run everything through the tool', async () => {
     await openDialog()
     fireEvent.click(screen.getByTestId('mail-by-engine').querySelector('input')!)

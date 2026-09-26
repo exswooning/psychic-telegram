@@ -68,7 +68,8 @@ def _start(cp, monkeypatch, **body):
     r = cp.post("/api/v2/auth/signup", json={"email": "a@example.com", "password": "hunter22222", "name": "Tester"})
     assert r.status_code == 200, r.text
     seen = {}
-    monkeypatch.setattr(A, "_run_admitted", lambda argv, account, name, env=None: seen.update(argv=argv, env=env) or (True, "started"))
+    monkeypatch.setattr(A, "_run_admitted", lambda argv, account, name, env=None, then=None: seen.update(
+        argv=argv, env=env, then=then) or (True, "started"))
     r = cp.post("/api/v2/migrate/start", json={"reason": "full migration", **body})
     return r, seen
 

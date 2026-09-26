@@ -278,7 +278,7 @@ export type MailMode = 'engine' | 'dms' | 'split'
 
 export const startMigration = (
   reason: string, services: string[], users: string[], dryRun = false,
-  accountId?: number, mailMode?: MailMode, sample?: number) =>
+  accountId?: number, mailMode?: MailMode, sample?: number, dmsAfter?: boolean) =>
   cpFetch<ActionResult>('/api/v2/migrate/start', {
     method: 'POST',
     // accountId is the migration on screen. Without it the server falls back
@@ -289,7 +289,9 @@ export const startMigration = (
     body: JSON.stringify({ reason, services, users, dry_run: dryRun,
                            account_id: accountId ?? null,
                            ...(mailMode ? { mail_mode: mailMode } : {}),
-                           ...(sample ? { sample } : {}) }),
+                           ...(sample ? { sample } : {}),
+                           // off only when asked; the server starts the DMS on its own otherwise
+                           ...(dmsAfter === false ? { dms_after: false } : {}) }),
   })
 
 // force is SIGKILL, for a run that took the interrupt and is still going.
