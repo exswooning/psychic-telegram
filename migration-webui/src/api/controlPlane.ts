@@ -1408,6 +1408,53 @@ export const reportUrl = (id: string, what: 'human' | 'claude' | 'json', account
     : `${CP_BASE}/api/v2/reports/${id}/pdf?audience=${what}${acct ? `&${acct}` : ''}`
 }
 
+/** Count both tenants and spot-check a sample, as a job. Read-only on the
+ *  tenants; the result is what the NEXT report's fidelity checks read. */
+export const startTally = (accountId?: number, opts: { sampleUsers?: number; countsOnly?: boolean } = {}) =>
+  cpFetch<ActionResult>('/api/v2/reports/tally', {
+    method: 'POST',
+    body: JSON.stringify({ reason: 'Tenant tally for the run report', account_id: accountId ?? null,
+                           sample_users: opts.sampleUsers ?? 5, counts_only: !!opts.countsOnly }),
+  })
+
+/* Incidents: what the run watcher found wrong (run_watch.py). */
+export type IncidentStatus = 'open' | 'acknowledged' | 'resolved'
+export interface Incident {
+  id: number
+  account_id: number | null
+  job_name: string | null
+  /** crashed | verdict_fail | failing | stalled | traceback */
+  kind: string
+  severity: 'info' | 'warn' | 'error'
+  title: string
+  summary: string
+  run_id: string | null
+  occurrences: number
+  status: IncidentStatus
+  note: string | null
+  opened_at: string
+  last_seen_at: string
+  resolved_at: string | null
+}
+
+export const fetchIncidents = (status?: IncidentStatus) =>
+  cpFetch<{ incidents: Incident[] }>(`/api/v2/incidents${status ? `?status=${status}` : ''}`)
+
+export const setIncidentStatus = (id: number, status: IncidentStatus, note = '') =>
+  cpFetch<{ ok: boolean }>(`/api/v2/incidents/${id}/status`, {
+    method: 'POST', body: JSON.stringify({ status, note }),
+  })
+
+/** The hand-off as plain text, ready to paste into Claude Code. Not JSON, so
+ *  it does not go through cpFetch. */
+export const fetchIncidentBrief = async (id: number): Promise<string> => {
+  const res = await fetch(`${CP_BASE}/api/v2/incidents/${id}/brief`, {
+    credentials: 'include', headers: { 'X-Operator': OPERATOR },
+  })
+  if (!res.ok) throw new Error(res.status === 404 ? 'this incident has no brief' : `HTTP ${res.status}`)
+  return res.text()
+}
+
 export const fetchTestReport = () => cpFetch<TestReport>('/api/v2/tests')
 
 export const runTests = (reason: string) =>

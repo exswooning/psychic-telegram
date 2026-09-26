@@ -7,9 +7,9 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import RunReports from './RunReports'
 
-const api = vi.hoisted(() => ({ fetchReports: vi.fn(), generateReport: vi.fn() }))
+const api = vi.hoisted(() => ({ fetchReports: vi.fn(), generateReport: vi.fn(), startTally: vi.fn() }))
 vi.mock('@/api/controlPlane', () => ({
-  fetchReports: api.fetchReports, generateReport: api.generateReport,
+  fetchReports: api.fetchReports, generateReport: api.generateReport, startTally: api.startTally,
   reportUrl: (id: string, what: string, account?: number | null) => {
     const a = account ? `account_id=${account}` : ''
     return what === 'json' ? `/api/v2/reports/${id}${a ? `?${a}` : ''}`
@@ -25,7 +25,7 @@ const rep = (over = {}) => ({
 })
 
 beforeEach(() => {
-  api.fetchReports.mockReset(); api.generateReport.mockReset()
+  api.fetchReports.mockReset(); api.generateReport.mockReset(); api.startTally.mockReset()
   api.fetchReports.mockResolvedValue({ accountId: 1, reports: [], error: '' })
 })
 
@@ -131,5 +131,21 @@ describe('RunReports', () => {
       render(<RunReports accountId={2} />)
       expect(await screen.findByTestId('report-migration-20260925T195855Z')).not.toHaveTextContent('account #')
     })
+  })
+
+  it('starts a tally for the account on screen and says what happened', async () => {
+    api.startTally.mockResolvedValue({ ok: true, actionId: 1, detail: 'the box is busy -- queued at position 1' })
+    render(<RunReports accountId={68} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Run tally' }))
+    await waitFor(() => expect(api.startTally).toHaveBeenCalledWith(68))
+    expect(await screen.findByTestId('tally-started')).toHaveTextContent('queued at position 1')
+  })
+
+  it('shows why a tally could not start', async () => {
+    api.startTally.mockRejectedValue(new Error('that migration belongs to another account'))
+    render(<RunReports />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Run tally' }))
+    expect(await screen.findByText('that migration belongs to another account')).toBeInTheDocument()
+    expect(screen.queryByTestId('tally-started')).toBeNull()
   })
 })

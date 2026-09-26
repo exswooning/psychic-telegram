@@ -146,6 +146,31 @@ class TestFacts:
                                                     "finishedAt": "2026-09-25T10:00:00Z"})["perf"]
         assert timed["itemsPerMin"] == pytest.approx(1.0)
 
+    def test_throughput_counts_only_what_this_run_wrote(self, settings, db):
+        """A resumed run, a delta: the ledger holds every earlier run's rows too,
+        and dividing all of them by this job's duration is a speed nobody had."""
+        _users(db)
+        db.conn.executemany(
+            "INSERT INTO audit_log(source_user, item_id, item_type, status, timestamp) VALUES(?,?,?,?,?)",
+            [("u0@a.com", f"old{i}", "file", "SUCCESS", "2026-09-01T00:00:00Z") for i in range(5000)])
+        _seed(db, [("u0@a.com", "file", "SUCCESS", None)] * 600)
+        db.conn.commit()
+        run = {"returnCode": 0, "startedAt": "2026-09-25T00:00:00Z", "finishedAt": "2026-09-25T10:00:00Z"}
+        perf = RR.collect_facts(db, settings, run=run)["perf"]
+        assert perf["itemsInRun"] == 600 and perf["itemsPerMin"] == pytest.approx(1.0)
+
+    def test_a_tally_taken_before_the_run_is_not_used_to_judge_it(self, settings, db):
+        db.record_fidelity({"countParity": 1.0, "checksumFailures": 0, "aclFidelity": 1.0, "extraGrants": 0})
+        db.conn.execute("UPDATE run_fidelity SET recorded_at='2026-09-01T00:00:00Z'")
+        db.conn.commit()
+        _users(db)
+        _seed(db, [("u0@a.com", "file", "SUCCESS", None)] * 600)
+        f = RR.collect_facts(db, settings, run={"returnCode": 0, "startedAt": "2026-09-25T00:00:00Z",
+                                                "finishedAt": "2026-09-25T00:10:00Z"})
+        assert f["fidelity"].get("stale") is True and "countParity" not in f["fidelity"]
+        r = B.evaluate(f)
+        assert r["verdict"] == "UNVERIFIED", [(x["id"], x["status"]) for x in r["results"] if x["status"] == "fail"]
+
     def test_failure_families_carry_counts_and_the_users_they_hit(self, settings, db):
         _users(db)
         _seed(db, [("u0@a.com", "file", "FAILED", "HTTP 403 storageQuotaExceeded")] * 3
@@ -298,6 +323,25 @@ class TestReportApi:
     def test_anonymous_callers_get_nothing(self, cp):
         assert cp.get("/api/v2/reports").status_code in (401, 403)
 
+    def test_starting_a_tally_launches_the_read_only_job_for_that_account(self, cp, monkeypatch):
+        import api_server
+        aid = _signup(cp, "a@example.com")
+        seen = {}
+        monkeypatch.setattr(api_server, "_run_admitted",
+                            lambda argv, account, name, env=None: seen.update(argv=argv, account=account, name=name)
+                            or (True, "started"))
+        r = cp.post("/api/v2/reports/tally", json={"reason": "check fidelity", "sample_users": 3,
+                                                   "users": ["a@x.com"]})
+        assert r.status_code == 200, r.text
+        assert seen["name"] == "tally" and seen["account"] == aid
+        assert seen["argv"][-5:] == ["tally", "--sample-users", "3", "--user", "a@x.com"]
+        assert "--account-id" in seen["argv"]
+
+    def test_a_tally_needs_a_reason_and_a_login(self, cp):
+        assert cp.post("/api/v2/reports/tally", json={"reason": "check fidelity"}).status_code in (401, 403)
+        _signup(cp, "b@example.com")
+        assert cp.post("/api/v2/reports/tally", json={}).status_code == 422
+
     def test_generate_list_and_download_both_pdfs(self, cp, settings, db, reports_home, monkeypatch):
         import api_server
         _users(db); _seed(db, [("u0@a.com", "file", "SUCCESS", None)] * 4)
@@ -356,6 +400,18 @@ class TestReportApi:
         rid = next(r["id"] for r in got["reports"] if r["accountId"] == 4242)
         assert cp.get(f"/api/v2/reports/{rid}/pdf", params={"account_id": 4242}).status_code == 200
 
-    def test_seed_reports_are_not_pretended(self, cp):
+    def test_an_unknown_kind_is_refused(self, cp):
         _signup(cp, "a@example.com")
-        assert cp.post("/api/v2/reports/generate", json={"kind": "seed"}).status_code == 400
+        assert cp.post("/api/v2/reports/generate", json={"kind": "wipe"}).status_code == 400
+
+    def test_a_seed_report_is_built_from_the_transcript(self, cp, settings, reports_home, monkeypatch):
+        import api_server
+        _signup(cp, "a@example.com")
+        monkeypatch.setattr(api_server, "_report_settings", lambda a: settings)
+        monkeypatch.setattr(api_server, "_job_log_lines", lambda a, names, max_bytes=0: [
+            "Seeding 2 users in x.com at scale 'small'", "  [a@x.com] starting (Eng)",
+            "  [a@x.com] done in 10.0s: 5 files", "  [b@x.com] starting (Ops)"])
+        made = cp.post("/api/v2/reports/generate", json={"kind": "seed"})
+        assert made.status_code == 200, made.text
+        assert made.json()["kind"] == "seed" and made.json()["id"].startswith("seed-")
+        assert cp.get(f"/api/v2/reports/{made.json()['id']}/pdf", params={"audience": "claude"}).status_code == 200

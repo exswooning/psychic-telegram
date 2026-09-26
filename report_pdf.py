@@ -130,17 +130,32 @@ def _human(report, st, width):
            _banner(report, st, width)]
 
     head = facts.get("headline") or {}
-    glance = [[Paragraph("<b>At a glance</b>", st["cell"]), ""],
-              ["Users", f"{_n(users.get('done'))} done, {_n(users.get('failed'))} failed, "
-                        f"{_n(users.get('pending'))} pending, of {_n(users.get('total'))}"],
-              ["Items migrated", _n(ledger.get("succeeded"))],
-              ["Items failed / blocked", f"{_n(ledger.get('failed'))} / {_n(ledger.get('blocked'))}"],
-              ["Skipped on purpose", f"{_n(ledger.get('skipped'))} (a decision, not a failure)"],
-              ["Data moved", _t(head.get("dataMigrated") or "not measured")],
-              ["Duration", _dur(run.get("durationSec")) + ("" if run.get("timingSource") == "job" else
-                                                           " (from the ledger's first and last row)" if run.get("durationSec") else "")],
-              ["Throughput", (f"{facts['perf']['itemsPerMin']:.0f} items/min" if (facts.get("perf") or {}).get("itemsPerMin")
-                              else "not measured (needs the job's own start and finish)")]]
+    if report["kind"] == "seed":
+        sd = facts.get("seed") or {}
+        glance = [["", ""],
+                  ["Domain", sd.get("domain") or "not recorded"],
+                  ["What it did", {"fill": "filled storage", "seed": "seeded new data"}.get(sd.get("mode"), "not recorded")],
+                  ["Users", f"{_n(sd.get('finished'))} finished of {_n(sd.get('totalUsers'))} "
+                            f"({_n(sd.get('started'))} started)"],
+                  ["Never reported", _n(sd.get("neverFinished")) if sd.get("neverFinished") is not None
+                   else "not judged (the run had not ended)"],
+                  ["Users with a failed service", _n(sd.get("failedServiceUsers"))],
+                  ["Warnings", _n(sd.get("warnings"))],
+                  ["Storage filled", (f"{sd['fillUploadedGb']:,.1f} GB uploaded of {sd['fillPlannedGb']:,.0f} GB planned"
+                                      if sd.get("fillPlannedGb") else "not a fill run")],
+                  ["Duration", _dur(run.get("durationSec")) + ("" if run.get("timingSource") == "job" else " (from the transcript)")]]
+    else:
+        glance = [[Paragraph("<b>At a glance</b>", st["cell"]), ""],
+                  ["Users", f"{_n(users.get('done'))} done, {_n(users.get('failed'))} failed, "
+                            f"{_n(users.get('pending'))} pending, of {_n(users.get('total'))}"],
+                  ["Items migrated", _n(ledger.get("succeeded"))],
+                  ["Items failed / blocked", f"{_n(ledger.get('failed'))} / {_n(ledger.get('blocked'))}"],
+                  ["Skipped on purpose", f"{_n(ledger.get('skipped'))} (a decision, not a failure)"],
+                  ["Data moved", _t(head.get("dataMigrated") or "not measured")],
+                  ["Duration", _dur(run.get("durationSec")) + ("" if run.get("timingSource") == "job" else
+                                                               " (from the ledger's first and last row)" if run.get("durationSec") else "")],
+                  ["Throughput", (f"{facts['perf']['itemsPerMin']:.0f} items/min" if (facts.get("perf") or {}).get("itemsPerMin")
+                                  else "not measured (needs the job's own start and finish)")]]
     g = Table([[Paragraph(_t(a), st["cellb"] if i else st["cell"]), Paragraph(_t(b), st["cell"])]
                for i, (a, b) in enumerate(glance[1:])], colWidths=[42 * mm, width - 42 * mm])
     g.setStyle(TableStyle([("LINEBELOW", (0, 0), (-1, -1), 0.25, RULE), ("VALIGN", (0, 0), (-1, -1), "TOP")]))
@@ -160,6 +175,7 @@ def _human(report, st, width):
                      Paragraph(_t(r["display"]), st["cell"]), Paragraph(_t(r["threshold"]), st["small"]),
                      _status_cell(r["status"], st)])
     out += [Paragraph("Benchmarks", st["h"]), _table(rows, [width - 122 * mm, 30 * mm, 60 * mm, 32 * mm])]
+    out += _tally(report, st, width)
 
     fam = facts.get("failures") or []
     if fam:
@@ -190,6 +206,46 @@ def _human(report, st, width):
         "actually there. SKIPPED means the engine decided not to copy something (too large, "
         "unexportable) and is not a failure. UNVERIFIED means a check could not be made, which is not "
         "the same as passing it.", st["small"])]
+    return out
+
+
+def _tally(report, st, width, detail=False):
+    """The two tenants counted against each other, one row per service. Says so
+    plainly when no tally exists or the last one predates the run, because a
+    missing table would read as 'nothing to report'."""
+    fid = (report["facts"].get("fidelity") or {})
+    if fid.get("stale"):
+        return [Paragraph("Tenant tally", st["h"]),
+                Paragraph(f"The last tally ({_t(fid.get('recordedAt'))}) was taken before this run began, so it "
+                          "is not used to judge it. Run a new tally to verify the result.", st["body"])]
+    if not fid.get("services"):
+        return [Paragraph("Tenant tally", st["h"]),
+                Paragraph("No tally has been run, so nothing here compares the two tenants directly. "
+                          "Run one from the Final Report tab.", st["body"])]
+    rows = [[Paragraph(f"<b>{h}</b>", st["cell"]) for h in
+             ("Service", "Source", "Skipped", "Expected", "Target", "Parity")]]
+    for k, v in fid["services"].items():
+        par = "not measured" if v.get("parity") is None else f"{v['parity'] * 100:.2f}%"
+        rows.append([Paragraph(_t(k), st["cell"])] + [Paragraph(f"{v[x]:,}", st["cell"])
+                     for x in ("source", "skipped", "expected", "target")] + [Paragraph(par, st["cell"])])
+    u = fid.get("users") or {}
+    smp = fid.get("sample") or {}
+    notes = [f"{u.get('tallied', 0):,} user(s) counted on both tenants; spot-checks (byte checksums, "
+             f"modified times, sharing) on a sample of {smp.get('users', 0)}."]
+    if u.get("unreachable"):
+        notes.append(f"{len(u['unreachable'])} user(s) have no usable target account; they count as empty, "
+                     "against parity: " + ", ".join(u["unreachable"][:6]) + (" ..." if len(u["unreachable"]) > 6 else ""))
+    if u.get("unknown"):
+        notes.append(f"{len(u['unknown'])} count(s) could not be made (errors) and are excluded, not passed.")
+    out = [Paragraph("Tenant tally", st["h"]), _table(rows, [width - 5 * 24 * mm] + [24 * mm] * 5)]
+    out += [Paragraph(_t(n), st["small"]) for n in notes]
+    if detail and u.get("worst"):
+        rows = [[Paragraph(f"<b>{h}</b>", st["cell"]) for h in ("User", "Service", "Expected", "Target", "Missing")]]
+        for w in u["worst"][:15]:
+            rows.append([Paragraph(_t(w["user"]), st["cell"]), Paragraph(_t(w["service"]), st["cell"])] +
+                        [Paragraph(f"{w[x]:,}", st["cell"]) for x in ("expected", "target", "missing")])
+        out += [Paragraph("Users furthest from parity", st["h"]),
+                _table(rows, [width - 3 * 22 * mm - 40 * mm, 40 * mm] + [22 * mm] * 3)]
     return out
 
 
@@ -232,7 +288,10 @@ def _claude(report, st, width):
     else:
         out.append(Paragraph("None: every benchmark passed.", st["body"]))
 
-    out.append(Paragraph("Failure families (audit_log, FAILED and BLOCKED)", st["h"]))
+    if report["kind"] != "seed":
+        out += _tally(report, st, width, detail=True)
+    out.append(Paragraph("Warning families (the transcript's '!' lines)" if report["kind"] == "seed"
+                         else "Failure families (audit_log, FAILED and BLOCKED)", st["h"]))
     fam = facts.get("failures") or []
     if fam:
         rows = [[Paragraph(f"<b>{h}</b>", st["cell"]) for h in ("Count", "Users", "Type", "Message (first 160 chars)")]]
@@ -250,13 +309,20 @@ def _claude(report, st, width):
             out.append(Paragraph(f"- <b>{_t(s['where'])}</b> - {s['failures']:,} failure(s), e.g. "
                                  f"{_t(' | '.join(s['examples']))}", st["body"]))
 
-    out.append(Paragraph("Ledger totals", st["h"]))
-    out.append(kv([("succeeded", ledger.get("succeeded")), ("failed", ledger.get("failed")),
-                   ("blocked", ledger.get("blocked")), ("skipped (deliberate)", ledger.get("skipped")),
-                   ("in progress", ledger.get("inProgress")),
-                   ("failure rate", None if ledger.get("failureRate") is None else f"{ledger['failureRate']:.4%}"),
-                   ("users", f"{users.get('done')} done / {users.get('failed')} failed / {users.get('pending')} pending "
-                             f"/ {users.get('running')} running of {users.get('total')}")]))
+    if report["kind"] == "seed":
+        sd = facts.get("seed") or {}
+        out.append(Paragraph("Seed totals (parsed from the transcript)", st["h"]))
+        out.append(kv([(k, v) for k, v in sd.items() if not isinstance(v, (dict, list))]
+                      + [("failed services", ", ".join(f"{k}: {v} user(s)" for k, v in (sd.get("failedServices") or {}).items()) or None),
+                         ("items written", ", ".join(f"{k}: {v:,}" for k, v in (sd.get("items") or {}).items()) or None)]))
+    else:
+        out.append(Paragraph("Ledger totals", st["h"]))
+        out.append(kv([("succeeded", ledger.get("succeeded")), ("failed", ledger.get("failed")),
+                       ("blocked", ledger.get("blocked")), ("skipped (deliberate)", ledger.get("skipped")),
+                       ("in progress", ledger.get("inProgress")),
+                       ("failure rate", None if ledger.get("failureRate") is None else f"{ledger['failureRate']:.4%}"),
+                       ("users", f"{users.get('done')} done / {users.get('failed')} failed / {users.get('pending')} pending "
+                                 f"/ {users.get('running')} running of {users.get('total')}")]))
     m = facts.get("metrics") or {}
     if m:
         out.append(Paragraph("Metrics snapshot (recorded by the migrating process)", st["h"]))
@@ -273,15 +339,21 @@ def _claude(report, st, width):
                 kv([(e["section"], e["error"]) for e in facts["errors"]])]
 
     out.append(Paragraph("Read-only ways to look further", st["h"]))
-    ledger_path = (facts.get("paths") or {}).get("ledger") or "<ledger>"
-    out.append(Preformatted(
-        f"DB='{ledger_path}'\n"
-        "sqlite3 \"$DB\" \"SELECT item_type, status, COUNT(*) FROM audit_log GROUP BY 1, 2\"\n"
-        "sqlite3 \"$DB\" \"SELECT source_user, item_id, error_message FROM audit_log\n"
-        "                  WHERE status = 'FAILED' LIMIT 20\"\n"
-        "python main.py report --max-failures 50\n"
-        "python main.py status\n"
-        "python repair.py     # survey only; --apply changes things, so ask first", st["mono"]))
+    if report["kind"] == "seed":
+        out.append(Preformatted(
+            "tail -n 200 logs/jobs/<account>/seed.log      # the run's own transcript\n"
+            "python check_seed.py                          # what the seed left in the tenant\n"
+            "python data-generator/seed_sandbox.py --help  # what each option does", st["mono"]))
+    else:
+        ledger_path = (facts.get("paths") or {}).get("ledger") or "<ledger>"
+        out.append(Preformatted(
+            f"DB='{ledger_path}'\n"
+            "sqlite3 \"$DB\" \"SELECT item_type, status, COUNT(*) FROM audit_log GROUP BY 1, 2\"\n"
+            "sqlite3 \"$DB\" \"SELECT source_user, item_id, error_message FROM audit_log\n"
+            "                  WHERE status = 'FAILED' LIMIT 20\"\n"
+            "python main.py report --max-failures 50\n"
+            "python main.py status\n"
+            "python repair.py     # survey only; --apply changes things, so ask first", st["mono"]))
 
     tail = (facts.get("transcript") or {}).get("tail") or []
     out.append(Paragraph(f"Log tail (last {len(tail)} lines of the run's transcript)", st["h"]))

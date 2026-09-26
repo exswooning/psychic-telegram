@@ -24,6 +24,7 @@ import {
 } from '@mui/icons-material'
 import { useMigrationStore } from '@/store'
 import RunReports from '@/components/RunReports'
+import Incidents from '@/components/Incidents'
 
 const FinalReport: React.FC = () => {
   const { report } = useMigrationStore()
@@ -42,6 +43,7 @@ const FinalReport: React.FC = () => {
         <Typography variant="h4" sx={{ fontWeight: 700, mb: 2 }}>Final Report</Typography>
         {/* Saved reports do not depend on anything running, so they are here
             even when the live summary below has nothing to say. */}
+        <Incidents />
         <RunReports />
         <Alert severity="info" sx={{ mt: 2 }}>No live summary yet. Run a migration, then generate a report above.</Alert>
       </Box>
@@ -70,6 +72,7 @@ const FinalReport: React.FC = () => {
       <Typography variant="h4" sx={{ fontWeight: 700, mb: 0.5 }}>Final Report</Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>Migration completion summary and downloadable reports</Typography>
 
+      <Incidents />
       <RunReports />
 
       <Alert severity={clean ? 'success' : 'warning'} sx={{ mb: 3 }}>

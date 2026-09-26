@@ -261,6 +261,11 @@ class TestSideTables:
                               # throughput samples, bounded to the last hour,
                               # and nothing consults them to decide whether an
                               # item still needs migrating
+            "run_fidelity",   # not per-user and not derived from the ledger: a
+                              # measurement of what the TENANTS held when it
+                              # was taken. A ledger reset does not change the
+                              # tenants, and a report already discards any
+                              # tally older than the run it judges
         }
         unaccounted = tables - reset - exempt
         assert not unaccounted, (

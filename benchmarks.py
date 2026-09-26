@@ -85,21 +85,50 @@ DEFAULTS: tuple[Benchmark, ...] = (
               "fidelity", "fidelity.countParity", "higher", 0.999, 0.99, unit="pct",
               why="Target count over source count, after items the engine "
                   "deliberately skipped are accounted for."),
-    Benchmark("checksum_failures", "Byte-level mismatches", "fidelity",
+    Benchmark("checksum_failures", "Byte-level mismatches (sampled files)", "fidelity",
               "fidelity.checksumFailures", "lower", 0, 0,
-              why="Corruption is never acceptable at any speed."),
-    Benchmark("acl_fidelity", "Share grants preserved", "fidelity",
+              why="Corruption is never acceptable at any speed. Checked on a random sample of files, "
+                  "so zero here means none found, not none exist."),
+    Benchmark("acl_fidelity", "Share grants preserved (sampled users)", "fidelity",
               "fidelity.aclFidelity", "higher", 0.99, 0.99, unit="pct",
-              why="Sharing that did not survive is access silently lost."),
-    Benchmark("extra_grants", "Grants that should not exist", "fidelity",
+              why="Sharing that did not survive is access silently lost. Compared for every "
+                  "file of the users the tally sampled."),
+    Benchmark("extra_grants", "Grants that should not exist (sampled users)", "fidelity",
               "fidelity.extraGrants", "lower", 0, 0,
               why="Any grant the source did not have is a security regression."),
-    Benchmark("timestamps_preserved", "Modified times preserved", "fidelity",
+    Benchmark("timestamps_preserved", "Modified times preserved (sampled files)", "fidelity",
               "fidelity.timestampsPreserved", "higher", 0.99, 0.90, unit="pct",
               required=False,
               why="A migration that resets every file to 'today' is complete and "
                   "useless for sorting by last modified."),
 )
+
+
+# A seed run has no ledger, so it has its own yardsticks. They read the same
+# way -- unknown is never a pass, and a run that did nothing fails.
+SEED_DEFAULTS: tuple[Benchmark, ...] = (
+    Benchmark("run_completed", "Run exited cleanly", "health", "run.nonzeroExit", "lower", 0, 0,
+              unit="exit", required=True,
+              why="A run that crashed part-way has not seeded what it says it did."),
+    Benchmark("users_finished", "Users that finished", "health", "seed.finishedShare", "higher", 1.0, 0.95,
+              unit="pct", required=True,
+              why="A user who started and never reported is a mailbox and drive seeded only in part."),
+    Benchmark("never_finished", "Users that never reported", "reliability", "seed.neverFinished", "lower", 0, 0,
+              required=True,
+              why="Judged once the run has ended; mid-run 'not finished' only means 'not yet'."),
+    Benchmark("service_failures", "Users with a failed service", "reliability", "seed.failedServiceShare",
+              "lower", 0.0, 0.10, unit="pct", required=False,
+              why="A user can read as done while chat or contacts produced nothing at all."),
+    Benchmark("warnings_per_user", "Warnings per user", "reliability", "seed.warningsPerUser", "lower", 1.0, None,
+              required=False, why="A noisy run is usually one cause repeated; the families say which."),
+    Benchmark("fill_reached", "Storage fill reached its target", "performance", "seed.fillReached", "higher",
+              0.98, 0.90, unit="pct", required=False,
+              why="Uploaded over planned, for a fill run once it has ended."),
+)
+
+
+def for_kind(kind: str) -> tuple[Benchmark, ...]:
+    return SEED_DEFAULTS if kind == "seed" else DEFAULTS
 
 
 def _get(facts: dict, path: str):

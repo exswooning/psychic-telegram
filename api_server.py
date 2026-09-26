@@ -74,7 +74,7 @@ try:
     from fastapi import (Cookie, Depends, FastAPI, Header, HTTPException,
                          Request, Response, WebSocket, WebSocketDisconnect)
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import FileResponse, JSONResponse
+    from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
     from pydantic import BaseModel, Field
 except ImportError:  # pragma: no cover - import guard, not logic
     sys.exit("control plane needs: pip install -r requirements-control-plane.txt")
@@ -685,6 +685,23 @@ async def _supervise_jobs() -> None:
                 log.error("ended wedged %s for account %s after %.0fs with no "
                           "progress", k["job_name"], k["account_id"],
                           k["silent_for"])
+                try:
+                    import run_watch
+                    title = f"{k['job_name']} was stalled for {k['silent_for']:.0f}s and was ended"
+                    run_watch.open_incident(
+                        kind="stalled", title=title, severity="error", account_id=k["account_id"],
+                        job_name=k["job_name"], fingerprint=f"stalled:{k['account_id']}:{k['job_name']}",
+                        summary=(f"The supervisor found `{k['job_name']}` making no progress (no ledger "
+                                 f"write, no output, no CPU) for {k['silent_for']:.0f}s and ended it. "
+                                 "A wedged process holds its slot forever, so this is worth understanding, "
+                                 "not just re-running."),
+                        brief_text=run_watch.write_brief(
+                            incident_id=None, title=title, account_id=k["account_id"],
+                            job_name=k["job_name"], kind="stalled", severity="error", report=None,
+                            summary="The supervisor ended a run that had stopped making progress.",
+                            transcript=_watch_transcript(k["account_id"], k["job_name"])))
+                except Exception as exc:      # noqa: BLE001
+                    log.warning("could not record the stall as an incident: %s", exc)
         except asyncio.CancelledError:
             raise
         except Exception as exc:      # noqa: BLE001 - must outlive any error
@@ -727,11 +744,13 @@ async def lifespan(_: FastAPI):
     await _off_loop(_ensure_account_schemas)
     task = asyncio.create_task(_tailer())
     watchdog = asyncio.create_task(_supervise_jobs())
+    observer = asyncio.create_task(_watch_runs())
     try:
         yield
     finally:
         task.cancel()
         watchdog.cancel()
+        observer.cancel()
 
 
 app = FastAPI(title="Migration Command Center", version="1.0", lifespan=lifespan)
@@ -1290,6 +1309,15 @@ def _start_admitted(argv: list[str], account_id: int | None, job_name: str,
 
     def _wait_then_release() -> None:
         proc.wait()
+        # The one place an API-launched job's real exit code is known. Recorded
+        # before the slot is released, so the watcher never sees "gone" without
+        # the code. (After a restart of this process the waiter is gone too,
+        # and the watcher records the exit as not observed rather than guessing.)
+        try:
+            import run_watch
+            run_watch.record_finished(account_id, job_name, proc.returncode, proc.pid)
+        except Exception as exc:      # noqa: BLE001 - recording must never block the release
+            print(f"could not record the exit of {job_name!r}: {exc}", flush=True)
         job_admission.release(account_id, job_name)
         # The slot is free for exactly one instant that anything notices;
         # hand it to whoever is waiting before something else takes it.
@@ -3582,9 +3610,110 @@ def _limiter_history(samples: list[dict]) -> dict:
 # whether or not anything is running -- the point of the Final Report tab is
 # that the answer to "how did it go" is still there tomorrow.
 # ---------------------------------------------------------------------------
+class StartTally(WriteAction):
+    """Count both tenants and spot-check a sample. Read-only on the tenants;
+    the result lands in the ledger, where the next report reads it."""
+    account_id: int | None = None
+    users: list[str] = Field(default_factory=list)   # empty = every mapped user
+    sample_users: int = Field(default=5, ge=0, le=50)
+    counts_only: bool = False
+
+
 class GenerateReportRequest(BaseModel):
     kind: str = "migration"
     account_id: int | None = None
+
+
+WATCH_POLL_SEC = int(os.getenv("RUN_WATCH_POLL_SEC", "30"))
+
+
+def _job_log_lines(account_id, names, max_bytes: int = 4_000_000) -> list[str]:
+    """The newest of these jobs' logs, up to its last `max_bytes`. Read from the
+    end: the files are appended to across every run and can be large."""
+    from webui import job_log_path
+    best, best_m = None, -1.0
+    for n in names:
+        try:
+            p = job_log_path(account_id, n)
+            m = os.path.getmtime(p)
+        except OSError:
+            continue
+        if m > best_m:
+            best, best_m = p, m
+    if not best:
+        return []
+    with open(best, "rb") as fh:
+        fh.seek(0, os.SEEK_END)
+        fh.seek(max(0, fh.tell() - max_bytes))
+        return fh.read().decode("utf-8", "replace").splitlines()
+
+
+def _watch_transcript(account_id, job_name) -> list[str]:
+    try:
+        return _job_log_lines(account_id, (job_name,), 65536)[-200:]
+    except Exception:      # noqa: BLE001 - a missing log is not a reason to lose an incident
+        return []
+
+
+def _watch_rc_for(account_id, job_name, started_epoch) -> int | None:
+    """The exit code of a run this process did not launch, if the launcher left
+    one. webui's Job archives each run's result with its rc; use it only when
+    it is THIS run's (started when the watcher saw it start) -- the previous run
+    of the same job leaves a result too, and its code would be a lie."""
+    try:
+        from webui import load_job_result
+        res = load_job_result(account_id, job_name)
+        if (res and res.get("rc") is not None and started_epoch is not None
+                and res.get("started") is not None
+                and abs(float(res["started"]) - started_epoch) <= 180):
+            return int(res["rc"])
+    except Exception:      # noqa: BLE001
+        pass
+    return None
+
+
+def _watch_log_path(account_id, job_name):
+    from webui import job_log_path
+    return job_log_path(account_id, job_name)
+
+
+def _watch_make_report(account_id, job_name, kind, run) -> dict | None:
+    """Build and save the report for a run that just ended. Returns the saved
+    report, or None where there is nothing to report on."""
+    import run_report
+    st = _report_settings(account_id)
+    if kind == "seed":
+        meta = run_report.generate(None, st, account_id, kind="seed", run=run,
+                                   transcript=_job_log_lines(account_id, (job_name,)))
+    else:
+        path = st.db_path
+        if not path or not os.path.isfile(path):
+            return None
+        with cpdb.ro(path) as conn:
+            class _D:
+                pass
+            d = _D()
+            d.conn = conn
+            meta = run_report.generate(d, st, account_id, kind="migration", run=run,
+                                       transcript=_watch_transcript(account_id, job_name))
+    return run_report.load_report(account_id, meta["id"])
+
+
+async def _watch_runs() -> None:
+    """Observe runs for as long as the server is up. See run_watch."""
+    import run_watch
+    watcher = run_watch.Watcher(
+        list_active=job_admission.list_active, is_live=job_admission.is_live,
+        make_report=_watch_make_report, ledger_path_for=_account_db_path, rc_for=_watch_rc_for,
+        transcript_for=_watch_transcript, log_path_for=_watch_log_path)
+    while True:
+        try:
+            await asyncio.sleep(WATCH_POLL_SEC)
+            await _off_loop(watcher.tick)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:      # noqa: BLE001 - the watcher must outlive any single bad look
+            log.warning("run watcher pass failed: %r", exc)
 
 
 def _reports_account(op: Operator, account_id: int | None) -> int | None:
@@ -3606,25 +3735,8 @@ def _report_settings(account_id: int):
 
 
 def _job_log_tail(account_id: int, names=("migrate", "delta")) -> list[str]:
-    """The end of the newest migration log for an account. Read from the end:
-    these files are appended to across every run and can be large."""
-    from webui import job_log_path
-    best, best_m = None, -1.0
-    for n in names:
-        try:
-            p = job_log_path(account_id, n)
-            m = os.path.getmtime(p)
-        except OSError:
-            continue
-        if m > best_m:
-            best, best_m = p, m
-    if not best:
-        return []
-    with open(best, "rb") as fh:
-        fh.seek(0, os.SEEK_END)
-        fh.seek(max(0, fh.tell() - 65536))
-        raw = fh.read().decode("utf-8", "replace")
-    return raw.splitlines()[-200:]
+    """The end of the newest migration log for an account."""
+    return _job_log_lines(account_id, names, 65536)[-200:]
 
 
 @app.get("/api/v2/reports")
@@ -3654,12 +3766,16 @@ async def generate_run_report(body: GenerateReportRequest, op: Operator = Depend
     aid = _reports_account(op, body.account_id)
     if not aid:
         raise HTTPException(400, "no account in context")
-    if body.kind != "migration":
-        raise HTTPException(400, "only migration reports exist so far")
+    if body.kind not in ("migration", "seed"):
+        raise HTTPException(400, "kind must be migration or seed")
 
     def _go() -> dict:
         import run_report
         st = _report_settings(aid)
+        if body.kind == "seed":
+            # No ledger: a seed's evidence is its own transcript.
+            return run_report.generate(None, st, aid, kind="seed",
+                                       transcript=_job_log_lines(aid, ("seed",)))
         path = st.db_path
         if not path or not os.path.isfile(path):
             raise HTTPException(404, "this account has no migration ledger yet -- open its "
@@ -3681,6 +3797,22 @@ def _report_or_404(op: Operator, account_id: int | None, run_id: str):
         return aid, run_report, run_report.report_file(aid, run_id, "json")
     except ValueError:
         raise HTTPException(404, "no such report")
+
+
+@app.post("/api/v2/reports/tally")
+async def start_tally(body: StartTally, op: Operator = Depends(operator)):
+    """Run the tally as a job. It reads both tenants' APIs for every mapped
+    user, so it takes a slot like a migration does, and queues if the box is
+    full -- a tally beside a migration would halve both."""
+    account_id = _resolve_account(body, op)
+    argv = [PY, "main.py"] + _account_argv(account_id) + ["tally", "--sample-users", str(body.sample_users)]
+    if body.counts_only:
+        argv.append("--counts-only")
+    for u in body.users:
+        argv += ["--user", u]
+    target = ",".join(body.users) if body.users else "ALL"
+    return await _gated(op, "report.tally", body, target,
+                        lambda: _run_admitted(argv, account_id, "tally"))
 
 
 @app.get("/api/v2/reports/{run_id}")
@@ -3711,6 +3843,58 @@ async def run_report_pdf(run_id: str, audience: str = "human", account_id: int |
         raise HTTPException(404, "that report has no PDF (regenerate it)")
     return FileResponse(path, media_type="application/pdf",
                         filename=f"{run_id}-{audience}.pdf", content_disposition_type="attachment")
+
+
+# ---------------------------------------------------------------------------
+# Incidents: problems the watcher found, with the hand-off for fixing them.
+# ---------------------------------------------------------------------------
+class IncidentStatusRequest(BaseModel):
+    status: str
+    note: str = ""
+
+
+def _incident_for(op: Operator, incident_id: int) -> dict:
+    import run_watch
+    inc = run_watch.get_incident(incident_id)
+    if not inc or not (op.is_superadmin or (op.account_id and inc["account_id"] == op.account_id)):
+        raise HTTPException(404, "no such incident")
+    return inc
+
+
+@app.get("/api/v2/incidents")
+async def run_incidents(status: str | None = None, op: Operator = Depends(operator)):
+    """Open problems, newest first. An ordinary account sees its own; a
+    superadmin sees everyone's."""
+    require_login(op)
+    import run_watch
+    if not op.is_superadmin and not op.account_id:
+        return {"incidents": []}
+    account = None if op.is_superadmin else op.account_id
+    return {"incidents": await _off_loop(run_watch.list_incidents, status or None, account)}
+
+
+@app.get("/api/v2/incidents/{incident_id}/brief")
+async def run_incident_brief(incident_id: int, op: Operator = Depends(operator)):
+    """The hand-off, as plain text: paste it into Claude Code as it is."""
+    require_login(op)
+    import run_watch
+    _incident_for(op, incident_id)
+    text = await _off_loop(run_watch.read_brief, incident_id)
+    if text is None:
+        raise HTTPException(404, "this incident has no brief")
+    return PlainTextResponse(text)
+
+
+@app.post("/api/v2/incidents/{incident_id}/status")
+async def set_run_incident_status(incident_id: int, body: IncidentStatusRequest,
+                                  op: Operator = Depends(operator)):
+    require_login(op)
+    import run_watch
+    _incident_for(op, incident_id)
+    if body.status not in ("open", "acknowledged", "resolved"):
+        raise HTTPException(400, "status must be open, acknowledged or resolved")
+    await _off_loop(run_watch.set_status, incident_id, body.status, body.note[:500])
+    return {"ok": True}
 
 
 @app.get("/api/v2/metrics")

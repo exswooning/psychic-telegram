@@ -116,6 +116,38 @@ the check-in account, the API refuses to issue another one (see
 `_refuse_new_authenticator` in `api_server.py`) — recovery from a lost device
 is by root editing that file directly, not through the app.
 
+**A run is watched, judged and reported without anyone asking.**
+`run_watch.py` (started by `api_server.py`) *observes* `job_admission` — every
+job, whether webui.py or api_server.py launched it, registers there, so nothing
+in webui.py had to change. It records start/finish in `run_events`, builds a
+report when a `migrate`/`delta`/`seed` job ends (`run_report.py` → JSON + a
+human PDF + a Claude PDF under `logs/reports/<account>/`), and opens an
+**incident** (deduped by fingerprint over 6 h) for: a crash (a signal death is a
+*negative* rc — judge `!= 0`, never `> 0`), a clean exit that failed its
+benchmarks, a burst of new failures, or a stall. Each incident has a brief in
+`logs/incidents/<id>.md` (also `GET /api/v2/incidents/<id>/brief`, the
+"Copy brief" button, and `incidents.py show <id>`), plus an append-only
+`logs/incidents/feed.log` — tail it, or run a `Monitor` on it, to be told the
+moment one opens.
+Benchmarks (`benchmarks.py`) have four outcomes; **a check nobody could make is
+`unknown`, and a report with any required `unknown` is `UNVERIFIED`, never
+`PASS`.** The ledger alone cannot say the tenants agree, so fidelity
+benchmarks read from `run_fidelity`, written only by `main.py tally`
+(`tally.py`: counts both tenants, spot-checks a sample of DONE users for
+checksums/timestamps/sharing). A tally older than the run it is used for is
+ignored. Throughput is items written *during the run*, never the ledger total.
+
+**Handling an incident.** Read the brief; reproduce from its evidence; fix on
+a **test sandbox tenant**, never a real one; add a test. **Do not deploy
+unattended**: `sync_vps.sh` restarts services and a webui-launched seed or a
+migration dies with it. Say what you changed and let the operator pick the
+moment (an API-only change needs only `systemctl restart bitport-api`, which
+does not touch a webui-launched job). Then `incidents.py resolve <id> -m
+"<what fixed it>"`. Notifications are opt-in via `INCIDENT_NTFY_TOPIC`,
+`INCIDENT_WEBHOOK_URL`, or `INCIDENT_GITHUB_REPO` + `INCIDENT_GITHUB_TOKEN`
+(the last opens an issue a Claude Code routine can be pointed at); none is set
+by default and a failed send never fails a run.
+
 **Progress reporting must come from real state, never be simulated.**
 `full_setup.py` and the seeder write `{pct, label}` checkpoints a poller
 reads; `_job_progress()` in `webui.py` computes a percentage only when there

@@ -12,6 +12,7 @@ import FinalReport from './FinalReport'
 import { useMigrationStore } from '@/store'
 
 vi.mock('@/components/RunReports', () => ({ default: () => <div data-testid="run-reports" /> }))
+vi.mock('@/components/Incidents', () => ({ default: () => <div data-testid="incidents" /> }))
 
 const report = (over = {}) => ({
   totalUsers: 10, successfulUsers: 8, failedUsers: 2, dataMigrated: '1.2 GB', emailsMigrated: 1,
@@ -55,5 +56,16 @@ describe('Final Report tab', () => {
     expect(screen.queryByText('Verification Success Rate')).toBeNull()
     expect(screen.getByTestId('users-clean')).toHaveTextContent('8 of 10')
     expect(screen.getByTestId('users-clean').parentElement?.textContent).not.toMatch(/%/)
+  })
+
+  it('keeps incidents on the page whether or not a migration has run', () => {
+    // The watcher records problems on a tenant that has never finished a run.
+    useMigrationStore.setState({ report: null } as never)
+    const { unmount } = render(<FinalReport />)
+    expect(screen.getByTestId('incidents')).toBeInTheDocument()
+    unmount()
+    useMigrationStore.setState({ report: report() } as never)
+    render(<FinalReport />)
+    expect(screen.getByTestId('incidents')).toBeInTheDocument()
   })
 })

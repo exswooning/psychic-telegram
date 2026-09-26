@@ -176,6 +176,15 @@ CREATE TABLE IF NOT EXISTS run_metrics (
 );
 CREATE INDEX IF NOT EXISTS ix_run_metrics_at ON run_metrics(recorded_at DESC);
 
+-- Tenant tallies (tally.py): what BOTH tenants hold, counted directly rather
+-- than read from this ledger. One row per tally, newest wins; a run report
+-- reads the latest one taken after the run began.
+CREATE TABLE IF NOT EXISTS run_fidelity (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    recorded_at TEXT NOT NULL,
+    payload     TEXT NOT NULL
+);
+
 -- Module 1: pre-scan output, one row per (user, run).
 CREATE TABLE IF NOT EXISTS discovery (
     source_user     TEXT NOT NULL,
@@ -669,6 +678,29 @@ class MigrationDB:
                 """DELETE FROM run_metrics WHERE id NOT IN
                        (SELECT id FROM run_metrics
                          ORDER BY id DESC LIMIT ?)""", (keep,))
+
+    def record_fidelity(self, payload: dict, keep: int = 20) -> None:
+        """Persist one tally. A handful is kept: each is a full snapshot, and
+        only the latest is ever compared against a run."""
+        import json as _json
+        with self.write() as conn:
+            conn.execute("INSERT INTO run_fidelity(recorded_at, payload) VALUES(?,?)",
+                         (utc_now(), _json.dumps(payload)))
+            conn.execute("DELETE FROM run_fidelity WHERE id NOT IN "
+                         "(SELECT id FROM run_fidelity ORDER BY id DESC LIMIT ?)", (keep,))
+
+    def latest_fidelity(self) -> Optional[dict]:
+        import json as _json
+        row = self.conn.execute("SELECT recorded_at, payload FROM run_fidelity "
+                                "ORDER BY id DESC LIMIT 1").fetchone()
+        if not row:
+            return None
+        try:
+            out = _json.loads(row["payload"])
+        except ValueError:
+            return None
+        out["recordedAt"] = row["recorded_at"]
+        return out
 
     def latest_metrics(self, limit: int = 1) -> list:
         """Most recent samples, newest first."""

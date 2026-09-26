@@ -155,6 +155,20 @@ def _ledger_span(conn) -> tuple[str | None, str | None]:
     return (a["timestamp"] if a else None, b["timestamp"] if b else None)
 
 
+def _items_since(conn, started: str | None) -> int | None:
+    """SUCCESS rows written since `started`, or None when that is not known.
+    audit_log rows are only ever collapsed by a manual retention pass and only
+    for finished users, so a run's own rows are still there to count."""
+    when = _parse_iso(started)
+    if not when:
+        return None
+    # Same shape as the column's own default -- a differently-shaped string
+    # would sort wrongly against it.
+    stamp = when.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return conn.execute("SELECT COUNT(*) c FROM audit_log WHERE status='SUCCESS' AND timestamp>=?",
+                        (stamp,)).fetchone()["c"]
+
+
 def _fidelity(conn) -> dict:
     """What the tenants themselves said (written by the tally / verify pass).
 
@@ -165,8 +179,23 @@ def _fidelity(conn) -> dict:
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='run_fidelity'").fetchone()
     if not have:
         return {}
-    row = conn.execute("SELECT payload FROM run_fidelity ORDER BY id DESC LIMIT 1").fetchone()
-    return json.loads(row["payload"]) if row else {}
+    row = conn.execute("SELECT recorded_at, payload FROM run_fidelity ORDER BY id DESC LIMIT 1").fetchone()
+    if not row:
+        return {}
+    out = json.loads(row["payload"])
+    out["recordedAt"] = row["recorded_at"]
+    return out
+
+
+def _fresh_fidelity(fid: dict, run: dict) -> dict:
+    """A tally taken before this run began describes some earlier state of the
+    tenants, not this run's result -- so it is not used to judge it. Its
+    numbers are dropped (the benchmarks then read UNKNOWN) and only the fact
+    that one exists, and when, is kept for the report to say."""
+    taken, began = _parse_iso(fid.get("recordedAt")), _parse_iso((run or {}).get("startedAt"))
+    if fid and taken and began and taken < began:
+        return {"stale": True, "recordedAt": fid["recordedAt"]}
+    return fid
 
 
 def _git_commit() -> str | None:
@@ -201,6 +230,49 @@ def _parse_iso(s: str | None):
     return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
 
 
+def _normalise_run(run: dict | None, fallback_span=(None, None), fallback_source: str = "ledger") -> dict:
+    """The run block: the job's own record where there is one, else the best
+    span the caller can offer (labelled as such)."""
+    run = dict(run or {})
+    started, finished, source = run.get("startedAt"), run.get("finishedAt"), "job"
+    if not started:
+        started, finished, source = fallback_span[0], fallback_span[1], fallback_source
+    run.setdefault("returnCode", None)
+    # 1 for any non-zero code, including the negative ones a signal produces.
+    run["nonzeroExit"] = None if run["returnCode"] is None else int(run["returnCode"] != 0)
+    run.update({"startedAt": started, "finishedAt": finished, "timingSource": source})
+    a, b = _parse_iso(started), _parse_iso(finished)
+    run["durationSec"] = (b - a).total_seconds() if a and b and b > a else None
+    return run
+
+
+def _transcript_block(transcript: list[str] | None) -> dict:
+    return {
+        "tail": [str(l)[:300] for l in (transcript or [])][-TRANSCRIPT_LINES:],
+        "errorLines": [l for l in (str(x)[:300] for x in (transcript or []))
+                       if re.search(r"Traceback|Error|FAILED|^\s*!", l)][:25],
+    }
+
+
+def collect_seed_facts(settings, *, run: dict | None = None, transcript: list[str] | None = None) -> dict:
+    """The facts for a seed run: no ledger, so everything is read back from its
+    transcript. `transcript` should be the whole of it, not a tail."""
+    import seed_report
+    errors: list[dict] = []
+    facts: dict = {"kind": "seed", "errors": errors}
+    ended = bool(run) and (run.get("returnCode") is not None or bool(run.get("finishedAt")))
+    seed, families = _guard(errors, "seed", lambda: seed_report.facts(transcript or [], ended=ended), ({}, []))
+    facts["seed"], facts["failures"] = seed, families
+    facts["run"] = _normalise_run(run, (None, None), "transcript")
+    if not facts["run"].get("durationSec") and seed.get("elapsedSec"):
+        facts["run"]["durationSec"], facts["run"]["timingSource"] = seed["elapsedSec"], "transcript"
+    facts["config"] = {k: getattr(settings, k, None) for k in CONFIG_KEYS
+                       if isinstance(getattr(settings, k, None), (str, int, float, bool, type(None)))}
+    facts["environment"] = _environment()
+    facts["transcript"] = _transcript_block(transcript)
+    return facts
+
+
 def collect_facts(db, settings, *, kind: str = "migration", run: dict | None = None,
                   transcript: list[str] | None = None) -> dict:
     """Everything the ledger and the process can say about a run. `db` needs
@@ -229,27 +301,23 @@ def collect_facts(db, settings, *, kind: str = "migration", run: dict | None = N
     facts["fidelity"] = _guard(errors, "fidelity", lambda: _fidelity(conn), {})
 
     # -- timing: the job's own record beats the ledger's first/last row ------
-    run = dict(run or {})
-    started, finished, source = run.get("startedAt"), run.get("finishedAt"), "job"
-    if not started:
-        span = _guard(errors, "timing", lambda: _ledger_span(conn), (None, None))
-        started, finished, source = span[0], span[1], "ledger"
-    run.setdefault("returnCode", None)
-    # 1 for any non-zero code, including the negative ones a signal produces.
-    run["nonzeroExit"] = None if run["returnCode"] is None else int(run["returnCode"] != 0)
-    run.update({"startedAt": started, "finishedAt": finished, "timingSource": source})
-    a, b = _parse_iso(started), _parse_iso(finished)
-    duration = (b - a).total_seconds() if a and b and b > a else None
-    run["durationSec"] = duration
-    facts["run"] = run
+    span = _guard(errors, "timing", lambda: _ledger_span(conn), (None, None)) if not (run or {}).get("startedAt") else (None, None)
+    facts["run"] = _normalise_run(run, span, "ledger")
+    run, source, duration = facts["run"], facts["run"]["timingSource"], facts["run"]["durationSec"]
+    facts["fidelity"] = _fresh_fidelity(facts["fidelity"], run)
 
     # -- performance: only from a job's own timing. A ledger's first and last
     # rows span idle days between passes, and dividing by that would report a
     # slow run that was merely a long one.
     workers = getattr(settings, "user_workers", None)
-    per_min = ((facts["ledger"].get("succeeded", 0) / (duration / 60))
-               if duration and source == "job" else None)
+    # Items written DURING this run. The ledger's own total is every run since
+    # the tenant began, so dividing it by one job's duration reports the whole
+    # history's work as this run's speed -- wildly high for a resume or a delta.
+    in_run = (_guard(errors, "itemsInRun", lambda: _items_since(conn, run.get("startedAt")), None)
+              if duration and source == "job" else None)
+    per_min = (in_run / (duration / 60)) if in_run is not None else None
     facts["perf"] = {
+        "itemsInRun": in_run,
         "itemsPerMin": per_min,
         "workers": workers,
         "itemsPerMinPerWorker": (per_min / workers) if per_min is not None and workers else None,
@@ -259,12 +327,7 @@ def collect_facts(db, settings, *, kind: str = "migration", run: dict | None = N
     facts["config"] = {k: getattr(settings, k, None) for k in CONFIG_KEYS
                        if isinstance(getattr(settings, k, None), (str, int, float, bool, type(None)))}
     facts["environment"] = _environment()
-    tail = [str(l)[:300] for l in (transcript or [])][-TRANSCRIPT_LINES:]
-    facts["transcript"] = {
-        "tail": tail,
-        "errorLines": [l for l in (str(x)[:300] for x in (transcript or []))
-                       if re.search(r"Traceback|Error|FAILED|^\s*!", l)][:25],
-    }
+    facts["transcript"] = _transcript_block(transcript)
     return facts
 
 
@@ -303,7 +366,29 @@ def suspected_areas(failures: list[dict]) -> list[dict]:
     return sorted(out.values(), key=lambda e: -e["failures"])
 
 
+def _seed_next_steps(facts: dict, bench: dict) -> list[str]:
+    steps: list[str] = []
+    rc = (facts.get("run") or {}).get("returnCode")
+    seed = facts.get("seed") or {}
+    if rc:
+        steps.append(f"The seed exited with code {rc}. Read the end of its log first (below).")
+    if seed.get("neverFinished"):
+        steps.append(f"{seed['neverFinished']} user(s) never reported a result. Check the warnings and the "
+                     "log for those users; a re-run only touches what is missing.")
+    if seed.get("failedServiceUsers"):
+        steps.append(f"{seed['failedServiceUsers']} user(s) finished with a failed service "
+                     f"({', '.join(sorted(seed.get('failedServices') or {}))}). Their data for that "
+                     "service is missing.")
+    if seed.get("mode") == "fill" and seed.get("fillReached") is not None and seed["fillReached"] < 0.98:
+        steps.append("The fill stopped short of its target. Run it again: a top-up only ever adds.")
+    if bench["verdict"] == "PASS":
+        steps.append("The seed finished cleanly. It is ready to migrate from.")
+    return steps
+
+
 def next_steps(facts: dict, bench: dict) -> list[str]:
+    if facts.get("kind") == "seed":
+        return _seed_next_steps(facts, bench)
     steps: list[str] = []
     rc = (facts.get("run") or {}).get("returnCode")
     if rc:
@@ -334,7 +419,7 @@ def next_steps(facts: dict, bench: dict) -> list[str]:
 
 def build_report(facts: dict, *, run_id: str | None = None, account_id=None,
                  overrides: dict | None = None, when: datetime | None = None) -> dict:
-    bench = benchmarks.evaluate(facts, overrides)
+    bench = benchmarks.evaluate(facts, overrides, benchmarks.for_kind(facts.get("kind", "migration")))
     now = when or _now()
     return {
         "schema": 1,
@@ -398,7 +483,8 @@ def summarise(report: dict, files: list[str] | None = None) -> dict:
 
 def generate(db, settings, account_id, *, kind: str = "migration", run: dict | None = None,
              transcript: list[str] | None = None) -> dict:
-    facts = collect_facts(db, settings, kind=kind, run=run, transcript=transcript)
+    facts = (collect_seed_facts(settings, run=run, transcript=transcript) if kind == "seed"
+             else collect_facts(db, settings, kind=kind, run=run, transcript=transcript))
     report = build_report(facts, account_id=account_id, overrides=load_overrides(account_id))
     return save_report(report, account_id)
 

@@ -17,7 +17,7 @@ import {
 import {
   Description as JsonIcon, PictureAsPdf as PdfIcon, SmartToy as ClaudeIcon,
 } from '@mui/icons-material'
-import { fetchReports, generateReport, reportUrl } from '@/api/controlPlane'
+import { fetchReports, generateReport, reportUrl, startTally } from '@/api/controlPlane'
 import type { ReportSummary, Verdict } from '@/api/controlPlane'
 
 const VERDICT: Record<Verdict, { color: 'success' | 'error' | 'warning'; hint: string }> = {
@@ -40,6 +40,7 @@ export const RunReports: React.FC<{
   const [reports, setReports] = useState<ReportSummary[] | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [tally, setTally] = useState('')
 
   const load = useCallback(() => {
     fetchReports(accountId)
@@ -61,10 +62,22 @@ export const RunReports: React.FC<{
     }
   }
 
+  const runTally = async () => {
+    setTally('')
+    setError('')
+    try {
+      const r = await startTally(accountId)
+      setTally(r.detail || 'Tally started.')
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
   return (
     <Paper variant="outlined" sx={{ p: 2, mb: 3 }} data-testid="run-reports">
       <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.5 }}>
         <Typography variant="h6" sx={{ fontWeight: 700, flexGrow: 1 }}>Run reports</Typography>
+        <Button variant="outlined" size="small" onClick={runTally}>Run tally</Button>
         <Button variant="contained" size="small" onClick={make} disabled={busy}
                 startIcon={busy ? <CircularProgress size={14} /> : undefined}>
           {busy ? 'Generating…' : 'Generate report now'}
@@ -77,7 +90,15 @@ export const RunReports: React.FC<{
         configuration and the tail of the run&apos;s log.
       </Typography>
 
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5, maxWidth: 780 }}>
+        <strong>Run tally</strong> counts what both tenants actually hold — Drive, mail, calendar,
+        contacts, tasks — and spot-checks a sample for byte-level checksums, modified times and
+        sharing. Read-only. Until one has run, a report cannot say the tenants agree, so it reads
+        UNVERIFIED. Run a tally, then generate the report.
+      </Typography>
+
       {error && <Alert severity="warning" sx={{ mb: 1.5 }}>{error}</Alert>}
+      {tally && <Alert severity="info" sx={{ mb: 1.5 }} data-testid="tally-started">{tally}</Alert>}
 
       {reports === null && <CircularProgress size={18} />}
       {reports !== null && reports.length === 0 && !error && (

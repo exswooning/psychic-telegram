@@ -58,7 +58,9 @@ const answer = (retry: { path: string; body: object }, after: object) =>
 
 beforeEach(() => {
   vi.mocked(client.fetchCompletedJobs).mockReset()
-  vi.mocked(client.fetchJobHistory).mockReset()
+  // mockReset() drops every implementation, so it resolves to nothing again --
+  // and Jobs.tsx chains .catch() on it. No history is null, as the real one is.
+  vi.mocked(client.fetchJobHistory).mockReset().mockResolvedValue(null)
   fetchMock.mockReset()
   vi.stubGlobal('fetch', fetchMock)
 })

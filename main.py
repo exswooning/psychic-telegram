@@ -1681,6 +1681,34 @@ def cmd_report(args, settings: Settings, db: MigrationDB, auth: AuthManager):
     print(f"\nTotal failed items: {total_failed}")
 
 
+def cmd_tally(args, settings: Settings, db: MigrationDB, auth: AuthManager):
+    """Count what BOTH tenants hold and spot-check a sample; see tally.py.
+
+    Read-only on both tenants. The result is stored in the ledger, where the
+    next run report reads it as the fidelity benchmarks.
+    """
+    import tally
+    from resilience import retry_on_google_error
+
+    out = tally.run(
+        settings, db, auth, users=args.user, sample_users=args.sample_users,
+        samples=args.samples, deep=not args.counts_only,
+        workers=min(max(1, settings.user_workers), 8),
+        retry=retry_on_google_error(max_retries=settings.max_retries))
+    print("\n=== Tenant tally ===")
+    for name, v in out["services"].items():
+        par = "not measured" if v["parity"] is None else f"{v['parity'] * 100:.2f}%"
+        print(f"  {tally.LABEL[name]:<16} source {v['source']:>9,}  skipped {v['skipped']:>7,}  "
+              f"target {v['target']:>9,}  parity {par}")
+    for label, key in (("checksum failures", "checksumFailures"), ("share grants preserved", "aclFidelity"),
+                       ("grants that should not exist", "extraGrants"),
+                       ("modified times preserved", "timestampsPreserved")):
+        v = out.get(key)
+        print(f"  {label:<30} {'not measured' if v is None else v}")
+    if out["users"]["unreachable"]:
+        print(f"  {len(out['users']['unreachable'])} user(s) have no usable target account")
+
+
 def cmd_backfill_services(args, settings: Settings, db: MigrationDB,
                           auth: AuthManager):
     """
@@ -2068,6 +2096,19 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("syncacls", help="recreate per-file ACLs on migrated items")
     s.add_argument("--user", action="append")
     s.set_defaults(func=cmd_syncacls)
+
+    s = sub.add_parser("tally",
+                       help="count both tenants and spot-check a sample "
+                            "(read-only; feeds the run report's fidelity)")
+    s.add_argument("--user", action="append", help="limit to specific user(s)")
+    s.add_argument("--sample-users", type=int, default=5,
+                   help="users to spot-check for checksums, timestamps and "
+                        "sharing (heavy; 0 skips it)")
+    s.add_argument("--samples", type=int, default=25,
+                   help="files checksummed per sampled user")
+    s.add_argument("--counts-only", action="store_true",
+                   help="count only; skip the spot-checks")
+    s.set_defaults(func=cmd_tally)
 
     s = sub.add_parser("status",
                        help="is anything running, how far, is memory coping")
