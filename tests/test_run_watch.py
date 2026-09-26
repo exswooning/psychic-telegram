@@ -328,3 +328,27 @@ def test_which_jobs_earn_a_report():
     assert W.report_kind("tally") is None      # an input to a report, not a run
     assert W.report_kind("seed") == "seed" and W.report_kind("seed top-up") == "seed"
     assert W.report_kind("reset target") is None and W.report_kind("setup") is None
+
+
+class TestTheRealSeedThatPassedWhileUsersWereRefused:
+    """End to end, with the real report code and a transcript in the seeder's real
+    format: a 300-user fill ended "Topped up 300/300" with exit 0 while 13 users'
+    uploads were refused. It was reported PASS and nobody was told. Now the same
+    run must open an incident, because a clean exit is not a good run."""
+
+    def test_a_fill_with_refused_users_opens_an_incident_at_exit_zero(self, cp, settings):
+        import run_report as RR
+        from tests.test_seed_report import fill
+        transcript = fill(n_ok=287, n_bad=13)
+
+        def make_report(aid, name, kind, run):
+            return RR.build_report(RR.collect_seed_facts(settings, run=run, transcript=transcript), account_id=aid)
+
+        b = Box()
+        w = W.Watcher(list_active=lambda: list(b.jobs), is_live=lambda j: True, make_report=make_report,
+                      rc_for=lambda a, n, s: 0, transcript_for=lambda a, n: transcript[-40:])
+        b.jobs = [job("seed")]; w.tick(); b.jobs = []; w.tick()
+        inc, = W.list_incidents()
+        assert inc["kind"] == "verdict_fail" and "fill_users_failed" in inc["title"]
+        brief = W.read_brief(inc["id"])
+        assert "storageQuotaExceeded" in brief and "POOL ran out" in brief

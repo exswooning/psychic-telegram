@@ -289,6 +289,14 @@ def write_brief(*, incident_id: int | None, title: str, summary: str, account_id
             lines += [f"- **{r['status'].upper()}** `{r['id']}`: {r['display']}  (need {r['threshold']}; "
                       f"read from `{r['metric']}`)" for r in bad]
             lines.append("")
+        steps = report.get("nextSteps") or []
+        if steps:
+            # The report already says what to do about what it found (for a refused
+            # fill: the pool ran out, free space, run it again). Whoever picks this
+            # up should not have to rediscover that from the log.
+            lines += ["### What the report suggests", ""]
+            lines += [f"- {t}" for t in steps[:6]]
+            lines.append("")
         fam = f.get("failures") or []
         if fam:
             lines += ["### Failure families", ""]
