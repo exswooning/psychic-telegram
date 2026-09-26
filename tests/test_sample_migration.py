@@ -128,6 +128,34 @@ class TestEachEngineStopsAtTheLimit:
         files = [f for f in tgt.store.values() if f.get("mimeType") != FOLDER_MIME and f["name"].startswith("in")]
         assert len(files) == 2 and tgt.count(mime=FOLDER_MIME) == 2
 
+    def test_a_sample_takes_small_files_and_leaves_the_big_ones_uncounted(self, auth, db, settings, identity, quota):
+        """Every file in a sample has to be small enough to compare byte for byte.
+        A 50 MB file is skipped WITHOUT spending the budget, so it cannot crowd the
+        small ones out."""
+        settings.sample_limit = 3
+        settings.sample_max_file_bytes = 1000
+        src = auth.source_drive(SRC_USER)
+        for n in range(4):
+            src.add_binary(f"big{n}.bin", data=b"x" * 5000)
+        for n in range(5):
+            src.add_binary(f"small{n}.bin", data=b"y" * 10)
+        drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota).run()
+        names = sorted(f["name"] for f in auth.target_drive(TGT_USER).store.values()
+                       if f.get("mimeType") != FOLDER_MIME and f["name"].endswith(".bin"))
+        assert len(names) == 3 and all(n.startswith("small") for n in names)
+
+    def test_the_size_ceiling_does_not_apply_outside_a_sample(self, auth, db, settings, identity, quota):
+        settings.sample_limit = None
+        settings.sample_max_file_bytes = 1000
+        auth.source_drive(SRC_USER).add_binary("big.bin", data=b"x" * 5000)
+        drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota).run()
+        assert any(f["name"] == "big.bin" for f in auth.target_drive(TGT_USER).store.values())
+
+    @pytest.mark.parametrize("raw,mb", [("", 10), ("2", 2), ("0.5", 0.5)])
+    def test_the_ceiling_reads_the_environment(self, monkeypatch, raw, mb):
+        monkeypatch.setenv("SAMPLE_MAX_FILE_MB", raw)
+        assert Settings().sample_max_file_bytes == int(mb * 1024 * 1024)
+
     def test_no_limit_moves_everything_as_before(self, auth, db, settings, identity):
         settings.sample_limit = None
         src = auth.source_gmail(SRC_USER)
@@ -144,6 +172,25 @@ class TestEachEngineStopsAtTheLimit:
         for _ in range(2):
             gmail_engine.GmailMigrator(auth, db, settings, SRC_USER, TGT_USER).run()
         assert len(auth.target_gmail(TGT_USER).messages) == 3
+
+
+class TestAnEngineBuiltWithoutInitStillHasABudget:
+    """Tests (and anything else) build engines with __new__, bypassing __init__. The
+    unlimited default lives on the class so they still work -- and it must never be
+    a limited one, or every such engine would share a counter."""
+
+    @pytest.mark.parametrize("cls", [drive_engine.DriveMigrator, gmail_engine.GmailMigrator,
+                                     calendar_engine.CalendarMigrator, contacts_engine.ContactsMigrator,
+                                     tasks_engine.TasksMigrator])
+    def test_it_is_unlimited(self, cls):
+        obj = cls.__new__(cls)
+        assert not obj.budget.limited and all(obj.budget.take() for _ in range(100))
+
+    def test_a_sample_gets_its_own_and_does_not_touch_the_shared_one(self, auth, db, settings, identity):
+        settings.sample_limit = 2
+        m = gmail_engine.GmailMigrator(auth, db, settings, SRC_USER, TGT_USER)
+        assert m.budget.limited and m.budget is not gmail_engine.GmailMigrator.budget
+        assert not gmail_engine.GmailMigrator.budget.limited
 
 
 class TestASampleNeverFinishesAUser:

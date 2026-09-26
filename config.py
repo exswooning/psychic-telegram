@@ -672,6 +672,13 @@ class Settings:
     # Unfinished matters as much as small: a sample that marked a user DONE would be
     # skipped by the next full migration, and the rest of their data would never be
     # copied while every screen said the user was done. See main.migrate_user.
+    # In a sample, files larger than this are skipped rather than counted. A sample is
+    # small on purpose, and every file in it has to be small enough to compare byte
+    # for byte afterwards (verify_sample.MAX_COMPARE_BYTES) -- otherwise it copies a
+    # few 50 MB files and checks almost nothing. Ignored outside a sample.
+    sample_max_file_bytes: int = field(
+        default_factory=lambda: int(float(os.environ.get("SAMPLE_MAX_FILE_MB") or 10) * 1024 * 1024)
+    )
     sample_limit: int | None = field(
         default_factory=lambda: (int(os.environ["SAMPLE_LIMIT"])
                                  if (os.environ.get("SAMPLE_LIMIT") or "").strip().isdigit()

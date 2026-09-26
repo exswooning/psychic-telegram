@@ -266,6 +266,11 @@ def _is_quota_rejection(exc: Exception) -> bool:
 
 
 class DriveMigrator:
+    # Unlimited by default, and shared: an unlimited Budget never changes, so this is
+    # safe for every instance -- including ones built without __init__ (tests do).
+    # __init__ replaces it with the run's own when a sample is asked for.
+    budget = Budget(None)
+
     def __init__(self, auth, db, settings: Settings, source_user: str,
                  target_user: str, quota):
         self.budget = Budget(getattr(settings, "sample_limit", None))
@@ -837,6 +842,9 @@ class DriveMigrator:
                 # Spent when a file is FOUND, not when it is synced (which is after
                 # this loop): otherwise every folder is walked into and created
                 # before the budget has noticed anything was taken.
+                # A sample takes SMALL files only, so each can be compared byte for byte.
+                if self.budget.limited and int(item.get("size") or 0) > self.settings.sample_max_file_bytes:
+                    continue
                 if not self.budget.take():
                     break
                 files.append(item)

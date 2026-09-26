@@ -39,6 +39,11 @@ TASK_FIELDS = ["title", "notes", "due", "status", "completed", "deleted"]
 
 
 class TasksMigrator:
+    # Unlimited by default, and shared: an unlimited Budget never changes, so this is
+    # safe for every instance -- including ones built without __init__ (tests do).
+    # __init__ replaces it with the run's own when a sample is asked for.
+    budget = Budget(None)
+
     def __init__(self, auth, db, settings, source_user: str, target_user: str):
         self.budget = Budget(getattr(settings, "sample_limit", None))
         self.auth = auth
