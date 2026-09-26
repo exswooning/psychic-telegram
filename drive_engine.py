@@ -382,7 +382,7 @@ class DriveMigrator:
 
     # -- plumbing -----------------------------------------------------------
     def _retry(self, fn, label=None, write: bool = True,
-               tenant: str = "target", cost: int = 1):
+               tenant: str = "target", cost: int = 1, max_retries: int | None = None):
         """
         Every Drive call goes through here, and every call is paced.
 
@@ -429,7 +429,7 @@ class DriveMigrator:
             self._write_limiter.acquire()
         try:
             return retry_on_google_error(
-                max_retries=self.settings.max_retries,
+                max_retries=self.settings.max_retries if max_retries is None else max_retries,
                 base_delay=self.settings.base_backoff,
                 max_delay=self.settings.max_backoff,
                 label=label or "drive",
@@ -2084,30 +2084,42 @@ class DriveMigrator:
                            audit_key: str) -> int:
         """A single permissions.create, with the retry/audit bookkeeping that
         has always wrapped it. Returns 1 on success, 0 on failure."""
-        try:
-            self._retry(lambda b=body: self.tgt.permissions().create(
-                fileId=target_id, body=b, sendNotificationEmail=False,
-                supportsAllDrives=True, fields="id",
-            ).execute(), label="drive.permissions.create")
-            # Same upsert-clears-the-failure reasoning as the batch path.
-            self.db.log_audit(self.source_user, audit_key, "acl", "SUCCESS")
-            return 1
-        except (PermanentAPIError, RuntimeError) as exc:
-            if _is_unreachable_grantee(exc):
-                # Not a failure to retry: no number of attempts creates a
-                # Google account for this address. Named so the report can
-                # say what was lost and why, instead of burying it in a
-                # count of things that look fixable.
-                self.db.log_audit(
-                    self.source_user, audit_key, "acl",
-                    "SKIPPED_GRANTEE_NOT_ON_GOOGLE",
-                    "Drive will not grant access to an address with no Google "
-                    "account unless the request emails them, and this "
-                    "migration does not send share notifications: " + str(exc))
+        # A SAMPLE gets one quick look first. An address with no account yet is given a
+        # full backoff window below (about 40 s) in case Drive is catching up with a
+        # user created moments ago -- right for a real migration, where they do
+        # appear. A sample runs against a target that usually holds only the few users
+        # in it, so everyone else the file was shared with never appears, and that
+        # window per grant made a "quick" run take hours. Anything that is NOT a
+        # missing account still gets the normal retries.
+        limits = (0, None) if self.budget.limited else (None,)
+        for i, limit in enumerate(limits):
+            try:
+                self._retry(lambda b=body: self.tgt.permissions().create(
+                    fileId=target_id, body=b, sendNotificationEmail=False,
+                    supportsAllDrives=True, fields="id",
+                ).execute(), label="drive.permissions.create", max_retries=limit)
+                # Same upsert-clears-the-failure reasoning as the batch path.
+                self.db.log_audit(self.source_user, audit_key, "acl", "SUCCESS")
+                return 1
+            except (PermanentAPIError, RuntimeError) as exc:
+                if _is_unreachable_grantee(exc):
+                    # Not a failure to retry: no number of attempts creates a
+                    # Google account for this address. Named so the report can
+                    # say what was lost and why, instead of burying it in a
+                    # count of things that look fixable.
+                    self.db.log_audit(
+                        self.source_user, audit_key, "acl",
+                        "SKIPPED_GRANTEE_NOT_ON_GOOGLE",
+                        "Drive will not grant access to an address with no Google "
+                        "account unless the request emails them, and this "
+                        "migration does not send share notifications: " + str(exc))
+                    return 0
+                if i + 1 < len(limits):
+                    continue                      # the quick look failed for another reason: try properly
+                self.db.log_audit(self.source_user, audit_key, "acl", "FAILED", str(exc))
+                self._bump("acl_failed")
                 return 0
-            self.db.log_audit(self.source_user, audit_key, "acl", "FAILED", str(exc))
-            self._bump("acl_failed")
-            return 0
+        return 0
 
     def _restore_modified_time(self, target_id: str, item: dict,
                                writes_applied: int) -> None:

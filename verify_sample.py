@@ -119,6 +119,33 @@ def compare_message(src_raw: bytes, tgt_raw: bytes, expected_after_rewrite: byte
     return "different", notes
 
 
+def compare_grants(src_perms: list[dict], tgt_perms: list[dict], translate, src_domain: str, tgt_domain: str,
+                   skipped_ids: set[str], source_id: str) -> dict:
+    """Who can see one file, source against target.
+
+    Each grant is reduced to (who, role) -- the thing a person would notice
+    changing -- with the source's people translated to their target addresses.
+      matched         on both
+      notReproduced   on the source, not the target, AND the migration recorded that it
+                      deliberately did not create it (the grantee has no account on the
+                      target). Said, never hidden -- but not a fault.
+      missing         on the source, not the target, and nothing explains it
+      extra           on the target and NOT on the source: access nobody granted
+    """
+    from acl_audit import _grant_key
+    want = {k for k in (_grant_key(p, translate, src_domain, tgt_domain) for p in src_perms if not p.get("deleted")) if k}
+    got = {k for k in (_grant_key(p, lambda e: e) for p in tgt_perms if not p.get("deleted")) if k}
+
+    def audit_id(k):
+        kind, who, _role = k
+        return f"{source_id}:{who}" if kind in ("user", "group") else (
+            f"{source_id}:domain:{who}" if kind == "domain" else f"{source_id}:anyone")
+    missing = sorted(want - got)
+    explained = [k for k in missing if audit_id(k) in skipped_ids]
+    return {"matched": len(want & got), "notReproduced": [list(k) for k in explained],
+            "missing": [list(k) for k in missing if k not in explained], "extra": [list(k) for k in sorted(got - want)]}
+
+
 def compare_labels(src_names: set[str], tgt_names: set[str]) -> list[str]:
     out = []
     if src_names - tgt_names:
@@ -213,6 +240,10 @@ class Verifier:
             (self.src_user, type_))]
 
     def _failed(self, types: tuple[str, ...]) -> list[dict]:
+        """Items the engine tried and failed to copy -- INCLUDING a whole service that
+        failed for this user, which migrate_user records under the service's own name
+        ('drive', 'gmail', ...). Missing that is how a run that copied nothing at all
+        would read as identical."""
         q = ",".join("?" * len(types))
         return [{"id": r["item_id"], "type": r["item_type"], "error": (r["error_message"] or "")[:200]}
                 for r in self.db.conn.execute(
@@ -279,6 +310,8 @@ class Verifier:
                 if kind == "file":
                     target_keys[(tp, tm.get("name"), tm.get("md5Checksum"))] = tid
                     diffs += self._content(src, tgt, sid, tid, sm, tm, ev)
+                sharing = self._sharing(src, tgt, sid, tid, res)
+                diffs += sharing
                 self.evidence.append({"service": "drive", **ev})
                 if diffs:
                     res["differences"].append({"item": sm.get("name"), "path": sp, "source": sid, "target": tid, "diffs": diffs})
@@ -298,8 +331,42 @@ class Verifier:
                     res["extras"].append({"target": f["id"], "name": f.get("name"), "path": key[0]})
         except Exception as exc:      # noqa: BLE001
             res["errors"].append(f"could not list the target's Drive: {str(exc)[:120]}")
-        res["notCopied"] = self._failed(("file", "folder"))
+        sh = res.get("sharing")
+        if sh and sh["notReproduced"]:
+            res["notes"].append(f"sharing: {sh['matched']} grants matched; {sh['notReproduced']} were deliberately not "
+                                "reproduced because the person has no account on the target")
+        elif sh:
+            res["notes"].append(f"sharing: all {sh['matched']} grants matched")
+        res["notCopied"] = self._failed(("file", "folder", "drive"))
         return res
+
+    def _perms(self, svc, fid) -> list[dict]:
+        r = self._x(lambda: svc.permissions().list(
+            fileId=fid, supportsAllDrives=True,
+            fields="permissions(id,type,role,emailAddress,domain,deleted)").execute())
+        return r.get("permissions", [])
+
+    def _sharing(self, src, tgt, sid, tid, res) -> list[str]:
+        """Compare who can see this item; returns the differences, and tallies the
+        grants that were matched or deliberately not reproduced on `res`."""
+        try:
+            sp, tp = self._perms(src, sid), self._perms(tgt, tid)
+        except Exception as exc:      # noqa: BLE001
+            res["errors"].append(f"sharing of {sid}: could not be read: {str(exc)[:100]}")
+            return []
+        if not hasattr(self, "_skipped_ids"):
+            self._skipped_ids = {r["item_id"] for r in self.db.conn.execute(
+                "SELECT item_id FROM audit_log WHERE source_user=? AND item_type='acl' AND status LIKE 'SKIPPED%'",
+                (self.src_user,))}
+        g = compare_grants(sp, tp, self._translate, self.settings.source_domain, self.settings.target_domain,
+                           self._skipped_ids, sid)
+        sh = res.setdefault("sharing", {"filesCompared": 0, "matched": 0, "notReproduced": 0})
+        sh["filesCompared"] += 1
+        sh["matched"] += g["matched"]
+        sh["notReproduced"] += len(g["notReproduced"])
+        out = [f"grant missing on the target: {m}" for m in g["missing"]]
+        out += [f"extra grant on the target (nobody granted it): {e}" for e in g["extra"]]
+        return out
 
     def _target_files(self, svc) -> list[dict]:
         out, token = [], None
@@ -419,7 +486,7 @@ class Verifier:
                 (res["duplicates"] if mid in mapped_msgids else res["extras"]).append({"target": m["id"], "messageId": mid})
         except Exception as exc:      # noqa: BLE001
             res["errors"].append(f"could not list the target's mailbox: {str(exc)[:100]}")
-        res["notCopied"] = self._failed(("message",))
+        res["notCopied"] = self._failed(("message", "gmail"))
         return res
 
     @staticmethod
@@ -458,7 +525,7 @@ class Verifier:
                 res["differences"].append({"item": sev.get("summary"), "source": eid, "target": tid, "diffs": diffs})
             else:
                 res["identical"] += 1
-        res["notCopied"] = self._failed(("event",))
+        res["notCopied"] = self._failed(("event", "calendar"))
         return res
 
     # -- Contacts ---------------------------------------------------------
@@ -484,7 +551,7 @@ class Verifier:
                 res["differences"].append({"item": name, "source": sid, "target": tid, "diffs": diffs})
             else:
                 res["identical"] += 1
-        res["notCopied"] = self._failed(("contact",))
+        res["notCopied"] = self._failed(("contact", "contacts"))
         return res
 
     # -- Tasks ------------------------------------------------------------
@@ -527,7 +594,7 @@ class Verifier:
                     res["differences"].append({"item": st.get("title"), "source": sid, "target": tid, "diffs": diffs})
                 else:
                     res["identical"] += 1
-        res["notCopied"] = self._failed(("task", "task_list"))
+        res["notCopied"] = self._failed(("task", "task_list", "tasks"))
         return res
 
 
@@ -583,6 +650,10 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
         report["users"][u] = per
         report["evidence"] += [{"user": u, **e} for e in v.evidence]
     report["verdict"], report["reasons"] = verdict_of(report["users"], services)
+    for u, per in report["users"].items():
+        for svc, r in per.items():
+            if r["checked"] == 0 and not r["errors"]:
+                r["notes"].append("nothing was copied for this service, so there was nothing to check")
     tot = {"checked": 0, "identical": 0, "differences": 0, "missing": 0, "duplicates": 0, "extras": 0,
            "notCopied": 0, "errors": 0, "filesOpened": sum(1 for e in report["evidence"] if e.get("opened") and e["service"] == "drive"),
            "bytesCompared": sum(e.get("bytes", 0) for e in report["evidence"] if e.get("opened"))}
@@ -592,6 +663,11 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
             for k in ("differences", "missing", "duplicates", "extras", "notCopied", "errors"):
                 tot[k] += len(r[k])
     report["totals"] = tot
+    if report["verdict"] == "IDENTICAL" and tot["checked"] == 0:
+        # Zero of zero is not a match. Nothing was copied (or nothing was recorded as
+        # copied), so nothing could be compared -- that is "not verified", never a pass.
+        report["verdict"] = "INCOMPLETE"
+        report["reasons"].append("nothing was copied, so nothing could be verified")
     report["notes"].append("Nothing was written to either tenant.")
     report["notes"].append("Items are paired using the migration ledger; every property of each pair is read fresh "
                            "from both tenants. Items the sample did not copy are not expected on the target.")

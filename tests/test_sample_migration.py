@@ -229,3 +229,58 @@ class TestASampleNeverFinishesAUser:
         self._run(auth, db, settings)
         status, done = self._status(db)
         assert status == "DONE" and "gmail" in done
+
+
+class TestASampleDoesNotWaitForAccountsThatWillNeverAppear:
+    """Found on the first live sample: each file was shared with ~28 people who do not
+    exist on the empty target, and every grant sat in the ~40 s propagation window
+    meant for a user created a moment ago -- hours for a "quick" run."""
+    NO_ACCOUNT = "there is no Google account associated with this email address"
+
+    def _m(self, auth, db, settings, sample):
+        settings.sample_limit = 5 if sample else None
+
+        class Q:
+            def reserve(self, n): pass
+            def refund(self, n): pass
+        return drive_engine.DriveMigrator(auth, db, settings, "u@src", "u@tgt", Q())
+
+    def _script(self, m, monkeypatch, outcomes):
+        calls = []
+
+        def fake(fn, *a, **k):
+            calls.append(k.get("max_retries", "unset"))
+            out = outcomes[min(len(calls) - 1, len(outcomes) - 1)]
+            if isinstance(out, Exception):
+                raise out
+            return out
+        monkeypatch.setattr(m, "_retry", fake)
+        return calls
+
+    def test_a_sample_takes_one_look_and_records_the_skip(self, auth, db, settings, monkeypatch):
+        m = self._m(auth, db, settings, sample=True)
+        calls = self._script(m, monkeypatch, [RuntimeError(self.NO_ACCOUNT)])
+        assert m._create_permission("t1", {"type": "user"}, "f1:a@x.com") == 0
+        assert calls == [0]                                            # no backoff window
+        assert db.get_audit("u@src", "f1:a@x.com", "acl")["status"] == "SKIPPED_GRANTEE_NOT_ON_GOOGLE"
+
+    def test_a_real_migration_still_gets_the_full_window(self, auth, db, settings, monkeypatch):
+        """There the user really may have been created a moment ago."""
+        m = self._m(auth, db, settings, sample=False)
+        calls = self._script(m, monkeypatch, [RuntimeError(self.NO_ACCOUNT)])
+        m._create_permission("t1", {"type": "user"}, "f1:a@x.com")
+        assert calls == [None]
+
+    def test_a_sample_still_retries_properly_when_the_failure_is_not_a_missing_account(self, auth, db, settings, monkeypatch):
+        m = self._m(auth, db, settings, sample=True)
+        calls = self._script(m, monkeypatch, [RuntimeError("HTTP 503 backend error"), {"id": "p1"}])
+        assert m._create_permission("t1", {"type": "user"}, "f1:a@x.com") == 1
+        assert calls == [0, None]
+        assert db.get_audit("u@src", "f1:a@x.com", "acl")["status"] == "SUCCESS"
+
+    def test_and_records_a_real_failure_if_it_never_clears(self, auth, db, settings, monkeypatch):
+        m = self._m(auth, db, settings, sample=True)
+        calls = self._script(m, monkeypatch, [RuntimeError("HTTP 503 backend error")])
+        assert m._create_permission("t1", {"type": "user"}, "f1:a@x.com") == 0
+        assert calls == [0, None] and m.stats.get("acl_failed", 0) == 1
+        assert db.get_audit("u@src", "f1:a@x.com", "acl")["status"] == "FAILED"

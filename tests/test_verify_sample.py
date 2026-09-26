@@ -332,6 +332,33 @@ class TestALinkRewriteIsRecognisedAsIntended:
         assert V.run(auth, db, settings, [SRC_USER], ("gmail",), progress=lambda *_: None)["verdict"] == "DIFFERENCES"
 
 
+class TestACopyThatDidNothingIsNotVerified:
+    """Found on the first live run: every service failed for every user, nothing was
+    copied, and the verifier would have said IDENTICAL, 0 of 0."""
+
+    def test_an_empty_migration_is_incomplete_not_identical(self, auth, db, settings, identity):
+        r = V.run(auth, db, settings, [SRC_USER], V.ALL_SERVICES, progress=lambda *_: None)
+        assert r["totals"]["checked"] == 0 and r["verdict"] == "INCOMPLETE"
+        assert "nothing was copied" in " ".join(r["reasons"])
+
+    def test_each_empty_service_says_so(self, auth, db, settings, identity):
+        r = V.run(auth, db, settings, [SRC_USER], ("drive",), progress=lambda *_: None)
+        assert any("nothing was copied for this service" in n for n in r["users"][SRC_USER]["drive"]["notes"])
+
+    @pytest.mark.parametrize("svc", V.ALL_SERVICES)
+    def test_a_service_that_failed_outright_is_reported_as_not_copied(self, auth, db, settings, identity, svc):
+        """migrate_user records it under the service's own name."""
+        db.log_audit(SRC_USER, SRC_USER, svc, "FAILED", "unauthorized_client: not yet usable")
+        r = V.run(auth, db, settings, [SRC_USER], (svc,), progress=lambda *_: None)
+        got = r["users"][SRC_USER][svc]["notCopied"]
+        assert got and "unauthorized_client" in got[0]["error"]
+        assert r["verdict"] == "DIFFERENCES"
+
+    def test_one_service_empty_among_others_that_verified_does_not_spoil_them(self, migrated):
+        r = verify(migrated)
+        assert r["verdict"] == "IDENTICAL"
+
+
 class TestTheReport:
     def test_it_is_saved_and_the_latest_can_be_read_back(self, migrated, tmp_path):
         r = verify(migrated)
@@ -349,3 +376,86 @@ class TestTheReport:
 
     def test_no_report_yet_reads_as_none(self, tmp_path):
         assert V.latest(None, base=str(tmp_path)) is None
+
+
+@pytest.fixture
+def shared(auth, db, settings, identity, quota):
+    """One file shared four ways: with a colleague who exists on the target, with the
+    whole company, with an outsider who has no Google account, and with a colleague
+    nobody mapped."""
+    from db import bulk_seed_identities
+    bulk_seed_identities(db, [("bob@tenanta.com", "bob@tenantb.com")])
+    settings.rewrite_drive_links = False
+    sd = auth.source_drive(SRC_USER)
+    fid = sd.add_binary("deck.pdf", data=b"deck")
+    sd.add_permission(fid, "user", "writer", email="bob@tenanta.com")
+    sd.add_permission(fid, "domain", "reader", domain="tenanta.com")
+    drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota).run()
+    tid = next(f["id"] for f in auth.target_drive(TGT_USER).store.values() if f.get("name") == "deck.pdf")
+    return type("S", (), {"auth": auth, "db": db, "settings": settings, "fid": fid, "tid": tid})
+
+
+class TestCompareGrants:
+    T = staticmethod(lambda e: e.replace("tenanta", "tenantb"))
+
+    def _g(self, s, t, skipped=(), sid="f1"):
+        return V.compare_grants(s, t, self.T, "tenanta.com", "tenantb.com", set(skipped), sid)
+
+    def test_the_same_people_with_the_same_roles(self):
+        g = self._g([{"type": "user", "role": "writer", "emailAddress": "bob@tenanta.com"}],
+                    [{"type": "user", "role": "writer", "emailAddress": "bob@tenantb.com"}])
+        assert g["matched"] == 1 and not g["missing"] and not g["extra"]
+
+    def test_the_owner_is_not_a_grant(self):
+        assert self._g([{"type": "user", "role": "owner", "emailAddress": "a@tenanta.com"}], [])["matched"] == 0
+
+    def test_a_domain_grant_follows_the_tenant(self):
+        g = self._g([{"type": "domain", "role": "reader", "domain": "tenanta.com"}],
+                    [{"type": "domain", "role": "reader", "domain": "tenantb.com"}])
+        assert g["matched"] == 1 and not g["missing"]
+
+    def test_a_weaker_role_is_missing_and_a_stronger_one_is_extra(self):
+        g = self._g([{"type": "user", "role": "writer", "emailAddress": "bob@tenanta.com"}],
+                    [{"type": "user", "role": "reader", "emailAddress": "bob@tenantb.com"}])
+        assert g["missing"] == [["user", "bob@tenantb.com", "writer"]] and g["extra"] == [["user", "bob@tenantb.com", "reader"]]
+
+    def test_access_nobody_granted_is_extra(self):
+        g = self._g([], [{"type": "anyone", "role": "reader"}])
+        assert g["extra"] == [["anyone", "", "reader"]]
+
+    def test_a_grant_the_migration_recorded_as_not_reproducible_is_explained_not_missing(self):
+        g = self._g([{"type": "user", "role": "reader", "emailAddress": "x@outside.com"}], [], skipped={"f1:x@outside.com"})
+        assert g["notReproduced"] == [["user", "x@outside.com", "reader"]] and g["missing"] == []
+
+    def test_the_same_grant_with_no_such_record_is_missing(self):
+        g = self._g([{"type": "user", "role": "reader", "emailAddress": "x@outside.com"}], [])
+        assert g["missing"] == [["user", "x@outside.com", "reader"]] and g["notReproduced"] == []
+
+    def test_a_deleted_grant_does_not_count(self):
+        assert self._g([{"type": "user", "role": "reader", "emailAddress": "x@y.com", "deleted": True}], [])["missing"] == []
+
+
+class TestSharingIsVerifiedOnRealMigratedFiles:
+    def test_the_engine_reproduces_the_sharing_and_the_verifier_sees_it(self, shared):
+        r = V.run(shared.auth, shared.db, shared.settings, [SRC_USER], ("drive",), progress=lambda *_: None)
+        d = r["users"][SRC_USER]["drive"]
+        assert r["verdict"] == "IDENTICAL", r["reasons"]
+        assert d["sharing"]["matched"] == 2 and any("all 2 grants matched" in n for n in d["notes"])
+
+    def test_a_grant_that_was_lost_is_a_difference(self, shared):
+        shared.auth.target_drive(TGT_USER).perms[shared.tid] = [
+            p for p in shared.auth.target_drive(TGT_USER).perms[shared.tid] if p["type"] != "user"]
+        r = V.run(shared.auth, shared.db, shared.settings, [SRC_USER], ("drive",), progress=lambda *_: None)
+        assert r["verdict"] == "DIFFERENCES"
+        assert any("grant missing on the target" in x for d in r["users"][SRC_USER]["drive"]["differences"] for x in d["diffs"])
+
+    def test_access_that_appeared_from_nowhere_is_a_difference(self, shared):
+        shared.auth.target_drive(TGT_USER).add_permission(shared.tid, "anyone", "reader")
+        r = V.run(shared.auth, shared.db, shared.settings, [SRC_USER], ("drive",), progress=lambda *_: None)
+        assert r["verdict"] == "DIFFERENCES"
+        assert any("extra grant" in x for d in r["users"][SRC_USER]["drive"]["differences"] for x in d["diffs"])
+
+    def test_sharing_that_could_not_be_read_makes_it_incomplete(self, shared, monkeypatch):
+        monkeypatch.setattr(V.Verifier, "_perms", lambda self, svc, fid: (_ for _ in ()).throw(RuntimeError("403")))
+        r = V.run(shared.auth, shared.db, shared.settings, [SRC_USER], ("drive",), progress=lambda *_: None)
+        assert r["verdict"] == "INCOMPLETE"
