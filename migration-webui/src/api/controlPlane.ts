@@ -292,9 +292,10 @@ export const startMigration = (
                            ...(sample ? { sample } : {}) }),
   })
 
-export const stopJob = (pid: number, reason: string) =>
+// force is SIGKILL, for a run that took the interrupt and is still going.
+export const stopJob = (pid: number, reason: string, force = false) =>
   cpFetch<ActionResult>(`/api/v2/jobs/${pid}/stop`, {
-    method: 'POST', body: JSON.stringify({ reason }),
+    method: 'POST', body: JSON.stringify({ reason, ...(force ? { force } : {}) }),
   })
 
 export const retryItem = (sourceUser: string, itemId: string, reason: string) =>

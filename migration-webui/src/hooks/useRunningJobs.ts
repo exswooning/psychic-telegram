@@ -54,7 +54,7 @@ export interface RunningJob {
   // never records a stoppable pid for seed/reset-target/full-setup (only
   // this account's own rich sources below know that), and stopping
   // someone else's job from here isn't a call this page should make anyway.
-  stop?: (reason: string) => Promise<void>
+  stop?: (reason: string, force?: boolean) => Promise<void>
 }
 
 /** "32m 08s", because "1928s elapsed" makes a reader do arithmetic. */
@@ -131,9 +131,9 @@ export function useRunningJobs() {
           key: 'setup-source', kind: 'setup', domain: srcCfg?.domain,
           label: srcCfg?.domain || 'source',
           detail: srcSetup.progressLabel || 'setting up…', pct: srcSetup.progressPct ?? null,
-          stop: async (reason) => {
+          stop: async (reason, force) => {
             if (!srcSetup.pid) throw new Error('no pid recorded for this run yet -- try again shortly')
-            const r = await stopFleetJob(srcSetup.pid, reason)
+            const r = await stopFleetJob(srcSetup.pid, reason, force)
             if (!r.ok) throw new Error(r.detail || 'could not stop')
           },
         })
@@ -143,9 +143,9 @@ export function useRunningJobs() {
           key: 'setup-target', kind: 'setup', domain: tgtCfg?.domain,
           label: tgtCfg?.domain || 'target',
           detail: tgtSetup.progressLabel || 'setting up…', pct: tgtSetup.progressPct ?? null,
-          stop: async (reason) => {
+          stop: async (reason, force) => {
             if (!tgtSetup.pid) throw new Error('no pid recorded for this run yet -- try again shortly')
-            const r = await stopFleetJob(tgtSetup.pid, reason)
+            const r = await stopFleetJob(tgtSetup.pid, reason, force)
             if (!r.ok) throw new Error(r.detail || 'could not stop')
           },
         })
@@ -215,7 +215,7 @@ export function useRunningJobs() {
           ].filter(Boolean).join(' · '),
           pct: job.progressPct ?? null, lines: job.lines, elapsedSec: job.elapsed,
           nodes: seedNodes,
-          stop: async () => { await stopSeedJob() },
+          stop: async (_reason, force) => { await stopSeedJob(undefined, force) },
         })
       }
       // healthy, or the claim is as old as the heartbeat that made it. A
@@ -228,8 +228,8 @@ export function useRunningJobs() {
           key: `fleet-${fleet.job_pid}`, kind: jobKind(fleet.active_job!),
           domain: srcCfg?.domain, label: fleet.active_job!,
           detail: `pid ${fleet.job_pid} on ${fleet.hostname || fleet.node_id}`, pct: null,
-          stop: async (reason) => {
-            const r = await stopFleetJob(fleet.job_pid!, reason)
+          stop: async (reason, force) => {
+            const r = await stopFleetJob(fleet.job_pid!, reason, force)
             if (!r.ok) throw new Error(r.detail || 'could not stop')
           },
         })
@@ -277,9 +277,9 @@ export function useRunningJobs() {
             + (st.existing ? `, ${st.existing} already existed` : '')
             + (st.failed ? `, ${st.failed} failed` : ''),
           pct: st.total ? Math.round(100 * (st.created + (st.existing ?? 0)) / st.total) : null,
-          stop: async (reason) => {
+          stop: async (reason, force) => {
             if (!st.pid) throw new Error('no pid recorded for this run yet -- try again shortly')
-            const r = await stopFleetJob(st.pid, reason)
+            const r = await stopFleetJob(st.pid, reason, force)
             if (!r.ok) throw new Error(r.detail || 'could not stop')
           },
         })

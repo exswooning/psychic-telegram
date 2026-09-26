@@ -3186,3 +3186,39 @@ class TestDomainGuardControls:
             "reason": "rehearsal tenant", "domain": "client.example",
             "confirm_domain": "client.example"})
         assert domain_guard.refuse_reason("client.example", "Seeding") == ""
+
+
+class TestForceStop:
+    """A run that took the interrupt can keep going for an hour -- the engine
+    reads its stop flag between items, and one file can hold a hundred slow
+    grants. The Jobs page's second press has to be able to end it, and only a
+    process this app runs is fair game for a signal that cannot be ignored."""
+
+    def _kills(self, monkeypatch):
+        import api_server
+        import webui
+        sent = []
+        monkeypatch.setattr(api_server.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+        monkeypatch.setattr(webui, "_external_processes",
+                            lambda: [{"pid": 4242, "elapsed": 9, "name": "migrate"}])
+        return sent
+
+    def test_the_first_stop_is_still_a_cooperative_interrupt(self, monkeypatch, cp):
+        sent = self._kills(monkeypatch)
+        r = cp.post("/api/v2/jobs/4242/stop", json={"reason": "wrong tenant"}, headers=ADMIN)
+        assert r.json()["ok"] is True
+        assert sent == [(4242, 2)]
+
+    def test_force_kills_a_job_this_app_runs(self, monkeypatch, cp):
+        sent = self._kills(monkeypatch)
+        r = cp.post("/api/v2/jobs/4242/stop",
+                    json={"reason": "still running", "force": True}, headers=ADMIN)
+        assert r.json()["ok"] is True
+        assert sent == [(4242, 9)]
+
+    def test_force_refuses_a_pid_that_is_not_a_job(self, monkeypatch, cp):
+        sent = self._kills(monkeypatch)
+        r = cp.post("/api/v2/jobs/1/stop",
+                    json={"reason": "still running", "force": True}, headers=ADMIN)
+        assert r.json()["ok"] is False
+        assert sent == [], "an unkillable-by-design signal went to a pid nothing here launched"

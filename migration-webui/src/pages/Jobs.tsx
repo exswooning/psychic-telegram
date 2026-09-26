@@ -116,6 +116,16 @@ const Jobs: React.FC = () => {
   // and nothing else has to know where a job can come from.
   const { jobs: running } = useRunningJobs()
   const [stopping, setStopping] = useState<RunningJob | null>(null)
+  // Runs already sent a Stop. The engine looks at its stop flag between items,
+  // so one slow file can keep a stopped run alive; the second press on the same
+  // run kills it instead. Keyed by run, forgotten once the run is gone.
+  const [stopAsked, setStopAsked] = useState<Set<string>>(new Set())
+  useEffect(() => {
+    setStopAsked((prev) => {
+      const kept = new Set([...prev].filter((k) => running.some((j) => j.key === k)))
+      return kept.size === prev.size ? prev : kept
+    })
+  }, [running])
   const [detail, setDetail] = useState<RunningJob | null>(null)
   // Completed runs, read off disk. A Job lives in this process's memory
   // only, so every deploy loses it -- the transcripts survive precisely so
@@ -375,7 +385,8 @@ const Jobs: React.FC = () => {
                 key={j.key} job={j}
                 onOpen={() => setDetail(j)}
                 action={j.stop ? (
-                  <Tooltip title="Stop this job">
+                  <Tooltip title={stopAsked.has(j.key)
+                    ? 'Force stop -- it took the stop and is still running' : 'Stop this job'}>
                     <span>
                       <IconButton size="small" color="error"
                                   data-testid={`stop-${j.key}`}
@@ -428,15 +439,21 @@ const Jobs: React.FC = () => {
 
       <ReasonCodeDialog
         open={!!stopping}
-        title={stopping ? `Stop ${stopping.label}` : ''}
-        description={<>This ends the running job. Work already done is kept —
-          seeds and migrations are resumable — but anything in flight stops
-          where it is.</>}
+        title={stopping ? `${stopAsked.has(stopping.key) ? 'Force stop' : 'Stop'} ${stopping.label}` : ''}
+        description={stopping && stopAsked.has(stopping.key)
+          ? <>Kills the process now. Work already recorded is kept and a re-run
+            resumes from it, but a file being copied is left half done.</>
+          : <>This ends the running job. Work already done is kept —
+            seeds and migrations are resumable — but anything in flight stops
+            where it is.</>}
         onCancel={() => setStopping(null)}
         onConfirm={async (reason) => {
           const j = stopping
           setStopping(null)
-          if (j?.stop) await j.stop(reason)
+          if (!j?.stop) return
+          const force = stopAsked.has(j.key)
+          await j.stop(reason, force)
+          if (!force) setStopAsked((prev) => new Set(prev).add(j.key))
         }}
       />
 

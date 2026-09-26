@@ -353,7 +353,9 @@ class StartDelta(WriteAction):
 
 
 class JobSignal(WriteAction):
-    pass
+    # SIGKILL instead of SIGINT. Only for a job that took the interrupt and is
+    # still running -- see job_stop.
+    force: bool = False
 
 
 class RetryItem(WriteAction):
@@ -1638,12 +1640,24 @@ async def jobs_history(run: str, account_id: int, op: Operator = Depends(operato
 @app.post("/api/v2/jobs/{pid}/stop")
 async def job_stop(pid: int, body: JobSignal, op: Operator = Depends(operator)):
     def _stop() -> tuple[bool, str]:
-        # SIGINT, not SIGKILL: the engine handles it cooperatively, finishes
-        # the item in flight and commits, so the ledger stays resumable.
-        # SIGKILL here would strand a file mid-copy in the staging drive.
-        os.kill(pid, 2)
-        return True, f"SIGINT -> {pid}"
-    return await _gated(op, "job.stop", body, str(pid), _stop)
+        if not body.force:
+            # SIGINT, not SIGKILL: the engine handles it cooperatively, finishes
+            # the item in flight and commits, so the ledger stays resumable.
+            os.kill(pid, 2)
+            return True, f"SIGINT -> {pid}"
+        # The second resort, for a run that took the interrupt and is still
+        # going: the engine only looks at its stop flag between items, so one
+        # file with a hundred slow grants keeps a "stopped" run alive for an
+        # hour. Only a process this app runs is killable this way, because
+        # unlike SIGINT this cannot be shrugged off and the pid is the
+        # caller's word.
+        import webui
+        if pid not in {j["pid"] for j in webui._external_processes()}:
+            return False, f"pid {pid} is not a migration job"
+        os.kill(pid, 9)
+        return True, f"SIGKILL -> {pid}"
+    return await _gated(op, "job.force-stop" if body.force else "job.stop",
+                        body, str(pid), _stop)
 
 
 @app.post("/api/v2/retry")
