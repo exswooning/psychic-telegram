@@ -11,7 +11,38 @@
 #
 #   ./sync_vps.sh root@203.0.113.10 /root/workspace-migrator [ssh-key] [port]
 
+# WHAT A DEPLOY RESTARTS DEPENDS ON WHAT IT CHANGES.
+#
+# Restarting bitport-webui kills a seed or reset that webui launched (its Job
+# launcher does not start a new session), so a restart is never free -- and a
+# purely cosmetic change to the frontend used to cost exactly the same as a
+# backend one. The dry run below lists what this deploy would change on the box;
+# when none of it can alter what a running process does (the frontend, which is
+# read from disk on every request, plus tests and docs) NOTHING is restarted and
+# no job is touched. Anything else restarts, as before, and says which files
+# made it so. FORCE_RESTART=1 restarts regardless.
+#
+#   printf 'migration-webui/src/x.tsx\n' | ./sync_vps.sh --classify   # -> frontend-only
+
 set -uo pipefail
+
+# The paths that cannot change what a running process does.
+runtime_changes() {
+  local p
+  while IFS= read -r p; do
+    [[ -z "$p" || "$p" == */ ]] && continue
+    case "$p" in
+      migration-webui/*|tests/*|data-generator/test_*|data-generator/conftest.py|*.md|.gitignore|DEPLOYED_COMMIT) ;;
+      *) printf '%s\n' "$p" ;;
+    esac
+  done
+}
+if [[ "${1:-}" == "--classify" ]]; then
+  changed="$(runtime_changes)"
+  if [[ -z "$changed" ]]; then echo "frontend-only"; exit 0; fi
+  printf '%s\n' "$changed"; exit 1
+fi
+
 TARGET="${1:?usage: ./sync_vps.sh user@host /remote/dir [key] [port]}"
 DEST="${2:?missing remote directory}"
 KEY="${3:-}"; PORT="${4:-22}"
@@ -48,21 +79,47 @@ try_rsync() {
 
 # Same exclusions as deploy_remote.py: never overwrite the remote's own
 # credentials or its resume ledger with whatever happens to be local.
-try_rsync -az --partial --timeout=90 -e "${SSH[*]}" \
-  --exclude '.git/' --exclude '__pycache__/' --exclude '.pytest_cache/' \
-  --exclude '.venv' --exclude 'scratch/' --exclude 'migration.db*' \
-  `# Protection state belongs to the DEPLOYMENT, not the checkout.`\
-  `# Syncing it would let a developer's local revocation travel to`\
-  `# production and unprotect a client's tenant.`\
-  --exclude 'unprotected_domains.json' \
-  `# .venv without a trailing slash: with one, rsync matches only a`\
-  `# DIRECTORY, and a checkout that symlinks its venv at an existing`\
-  `# deployment then tries to ship the symlink over the real thing --`\
-  `# "could not make way for new symlink: .venv", and the deploy aborts`\
-  --exclude '*.log' --exclude 'sandbox_manifest*.json' --exclude 'identities*.csv' \
-  --exclude 'keys/' --exclude 'oauth/' --exclude 'env.sh' \
-  --exclude 'run_state.json' \
-  "$(cd "$(dirname "$0")" && pwd)/" "$TARGET:$DEST/" || exit 1
+#
+# One list, used by the dry run AND the transfer, so what is classified is
+# exactly what is shipped.
+#
+#  * Protection state belongs to the DEPLOYMENT, not the checkout. Syncing it
+#    would let a developer's local revocation travel to production and
+#    unprotect a client's tenant.
+#  * .venv without a trailing slash: with one, rsync matches only a DIRECTORY,
+#    and a checkout that symlinks its venv at an existing deployment then tries
+#    to ship the symlink over the real thing ("could not make way for new
+#    symlink: .venv"), and the deploy aborts.
+#  * logs/ is the box's own runtime record (job transcripts, reports,
+#    incidents). Only *.log was excluded, so the .json files a developer's test
+#    runs leave in a local logs/ -- including reports for an account id that
+#    exists in production -- were copied into the live directory.
+#  * node_modules/ is a build dependency of the frontend, which is built HERE
+#    and shipped as dist/. It was 432 MB of dead weight on a small disk.
+SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
+SYNC_EXCLUDES=(
+  --exclude '.git/' --exclude '__pycache__/' --exclude '.pytest_cache/'
+  --exclude '.venv' --exclude 'scratch/' --exclude 'migration.db*'
+  --exclude 'unprotected_domains.json'
+  --exclude '*.log' --exclude 'sandbox_manifest*.json' --exclude 'identities*.csv'
+  --exclude 'keys/' --exclude 'oauth/' --exclude 'env.sh'
+  --exclude 'run_state.json'
+  --exclude 'logs/' --exclude 'node_modules/'
+)
+
+# What would this change on the box? Compared by CONTENT (-c): a checkout or a
+# merge rewrites modification times without changing a byte, and comparing those
+# would call every deploy a backend one. If the dry run itself fails, assume the
+# worst -- a full deploy is the safe direction.
+if WOULD_CHANGE="$(rsync -azcn --out-format='%n' -e "${SSH[*]}" "${SYNC_EXCLUDES[@]}" \
+      "$SRC_DIR/" "$TARGET:$DEST/" 2>/dev/null)"; then
+  RUNTIME_CHANGES="$(printf '%s\n' "$WOULD_CHANGE" | runtime_changes)"
+else
+  RUNTIME_CHANGES="(could not compare with the target)"
+fi
+
+try_rsync -az --partial --timeout=90 -e "${SSH[*]}" "${SYNC_EXCLUDES[@]}" \
+  "$SRC_DIR/" "$TARGET:$DEST/" || exit 1
 echo "  synced to $TARGET:$DEST"
 
 # Second pass, scoped to the built frontend, WITH --delete.
@@ -90,6 +147,21 @@ if [[ -f "$LOCAL_DIST/index.html" ]]; then
 else
   echo "  no local frontend build -- left the remote's dist/ untouched"
 fi
+
+# Nothing that runs changed: stop here, before anything that could touch a job
+# (dependency install, unit files, permissions, restarts).
+if [[ -z "$RUNTIME_CHANGES" && "${FORCE_RESTART:-0}" != "1" ]]; then
+  COMMIT="$(cd "$SRC_DIR" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  [[ -n "$(cd "$SRC_DIR" && git status --porcelain 2>/dev/null)" ]] && COMMIT="$COMMIT-dirty"
+  "${SSH[@]}" "$TARGET" "printf '%s\n' '$COMMIT' > $DEST/DEPLOYED_COMMIT"
+  echo "  stamped DEPLOYED_COMMIT=$COMMIT"
+  echo "  FRONTEND-ONLY: nothing that runs on the box changed, so no service was"
+  echo "  restarted and no job was touched. Reload the page to see it."
+  exit 0
+fi
+echo "  restarting, because these changed on the box:"
+printf '%s\n' "$RUNTIME_CHANGES" | head -8 | sed 's/^/    /'
+[[ $(printf '%s\n' "$RUNTIME_CHANGES" | wc -l) -gt 8 ]] && echo "    ... and more"
 
 # Keep the venv in step with requirements.txt on EVERY deploy, not just the
 # one install.sh ran once.

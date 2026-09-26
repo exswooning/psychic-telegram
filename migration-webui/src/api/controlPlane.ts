@@ -1417,6 +1417,15 @@ export const startTally = (accountId?: number, opts: { sampleUsers?: number; cou
                            sample_users: opts.sampleUsers ?? 5, counts_only: !!opts.countsOnly }),
   })
 
+/* Finished runs across accounts (a superadmin's), and one run's transcript for the
+ * account that ran it. */
+export const fetchCompletedJobsAcrossAccounts = () =>
+  cpFetch<{ jobs: import('@/api/client').CompletedJob[] }>('/api/v2/jobs/completed').then((r) => r.jobs)
+
+export const fetchJobHistoryFor = (accountId: number, runId: string) =>
+  cpFetch<{ result: import('@/api/client').JobResult | null }>(
+    `/api/v2/jobs/history?account_id=${accountId}&run=${encodeURIComponent(runId)}`).then((r) => r.result)
+
 /* Trim filler: the reverse of a fill (seed_sandbox.py --trim-filler). */
 export interface TrimStatus {
   hasRun: boolean

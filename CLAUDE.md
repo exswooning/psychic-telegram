@@ -53,8 +53,13 @@ required, or the bundle bakes in `http://localhost:8090` and every API call
 breaks in production. `grep -c localhost:8090 dist/assets/*.js` should show
 exactly 1 (an inert placeholder string in Settings.tsx), never more.
 
-**Deploying**: `./sync_vps.sh user@host /remote/dir [keyfile]` — rsyncs the
-tree (excluding `.venv`, `keys/`, `migration.db`, other live state), installs
+**Deploying**: `./sync_vps.sh user@host /remote/dir [keyfile]` — first dry-runs
+by *content* to see what would change on the box. **If nothing that runs changed
+(the frontend, tests, docs) it restarts nothing and touches no job** — a colour
+change must never cost a twelve-hour seed. Any other file restarts the units and
+the output names the files that forced it; `FORCE_RESTART=1` restarts regardless.
+It then rsyncs the tree (excluding `.venv`, `keys/`, `migration.db`, `logs/`,
+`node_modules/`, other live state), installs
 `requirements.txt`/`requirements-control-plane.txt` idempotently, syntax-checks
 under the target's Python, warns (but does not block) on a dirty tree or an
 in-progress `full_setup.py`/`seed_sandbox.py` run that the restart is about to

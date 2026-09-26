@@ -134,3 +134,62 @@ class TestSeedPdfsAndStorage:
                            run={"returnCode": 0, "finishedAt": "2026-09-26T01:00:00Z"})
         assert meta["kind"] == "seed" and meta["files"] == ["json", "human.pdf", "claude.pdf"]
         assert [r["kind"] for r in RR.list_reports(3)] == ["seed"]
+
+
+# ---------------------------------------------------------------------------
+# A fill whose uploads were REFUSED. Real lines from the 300-user run that
+# ended "Topped up 300/300" with exit 0 and was reported PASS while 13 users hit
+# the pool's quota: the total read 98% reached, and the tail got none of it.
+# ---------------------------------------------------------------------------
+FILL_HEAD = "Topping up storage for 4 user(s) toward 100% of each account's own storage share ..."
+OK_LINE = "  [george@x.com] top-up in 1.4s: 29.7GB -> 30.0GB (6 filler file(s)) -- 100% of this account's 30 GB share"
+QUOTA_LINE = ("  [seeduser94@x.com] top-up in 1591.3s: 0.3GB -> 0.0GB (557 filler file(s)) -- storage top-up failed: "
+              "HTTP 403 (storageQuotaExceeded): <HttpError 403 when requesting None returned \"The user's Drive "
+              "storage quota has been exceeded.\". Details: \"[{'message': \"The user's Drive storage quota has "
+              "been exceeded.\", 'domain': 'usageLimits', 'reason': 'storageQuotaExceeded'}]\">")
+BEAT = "  ... still topping up: 4/4 users done after 615m00s (12 in flight) -- 900.0 GB uploaded of 920.0 GB planned"
+
+
+def fill(n_ok=3, n_bad=1):
+    out = [FILL_HEAD]
+    out += [OK_LINE.replace("george", f"ok{i}") for i in range(n_ok)]
+    out += [QUOTA_LINE.replace("seeduser94", f"bad{i}") for i in range(n_bad)]
+    return out + [BEAT, "", f"Topped up {n_ok + n_bad}/{n_ok + n_bad} user(s)."]
+
+
+class TestRefusedFills:
+    def test_a_refused_upload_is_a_failed_user_not_a_warning(self):
+        seed, _ = SR.facts(fill(3, 1), ended=True)
+        assert seed["fillFailedUsers"] == 1 and seed["fillFailedShare"] == pytest.approx(0.25)
+        assert seed["fillFailures"] == {"HTTP 403 (storageQuotaExceeded)": 1}
+
+    def test_the_run_that_said_topped_up_all_fails_when_users_were_refused(self):
+        """The total was 98% of plan and the exit was 0. Neither says a user got nothing."""
+        seed, _ = SR.facts(fill(3, 1), ended=True)
+        r = verdict({"run": {"returnCode": 0, "nonzeroExit": 0}, "seed": seed})
+        assert r["verdict"] == "FAIL"
+        assert {x["id"]: x["status"] for x in r["results"]}["fill_users_failed"] == "fail"
+
+    def test_one_refusal_in_a_large_run_is_a_warning_not_a_failure(self):
+        seed, _ = SR.facts(fill(n_ok=299, n_bad=1), ended=True)
+        assert {x["id"]: x["status"] for x in verdict({"seed": seed})["results"]}["fill_users_failed"] == "warn"
+
+    def test_a_clean_fill_passes_it(self):
+        seed, _ = SR.facts(fill(4, 0), ended=True)
+        assert seed["fillFailedUsers"] == 0 and seed["fillFailedShare"] == 0.0
+        assert {x["id"]: x["status"] for x in verdict({"seed": seed})["results"]}["fill_users_failed"] == "pass"
+
+    def test_an_ordinary_seed_is_not_judged_on_a_fill_it_never_did(self):
+        seed, _ = SR.facts(lines(4), ended=True)
+        assert seed["fillFailedShare"] is None
+        assert {x["id"]: x["status"] for x in verdict({"seed": seed})["results"]}["fill_users_failed"] == "unknown"
+        assert verdict({"run": {"returnCode": 0, "nonzeroExit": 0}, "seed": seed})["verdict"] != "FAIL"
+
+    def test_the_seeders_zero_gb_after_an_error_is_not_counted_as_a_measurement(self):
+        seed, _ = SR.facts(fill(0, 2), ended=True)
+        assert seed["fillAddedGb"] == 0.0
+
+    def test_next_steps_say_the_pool_ran_out_and_how_to_finish(self, settings):
+        r = _report(settings, fill(3, 1), {"returnCode": 0, "finishedAt": "x"})
+        text = " ".join(r["nextSteps"])
+        assert "POOL ran out" in text and "Remove filler" in text and "only ever adds" in text

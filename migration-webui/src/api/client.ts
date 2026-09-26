@@ -236,15 +236,23 @@ export async function fetchJobHistory(
  *  check the original went through (confirmation, domain guard, admission,
  *  which account) runs again. Seeds only: they are additive, so doing one
  *  twice is safe, and nothing else has recorded a request. */
-export async function retryJob(name: string, runId: string | null):
+export async function retryJob(name: string, runId: string | null, accountId?: number,
+                               readHistory: (a: number, run: string) => Promise<JobResult | null> = async () => null):
     Promise<{ ok: boolean; queued?: boolean; msg?: string; error?: string }> {
-  const spec = (await fetchJobHistory(name, runId).catch(() => null))?.retry
+  // Another account's run is read from ITS archive, and replayed against IT: a
+  // stored request that never named an account would otherwise resolve to
+  // whoever is signed in, and re-run the seed on the wrong tenant.
+  const past = accountId != null && runId
+    ? await readHistory(accountId, runId).catch(() => null)
+    : await fetchJobHistory(name, runId).catch(() => null)
+  const spec = past?.retry
   if (!spec || spec.path !== '/api/seed') {
     return { ok: false, error: 'this run did not record how it was started' }
   }
   const res = await fetch(spec.path, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    credentials: 'include', body: JSON.stringify(spec.body),
+    credentials: 'include',
+    body: JSON.stringify(accountId != null ? { ...spec.body, account_id: accountId } : spec.body),
   })
   return res.json()
 }
@@ -1062,6 +1070,12 @@ export interface CompletedJob {
   /** The request that started this run was recorded, so it can be replayed.
    *  False for runs saved before that was recorded. */
   retryable?: boolean
+  /** Whose run this is, and which tenants that account has. Present when the
+   *  list spans accounts (a superadmin's); the tenant is then the run's own,
+   *  not whichever the signed-in account happens to have. */
+  accountId?: number
+  sourceDomain?: string | null
+  targetDomain?: string | null
 }
 
 export const fetchCompletedJobs = () =>

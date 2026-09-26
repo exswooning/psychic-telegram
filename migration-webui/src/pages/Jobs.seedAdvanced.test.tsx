@@ -38,6 +38,9 @@ vi.mock('@/api/controlPlane', () => ({
   fetchFleet: () => Promise.resolve([]),
   fetchActiveJobs: () => Promise.resolve([]),
   fetchMe: () => Promise.resolve({ is_superadmin: true, id: 1, seed_enabled: true }),
+  // Cross-account list unavailable here: the page falls back to this account's own.
+  fetchCompletedJobsAcrossAccounts: () => Promise.reject(new Error('not in this test')),
+  fetchJobHistoryFor: () => Promise.resolve(null),
   startMigration: () => Promise.resolve({ ok: true, detail: '' }),
   stopJob: () => Promise.resolve({ ok: true }),
   getCpBase: () => '',

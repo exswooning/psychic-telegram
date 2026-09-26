@@ -33,7 +33,9 @@ export function groupRunsByDomain(done: CompletedJob[], source?: string,
   const sides = new Map<string, { side: 'source' | 'target'; configured: boolean }>()
   for (const d of done) {
     const toTarget = /target/i.test(d.name)
-    const configuredDomain = toTarget ? target : source
+    // The run's own tenant when it says (a list spanning accounts), else the
+    // signed-in account's.
+    const configuredDomain = toTarget ? (d.targetDomain ?? target) : (d.sourceDomain ?? source)
     const domain = configuredDomain
       // A run whose tenant is no longer configured still happened, and
       // dropping it would make the history lie by omission.
@@ -64,10 +66,13 @@ export function groupRunsByDomain(done: CompletedJob[], source?: string,
  * (no exit code) is left out rather than called a failure.
  */
 export function needsAttention(done: CompletedJob[]): CompletedJob[] {
+  // Newest per (account, name): a failed seed on one account is not cleared by
+  // a good one on another.
   const newest = new Map<string, CompletedJob>()
   for (const d of done) {
-    const seen = newest.get(d.name)
-    if (!seen || (d.finished ?? 0) > (seen.finished ?? 0)) newest.set(d.name, d)
+    const key = `${d.accountId ?? ''}:${d.name}`
+    const seen = newest.get(key)
+    if (!seen || (d.finished ?? 0) > (seen.finished ?? 0)) newest.set(key, d)
   }
   return [...newest.values()]
     .filter((d) => d.rc != null && d.rc !== 0)

@@ -119,6 +119,11 @@ SEED_DEFAULTS: tuple[Benchmark, ...] = (
     Benchmark("service_failures", "Users with a failed service", "reliability", "seed.failedServiceShare",
               "lower", 0.0, 0.10, unit="pct", required=False,
               why="A user can read as done while chat or contacts produced nothing at all."),
+    Benchmark("fill_users_failed", "Users whose storage fill failed", "reliability", "seed.fillFailedShare",
+              "lower", 0.0, 0.01, unit="pct", required=False,
+              why="A refused upload is a failed user, not a warning. On a pooled tenant it is usually the pool "
+                  "running out (storageQuotaExceeded), so the total can still read 98% reached while the last "
+                  "users got none of their share."),
     Benchmark("warnings_per_user", "Warnings per user", "reliability", "seed.warningsPerUser", "lower", 1.0, None,
               required=False, why="A noisy run is usually one cause repeated; the families say which."),
     Benchmark("fill_reached", "Storage fill reached its target", "performance", "seed.fillReached", "higher",

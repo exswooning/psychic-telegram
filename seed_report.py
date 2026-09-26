@@ -32,6 +32,12 @@ def _num(s: str) -> float:
     return float(s.replace(",", ""))
 
 
+def _code(text: str) -> str:
+    """'HTTP 403 (storageQuotaExceeded)' out of an error line, or ''."""
+    m = HTTP_CODE.search(text)
+    return f"HTTP {m.group(1)}{f' ({m.group(2)})' if m.group(2) else ''}" if m else ""
+
+
 def split_records(line: str) -> list[str]:
     parts = RECORD_START.split(line)
     return [line] if len(parts) < 2 else [p.strip() for p in parts if p.strip()]
@@ -49,7 +55,8 @@ def parse(lines: list[str]) -> dict:
             if m:
                 email, verb, rest = m.group(1), m.group(2), m.group(3).strip()
                 if verb == "starting":
-                    users[email] = {"status": "running", "counts": {}, "failedServices": [], "storage": None}
+                    users[email] = {"status": "running", "counts": {}, "failedServices": [], "storage": None,
+                                    "fillFailed": False, "fillError": ""}
                 else:
                     counts: dict[str, int] = {}
                     for c in COUNT_RE.finditer(rest):
@@ -59,6 +66,11 @@ def parse(lines: list[str]) -> dict:
                         "status": "done" if verb == "done" else "topped-up", "counts": counts,
                         "failedServices": re.findall(r"(\w+) failed \(", rest),
                         "storage": (float(st.group(1)), float(st.group(2))) if st else None,
+                        # A top-up line still says "top-up in 12s" when the upload was
+                        # refused; only its tail says it failed. The seeder's own
+                        # "0.3GB -> 0.0GB" on such a line is not a measurement.
+                        "fillFailed": verb == "top-up" and "top-up failed" in rest,
+                        "fillError": _code(rest) if verb == "top-up" and "top-up failed" in rest else "",
                     }
                 continue
             w = WARNING_LINE.match(line)
@@ -106,6 +118,14 @@ def facts(lines: list[str], *, ended: bool) -> tuple[dict, list[dict]]:
     uploaded = p["fill"][-1][1] if p["fill"] else None
     with_failed = sum(1 for u in finished if u["failedServices"])
     warn_total = sum(w["count"] for w in p["warnings"])
+    # A user whose upload was REFUSED is a failed user, not a warning: the run did
+    # not do what it said for them. Judged over the users that were topped up
+    # (None when this was not a fill, so an ordinary seed is not marked down).
+    topped = [u for u in finished if u["status"] == "topped-up"]
+    fill_failed = [u for u in topped if u.get("fillFailed")]
+    fill_failures: dict[str, int] = {}
+    for u in fill_failed:
+        fill_failures[u["fillError"] or "unknown"] = fill_failures.get(u["fillError"] or "unknown", 0) + 1
     services: dict[str, int] = {}
     for u in finished:
         for s in u["failedServices"]:
@@ -120,6 +140,8 @@ def facts(lines: list[str], *, ended: bool) -> tuple[dict, list[dict]]:
         "failedServiceUsers": with_failed, "failedServices": services,
         "failedServiceShare": (with_failed / len(finished)) if finished else None,
         "warnings": warn_total, "warningsPerUser": (warn_total / len(finished)) if finished else None,
+        "fillFailedUsers": len(fill_failed), "fillFailures": fill_failures,
+        "fillFailedShare": (len(fill_failed) / len(topped)) if topped else None,
         "fillAddedGb": round(added, 2) if (finished and any(u["storage"] for u in finished)) else None,
         "fillPlannedGb": planned, "fillUploadedGb": uploaded,
         # Reached-ness only means something once the run is over.

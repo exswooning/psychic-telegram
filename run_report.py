@@ -379,6 +379,14 @@ def _seed_next_steps(facts: dict, bench: dict) -> list[str]:
         steps.append(f"{seed['failedServiceUsers']} user(s) finished with a failed service "
                      f"({', '.join(sorted(seed.get('failedServices') or {}))}). Their data for that "
                      "service is missing.")
+    if seed.get("fillFailedUsers"):
+        why = ", ".join(f"{n} x {c}" for c, n in sorted((seed.get("fillFailures") or {}).items(), key=lambda kv: -kv[1]))
+        steps.append(f"{seed['fillFailedUsers']} user(s) had their storage fill refused ({why}). "
+                     + ("storageQuotaExceeded on a pooled tenant means the POOL ran out, not that those "
+                        "accounts are full: free space (accounts far above their own share are the usual "
+                        "cause -- Seed Wizard > Top up > Remove filler previews and trims them), then run "
+                        "the same fill again; a top-up only ever adds, so it finishes the tail."
+                        if "storageQuotaExceeded" in why else "Run the fill again; a top-up only ever adds."))
     if seed.get("mode") == "fill" and seed.get("fillReached") is not None and seed["fillReached"] < 0.98:
         steps.append("The fill stopped short of its target. Run it again: a top-up only ever adds.")
     if bench["verdict"] == "PASS":

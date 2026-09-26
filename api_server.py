@@ -1486,6 +1486,59 @@ async def seed_trim_filler_status(account_id: int | None = None, op: Operator = 
     return await _off_loop(_trim_status, aid)
 
 
+def _completed_across(account_ids: list[int] | None) -> list[dict]:
+    """Finished runs, newest first, each labelled with the account and tenant it
+    belongs to. `None` means every account that has any record.
+
+    webui.completed_jobs reads one account's archive; this is the same read, over
+    more of them. Running jobs were already listed across accounts (that is what
+    the header chip shows), so a job an operator watched running for twelve hours
+    fell out of view the moment it FINISHED -- it was in another account's list.
+    """
+    import webui
+    root = os.path.dirname(os.path.dirname(webui.job_result_path(0, "x")))
+    if account_ids is None:
+        try:
+            account_ids = sorted(int(n) for n in os.listdir(root) if n.isdigit())
+        except OSError:
+            account_ids = []
+    rows: list[dict] = []
+    for aid in account_ids:
+        try:
+            from config import Settings
+            st = Settings(account_id=aid)
+            src, tgt = st.source_domain or None, st.target_domain or None
+        except Exception:      # noqa: BLE001 - an account with no tenant config still has a history
+            src = tgt = None
+        for r in webui.completed_jobs(aid):
+            rows.append({**r, "accountId": aid, "sourceDomain": src, "targetDomain": tgt})
+    rows.sort(key=lambda r: r.get("finished") or 0, reverse=True)
+    return rows[:300]
+
+
+@app.get("/api/v2/jobs/completed")
+async def jobs_completed(op: Operator = Depends(operator)):
+    """Finished runs. A superadmin sees every account's -- they watch other
+    accounts' jobs run, and what those jobs did must not vanish from the same
+    page when they end. Anyone else sees their own account's."""
+    require_login(op)
+    if op.is_superadmin:
+        return {"jobs": await _off_loop(_completed_across, None)}
+    return {"jobs": await _off_loop(_completed_across, [op.account_id] if op.account_id else [])}
+
+
+@app.get("/api/v2/jobs/history")
+async def jobs_history(run: str, account_id: int, op: Operator = Depends(operator)):
+    """One archived run, with its transcript, for the account that ran it."""
+    require_login(op)
+    _require_account_access(account_id, op)
+
+    def _load():
+        import webui
+        return webui.load_job_archive(account_id, run)     # validates `run` against its own pattern
+    return {"result": await _off_loop(_load)}
+
+
 @app.post("/api/v2/jobs/{pid}/stop")
 async def job_stop(pid: int, body: JobSignal, op: Operator = Depends(operator)):
     def _stop() -> tuple[bool, str]:

@@ -17,6 +17,7 @@ import {
   fetchFullSetupStatus, FullSetupStatus,
   fetchDwdStatus, fetchFleet, FleetNode, fetchActiveJobs,
   fetchMe, startMigration, stopJob as stopFleetJob,
+  fetchCompletedJobsAcrossAccounts, fetchJobHistoryFor,
 } from '@/api/controlPlane'
 import {
   fetchJob, fetchJobHistory, fetchCompletedJobs, runSeed, fetchSeedScopes,
@@ -121,7 +122,12 @@ const Jobs: React.FC = () => {
   // this page does not have to.
   const [done, setDone] = useState<CompletedJob[]>([])
   useEffect(() => {
-    fetchCompletedJobs().then(setDone).catch(() => setDone([]))
+    // Across accounts where the caller may see them: running jobs are listed
+    // from every account, so a finished one must not drop out of view because
+    // it belonged to a different account than the one signed in.
+    fetchCompletedJobsAcrossAccounts()
+      .catch(() => fetchCompletedJobs())
+      .then(setDone).catch(() => setDone([]))
   }, [running.length])
   const [openDone, setOpenDone] = useState<RunningJob | null>(null)
   // Which finished run a retry is in flight for, and what came back.
@@ -276,7 +282,7 @@ const Jobs: React.FC = () => {
     setRetrying(key)
     setRetryMsg(null)
     try {
-      const r = await retryJob(d.name, d.runId)
+      const r = await retryJob(d.name, d.runId, d.accountId, fetchJobHistoryFor)
       setRetryMsg({ ok: r.ok, text: r.ok
         ? (r.queued ? (r.msg || 'queued — it will start on its own') : `${d.name} started again`)
         : (r.error || 'could not start') })
@@ -323,7 +329,9 @@ const Jobs: React.FC = () => {
         onOpen={async () => {
           // The lines are fetched only when one is opened: most never are,
           // and a finished seed carries thousands.
-          const full = await fetchJobHistory(d.name, d.runId).catch(() => null)
+          const full = await (d.accountId != null && d.runId
+            ? fetchJobHistoryFor(d.accountId, d.runId)
+            : fetchJobHistory(d.name, d.runId)).catch(() => null)
           setOpenDone({
             key: `done-${key}`, kind: jobKind(d.name), label: d.name,
             detail: `exit ${d.rc ?? '?'} — ${d.lineCount.toLocaleString()} line(s)`,
