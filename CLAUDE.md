@@ -112,6 +112,13 @@ is fully exposed. `sync_vps.sh` checks for either process before restarting
 and warns if one is running — **do not deploy while a real migration, setup,
 or seed job is in flight** without heeding that warning.
 
+**Stop is cooperative, and only looks between items.** SIGINT sets a flag the
+Drive walk reads between files, so one file with a hundred slow grants keeps a
+"stopped" run alive for an hour. The Jobs page's second press on the same run
+sends SIGKILL (`POST /api/v2/jobs/{pid}/stop` with `force`, audited as
+`job.force-stop`, refused for any pid `webui._external_processes()` does not
+list). Work already in the ledger survives; a file mid-copy does not.
+
 **The dead man switch (`deadman.py`) is a real, destructive automation**,
 armed on the production VPS. `require_checkin` mode means *only* a current
 TOTP code from the dedicated check-in account resets its countdown — logins,
