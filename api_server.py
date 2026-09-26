@@ -5453,6 +5453,16 @@ async def link_domains(body: LinkDomains, op: Operator = Depends(operator)):
                 "in the Setup Wizard so it gets a service account of its "
                 "own, then link them.")
 
+        # Record what these slots hold NOW, while their keys are still the outgoing
+        # ones. accounts_auth.update_tenant_config snapshots too, but it runs AFTER the
+        # copy below, when the slot's file already holds the INCOMING key -- so the
+        # "backup" of the evicted domain was a copy of the domain that replaced it,
+        # and re-linking the evicted domain later wired it to the wrong tenant's key
+        # (delegation 0/11, reported as a healthy link). snapshot_superseded is
+        # idempotent, so the later call becomes a no-op.
+        for slot, cfg in (("source", scfg), ("target", tcfg)):
+            accounts_auth.snapshot_superseded(op.account_id, slot, cfg["domain"])
+
         dest_dir = os.path.join(HERE, "keys", str(op.account_id))
         os.makedirs(dest_dir, exist_ok=True)
         stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())

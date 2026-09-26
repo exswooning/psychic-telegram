@@ -1905,6 +1905,41 @@ class TestLinkingTwoSetUpDomains:
         assert dest.is_file()
         assert json.loads(dest.read_text())["client_id"] == "111"
 
+    def test_the_backup_of_an_evicted_domain_is_its_own_key_not_the_one_that_replaced_it(self, cp, tmp_path, monkeypatch):
+        """Live, on account 3: linking a new target evicted target2, and the record
+        of target2 held a copy of the NEW target's key. Linking target2 back then
+        wired it to the wrong tenant's service account -- delegation 0/11 -- and
+        reported success. The snapshot has to be taken before the key is copied."""
+        import api_server, accounts_auth
+        a = self._signed_in(cp, "evA@ex.com"); cp.post("/api/v2/auth/logout")
+        b = self._signed_in(cp, "evB@ex.com"); cp.post("/api/v2/auth/logout")
+        boss = self._signed_in(cp, "evboss@ex.com")
+        accounts_auth.promote_to_superadmin("evboss@ex.com")
+        monkeypatch.setattr(api_server, "HERE", str(tmp_path))
+        monkeypatch.setattr(accounts_auth, "HERE", str(tmp_path))
+        self._donor(tmp_path, accounts_auth, a, "source", "srcdom.com", "111")
+        self._donor(tmp_path, accounts_auth, b, "target", "newtarget.com", "222")
+        self._donor(tmp_path, accounts_auth, boss, "target", "oldtarget.com", "333")      # what the slot holds now
+
+        r = cp.post("/api/v2/setup/link-domains", headers=ADMIN, json={
+            "reason": "link a new target", "source_account_id": a, "source_side": "source",
+            "target_account_id": b, "target_side": "target"})
+        assert r.status_code == 200 and r.json()["ok"] is True, r.text
+        slot = tmp_path / "keys" / str(boss) / "target-sa.json"
+        assert json.loads(slot.read_text())["client_id"] == "222"             # the new one is live
+
+        evicted = next(x for x in accounts_auth.list_superseded(boss) if x["domain"] == "oldtarget.com")
+        backup = tmp_path / evicted["key_path"]
+        assert json.loads(backup.read_text())["client_id"] == "333", "the backup holds the wrong tenant's key"
+
+        # ...so linking the evicted domain back really restores it.
+        r = cp.post("/api/v2/setup/link-domains", headers=ADMIN, json={
+            "reason": "link it back", "source_account_id": a, "source_side": "source",
+            "target_account_id": boss, "target_side": "target", "target_superseded_id": evicted["id"]})
+        assert r.status_code == 200 and r.json()["ok"] is True, r.text
+        assert accounts_auth.get_tenant_config(boss, "target")["domain"] == "oldtarget.com"
+        assert json.loads(slot.read_text())["client_id"] == "333"
+
     def test_a_superseded_domain_can_be_linked_back_in(self, cp, tmp_path,
                                                        monkeypatch):
         """The whole reason 009_superseded_configs.sql keeps an evicted
