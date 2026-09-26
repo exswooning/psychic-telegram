@@ -34,6 +34,7 @@ import metrics
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload  # noqa: F401
 
 from config import EXPORT_MIME_MAP, FOLDER_MIME, SHORTCUT_MIME, Settings
+from sample_budget import Budget
 from resilience import (AdaptiveRateLimiter, PermanentAPIError, QuotaExhausted,
                         RateLimiter, retry_on_google_error, shutdown_requested)
 
@@ -267,6 +268,7 @@ def _is_quota_rejection(exc: Exception) -> bool:
 class DriveMigrator:
     def __init__(self, auth, db, settings: Settings, source_user: str,
                  target_user: str, quota):
+        self.budget = Budget(getattr(settings, "sample_limit", None))
         self.auth = auth
         self.db = db
         self.settings = settings
@@ -820,6 +822,10 @@ class DriveMigrator:
             # below, which this mirrors.
             if shutdown_requested():
                 break
+            # A sample has seen enough: stop here rather than walk on and create
+            # folders nothing will be put in.
+            if self.budget.exhausted:
+                break
             mime = item.get("mimeType")
             if mime == FOLDER_MIME:
                 tgt_id = self._sync_folder(item, tgt_parent)
@@ -828,6 +834,11 @@ class DriveMigrator:
             elif mime == SHORTCUT_MIME:
                 self._defer_shortcut(item, tgt_parent)
             else:
+                # Spent when a file is FOUND, not when it is synced (which is after
+                # this loop): otherwise every folder is walked into and created
+                # before the budget has noticed anything was taken.
+                if not self.budget.take():
+                    break
                 files.append(item)
         self._sync_files(files, tgt_parent)
 

@@ -363,7 +363,10 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
     # state -- otherwise running --dry-run before the real migrate (exactly
     # the sequence this tool's own docs recommend) marks every user DONE and
     # the real run then skips all of them as "already done".
-    track_status = not settings.dry_run
+    # A SAMPLE run (SAMPLE_LIMIT) is the same: it copied a slice, so it must not mark
+    # the user DONE or record any service as done -- the next full migration would
+    # skip them as finished and never copy the rest, while every screen said done.
+    track_status = not settings.dry_run and getattr(settings, "sample_limit", None) is None
 
     # Nothing to do is not the same as done. `delta --services all` reached
     # here with the literal service name "all", which matches none of the
@@ -852,7 +855,7 @@ def demote_stale_running(db) -> int:
 
 
 def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
-                           only=None, passes=None) -> list[dict]:
+                           only=None, passes=None, after=None) -> list[dict]:
     """run_batch under the memory watchdog; exits PAUSED if it fires.
 
     Registration lives HERE rather than at the call sites, because putting
@@ -916,6 +919,17 @@ def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
                 # asked it to stop, is the opposite of what either means.
                 if MEMORY_PAUSE.is_set() or SHUTDOWN.is_set():
                     break
+            # `after` (cmd_migrate --verify-after) runs INSIDE the registration: the
+            # run is still the run while it checks its own work, and leaving the
+            # admission table first would show it finished, hand its slot to
+            # another job and prompt the watcher to report on a run mid-flight.
+            # Not after a Stop or a pause: an incomplete run has nothing to verify.
+            if after is not None and not (MEMORY_PAUSE.is_set() or SHUTDOWN.is_set()):
+                try:
+                    after(results)
+                except Exception as exc:      # noqa: BLE001 - a failed check must not undo the copy
+                    log.exception("the post-run check failed")
+                    print(f"VERIFY FAILED: {type(exc).__name__}: {exc}", flush=True)
     finally:
         stop.set()
         watchdog.join(timeout=WATCHDOG_POLL_SEC * 2 + 1)
@@ -1573,10 +1587,21 @@ def ordered_passes(services: set[str]) -> list[set[str]]:
 def cmd_migrate(args, settings: Settings, db: MigrationDB, auth: AuthManager):
     services = resolve_services(args.services)
     _enable_selected_services(settings, services)
+    after = None
+    if getattr(args, "verify_after", False):
+        def after(results):
+            # Every user this run touched, checked one to one against the target.
+            import verify_sample
+            from resilience import retry_on_google_error
+            users = sorted({r["source"] for r in results if r.get("source")})
+            verify_sample.run_and_save(
+                auth, db, settings, users, tuple(sorted(services)),
+                retry=retry_on_google_error(max_retries=settings.max_retries), progress=lambda m: print(m, flush=True))
     results = _run_with_memory_pause(
         auth, db, settings, services, delta=False, delta_days=0,
         only=args.user,
-        passes=ordered_passes(services) if getattr(args, "ordered", False) else None)
+        passes=ordered_passes(services) if getattr(args, "ordered", False) else None,
+        after=after)
     _print_batch_summary(results, services)
     _auto_repair(db, auth, settings)
 
@@ -2123,6 +2148,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "per-user service; run shared_drives.py, or use "
                         "phases.py which sequences both.")
     s.add_argument("--user", action="append", help="limit to specific user(s)")
+    s.add_argument("--verify-after", action="store_true",
+                   help="when the run ends, compare every user it touched with the "
+                        "target one to one (verify_sample.py) and save the evidence "
+                        "under logs/quick/. Read-only; how a quick migration checks "
+                        "itself with nobody watching.")
     s.add_argument("--ordered", action="store_true",
                    help="run the services as separate passes across ALL users -- "
                         "Drive, then mail, then the rest -- instead of "

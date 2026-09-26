@@ -317,6 +317,11 @@ class StartMigration(WriteAction):
     #           must run AFTER this one (see migrate_start). The migration
     #           dialog defaults to this.
     mail_mode: Literal["engine", "dms", "split"] = "engine"
+    # A SAMPLE run: consider at most this many items of each service per user
+    # (the first N found), and leave the users UNFINISHED so the next full
+    # migration still copies the rest. For a quick copy small enough to check one to
+    # one. Always the engine, and always ordered.
+    sample: int | None = Field(default=None, ge=1, le=1000)
 
 
 class TrimFillerRequest(WriteAction):
@@ -1425,13 +1430,25 @@ async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
     # migrate into an empty account of their own and report success.
     account_id = _resolve_account(body, op)
 
+    if body.sample is not None and body.mail_mode != "engine":
+        # Split leaves the rest of the mail to the DMS and dms takes all of it, so
+        # either way the mail could not be compared one to one -- the reason to
+        # take a sample at all.
+        raise HTTPException(400, "a sample moves its mail through this tool; "
+                                 f"mail_mode {body.mail_mode!r} would leave it to the DMS")
     services, env, ordered = _mail_plan(body.services, body.mail_mode)
+    if body.sample is not None:
+        env = {**(env or os.environ), "SAMPLE_LIMIT": str(body.sample)}
+        ordered = True      # Drive first, so links in the sampled mail can resolve
     argv = [PY, "main.py"] + _account_argv(account_id)
     if body.dry_run:
         argv.append("--dry-run")
     argv += ["migrate", "--services", ",".join(services)]
     if ordered:
         argv.append("--ordered")
+    if body.sample is not None:
+        # The run checks itself when it ends, on the server, with nobody watching.
+        argv.append("--verify-after")
     for u in body.users:
         argv += ["--user", u]
     target = ",".join(body.users) if body.users else "ALL"
@@ -1440,6 +1457,36 @@ async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
     launch = ((lambda: _run_admitted(argv, account_id, "migrate", env=env)) if env
               else (lambda: _run_admitted(argv, account_id, "migrate")))
     return await _gated(op, "migrate.start", body, target, launch)
+
+
+@app.get("/api/v2/quick/latest")
+async def quick_latest(account_id: int | None = None, op: Operator = Depends(operator)):
+    """The newest one-to-one verification a quick migration saved for this account,
+    or null. Written by the run itself on the server, so it is here whether or not
+    anyone was watching when it finished."""
+    require_login(op)
+    aid = account_id if account_id is not None else op.account_id
+    if not aid:
+        return {"report": None}
+    _require_account_access(aid, op)
+    import verify_sample
+    return {"report": await _off_loop(verify_sample.latest, aid)}
+
+
+@app.get("/api/v2/quick/latest.md")
+async def quick_latest_markdown(account_id: int | None = None, op: Operator = Depends(operator)):
+    """The same verification as a document to read or hand to Claude Code."""
+    require_login(op)
+    aid = account_id if account_id is not None else op.account_id
+    if not aid:
+        raise HTTPException(404, "no account in context")
+    _require_account_access(aid, op)
+    import verify_sample
+    path = os.path.join(verify_sample.quick_dir(aid), "latest.md")
+    if not os.path.isfile(path):
+        raise HTTPException(404, "no quick migration has been verified yet")
+    return FileResponse(path, media_type="text/markdown", filename=f"quick-verification-{aid}.md",
+                        content_disposition_type="attachment")
 
 
 @app.post("/api/v2/migrate/delta")

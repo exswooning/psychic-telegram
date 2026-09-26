@@ -29,6 +29,7 @@ from google.auth.exceptions import RefreshError
 from googleapiclient.http import MediaFileUpload  # noqa: F401
 
 from config import DEFERRED_TO_DMS, Settings
+from sample_budget import Budget
 from link_rewrite import has_drive_link, rewrite_raw
 from resilience import (PermanentAPIError, RateLimiter, TransportExhausted,
                         retry_on_google_error, shutdown_requested)
@@ -53,6 +54,7 @@ LARGE_MESSAGE_THRESHOLD = 5 * 1024 * 1024
 
 class GmailMigrator:
     def __init__(self, auth, db, settings: Settings, source_user: str, target_user: str):
+        self.budget = Budget(getattr(settings, "sample_limit", None))
         self.auth = auth
         self.db = db
         self.settings = settings
@@ -340,6 +342,8 @@ class GmailMigrator:
                 includeSpamTrash=True,
             ).execute())
             for m in resp.get("messages", []):
+                if not self.budget.take():
+                    return
                 yield m
             token = resp.get("nextPageToken")
             if not token:

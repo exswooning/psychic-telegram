@@ -6,6 +6,9 @@ import MigrationDetail from './MigrationDetail'
 const fetchMigrationDetail = vi.fn()
 const startDelta = vi.fn()
 const startMigration = vi.fn()
+vi.mock('@/components/QuickVerification', () => ({
+  default: ({ accountId }: { accountId: number }) => <div data-testid="quick-panel">{accountId}</div>,
+}))
 vi.mock('@/components/RunReports', () => ({
   default: ({ accountId }: { accountId?: number }) => <div data-testid="reports-panel">{accountId}</div>,
 }))
@@ -369,3 +372,102 @@ describe('MigrationDetail: what a split run says about itself', () => {
     expect(screen.queryByTestId('run-pass')).toBeNull()
   })
 })
+
+
+/*
+ * Quick migrate: a small slice of each user's data, small enough to check one to one.
+ * What must hold: it asks the server for a SAMPLE, always through the engine (a
+ * sample handed to the DMS could not be compared), names its users on the SOURCE
+ * tenant, and refuses a nonsense limit before anything is sent.
+ */
+describe('MigrationDetail: quick migrate', () => {
+  beforeEach(() => { vi.clearAllMocks(); startMigration.mockResolvedValue({ ok: true, actionId: 1, detail: 'started' }) })
+
+  const open = async () => {
+    show(detail())
+    fireEvent.click(await screen.findByTestId('run-quick'))
+    await screen.findByText(/Quick migrate from/)
+  }
+  const send = async () => {
+    fireEvent.change(screen.getByLabelText('Reason Code'), { target: { value: 'sample check' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+  }
+  const field = (id: string) => screen.getByTestId(id) as HTMLInputElement
+
+  it('offers a few users to start with, so one click is a small run', async () => {
+    await open()
+    expect(field('quick-users').value).toBe('zane@source.example.com, ada@source.example.com')
+    expect(field('quick-limit').value).toBe('20')
+  })
+
+  it('asks the server for a sample through the engine, for the users and services chosen', async () => {
+    await open(); await send()
+    await waitFor(() => expect(startMigration).toHaveBeenCalled())
+    const [, services, users, dry, account, mode, sample] = startMigration.mock.calls[0]
+    expect(services).toEqual(['drive', 'gmail', 'calendar', 'contacts', 'tasks'])       // chat is never sampled
+    expect(users).toEqual(['zane@source.example.com', 'ada@source.example.com'])
+    expect([dry, account, mode, sample]).toEqual([false, 7, 'engine', 20])
+  })
+
+  it('takes a bare name as the address on the SOURCE tenant', async () => {
+    await open()
+    fireEvent.change(field('quick-users'), { target: { value: 'george, ivan@elsewhere.com' } })
+    await send()
+    await waitFor(() => expect(startMigration).toHaveBeenCalled())
+    expect(startMigration.mock.calls[0][2]).toEqual(['george@source.example.com', 'ivan@elsewhere.com'])
+  })
+
+  it('sends the limit and services as changed', async () => {
+    await open()
+    fireEvent.change(field('quick-limit'), { target: { value: '5' } })
+    fireEvent.click(screen.getByTestId('quick-svc-gmail'))
+    await send()
+    await waitFor(() => expect(startMigration).toHaveBeenCalled())
+    expect(startMigration.mock.calls[0][6]).toBe(5)
+    expect(startMigration.mock.calls[0][1]).not.toContain('gmail')
+  })
+
+  it('says blank means every user, and creates accounts', async () => {
+    await open()
+    expect(screen.getByText(/Blank means EVERY user/)).toBeInTheDocument()
+    expect(screen.getByText(/licences/)).toBeInTheDocument()
+  })
+
+  it('says the users are left unfinished, so a full migration still copies the rest', async () => {
+    await open()
+    expect(screen.getByText(/unfinished/)).toBeInTheDocument()
+  })
+
+  it.each(['0', '-3', '1001', '2.5', ''])('refuses %j before anything is sent', async (bad) => {
+    await open()
+    fireEvent.change(field('quick-limit'), { target: { value: bad } })
+    await send()
+    expect(await screen.findByText(/whole number from 1 to 1000/)).toBeInTheDocument()
+    expect(startMigration).not.toHaveBeenCalled()
+  })
+
+  it('refuses no services', async () => {
+    await open()
+    for (const svc of ['drive', 'gmail', 'calendar', 'contacts', 'tasks']) fireEvent.click(screen.getByTestId(`quick-svc-${svc}`))
+    await send()
+    expect(await screen.findByText(/Tick at least one service/)).toBeInTheDocument()
+    expect(startMigration).not.toHaveBeenCalled()
+  })
+
+  it('shows why the server refused it', async () => {
+    startMigration.mockResolvedValue({ ok: false, actionId: 1, detail: 'the box is at capacity' })
+    await open(); await send()
+    expect(await screen.findByText('the box is at capacity')).toBeInTheDocument()
+  })
+
+  it('cannot be started while a migration is running', async () => {
+    show(detail({ running: true }))
+    expect(await screen.findByTestId('run-quick')).toBeDisabled()
+  })
+
+  it('puts the saved verification on the page', async () => {
+    show(detail())
+    expect(await screen.findByTestId('quick-panel')).toHaveTextContent('7')
+  })
+})
+

@@ -278,15 +278,18 @@ export type MailMode = 'engine' | 'dms' | 'split'
 
 export const startMigration = (
   reason: string, services: string[], users: string[], dryRun = false,
-  accountId?: number, mailMode?: MailMode) =>
+  accountId?: number, mailMode?: MailMode, sample?: number) =>
   cpFetch<ActionResult>('/api/v2/migrate/start', {
     method: 'POST',
     // accountId is the migration on screen. Without it the server falls back
     // to the caller's own account -- the same trap the delta button hit.
     // mail_mode omitted means the engine, exactly as before it existed.
+    // sample: a quick run that copies only the first N items of each service per
+    // user and leaves the users unfinished (see sample_budget.py).
     body: JSON.stringify({ reason, services, users, dry_run: dryRun,
                            account_id: accountId ?? null,
-                           ...(mailMode ? { mail_mode: mailMode } : {}) }),
+                           ...(mailMode ? { mail_mode: mailMode } : {}),
+                           ...(sample ? { sample } : {}) }),
   })
 
 export const stopJob = (pid: number, reason: string) =>
@@ -1440,6 +1443,33 @@ export const fetchCompletedJobsAcrossAccounts = () =>
 export const fetchJobHistoryFor = (accountId: number, runId: string) =>
   cpFetch<{ result: import('@/api/client').JobResult | null }>(
     `/api/v2/jobs/history?account_id=${accountId}&run=${encodeURIComponent(runId)}`).then((r) => r.result)
+
+/* The one-to-one verification a quick migration saves for itself (verify_sample.py). */
+export type QuickVerdict = 'IDENTICAL' | 'DIFFERENCES' | 'INCOMPLETE'
+export interface QuickServiceResult {
+  checked: number; identical: number
+  differences: unknown[]; missing: unknown[]; duplicates: unknown[]
+  extras: unknown[]; notCopied: unknown[]; errors: string[]
+}
+export interface QuickReport {
+  generatedAt: string
+  verdict: QuickVerdict
+  sourceDomain: string; targetDomain: string
+  sampleLimit: number | null
+  services: string[]
+  reasons: string[]
+  totals: {
+    checked: number; identical: number; differences: number; missing: number
+    duplicates: number; extras: number; notCopied: number; errors: number
+    filesOpened: number; bytesCompared: number
+  }
+  users: Record<string, Record<string, QuickServiceResult>>
+}
+export const fetchQuickLatest = (accountId?: number) =>
+  cpFetch<{ report: QuickReport | null }>(`/api/v2/quick/latest${accountId ? `?account_id=${accountId}` : ''}`)
+    .then((r) => r.report)
+export const quickReportUrl = (accountId?: number) =>
+  `${CP_BASE}/api/v2/quick/latest.md${accountId ? `?account_id=${accountId}` : ''}`
 
 /* Trim filler: the reverse of a fill (seed_sandbox.py --trim-filler). */
 export interface TrimStatus {

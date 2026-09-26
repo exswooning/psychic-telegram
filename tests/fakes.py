@@ -878,10 +878,20 @@ class _GmailMessages:
     def get(self, **kw):
         return _Call(self.s, "messages.get", self._get, kw)
 
-    def _get(self, id: str, **_):
+    def _get(self, id: str, format: str = "", **_):
         if id not in self.s.messages:
             raise http_error(404, "notFound", id)
-        return copy.deepcopy(self.s.messages[id])
+        out = copy.deepcopy(self.s.messages[id])
+        if format in ("metadata", "minimal", "full"):
+            # What the real API returns for these: the headers parsed out, not the
+            # raw bytes. Enough for callers that ask only for a header.
+            import email as _email
+            raw = out.get("raw") or ""
+            msg = _email.message_from_bytes(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)))
+            out["payload"] = {"headers": [{"name": k, "value": str(v)} for k, v in msg.items()]}
+            if format != "full":
+                out.pop("raw", None)
+        return out
 
     def insert(self, **kw):
         return _Call(self.s, "messages.insert", self._insert, kw)
@@ -1220,6 +1230,15 @@ class _CalEvents:
         if start + maxResults < len(rows):
             out["nextPageToken"] = str(start + maxResults)
         return out
+
+    def get(self, **kw):
+        return _Call(self.s, "events.get", self._get, kw)
+
+    def _get(self, eventId: str, calendarId: str = "primary", **_):
+        source = (self.s.store if calendarId == "primary" else self.s.cal_events[calendarId])
+        if eventId not in source:
+            raise http_error(404, "notFound", eventId)
+        return copy.deepcopy(source[eventId])
 
     # The whole point of Module 4b. If anyone swaps this for insert, every
     # attendee of every historical meeting gets an invitation.
@@ -1659,6 +1678,14 @@ class _PeoplePeople:
 
     def _list(self, **_):
         return {"connections": [copy.deepcopy(v) for v in self.s.contacts.values()]}
+
+    def get(self, **kw):
+        return _Call(self.s, "people.get", self._get, kw)
+
+    def _get(self, resourceName: str, **_):
+        if resourceName not in self.s.contacts:
+            raise http_error(404, "notFound", resourceName)
+        return copy.deepcopy(self.s.contacts[resourceName])
 
     def createContact(self, **kw):
         return _Call(self.s, "people.createContact", self._create, kw)

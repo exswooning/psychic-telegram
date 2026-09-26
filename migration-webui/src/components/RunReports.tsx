@@ -131,12 +131,22 @@ export const RunReports: React.FC<{
               </Typography>
             </Box>
             <Stack direction="row" spacing={0.75}>
-              <Button size="small" variant="outlined" startIcon={<PdfIcon />} component="a"
-                      href={reportUrl(r.id, 'human', r.accountId ?? accountId)} download disabled={!r.files.includes('human.pdf')}
-                      data-testid={`pdf-human-${r.id}`}>Human PDF</Button>
-              <Button size="small" variant="outlined" startIcon={<ClaudeIcon />} component="a"
-                      href={reportUrl(r.id, 'claude', r.accountId ?? accountId)} download disabled={!r.files.includes('claude.pdf')}
-                      data-testid={`pdf-claude-${r.id}`}>Claude PDF</Button>
+              {/* Different documents, not two copies: the human one is a summary to
+                  read; the Claude one is the evidence to fix from. */}
+              <Tooltip title="A summary to read: the numbers at a glance, every benchmark with its target, what went wrong, and what to do next.">
+                <span>
+                  <Button size="small" variant="outlined" startIcon={<PdfIcon />} component="a"
+                          href={reportUrl(r.id, 'human', r.accountId ?? accountId)} download disabled={!r.files.includes('human.pdf')}
+                          data-testid={`pdf-human-${r.id}`}>Human PDF</Button>
+                </span>
+              </Tooltip>
+              <Tooltip title="The evidence to hand to Claude Code to fix a problem: exit code and timings, each failing benchmark with its metric and why it matters, the full error messages, ledger totals, configuration, environment, and the tail of the log.">
+                <span>
+                  <Button size="small" variant="outlined" startIcon={<ClaudeIcon />} component="a"
+                          href={reportUrl(r.id, 'claude', r.accountId ?? accountId)} download disabled={!r.files.includes('claude.pdf')}
+                          data-testid={`pdf-claude-${r.id}`}>Claude PDF</Button>
+                </span>
+              </Tooltip>
               <Button size="small" startIcon={<JsonIcon />} component="a"
                       href={reportUrl(r.id, 'json', r.accountId ?? accountId)} target="_blank" rel="noreferrer">JSON</Button>
             </Stack>

@@ -24,6 +24,7 @@ import logging
 from google.auth.exceptions import RefreshError
 
 from config import Settings
+from sample_budget import Budget
 from resilience import (PermanentAPIError, RateLimiter, retry_on_google_error,
                         shutdown_requested)
 
@@ -42,6 +43,7 @@ _PATCH_KEYS = ("summary", "description", "location", "start", "end", "status")
 
 class CalendarMigrator:
     def __init__(self, auth, db, settings: Settings, source_user: str, target_user: str):
+        self.budget = Budget(getattr(settings, "sample_limit", None))
         self.auth = auth
         self.db = db
         self.settings = settings
@@ -72,6 +74,8 @@ class CalendarMigrator:
                 kw["updatedMin"] = updated_min
             resp = self._retry(lambda kw=kw: self.src.events().list(**kw).execute())
             for e in resp.get("items", []):
+                if not self.budget.take():
+                    return
                 yield e
             token = resp.get("nextPageToken")
             if not token:

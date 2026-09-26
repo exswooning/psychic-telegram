@@ -666,6 +666,17 @@ class Settings:
     mail_only_with_links: bool = field(
         default_factory=lambda: _env_bool("MAIL_ONLY_WITH_LINKS", False)
     )
+    # A SAMPLE run: consider at most this many items of each service per user, and
+    # leave the user unfinished. None (the default) is an ordinary migration.
+    #
+    # Unfinished matters as much as small: a sample that marked a user DONE would be
+    # skipped by the next full migration, and the rest of their data would never be
+    # copied while every screen said the user was done. See main.migrate_user.
+    sample_limit: int | None = field(
+        default_factory=lambda: (int(os.environ["SAMPLE_LIMIT"])
+                                 if (os.environ.get("SAMPLE_LIMIT") or "").strip().isdigit()
+                                 and int(os.environ["SAMPLE_LIMIT"]) > 0 else None)
+    )
     # Redo mail that was migrated before rewriting was switched on.
     #
     # Off, and destructive, so it stays opt-in. A migrated message cannot be

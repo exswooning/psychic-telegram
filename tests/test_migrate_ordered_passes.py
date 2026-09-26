@@ -68,8 +68,8 @@ def runner(monkeypatch, settings, db, capsys):
     monkeypatch.setattr(main, "_metrics_flusher", lambda stop, *a, **k: stop.wait(0.01))
     main.MEMORY_PAUSE.clear(); main.SHUTDOWN.clear()
 
-    def run(services, plan=None, delta=False):
-        return main._run_with_memory_pause(None, db, settings, services, delta=delta, delta_days=0, passes=plan)
+    def run(services, plan=None, delta=False, after=None):
+        return main._run_with_memory_pause(None, db, settings, services, delta=delta, delta_days=0, passes=plan, after=after)
     run.passes, run.registered, run.hook, run.out = passes, registered, hook, capsys
     yield run
     main.MEMORY_PAUSE.clear(); main.SHUTDOWN.clear()
@@ -148,3 +148,56 @@ class TestTheCommand:
     def test_the_flag_defaults_off(self):
         assert main.build_parser().parse_args(["migrate"]).ordered is False
         assert main.build_parser().parse_args(["migrate", "--ordered"]).ordered is True
+
+
+class TestTheCheckAfterTheRun:
+    """--verify-after: a quick migration checks its own work on the server, inside
+    the run, with nobody watching."""
+    ALL = {"drive", "gmail"}
+
+    def test_it_runs_once_after_every_pass_and_gets_every_passs_results(self, runner):
+        seen = []
+        results = runner(self.ALL, main.ordered_passes(self.ALL), after=lambda res: seen.append(list(res)))
+        assert len(seen) == 1 and [r["source"] for r in seen[0]] == ["u1", "u2"] and len(results) == 2
+
+    def test_it_runs_INSIDE_the_registration(self, runner, monkeypatch):
+        """Or the run would leave the job table before it had finished checking, the
+        watcher would report on a run mid-flight, and its slot would go to someone
+        else."""
+        events = []
+
+        @contextlib.contextmanager
+        def reg(name, account):
+            events.append("in"); yield; events.append("out")
+        monkeypatch.setattr(main, "_registered", reg)
+        runner(self.ALL, main.ordered_passes(self.ALL), after=lambda res: events.append("check"))
+        assert events == ["in", "check", "out"]
+
+    def test_it_does_not_run_after_a_stop(self, runner):
+        runner.hook.append(lambda n: main.SHUTDOWN.set())
+        called = []
+        runner(self.ALL, main.ordered_passes(self.ALL), after=lambda res: called.append(1))
+        assert called == []
+
+    def test_a_check_that_crashes_is_reported_and_does_not_undo_the_copy(self, runner):
+        def boom(res):
+            raise RuntimeError("tenant unreachable")
+        results = runner(self.ALL, main.ordered_passes(self.ALL), after=boom)
+        assert len(results) == 2
+        assert "VERIFY FAILED: RuntimeError: tenant unreachable" in runner.out.readouterr().out
+
+    def test_no_check_unless_asked(self, runner):
+        assert main.build_parser().parse_args(["migrate"]).verify_after is False
+        assert main.build_parser().parse_args(["migrate", "--verify-after"]).verify_after is True
+
+    def test_the_command_checks_exactly_the_users_the_run_touched(self, monkeypatch, settings, db):
+        import verify_sample
+        got = {}
+        monkeypatch.setattr(verify_sample, "run_and_save", lambda auth, d, s, users, services, **kw: got.update(users=users, services=services))
+        monkeypatch.setattr(main, "_run_with_memory_pause",
+                            lambda *a, **kw: (kw["after"]([{"source": "b@x.com"}, {"source": "a@x.com"}, {"source": "a@x.com"}]) or []))
+        monkeypatch.setattr(main, "_print_batch_summary", lambda *a, **k: None)
+        monkeypatch.setattr(main, "_auto_repair", lambda *a, **k: None)
+        main.cmd_migrate(argparse.Namespace(services="drive,gmail", user=None, ordered=True, verify_after=True), settings, db, None)
+        assert got["users"] == ["a@x.com", "b@x.com"] and got["services"] == ("drive", "gmail")
+

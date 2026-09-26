@@ -5,6 +5,7 @@ import {
   Table, TableBody, TableCell, TableHead, TableRow, TextField, Typography,
   RadioGroup,
   Radio,
+  Checkbox,
   FormControlLabel,
 } from '@mui/material'
 import {
@@ -19,6 +20,7 @@ import {
 import type { MailMode } from '@/api/controlPlane'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
 import RunReports from '@/components/RunReports'
+import QuickVerification from '@/components/QuickVerification'
 
 /**
  * One migration in full: what moved, what failed, and why.
@@ -29,6 +31,10 @@ import RunReports from '@/components/RunReports'
  * anybody acts on. Affected mailboxes are named per cause because "which
  * users" is the next question every single time.
  */
+
+/** Chat is left out of a quick run: it writes messages into spaces other people
+ *  can see, which is not something to do for a sample. */
+const QUICK_SERVICES = ['drive', 'gmail', 'calendar', 'contacts', 'tasks']
 
 const Stat: React.FC<{ id: string; label: string; value: number; tone?: 'error' }> =
   ({ id, label, value, tone }) => (
@@ -62,6 +68,14 @@ export const MigrationDetail: React.FC = () => {
   // Google's DMS moves the rest, which is most of a mailbox. See the dialog.
   const [mailBy, setMailBy] = useState<MailMode>('split')
   const [fullBusy, setFullBusy] = useState(false)
+  // Quick migrate: a small slice of each user's data, small enough to check one to
+  // one. See the dialog.
+  const [askQuick, setAskQuick] = useState(false)
+  const [quickUsers, setQuickUsers] = useState('')
+  const [quickLimit, setQuickLimit] = useState('20')
+  const [quickServices, setQuickServices] = useState<string[]>(QUICK_SERVICES)
+  const [quickBusy, setQuickBusy] = useState(false)
+  const [quickError, setQuickError] = useState<string | null>(null)
   const [fullError, setFullError] = useState<string | null>(null)
   const [deltaError, setDeltaError] = useState<string | null>(null)
   const [deltaDays, setDeltaDays] = useState(2)
@@ -144,6 +158,16 @@ export const MigrationDetail: React.FC = () => {
                 onClick={() => setAskDelta(true)}>
           {d?.running ? 'migration running' : 'Run delta'}
         </Button>
+        <Button size="small" variant="outlined"
+                data-testid="run-quick"
+                disabled={d?.running || quickBusy}
+                onClick={() => {
+                  // Offer the first few users, so a click is a small run by default.
+                  if (!quickUsers) setQuickUsers((d?.users ?? []).slice(0, 3).map((u) => u.sourceUser).join(', '))
+                  setAskQuick(true)
+                }}>
+          Quick migrate
+        </Button>
         <Button size="small" variant="outlined" color="warning"
                 data-testid="run-full"
                 disabled={d?.running || fullBusy}
@@ -191,6 +215,10 @@ export const MigrationDetail: React.FC = () => {
               </Typography>
             )}
           </Stack>
+
+          {/* What the last quick migration found when it checked its own work. Fetched
+              again when a run starts or ends. */}
+          <QuickVerification accountId={Number(accountId)} refreshKey={d.running} />
 
           {p && (
             <Paper variant="outlined" sx={{ p: 2, mb: 3 }}>
@@ -696,6 +724,70 @@ export const MigrationDetail: React.FC = () => {
             setFullError((e instanceof Error ? e.message : String(e)))
           } finally {
             setFullBusy(false)
+          }
+        }}
+      />
+      <ReasonCodeDialog
+        open={askQuick}
+        busy={quickBusy}
+        error={quickError}
+        title={`Quick migrate from ${d?.sourceDomain || 'this tenant'}`}
+        description={
+          <>
+            Copies only a small slice: the first {quickLimit || 'N'} items of each
+            service you tick, for each user named. It finishes in about a minute and
+            is small enough to check one to one, and when it ends it does exactly
+            that — compares every copied item with its original, opens the files,
+            and saves the evidence. Mail goes through this tool (not the DMS) so it
+            can be compared exactly.
+            <Box sx={{ mt: 1.5 }}>
+              <Alert severity="info" sx={{ mb: 1.5 }}>
+                The users are left <strong>unfinished</strong>, so a full migration
+                afterwards still copies the rest and nothing is copied twice.
+              </Alert>
+              <TextField size="small" fullWidth label="Users" value={quickUsers}
+                         onChange={(e) => setQuickUsers(e.target.value)}
+                         inputProps={{ 'data-testid': 'quick-users' }}
+                         helperText="Comma-separated addresses or names. Blank means EVERY user — and creates any missing target accounts, which use licences." />
+              <TextField size="small" type="number" label="Items per service, per user"
+                         value={quickLimit} sx={{ mt: 1.5, width: 260 }}
+                         onChange={(e) => setQuickLimit(e.target.value)}
+                         inputProps={{ min: 1, max: 1000, 'data-testid': 'quick-limit' }} />
+              <Box sx={{ mt: 1 }}>
+                {QUICK_SERVICES.map((svc) => (
+                  <FormControlLabel key={svc} label={svc}
+                    control={<Checkbox size="small" data-testid={`quick-svc-${svc}`}
+                      checked={quickServices.includes(svc)}
+                      onChange={(e) => setQuickServices((cur) =>
+                        e.target.checked ? [...cur, svc] : cur.filter((x) => x !== svc))} />} />
+                ))}
+              </Box>
+            </Box>
+          </>
+        }
+        onCancel={() => { setAskQuick(false); setQuickError(null) }}
+        onConfirm={async (reason: string) => {
+          const limit = Number(quickLimit)
+          if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
+            setQuickError('Items per service must be a whole number from 1 to 1000.')
+            return
+          }
+          if (quickServices.length === 0) { setQuickError('Tick at least one service.'); return }
+          setQuickBusy(true); setQuickError(null)
+          try {
+            // A bare name is the person's address on the SOURCE tenant.
+            const users = quickUsers.split(',').map((u) => u.trim()).filter(Boolean)
+              .map((u) => (u.includes('@') ? u : `${u}@${d?.sourceDomain ?? ''}`))
+            const r = await startMigration(reason, quickServices, users, false,
+                                           Number(accountId), 'engine', limit)
+            if (!r.ok) throw new Error(r.detail || 'could not start')
+            setAskQuick(false)
+            setStarted(r.detail || 'quick migration started')
+            refresh()
+          } catch (e: unknown) {
+            setQuickError((e instanceof Error ? e.message : String(e)))
+          } finally {
+            setQuickBusy(false)
           }
         }}
       />

@@ -32,6 +32,8 @@ from __future__ import annotations
 
 import logging
 
+from sample_budget import Budget
+
 from resilience import (PermanentAPIError, RateLimiter, retry_on_google_error,
                         shutdown_requested)
 
@@ -98,6 +100,7 @@ def _update_time(person: dict) -> str | None:
 
 class ContactsMigrator:
     def __init__(self, auth, db, settings, source_user: str, target_user: str):
+        self.budget = Budget(getattr(settings, "sample_limit", None))
         self.auth = auth
         self.db = db
         self.settings = settings
@@ -127,6 +130,8 @@ class ContactsMigrator:
                                      pageToken=t,
                                      personFields=PERSON_FIELDS).execute())
             for p in resp.get("connections", []):
+                if not self.budget.take():
+                    return
                 yield p
             token = resp.get("nextPageToken")
             if not token:

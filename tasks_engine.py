@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import logging
 
+from sample_budget import Budget
+
 from resilience import (PermanentAPIError, RateLimiter, retry_on_google_error,
                         shutdown_requested)
 
@@ -38,6 +40,7 @@ TASK_FIELDS = ["title", "notes", "due", "status", "completed", "deleted"]
 
 class TasksMigrator:
     def __init__(self, auth, db, settings, source_user: str, target_user: str):
+        self.budget = Budget(getattr(settings, "sample_limit", None))
         self.auth = auth
         self.db = db
         self.settings = settings
@@ -180,7 +183,7 @@ class TasksMigrator:
         # already exists. Tasks nest one level in the UI but the API permits
         # deeper, so this walks generations rather than assuming two.
         by_parent: dict[str, list[dict]] = {}
-        for t in tasks:
+        for t in self.budget.trim(tasks):
             by_parent.setdefault(t.get("parent") or "", []).append(t)
 
         def emit(parent_src: str, parent_tgt: str | None) -> None:
