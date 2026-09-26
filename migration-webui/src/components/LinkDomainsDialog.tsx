@@ -41,11 +41,17 @@ export const LinkDomainsDialog: React.FC<{
   // point is that this is easy to miss: live, a target that hit its
   // licence ceiling was not discovered until three hours into a migration
   // that had already started writing data.
-  const [warning, setWarning] = useState('')
+  //
+  // Kept WITH the pair it describes, and shown only while the selection still
+  // is that pair. It used to be a bare string, so once it appeared the dialog
+  // sat in a "done" state with only Close: changing the target to a different
+  // tenant left the old pair's warning over it and no way to link the new one.
+  const [warned, setWarned] = useState<{ pair: string; text: string } | null>(null)
+  const warning = warned && warned.pair === `${src}|${tgt}` ? warned.text : ''
 
   useEffect(() => {
     if (!open) return
-    setErr(''); setWarning(''); setSrc(''); setTgt(''); setReason('')
+    setErr(''); setWarned(null); setSrc(''); setTgt(''); setReason('')
     fetchAllDomains()
       // hasKey only. A superseded domain was filtered out too, which made
       // the one thing 009_superseded_configs.sql kept it for -- re-linking
@@ -72,7 +78,7 @@ export const LinkDomainsDialog: React.FC<{
   const connect = async () => {
     const s = byKey(src); const t = byKey(tgt)
     if (!s || !t) return
-    setBusy(true); setErr(''); setWarning('')
+    setBusy(true); setErr(''); setWarned(null)
     try {
       const r = await linkDomains(reason.trim(),
         { accountId: s.accountId, side: s.side, supersededId: s.supersededId },
@@ -84,7 +90,7 @@ export const LinkDomainsDialog: React.FC<{
       // of closing on a clean run.
       const idx = r.detail.indexOf('⚠')
       if (idx === -1) { onClose(); return }
-      setWarning(r.detail.slice(idx))
+      setWarned({ pair: `${src}|${tgt}`, text: r.detail.slice(idx) })
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
     } finally {
@@ -112,7 +118,7 @@ export const LinkDomainsDialog: React.FC<{
         )}
         <Stack spacing={2}>
           <TextField select fullWidth label="Source (read from)" value={src}
-                     onChange={(e) => setSrc(e.target.value)}
+                     onChange={(e) => { setSrc(e.target.value); setErr('') }}
                      SelectProps={{ native: true }} InputLabelProps={{ shrink: true }}
                      inputProps={{ 'data-testid': 'link-source' }}
                      helperText="the tenant whose data is copied">
@@ -122,7 +128,7 @@ export const LinkDomainsDialog: React.FC<{
             ))}
           </TextField>
           <TextField select fullWidth label="Target (written to)" value={tgt}
-                     onChange={(e) => setTgt(e.target.value)}
+                     onChange={(e) => { setTgt(e.target.value); setErr('') }}
                      SelectProps={{ native: true }} InputLabelProps={{ shrink: true }}
                      error={!!tgt && tgt === src}
                      helperText={tgt && tgt === src

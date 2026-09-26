@@ -93,3 +93,80 @@ describe('LinkDomainsDialog licence-headroom warning', () => {
     expect(screen.queryByTestId('link-warning')).toBeNull()
   })
 })
+
+/*
+ * The screenshot: link source -> target, get the licence warning (300 users
+ * against 201 seats), then change the TARGET to a different tenant. The dialog
+ * stayed on "Close" with the old pair's warning over it and no way to link the
+ * new one. The warning describes the pair that was linked, so it must go when
+ * that pair is no longer what is selected.
+ */
+describe('changing the pair after a warning', () => {
+  const three = () => allDomains.mockResolvedValue({ domains: [
+    { accountId: 1, accountEmail: 'a@ex.com', side: 'source', domain: 'src.example',
+      adminEmail: 'admin@src.example', hasKey: true, clientId: '111' },
+    { accountId: 2, accountEmail: 'b@ex.com', side: 'target', domain: 'tgt.example',
+      adminEmail: 'admin@tgt.example', hasKey: true, clientId: '222' },
+    { accountId: 3, accountEmail: 'c@ex.com', side: 'target', domain: 'tgt2.example',
+      adminEmail: 'admin@tgt2.example', hasKey: true, clientId: '333' },
+  ] })
+  const warnFirst = () => linkDomains.mockResolvedValueOnce({
+    ok: true, detail: 'src.example -> tgt.example  ⚠ src.example has 300 user(s); tgt.example currently has only 201.' })
+  const setup = async () => {
+    three(); warnFirst()
+    render(<MemoryRouter><LinkDomainsDialog open onClose={vi.fn()} onLinked={vi.fn()} /></MemoryRouter>)
+    await pickAndConnect()
+    await screen.findByTestId('link-warning')
+  }
+  const changeTarget = (v: string) =>
+    fireEvent.change(screen.getByTestId('link-target'), { target: { value: v } })
+
+  it('drops the old pair\'s warning and offers to link again when the target changes', async () => {
+    await setup()
+    expect(screen.queryByTestId('link-connect')).toBeNull()          // the locked state
+    changeTarget('3:target:')
+    expect(screen.queryByTestId('link-warning')).toBeNull()
+    expect(screen.getByTestId('link-connect')).toBeEnabled()
+    expect(screen.queryByTestId('link-close')).toBeNull()
+  })
+
+  it('links the newly chosen pair, not the one that was warned about', async () => {
+    await setup()
+    changeTarget('3:target:')
+    linkDomains.mockResolvedValueOnce({ ok: true, detail: 'src.example -> tgt2.example' })
+    fireEvent.click(screen.getByTestId('link-connect'))
+    await waitFor(() => expect(linkDomains).toHaveBeenCalledTimes(2))
+    expect(linkDomains.mock.calls[1][2]).toMatchObject({ accountId: 3, side: 'target' })
+  })
+
+  it('brings the warning back if the selection returns to the pair it was about', async () => {
+    await setup()
+    changeTarget('3:target:')
+    changeTarget('2:target:')
+    expect(await screen.findByTestId('link-warning')).toHaveTextContent('300 user(s)')
+    expect(screen.getByTestId('link-close')).toBeInTheDocument()
+  })
+
+  it('changing the source also releases it', async () => {
+    three(); warnFirst()
+    allDomains.mockResolvedValue({ domains: [
+      { accountId: 1, accountEmail: 'a@ex.com', side: 'source', domain: 'src.example', adminEmail: 'x', hasKey: true, clientId: '1' },
+      { accountId: 4, accountEmail: 'd@ex.com', side: 'source', domain: 'src2.example', adminEmail: 'x', hasKey: true, clientId: '4' },
+      { accountId: 2, accountEmail: 'b@ex.com', side: 'target', domain: 'tgt.example', adminEmail: 'x', hasKey: true, clientId: '2' },
+    ] })
+    render(<MemoryRouter><LinkDomainsDialog open onClose={vi.fn()} onLinked={vi.fn()} /></MemoryRouter>)
+    await pickAndConnect(); await screen.findByTestId('link-warning')
+    fireEvent.change(screen.getByTestId('link-source'), { target: { value: '4:source:' } })
+    expect(screen.getByTestId('link-connect')).toBeEnabled()
+  })
+
+  it('a failed attempt\'s error does not outlive the selection it was about', async () => {
+    three()
+    linkDomains.mockResolvedValueOnce({ ok: false, detail: 'target has no key on file' })
+    render(<MemoryRouter><LinkDomainsDialog open onClose={vi.fn()} onLinked={vi.fn()} /></MemoryRouter>)
+    await pickAndConnect()
+    await screen.findByTestId('link-error')
+    changeTarget('3:target:')
+    expect(screen.queryByTestId('link-error')).toBeNull()
+  })
+})
