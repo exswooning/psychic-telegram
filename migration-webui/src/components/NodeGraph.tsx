@@ -18,7 +18,10 @@ import React, {
   forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState,
 } from 'react'
 import { Box, Chip, IconButton, Stack, Tooltip } from '@mui/material'
-import { Add as ZoomInIcon, FitScreen as FitIcon, Remove as ZoomOutIcon } from '@mui/icons-material'
+import {
+  Add as ZoomInIcon, FitScreen as FitIcon, Fullscreen as FullscreenIcon,
+  FullscreenExit as FullscreenExitIcon, Remove as ZoomOutIcon,
+} from '@mui/icons-material'
 import { HEAD, LIVE, NODE_W, ROW, SUB, nodeHeight } from '@/pipeline/geometry'
 
 export type Kind = 'creds' | 'items' | 'map' | 'ctl'
@@ -86,6 +89,50 @@ const NodeGraph = forwardRef<NodeGraphHandle, {
   const wrap = useRef<HTMLDivElement>(null)
   const touched = useRef(false)
   const drag = useRef({ moved: false, sx: 0, sy: 0, vx: 0, vy: 0 })
+
+  // Full screen: the browser's own Fullscreen API where it is allowed (which
+  // also hides the tabs and address bar), else the graph simply covers the
+  // window. Either way the view refits to the new size -- a manual pan or zoom
+  // stops the automatic refit, and a stale fit in a much bigger box is the
+  // graph huddled in a corner.
+  const [full, setFull] = useState(false)
+  const viaApi = useRef(false)
+  const toggleFull = () => {
+    touched.current = false
+    if (full) {
+      if (viaApi.current && document.fullscreenElement) void document.exitFullscreen?.()
+      viaApi.current = false
+      setFull(false)
+      return
+    }
+    setFull(true)
+    const el = wrap.current
+    if (el?.requestFullscreen) {
+      el.requestFullscreen().then(() => { viaApi.current = true }).catch(() => { /* the overlay stands */ })
+    }
+  }
+  useEffect(() => {
+    // Esc (or the browser's own exit) leaves the API's full screen without
+    // going through the button.
+    const onChange = () => {
+      if (viaApi.current && document.fullscreenElement !== wrap.current) {
+        viaApi.current = false
+        touched.current = false
+        setFull(false)
+      }
+    }
+    document.addEventListener('fullscreenchange', onChange)
+    return () => document.removeEventListener('fullscreenchange', onChange)
+  }, [])
+  useEffect(() => {
+    if (!full) return
+    // The overlay has no browser Esc of its own.
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !viaApi.current) { touched.current = false; setFull(false) }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [full])
 
   const box = () => {
     const r = wrap.current?.getBoundingClientRect()
@@ -194,6 +241,8 @@ const NodeGraph = forwardRef<NodeGraphHandle, {
   return (
     <Box ref={wrap} data-testid="node-graph" onPointerDown={onPointerDown}
          sx={{ position: 'relative', width: '100%', height: viewHeight, overflow: 'hidden',
+               ...(full && { position: 'fixed', inset: 0, width: '100vw', height: '100vh',
+                             zIndex: (t: { zIndex: { modal: number } }) => t.zIndex.modal + 1 }),
                bgcolor: '#1b1b1b', touchAction: 'none', cursor: dragging ? 'grabbing' : 'grab',
                userSelect: 'none',
                '& .pulse': { animation: 'pulse 1.1s linear infinite' },
@@ -306,6 +355,9 @@ const NodeGraph = forwardRef<NodeGraphHandle, {
         {([['Zoom in', <ZoomInIcon key="i" fontSize="small" />, () => { const b = box(); b && zoomAt(b.w / 2, b.h / 2, 1.25) }],
            ['Zoom out', <ZoomOutIcon key="o" fontSize="small" />, () => { const b = box(); b && zoomAt(b.w / 2, b.h / 2, 0.8) }],
            ['Fit everything', <FitIcon key="f" fontSize="small" />, () => { touched.current = true; fit() }],
+           [full ? 'Exit full screen' : 'Full screen',
+            full ? <FullscreenExitIcon key="x" fontSize="small" /> : <FullscreenIcon key="x" fontSize="small" />,
+            toggleFull],
         ] as [string, React.ReactNode, () => void][]).map(([t, icon, fn]) => (
           <Tooltip key={t} title={t} placement="left">
             <IconButton size="small" aria-label={t} onClick={fn} sx={{ color: '#ddd' }}>{icon}</IconButton>
