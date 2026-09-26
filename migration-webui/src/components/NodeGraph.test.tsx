@@ -95,6 +95,20 @@ describe('NodeGraph full screen, with the browser API', () => {
     expect(covering()).toBe(false)
   })
 
+  it('leaves the exit to the browser: an Esc the page happens to see does not desync the button', async () => {
+    /* Chrome consumes Esc to leave full screen, but a key event can still reach
+       the page (automation, some browsers). While the browser is in full screen
+       the button must not claim otherwise. */
+    grant()
+    view()
+    fireEvent.click(screen.getByRole('button', { name: 'Full screen' }))
+    await screen.findByRole('button', { name: 'Exit full screen' })
+    await act(async () => { await Promise.resolve() })
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(document.fullscreenElement).toBe(graph())
+    expect(screen.getByRole('button', { name: 'Exit full screen' })).toBeInTheDocument()
+  })
+
   it('falls back to covering the window when the browser refuses', async () => {
     const refuse = vi.fn(() => Promise.reject(new Error('not allowed')));
     (HTMLElement.prototype as { requestFullscreen?: unknown }).requestFullscreen = refuse
