@@ -34,6 +34,15 @@ TRANSFER_MODES = ("download_upload", "server_side", "link_flip")
 CHAT_SPACE_MODES = ("import", "direct")
 
 FOLDER_MIME = "application/vnd.google-apps.folder"
+
+# The audit status of a message the engine did NOT insert because it carries no
+# Drive link and was left for the DMS pass (split mode). It is DEFERRED work, not
+# a decision: until the DMS delivers it the target is missing that mail. It
+# starts with "SKIPPED" only because the engine skips it, so anything that reads
+# SKIPPED% as "deliberately declined" -- the tally's expected count, the report's
+# skipped total, the migrations page -- must treat this one apart, or a split
+# run that never reached the DMS reports mail parity as perfect.
+DEFERRED_TO_DMS = "SKIPPED_NO_DRIVE_LINK"
 SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
 
 # Native Google types this engine knows how to round-trip through an OOXML

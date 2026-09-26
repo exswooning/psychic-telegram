@@ -16,6 +16,7 @@ import {
   fetchMigrationDetail, startDelta, startMigration, runRepair,
   MigrationDetail as Detail, RepairSurvey,
 } from '@/api/controlPlane'
+import type { MailMode } from '@/api/controlPlane'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
 import RunReports from '@/components/RunReports'
 
@@ -57,7 +58,9 @@ export const MigrationDetail: React.FC = () => {
      "Start a new migration" on the list page opens the setup wizard for a
      new tenant pair, which is a different thing entirely. */
   const [askFull, setAskFull] = useState(false)
-  const [mailBy, setMailBy] = useState('engine')
+  // Split by default: the tool moves the mail that needs its links rewritten and
+  // Google's DMS moves the rest, which is most of a mailbox. See the dialog.
+  const [mailBy, setMailBy] = useState<MailMode>('split')
   const [fullBusy, setFullBusy] = useState(false)
   const [fullError, setFullError] = useState<string | null>(null)
   const [deltaError, setDeltaError] = useState<string | null>(null)
@@ -201,10 +204,40 @@ export const MigrationDetail: React.FC = () => {
                 <Stat id="items" label="items migrated" value={p.items} />
                 <Stat id="itemsskipped" label="items skipped"
                       value={p.itemsSkipped ?? 0} />
+                {/* Its own figure, never folded into "skipped": a skip is a
+                    decision, this is mail the target does not have yet. */}
+                {(p.itemsDeferred ?? 0) > 0 && (
+                  <Stat id="itemsdeferred" label="mail awaiting DMS"
+                        value={p.itemsDeferred ?? 0} tone="error" />
+                )}
                 <Stat id="itemsfailed" label="items failed" value={p.itemsFailed}
                       tone="error" />
               </Stack>
             </Paper>
+          )}
+
+          {/* Status is per user, not per service: once the Drive pass is over
+              every user reads "done" while mail has not started. Say which pass
+              the counts above belong to rather than let 300 of 300 mislead. */}
+          {d.run && (
+            <Alert severity="info" sx={{ mb: 2 }} data-testid="run-pass">
+              <strong>Pass {d.run.pass} of {d.run.of}</strong> ({d.run.services.join(', ')}).
+              Users shown as done have finished the earlier passes, not this one.
+            </Alert>
+          )}
+          {(p?.itemsDeferred ?? 0) > 0 && (
+            <Alert severity="warning" sx={{ mb: 2 }} data-testid="awaiting-dms"
+                   action={
+                     <Button color="inherit" size="small" data-testid="to-services"
+                             onClick={() => navigate('/services')}>
+                       Other services
+                     </Button>}>
+              <strong>{(p?.itemsDeferred ?? 0).toLocaleString()} mail message(s) are waiting
+              for Google&apos;s Data Migration Service</strong> and are not on the target yet.
+              Start it <em>after</em> this run has finished — before, and it moves
+              link-bearing mail without rewriting its links. A tally counts this mail as
+              still owed, so mail parity stays short until the DMS has delivered it.
+            </Alert>
           )}
 
           {/* Pressing Run delta changed nothing visible: it moves the same
@@ -591,28 +624,43 @@ export const MigrationDetail: React.FC = () => {
             changed in a short window, so it would re-copy only recent mail
             and events and leave everything older unmigrated. Anything still
             in the ledger is skipped, so this is safe to re-run.
-            {/* Mail was 349,560 of 593,816 items in the last real run --
-                58.9% -- and it is the only service behind a ceiling that
-                cannot be raised (3 sustained writes/sec/account, which
-                Google states is not adjustable). Handing it to Google's own
-                Data Migration Service sidesteps that limit instead of
-                pacing against it. Offered as a choice, not a default: DMS
-                gives per-user console status, not the per-item ledger that
-                makes a re-run here idempotent. */}
+            {/* Mail was 349,560 of 593,816 items in the last real run -- 58.9% -- and
+                it is the only service behind a ceiling that cannot be raised (3
+                sustained writes/sec/account, which Google states is not
+                adjustable). Only a fortieth or so of it carries a Drive link,
+                and those are the messages that need THIS tool: Google moves the
+                bytes and never rewrites anything. So the default hands the tool
+                the mail with links and the DMS the rest. Order matters -- the
+                DMS must run after -- which is why this says so in words. */}
             <Box sx={{ mt: 2 }}>
               <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 0.5 }}>
                 Who moves the mail?
               </Typography>
               <RadioGroup value={mailBy}
-                          onChange={(e) => setMailBy(e.target.value)}>
+                          onChange={(e) => setMailBy(e.target.value as MailMode)}>
+                <FormControlLabel
+                  value="split" control={<Radio size="small" />}
+                  data-testid="mail-by-split"
+                  label={
+                    <Typography variant="body2">
+                      <strong>Split (recommended)</strong> — Drive first, for every
+                      user. Then this tool moves only the mail that carries a Drive
+                      link and rewrites those links to the copies on the target.
+                      Google&apos;s Data Migration Service then moves all the rest
+                      — start it <em>after</em> this run finishes, from Other
+                      services. Until it has, most of the mail is not on the
+                      target, and the run will say so.
+                    </Typography>
+                  } />
                 <FormControlLabel
                   value="engine" control={<Radio size="small" />}
                   data-testid="mail-by-engine"
                   label={
                     <Typography variant="body2">
-                      <strong>This tool</strong> — full per-item ledger, exact
-                      failure accounting, idempotent re-runs. Paced against
-                      3 writes/sec/account, so mail sets the run&apos;s length.
+                      <strong>This tool moves all of it</strong> — full per-item
+                      ledger, exact failure accounting, idempotent re-runs. Paced
+                      against 3 writes/sec/account, so mail sets the run&apos;s
+                      length.
                     </Typography>
                   } />
                 <FormControlLabel
@@ -620,12 +668,11 @@ export const MigrationDetail: React.FC = () => {
                   data-testid="mail-by-dms"
                   label={
                     <Typography variant="body2">
-                      <strong>Google Data Migration Service</strong> — moves
-                      mail inside Google, spending none of this
-                      project&apos;s Gmail quota. Set it up in the Admin
-                      console (Nodes → Deploy has the helper); this run then
-                      migrates everything <em>except</em> mail, so nothing is
-                      copied twice. You give up the per-item ledger for mail.
+                      <strong>Google&apos;s Data Migration Service moves all of
+                      it</strong> — spends none of this project&apos;s Gmail quota.
+                      This run then migrates everything <em>except</em> mail, so
+                      nothing is copied twice. Links in mail are not rewritten,
+                      and you give up the per-item ledger for mail.
                     </Typography>
                   } />
               </RadioGroup>
@@ -636,14 +683,11 @@ export const MigrationDetail: React.FC = () => {
         onConfirm={async (reason: string) => {
           setFullBusy(true); setFullError(null)
           try {
-            // Excluding mail is the whole point of choosing DMS: running
-            // both would insert every message twice, and the ledger cannot
-            // see what Google moved internally.
-            const services = mailBy === 'dms'
-              ? ['drive', 'calendar', 'contacts', 'tasks', 'chat']
-              : ['all']
-            const r = await startMigration(reason, services, [], false,
-                                           Number(accountId))
+            // The server decides what each mode means for the service list, the
+            // ordering and the rewriting (see _mail_plan in api_server.py). Sending
+            // the services here as well is what let "DMS" and "engine" drift apart.
+            const r = await startMigration(reason, ['all'], [], false,
+                                           Number(accountId), mailBy)
             if (!r.ok) throw new Error(r.detail || 'could not start')
             setAskFull(false)
             setStarted(r.detail || 'migration started')

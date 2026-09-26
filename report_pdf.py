@@ -151,6 +151,8 @@ def _human(report, st, width):
                   ["Items migrated", _n(ledger.get("succeeded"))],
                   ["Items failed / blocked", f"{_n(ledger.get('failed'))} / {_n(ledger.get('blocked'))}"],
                   ["Skipped on purpose", f"{_n(ledger.get('skipped'))} (a decision, not a failure)"],
+                  *([["Mail waiting for the DMS", f"{_n(ledger.get('deferred'))} (NOT on the target yet)"]]
+                    if ledger.get("deferred") else []),
                   ["Data moved", _t(head.get("dataMigrated") or "not measured")],
                   ["Duration", _dur(run.get("durationSec")) + ("" if run.get("timingSource") == "job" else
                                                                " (from the ledger's first and last row)" if run.get("durationSec") else "")],

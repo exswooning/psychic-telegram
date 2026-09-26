@@ -5,12 +5,14 @@ import MigrationDetail from './MigrationDetail'
 
 const fetchMigrationDetail = vi.fn()
 const startDelta = vi.fn()
+const startMigration = vi.fn()
 vi.mock('@/components/RunReports', () => ({
   default: ({ accountId }: { accountId?: number }) => <div data-testid="reports-panel">{accountId}</div>,
 }))
 vi.mock('@/api/controlPlane', () => ({
   fetchMigrationDetail: (...a: unknown[]) => fetchMigrationDetail(...a),
   startDelta: (...a: unknown[]) => startDelta(...a),
+  startMigration: (...a: unknown[]) => startMigration(...a),
   // The page also surveys its failures. A mock missing an export the
   // component calls throws inside render, which surfaces as every assertion
   // failing rather than as the one missing name.
@@ -264,5 +266,106 @@ describe('MigrationDetail — delta pass', () => {
     await waitFor(() => expect(screen.getByTestId('delta-days')).toBeTruthy())
     fireEvent.change(screen.getByTestId('delta-days'), { target: { value: '0' } })
     expect((screen.getByTestId('delta-days') as HTMLInputElement).value).toBe('1')
+  })
+})
+
+
+/*
+ * Who moves the mail. Split is the default: the tool moves the mail that needs its
+ * Drive links rewritten and Google's DMS moves the rest -- which is most of a
+ * mailbox, so a run that stops at the handoff has not moved most of the mail. The
+ * page must say so instead of counting it as skipped or showing 300 of 300 done.
+ */
+describe('MigrationDetail: who moves the mail', () => {
+  beforeEach(() => { vi.clearAllMocks(); startMigration.mockResolvedValue({ ok: true, actionId: 1, detail: 'started' }) })
+
+  const openDialog = async () => {
+    show(detail())
+    fireEvent.click(await screen.findByTestId('run-full'))
+    await screen.findByText('Who moves the mail?')
+  }
+  const confirm = async () => {
+    fireEvent.change(screen.getByLabelText('Reason Code'), { target: { value: 'full migration' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+    await waitFor(() => expect(startMigration).toHaveBeenCalled())
+  }
+
+  it('offers all three and has split selected', async () => {
+    await openDialog()
+    expect(screen.getByTestId('mail-by-split').querySelector('input')).toBeChecked()
+    expect(screen.getByTestId('mail-by-engine').querySelector('input')).not.toBeChecked()
+    expect(screen.getByTestId('mail-by-dms').querySelector('input')).not.toBeChecked()
+  })
+
+  it('says the DMS has to run AFTER, and that the mail is not on the target until it has', async () => {
+    await openDialog()
+    const split = screen.getByTestId('mail-by-split')
+    expect(split).toHaveTextContent('after this run finishes')
+    expect(split).toHaveTextContent('most of the mail is not on the target')
+    expect(split).toHaveTextContent('Drive first, for every user')
+  })
+
+  it('starts a split run by default, and asks the server for it', async () => {
+    await openDialog(); await confirm()
+    const [, services, users, dry, account, mode] = startMigration.mock.calls[0]
+    expect([services, users, dry, account, mode]).toEqual([['all'], [], false, 7, 'split'])
+  })
+
+  it('sends the mode chosen, and never decides the service list itself', async () => {
+    await openDialog()
+    fireEvent.click(screen.getByTestId('mail-by-dms').querySelector('input')!)
+    await confirm()
+    expect(startMigration.mock.calls[0][1]).toEqual(['all'])          // the server drops mail for dms
+    expect(startMigration.mock.calls[0][5]).toBe('dms')
+  })
+
+  it('can still run everything through the tool', async () => {
+    await openDialog()
+    fireEvent.click(screen.getByTestId('mail-by-engine').querySelector('input')!)
+    await confirm()
+    expect(startMigration.mock.calls[0][5]).toBe('engine')
+  })
+})
+
+describe('MigrationDetail: what a split run says about itself', () => {
+  beforeEach(() => { vi.clearAllMocks() })
+
+  it('says plainly that mail is waiting for the DMS, and where to start it', async () => {
+    show(detail({ progress: { users: 201, done: 201, running: 0, failed: 0, pending: 0, items: 12000,
+                              itemsFailed: 0, itemsSkipped: 3, itemsDeferred: 349560 } }))
+    const alert = await screen.findByTestId('awaiting-dms')
+    expect(alert).toHaveTextContent('349,560 mail message(s) are waiting')
+    expect(alert).toHaveTextContent('not on the target yet')
+    expect(alert).toHaveTextContent('after this run has finished')
+    expect(screen.getByTestId('to-services')).toBeInTheDocument()
+  })
+
+  it('shows deferred mail as its own figure, never folded into skipped', async () => {
+    show(detail({ progress: { users: 201, done: 201, running: 0, failed: 0, pending: 0, items: 12000,
+                              itemsFailed: 0, itemsSkipped: 3, itemsDeferred: 349560 } }))
+    expect(await screen.findByTestId('stat-itemsdeferred')).toHaveTextContent('349,560')
+    expect(screen.getByTestId('stat-itemsskipped')).toHaveTextContent('3')
+    expect(screen.getByTestId('stat-itemsskipped')).not.toHaveTextContent('349,560')
+  })
+
+  it('says nothing about the DMS when nothing is waiting for it', async () => {
+    show(detail())
+    await screen.findByTestId('stat-users')
+    expect(screen.queryByTestId('awaiting-dms')).toBeNull()
+    expect(screen.queryByTestId('stat-itemsdeferred')).toBeNull()
+  })
+
+  it('says which pass an ordered run is on, so 300 of 300 done is not misread', async () => {
+    show(detail({ running: true, run: { pass: 2, of: 3, services: ['gmail'] } }))
+    const chip = await screen.findByTestId('run-pass')
+    expect(chip).toHaveTextContent('Pass 2 of 3')
+    expect(chip).toHaveTextContent('gmail')
+    expect(chip).toHaveTextContent('finished the earlier passes')
+  })
+
+  it('shows no pass when nothing ordered is running', async () => {
+    show(detail({ run: null }))
+    await screen.findByTestId('stat-users')
+    expect(screen.queryByTestId('run-pass')).toBeNull()
   })
 })

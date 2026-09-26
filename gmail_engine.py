@@ -28,7 +28,7 @@ import uuid
 from google.auth.exceptions import RefreshError
 from googleapiclient.http import MediaFileUpload  # noqa: F401
 
-from config import Settings
+from config import DEFERRED_TO_DMS, Settings
 from link_rewrite import has_drive_link, rewrite_raw
 from resilience import (PermanentAPIError, RateLimiter, TransportExhausted,
                         retry_on_google_error, shutdown_requested)
@@ -453,7 +453,7 @@ class GmailMigrator:
         if self.settings.mail_only_with_links:
             if not has_drive_link(raw):
                 self.db.log_audit(self.source_user, mid, "message",
-                                  "SKIPPED_NO_DRIVE_LINK",
+                                  DEFERRED_TO_DMS,
                                   "no Drive link; left for the DMS pass")
                 self._bump("skipped")
                 return

@@ -153,6 +153,24 @@ does not touch a webui-launched job). Then `incidents.py resolve <id> -m
 (the last opens an issue a Claude Code routine can be pointed at); none is set
 by default and a failed send never fails a run.
 
+**Who moves the mail is a per-run choice (`mail_mode`), and the dialog defaults to
+`split`.** `engine`: this tool moves all mail (the API's own default). `dms`:
+Google's Data Migration Service does, and the run migrates everything else.
+`split`: the engine inserts only mail that carries a Drive link and rewrites it;
+the rest is written `SKIPPED_NO_DRIVE_LINK` (`config.DEFERRED_TO_DMS`) and moved by
+the DMS **after** the run — before, and the DMS moves link mail unrewritten and the
+engine then adopts that copy. Two invariants make split safe, both decided in
+`api_server._mail_plan`: the run is `--ordered` (Drive for *every* user, then mail,
+then the rest — a link names whoever owned the file, and an interleaved run reads
+mail before other users' Drive has migrated, leaving those links on the source
+tenant forever), and rewriting is forced on. **Deferred mail is owed, not
+declined**: `tally`, the report and the migrations page count it apart from
+`SKIPPED%` decisions, or a split run that never reached the DMS would score mail
+parity 100%. Status is per user, not per service, so an ordered run prints `PASS
+i/n pid=…` markers and the detail page says which pass the "users done" counts
+belong to. This tool does not start the DMS itself: `dms_migrate.py` drives the
+Admin console in a browser and is not account-aware.
+
 **Progress reporting must come from real state, never be simulated.**
 `full_setup.py` and the seeder write `{pct, label}` checkpoints a poller
 reads; `_job_progress()` in `webui.py` computes a percentage only when there

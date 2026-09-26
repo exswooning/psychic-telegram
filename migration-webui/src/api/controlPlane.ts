@@ -270,15 +270,23 @@ export const fetchActions = () => cpFetch<OperatorAction[]>('/api/v2/actions')
 // UI convention that a future caller could skip.
 export interface ActionResult { ok: boolean; actionId: number; detail: string }
 
+/** Who moves the mail. `engine` (the API's own default): this tool moves all of
+ *  it. `dms`: Google's Data Migration Service does, and this run does everything
+ *  else. `split`: this tool moves only mail that carries a Drive link, rewriting
+ *  it, and the DMS moves the rest AFTER the run. */
+export type MailMode = 'engine' | 'dms' | 'split'
+
 export const startMigration = (
   reason: string, services: string[], users: string[], dryRun = false,
-  accountId?: number) =>
+  accountId?: number, mailMode?: MailMode) =>
   cpFetch<ActionResult>('/api/v2/migrate/start', {
     method: 'POST',
     // accountId is the migration on screen. Without it the server falls back
     // to the caller's own account -- the same trap the delta button hit.
+    // mail_mode omitted means the engine, exactly as before it existed.
     body: JSON.stringify({ reason, services, users, dry_run: dryRun,
-                           account_id: accountId ?? null }),
+                           account_id: accountId ?? null,
+                           ...(mailMode ? { mail_mode: mailMode } : {}) }),
   })
 
 export const stopJob = (pid: number, reason: string) =>
@@ -555,6 +563,9 @@ export interface MigrationProgress {
    *  these into the failure count is how a clean run teaches people to
    *  ignore red. */
   itemsSkipped?: number
+  /** Mail left for Google's Data Migration Service (split mode). NOT a skip:
+   *  it is owed, and the target does not have it until the DMS delivers it. */
+  itemsDeferred?: number
 }
 
 export interface MigrationRow {
@@ -586,6 +597,10 @@ export interface MigrationDetail {
   targetDomain: string
   running: boolean
   progress: MigrationProgress
+  /** Which pass a live ORDERED run is on. Status is per user, so after the Drive
+   *  pass every user reads "done" while mail has not started; this says which
+   *  pass the counts belong to. Null when nothing ordered is running. */
+  run?: { pass: number; of: number; services: string[] } | null
   items: Array<{ type: string; count: number }>
   /** Jobs occupying this tenant right now. A bare `running` boolean could
    *  not name which job, so a delta looked identical to a migration. */

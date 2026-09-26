@@ -29,6 +29,7 @@ import sys
 from datetime import datetime, timezone
 
 import benchmarks
+from config import DEFERRED_TO_DMS
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -102,14 +103,17 @@ def _ledger(conn) -> dict:
             "SELECT item_type, status, COUNT(*) n FROM audit_log "
             "GROUP BY item_type, status").fetchall()
     by_type: dict[str, dict] = {}
-    tot = {"succeeded": 0, "failed": 0, "blocked": 0, "skipped": 0, "inProgress": 0}
+    tot = {"succeeded": 0, "failed": 0, "blocked": 0, "skipped": 0, "inProgress": 0, "deferred": 0}
     for r in rows:
         st, n = r["status"] or "", r["n"] or 0
         bucket = ("succeeded" if st == "SUCCESS" else "failed" if st == "FAILED"
                   else "blocked" if st == "BLOCKED" else "inProgress" if st == "IN_PROGRESS"
+                  # Left for the DMS: owed, not declined. Counted apart so "skipped on
+                  # purpose" never includes mail the target does not have yet.
+                  else "deferred" if st == DEFERRED_TO_DMS
                   else "skipped")
         t = by_type.setdefault(r["item_type"], {"succeeded": 0, "failed": 0, "blocked": 0,
-                                                "skipped": 0, "inProgress": 0})
+                                                "skipped": 0, "inProgress": 0, "deferred": 0})
         t[bucket] += n
         tot[bucket] += n
     # "Attempts" excludes deliberate skips (a decision, not a failure) and
@@ -398,6 +402,15 @@ def next_steps(facts: dict, bench: dict) -> list[str]:
     if facts.get("kind") == "seed":
         return _seed_next_steps(facts, bench)
     steps: list[str] = []
+    deferred = (facts.get("ledger") or {}).get("deferred") or 0
+    if deferred:
+        # First, because until it is done the migration is not: this mail is not on
+        # the target and nothing in the ledger says otherwise.
+        steps.append(f"{deferred:,} mail message(s) were deliberately left for Google's Data Migration "
+                     "Service and are NOT on the target yet. Run it now (Nodes > Deploy > Start Google DMS "
+                     "mail import) -- after this run, never before, or it moves link-bearing mail "
+                     "without rewriting its links. Then run the tally: it counts them as still owed, "
+                     "so mail parity stays short until the DMS has delivered them.")
     rc = (facts.get("run") or {}).get("returnCode")
     if rc:
         steps.append(f"The run exited with code {rc}. Read the end of its log first (below) -- "

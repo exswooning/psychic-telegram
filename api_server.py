@@ -307,6 +307,16 @@ class StartMigration(WriteAction):
     # console sends the id of the migration on screen.
     account_id: int | None = None
     dry_run: bool = False
+    # Who moves the mail.
+    #   engine  this tool moves all of it. What every caller got before this
+    #           field existed, so it stays the API's own default.
+    #   dms     Google's Data Migration Service moves all of it; this run
+    #           migrates everything else.
+    #   split   this tool moves only the mail that carries a Drive link,
+    #           rewriting those links; the rest is left for the DMS pass, which
+    #           must run AFTER this one (see migrate_start). The migration
+    #           dialog defaults to this.
+    mail_mode: Literal["engine", "dms", "split"] = "engine"
 
 
 class TrimFillerRequest(WriteAction):
@@ -1374,6 +1384,39 @@ def _account_argv(account_id: int | None) -> list[str]:
     return [] if account_id is None else ["--account-id", str(account_id)]
 
 
+# main.py's PER_USER_SERVICES. Not imported: this process never loads the engines
+# (they run in their own), and a test pins the two lists together.
+_ALL_SERVICES = ("drive", "gmail", "calendar", "chat", "contacts", "tasks")
+
+
+def _mail_plan(services: list[str], mail_mode: str) -> tuple[list[str], dict | None, bool]:
+    """(services, env, ordered) for who moves the mail.
+
+    split is the one that needs care. The engine inserts only mail that carries
+    a Drive link and rewrites it, marking the rest SKIPPED_NO_DRIVE_LINK for the
+    DMS. Two things make that correct, and both are decided here:
+
+      * ORDERED passes. A link in one mailbox names whoever owned the file, and
+        one interleaved run reads mail before other users' Drive has migrated,
+        leaving those links on the source tenant for good.
+      * Rewriting forced ON. Split exists to rewrite; a config that had it off
+        would insert the link mail unrewritten and leave the rest to DMS, which
+        cannot rewrite anything.
+
+    DMS must run AFTER this: DMS first moves link-bearing mail unrewritten, and
+    the engine then adopts that copy instead of replacing it.
+    """
+    wanted = list(_ALL_SERVICES) if "all" in services else list(services)
+    if mail_mode == "dms":
+        # Excluding mail is the whole point: running both inserts every message
+        # twice, and the ledger cannot see what Google moved internally.
+        return [s for s in wanted if s != "gmail"], None, False
+    if mail_mode == "split":
+        env = {**os.environ, "REWRITE_DRIVE_LINKS": "true", "MAIL_ONLY_WITH_LINKS": "true"}
+        return wanted, env, True
+    return list(services), None, False
+
+
 @app.post("/api/v2/migrate/start")
 async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
     # The migration being looked at, not the operator's own account -- the
@@ -1382,15 +1425,21 @@ async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
     # migrate into an empty account of their own and report success.
     account_id = _resolve_account(body, op)
 
+    services, env, ordered = _mail_plan(body.services, body.mail_mode)
     argv = [PY, "main.py"] + _account_argv(account_id)
     if body.dry_run:
         argv.append("--dry-run")
-    argv += ["migrate", "--services", ",".join(body.services)]
+    argv += ["migrate", "--services", ",".join(services)]
+    if ordered:
+        argv.append("--ordered")
     for u in body.users:
         argv += ["--user", u]
     target = ",".join(body.users) if body.users else "ALL"
-    return await _gated(op, "migrate.start", body, target,
-                        lambda: _run_admitted(argv, account_id, "migrate"))
+    # env only when there is one (split): every other mode calls exactly as it
+    # always did.
+    launch = ((lambda: _run_admitted(argv, account_id, "migrate", env=env)) if env
+              else (lambda: _run_admitted(argv, account_id, "migrate")))
+    return await _gated(op, "migrate.start", body, target, launch)
 
 
 @app.post("/api/v2/migrate/delta")
@@ -3048,6 +3097,32 @@ async def claims_release(body: ClaimBody, _: None = Depends(node_auth)):
     return await _off_loop(_do)
 
 
+_PASS_LINE = re.compile(r"^PASS (\d+)/(\d+) pid=(\d+): (\S+)\s*$")
+
+
+def _run_pass(account_id: int) -> dict | None:
+    """Which pass an ORDERED run is on, or None.
+
+    Status is per user, not per service, so once the Drive pass has finished every
+    user reads DONE while mail has not started: "300 of 300 users done" for most of
+    the run. The run prints a marker as each pass begins; this reads the newest
+    one for the live process (matched by pid, since the log outlives runs), so the
+    page can say which pass those counts belong to.
+    """
+    live = [j for j in job_admission.list_active()
+            if j.get("account_id") == account_id and j.get("job_name") == "migrate"
+            and job_admission.is_live(j) and j.get("pid")]
+    if not live:
+        return None
+    pid = int(live[0]["pid"])
+    latest = None
+    for line in _job_log_lines(account_id, ("migrate",), 400_000):
+        m = _PASS_LINE.match(line)
+        if m and int(m.group(3)) == pid:
+            latest = {"pass": int(m.group(1)), "of": int(m.group(2)), "services": m.group(4).split(",")}
+    return latest
+
+
 def _migration_progress(account_id: int | None) -> dict:
     """Per-user rollup from ONE account's ledger.
 
@@ -3058,12 +3133,15 @@ def _migration_progress(account_id: int | None) -> dict:
     """
     empty = {"users": 0, "done": 0, "running": 0, "failed": 0, "pending": 0,
              "itemsSkipped": 0,
+             # Mail left for the DMS: owed, so counted apart from a skip (which is a
+             # decision). In split mode this is most of the mailbox.
+             "itemsDeferred": 0,
              # Waiting on something outside the tool (a Workspace licence),
              # not broken. Counted apart so a failure list keeps meaning
              # "investigate this".
              "blocked": 0, "items": 0, "itemsFailed": 0}
     try:
-        from config import Settings
+        from config import DEFERRED_TO_DMS, Settings
         path = Settings(account_id=account_id).db_path
     except Exception:      # noqa: BLE001
         return empty
@@ -3113,8 +3191,14 @@ def _migration_progress(account_id: int | None) -> dict:
             # tenant can afford in exchange for a count that means this run.
             out["itemsSkipped"] = conn.execute(
                 "SELECT COUNT(*) n FROM audit_log a WHERE a.status LIKE 'SKIPPED%' "
+                "AND a.status <> ? "
                 "AND EXISTS (SELECT 1 FROM identity_map m "
-                "            WHERE m.source_email = a.source_user)"
+                "            WHERE m.source_email = a.source_user)", (DEFERRED_TO_DMS,)
+            ).fetchone()["n"]
+            out["itemsDeferred"] = conn.execute(
+                "SELECT COUNT(*) n FROM audit_log a WHERE a.status = ? "
+                "AND EXISTS (SELECT 1 FROM identity_map m "
+                "            WHERE m.source_email = a.source_user)", (DEFERRED_TO_DMS,)
             ).fetchone()["n"]
             return out
     except Exception:      # noqa: BLE001 - a ledger mid-migration, or absent
@@ -4289,6 +4373,8 @@ async def migration_detail(account_id: int, op: Operator = Depends(operator)):
             "sourceDomain": src.get("domain") or "",
             "targetDomain": tgt.get("domain") or "",
             "progress": _migration_progress(account_id),
+            # Only for a live ORDERED run: which pass the counts below belong to.
+            "run": _run_pass(account_id),
             # Declared up here so the payload has ONE shape regardless of
             # whether this account has a ledger yet. The endpoint returns
             # early for an unconfigured account, and a client that has to

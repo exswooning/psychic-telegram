@@ -40,6 +40,8 @@ import threading
 from concurrent import futures
 from datetime import datetime, timezone
 
+from config import DEFERRED_TO_DMS
+
 SERVICES = ("drive_files", "drive_folders", "mail", "calendar", "contacts", "tasks")
 LABEL = {"drive_files": "Drive files", "drive_folders": "Drive folders", "mail": "Mail messages",
          "calendar": "Calendar events", "contacts": "Contacts", "tasks": "Tasks"}
@@ -270,8 +272,11 @@ def skipped_by_user(conn) -> dict[str, dict[str, int]]:
     """Deliberate skips per user and service, from the ledger. Non-SUCCESS rows
     are never pruned, so this survives audit retention."""
     out: dict[str, dict[str, int]] = {}
+    # Not DEFERRED_TO_DMS: mail left for the DMS is owed, not declined. Subtracting
+    # it would let a split run that never reached the DMS score mail parity 100%.
     for r in conn.execute("SELECT source_user, item_type, COUNT(*) n FROM audit_log "
-                          "WHERE status LIKE 'SKIPPED%' GROUP BY 1, 2"):
+                          "WHERE status LIKE 'SKIPPED%' AND status <> ? GROUP BY 1, 2",
+                          (DEFERRED_TO_DMS,)):
         svc = SKIP_TYPE.get(r["item_type"])
         if svc:
             out.setdefault(r["source_user"], {})[svc] = r["n"]

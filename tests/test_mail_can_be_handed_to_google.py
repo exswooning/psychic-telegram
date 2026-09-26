@@ -12,12 +12,16 @@ Google states the 3/sec ceiling is not adjustable on request, so
 many nodes. Google's own Data Migration Service moves mail inside Google
 and spends none of this project's Gmail quota.
 
-The engine keeps its own Gmail migration and it stays the default -- DMS
-gives per-user console status, not the per-item ledger that makes a re-run
-here idempotent. This is a per-run choice between two real options.
+The engine keeps its own Gmail migration. DMS gives per-user console status,
+not the per-item ledger that makes a re-run here idempotent, so handing ALL mail
+over is a deliberate per-run choice. The migration dialog now defaults to SPLIT --
+the engine moves the mail that carries a Drive link (it is the only thing that can
+rewrite one) and the DMS moves the rest -- while the API's own default stays the
+engine, so nothing else that starts a migration changes.
 
-The one thing that must not happen is both moving mail: the ledger cannot
-see what Google did internally, so every message would be inserted twice.
+The one thing that must not happen is both moving the same mail: the ledger cannot
+see what Google did internally, so every message would be inserted twice. Which
+services each mode runs is decided server-side (api_server._mail_plan).
 """
 import os
 
@@ -30,14 +34,22 @@ def _detail():
 
 
 class TestTheChoiceIsOffered:
-    def test_both_options_exist(self):
+    def test_all_three_options_exist(self):
         src = _detail()
-        assert "mail-by-engine" in src
-        assert "mail-by-dms" in src
+        for option in ("mail-by-split", "mail-by-engine", "mail-by-dms"):
+            assert option in src
 
-    def test_the_engine_is_the_default(self):
-        # The ledger is the product; giving it up must be deliberate.
-        assert "useState('engine')" in _detail()
+    def test_the_dialog_defaults_to_split(self):
+        """Deliberately: only a fortieth or so of mail carries a Drive link, and
+        those are the messages that need this tool. See the dialog's own comment."""
+        assert "useState<MailMode>('split')" in _detail()
+
+    def test_but_the_apis_own_default_is_still_the_engine(self):
+        """Giving up the per-item ledger for mail must be asked for, so a caller
+        that names no mode -- a script, the fleet, another page -- gets what it
+        always got."""
+        import api_server
+        assert api_server.StartMigration.model_fields["mail_mode"].default == "engine"
 
     def test_each_option_says_what_it_costs(self):
         src = _detail()
@@ -46,22 +58,30 @@ class TestTheChoiceIsOffered:
 
 
 class TestChoosingDmsExcludesMailFromTheRun:
+    """Decided server-side now, so the dialog cannot drift from the API."""
+
     def test_the_services_list_drops_gmail(self):
-        src = _detail()
-        block = src.split("const services = mailBy === 'dms'")[1][:220]
-        assert "'gmail'" not in block, (
+        import api_server
+        services = api_server._mail_plan(["all"], "dms")[0]
+        assert "gmail" not in services, (
             "both would move mail -- every message inserted twice, and the "
             "ledger cannot see what Google moved internally")
 
     def test_it_still_migrates_everything_else(self):
-        src = _detail()
-        block = src.split("const services = mailBy === 'dms'")[1][:220]
+        import api_server
+        services = api_server._mail_plan(["all"], "dms")[0]
         for svc in ("drive", "calendar", "contacts", "tasks", "chat"):
-            assert f"'{svc}'" in block, f"{svc} would be silently skipped"
+            assert svc in services, f"{svc} would be silently skipped"
 
     def test_the_engine_path_is_unchanged(self):
-        block = _detail().split("const services = mailBy === 'dms'")[1][:220]
-        assert "['all']" in block
+        import api_server
+        assert api_server._mail_plan(["all"], "engine") == (["all"], None, False)
+
+    def test_the_dialog_leaves_the_service_list_to_the_server(self):
+        """It used to build the list itself, which is how the modes could drift."""
+        src = _detail()
+        assert "startMigration(reason, ['all'], [], false," in src
+        assert "const services = mailBy" not in src
 
 
 class TestTheDriver:

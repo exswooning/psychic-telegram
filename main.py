@@ -852,7 +852,7 @@ def demote_stale_running(db) -> int:
 
 
 def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
-                           only=None) -> list[dict]:
+                           only=None, passes=None) -> list[dict]:
     """run_batch under the memory watchdog; exits PAUSED if it fires.
 
     Registration lives HERE rather than at the call sites, because putting
@@ -894,8 +894,28 @@ def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
     try:
         with _registered("delta" if delta else "migrate",
                          getattr(settings, "account_id", None)):
-            results = run_batch(auth, db, settings, services, delta=delta,
-                                delta_days=delta_days, only=only)
+            # `passes` is an --ordered run: the same services, as separate passes
+            # across ALL users. They live inside this ONE registration, memory
+            # watchdog and Stop handler: a pass registering and releasing on its
+            # own would drop the run out of the admission table between passes,
+            # and everything that watches that table -- the slot cap, the
+            # dashboard, the run watcher -- would see a run that had finished.
+            results = []
+            plan = passes or [services]
+            for i, one in enumerate(plan, 1):
+                if len(plan) > 1:
+                    # Read back by the API to say which pass a live run is on. Carries
+                    # the pid because the log is appended across runs, and a marker
+                    # from the PREVIOUS run would otherwise read as this one's.
+                    print(f"PASS {i}/{len(plan)} pid={os.getpid()}: {','.join(sorted(one))}",
+                          flush=True)
+                results += run_batch(auth, db, settings, one, delta=delta,
+                                     delta_days=delta_days, only=only)
+                # A pause or a Stop ends the RUN, not just the pass: starting the
+                # next one under sustained memory pressure, or after the operator
+                # asked it to stop, is the opposite of what either means.
+                if MEMORY_PAUSE.is_set() or SHUTDOWN.is_set():
+                    break
     finally:
         stop.set()
         watchdog.join(timeout=WATCHDOG_POLL_SEC * 2 + 1)
@@ -1532,12 +1552,31 @@ def _enable_selected_services(settings: Settings, services: set[str]) -> None:
         settings.migrate_tasks = True
 
 
+# The order an --ordered run takes its services in, and why.
+#
+# Drive for EVERY user before any mail. Rewriting a link needs the target id of
+# the file it names, and a link in one mailbox names whoever owned the file, so
+# "this user's Drive has run" is the wrong condition: mail read while another
+# user's Drive is still to come keeps that link pointed at the source tenant
+# permanently -- the message is then in the ledger and every later pass skips
+# it -- and the run still reports success. One interleaved pass cannot promise
+# that; separate passes can. The engine's own guard only asks whether ANY Drive
+# has migrated, which the first user to finish satisfies.
+ORDERED_PASSES = (("drive",), ("gmail",), ("calendar", "contacts", "tasks", "chat"))
+
+
+def ordered_passes(services: set[str]) -> list[set[str]]:
+    """The selected services, split into ORDERED_PASSES, empty passes dropped."""
+    return [set(p) & services for p in ORDERED_PASSES if set(p) & services]
+
+
 def cmd_migrate(args, settings: Settings, db: MigrationDB, auth: AuthManager):
     services = resolve_services(args.services)
     _enable_selected_services(settings, services)
     results = _run_with_memory_pause(
         auth, db, settings, services, delta=False, delta_days=0,
-        only=args.user)
+        only=args.user,
+        passes=ordered_passes(services) if getattr(args, "ordered", False) else None)
     _print_batch_summary(results, services)
     _auto_repair(db, auth, settings)
 
@@ -2084,6 +2123,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "per-user service; run shared_drives.py, or use "
                         "phases.py which sequences both.")
     s.add_argument("--user", action="append", help="limit to specific user(s)")
+    s.add_argument("--ordered", action="store_true",
+                   help="run the services as separate passes across ALL users -- "
+                        "Drive, then mail, then the rest -- instead of "
+                        "interleaved per user. Needed for Drive links in mail "
+                        "to resolve to files another user owns.")
     s.set_defaults(func=cmd_migrate)
 
     s = sub.add_parser("delta", help="incremental catch-up pass")
