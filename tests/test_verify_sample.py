@@ -459,3 +459,131 @@ class TestSharingIsVerifiedOnRealMigratedFiles:
         monkeypatch.setattr(V.Verifier, "_perms", lambda self, svc, fid: (_ for _ in ()).throw(RuntimeError("403")))
         r = V.run(shared.auth, shared.db, shared.settings, [SRC_USER], ("drive",), progress=lambda *_: None)
         assert r["verdict"] == "INCOMPLETE"
+
+
+class TestFalsePositivesFoundOnTheFirstLiveVerification:
+    """The first real run said DIFFERENCES for things that were the migration working:
+    a Drive link in an event repointed on purpose, drafts read as strays, Google's own
+    welcome mail read as strays, and a failure a later run had already overtaken."""
+
+    SRC_ID, TGT_ID = "1AbCdEfGhIjKlMnOpQrStUvWxYz012345", "1ZyXwVuTsRqPoNmLkJiHgFeDcBa987654"
+    ident = staticmethod(lambda a: a)
+
+    def _event(self, text):
+        return {"summary": "S", "description": text, "start": {"dateTime": "2024-01-01T10:00:00Z"},
+                "end": {"dateTime": "2024-01-01T11:00:00Z"}}
+
+    def test_an_event_link_repointed_at_the_copy_is_no_difference(self):
+        notes = []
+        src = self._event(f"Agenda: https://drive.google.com/drive/folders/{self.SRC_ID}")
+        tgt = self._event(f"Agenda: https://drive.google.com/drive/folders/{self.TGT_ID}")
+        lookup = {self.SRC_ID: self.TGT_ID}.get
+        assert V.compare_event(src, tgt, self.ident, lookup, notes) == []
+        assert any("repointed" in n for n in notes)
+
+    def test_but_a_link_pointing_anywhere_else_still_is(self):
+        src = self._event(f"Agenda: https://drive.google.com/drive/folders/{self.SRC_ID}")
+        tgt = self._event("Agenda: https://drive.google.com/drive/folders/1WrongWrongWrongWrongWrong12345")
+        assert any("description" in d for d in V.compare_event(src, tgt, self.ident, {self.SRC_ID: self.TGT_ID}.get))
+
+    def test_without_a_lookup_the_text_must_match_exactly(self):
+        src = self._event(f"see {self.SRC_ID}")
+        assert V.compare_event(src, self._event(f"see {self.TGT_ID}"), self.ident)
+
+    def test_a_service_failure_overtaken_by_a_later_success_is_not_reported(self, auth, db, settings, identity):
+        db.log_audit(SRC_USER, SRC_USER, "drive", "FAILED", "unauthorized_client: not yet usable")
+        db.conn.execute("UPDATE audit_log SET timestamp='2026-01-01T00:00:00Z' WHERE item_type='drive'")
+        db.log_audit(SRC_USER, "f1", "file", "SUCCESS")
+        db.conn.execute("UPDATE audit_log SET timestamp='2026-01-01T00:05:00Z' WHERE item_id='f1'")
+        db.conn.commit()
+        v = V.Verifier(auth, db, settings, SRC_USER, TGT_USER)
+        assert v._failed(("file", "folder", "drive")) == []
+
+    def test_a_service_failure_nothing_overtook_still_is(self, auth, db, settings, identity):
+        db.log_audit(SRC_USER, SRC_USER, "drive", "FAILED", "unauthorized_client: not yet usable")
+        db.log_audit(SRC_USER, "m1", "message", "SUCCESS")       # a DIFFERENT service's success
+        db.conn.commit()
+        v = V.Verifier(auth, db, settings, SRC_USER, TGT_USER)
+        assert len(v._failed(("file", "folder", "drive"))) == 1
+
+    def test_drafts_are_compared_and_are_not_strays(self, auth, db, settings, identity):
+        raw = MSG % (7, 7, 7)
+        auth.source_gmail(SRC_USER).add_draft(raw)
+        gmail_engine.GmailMigrator(auth, db, settings, SRC_USER, TGT_USER).run()
+        tg = auth.target_gmail(TGT_USER)
+        # Gmail lists a draft's message among the mailbox's messages
+        did = next(iter(tg.drafts))
+        tg.messages[did] = {"id": did, "raw": tg.drafts[did]["message"]["raw"], "labelIds": ["DRAFT"]}
+        g = V.run(auth, db, settings, [SRC_USER], ("gmail",), progress=lambda *_: None)["users"][SRC_USER]["gmail"]
+        assert g["checked"] == 1 and g["identical"] == 1 and g["extras"] == []
+
+    def test_an_altered_draft_is_found(self, auth, db, settings, identity):
+        auth.source_gmail(SRC_USER).add_draft(MSG % (7, 7, 7))
+        gmail_engine.GmailMigrator(auth, db, settings, SRC_USER, TGT_USER).run()
+        tg = auth.target_gmail(TGT_USER)
+        d = next(iter(tg.drafts.values()))["message"]
+        d["raw"] = base64.urlsafe_b64encode(base64.urlsafe_b64decode(d["raw"]).replace(b"body 7", b"body X")).decode()
+        r = V.run(auth, db, settings, [SRC_USER], ("gmail",), progress=lambda *_: None)
+        assert r["verdict"] == "DIFFERENCES"
+
+    def test_a_draft_missing_from_the_target_is_found(self, auth, db, settings, identity):
+        auth.source_gmail(SRC_USER).add_draft(MSG % (7, 7, 7))
+        gmail_engine.GmailMigrator(auth, db, settings, SRC_USER, TGT_USER).run()
+        auth.target_gmail(TGT_USER).drafts.clear()
+        r = V.run(auth, db, settings, [SRC_USER], ("gmail",), progress=lambda *_: None)
+        assert r["users"][SRC_USER]["gmail"]["missing"] and r["verdict"] == "DIFFERENCES"
+
+    def test_googles_own_welcome_mail_is_said_and_not_counted_as_a_stray(self, auth, db, settings, identity):
+        auth.source_gmail(SRC_USER).add_message(MSG % (1, 1, 1), ["INBOX"])
+        gmail_engine.GmailMigrator(auth, db, settings, SRC_USER, TGT_USER).run()
+        auth.target_gmail(TGT_USER).add_message(
+            b"Message-ID: <w@mail.gmail.com>\r\nFrom: Gmail Team <mail-noreply@google.com>\r\n"
+            b"To: t@x\r\nSubject: Tips for using your new inbox\r\n\r\nhi\r\n", ["INBOX"])
+        g = V.run(auth, db, settings, [SRC_USER], ("gmail",), progress=lambda *_: None)["users"][SRC_USER]["gmail"]
+        assert g["extras"] == [] and any("welcome mail" in n for n in g["notes"])
+
+    def test_any_other_stray_is_still_a_stray(self, auth, db, settings, identity):
+        auth.source_gmail(SRC_USER).add_message(MSG % (1, 1, 1), ["INBOX"])
+        gmail_engine.GmailMigrator(auth, db, settings, SRC_USER, TGT_USER).run()
+        auth.target_gmail(TGT_USER).add_message(
+            b"Message-ID: <s@elsewhere>\r\nFrom: eve@example.com\r\nTo: t@x\r\nSubject: hi\r\n\r\nhi\r\n", ["INBOX"])
+        g = V.run(auth, db, settings, [SRC_USER], ("gmail",), progress=lambda *_: None)["users"][SRC_USER]["gmail"]
+        assert len(g["extras"]) == 1
+
+
+class TestDraftsAreComparedOnWhatAPersonWrote:
+    """Found by opening a real migrated draft: Gmail gives it a new Message-Id, a Date of now and
+    a normalised From, so a byte comparison can never pass -- and a comparison that ignores the
+    whole draft would pass a draft that lost its recipient."""
+    SRC = (b"Message-Id: <a@mail.gmail.com>\r\nFrom: tom@tenanta.com\r\nTo: bob@tenanta.com\r\n"
+           b"Date: Fri, 18 Sep 2026 08:56:11 -0700\r\nSubject: Half-finished\r\nMIME-Version: 1.0\r\n"
+           b"Content-Type: text/plain; charset=UTF-8\r\n\r\nStill drafting this.\r\n")
+    tr = staticmethod(lambda a: a.replace("tenanta", "tenantb"))
+
+    def _tgt(self, old=b"", new=b""):
+        raw = (self.SRC.replace(b"<a@mail.gmail.com>", b"<zzz@mail.gmail.com>")
+               .replace(b"From: tom@tenanta.com", b"From: Tom User <tom@tenantb.com>")
+               .replace(b"Fri, 18 Sep 2026 08:56:11 -0700", b"Sat, 26 Sep 2026 07:43:38 -0700"))
+        return raw.replace(old, new) if old else raw
+
+    def test_a_regenerated_message_id_date_and_from_is_the_same_draft(self):
+        assert V.compare_draft(self.SRC, self._tgt(), self.tr) == ("equivalent", [])
+
+    @pytest.mark.parametrize("old,new,needle", [
+        (b"To: bob@tenanta.com", b"To: eve@tenanta.com", "to"),
+        (b"Subject: Half-finished", b"Subject: Something else", "subject"),
+        (b"Still drafting this.", b"Still drafting THAT.", "body"),
+        (b"Still drafting this.", b"", "body"),
+    ])
+    def test_a_draft_that_lost_what_was_written_is_different(self, old, new, needle):
+        verdict, diffs = V.compare_draft(self.SRC, self._tgt(old, new), self.tr)
+        assert verdict == "different" and any(needle in d for d in diffs)
+
+    def test_a_draft_from_the_wrong_mailbox_is_different(self):
+        verdict, diffs = V.compare_draft(self.SRC, self._tgt(b"tom@tenantb.com", b"eve@tenantb.com"), self.tr)
+        assert verdict == "different" and any(d.startswith("from") for d in diffs)
+
+    def test_an_encoded_subject_equals_the_same_subject_written_out(self):
+        src = self.SRC.replace(b"Subject: Half-finished", "Subject: Reply \u2014 review".encode("utf-8"))
+        tgt = self._tgt().replace(b"Subject: Half-finished", b"Subject: =?UTF-8?B?UmVwbHkg4oCUIHJldmlldw==?=")
+        assert V.compare_draft(src, tgt, self.tr)[0] == "equivalent"

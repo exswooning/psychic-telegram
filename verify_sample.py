@@ -146,6 +146,29 @@ def compare_grants(src_perms: list[dict], tgt_perms: list[dict], translate, src_
             "missing": [list(k) for k in missing if k not in explained], "extra": [list(k) for k in sorted(got - want)]}
 
 
+def compare_draft(src_raw: bytes, tgt_raw: bytes, translate) -> tuple[str, list[str]]:
+    """('equivalent' | 'different', differences). Gmail rebuilds a draft's Message-Id, Date and From
+    when it is created, so no copy of a draft is byte-identical to its source. What a person wrote
+    is who it is addressed to, its subject and its body (attachments included) -- those are compared,
+    and From only after the migration's own address mapping."""
+    from email.policy import default
+    from email.utils import parseaddr
+    # policy.default reads a raw UTF-8 header and an RFC 2047 encoded one to the same text.
+    s = email.message_from_bytes(src_raw, policy=default)
+    t = email.message_from_bytes(tgt_raw, policy=default)
+
+    def hdr(m, k):
+        return " ".join(str(m.get(k, "")).split())
+    diffs = [f"{k}: {hdr(s, k)!r} -> {hdr(t, k)!r}"
+             for k in ("to", "cc", "bcc", "subject", "reply-to", "in-reply-to", "references") if hdr(s, k) != hdr(t, k)]
+    sa, ta = parseaddr(str(s.get("from", "")))[1].lower(), parseaddr(str(t.get("from", "")))[1].lower()
+    if translate(sa) != ta:
+        diffs.append(f"from: {sa} -> {ta}")
+    if normalise_message(src_raw)[1] != normalise_message(tgt_raw)[1]:
+        diffs.append("body or attachments differ")
+    return ("different" if diffs else "equivalent"), diffs
+
+
 def compare_labels(src_names: set[str], tgt_names: set[str]) -> list[str]:
     out = []
     if src_names - tgt_names:
@@ -161,10 +184,19 @@ def _norm_when(t: dict | None) -> str:
     return (t.get("dateTime") or t.get("date") or "")
 
 
-def compare_event(src: dict, tgt: dict, translate) -> list[str]:
+def compare_event(src: dict, tgt: dict, translate, lookup=None, notes: list | None = None) -> list[str]:
+    """`lookup` maps a source Drive id to its target id. The engine repoints Drive links in an
+    event's description and location, so those two fields are equal when the source text put
+    through the engine's OWN rewriter is exactly the target's -- said in `notes`, not hidden."""
     out = []
     for f in ("summary", "description", "location", "status", "transparency", "visibility", "colorId"):
         a, b = src.get(f) or None, tgt.get(f) or None
+        if a != b and lookup and f in ("description", "location") and a and b:
+            from link_rewrite import rewrite_text
+            if rewrite_text(a, lookup)[0] == b:
+                if notes is not None:
+                    notes.append(f"{f}: Drive links repointed at the copies on the target, as intended")
+                continue
         if a != b:
             out.append(f"{f}: {a!r} -> {b!r}")
     for f in ("start", "end"):
@@ -245,10 +277,19 @@ class Verifier:
         ('drive', 'gmail', ...). Missing that is how a run that copied nothing at all
         would read as identical."""
         q = ",".join("?" * len(types))
-        return [{"id": r["item_id"], "type": r["item_type"], "error": (r["error_message"] or "")[:200]}
-                for r in self.db.conn.execute(
-                    f"SELECT item_id, item_type, error_message FROM audit_log WHERE source_user=? "
-                    f"AND status LIKE 'FAILED%' AND item_type IN ({q})", (self.src_user, *types))]
+        items = types[:-1]          # every caller ends `types` with the service's own name
+        rows = self.db.conn.execute(
+            f"SELECT item_id, item_type, error_message, timestamp FROM audit_log WHERE source_user=? "
+            f"AND status LIKE 'FAILED%' AND item_type IN ({q})", (self.src_user, *types)).fetchall()
+        out = []
+        for r in rows:
+            if r["item_type"] == types[-1] and self.db.conn.execute(
+                    f"SELECT 1 FROM audit_log WHERE source_user=? AND status='SUCCESS' AND timestamp>? "
+                    f"AND item_type IN ({','.join('?' * len(items))}) LIMIT 1",
+                    (self.src_user, r["timestamp"], *items)).fetchone():
+                continue            # the service failed once, and a later run of it copied items
+            out.append({"id": r["item_id"], "type": r["item_type"], "error": (r["error_message"] or "")[:200]})
+        return out
 
     @staticmethod
     def _blank() -> dict:
@@ -474,20 +515,63 @@ class Verifier:
                 res["differences"].append({"item": msgid or sid, "source": sid, "target": tid, "diffs": diffs})
             else:
                 res["identical"] += 1
+        self._drafts(src, tgt, res, mapped_ids)
         # Duplicates and extras by Message-ID.
         try:
+            welcome = 0
             for m in self._list_all(tgt):
                 if m["id"] in mapped_ids:
                     continue
                 hdr = self._x(lambda i=m["id"]: tgt.users().messages().get(
-                    userId="me", id=i, format="metadata", metadataHeaders=["Message-ID"]).execute())
-                mid = next((h["value"] for h in hdr.get("payload", {}).get("headers", [])
-                            if h["name"].lower() == "message-id"), "").strip()
+                    userId="me", id=i, format="metadata", metadataHeaders=["Message-ID", "From"]).execute())
+                head = {h["name"].lower(): h["value"].strip() for h in hdr.get("payload", {}).get("headers", [])}
+                mid = head.get("message-id", "")
+                if mid not in mapped_msgids and "@google.com" in head.get("from", "").lower():
+                    welcome += 1        # what Google puts in every new mailbox; nobody migrated it
+                    continue
                 (res["duplicates"] if mid in mapped_msgids else res["extras"]).append({"target": m["id"], "messageId": mid})
+            if welcome:
+                res["notes"].append(f"{welcome} message(s) from Google itself (new-mailbox welcome mail) sit on the "
+                                    f"target; they were never on the source and are not counted as strays")
         except Exception as exc:      # noqa: BLE001
             res["errors"].append(f"could not list the target's mailbox: {str(exc)[:100]}")
         res["notCopied"] = self._failed(("message", "gmail"))
         return res
+
+    def _draft_raw(self, svc, did) -> tuple[bytes, str]:
+        d = self._x(lambda: svc.users().drafts().get(userId="me", id=did, format="raw").execute())
+        m = d.get("message") or {}
+        raw = m.get("raw", "")
+        raw = raw if isinstance(raw, str) else raw.decode()
+        return base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)), m.get("id", "")
+
+    def _drafts(self, src, tgt, res, mapped_ids) -> None:
+        """Drafts are copied by a pass of their own, so they are opened and compared like messages.
+        Their underlying message ids are recorded so a draft is never mistaken for a stray."""
+        for sid, tid, _ in self._pairs("draft"):
+            res["checked"] += 1
+            try:
+                sraw, _m = self._draft_raw(src, sid)
+            except Exception as exc:      # noqa: BLE001
+                res["errors"].append(f"draft {sid}: could not read the SOURCE: {str(exc)[:100]}")
+                continue
+            try:
+                traw, tmsg = self._draft_raw(tgt, tid)
+            except Exception as exc:      # noqa: BLE001
+                res["missing"].append({"source": sid, "target": tid, "why": f"draft not on the target ({str(exc)[:80]})"})
+                continue
+            mapped_ids.add(tmsg)
+            verdict, notes = compare_draft(sraw, traw, self._translate)
+            self.evidence.append({"service": "gmail", "name": f"draft {sid}", "how": verdict, "bytes": len(sraw),
+                                  "sha256": sha256(sraw)[:16], "opened": True})
+            if verdict == "different":
+                res["differences"].append({"item": f"draft {sid}", "source": sid, "target": tid,
+                                           "diffs": [f"draft differs: {n}" for n in notes]})
+            else:
+                res["identical"] += 1
+        if self._pairs("draft"):
+            res["notes"].append("drafts: Gmail rebuilds a draft's Message-Id, Date and From when it is created, so drafts "
+                                "are compared on recipients, subject and body, not byte for byte")
 
     @staticmethod
     def _list_all(svc) -> list[dict]:
@@ -519,7 +603,7 @@ class Verifier:
                 res["missing"].append({"source": eid, "target": tid, "name": sev.get("summary"),
                                        "why": f"not on the target ({str(exc)[:80]})"})
                 continue
-            diffs = compare_event(sev, tev, self._translate)
+            diffs = compare_event(sev, tev, self._translate, self.db.target_for_source_id, res["notes"])
             self.evidence.append({"service": "calendar", "name": sev.get("summary"), "opened": True, "how": "fields compared"})
             if diffs:
                 res["differences"].append({"item": sev.get("summary"), "source": eid, "target": tid, "diffs": diffs})
