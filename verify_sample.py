@@ -845,10 +845,14 @@ def main(argv=None) -> int:
     ap.add_argument("--user", action="append", help="limit to these source users")
     ap.add_argument("--services", default=",".join(ALL_SERVICES))
     a = ap.parse_args(argv)
+    services = tuple(s.strip() for s in a.services.split(","))
     settings = Settings(account_id=a.account_id)
+    # The scopes a credential carries follow these flags (config.source_scopes), and main.py switches
+    # them on for the services a run names. Without this, reading contacts or tasks is a 403.
+    settings.migrate_contacts = settings.migrate_contacts or "contacts" in services
+    settings.migrate_tasks = settings.migrate_tasks or "tasks" in services
     db = MigrationDB(settings.db_path)
-    report = run_and_save(AuthManager(settings), db, settings, a.user,
-                          tuple(s.strip() for s in a.services.split(",")),
+    report = run_and_save(AuthManager(settings), db, settings, a.user, services,
                           retry=retry_on_google_error(max_retries=settings.max_retries))
     return 0 if report["verdict"] == "IDENTICAL" else 1
 

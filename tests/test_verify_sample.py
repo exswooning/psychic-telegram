@@ -587,3 +587,31 @@ class TestDraftsAreComparedOnWhatAPersonWrote:
         src = self.SRC.replace(b"Subject: Half-finished", "Subject: Reply \u2014 review".encode("utf-8"))
         tgt = self._tgt().replace(b"Subject: Half-finished", b"Subject: =?UTF-8?B?UmVwbHkg4oCUIHJldmlldw==?=")
         assert V.compare_draft(src, tgt, self.tr)[0] == "equivalent"
+
+
+class TestTheCommandLineCanReadWhatItVerifies:
+    """Found re-verifying a live run by hand: the credential's scopes follow the migrate_* flags, main.py
+    switches them on for the services a run names, and the standalone command did not -- so it could not
+    read a single contact or task (403 insufficient scopes) and said so as errors."""
+
+    def _scopes_for(self, monkeypatch, *argv):
+        import auth as auth_mod
+        import config
+        import db as db_mod
+        seen = {}
+        monkeypatch.setattr(auth_mod, "AuthManager", lambda settings: object())
+        monkeypatch.setattr(db_mod, "MigrationDB", lambda path: object())
+        monkeypatch.setattr(V, "run_and_save", lambda a, d, settings, users, services, **kw: (
+            seen.update(settings=settings) or {"verdict": "IDENTICAL"}))
+        assert V.main(list(argv)) == 0
+        return config.source_scopes(seen["settings"])
+
+    def test_contacts_and_tasks_are_readable_when_asked_for(self, monkeypatch):
+        import config
+        scopes = self._scopes_for(monkeypatch, "--services", "contacts,tasks")
+        assert config.CONTACTS_READONLY_SCOPE in scopes and config.TASKS_READONLY_SCOPE in scopes
+
+    def test_and_are_not_requested_when_they_are_not(self, monkeypatch):
+        import config
+        scopes = self._scopes_for(monkeypatch, "--services", "drive")
+        assert config.CONTACTS_READONLY_SCOPE not in scopes and config.TASKS_READONLY_SCOPE not in scopes
