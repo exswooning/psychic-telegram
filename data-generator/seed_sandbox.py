@@ -73,6 +73,7 @@ import json
 import uuid
 import os
 import random
+import re
 import sys
 import threading
 import traceback
@@ -333,6 +334,111 @@ def _fill_note(uploaded: int = 0, planned: int = 0) -> None:
     with _fill_lock:
         _fill_totals["uploaded"] += uploaded
         _fill_totals["planned"] += planned
+
+
+# Trim -- the reverse of a fill, for accounts that ended up above their share.
+#
+# A mistaken fill once treated Drive's pooled tenant limit as one account's
+# ceiling and wrote ~3 TB into a dozen accounts. Storage is pooled, so that
+# excess starves every account still to be filled. This removes it again, and
+# is deliberately narrow: it can only ever delete a file that
+#   - is named exactly filler-NNNN.bin (what top_up_storage() writes),
+#   - is owned by the account, and
+#   - sits inside a folder named MIGRATION-TEST (where the filler is put),
+# whole files at a time, and stops once the account is back at its share.
+# Anything else -- seeded documents, mail, a large mailbox -- is never touched.
+_FILLER_NAME = re.compile(r"^filler-\d{4,}\.bin$")
+_FILLER_FOLDER = "MIGRATION-TEST"
+_trim_totals = {"planned": 0, "done": 0}
+
+
+def _trim_note(planned: int = 0, done: int = 0) -> None:
+    with _fill_lock:
+        _trim_totals["planned"] += planned
+        _trim_totals["done"] += done
+
+
+def trim_progress_line() -> str:
+    with _fill_lock:
+        plan, done = _trim_totals["planned"], _trim_totals["done"]
+    return f" -- {done / 1e9:,.1f} GB removed of {plan / 1e9:,.1f} GB to remove" if plan else ""
+
+
+def trim_filler(drive, settings: Settings, user: str, share_bytes: int | None,
+                apply: bool = False) -> dict:
+    """Bring one account back to its own storage share by deleting filler.
+
+    A preview unless `apply`: it reports exactly what it would delete. Deleted
+    permanently (trash counts toward usage, so trashing would free nothing).
+    """
+    from config import FOLDER_MIME
+
+    retry = _retry_factory(settings)
+    m = {"usage_bytes": 0, "excess_bytes": 0, "files": 0, "bytes": 0, "note": "",
+         "planned_files": 0, "planned_bytes": 0}
+    if not share_bytes:
+        m["note"] = "storage share unknown (licence not recognised) -- left alone"
+        return m
+    quota = retry(lambda: drive.about().get(fields="storageQuota").execute())().get("storageQuota", {})
+    own = quota.get("usageInDrive")
+    if own is None:
+        m["note"] = "own usage not reported -- left alone"
+        return m
+    usage = int(own) + int(quota.get("usageInDriveTrash") or 0)
+    excess = usage - share_bytes
+    m["usage_bytes"], m["excess_bytes"] = usage, max(0, excess)
+    if excess <= 0:
+        m["note"] = "at or under its share"
+        return m
+
+    in_folder: dict[str, bool] = {}
+
+    def in_filler_folder(parents) -> bool:
+        for pid in parents or []:
+            if pid not in in_folder:
+                meta = retry(lambda p=pid: drive.files().get(
+                    fileId=p, fields="name", supportsAllDrives=True).execute())()
+                in_folder[pid] = meta.get("name") == _FILLER_FOLDER
+            if in_folder[pid]:
+                return True
+        return False
+
+    picked: list[dict] = []
+    picked_bytes, token = 0, None
+    while picked_bytes < excess:
+        resp = retry(lambda t=token: drive.files().list(
+            q=f"name contains 'filler' and mimeType != '{FOLDER_MIME}' and 'me' in owners",
+            spaces="drive", pageSize=1000, pageToken=t, supportsAllDrives=True,
+            fields="nextPageToken, files(id,name,size,parents)").execute())()
+        for f in resp.get("files", []):
+            if picked_bytes >= excess:
+                break
+            if not _FILLER_NAME.match(f.get("name") or "") or not f.get("size"):
+                continue
+            if not in_filler_folder(f.get("parents")):
+                continue
+            picked.append(f)
+            picked_bytes += int(f["size"])
+        token = resp.get("nextPageToken")
+        if not token:
+            break
+    m["planned_files"], m["planned_bytes"] = len(picked), picked_bytes
+    if picked_bytes < excess:
+        m["note"] = (f"only {picked_bytes / 2**30:.1f} of the {excess / 2**30:.1f} GB over its "
+                     "share is filler; the rest is other content and was left")
+    _trim_note(planned=picked_bytes)
+    if apply:
+        for f in picked:
+            try:
+                retry(lambda i=f["id"]: drive.files().delete(
+                    fileId=i, supportsAllDrives=True).execute())()
+            except Exception as exc:  # noqa: BLE001
+                if "404" not in str(exc):      # already gone is the goal, not a failure
+                    raise
+            m["files"] += 1
+            m["bytes"] += int(f["size"])
+            _trim_note(done=int(f["size"]))
+    return m
 
 
 def _throttle_note() -> str:
@@ -2505,6 +2611,21 @@ def top_up_one_user(settings: Settings, user: str,
     return {"user": user, "storage": m, "elapsed_sec": elapsed}
 
 
+def trim_one_user(settings: Settings, user: str, share_bytes: int | None,
+                  apply: bool = False) -> dict:
+    """The --trim-filler path: one account back down to its own share."""
+    drive, _gmail, _cal = build_services(settings, user)
+    t0 = time.time()
+    m = trim_filler(drive, settings, user, share_bytes, apply=apply)
+    gb = lambda b: f"{b / 2**30:,.1f}GB"      # noqa: E731
+    what = "deleted" if apply else "would delete"
+    n, b = (m["files"], m["bytes"]) if apply else (m["planned_files"], m["planned_bytes"])
+    print(f"  [{user}] {gb(m['usage_bytes'])} vs share "
+          f"{gb(share_bytes or 0)}: {what} {n:,} filler file(s) ({gb(b)})"
+          + (f" -- {m['note']}" if m["note"] else ""), flush=True)
+    return {"user": user, "trim": m, "elapsed_sec": round(time.time() - t0, 1)}
+
+
 def reset_one_user(settings: Settings, user: str) -> dict:
     drive, gmail, cal = build_services(settings, user)
     chat = build_chat(settings, user)
@@ -2640,6 +2761,14 @@ def main(argv: list[str] | None = None) -> int:
                          "--fill-until-full. Safe to run repeatedly -- it "
                          "never touches mail, Drive documents, contacts or "
                          "tasks.")
+    ap.add_argument("--trim-filler", action="store_true",
+                    help="bring every account that is over its own storage "
+                         "share back down to it by deleting filler files "
+                         "(only filler-NNNN.bin inside MIGRATION-TEST). "
+                         "Reports what it would do unless --trim-apply.")
+    ap.add_argument("--trim-apply", action="store_true",
+                    help="with --trim-filler: actually delete. Without it "
+                         "nothing is deleted.")
     ap.add_argument("--fill-until-full", action="store_true",
                     help="top up storage to --fill-percent of each account's "
                          "OWN storage share, taken from its licence "
@@ -2698,6 +2827,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.top_up_only and args.reset:
         sys.exit("--top-up-only makes no sense with --reset")
+    if args.trim_apply and not args.trim_filler:
+        sys.exit("--trim-apply needs --trim-filler")
+    if args.trim_filler and (args.reset or args.top_up_only or args.fill_until_full
+                             or args.create_users or args.target_gb_per_user):
+        sys.exit("--trim-filler only removes filler; it cannot be combined with "
+                 "--reset, --top-up-only, --fill-until-full, --create-users or "
+                 "--target-gb-per-user.")
 
     settings = Settings()
     assert_sandbox(settings, args.confirm_domain)
@@ -2892,7 +3028,50 @@ def main(argv: list[str] | None = None) -> int:
 
     # A percentage needs something to be a percentage OF: each account's own
     # share, read once from its licence (see top_up_storage()).
-    shares = account_shares(settings, all_users) if args.fill_until_full else {}
+    shares = account_shares(settings, all_users) if (args.fill_until_full or args.trim_filler) else {}
+
+    # --- Trim filler -------------------------------------------------------
+    if args.trim_filler:
+        mode = "DELETING" if args.trim_apply else "PREVIEW -- nothing is deleted"
+        print(f"\nTrimming filler back to each account's own storage share for "
+              f"{len(all_users)} user(s) [{mode}] ...", flush=True)
+        stop_beat = threading.Event()
+        done = 0
+        over = files = freed = 0
+
+        def _heartbeat() -> None:
+            waited = 0.0
+            while not stop_beat.wait(HEARTBEAT_EVERY_SEC):
+                waited += HEARTBEAT_EVERY_SEC
+                print(f"  ... still trimming: {done}/{len(all_users)} users done "
+                      f"after {int(waited) // 60}m{int(waited) % 60:02d}s"
+                      + trim_progress_line(), flush=True)
+
+        threading.Thread(target=_heartbeat, daemon=True).start()
+        try:
+            with futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
+                jobs = {pool.submit(trim_one_user, settings, u, shares.get(u.lower()),
+                                    args.trim_apply): u for u in all_users}
+                for fut in futures.as_completed(jobs):
+                    done += 1
+                    try:
+                        r = fut.result()["trim"]
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"  [{done}/{len(all_users)}] ! {jobs[fut]} FAILED: {exc}", flush=True)
+                        continue
+                    if r["excess_bytes"]:
+                        over += 1
+                    files += r["files"] if args.trim_apply else r["planned_files"]
+                    freed += r["bytes"] if args.trim_apply else r["planned_bytes"]
+                    print(f"  [{done}/{len(all_users)}] {jobs[fut]} done", flush=True)
+        finally:
+            stop_beat.set()
+        verb = "Deleted" if args.trim_apply else "Would delete"
+        print(f"\n{over} account(s) over their share. {verb} {files:,} filler "
+              f"file(s), {freed / 2**30:,.1f} GB.", flush=True)
+        if not args.trim_apply:
+            print("Preview only -- nothing was deleted.", flush=True)
+        return 0
 
     # --- Top-up only -------------------------------------------------------
     if args.top_up_only:

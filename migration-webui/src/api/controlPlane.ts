@@ -1417,6 +1417,33 @@ export const startTally = (accountId?: number, opts: { sampleUsers?: number; cou
                            sample_users: opts.sampleUsers ?? 5, counts_only: !!opts.countsOnly }),
   })
 
+/* Trim filler: the reverse of a fill (seed_sandbox.py --trim-filler). */
+export interface TrimStatus {
+  hasRun: boolean
+  running: boolean
+  mode: 'preview' | 'apply' | null
+  /** Accounts finished of accounts in the run -- read from the job's own log. */
+  done: number
+  total: number
+  /** Only the accounts that had filler to remove. */
+  affected: string[]
+  summary: string | null
+  lines: string[]
+}
+
+/** A preview unless `apply`. Nothing is deleted without it. */
+export const trimFiller = (confirmDomain: string, opts: { apply?: boolean; accountId?: number } = {}) =>
+  cpFetch<ActionResult>('/api/v2/seed/trim-filler', {
+    method: 'POST',
+    body: JSON.stringify({
+      reason: opts.apply ? 'Delete filler above each account\'s share' : 'Preview filler above each account\'s share',
+      confirm_domain: confirmDomain, account_id: opts.accountId ?? null, apply: !!opts.apply,
+    }),
+  })
+
+export const fetchTrimStatus = (accountId?: number) =>
+  cpFetch<TrimStatus>(`/api/v2/seed/trim-filler/status${accountId ? `?account_id=${accountId}` : ''}`)
+
 /* Incidents: what the run watcher found wrong (run_watch.py). */
 export type IncidentStatus = 'open' | 'acknowledged' | 'resolved'
 export interface Incident {

@@ -69,12 +69,19 @@ class TestTheNodeBuildsTheSameCommandALocalSeedWould:
 
         import sys
 
+        # Put back whatever was there, not delete it: a real webui already in
+        # sys.modules that vanishes here makes every later `import webui` build
+        # a second copy, and monkeypatches on the first never reach it.
+        real = sys.modules.get("webui")
         sys.modules["webui"] = FakeWebui  # short-circuits the real import
         try:
             with pytest.raises(RuntimeError, match="not a sandbox"):
                 agent.start_seed({"confirm_domain": "prod.example.com"})
         finally:
-            del sys.modules["webui"]
+            if real is not None:
+                sys.modules["webui"] = real
+            else:
+                del sys.modules["webui"]
         assert agent.proc is None
 
     def test_it_launches_from_the_data_generator_directory(self):

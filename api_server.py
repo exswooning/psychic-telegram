@@ -309,6 +309,15 @@ class StartMigration(WriteAction):
     dry_run: bool = False
 
 
+class TrimFillerRequest(WriteAction):
+    """Bring accounts back down to their own storage share by deleting the
+    seeder's filler (and nothing else). A preview unless `apply`."""
+    confirm_domain: str
+    account_id: int | None = None
+    users: str = ""          # comma-separated localparts; blank = every account
+    apply: bool = False
+
+
 class StartDelta(WriteAction):
     """An incremental catch-up pass over the same tenant pair.
 
@@ -1408,6 +1417,73 @@ async def migrate_delta(body: StartDelta, op: Operator = Depends(operator)):
     target = ",".join(body.users) if body.users else "ALL"
     return await _gated(op, "migrate.delta", body, target,
                         lambda: _run_admitted(argv, account_id, "delta"))
+
+
+@app.post("/api/v2/seed/trim-filler")
+async def seed_trim_filler(body: TrimFillerRequest, op: Operator = Depends(operator)):
+    """Delete filler from accounts that are over their share of the pool.
+
+    The same gates as a seed -- typed domain, sandbox declaration, seeding
+    enabled on the account -- because it is a delete. It PREVIEWS unless
+    `apply` is set: the job reports what it would remove and removes nothing.
+    Launched from here rather than webui.py so it can run beside a fill
+    without restarting the process that owns it.
+    """
+    account_id = _resolve_account(body, op)
+
+    def _go() -> tuple[bool, str]:
+        import webui
+        if not webui._seed_ok(account_id):
+            return False, "seeding is not enabled on this account"
+        argv, env, err = webui.seed_argv(
+            {"confirm_domain": body.confirm_domain, "trim_filler": True,
+             "trim_apply": body.apply, "users": body.users}, account_id)
+        if err:
+            return False, err
+        # _start_admitted runs from the repo root; the seeder lives beside its
+        # own modules.
+        argv[1] = os.path.join(HERE, "data-generator", argv[1])
+        return _run_admitted(argv, account_id, "trim-filler", env=env)
+    return await _gated(op, "seed.trim_filler." + ("apply" if body.apply else "preview"), body,
+                        body.confirm_domain, _go)
+
+
+_TRIM_HEADER = "Trimming filler back to each account"
+
+
+def _trim_status(account_id: int) -> dict:
+    """The latest trim run as its own log says it: what mode, how far along,
+    which accounts had filler to remove, and the summary once it has one.
+    Read from the transcript and the admission table, never estimated."""
+    lines = _job_log_lines(account_id, ("trim-filler",), 400_000)
+    starts = [i for i, l in enumerate(lines) if _TRIM_HEADER in l]
+    run = lines[starts[-1]:] if starts else []
+    live = any(j.get("job_name") == "trim-filler" and j.get("account_id") == account_id
+               and job_admission.is_live(j) for j in job_admission.list_active())
+    done = total = 0
+    for l in run:
+        m = re.search(r"\[(\d+)/(\d+)\]", l)
+        if m:
+            done, total = int(m.group(1)), int(m.group(2))
+    affected = [l.strip() for l in run
+                if re.search(r"(would delete|deleted) ([1-9][\d,]*) filler", l)]
+    return {"hasRun": bool(run), "running": live,
+            "mode": ("apply" if run and "DELETING" in run[0] else "preview") if run else None,
+            "done": done, "total": total, "affected": affected[-50:],
+            "summary": next((l.strip() for l in reversed(run) if "account(s) over their share" in l), None),
+            "lines": [l for l in run if l.strip()][-40:]}
+
+
+@app.get("/api/v2/seed/trim-filler/status")
+async def seed_trim_filler_status(account_id: int | None = None, op: Operator = Depends(operator)):
+    """How the last trim (preview or delete) went, and whether one is running."""
+    require_login(op)
+    aid = account_id if account_id is not None else op.account_id
+    if not aid:
+        return {"hasRun": False, "running": False, "mode": None, "done": 0, "total": 0,
+                "affected": [], "summary": None, "lines": []}
+    _require_account_access(aid, op)
+    return await _off_loop(_trim_status, aid)
 
 
 @app.post("/api/v2/jobs/{pid}/stop")

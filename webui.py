@@ -2459,6 +2459,28 @@ def _seedable_services() -> list[str]:
     raise RuntimeError("SEEDABLE not found in seed_sandbox.py")
 
 
+def _seed_env(st, account_id: int | None) -> dict:
+    """The child environment every seeder run gets: sandbox mode, and -- for a
+    SaaS account -- its own tenant and ledger overlaid on env.sh."""
+    env = gcloud_env()
+    # Set here rather than asking the operator to export it: the value carries
+    # no judgement, the typed domain above is what actually gates this.
+    env["SANDBOX_MODE"] = "true"
+    if account_id is not None:
+        env.update(SOURCE_DOMAIN=st.source_domain, SOURCE_ADMIN=st.source_admin,
+                   SOURCE_SA_KEY=st.source_sa_key, MIGRATION_DB=st.db_path)
+        # TARGET_DOMAIN too, even though the seeder never writes to the
+        # target: it names every row of the identity map
+        # `<localpart>@{settings.target_domain}`. Overlaying only the source
+        # left that read falling through to env.sh's global placeholder, so a
+        # 201-user seed of source.rohitrokaya.com.np produced 201 rows
+        # pointing at a.example.com -- a domain in no part of this migration.
+        # Loading that map would have aimed provision-users and the whole
+        # migration at accounts that cannot exist.
+        env.update(TARGET_DOMAIN=st.target_domain, TARGET_ADMIN=st.target_admin)
+    return env
+
+
 def seed_argv(body: dict, account_id: int | None = None) -> tuple[list[str], dict, str]:
     """Build the seeder command, or return why it must not run.
 
@@ -2491,9 +2513,27 @@ def seed_argv(body: dict, account_id: int | None = None) -> tuple[list[str], dic
 
     import domain_guard
 
-    refusal = domain_guard.refuse_reason(domain, "Seeding")
+    trim = bool(body.get("trim_filler"))
+    refusal = domain_guard.refuse_reason(domain, "Deleting filler from" if trim else "Seeding")
     if refusal:
         return [], {}, refusal
+
+    if trim:
+        # Its own, narrow command: the seeder's --trim-filler removes filler
+        # files (and only those) from accounts above their share, and nothing
+        # else in this function applies to it. A PREVIEW unless trim_apply --
+        # deleting is never the default. Few workers, on purpose: it runs
+        # beside a fill, and most accounts need nothing more than one read.
+        argv = [PY, "seed_sandbox.py", "--confirm-domain", domain, "--yes",
+                "--trim-filler", "--workers", "4"]
+        if body.get("trim_apply"):
+            argv.append("--trim-apply")
+        users = (body.get("users") or "").strip()
+        bad = [u for u in (x.strip() for x in users.split(",")) if "@" in u]
+        if bad:
+            return [], {}, "users must be localparts, not addresses: " + ", ".join(bad)
+        argv += ["--users", users] if users else ["--all-users"]
+        return argv, _seed_env(st, account_id), ""
 
     scale = (body.get("scale") or "medium").strip().lower()
     if scale not in SEED_SCALES:
@@ -2722,23 +2762,7 @@ def seed_argv(body: dict, account_id: int | None = None) -> tuple[list[str], dic
                             f"{edge!r}")
         argv += ["--edge-cases", edge]
 
-    env = gcloud_env()
-    # Set here rather than asking the operator to export it: the value carries
-    # no judgement, the typed domain above is what actually gates this.
-    env["SANDBOX_MODE"] = "true"
-    if account_id is not None:
-        env.update(SOURCE_DOMAIN=st.source_domain, SOURCE_ADMIN=st.source_admin,
-                   SOURCE_SA_KEY=st.source_sa_key, MIGRATION_DB=st.db_path)
-        # TARGET_DOMAIN too, even though the seeder never writes to the
-        # target: it names every row of the identity map
-        # `<localpart>@{settings.target_domain}`. Overlaying only the source
-        # left that read falling through to env.sh's global placeholder, so a
-        # 201-user seed of source.rohitrokaya.com.np produced 201 rows
-        # pointing at a.example.com -- a domain in no part of this migration.
-        # Loading that map would have aimed provision-users and the whole
-        # migration at accounts that cannot exist.
-        env.update(TARGET_DOMAIN=st.target_domain, TARGET_ADMIN=st.target_admin)
-    return argv, env, ""
+    return argv, _seed_env(st, account_id), ""
 
 
 def reset_target_argv(body: dict, account_id: int | None = None) -> tuple[list[str], dict, str]:

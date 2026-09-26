@@ -12,6 +12,7 @@ import {
 import { SERVICES as SEEDABLE } from '@/components/SeedOneService'
 import DomainSandboxToggle from '@/components/DomainSandboxToggle'
 import SeedTopUp from '@/components/SeedTopUp'
+import SeedTrimFiller from '@/components/SeedTrimFiller'
 import JobRunner from '@/components/JobRunner'
 import JobProgress from '@/components/JobProgress'
 import CloudSetup from '@/components/CloudSetup'
@@ -153,6 +154,7 @@ const SeedWizard: React.FC<{
       </Tabs>
 
       {configured && route === 'topup' && (
+        <>
         <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid',
                                   borderColor: 'divider' }}>
           <CardContent sx={{ p: 3 }}>
@@ -162,6 +164,16 @@ const SeedWizard: React.FC<{
             <SeedTopUp domain={sourceDomain} accountId={accountId} />
           </CardContent>
         </Card>
+        <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid',
+                                  borderColor: 'divider', mt: 2 }}>
+          <CardContent sx={{ p: 3 }}>
+            <Typography variant="h6" sx={{ fontWeight: 600, mb: 1.5 }}>
+              Remove filler from {sourceDomain}
+            </Typography>
+            <SeedTrimFiller domain={sourceDomain} accountId={accountId} />
+          </CardContent>
+        </Card>
+        </>
       )}
 
       {configured && route === 'automated' && (

@@ -19,6 +19,7 @@ import base64
 import inspect
 import os
 import re
+import sys
 
 import pytest
 
@@ -1863,3 +1864,128 @@ class TestReseedSkipsTheCorpusNotEverything:
     def test_a_fresh_user_is_unaffected(self):
         want = self._want(seeded=False)
         assert want("drive") and want("gmail") and want("gmail_settings")
+
+
+# ======================================================================
+# Trimming filler back to a share. A delete, so what matters is what it
+# refuses to touch: only filler-NNNN.bin, owned, inside MIGRATION-TEST --
+# never the seeded corpus -- and never more than the excess.
+# ======================================================================
+GIB = 1024 ** 3
+MIB = 1024 ** 2
+
+
+class _TrimDrive:
+    """Just enough Drive for trim_filler: about, list, get and delete, over a
+    plain dict, recording every delete."""
+
+    def __init__(self, usage, files, folders=None, trash=0):
+        self.usage, self.trash = usage, trash
+        self.files_ = {f["id"]: f for f in files}
+        self.folders = folders or {"F": "MIGRATION-TEST", "D": "Documents"}
+        self.deleted, self.queries = [], []
+
+    def about(self):
+        d = self
+        return type("A", (), {"get": lambda s, **k: type("C", (), {"execute": staticmethod(
+            lambda: {"storageQuota": {"usageInDrive": str(d.usage), "usageInDriveTrash": str(d.trash)}})})()})()
+
+    def files(self):
+        d = self
+
+        class F:
+            def list(self, **kw):
+                d.queries.append(kw["q"])
+                rows = [{k: v for k, v in f.items() if k != "trashed"} for f in d.files_.values()]
+                return type("C", (), {"execute": staticmethod(lambda: {"files": rows})})()
+
+            def get(self, **kw):
+                return type("C", (), {"execute": staticmethod(
+                    lambda: {"name": d.folders[kw["fileId"]]})})()
+
+            def delete(self, **kw):
+                def run():
+                    d.deleted.append(kw["fileId"])
+                    d.files_.pop(kw["fileId"], None)
+                return type("C", (), {"execute": staticmethod(run)})()
+        return F()
+
+
+def _filler(i, parent="F", size=50 * MIB, name=None):
+    return {"id": f"f{i}", "name": name or f"filler-{i:04d}.bin", "size": str(size), "parents": [parent]}
+
+
+class TestTrimFiller:
+    def test_a_preview_deletes_nothing_but_says_what_it_would(self, settings):
+        import seed_sandbox as s
+        drive = _TrimDrive(30 * GIB + 500 * MIB, [_filler(i) for i in range(20)])
+        m = s.trim_filler(drive, settings, "a@x", 30 * GIB, apply=False)
+        assert drive.deleted == [] and m["files"] == 0
+        assert m["planned_files"] == 10 and m["planned_bytes"] == 500 * MIB
+
+    def test_apply_deletes_only_as_many_whole_files_as_the_excess_needs(self, settings):
+        import seed_sandbox as s
+        drive = _TrimDrive(30 * GIB + 120 * MIB, [_filler(i) for i in range(20)])
+        m = s.trim_filler(drive, settings, "a@x", 30 * GIB, apply=True)
+        assert m["files"] == 3 == len(drive.deleted)         # 120 MB of excess = three 50 MB files
+        assert len(drive.files_) == 17
+
+    def test_an_account_at_or_under_its_share_is_left_alone(self, settings):
+        import seed_sandbox as s
+        drive = _TrimDrive(30 * GIB, [_filler(i) for i in range(5)])
+        m = s.trim_filler(drive, settings, "a@x", 30 * GIB, apply=True)
+        assert drive.deleted == [] and drive.queries == [] and "under its share" in m["note"]
+
+    def test_only_exactly_named_filler_is_ever_deleted(self, settings):
+        import seed_sandbox as s
+        keep = [_filler(1, name="filler-notes.txt"), _filler(2, name="my-filler-0001.bin"),
+                _filler(3, name="filler-0001.bin.bak"), _filler(4, name="Q3 report.xlsx")]
+        drive = _TrimDrive(31 * GIB, keep + [_filler(10, name="filler-0010.bin")])
+        s.trim_filler(drive, settings, "a@x", 30 * GIB, apply=True)
+        assert drive.deleted == ["f10"]
+
+    def test_filler_named_files_outside_the_migration_test_folder_are_never_deleted(self, settings):
+        import seed_sandbox as s
+        drive = _TrimDrive(31 * GIB, [_filler(1, parent="D"), _filler(2, parent="F")])
+        s.trim_filler(drive, settings, "a@x", 30 * GIB, apply=True)
+        assert drive.deleted == ["f2"]
+
+    def test_it_says_when_the_excess_is_not_filler_and_leaves_that_alone(self, settings):
+        import seed_sandbox as s
+        drive = _TrimDrive(40 * GIB, [_filler(i) for i in range(4)])          # 200 MB filler, 10 GB over
+        m = s.trim_filler(drive, settings, "a@x", 30 * GIB, apply=True)
+        assert len(drive.deleted) == 4 and "other content" in m["note"]
+
+    def test_an_unknown_share_or_unreported_usage_means_left_alone(self, settings):
+        import seed_sandbox as s
+        drive = _TrimDrive(99 * GIB, [_filler(1)])
+        assert "unknown" in s.trim_filler(drive, settings, "a@x", None, apply=True)["note"]
+        assert drive.deleted == []
+
+    def test_it_only_asks_for_files_the_account_owns(self, settings):
+        import seed_sandbox as s
+        drive = _TrimDrive(31 * GIB, [_filler(1)])
+        s.trim_filler(drive, settings, "a@x", 30 * GIB)
+        assert "'me' in owners" in drive.queries[0] and "name contains 'filler'" in drive.queries[0]
+
+    def test_trash_counts_toward_what_is_over(self, settings):
+        import seed_sandbox as s
+        drive = _TrimDrive(29 * GIB, [_filler(i) for i in range(40)], trash=1 * GIB + 100 * MIB)
+        m = s.trim_filler(drive, settings, "a@x", 30 * GIB)
+        assert m["excess_bytes"] == 100 * MIB and m["planned_files"] == 2
+
+
+class TestTrimFlags:
+    def test_apply_needs_trim(self, monkeypatch):
+        import seed_sandbox as s
+        monkeypatch.setattr(sys, "argv", ["seed_sandbox.py", "--confirm-domain", "x.com", "--trim-apply"])
+        with pytest.raises(SystemExit, match="--trim-apply needs --trim-filler"):
+            s.main()
+
+    @pytest.mark.parametrize("other", [["--reset"], ["--top-up-only", "--target-gb-per-user", "5"],
+                                       ["--create-users"]])
+    def test_trim_cannot_be_combined_with_anything_that_writes(self, monkeypatch, other):
+        import seed_sandbox as s
+        monkeypatch.setattr(sys, "argv", ["seed_sandbox.py", "--confirm-domain", "x.com", "--trim-filler", *other])
+        with pytest.raises(SystemExit, match="only removes filler"):
+            s.main()
