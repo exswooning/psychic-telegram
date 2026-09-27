@@ -14,6 +14,26 @@ describe('history', () => {
     expect(r.map((x) => x.p95Ms)).toEqual([250, 500])
   })
   it('tolerates no history at all', () => expect(historyRows(undefined)).toEqual([]))
+
+  it('shows NEW failures since the last snapshot, not the running total', () => {
+    // failures on the wire is metrics.py's cumulative count since the process started --
+    // plotted directly under a "per snapshot" title, a burst that stopped hours ago reads
+    // as still happening. 5 -> 5 -> 8 -> 8 must show 0, 3, 0, not the raw 5, 5, 8.
+    const r = historyRows([
+      { recordedAt: '2026-09-25T10:00:00Z', requestsPerSec: 2, p95: 0.25, failures: 5 },
+      { recordedAt: '2026-09-25T10:00:10Z', requestsPerSec: 2, p95: 0.25, failures: 5 },
+      { recordedAt: '2026-09-25T10:00:20Z', requestsPerSec: 2, p95: 0.25, failures: 8 },
+    ])
+    expect(r.map((x) => x.failures)).toEqual([0, 0, 3])
+  })
+
+  it('never goes negative when a counter resets mid-run', () => {
+    const r = historyRows([
+      { recordedAt: '2026-09-25T10:00:00Z', requestsPerSec: 2, p95: 0.25, failures: 40 },
+      { recordedAt: '2026-09-25T10:00:10Z', requestsPerSec: 2, p95: 0.25, failures: 2 },
+    ])
+    expect(r.map((x) => x.failures)).toEqual([0, 0])
+  })
 })
 
 describe('operations', () => {

@@ -14,14 +14,27 @@ export const clock = (iso: string): string => {
     : `${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}`
 }
 
-/** Oldest first, whatever order the server sent them in. */
+/** Oldest first, whatever order the server sent them in.
+ *
+ * `failures` on the wire is metrics.py's own running total since the process started (or
+ * its last reset), the same number "Retries and failures by operation" already shows as a
+ * lifetime total -- correct there, but this chart is titled "per snapshot", and plotting
+ * the cumulative count directly under that title drew a flat plateau at whatever height a
+ * burst hours earlier left it, which reads as failures happening continuously, right now,
+ * long after they stopped. Diffed against the previous row instead, clamped at 0 so a
+ * counter reset (a fresh process picking up mid-run) reads as "unknown", never negative. */
 export function historyRows(h: MetricsSnapshot['history'] | undefined) {
-  return [...(h ?? [])]
+  const ordered = [...(h ?? [])]
     .sort((a, b) => Date.parse(a.recordedAt) - Date.parse(b.recordedAt))
-    .map((p) => ({
+  let prevFailures: number | null = null
+  return ordered.map((p) => {
+    const failures = prevFailures === null ? 0 : Math.max(0, p.failures - prevFailures)
+    prevFailures = p.failures
+    return {
       t: clock(p.recordedAt), rps: p.requestsPerSec,
-      p95Ms: Math.round(p.p95 * 1000), failures: p.failures,
-    }))
+      p95Ms: Math.round(p.p95 * 1000), failures,
+    }
+  })
 }
 
 /** Slowest first: "which call is costing the run" is the question. */
