@@ -912,7 +912,7 @@ class Job:
         # showing after the job stops (a finished run's final 100%); an ETA
         # is not -- "time left" on a job that already ended is nonsense, so
         # that half is dropped the moment running goes false.
-        pct, eta = _job_progress(name, all_lines or [], elapsed)
+        pct, eta = _job_progress(name, all_lines or [], elapsed, self.account_id)
         if not running:
             eta = None
         return {
@@ -1588,14 +1588,29 @@ def _external_job_snapshot(since: int = 0) -> dict | None:
     if not jobs:
         return None
     job = jobs[0]
-    # name/account: lets the fallback find this job's own on-disk transcript
-    # when fd/1 is a dead pipe left by a previous server process. account is
-    # the legacy slot deliberately -- _external_processes() is a machine-wide
-    # ps scan with no account context (see _job_snapshot's `external` flag),
-    # and JOBS[None] is where a detached run's log lands.
+    # name/account passed to _process_output_tail below: lets the fallback find this
+    # job's own on-disk transcript when fd/1 is a dead pipe left by a previous server
+    # process. That account is the legacy slot deliberately -- _external_processes() is
+    # a machine-wide ps scan with no account context of its own (see _job_snapshot's
+    # `external` flag), and JOBS[None] is where a detached run's log lands regardless of
+    # whose migration.db it will read from.
+    #
+    # The PROGRESS fraction is a different question, and does have an answer:
+    # job_admission's own table records which account admitted this exact pid (api_server's
+    # migrate_start does, even though it never touches webui.py's Job class at all), so it
+    # is looked up here rather than left at the legacy default. Confirmed live: a real,
+    # healthy multi-hour migration read "--" for Progress and ETA the whole time it ran,
+    # because nothing before this read the legacy ledger's empty fraction as though it
+    # were this account's.
+    try:
+        pid_int = int(job["pid"])
+        owner = next((r["account_id"] for r in job_admission.list_active()
+                     if r.get("pid") == pid_int), None)
+    except Exception:      # noqa: BLE001 - advisory only; the legacy default still works
+        owner = None
     tail = _process_output_tail(job["pid"], job["name"], None)
     lines = tail[since:] if since < len(tail) else []
-    pct, eta = _job_progress(job["name"], tail, job["elapsed"])
+    pct, eta = _job_progress(job["name"], tail, job["elapsed"], owner)
     return {
         "name": job["name"],
         "running": True,
@@ -4130,8 +4145,8 @@ def _ledger_progress_fraction(account_id: int | None = None) -> float | None:
         conn.close()
 
 
-def _job_progress(name: str, lines: list[str], elapsed: float
-                  ) -> tuple[int | None, int | None]:
+def _job_progress(name: str, lines: list[str], elapsed: float,
+                  account_id: int | None = None) -> tuple[int | None, int | None]:
     """(progressPct, etaSeconds) for the running job, or (None, None) when
     there is no reliable source for either -- guessing a percentage from
     nothing but log lines is worse than showing none at all.
@@ -4142,6 +4157,15 @@ def _job_progress(name: str, lines: list[str], elapsed: float
     mailbox, but it is the same assumption every "time remaining" bar
     anyone has ever used makes, and it gets more accurate as fraction
     grows -- which is exactly when an operator starts actually watching it.
+
+    account_id matters only for the ledger-backed branch below: a migrate
+    for account 3 has account 3's own migration.db, and reading the legacy
+    (account_id=None) one instead -- which every caller here did until this
+    parameter existed -- finds a different tenant's ledger, or none at all,
+    and reports no progress for a run that is plainly making some. Confirmed
+    live: Progress and ETA read "--" for a real, healthy multi-hour SaaS
+    migration the whole time it ran, because nothing had ever threaded the
+    account through to here.
     """
     # A job that counts itself wins over every heuristic below: it is the
     # job's own statement of where it is, not an inference about it -- but
@@ -4153,7 +4177,7 @@ def _job_progress(name: str, lines: list[str], elapsed: float
     elif name == "seed":
         pct = _seed_progress_pct(lines)
     elif name in ("migrate", "delta", "discover"):
-        frac = _ledger_progress_fraction()
+        frac = _ledger_progress_fraction(account_id)
         pct = round(frac * 100) if frac is not None else None
     if pct is None or pct <= 0 or elapsed <= 0:
         return pct, None

@@ -1505,7 +1505,7 @@ class TestJobProgressAndEta:
         assert snap["etaSeconds"] is None
 
     def test_migrate_progress_reads_the_ledger_fraction_not_the_lines(self, monkeypatch):
-        monkeypatch.setattr(webui, "_ledger_progress_fraction", lambda: 0.4)
+        monkeypatch.setattr(webui, "_ledger_progress_fraction", lambda account_id=None: 0.4)
         job = webui.Job()
         job.name = "migrate"
         job.started = 100.0
@@ -1518,7 +1518,7 @@ class TestJobProgressAndEta:
         assert snap["etaSeconds"] == 60
 
     def test_an_empty_ledger_reports_no_percentage_or_eta(self, monkeypatch):
-        monkeypatch.setattr(webui, "_ledger_progress_fraction", lambda: None)
+        monkeypatch.setattr(webui, "_ledger_progress_fraction", lambda account_id=None: None)
         job = webui.Job()
         job.name = "migrate"
         job.started = 100.0
@@ -1537,7 +1537,7 @@ class TestJobProgressAndEta:
         assert snap["etaSeconds"] is None
 
     def test_zero_percent_never_divides_by_zero_for_an_eta(self, monkeypatch):
-        monkeypatch.setattr(webui, "_ledger_progress_fraction", lambda: 0.0)
+        monkeypatch.setattr(webui, "_ledger_progress_fraction", lambda account_id=None: 0.0)
         job = webui.Job()
         job.name = "migrate"
         job.started = 100.0
@@ -1547,8 +1547,26 @@ class TestJobProgressAndEta:
         assert snap["progressPct"] == 0
         assert snap["etaSeconds"] is None
 
+    def test_an_accounts_own_migrate_reads_that_accounts_own_ledger(self, monkeypatch):
+        """Confirmed live: Progress and ETA read "--" for a real, healthy multi-hour
+        SaaS migration the whole time it ran, because nothing threaded the job's own
+        account through to the ledger-backed fraction -- every caller read the legacy
+        (account_id=None) ledger regardless of which account's job it actually was."""
+        seen = {}
+
+        def fake_fraction(account_id=None):
+            seen["account_id"] = account_id
+            return 0.4
+        monkeypatch.setattr(webui, "_ledger_progress_fraction", fake_fraction)
+        job = webui.Job(account_id=7)
+        job.name = "migrate"
+        job.started = 100.0
+        job.proc = _FakeRunningProc()
+        job.snapshot()
+        assert seen["account_id"] == 7
+
     def test_activity_entry_carries_progress_and_eta_through(self, monkeypatch):
-        monkeypatch.setattr(webui, "_ledger_progress_fraction", lambda: 0.5)
+        monkeypatch.setattr(webui, "_ledger_progress_fraction", lambda account_id=None: 0.5)
         webui.JOB.name = "migrate"
         webui.JOB.started = 100.0
         webui.JOB.lines = ["some output"]

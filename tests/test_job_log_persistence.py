@@ -32,6 +32,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import job_admission  # noqa: E402
 import webui  # noqa: E402
 
 
@@ -195,3 +196,76 @@ class TestExternalSnapshotHonoursTheCallersCursor:
     def test_a_caller_fully_caught_up_gets_nothing(self, monkeypatch):
         self._fake_external(monkeypatch, ["one", "two", "three"])
         assert webui._external_job_snapshot(since=3)["lines"] == []
+
+
+class TestExternalSnapshotResolvesTheOwningAccount:
+    """_external_processes() is a machine-wide ps scan with no account context of its
+    own, so the ledger-backed progress fraction used to always read the legacy
+    (account_id=None) migration.db, whatever account's job this actually was. Confirmed
+    live: Progress and ETA read "--" for a real, healthy multi-hour SaaS migration the
+    whole time it ran. job_admission's own table knows which account admitted this exact
+    pid -- looked up here instead of left at the legacy default."""
+
+    def _fake_external(self, monkeypatch, pid=4242):
+        monkeypatch.setattr(webui, "_external_processes",
+                            lambda: [{"pid": pid, "elapsed": 10, "name": "migrate"}])
+        monkeypatch.setattr(webui, "_process_output_tail",
+                            lambda pid, name="", account_id=None: [])
+
+    def test_the_fraction_is_read_for_the_account_that_admitted_this_pid(self, monkeypatch):
+        self._fake_external(monkeypatch, pid=4242)
+        monkeypatch.setattr(job_admission, "list_active",
+                            lambda: [{"account_id": 9, "job_name": "migrate", "pid": 4242}])
+        seen = {}
+
+        def fake_fraction(account_id=None):
+            seen["account_id"] = account_id
+            return 0.4
+        monkeypatch.setattr(webui, "_ledger_progress_fraction", fake_fraction)
+        snap = webui._external_job_snapshot()
+        assert seen["account_id"] == 9
+        assert snap["progressPct"] == 40
+
+    def test_a_pid_admission_never_recorded_falls_back_to_the_legacy_ledger(self, monkeypatch):
+        """Not every detached process was admitted through job_admission (an operator's
+        own manual run, say) -- that must still work exactly as it always did, not raise."""
+        self._fake_external(monkeypatch, pid=4242)
+        monkeypatch.setattr(job_admission, "list_active", lambda: [])
+        seen = {}
+
+        def fake_fraction(account_id=None):
+            seen["account_id"] = account_id
+            return 0.4
+        monkeypatch.setattr(webui, "_ledger_progress_fraction", fake_fraction)
+        webui._external_job_snapshot()
+        assert seen["account_id"] is None
+
+    def test_a_different_pids_admission_row_is_not_mistaken_for_this_one(self, monkeypatch):
+        self._fake_external(monkeypatch, pid=4242)
+        monkeypatch.setattr(job_admission, "list_active",
+                            lambda: [{"account_id": 9, "job_name": "seed", "pid": 999}])
+        seen = {}
+
+        def fake_fraction(account_id=None):
+            seen["account_id"] = account_id
+            return 0.4
+        monkeypatch.setattr(webui, "_ledger_progress_fraction", fake_fraction)
+        webui._external_job_snapshot()
+        assert seen["account_id"] is None
+
+    def test_the_lookup_failing_falls_back_to_the_legacy_default_rather_than_raising(self, monkeypatch):
+        """job_admission's own table can be unreadable (busy, not yet migrated, ...) --
+        advisory only, so a snapshot must still render, just without the resolved account."""
+        self._fake_external(monkeypatch, pid=4242)
+
+        def boom():
+            raise RuntimeError("db is busy")
+        monkeypatch.setattr(job_admission, "list_active", boom)
+        seen = {}
+
+        def fake_fraction(account_id=None):
+            seen["account_id"] = account_id
+            return 0.4
+        monkeypatch.setattr(webui, "_ledger_progress_fraction", fake_fraction)
+        snap = webui._external_job_snapshot()
+        assert seen["account_id"] is None and snap["progressPct"] == 40
