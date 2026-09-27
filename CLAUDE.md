@@ -261,7 +261,15 @@ what moved. The ledger calls an item done the
 moment it lands — before its sharing runs — so an item is marked `acl_pass` PENDING
 first and cleared when the sharing has run; a resume finishes what is still pending
 and does not re-attempt grants already decided. Only an interrupted item keeps the
-mark, so a ledger from before it reads as finished, as it always did.
+mark, so a ledger from before it reads as finished, as it always did. **Rebuilding a
+native Doc/Sheet/Slide by uploading exported bytes under the native mimeType (the
+download/upload path's only way to do it) makes Drive ignore the requested
+modifiedTime in the create call itself** — measured directly, unlike a plain upload
+or a bare create, which both honour it. `_finish_item`'s restore only runs when
+something else writes to the file afterward, so an unshared, uncommented native file
+had nothing to ever trigger a correction; `_sync_native` now widens its create
+`fields` to read back what Drive actually kept (free — already paying for the round
+trip) and forces the restore via `force_mtime_restore` when it disagrees.
 `gmail_engine._ascii_headers` sends a draft's non-ASCII headers as encoded words:
 `drafts.create` reads raw 8-bit header bytes as Latin-1, one more layer of mojibake
 per copy.
