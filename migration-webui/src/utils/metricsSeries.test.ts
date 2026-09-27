@@ -1,8 +1,32 @@
 import { describe, it, expect } from 'vitest'
 import {
-  dayRows, historyRows, limiterRows, operationRows, progressRow, sawtoothRows, transferRow,
-  volumeRows,
+  clock, dayRows, historyRows, limiterRows, operationRows, progressRow, sawtoothRows,
+  transferRow, volumeRows,
 } from './metricsSeries'
+
+describe('the clock', () => {
+  // Built from LOCAL hour/minute/second (the Date constructor's own reading of its
+  // arguments), then handed to clock() as the ISO string that same instant serialises
+  // to -- so the expected wall-clock reading is fixed by the test, never by whatever
+  // timezone happens to run it.
+  const at = (h: number, m: number, s: number) => new Date(2026, 8, 27, h, m, s).toISOString()
+
+  it('reads a 24-hour hour as 12-hour with AM/PM, not 20:49', () => {
+    expect(clock(at(20, 49, 1))).toBe('8:49:01 PM')
+  })
+  it('reads midnight as 12, not 0', () => {
+    expect(clock(at(0, 5, 9))).toBe('12:05:09 AM')
+  })
+  it('reads noon as 12 PM, not 0 PM', () => {
+    expect(clock(at(12, 0, 0))).toBe('12:00:00 PM')
+  })
+  it('reads a morning hour as AM', () => {
+    expect(clock(at(8, 3, 4))).toBe('8:03:04 AM')
+  })
+  it('still passes through whatever it cannot parse, unchanged', () => {
+    expect(clock('not a date')).toBe('not a date')
+  })
+})
 
 describe('history', () => {
   it('is oldest first whatever order the server sent, with latency in ms', () => {

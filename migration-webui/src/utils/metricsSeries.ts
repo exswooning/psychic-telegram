@@ -8,10 +8,16 @@ import type { LimiterPoint, MetricsSnapshot } from '@/api/controlPlane'
 const GB = 1024 ** 3
 const two = (n: number) => String(n).padStart(2, '0')
 
+/** 12-hour, the reading every chart axis and "last checked" timestamp in this app now
+ *  shares -- a 24-hour "20:49:01" reads as 8:49 AM to more than half the people who might
+ *  open this dashboard, and a chart nobody can read at a glance is not much of a chart. */
 export const clock = (iso: string): string => {
   const d = new Date(iso)
-  return Number.isNaN(d.getTime()) ? iso
-    : `${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}`
+  if (Number.isNaN(d.getTime())) return iso
+  const h24 = d.getHours()
+  const h12 = h24 % 12 || 12
+  const ampm = h24 < 12 ? 'AM' : 'PM'
+  return `${h12}:${two(d.getMinutes())}:${two(d.getSeconds())} ${ampm}`
 }
 
 /** Oldest first, whatever order the server sent them in.

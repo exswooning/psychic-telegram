@@ -1506,7 +1506,7 @@ class DriveMigrator:
             media = MediaFileUpload(path, mimetype=export_mime,
                                     resumable=size > LARGE_UPLOAD_THRESHOLD)
             result = self._retry(lambda: self.tgt.files().create(
-                body=body, media_body=media, fields="id", supportsAllDrives=True,
+                body=body, media_body=media, fields="id,modifiedTime", supportsAllDrives=True,
             ).execute())
         except (PermanentAPIError, RuntimeError) as exc:
             self.db.log_audit(self.source_user, item["id"], "file", "FAILED", str(exc))
@@ -1516,6 +1516,19 @@ class DriveMigrator:
             self._cleanup(path)
 
         tgt_id = result["id"]
+        # Measured directly against Drive: importing uploaded bytes INTO a native format
+        # (this is that conversion -- export_mime is not item["mimeType"]) does not honour
+        # modifiedTime in the create call at all, unlike a plain upload or a bare create,
+        # which do. The response already names what Drive actually kept, so this costs no
+        # extra call -- the same trick _restore_modified_time's own response check uses.
+        # _finish_item's restore is skipped when nothing else writes to the file afterward
+        # (no grants, no comments), which is exactly the set of files this silently affected:
+        # confirmed live, several of a real migration's files carried the migration's own
+        # timestamp with nothing in the ledger to explain it, because nothing had ever
+        # written to them a second time to trigger the correction.
+        stuck = (result.get("modifiedTime") or "")[:19]
+        wanted = (item.get("modifiedTime") or "")[:19]
+        needs_restore = bool(wanted) and stuck != wanted
         self.db.record_mapping(self.source_user, item["id"], tgt_id, "file",
                                parent_target_id=tgt_parent, source_name=item["name"])
         self.db.log_audit(self.source_user, item["id"], "file", "SUCCESS",
@@ -1535,7 +1548,7 @@ class DriveMigrator:
             # next week's folder is ordinary -- so the mapping it needs does
             # not exist until the whole tree is done.
             self._pending_link_rewrites.append((item, tgt_id, export_mime))
-        self._finish_item(item, tgt_id)
+        self._finish_item(item, tgt_id, force_mtime_restore=needs_restore)
 
     def _rewrite_pending_links(self) -> None:
         """Point migrated documents at their migrated neighbours.
@@ -2143,7 +2156,7 @@ class DriveMigrator:
         return 0
 
     def _finish_item(self, item: dict, target_id: str, *, comments: bool = True,
-                     resume: bool = False) -> None:
+                     resume: bool = False, force_mtime_restore: bool = False) -> None:
         """Everything done to an item after it lands -- its sharing, its comments -- and
         then the modifiedTime those writes moved.
 
@@ -2151,6 +2164,12 @@ class DriveMigrator:
         _sync_with_fallback, which logged it at DEBUG and went on: the modifiedTime was
         never put back and nothing said why. A real verification found half the commented
         Docs and Sheets carrying the migration's timestamp with no warning in the log.
+
+        force_mtime_restore is for a file the CREATE call itself already proved needs
+        correcting (a native-format import ignoring modifiedTime entirely, measured
+        directly against Drive -- see the download/upload native path) -- the restore
+        below only runs when something wrote to the file, and a file with no grants and
+        no comments would otherwise never get one.
 
         The ledger calls an item done the moment it lands, before its sharing has run, so a
         run that died in the middle of the sharing left it looking finished with grants
@@ -2186,7 +2205,8 @@ class DriveMigrator:
                             self.source_user, item.get("name"), type(exc).__name__, exc)
         # Always put the time back after ANY step that may have written -- including one
         # that raised half way through.
-        self._restore_modified_time(target_id, item, touched or (1 if failed else 0), late_bump=bool(commented))
+        writes_applied = touched or (1 if failed else 0) or (1 if force_mtime_restore else 0)
+        self._restore_modified_time(target_id, item, writes_applied, late_bump=bool(commented))
         if shareable and sharing_ran:
             self.db.clear_acl_pending(self.source_user, item["id"])
 

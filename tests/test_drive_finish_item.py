@@ -249,6 +249,37 @@ class TestARunKilledMidSharingIsFinishedByTheNextOne:
         assert got == ["bob@tenantb.com", "carol@tenantb.com"] and not db.acl_pending(SRC_USER, folder)
 
 
+class TestANativeImportThatIgnoredTheTimestampIsCorrectedAnyway:
+    """Measured directly against Drive: converting uploaded bytes into a native format (the
+    download/upload path's only way to rebuild one) ignores the requested modifiedTime in the
+    create call itself -- unlike a plain upload or a bare create, which honour it. A file with
+    no grants and no comments has nothing else to trigger _finish_item's restore, so it used to
+    keep the migration's own timestamp forever."""
+
+    def test_an_unshared_uncommented_native_file_still_gets_its_timestamp_back(self, migrator, auth, db):
+        auth.source_drive(SRC_USER).add_native("Plan", mtime=OLD)   # no permissions, no comment
+        migrator.run()
+        _, f = _target(auth, "Plan")
+        assert f["modifiedTime"] == OLD
+
+    def test_it_costs_exactly_one_extra_write_for_that_file(self, migrator, auth, db):
+        auth.source_drive(SRC_USER).add_native("Plan", mtime=OLD)
+        migrator.run()
+        assert len([1 for n, kw in auth.target_drive(TGT_USER).calls
+                    if n == "files.update" and "modifiedTime" in str(kw.get("body"))]) == 1
+
+    def test_a_native_file_whose_create_did_honour_the_time_costs_no_extra_write(self, migrator, auth, db, monkeypatch):
+        """The fake's NATIVE_IMPORT_TIME models the measured bug; a create that DID stick
+        needs no forced restore -- confirming the fix reacts to the response, not to every
+        native file on principle."""
+        import tests.fakes as fakes
+        monkeypatch.setattr(fakes, "NATIVE_IMPORT_TIME", OLD)   # this "import" happens to honour it
+        auth.source_drive(SRC_USER).add_native("Plan", mtime=OLD)
+        migrator.run()
+        assert not [n for n, kw in auth.target_drive(TGT_USER).calls
+                    if n == "files.update" and "modifiedTime" in str(kw.get("body"))]
+
+
 class TestNothingChangesForAnOrdinaryOrOlderLedger:
     def test_a_normal_run_leaves_no_marker_behind(self, migrator, auth, db):
         fid = _shared_file(auth, db)

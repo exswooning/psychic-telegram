@@ -52,6 +52,13 @@ PERMISSION_BUMP_TIME = "2099-12-31T23:59:59Z"
 # comment-ordering bug got past the whole suite: the engine restored the
 # timestamp after ACLs, then wrote comments, and the fake never noticed.
 COMMENT_BUMP_TIME = "2098-11-30T22:58:58Z"
+# A native Google Doc/Sheet/Slide created by uploading exported bytes (the
+# only way to rebuild one server_side copy can't just files.copy) forces
+# Drive to CONVERT the upload -- measured live: that conversion ignores the
+# requested modifiedTime entirely, unlike a plain-file upload, which honours
+# it. Distinct value again so a failing assertion says which of the three
+# writes left the timestamp wrong.
+NATIVE_IMPORT_TIME = "2097-06-15T09:30:00Z"
 
 
 # ======================================================================
@@ -473,6 +480,9 @@ class _DriveFiles:
                 self.s.exports[fid] = data
                 self.s.content.pop(fid, None)
                 meta.pop("size", None)
+                # Measured, not assumed: the convert-on-upload ignores the
+                # modifiedTime the caller asked for.
+                meta["modifiedTime"] = NATIVE_IMPORT_TIME
             else:
                 meta["md5Checksum"] = hashlib.md5(data).hexdigest()
                 result["md5Checksum"] = meta["md5Checksum"]
@@ -482,6 +492,10 @@ class _DriveFiles:
             # deck) is still a real, exportable Google file — just empty.
             self.s.exports[fid] = b""
         self.s.store[fid] = meta
+        # Real Drive's create response echoes the field back whenever it's
+        # requested, honoured or not -- the fake does too, so the engine's
+        # own "did it stick" check has something real to compare against.
+        result["modifiedTime"] = meta["modifiedTime"]
         return result
 
     def copy(self, **kw):
