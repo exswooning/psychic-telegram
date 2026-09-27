@@ -21,6 +21,7 @@ import type { MailMode } from '@/api/controlPlane'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
 import RunReports from '@/components/RunReports'
 import QuickVerification from '@/components/QuickVerification'
+import OneToOneSummary from '@/components/OneToOneSummary'
 
 /**
  * One migration in full: what moved, what failed, and why.
@@ -225,6 +226,11 @@ export const MigrationDetail: React.FC = () => {
           {/* What the last quick migration found when it checked its own work. Fetched
               again when a run starts or ends. */}
           <QuickVerification accountId={Number(accountId)} refreshKey={d.running} />
+
+          {/* Every user's own one-to-one verdict, rolled up -- distinct from the quick
+              migration's single self-check above: this fills in continuously as each
+              user's migration finishes. Hides itself until there is something to say. */}
+          <OneToOneSummary accountId={Number(accountId)} />
 
           {p && (
             <Paper variant="outlined" sx={{ p: 2, mb: 3 }}>

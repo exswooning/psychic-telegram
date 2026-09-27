@@ -733,6 +733,13 @@ class MigrationDB:
                         "sampledOf": r["sampled_of"], **payload})
         return out
 
+    def one_to_one_summary(self) -> dict:
+        """Every user rolled up to one verdict. See the module-level `verification_rollup`
+        for the shared logic (also used by api_server._verification_view against a
+        read-only connection, and by the run report)."""
+        users = [r for r in self.all_identities() if r["entity_type"] == "user"]
+        return verification_rollup(users, self.user_verifications())
+
     def latest_fidelity(self) -> Optional[dict]:
         import json as _json
         row = self.conn.execute("SELECT recorded_at, payload FROM run_fidelity "
@@ -1009,6 +1016,53 @@ def bulk_seed_identities(db: MigrationDB, pairs: Iterable[tuple[str, str]]) -> N
             [(a.lower(), b.lower()) for a, b in pairs],
         )
     db._identity_cache = None            # membership changed
+
+
+# Worst verdict wins a user's rollup: one DIFFERENCES service means the user is not
+# clean, however many others came back IDENTICAL.
+_VERDICT_RANK = {"DIFFERENCES": 3, "INCOMPLETE": 2, "IDENTICAL": 1}
+
+
+def parse_user_verification_rows(rows) -> list[dict]:
+    """Raw `user_verification` rows -> the shape verification_rollup and the rest of this
+    module's callers share. Module-level, like last_repair_from above, so a caller reading
+    through a bare read-only connection (api_server._verification_view) needs no
+    MigrationDB instance to get the same parsing MigrationDB.user_verifications() does."""
+    import json as _json
+    out = []
+    for r in rows:
+        try:
+            payload = _json.loads(r["payload"])
+        except ValueError:
+            payload = {}
+        out.append({"user": r["source_user"], "service": r["service"], "verifiedAt": r["verified_at"],
+                    "verdict": r["verdict"], "checked": r["checked"], "identical": r["identical"],
+                    "sampledOf": r["sampled_of"], **payload})
+    return out
+
+
+def verification_rollup(users, verifications: list[dict]) -> dict:
+    """Every user rolled up to one verdict: the worst across their checked services, or
+    NOT_VERIFIED if nobody has checked any of them yet -- never a blank, which would read
+    as a pass. `users` is identity_map rows (or anything indexable the same way) already
+    filtered to entity_type='user'; `verifications` is user_verifications()'s own shape
+    (or parse_user_verification_rows() of a raw query). Shared by the One-to-one page
+    (api_server._verification_view), MigrationDB.one_to_one_summary, and the run report,
+    so none of the three can disagree about the same ledger."""
+    by_user: dict[str, list[dict]] = {}
+    for v in verifications:
+        by_user.setdefault(v["user"], []).append(v)
+    totals = {"IDENTICAL": 0, "DIFFERENCES": 0, "INCOMPLETE": 0, "NOT_VERIFIED": 0}
+    out_users = []
+    for u in users:
+        svcs = by_user.get(u["source_email"], [])
+        verdict = (max((x["verdict"] for x in svcs), key=lambda v: _VERDICT_RANK.get(v, 0))
+                  if svcs else "NOT_VERIFIED")
+        totals[verdict] = totals.get(verdict, 0) + 1
+        out_users.append({"user": u["source_email"], "target": u["target_email"], "status": u["status"],
+                          "verdict": verdict, "verifiedAt": max((x["verifiedAt"] for x in svcs), default=None),
+                          "services": svcs})
+    return {"users": out_users, "totals": totals}
 
 
 def last_repair_from(conn) -> dict | None:

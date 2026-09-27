@@ -199,6 +199,25 @@ class TestFacts:
         assert any("resilience.py" in s["where"] for s in sus)
         assert all(s["failures"] == 40 for s in sus)
 
+    def test_one_to_one_rolls_up_per_user_the_same_way_the_page_does(self, settings, db):
+        """The report's oneToOne section is db.one_to_one_summary() -- the same rollup the
+        One-to-one page reads, so a user nobody checked reads NOT_VERIFIED here too."""
+        _users(db, done=2, failed=0)          # u0@a.com, u1@a.com
+        db.save_user_verification("u0@a.com", "drive", "IDENTICAL", 20, 20, None, {})
+        db.save_user_verification("u0@a.com", "gmail", "DIFFERENCES", 20, 18, None, {})
+        o2o = RR.collect_facts(db, settings)["oneToOne"]
+        assert o2o["totals"] == {"IDENTICAL": 0, "DIFFERENCES": 1, "INCOMPLETE": 0, "NOT_VERIFIED": 1}
+        by_user = {u["user"]: u for u in o2o["users"]}
+        assert by_user["u0@a.com"]["verdict"] == "DIFFERENCES"     # worst of its two services
+        assert by_user["u1@a.com"]["verdict"] == "NOT_VERIFIED"    # never a blank
+
+    def test_a_broken_one_to_one_section_does_not_lose_the_rest_of_the_report(self, settings, db, monkeypatch):
+        monkeypatch.setattr(db, "one_to_one_summary", lambda: (_ for _ in ()).throw(RuntimeError("nope")))
+        f = RR.collect_facts(db, settings)
+        assert f["oneToOne"] == {"users": [], "totals": {}}
+        assert any(e["section"] == "oneToOne" and "nope" in e["error"] for e in f["errors"])
+        assert "ledger" in f
+
 
 # ---------------------------------------------------------------------------
 # Persistence and paths
@@ -265,6 +284,8 @@ class TestPdfs:
         _users(db, done=2, failed=1)
         _seed(db, [("u0@a.com", "file", "SUCCESS", None)] * 8
                   + [("u2@a.com", "file", "FAILED", "HTTP 403 storageQuotaExceeded → café 中文")] * 2)
+        db.save_user_verification("u0@a.com", "drive", "DIFFERENCES", 20, 18, None,
+                                  {"differences": [{"item": "budget.pdf"}]})
         return RR.build_report(RR.collect_facts(db, settings, transcript=["x → y 中"]), account_id=1)
 
     def test_both_are_real_pdfs(self, settings, db, tmp_path):
@@ -293,6 +314,37 @@ class TestPdfs:
         import report_pdf
         with pytest.raises(ValueError):
             report_pdf.write_pdf(self._report(settings, db), str(tmp_path / "x.pdf"), "robot")
+
+    def test_the_one_to_one_section_names_the_user_it_found_a_difference_for(self, settings, db, tmp_path):
+        import report_pdf
+        p = str(tmp_path / "c.pdf")
+        report_pdf.write_pdf(self._report(settings, db), p, "claude")
+        raw = open(p, "rb").read()
+        assert b"One-to-one check" in raw and b"u0@a.com" in raw
+
+    def test_an_empty_ledger_says_so_instead_of_an_empty_table(self, settings, db, tmp_path):
+        # human is compressed and cannot be grepped for text (see the claude-only test
+        # above); claude is uncompressed, same section, exercised here instead.
+        import report_pdf
+        rep = RR.build_report(RR.collect_facts(db, settings), account_id=1)  # no identity_map rows at all
+        p = str(tmp_path / "c.pdf")
+        report_pdf.write_pdf(rep, p, "claude")
+        assert b"No user has been checked yet" in open(p, "rb").read()
+
+    def test_a_user_nobody_has_checked_yet_shows_in_the_totals_not_as_a_blank(self, settings, db, tmp_path):
+        import report_pdf
+        _users(db, done=1, failed=0)          # u0@a.com, never verified
+        rep = RR.build_report(RR.collect_facts(db, settings), account_id=1)
+        p = str(tmp_path / "c.pdf")
+        report_pdf.write_pdf(rep, p, "claude")
+        assert b"1 not verified" in open(p, "rb").read()
+
+    def test_the_section_is_skipped_for_a_seed_report(self, settings, tmp_path):
+        import report_pdf
+        rep = RR.build_report(RR.collect_seed_facts(settings, transcript=["ok"]), account_id=1)
+        p = str(tmp_path / "s.pdf")
+        report_pdf.write_pdf(rep, p, "claude")
+        assert b"One-to-one check" not in open(p, "rb").read()
 
 
 # ---------------------------------------------------------------------------

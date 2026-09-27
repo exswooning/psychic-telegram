@@ -303,6 +303,11 @@ def collect_facts(db, settings, *, kind: str = "migration", run: dict | None = N
     facts["repair"] = _guard(errors, "repair", _repair, {})
     facts["metrics"] = _guard(errors, "metrics", lambda: _metrics(conn), None) or {}
     facts["fidelity"] = _guard(errors, "fidelity", lambda: _fidelity(conn), {})
+    # Per-user, not tenant-wide like fidelity above: what verify_sample found for each user
+    # as they finished (main.migrate_user's completion hook) or on a manual re-check --
+    # the same rollup the One-to-one page shows, so the two never disagree.
+    facts["oneToOne"] = _guard(errors, "oneToOne", lambda: db.one_to_one_summary(),
+                               {"users": [], "totals": {}})
 
     # -- timing: the job's own record beats the ledger's first/last row ------
     span = _guard(errors, "timing", lambda: _ledger_span(conn), (None, None)) if not (run or {}).get("startedAt") else (None, None)
@@ -495,10 +500,15 @@ def save_report(report: dict, account_id) -> dict:
 
 def summarise(report: dict, files: list[str] | None = None) -> dict:
     run = (report.get("facts") or {}).get("run") or {}
+    # Totals only, not the per-user list: this rides the reports list (RunReports.tsx),
+    # which is read on every account and every kind, so it stays a few small integers
+    # rather than a copy of every user's row. The full breakdown is in the PDFs/JSON.
+    o2o = (report.get("facts") or {}).get("oneToOne") or {}
     return {"id": report["id"], "kind": report["kind"], "generatedAt": report["generatedAt"],
             "accountId": report.get("accountId"), "verdict": report["verdict"], "counts": report["benchmarks"]["counts"],
             "tenants": report.get("tenants"), "returnCode": run.get("returnCode"),
             "startedAt": run.get("startedAt"), "finishedAt": run.get("finishedAt"),
+            "oneToOne": o2o.get("totals") or None,
             "files": files or []}
 
 

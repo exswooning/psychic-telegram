@@ -1406,6 +1406,9 @@ export interface ReportSummary {
   returnCode: number | null
   startedAt: string | null
   finishedAt: string | null
+  /** Per-user one-to-one verdicts, rolled up (same source as the One-to-one page) --
+   *  null for a seed report, or a migration report from before this existed. */
+  oneToOne?: { IDENTICAL?: number; DIFFERENCES?: number; INCOMPLETE?: number; NOT_VERIFIED?: number } | null
   /** Which files exist for this report: json, human.pdf, claude.pdf. */
   files: string[]
 }

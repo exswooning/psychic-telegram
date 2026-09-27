@@ -1638,15 +1638,17 @@ def _ledger_path(account_id: int | None) -> str:
     return Settings(account_id=account_id).db_path
 
 
-_VERDICT_RANK = {"DIFFERENCES": 3, "INCOMPLETE": 2, "IDENTICAL": 1}
-
-
 def _verification_view(account_id: int | None) -> dict:
-    """Every user's last one-to-one verification, from that account's own ledger.
+    """Every user's last one-to-one verification, from that account's own ledger, through a
+    true read-only connection so polling this never contends with a running migration for
+    the ledger's write lock. The rollup itself is db.verification_rollup -- shared with
+    MigrationDB.one_to_one_summary (the run report's own source) so the two can never
+    disagree about the same ledger.
 
     A user the checker has never looked at is NOT_VERIFIED -- not "fine": a page that
     showed nothing for them would read as a pass."""
     from config import Settings
+    import db as db_module
     st = Settings(account_id=account_id)
     out: dict = {"accountId": account_id, "onComplete": st.verify_on_complete,
                  "perService": st.verify_sample_per_service, "users": [],
@@ -1661,24 +1663,9 @@ def _verification_view(account_id: int | None) -> dict:
             rows = conn.execute("SELECT * FROM user_verification ORDER BY service").fetchall()
         except sqlite3.OperationalError:          # a ledger from before this table existed
             rows = []
-    by_user: dict[str, list[dict]] = {}
-    for r in rows:
-        try:
-            payload = json.loads(r["payload"])
-        except ValueError:
-            payload = {}
-        by_user.setdefault(r["source_user"], []).append({
-            "service": r["service"], "verdict": r["verdict"], "verifiedAt": r["verified_at"],
-            "checked": r["checked"], "identical": r["identical"], "sampledOf": r["sampled_of"], **payload})
-    for u in users:
-        svcs = by_user.get(u["source_email"], [])
-        verdict = (max((x["verdict"] for x in svcs), key=lambda v: _VERDICT_RANK.get(v, 0))
-                   if svcs else "NOT_VERIFIED")
-        out["totals"][verdict] = out["totals"].get(verdict, 0) + 1
-        out["users"].append({"user": u["source_email"], "target": u["target_email"], "status": u["status"],
-                             "verdict": verdict, "verifiedAt": max((x["verifiedAt"] for x in svcs), default=None),
-                             "services": svcs})
-    return out
+    verifications = db_module.parse_user_verification_rows(rows)
+    rollup = db_module.verification_rollup(users, verifications)
+    return {**out, **rollup}
 
 
 @app.get("/api/v2/one-to-one")

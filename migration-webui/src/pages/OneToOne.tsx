@@ -22,13 +22,9 @@ import ReasonCodeDialog from '@/components/ReasonCodeDialog'
 import { fetchMe, fetchOneToOne, runOneToOne } from '@/api/controlPlane'
 import type { OneToOneService, OneToOneUser, OneToOneVerdict, OneToOneView } from '@/api/controlPlane'
 
-const VERDICT: Record<OneToOneVerdict, { color: 'success' | 'error' | 'warning' | 'default'; label: string; hint: string }> = {
-  IDENTICAL: { color: 'success', label: 'Identical', hint: 'Every item compared matched its original and nothing was left over.' },
-  DIFFERENCES: { color: 'error', label: 'Differences', hint: 'Something copied does not match its original, is missing, or was copied twice.' },
-  INCOMPLETE: { color: 'warning', label: 'Incomplete', hint: 'Some check could not be made. That is not a pass.' },
-  NOT_VERIFIED: { color: 'default', label: 'Not verified', hint: 'Nobody has compared this user against both tenants yet.' },
-}
-const ORDER: OneToOneVerdict[] = ['DIFFERENCES', 'INCOMPLETE', 'NOT_VERIFIED', 'IDENTICAL']
+// Shared with MigrationDetail's compact summary section, from its own module (not
+// exported from here) so this page file keeps exporting only its component.
+import { VERDICT, ORDER } from '@/oneToOneVerdicts'
 
 const when = (iso: string | null) => {
   if (!iso) return '—'

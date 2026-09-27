@@ -178,6 +178,8 @@ def _human(report, st, width):
                      _status_cell(r["status"], st)])
     out += [Paragraph("Benchmarks", st["h"]), _table(rows, [width - 122 * mm, 30 * mm, 60 * mm, 32 * mm])]
     out += _tally(report, st, width)
+    if report["kind"] != "seed":
+        out += _one_to_one(report, st, width)
 
     fam = facts.get("failures") or []
     if fam:
@@ -251,6 +253,39 @@ def _tally(report, st, width, detail=False):
     return out
 
 
+def _one_to_one(report, st, width, detail=False):
+    """Per-user one-to-one verdicts (verify_sample, run automatically as each user's migration
+    finishes, or on demand from the One-to-one page) -- distinct from _tally's tenant-wide
+    fidelity numbers just above: this is one row per user, and a user nobody has checked yet
+    reads NOT_VERIFIED, never silently absent, the same rule the page itself follows."""
+    o2o = (report["facts"].get("oneToOne") or {})
+    users = o2o.get("users") or []
+    out = [Paragraph("One-to-one check", st["h"])]
+    if not users:
+        out.append(Paragraph("No user has been checked yet -- this fills in as each user's migration "
+                             "finishes, or after “Verify now” on the One-to-one page.", st["body"]))
+        return out
+    totals = o2o.get("totals") or {}
+    order = ("IDENTICAL", "DIFFERENCES", "INCOMPLETE", "NOT_VERIFIED")
+    summary = ", ".join(f"{totals.get(v, 0):,} {v.lower().replace('_', ' ')}" for v in order if totals.get(v))
+    out.append(Paragraph(f"{summary or 'nothing checked yet'}, of {len(users):,} user(s). Each check reads a "
+                         "sample of up to 25 of each kind of item, fresh from both tenants; nothing is "
+                         "written to either.", st["body"]))
+    attention = [u for u in users if u["verdict"] in ("DIFFERENCES", "INCOMPLETE")]
+    if attention:
+        rows = [[Paragraph(f"<b>{h}</b>", st["cell"]) for h in ("Verdict", "User", "Last checked", "Services")]]
+        for u in attention[:(50 if detail else 10)]:
+            svc_txt = ", ".join(f"{s['service']} {s['verdict'].lower()}" for s in u["services"]) or "-"
+            rows.append([_status_cell("fail" if u["verdict"] == "DIFFERENCES" else "warn", st),
+                        Paragraph(_t(u["user"]), st["cell"]), Paragraph(_t(u["verifiedAt"] or "-"), st["small"]),
+                        Paragraph(_t(svc_txt), st["cell"])])
+        out.append(_table(rows, [22 * mm, 58 * mm, 30 * mm, width - 22 * mm - 58 * mm - 30 * mm]))
+        if len(attention) > len(rows) - 1:
+            out.append(Paragraph(f"...and {len(attention) - (len(rows) - 1)} more; see the One-to-one page "
+                                 "for the rest.", st["small"]))
+    return out
+
+
 def _claude(report, st, width):
     facts = report["facts"]
     run, ledger, users = _pair_run(facts)
@@ -292,6 +327,7 @@ def _claude(report, st, width):
 
     if report["kind"] != "seed":
         out += _tally(report, st, width, detail=True)
+        out += _one_to_one(report, st, width, detail=True)
     out.append(Paragraph("Warning families (the transcript's '!' lines)" if report["kind"] == "seed"
                          else "Failure families (audit_log, FAILED and BLOCKED)", st["h"]))
     fam = facts.get("failures") or []

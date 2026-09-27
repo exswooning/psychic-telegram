@@ -129,6 +129,16 @@ export const RunReports: React.FC<{
                 {r.counts.fail} failed · {r.counts.unknown} not checked
                 {r.returnCode != null && ` · exit ${r.returnCode}`}
               </Typography>
+              {/* Per-user, not the tenant-wide fidelity above: what verify_sample found for
+                  each user, same rollup as the One-to-one page. Absent for a seed report. */}
+              {r.oneToOne && (
+                <Typography variant="caption" color="text.secondary" component="div" data-testid={`one-to-one-${r.id}`}>
+                  One-to-one: {r.oneToOne.IDENTICAL ?? 0} identical
+                  {(r.oneToOne.DIFFERENCES ?? 0) > 0 && `, ${r.oneToOne.DIFFERENCES} with differences`}
+                  {(r.oneToOne.INCOMPLETE ?? 0) > 0 && `, ${r.oneToOne.INCOMPLETE} incomplete`}
+                  {(r.oneToOne.NOT_VERIFIED ?? 0) > 0 && `, ${r.oneToOne.NOT_VERIFIED} not verified`}
+                </Typography>
+              )}
             </Box>
             <Stack direction="row" spacing={0.75}>
               {/* Different documents, not two copies: the human one is a summary to

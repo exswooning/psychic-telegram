@@ -12,6 +12,9 @@ vi.mock('@/components/QuickVerification', () => ({
 vi.mock('@/components/RunReports', () => ({
   default: ({ accountId }: { accountId?: number }) => <div data-testid="reports-panel">{accountId}</div>,
 }))
+vi.mock('@/components/OneToOneSummary', () => ({
+  default: ({ accountId }: { accountId: number }) => <div data-testid="one-to-one-summary-panel">{accountId}</div>,
+}))
 vi.mock('@/api/controlPlane', () => ({
   fetchMigrationDetail: (...a: unknown[]) => fetchMigrationDetail(...a),
   startDelta: (...a: unknown[]) => startDelta(...a),

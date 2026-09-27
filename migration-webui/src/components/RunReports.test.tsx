@@ -46,6 +46,21 @@ describe('RunReports', () => {
     expect(row).toHaveTextContent('a.com → b.com')
   })
 
+  it('shows the per-user one-to-one rollup, not just the tenant-wide fidelity counts', async () => {
+    api.fetchReports.mockResolvedValue({ accountId: 1, reports: [rep({
+      oneToOne: { IDENTICAL: 3, DIFFERENCES: 1, NOT_VERIFIED: 297 } })], error: '' })
+    render(<RunReports />)
+    expect(await screen.findByTestId('one-to-one-migration-20260925T195855Z'))
+      .toHaveTextContent('One-to-one: 3 identical, 1 with differences, 297 not verified')
+  })
+
+  it('says nothing about one-to-one for a report that has none (a seed report)', async () => {
+    api.fetchReports.mockResolvedValue({ accountId: 1, reports: [rep({ kind: 'seed', oneToOne: null })], error: '' })
+    render(<RunReports />)
+    await screen.findByTestId('report-migration-20260925T195855Z')
+    expect(screen.queryByTestId('one-to-one-migration-20260925T195855Z')).toBeNull()
+  })
+
   it('never shows an unverified run as a pass', async () => {
     api.fetchReports.mockResolvedValue({ accountId: 1, reports: [rep()], error: '' })
     render(<RunReports />)
