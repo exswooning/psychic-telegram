@@ -122,6 +122,68 @@ class TestSelectiveServiceReset:
         assert reset_target.ALL_SERVICES == ("drive", "gmail", "calendar", "chat")
 
 
+class _FakeGmail:
+    """Just enough of the Gmail client: a paged listing that remembers the query, and trash()."""
+    def __init__(self, pages):
+        self.pages, self.queries, self.trashed = list(pages), [], []
+
+    def users(self):
+        return self
+
+    def messages(self):
+        return self
+
+    def list(self, userId, q, maxResults, pageToken=None):
+        self.queries.append(q)
+        page = self.pages[0 if pageToken is None else int(pageToken)]
+        return _Call({"messages": [{"id": i} for i in page],
+                      **({"nextPageToken": str(self.pages.index(page) + 1)} if page is not self.pages[-1] else {})})
+
+    def trash(self, userId, id):
+        self.trashed.append(id)
+        return _Call({})
+
+
+class _Call:
+    def __init__(self, value):
+        self.value = value
+
+    def execute(self):
+        return self.value
+
+
+class TestGoogleWelcomeMail:
+    """A reset-and-rerun cycle left a pair of Google's welcome mail on the target each time: the
+    seeder's reset only trashes @seed.test mail, and the source's welcome mail is copied across."""
+
+    def test_it_trashes_every_page_of_googles_own_mail_and_counts_it(self):
+        g = _FakeGmail([["a", "b"], ["c"]])
+        assert reset_target.trash_google_welcome_mail(g) == 3
+        assert g.trashed == ["a", "b", "c"]
+
+    def test_it_only_asks_for_mail_from_google_and_never_lists_the_trash(self):
+        g = _FakeGmail([[]])
+        assert reset_target.trash_google_welcome_mail(g) == 0
+        assert g.queries == ["from:mail-noreply@google.com"]      # no `in:anywhere`: the trash is left as it is
+
+    def test_the_reset_does_it_for_mail_and_only_for_mail(self, monkeypatch):
+        calls, swept = [], []
+        monkeypatch.setattr(reset_target, "_load_seeder", lambda: _fake_seeder(calls))
+        monkeypatch.setattr(reset_target, "trash_google_welcome_mail", lambda g: swept.append(g) or 4)
+        out = reset_target.reset_one(settings(), _FakeAuth(), "a@a.example.com")
+        assert swept == [("gmail", "a@a.example.com")] and out["gmail"] == 1 + 4
+        swept.clear()
+        reset_target.reset_one(settings(), _FakeAuth(), "a@a.example.com", services=("drive",))
+        assert swept == []
+
+    def test_a_failure_tidying_up_does_not_lose_the_rest_of_the_reset(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(reset_target, "_load_seeder", lambda: _fake_seeder(calls))
+        monkeypatch.setattr(reset_target, "trash_google_welcome_mail", lambda g: 1 / 0)
+        out = reset_target.reset_one(settings(), _FakeAuth(), "a@a.example.com")
+        assert calls == ["drive", "gmail", "calendar", "chat"] and out["chat"] == 1
+
+
 class _FakeAuth:
     def target_drive(self, user):
         return ("drive", user)

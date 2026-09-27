@@ -692,10 +692,11 @@ export const MigrationDetail: React.FC = () => {
                   data-testid="mail-by-engine"
                   label={
                     <Typography variant="body2">
-                      <strong>This tool moves all of it</strong> — full per-item
-                      ledger, exact failure accounting, idempotent re-runs. Paced
-                      against 3 writes/sec/account, so mail sets the run&apos;s
-                      length.
+                      <strong>This tool moves all of it</strong> — Drive for every
+                      user first, then mail, so each Drive link resolves to its copy.
+                      Full per-item ledger, exact failure accounting, idempotent
+                      re-runs. Paced against 3 writes/sec/account, so mail sets the
+                      run&apos;s length.
                     </Typography>
                   } />
                 <FormControlLabel
@@ -705,8 +706,8 @@ export const MigrationDetail: React.FC = () => {
                     <Typography variant="body2">
                       <strong>Google&apos;s Data Migration Service moves all of
                       it</strong> — spends none of this project&apos;s Gmail quota.
-                      This run then migrates everything <em>except</em> mail, so
-                      nothing is copied twice. Links in mail are not rewritten,
+                      This run then migrates everything <em>except</em> mail (Drive
+                      first, then the rest), so nothing is copied twice. Links in mail are not rewritten,
                       and you give up the per-item ledger for mail.
                     </Typography>
                   } />

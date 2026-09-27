@@ -324,7 +324,9 @@ class StartMigration(WriteAction):
     #           rewriting those links; the rest is left for the DMS pass, which
     #           must run AFTER this one (see migrate_start). The migration
     #           dialog defaults to this.
-    mail_mode: Literal["engine", "dms", "split"] = "engine"
+    # Left out, it is `split` for a whole-tenant run that moves both Drive and
+    # mail (_default_mail_mode) and `engine` for anything else.
+    mail_mode: Literal["engine", "dms", "split"] | None = None
     # A SAMPLE run: consider at most this many items of each service per user
     # (the first N found), and leave the users UNFINISHED so the next full
     # migration still copies the rest. For a quick copy small enough to check one to
@@ -1421,32 +1423,47 @@ def _account_argv(account_id: int | None) -> list[str]:
 _ALL_SERVICES = ("drive", "gmail", "calendar", "chat", "contacts", "tasks")
 
 
-def _mail_plan(services: list[str], mail_mode: str) -> tuple[list[str], dict | None, bool]:
+def _mail_plan(services: list[str], mail_mode: str, rewrite: bool = True) -> tuple[list[str], dict | None, bool]:
     """(services, env, ordered) for who moves the mail.
 
-    split is the one that needs care. The engine inserts only mail that carries
-    a Drive link and rewrites it, marking the rest SKIPPED_NO_DRIVE_LINK for the
-    DMS. Two things make that correct, and both are decided here:
+    ORDERED is decided for every mode, not only split: whenever links are being rewritten and
+    the run has both Drive and something that carries Drive links (mail, calendar). A link in one
+    mailbox names whoever owned the file, and one interleaved run reads mail before other users'
+    Drive has migrated, leaving those links on the source tenant for good -- the message is then
+    in the ledger and every later pass skips it. `rewrite` is whether the run will rewrite links
+    (a split run always does; otherwise the account's REWRITE_DRIVE_LINKS): with it off, ordering
+    would cost the run its interleaving and buy nothing.
 
-      * ORDERED passes. A link in one mailbox names whoever owned the file, and
-        one interleaved run reads mail before other users' Drive has migrated,
-        leaving those links on the source tenant for good.
-      * Rewriting forced ON. Split exists to rewrite; a config that had it off
-        would insert the link mail unrewritten and leave the rest to DMS, which
-        cannot rewrite anything.
+    split is the one that needs more care. The engine inserts only mail that carries a Drive link
+    and rewrites it, marking the rest SKIPPED_NO_DRIVE_LINK for the DMS. Rewriting is forced ON:
+    a config that had it off would insert the link mail unrewritten and leave the rest to DMS,
+    which cannot rewrite anything.
 
-    DMS must run AFTER this: DMS first moves link-bearing mail unrewritten, and
-    the engine then adopts that copy instead of replacing it.
+    DMS must run AFTER this: DMS first moves link-bearing mail unrewritten, and the engine then
+    adopts that copy instead of replacing it.
     """
     wanted = list(_ALL_SERVICES) if "all" in services else list(services)
+    env = None
     if mail_mode == "dms":
         # Excluding mail is the whole point: running both inserts every message
         # twice, and the ledger cannot see what Google moved internally.
-        return [s for s in wanted if s != "gmail"], None, False
-    if mail_mode == "split":
+        wanted = out = [s for s in wanted if s != "gmail"]
+    elif mail_mode == "split":
         env = {**os.environ, "REWRITE_DRIVE_LINKS": "true", "MAIL_ONLY_WITH_LINKS": "true"}
-        return wanted, env, True
-    return list(services), None, False
+        rewrite, out = True, wanted
+    else:
+        out = list(services)
+    return out, env, rewrite and "drive" in wanted and bool({"gmail", "calendar"} & set(wanted))
+
+
+def _default_mail_mode(body: "StartMigration") -> str:
+    """Who moves the mail when the caller did not say: the tool moves the mail with Drive links and
+    the DMS the rest, for a whole-tenant run that moves both. Not for a sample (its mail is
+    compared one to one, so it is all ours), and not for a few chosen users: the DMS is never
+    started for those, so the mail split off would simply not arrive."""
+    wanted = set(_ALL_SERVICES) if "all" in body.services else set(body.services)
+    whole = body.sample is None and not body.users and {"drive", "gmail"} <= wanted
+    return "split" if whole else "engine"
 
 
 def _export_identities_csv(account_id: int | None) -> tuple[str, int]:
@@ -1517,6 +1534,42 @@ def _start_dms(account_id: int | None, *, require_clean: bool, why: str) -> tupl
     return ok, detail
 
 
+def _start_discovery(account_id: int | None, source_domain: str, target_domain: str) -> tuple[bool, str]:
+    """Index the source tenant (`main.py discover --include-mail`: files, folders, bytes, mail, and the
+    ETA baseline) as soon as a pair is ready -- but only once this account's ledger maps THIS pair's
+    users. A ledger outlives the pair it was built for, so a scan run over whatever is mapped could
+    read the previous pair's tenant; that is refused, and says so, rather than scanning the wrong one."""
+    path = _ledger_path(account_id)
+    rows = []
+    if os.path.isfile(path):
+        with cpdb.ro(path) as conn:
+            rows = conn.execute("SELECT source_email, target_email FROM identity_map "
+                                "WHERE entity_type='user'").fetchall()
+    if not rows:
+        return False, "no users are mapped for this pair yet; it starts once they are"
+
+    def dom(email: str) -> str:
+        return email.rsplit("@", 1)[-1].strip().lower()
+    src, tgt = source_domain.strip().lower(), target_domain.strip().lower()
+    stale = {dom(r["source_email"]) for r in rows} - {src}
+    stale |= {dom(r["target_email"]) for r in rows if r["target_email"]} - {tgt}
+    if stale:
+        return False, (f"the ledger still maps another pair's users ({', '.join(sorted(stale))}); "
+                       "rebuild the identity map for this pair first")
+    return _run_admitted([PY, "main.py"] + _account_argv(account_id) + ["discover", "--include-mail"],
+                         account_id, "discover")
+
+
+def _discover_when_mapped(proc, account_id: int | None) -> None:
+    """After a detached identity-map build ends cleanly, index the source it just mapped."""
+    from config import Settings
+    if proc.wait() != 0:
+        return
+    st = Settings(account_id=account_id)
+    ok, detail = _start_discovery(account_id, st.source_domain or "", st.target_domain or "")
+    log.info("discovery after the identity map (account %s): %s %s", account_id, "started" if ok else "not started", detail)
+
+
 def _follow_on(kind: str, account_id: int | None) -> None:
     """What a job that just exited cleanly asked to have done next."""
     if kind == "dms":
@@ -1532,13 +1585,18 @@ async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
     # migrate into an empty account of their own and report success.
     account_id = _resolve_account(body, op)
 
+    # Resolved once and written back, so the audit row and the DMS follow-on below both see
+    # what this run actually does rather than "not said".
+    body.mail_mode = body.mail_mode or _default_mail_mode(body)
     if body.sample is not None and body.mail_mode != "engine":
         # Split leaves the rest of the mail to the DMS and dms takes all of it, so
         # either way the mail could not be compared one to one -- the reason to
         # take a sample at all.
         raise HTTPException(400, "a sample moves its mail through this tool; "
                                  f"mail_mode {body.mail_mode!r} would leave it to the DMS")
-    services, env, ordered = _mail_plan(body.services, body.mail_mode)
+    from config import Settings
+    services, env, ordered = _mail_plan(body.services, body.mail_mode,
+                                        Settings(account_id=account_id).rewrite_drive_links)
     if body.sample is not None:
         env = {**(env or os.environ), "SAMPLE_LIMIT": str(body.sample)}
         ordered = True      # Drive first, so links in the sampled mail can resolve
@@ -2118,7 +2176,8 @@ async def identities_auto_map(body: BuildIdentityMap,
                                     stderr=subprocess.STDOUT,
                                     stdin=subprocess.DEVNULL,
                                     start_new_session=True)
-        return True, f"building the identity map, pid {proc.pid}"
+        threading.Thread(target=_discover_when_mapped, args=(proc, op.account_id), daemon=True).start()
+        return True, f"building the identity map, pid {proc.pid}; the source is indexed when it finishes"
 
     return await _gated(op, "identities.auto_map", body, "identity_map", _launch)
 
@@ -5699,6 +5758,8 @@ async def link_domains(body: LinkDomains, op: Operator = Depends(operator)):
             admin_email=tcfg.get("admin_email") or "",
             sa_key_path=f"keys/{op.account_id}/target-sa.json")
         detail = f"{scfg['domain']} -> {tcfg['domain']}"
+        d_ok, d_detail = _start_discovery(op.account_id, scfg["domain"], tcfg["domain"])
+        detail += f"; discovery {'started' if d_ok else 'not started'}: {d_detail}"
         return True, detail + _license_headroom_warning(op.account_id)
 
     return await _gated(op, "setup.link_domains", body, target, _link)

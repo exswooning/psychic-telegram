@@ -161,12 +161,12 @@ does not touch a webui-launched job). Then `incidents.py resolve <id> -m
 by default and a failed send never fails a run.
 
 **Who moves the mail is a per-run choice (`mail_mode`), and the dialog defaults to
-`split`.** `engine`: this tool moves all mail (the API's own default). `dms`:
+`split`.** `engine`: this tool moves all mail. A caller that names no mode gets `split` for a whole-tenant run that moves both Drive and mail, `engine` for anything else (a sample, a few users, no Drive or no mail; `api_server._default_mail_mode`). `dms`:
 Google's Data Migration Service does, and the run migrates everything else.
 `split`: the engine inserts only mail that carries a Drive link and rewrites it;
 the rest is written `SKIPPED_NO_DRIVE_LINK` (`config.DEFERRED_TO_DMS`) and moved by
 the DMS **after** the run — before, and the DMS moves link mail unrewritten and the
-engine then adopts that copy. Two invariants make split safe, both decided in
+engine then adopts that copy. **Ordered passes are the rule for every mode, not only split**: `_mail_plan` orders any run that is rewriting links and has Drive plus mail or calendar (a calendar description carries Drive links too); with rewriting off ordering would only cost the interleaving. Two invariants make split safe, both decided in
 `api_server._mail_plan`: the run is `--ordered` (Drive for *every* user, then mail,
 then the rest — a link names whoever owned the file, and an interleaved run reads
 mail before other users' Drive has migrated, leaving those links on the source
@@ -185,6 +185,10 @@ start over a failed, running or blocked user — their link mail would cross the
 unrewritten — and says why as a `dms_not_started` incident. Never for a sample, a
 dry run, or a chosen few users. Its identities come from the account's own ledger
 (`_export_identities_csv`), not the repo-root `identities.csv` the seeder leaves.
+
+**The source is indexed when a pair is ready** (`api_server._start_discovery`, a `discover` job: `main.py discover --include-mail`, the ETA baseline): after `link-domains`, and after an identity-map build ends cleanly (`_discover_when_mapped`) -- but only when the account's ledger maps THIS pair's users. A ledger outlives the pair it was built for, so a scan over whatever is mapped could read the previous pair's tenant; it says why it did not start instead.
+
+**`reset_target` also trashes Google's own welcome mail** (`from:mail-noreply@google.com`, `trash_google_welcome_mail`): the seeder's reset only trashes `@seed.test` mail, the source mailboxes hold the same two welcome messages and a migration copies them, so each reset-and-rerun cycle used to stack another pair on the target. The listing excludes the trash, so its count is also the check.
 
 **Every user is verified as they finish** (`verify_sample.verify_user`, started from
 the end of `main.migrate_user`, gated by `VERIFY_ON_COMPLETE`, default on): a

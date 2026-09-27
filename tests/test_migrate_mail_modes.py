@@ -19,14 +19,26 @@ from db import MigrationDB  # noqa: E402
 
 
 class TestThePlan:
-    def test_the_apis_own_default_is_what_every_caller_already_got(self):
-        assert A._mail_plan(["all"], "engine") == (["all"], None, False)
-        assert A._mail_plan(["drive", "gmail"], "engine") == (["drive", "gmail"], None, False)
+    def test_engine_keeps_its_services_and_orders_the_passes_when_a_link_can_need_rewriting(self):
+        assert A._mail_plan(["all"], "engine") == (["all"], None, True)
+        assert A._mail_plan(["drive", "gmail"], "engine") == (["drive", "gmail"], None, True)
+        # Calendar carries Drive links too (event descriptions), so it needs Drive first as well.
+        assert A._mail_plan(["drive", "calendar"], "engine")[2] is True
+
+    def test_nothing_to_order_when_there_is_no_drive_or_nothing_that_carries_a_link(self):
+        assert A._mail_plan(["drive"], "engine")[2] is False
+        assert A._mail_plan(["gmail"], "engine")[2] is False
+        assert A._mail_plan(["drive", "contacts", "tasks"], "engine")[2] is False
+
+    def test_and_not_when_the_run_is_not_rewriting_links(self):
+        """Ordering costs the run its interleaving; with rewriting off it would buy nothing."""
+        assert A._mail_plan(["all"], "engine", rewrite=False) == (["all"], None, False)
 
     def test_dms_takes_mail_off_the_engine_however_the_services_were_named(self):
         every = [s for s in A._ALL_SERVICES if s != "gmail"]
-        assert A._mail_plan(["all"], "dms") == (every, None, False)
-        assert A._mail_plan(["drive", "gmail", "chat"], "dms")[0] == ["drive", "chat"]
+        # Calendar is still moved, so its links still need Drive first.
+        assert A._mail_plan(["all"], "dms") == (every, None, True)
+        assert A._mail_plan(["drive", "gmail", "chat"], "dms") == (["drive", "chat"], None, False)
 
     def test_split_keeps_mail_on_the_engine_orders_the_passes_and_forces_rewriting(self):
         services, env, ordered = A._mail_plan(["all"], "split")
@@ -36,7 +48,8 @@ class TestThePlan:
 
     def test_split_forces_rewriting_on_even_if_the_box_has_it_off(self, monkeypatch):
         monkeypatch.setenv("REWRITE_DRIVE_LINKS", "false")
-        assert A._mail_plan(["all"], "split")[1]["REWRITE_DRIVE_LINKS"] == "true"
+        services, env, ordered = A._mail_plan(["all"], "split", rewrite=False)
+        assert env["REWRITE_DRIVE_LINKS"] == "true" and ordered is True
 
     def test_split_env_is_the_whole_environment_not_just_the_toggles(self):
         """A child launched with env= gets exactly that, so it has to carry PATH
@@ -84,12 +97,43 @@ class TestTheEndpoint:
     def test_dms_leaves_mail_out_of_the_run(self, cp, monkeypatch):
         r, seen = _start(cp, monkeypatch, services=["all"], mail_mode="dms")
         assert "gmail" not in seen["argv"][seen["argv"].index("--services") + 1].split(",")
-        assert "--ordered" not in seen["argv"] and seen["env"] is None
+        assert seen["env"] is None
+        assert "--ordered" in seen["argv"]      # calendar is still moved, and its links need Drive first
 
-    def test_not_naming_a_mode_is_the_engine_as_before(self, cp, monkeypatch):
-        r, seen = _start(cp, monkeypatch, services=["all"])
+    def test_the_engine_still_orders_the_passes_because_links_are_being_rewritten(self, cp, monkeypatch):
+        r, seen = _start(cp, monkeypatch, services=["all"], mail_mode="engine")
         assert seen["argv"][seen["argv"].index("--services") + 1] == "all"
-        assert "--ordered" not in seen["argv"] and seen["env"] is None
+        assert "--ordered" in seen["argv"] and seen["env"] is None
+
+    def test_but_not_when_the_box_has_rewriting_off(self, cp, monkeypatch):
+        monkeypatch.setenv("REWRITE_DRIVE_LINKS", "false")
+        r, seen = _start(cp, monkeypatch, services=["all"], mail_mode="engine")
+        assert "--ordered" not in seen["argv"]
+
+    def test_naming_no_mode_on_a_whole_tenant_run_moves_only_the_mail_with_links(self, cp, monkeypatch):
+        r, seen = _start(cp, monkeypatch, services=["all"])
+        assert r.status_code == 200 and r.json()["ok"] is True, r.text
+        assert "--ordered" in seen["argv"]
+        assert seen["env"]["MAIL_ONLY_WITH_LINKS"] == "true" and seen["env"]["REWRITE_DRIVE_LINKS"] == "true"
+        assert seen["then"] == "dms"            # and the rest is handed to the DMS once it finishes
+
+    def test_the_mode_that_was_decided_is_the_one_in_the_audit_record(self, cp, monkeypatch):
+        _start(cp, monkeypatch, services=["all"])
+        with cpdb.ro() as c:
+            row = c.execute("SELECT params_json FROM operator_actions_log WHERE action='migrate.start' ORDER BY id DESC LIMIT 1").fetchone()
+        assert '"mail_mode": "split"' in row[0]
+
+    @pytest.mark.parametrize("body", [
+        {"services": ["all"], "users": ["a@x.com"]},        # the DMS is never started for a few users
+        {"services": ["drive"]},                            # no mail in it
+        {"services": ["gmail"]},                            # no Drive to rewrite against
+        {"services": ["all"], "sample": 5},                 # compared one to one, so all of it is ours
+    ])
+    def test_otherwise_it_is_the_engine_as_before(self, cp, monkeypatch, body):
+        r, seen = _start(cp, monkeypatch, **body)
+        assert r.status_code == 200, r.text
+        assert seen["then"] is None
+        assert "MAIL_ONLY_WITH_LINKS" not in (seen["env"] or {})
 
     def test_an_unknown_mode_is_refused_rather_than_guessed(self, cp, monkeypatch):
         r, seen = _start(cp, monkeypatch, services=["all"], mail_mode="everything")
@@ -128,7 +172,7 @@ class TestASampleRun:
 
     def test_no_sample_is_an_ordinary_run_with_no_limit_in_the_environment(self, cp, monkeypatch):
         r, seen = _start(cp, monkeypatch, services=["all"])
-        assert seen["env"] is None and "--ordered" not in seen["argv"]
+        assert "SAMPLE_LIMIT" not in (seen["env"] or {})
 
     def test_the_limit_is_in_the_audit_record(self, cp, monkeypatch):
         _start(cp, monkeypatch, services=["gmail"], sample=7)

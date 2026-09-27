@@ -44,12 +44,16 @@ class TestTheChoiceIsOffered:
         those are the messages that need this tool. See the dialog's own comment."""
         assert "useState<MailMode>('split')" in _detail()
 
-    def test_but_the_apis_own_default_is_still_the_engine(self):
-        """Giving up the per-item ledger for mail must be asked for, so a caller
-        that names no mode -- a script, the fleet, another page -- gets what it
-        always got."""
+    def test_the_api_decides_when_a_caller_names_no_mode(self):
+        """A whole-tenant run that moves Drive and mail is a split; anything else is the engine,
+        so a script asking for one user or one service still gets what it always got."""
         import api_server
-        assert api_server.StartMigration.model_fields["mail_mode"].default == "engine"
+        S = api_server.StartMigration
+        assert S.model_fields["mail_mode"].default is None
+        assert api_server._default_mail_mode(S(reason="full run", services=["all"])) == "split"
+        assert api_server._default_mail_mode(S(reason="one user", services=["all"], users=["a@x.com"])) == "engine"
+        assert api_server._default_mail_mode(S(reason="a sample", services=["all"], sample=5)) == "engine"
+        assert api_server._default_mail_mode(S(reason="drive only", services=["drive"])) == "engine"
 
     def test_each_option_says_what_it_costs(self):
         src = _detail()
@@ -73,9 +77,9 @@ class TestChoosingDmsExcludesMailFromTheRun:
         for svc in ("drive", "calendar", "contacts", "tasks", "chat"):
             assert svc in services, f"{svc} would be silently skipped"
 
-    def test_the_engine_path_is_unchanged(self):
+    def test_the_engine_path_keeps_its_services_and_environment(self):
         import api_server
-        assert api_server._mail_plan(["all"], "engine") == (["all"], None, False)
+        assert api_server._mail_plan(["all"], "engine") == (["all"], None, True)
 
     def test_the_dialog_leaves_the_service_list_to_the_server(self):
         """It used to build the list itself, which is how the modes could drift."""

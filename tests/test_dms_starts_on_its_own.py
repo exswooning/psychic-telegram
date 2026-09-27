@@ -54,6 +54,7 @@ def _users(db, statuses):
 
 class _Settings:
     source_domain, target_domain, target_admin, source_admin = "a.com", "b.com", "admin@b.com", "admin@a.com"
+    rewrite_drive_links = True
 
 
 @pytest.fixture
@@ -132,7 +133,7 @@ class TestTheEndpointHandsItOn:
         assert wired["jobs"][0]["then"] is None
 
     def test_the_engine_mode_never_does(self, cp, wired, monkeypatch):
-        self._go(cp, wired, monkeypatch)
+        self._go(cp, wired, monkeypatch, mail_mode="engine")
         assert wired["jobs"][0]["then"] is None and len(wired["jobs"]) == 1
 
     def test_a_dms_run_starts_it_beside_the_migration(self, cp, wired, monkeypatch):

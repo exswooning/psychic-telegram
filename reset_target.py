@@ -21,7 +21,8 @@ Exactly what `seed_sandbox.reset_*` removes, run with target credentials:
             "all files this user owns", because a test tenant can still hold
             something real and that deletion is unrecoverable
   Gmail     messages carrying the seeder's @seed.test Message-ID, plus drafts
-            and the seeded labels
+            and the seeded labels, and Google's own welcome mail (a migration
+            copies the source's, so each cycle would otherwise stack another pair)
   Calendar  the seeded calendars and events
   Chat      the seeded spaces
 
@@ -116,6 +117,30 @@ def assert_sandbox(settings: Settings, confirm_domain: str,
 
 ALL_SERVICES = ("drive", "gmail", "calendar", "chat")
 
+# What Google puts in every new mailbox ("Tips for using your new inbox", "Get the official Gmail
+# app"). The seeder's own reset only trashes @seed.test mail, so these survive it -- and the source
+# mailboxes hold the same two, which a migration copies. Every reset-and-rerun cycle then leaves
+# another pair of copies on the target, and a one-to-one check finds duplicates that are nothing
+# but debris from the cycle. Trashed with the rest of the reset; recoverable for 30 days.
+GOOGLE_WELCOME_QUERY = "from:mail-noreply@google.com"
+
+
+def trash_google_welcome_mail(gmail) -> int:
+    """Trash Google's own new-mailbox mail that is not in the trash already; how many.
+
+    The listing excludes the trash, so a second reset finds nothing to do and the count is the
+    check: it says how much of this the mailbox was still holding."""
+    n, token = 0, None
+    while True:
+        r = gmail.users().messages().list(userId="me", q=GOOGLE_WELCOME_QUERY, maxResults=500,
+                                          pageToken=token).execute()
+        for m in r.get("messages", []):
+            gmail.users().messages().trash(userId="me", id=m["id"]).execute()
+            n += 1
+        token = r.get("nextPageToken")
+        if not token:
+            return n
+
 
 def reset_one(settings: Settings, auth: AuthManager, user: str,
               services: tuple[str, ...] = ALL_SERVICES) -> dict:
@@ -134,6 +159,14 @@ def reset_one(settings: Settings, auth: AuthManager, user: str,
             out[key] = fn(svc(user), settings)
         except Exception as exc:  # noqa: BLE001 - one service must not lose the rest
             print(f"    ! {user} {key}: {str(exc)[:90]}")
+    if "gmail" in services:
+        try:
+            welcome = trash_google_welcome_mail(auth.target_gmail(user))
+            out["gmail"] += welcome
+            if welcome:
+                print(f"    {user}: trashed {welcome} of Google's own welcome mail")
+        except Exception as exc:  # noqa: BLE001 - the seeded mail is already gone; this is tidying
+            print(f"    ! {user} welcome mail: {str(exc)[:90]}")
     if "chat" in services:
         try:
             out["chat"] = seed.reset_chat(auth.target_chat(user), settings, local)
