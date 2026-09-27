@@ -1554,8 +1554,9 @@ def _start_discovery(account_id: int | None, source_domain: str, target_domain: 
     stale = {dom(r["source_email"]) for r in rows} - {src}
     stale |= {dom(r["target_email"]) for r in rows if r["target_email"]} - {tgt}
     if stale:
-        return False, (f"the ledger still maps another pair's users ({', '.join(sorted(stale))}); "
-                       "rebuild the identity map for this pair first")
+        # The warning mark is what makes the link dialog stay open and show this (see LinkDomainsDialog).
+        return False, (f"\u26a0 the ledger still maps another pair's users ({', '.join(sorted(stale))}); "
+                       "rebuild the identity map for this pair, then run Discover")
     return _run_admitted([PY, "main.py"] + _account_argv(account_id) + ["discover", "--include-mail"],
                          account_id, "discover")
 

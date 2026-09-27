@@ -2948,7 +2948,7 @@ class TestMigrateTargetsTheMigrationOnScreen:
         api_server = self._boot(monkeypatch)
         seen = {}
         monkeypatch.setattr(api_server, "_run_admitted",
-                            lambda argv, aid, name: seen.update(
+                            lambda argv, aid, name, **kw: seen.update(
                                 argv=argv, account_id=aid)
                             or {"ok": True, "detail": ""})
         with TestClient(api_server.app) as client:
@@ -2966,7 +2966,7 @@ class TestMigrateTargetsTheMigrationOnScreen:
         api_server = self._boot(monkeypatch)
         seen = {}
         monkeypatch.setattr(api_server, "_run_admitted",
-                            lambda argv, aid, name: seen.update(account_id=aid)
+                            lambda argv, aid, name, **kw: seen.update(account_id=aid)
                             or {"ok": True, "detail": ""})
         with TestClient(api_server.app) as client:
             client.post("/api/v2/auth/signup",
