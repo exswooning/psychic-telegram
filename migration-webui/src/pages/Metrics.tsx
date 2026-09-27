@@ -64,7 +64,7 @@ const bytes = (n: number) => {
 const isFailure = (status: string) =>
   status === 'FAILED' || status === 'BLOCKED'
 
-const Stat: React.FC<{
+export const Stat: React.FC<{
   id: string; label: string; value: string; hint?: string; tone?: 'error' | 'warn'
 }> = ({ id, label, value, hint, tone }) => (
   <Box data-testid={`metric-${id}`} sx={{ minWidth: 110 }}>

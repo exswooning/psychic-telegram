@@ -8,22 +8,25 @@
  * says so instead of drawing an axis that reads as zero.
  */
 import React from 'react'
-import { Box, Typography } from '@mui/material'
+import { Box, Paper, Stack, Typography } from '@mui/material'
 import type { MetricsSnapshot } from '@/api/controlPlane'
 import { useChartStyle } from '@/hooks/useChartStyle'
 import { BarsChart, ChartFrame, SeriesChart } from '@/components/Charts'
+import { Stat } from '@/pages/Metrics'
 import {
-  clockAt, dayRows, historyRows, limiterRows, operationRows, progressRow, sawtoothRows,
-  transferRow, volumeRows,
+  clockAt, dayRows, historyRows, historyStats, limiterRows, operationRows, progressRow,
+  sawtoothRows, transferRow, volumeRows, volumeShareRows,
 } from '@/utils/metricsSeries'
 
 const n = (v: number) => v.toLocaleString()
 const ms = (v: number) => `${v}ms`
 const gb = (v: number) => `${v} GB`
+const pct = (v: number) => `${v}%`
 
 export const MigrateMetricsCharts: React.FC<{ m: MetricsSnapshot }> = ({ m }) => {
   const { c } = useChartStyle()
   const hist = historyRows(m.history)
+  const stats = historyStats(hist)
   const ops = operationRows(m.operations)
   const lim = limiterRows(m.limiters)
   // One entry per limiter, each shaped on its own.
@@ -33,6 +36,7 @@ export const MigrateMetricsCharts: React.FC<{ m: MetricsSnapshot }> = ({ m }) =>
   }).filter((x) => x.stat)
   const sawColors = [c.primary, c.info, c.success, c.warning]
   const vol = volumeRows(m.volume)
+  const volShare = volumeShareRows(m.volume)
   const days = dayRows(m.throughput)
   const prog = progressRow(m.throughput)
   const xfer = transferRow(m.transfer)
@@ -44,21 +48,68 @@ export const MigrateMetricsCharts: React.FC<{ m: MetricsSnapshot }> = ({ m }) =>
 
   return (
     <Box data-testid="migrate-charts">
+      {stats && (
+        <Paper variant="outlined" sx={{ p: 2, mb: 1.5 }} data-testid="stability-stats">
+          <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>
+            Stability over the last {hist.length} snapshots
+          </Typography>
+          {/* Every chart below shows the SHAPE of these snapshots; these are the shape
+              reduced to numbers, because "is the rate actually stable" is exactly the
+              question a sawtooth chart forces someone to eyeball rather than answer.
+              Coefficient of variation (stdev / mean) is unitless, so a source bucket
+              pinned near 1,200/s and a target one at 60/s are comparable by the same
+              number -- a raw stdev is not. */}
+          <Stack direction="row" spacing={4} sx={{ flexWrap: 'wrap', gap: 2 }}>
+            <Stat id="rps-mean" label="requests/s, mean ± stdev"
+                  value={`${stats.rps.mean} ± ${stats.rps.stdev}`}
+                  hint={`range ${stats.rps.min}–${stats.rps.max} across the window`} />
+            <Stat id="rps-cv" label="rate variability (CV)"
+                  value={stats.rps.cvPct === null ? '—' : `${stats.rps.cvPct}%`}
+                  tone={stats.rps.cvPct !== null && stats.rps.cvPct > 40 ? 'warn' : undefined}
+                  hint="Coefficient of variation: stdev as a % of the mean. Near 0 is a flat, held rate; above ~40% is a run still lurching between probes and pushbacks." />
+            <Stat id="p95-mean" label="p95 latency, mean ± stdev"
+                  value={`${ms(stats.p95Ms.mean)} ± ${ms(stats.p95Ms.stdev)}`} />
+            <Stat id="window-retry-rate" label="retry rate"
+                  value={pct(stats.retryRatePct)}
+                  hint={`${stats.totalRetries.toLocaleString()} retries across ${stats.totalCalls.toLocaleString()} calls in this window`} />
+            <Stat id="window-failure-rate" label="failure rate"
+                  value={pct(stats.failureRatePct)}
+                  tone={stats.failureRatePct > 0 ? 'error' : undefined}
+                  hint={`${stats.totalFailures.toLocaleString()} failures across ${stats.totalCalls.toLocaleString()} calls in this window`} />
+          </Stack>
+        </Paper>
+      )}
       <Typography variant="overline" color="text.secondary">Charts</Typography>
       <Box sx={{ display: 'grid', gap: 1.5, mt: 0.5,
                  gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', alignItems: 'start' }}>
-        <ChartFrame title="Requests per second" hint={`last ${hist.length} snapshots`} empty={needTwo}>
+        <ChartFrame title="Requests per second" hint={`last ${hist.length} snapshots, with a trailing 5-point average`}
+                    empty={needTwo}>
           <SeriesChart data={hist} xKey="t"
-                       series={[{ key: 'rps', name: 'requests/s', color: c.primary, type: 'area' }]} />
+                       series={[{ key: 'rps', name: 'requests/s', color: c.primary, type: 'area' },
+                                { key: 'rpsAvg', name: '5-pt average', color: c.info, type: 'line' }]} />
         </ChartFrame>
-        <ChartFrame title="p95 latency" hint="Google queues before it rejects — a climb is the early warning"
+        <ChartFrame title="Latency percentiles" hint="p50 / p95 / p99 — Google queues before it rejects, so a climb in the tail is the early warning"
                     empty={needTwo}>
           <SeriesChart data={hist} xKey="t" fmt={ms}
-                       series={[{ key: 'p95Ms', name: 'p95', color: c.warning, type: 'line' }]} />
+                       series={[{ key: 'p50Ms', name: 'p50', color: c.info, type: 'line' },
+                                { key: 'p95Ms', name: 'p95', color: c.warning, type: 'line' },
+                                { key: 'p99Ms', name: 'p99', color: c.error, type: 'line' }]} />
+        </ChartFrame>
+        <ChartFrame title="Tail latency spread (p99 − p50)"
+                    hint="widening here means a growing share of calls are far slower than typical, even while p50 looks fine"
+                    empty={needTwo}>
+          <SeriesChart data={hist} xKey="t" fmt={ms}
+                       series={[{ key: 'spreadMs', name: 'p99 − p50', color: c.warning, type: 'area' }]} />
         </ChartFrame>
         <ChartFrame title="Failures per snapshot" empty={needTwo}>
           <SeriesChart data={hist} xKey="t"
                        series={[{ key: 'failures', name: 'failures', color: c.error }]} />
+        </ChartFrame>
+        <ChartFrame title="Retry and failure rate" hint="% of that snapshot's own calls — normalizes for a burst of volume, which a raw count cannot"
+                    empty={needTwo}>
+          <SeriesChart data={hist} xKey="t" fmt={pct}
+                       series={[{ key: 'retryRatePct', name: 'retry rate', color: c.warning, type: 'line' },
+                                { key: 'failureRatePct', name: 'failure rate', color: c.error, type: 'line' }]} />
         </ChartFrame>
 
         <ChartFrame title="Latency by operation" hint="slowest first" height={Math.max(150, ops.length * 30)}
@@ -77,6 +128,13 @@ export const MigrateMetricsCharts: React.FC<{ m: MetricsSnapshot }> = ({ m }) =>
           <BarsChart data={ops} xKey="label" horizontal fmt={n} labelWidth={165}
                      series={[{ key: 'retries', name: 'retries', color: c.warning },
                               { key: 'failures', name: 'failures', color: c.error }]} />
+        </ChartFrame>
+        <ChartFrame title="Retry/failure rate by operation" hint="% of that operation's own calls — five retries out of ten and five out of ten thousand are not the same fact"
+                    height={Math.max(150, ops.length * 30)}
+                    empty={none(ops.filter((o) => o.retryPct || o.failurePct), 'No retries or failures — a clean run.')}>
+          <BarsChart data={ops} xKey="label" horizontal fmt={pct} labelWidth={165}
+                     series={[{ key: 'retryPct', name: 'retry rate', color: c.warning },
+                              { key: 'failurePct', name: 'failure rate', color: c.error }]} />
         </ChartFrame>
 
         {/* One chart PER limiter, full width. They differ by orders of
@@ -131,6 +189,14 @@ export const MigrateMetricsCharts: React.FC<{ m: MetricsSnapshot }> = ({ m }) =>
                      series={[{ key: 'done', name: 'done', color: c.success, stackId: 'o' },
                               { key: 'skipped', name: 'skipped', color: c.muted, stackId: 'o' },
                               { key: 'failed', name: 'failed', color: c.error, stackId: 'o' }]} />
+        </ChartFrame>
+        <ChartFrame title="Outcome share by item type" hint="each type's own 100% — a rare type that failed entirely is invisible on the raw-count chart beside a huge one"
+                    height={Math.max(150, volShare.length * 30)}
+                    empty={none(volShare, 'Nothing recorded in the ledger yet.')}>
+          <BarsChart data={volShare} xKey="itemType" horizontal fmt={pct} labelWidth={100}
+                     series={[{ key: 'done', name: 'done', color: c.success, stackId: 'os' },
+                              { key: 'skipped', name: 'skipped', color: c.muted, stackId: 'os' },
+                              { key: 'failed', name: 'failed', color: c.error, stackId: 'os' }]} />
         </ChartFrame>
         <ChartFrame title="Items done and remaining" hint="counts, from the run's own expected total"
                     height={90} empty={prog ? null : 'No expected total recorded yet.'}>

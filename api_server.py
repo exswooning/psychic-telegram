@@ -4714,11 +4714,20 @@ async def migration_metrics(account_id: int, history: int = 60,
             }
         except Exception as exc:      # noqa: BLE001
             out["hostError"] = str(exc)[:160]
-        # Oldest first for plotting.
+        # Oldest first for plotting. p50/p99/calls/retries were already being
+        # written to every run_metrics row (see `latest` above) and simply
+        # never projected into history -- widening this costs nothing extra,
+        # no new write, no schema change, and is what lets the frontend plot
+        # percentile spread and normalized retry/failure RATES over time
+        # instead of only p95 and raw failure counts.
         out["history"] = [
             {"recordedAt": s.get("recordedAt"),
              "requestsPerSec": s.get("requests_per_sec", 0),
+             "p50": s.get("p50", 0),
              "p95": s.get("p95", 0),
+             "p99": s.get("p99", 0),
+             "calls": s.get("calls", 0),
+             "retries": s.get("retries", 0),
              "failures": s.get("failures", 0)}
             for s in reversed(samples)]
         out["limiterHistory"] = _limiter_history(samples)

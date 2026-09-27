@@ -1353,7 +1353,12 @@ export interface MetricsSnapshot {
     disabled: boolean
     density?: number
   }
-  history: { recordedAt: string; requestsPerSec: number; p95: number; failures: number }[]
+  history: {
+    recordedAt: string; requestsPerSec: number; p95: number; failures: number
+    /** Added alongside p95/failures -- optional so a snapshot from before this
+     *  existed (or a test fixture that predates it) still type-checks. */
+    p50?: number; p99?: number; calls?: number; retries?: number
+  }[]
   /** Each limiter's rate over the same window, oldest first -- the sawtooth. */
   limiterHistory?: Record<string, LimiterPoint[]>
 }

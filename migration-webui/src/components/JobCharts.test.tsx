@@ -60,9 +60,10 @@ describe('migrate charts', () => {
 
   it('draws every series it has data for', () => {
     render(<MigrateMetricsCharts m={RICH} />)
-    for (const t of ['Requests per second', 'p95 latency', 'Latency by operation', 'Rate limiters',
-                     'Work per day', 'Outcome by item type', 'Items done and remaining',
-                     'Live mappings on the target', 'Workers against cores']) {
+    for (const t of ['Requests per second', 'Latency percentiles', 'Tail latency spread (p99 − p50)',
+                     'Retry and failure rate', 'Latency by operation', 'Retry/failure rate by operation',
+                     'Rate limiters', 'Work per day', 'Outcome by item type', 'Outcome share by item type',
+                     'Items done and remaining', 'Live mappings on the target', 'Workers against cores']) {
       expect(frame(t).textContent).not.toMatch(/Needs two|No calls|Nothing recorded|No expected|No mappings/)
     }
     // The sawtooth names what it shows: pushbacks, their spacing, the range.
@@ -72,6 +73,21 @@ describe('migrate charts', () => {
     expect(screen.queryByTestId('chart-Rate limiter sawtooth')).toBeNull()
     // Retries exist, so that chart is not the "clean run" placeholder.
     expect(frame('Retries and failures by operation').textContent).not.toMatch(/clean run/)
+    // The one operation recorded has calls, so its rate is a real number, not a placeholder.
+    expect(frame('Retry/failure rate by operation').textContent).not.toMatch(/clean run/)
+  })
+
+  it('reduces the same snapshots to mean/spread/variability numbers once there are at least two', () => {
+    render(<MigrateMetricsCharts m={RICH} />)
+    const panel = screen.getByTestId('stability-stats')
+    expect(panel).toHaveTextContent('rate variability')
+    expect(panel).toHaveTextContent('retry rate')
+    expect(panel).toHaveTextContent('failure rate')
+  })
+
+  it('has no stability panel before there is anything to reduce', () => {
+    render(<MigrateMetricsCharts m={EMPTY as unknown as MetricsSnapshot} />)
+    expect(screen.queryByTestId('stability-stats')).toBeNull()
   })
 })
 
