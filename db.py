@@ -200,6 +200,20 @@ CREATE TABLE IF NOT EXISTS user_verification (
     PRIMARY KEY (source_user, service)
 );
 
+-- One row per user: an exhaustive count of every service on both tenants (tally.py),
+-- distinct from user_verification above, which samples up to 25 items per service and
+-- compares them directly. count_parity is the worst service's parity, NULL when nothing
+-- could be counted at all; the full per-service breakdown is in payload. Never fed by
+-- tally.run()'s whole-tenant pass (that still writes only run_fidelity) -- this is
+-- tally.tally_user_and_save, one user at a time.
+CREATE TABLE IF NOT EXISTS user_tally (
+    source_user   TEXT NOT NULL PRIMARY KEY,
+    target_user   TEXT NOT NULL,
+    recorded_at   TEXT NOT NULL,
+    count_parity  REAL,
+    payload       TEXT NOT NULL
+);
+
 -- Module 1: pre-scan output, one row per (user, run).
 CREATE TABLE IF NOT EXISTS discovery (
     source_user     TEXT NOT NULL,
@@ -740,6 +754,38 @@ class MigrationDB:
         users = [r for r in self.all_identities() if r["entity_type"] == "user"]
         return verification_rollup(users, self.user_verifications())
 
+    def save_user_tally(self, source_user: str, target_user: str,
+                        count_parity: Optional[float], payload: dict) -> None:
+        import json as _json
+        with self.write() as conn:
+            conn.execute(
+                """INSERT INTO user_tally (source_user, target_user, recorded_at, count_parity, payload)
+                   VALUES (?,?,?,?,?)
+                   ON CONFLICT(source_user) DO UPDATE SET
+                       target_user=excluded.target_user, recorded_at=excluded.recorded_at,
+                       count_parity=excluded.count_parity, payload=excluded.payload""",
+                (source_user, target_user, utc_now(), count_parity, _json.dumps(payload, default=str)))
+
+    def user_tallies(self) -> list[dict]:
+        """Every stored per-user tally, one per user."""
+        import json as _json
+        out = []
+        for r in self.conn.execute("SELECT * FROM user_tally ORDER BY source_user"):
+            try:
+                payload = _json.loads(r["payload"])
+            except ValueError:
+                payload = {}
+            out.append({"user": r["source_user"], "target": r["target_user"], "recordedAt": r["recorded_at"],
+                        "countParity": r["count_parity"], **payload})
+        return out
+
+    def tally_summary(self) -> dict:
+        """Every user rolled up to one tally verdict. See the module-level `tally_rollup`
+        for the shared logic (also used by api_server._tally_view against a read-only
+        connection)."""
+        users = [r for r in self.all_identities() if r["entity_type"] == "user"]
+        return tally_rollup(users, self.user_tallies())
+
     def latest_fidelity(self) -> Optional[dict]:
         import json as _json
         row = self.conn.execute("SELECT recorded_at, payload FROM run_fidelity "
@@ -1062,6 +1108,52 @@ def verification_rollup(users, verifications: list[dict]) -> dict:
         out_users.append({"user": u["source_email"], "target": u["target_email"], "status": u["status"],
                           "verdict": verdict, "verifiedAt": max((x["verifiedAt"] for x in svcs), default=None),
                           "services": svcs})
+    return {"users": out_users, "totals": totals}
+
+
+# Same bar as benchmarks.py's own count_parity benchmark (ok=0.999), so a user reading
+# COMPLETE here is exactly what would score a "pass" on that check -- one threshold, not
+# two that could quietly drift apart.
+TALLY_PARITY_OK = 0.999
+
+
+def parse_user_tally_rows(rows) -> list[dict]:
+    """Raw `user_tally` rows -> the shape tally_rollup and MigrationDB.user_tallies() share.
+    Module-level like parse_user_verification_rows above, for a bare read-only connection."""
+    import json as _json
+    out = []
+    for r in rows:
+        try:
+            payload = _json.loads(r["payload"])
+        except ValueError:
+            payload = {}
+        out.append({"user": r["source_user"], "target": r["target_user"], "recordedAt": r["recorded_at"],
+                    "countParity": r["count_parity"], **payload})
+    return out
+
+
+def tally_rollup(users, tallies: list[dict]) -> dict:
+    """Every user rolled up to one tally verdict: COMPLETE (every service at or above the
+    count_parity bar), SHORT (a service came up short), UNKNOWN (a tally ran but nothing
+    could be counted -- e.g. every service errored), or NOT_TALLIED -- never a blank, the
+    same rule verification_rollup follows. Shared by the Tally page (api_server._tally_view),
+    MigrationDB.tally_summary, and (should a report ever want it) the run report."""
+    by_user = {t["user"]: t for t in tallies}
+    totals = {"COMPLETE": 0, "SHORT": 0, "UNKNOWN": 0, "NOT_TALLIED": 0}
+    out_users = []
+    for u in users:
+        t = by_user.get(u["source_email"])
+        if t is None:
+            verdict = "NOT_TALLIED"
+        elif t.get("countParity") is None:
+            verdict = "UNKNOWN"
+        else:
+            verdict = "COMPLETE" if t["countParity"] >= TALLY_PARITY_OK else "SHORT"
+        totals[verdict] += 1
+        out_users.append({"user": u["source_email"], "target": u["target_email"], "status": u["status"],
+                          "verdict": verdict, "countParity": (t or {}).get("countParity"),
+                          "recordedAt": (t or {}).get("recordedAt"), "services": (t or {}).get("services") or {},
+                          "worst": (t or {}).get("worst") or []})
     return {"users": out_users, "totals": totals}
 
 

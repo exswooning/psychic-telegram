@@ -699,6 +699,11 @@ class Settings:
     verify_on_complete: bool = field(default_factory=lambda: _env_bool("VERIFY_ON_COMPLETE", True))
     verify_sample_per_service: int = field(
         default_factory=lambda: max(1, int(os.environ.get("VERIFY_SAMPLE_PER_SERVICE") or 25)))
+    # Same trigger and the same off-thread queue as verify_on_complete above, but an
+    # exhaustive count instead of a sample: every item on both sides, not just 25 of
+    # each kind. Heavier per user, so its own flag -- a tenant where that cost is too
+    # much can turn it off and keep the sampled one-to-one check running.
+    tally_on_complete: bool = field(default_factory=lambda: _env_bool("TALLY_ON_COMPLETE", True))
     # Redo mail that was migrated before rewriting was switched on.
     #
     # Off, and destructive, so it stays opt-in. A migrated message cannot be

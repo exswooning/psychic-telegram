@@ -1699,6 +1699,62 @@ async def one_to_one_run(body: RunVerification, op: Operator = Depends(operator)
                         lambda: _run_admitted(argv, account_id, "verify"))
 
 
+def _tally_view(account_id: int | None) -> dict:
+    """Every user's last per-user tally, from that account's own ledger, through a true
+    read-only connection -- same shape and same reasoning as _verification_view just
+    above, for tally.tally_user_and_save/db.user_tally instead of verify_sample's
+    user_verification. NOT the whole-tenant fidelity number ("Run tally" on the reports
+    panel); this is per user, and a user nobody has tallied yet is NOT_TALLIED, never a
+    blank."""
+    from config import Settings
+    import db as db_module
+    st = Settings(account_id=account_id)
+    out: dict = {"accountId": account_id, "onComplete": st.tally_on_complete, "users": [],
+                 "totals": {"COMPLETE": 0, "SHORT": 0, "UNKNOWN": 0, "NOT_TALLIED": 0}}
+    path = _ledger_path(account_id)
+    if not os.path.isfile(path):
+        return out
+    with cpdb.ro(path) as conn:
+        users = conn.execute("SELECT source_email, target_email, status FROM identity_map "
+                             "WHERE entity_type='user' ORDER BY source_email").fetchall()
+        try:
+            rows = conn.execute("SELECT * FROM user_tally ORDER BY source_user").fetchall()
+        except sqlite3.OperationalError:          # a ledger from before this table existed
+            rows = []
+    tallies = db_module.parse_user_tally_rows(rows)
+    rollup = db_module.tally_rollup(users, tallies)
+    return {**out, **rollup}
+
+
+@app.get("/api/v2/tally")
+async def tally_status(account_id: int | None = None, op: Operator = Depends(operator)):
+    """What the per-user tally last found for each user of this account. It runs on its
+    own as each user finishes; see main.migrate_user and tally.tally_user_and_save."""
+    require_login(op)
+    aid = account_id if account_id is not None else op.account_id
+    if not aid:
+        return {"accountId": None, "users": [], "totals": {}, "onComplete": True}
+    _require_account_access(aid, op)
+    return await _off_loop(_tally_view, aid)
+
+
+@app.post("/api/v2/tally/run")
+async def tally_run(body: RunVerification, op: Operator = Depends(operator)):
+    """Tally again, now: counts both tenants for the chosen users (or every user), writing
+    nothing to either. Runs as a job of its own -- named `user-tally`, not `tally`, so it
+    never shares a slot or a log file with the whole-tenant `main.py tally` behind "Run
+    tally" on the reports panel; the two can run independently and neither's output lands
+    in the other's log. `limit` from RunVerification is unused here (a tally is exhaustive,
+    not sampled) and accepted only so the two share one request shape."""
+    account_id = _resolve_account(body, op)
+    argv = [PY, "tally.py"] + _account_argv(account_id)
+    for u in body.users:
+        argv += ["--user", u]
+    target = ",".join(body.users) if body.users else "ALL"
+    return await _gated(op, "tally.run", body, target,
+                        lambda: _run_admitted(argv, account_id, "user-tally"))
+
+
 @app.get("/api/v2/quick/latest")
 async def quick_latest(account_id: int | None = None, op: Operator = Depends(operator)):
     """The newest one-to-one verification a quick migration saved for this account,

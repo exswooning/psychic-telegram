@@ -348,3 +348,81 @@ def run(settings, db, auth, *, users: list[str] | None = None, sample_users: int
                                    f"{deep_agg['users'] if deep_agg else 0}"))
     db.record_fidelity(payload)
     return payload
+
+
+
+# ---------------------------------------------------------------------------
+# Per-user tally -- runs automatically as each user's migration finishes
+# (main.migrate_user, gated by settings.tally_on_complete), and on demand from
+# the Tally page. Reuses count_side/aggregate above, scoped to one pair, and
+# does NOT touch run_fidelity: that stays the whole-tenant number `main.py
+# tally` writes for the report's fidelity section. Persisted instead in its
+# own table, one row per user (db.save_user_tally / db.user_tallies).
+# ---------------------------------------------------------------------------
+import logging
+
+log = logging.getLogger("tally")
+
+
+def tally_user(auth, settings, db, source_user: str, target_user: str,
+               retry=lambda f: f) -> dict:
+    """Count one user's items on both tenants and roll them up to a single row's worth of
+    services/parity -- the same counting and aggregation `run()` uses for the whole
+    tenant, aggregate() just given a list of one."""
+    skipped = skipped_by_user(db.conn).get(source_user, {})
+    row = {"user": source_user, "target_user": target_user, "skipped": skipped,
+           "source": count_side(auth, settings, "source", source_user, retry),
+           "target": count_side(auth, settings, "target", target_user, retry)}
+    return aggregate([row])
+
+
+def tally_user_and_save(auth, db, settings, source_user: str, target_user: str,
+                        retry=lambda f: f) -> dict | None:
+    """Tally one user and record it. Returns the payload, or None when it could not be run --
+    never raises: it runs on the heels of a migration worker (main.migrate_user's completion
+    hook) and a failed tally must not become a failed migration."""
+    try:
+        payload = tally_user(auth, settings, db, source_user, target_user, retry)
+        db.save_user_tally(source_user, target_user, payload.get("countParity"), payload)
+        log.info("[%s] tallied: parity %s", source_user, payload.get("countParity"))
+        return payload
+    except Exception:      # noqa: BLE001
+        log.exception("[%s] tally could not be run", source_user)
+        return None
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Per-user tally, standalone: `python tally.py --account-id 3 --user tom@source...`.
+    Not the whole-tenant fidelity number -- that is `main.py tally`, which this leaves
+    untouched. Every user by default; --user narrows it. Always exits 0 once the pass
+    ran: a non-zero exit reads as a crash to run_watch, and a user this could not tally
+    is a finding (recorded as NOT_TALLIED/UNKNOWN on the page), not a crash."""
+    import argparse
+
+    from auth import AuthManager
+    from config import Settings
+    from db import MigrationDB
+    from resilience import retry_on_google_error
+
+    ap = argparse.ArgumentParser(description="Tally one or more users; writes nothing to either tenant.")
+    ap.add_argument("--account-id", type=int)
+    ap.add_argument("--user", action="append", help="limit to these source users")
+    a = ap.parse_args(argv)
+    settings = Settings(account_id=a.account_id)
+    db = MigrationDB(settings.db_path)
+    auth = AuthManager(settings)
+    pairs = [(r["source_email"], r["target_email"]) for r in db.all_identities()
+            if r["entity_type"] == "user"]
+    if a.user:
+        want = {u.lower() for u in a.user}
+        pairs = [p for p in pairs if p[0].lower() in want]
+    retry = retry_on_google_error(max_retries=settings.max_retries)
+    for i, (source_user, target_user) in enumerate(pairs, 1):
+        print(f"tally: {i}/{len(pairs)} {source_user}", flush=True)
+        tally_user_and_save(auth, db, settings, source_user, target_user, retry)
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main())

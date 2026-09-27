@@ -265,6 +265,11 @@ class TestSideTables:
                               # rows it describes: what the verifier found for
                               # drive is stale after a drive reset, what it found
                               # for gmail is not
+            "user_tally",     # cleared WHOLESALE, in the same transaction, whenever any
+                              # one of its services is reset -- one row combines every
+                              # service into a single countParity, so there is no slice
+                              # of it left to preserve the way user_verification's
+                              # per-service rows allow
             "run_fidelity",   # not per-user and not derived from the ledger: a
                               # measurement of what the TENANTS held when it
                               # was taken. A ledger reset does not change the
@@ -424,3 +429,28 @@ class TestAVerificationDoesNotOutliveTheItemsItDescribes:
         db.mark_acl_pending("u@a.com", "file1")
         r.reset_service_ledger(db, "u@a.com", ("drive",))
         assert not db.acl_pending("u@a.com", "file1")
+
+
+class TestATallyDoesNotOutliveTheItemsItDescribes:
+    """user_tally has no per-service split -- one row combines every service into a single
+    countParity -- so unlike user_verification above, ANY service being reset drops the
+    whole row rather than a slice of it."""
+
+    def _seed(self, db):
+        db.conn.execute("INSERT OR REPLACE INTO identity_map(source_email, target_email, entity_type, status, services_done) "
+                        "VALUES ('u@a.com','u@b.com','user','DONE','drive,gmail')")
+        db.conn.commit()
+        db.save_user_tally("u@a.com", "u@b.com", 1.0, {"services": {}})
+
+    def test_resetting_one_service_drops_the_whole_row(self, db):
+        import reset_drive_ledger as r
+        self._seed(db)
+        r.reset_service_ledger(db, "u@a.com", ("drive",))
+        assert db.user_tallies() == []
+
+    def test_another_users_tally_is_untouched(self, db):
+        import reset_drive_ledger as r
+        self._seed(db)
+        db.save_user_tally("v@a.com", "v@b.com", 1.0, {"services": {}})
+        r.reset_service_ledger(db, "u@a.com", ("drive",))
+        assert [t["user"] for t in db.user_tallies()] == ["v@a.com"]

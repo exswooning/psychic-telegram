@@ -27,6 +27,7 @@ import {
   BarChart as BarChartIcon,
   CheckCircle as VerifyIcon,
   CompareArrows as OneToOneIcon,
+  Calculate as TallyIcon,
   Assessment as ReportIcon,
   ListAlt as ActivityIcon,
   Menu as MenuIcon,
@@ -104,6 +105,9 @@ const NAV_ITEMS = [
   // Each user compared against both tenants as they finish; not the same page as the
   // domain/reconciliation checks above, which need a run and a person to press them.
   { path: '/one-to-one', label: 'One-to-one', icon: <OneToOneIcon /> , group: 'Check' },
+  // An exhaustive per-user count on both tenants, not a sample -- distinct from
+  // one-to-one just above, which opens and compares a bounded slice of items.
+  { path: '/tally', label: 'Tally', icon: <TallyIcon /> , group: 'Check' },
   { path: '/errors', label: 'Failures', icon: <ErrorsIconNav /> , group: 'Check' },
   { path: '/report', label: 'Final Report', icon: <ReportIcon /> , group: 'Check' },
   { path: '/help', label: 'Help', icon: <HelpIconNav /> , group: 'Admin' },

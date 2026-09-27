@@ -1521,6 +1521,54 @@ export const runOneToOne = (reason: string, opts: { accountId?: number; users?: 
                            ...(opts.limit !== undefined ? { limit: opts.limit } : {}) }),
   })
 
+/** An exhaustive per-user count on both tenants (tally.py), not a sample -- distinct from
+ *  one-to-one above. COMPLETE/SHORT read off count_parity against the same bar
+ *  benchmarks.py's own count_parity check uses; UNKNOWN is a tally that measured nothing. */
+export type TallyVerdict = 'COMPLETE' | 'SHORT' | 'UNKNOWN' | 'NOT_TALLIED'
+export interface TallyServiceCount {
+  source: number
+  target: number
+  skipped: number
+  expected: number
+  parity: number | null
+  surplus: number
+}
+export interface TallyWorst {
+  user: string
+  service: string
+  source: number
+  skipped: number
+  expected: number
+  target: number
+  missing: number
+}
+export interface TallyUser {
+  user: string
+  target: string | null
+  status: string | null
+  verdict: TallyVerdict
+  countParity: number | null
+  recordedAt: string | null
+  services: Record<string, TallyServiceCount>
+  worst: TallyWorst[]
+}
+export interface TallyView {
+  accountId: number | null
+  onComplete: boolean
+  users: TallyUser[]
+  totals: Partial<Record<TallyVerdict, number>>
+}
+export const fetchTally = (accountId?: number) =>
+  cpFetch<TallyView>(`/api/v2/tally${accountId ? `?account_id=${accountId}` : ''}`)
+
+/** The per-user tally, on demand -- distinct from startTally above, which runs the
+ *  whole-tenant fidelity number behind the reports panel's "Run tally" button. */
+export const runTally = (reason: string, opts: { accountId?: number; users?: string[] } = {}) =>
+  cpFetch<ActionResult>('/api/v2/tally/run', {
+    method: 'POST',
+    body: JSON.stringify({ reason, account_id: opts.accountId ?? null, users: opts.users ?? [] }),
+  })
+
 /* Trim filler: the reverse of a fill (seed_sandbox.py --trim-filler). */
 export interface TrimStatus {
   hasRun: boolean

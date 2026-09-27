@@ -618,6 +618,17 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
             VERIFY.submit(verify_sample.verify_user, auth, db, settings, source_user, tuple(done),
                           settings.verify_sample_per_service,
                           retry_on_google_error(max_retries=settings.max_retries))
+    # Same trigger, same queue (both are checks that must never hold a migration worker;
+    # see _VerifyQueue) -- an exhaustive count instead of a sample. Every service, not only
+    # the ones this pass finished: an earlier pass may have finished others already, and a
+    # tally re-run just recounts what is already correct.
+    # ponytail: shares VERIFY's 2 threads with the (lighter) sampled check above; split
+    # into its own pool if a heavy tally is seen to bottleneck verify's own results.
+    if track_status and result.get("status") == "DONE" and getattr(settings, "tally_on_complete", False):
+        import tally
+        from resilience import retry_on_google_error
+        VERIFY.submit(tally.tally_user_and_save, auth, db, settings, source_user, target_user,
+                      retry_on_google_error(max_retries=settings.max_retries))
     return result
 
 

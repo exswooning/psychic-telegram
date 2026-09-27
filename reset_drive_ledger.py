@@ -145,6 +145,11 @@ def reset_service_ledger(db: MigrationDB, source_email: str,
         side_deleted += conn.execute(
             f"DELETE FROM user_verification WHERE source_user=? AND service IN "
             f"({','.join('?' * len(services))})", (source_email, *services)).rowcount
+        # user_tally has no such per-service split -- one row combines every service into a
+        # single countParity -- so any service being reset invalidates the whole row rather
+        # than a slice of it.
+        side_deleted += conn.execute(
+            "DELETE FROM user_tally WHERE source_user=?", (source_email,)).rowcount
         row = conn.execute(
             "SELECT services_done FROM identity_map WHERE source_email=?",
             (source_email,)).fetchone()

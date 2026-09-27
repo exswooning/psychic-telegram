@@ -208,6 +208,23 @@ CLI exits 0 whenever the check ran — a non-zero exit reads as a crash to
 report under `logs/quick/`. `reset_drive_ledger` clears a service's verification
 with the items it describes.
 
+**Every user is also tallied as they finish** (`tally.tally_user_and_save`, the same hook,
+the same `main.VERIFY` queue, gated by `TALLY_ON_COMPLETE`, default on): an *exhaustive*
+count of every service on both tenants, not a sample — `tally.count_side` + `aggregate`
+scoped to one pair, reusing exactly what `main.py tally` uses for the whole tenant, but
+**never** writing `run_fidelity` (that stays the whole-tenant number the report's fidelity
+section reads; a per-user pass overwriting it with one user's counts would corrupt it for
+everyone else). Results are one row per user (`user_tally`, one row combining every
+service — no per-service split, unlike `user_verification`), served by `GET /api/v2/tally`
+and shown on its own **Tally** page, which can also run it again (`POST /api/v2/tally/run`,
+a job named `user-tally` — deliberately not `tally`, so it never shares a slot or a log
+file with the whole-tenant job behind the reports panel's "Run tally"). Verdicts: `COMPLETE`
+(every service at or above the same parity bar `benchmarks.py`'s own `count_parity` check
+uses, 0.999), `SHORT` (a service came up short), `UNKNOWN` (a tally ran but nothing could be
+counted), `NOT_TALLIED` (nobody has, yet — never a blank). `reset_drive_ledger` clears a
+user's whole tally row on any of its services being reset (there is no per-service slice
+to preserve, unlike `user_verification`).
+
 **What happens to an item after it lands is one step, `drive_engine._finish_item`**:
 sharing, comments, then the modifiedTime those writes moved. Each stands alone (an
 exception used to be logged at DEBUG by `_sync_with_fallback` and dropped, so the
