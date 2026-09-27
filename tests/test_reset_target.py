@@ -176,6 +176,18 @@ class TestGoogleWelcomeMail:
         reset_target.reset_one(settings(), _FakeAuth(), "a@a.example.com", services=("drive",))
         assert swept == []
 
+    def test_a_mailbox_the_reset_could_not_reach_is_not_swept_or_reported_twice(self, monkeypatch, capsys):
+        class Seed:
+            def reset_drive(self, svc, st): return 0
+            def reset_gmail(self, svc, st): raise RuntimeError("invalid_grant")
+            def reset_calendar(self, svc, st): return 0
+            def reset_chat(self, svc, st, local): return 0
+        swept = []
+        monkeypatch.setattr(reset_target, "_load_seeder", lambda: Seed())
+        monkeypatch.setattr(reset_target, "trash_google_welcome_mail", lambda g: swept.append(g) or 1)
+        reset_target.reset_one(settings(), _FakeAuth(), "ghost@a.example.com")
+        assert swept == [] and capsys.readouterr().out.count("invalid_grant") == 1
+
     def test_a_failure_tidying_up_does_not_lose_the_rest_of_the_reset(self, monkeypatch):
         calls = []
         monkeypatch.setattr(reset_target, "_load_seeder", lambda: _fake_seeder(calls))

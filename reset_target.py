@@ -148,6 +148,7 @@ def reset_one(settings: Settings, auth: AuthManager, user: str,
 
     local = user.split("@")[0]
     out = {"user": user, "drive": 0, "gmail": 0, "calendar": 0, "chat": 0}
+    unreachable = set()
     for key, fn, svc in (
         ("drive", seed.reset_drive, auth.target_drive),
         ("gmail", seed.reset_gmail, auth.target_gmail),
@@ -158,8 +159,11 @@ def reset_one(settings: Settings, auth: AuthManager, user: str,
         try:
             out[key] = fn(svc(user), settings)
         except Exception as exc:  # noqa: BLE001 - one service must not lose the rest
+            unreachable.add(key)
             print(f"    ! {user} {key}: {str(exc)[:90]}")
-    if "gmail" in services:
+    # Not for a mailbox the seeder's own reset could not reach (an account the target does not have):
+    # that error has been reported once already, and a second one for the same cause is only noise.
+    if "gmail" in services and "gmail" not in unreachable:
         try:
             welcome = trash_google_welcome_mail(auth.target_gmail(user))
             out["gmail"] += welcome
