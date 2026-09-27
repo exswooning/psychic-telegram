@@ -152,8 +152,14 @@ class TestTheCliExitsCleanEvenWhenSomethingComesUpShort:
         tally_user_and_save, which itself never raises (see TestNeverRaises below)."""
         import auth as auth_mod
         import db as db_mod
+        import config
         import tally as T
         monkeypatch.setattr(auth_mod, "AuthManager", lambda settings: object())
+
+        class _Settings:
+            db_path = "unused"
+            max_retries = 3
+        monkeypatch.setattr(config, "Settings", lambda account_id=None: _Settings())
 
         class _DB:
             def all_identities(self):

@@ -115,7 +115,7 @@ class TestTheEndpoint:
         assert r.status_code == 200 and r.json()["ok"] is True, r.text
         assert "--ordered" in seen["argv"]
         assert seen["env"]["MAIL_ONLY_WITH_LINKS"] == "true" and seen["env"]["REWRITE_DRIVE_LINKS"] == "true"
-        assert seen["then"] == "dms"            # and the rest is handed to the DMS once it finishes
+        assert seen["then"] == ["repair", "dms"]  # repaired first, then the rest handed to the DMS
 
     def test_the_mode_that_was_decided_is_the_one_in_the_audit_record(self, cp, monkeypatch):
         _start(cp, monkeypatch, services=["all"])
@@ -132,7 +132,7 @@ class TestTheEndpoint:
     def test_otherwise_it_is_the_engine_as_before(self, cp, monkeypatch, body):
         r, seen = _start(cp, monkeypatch, **body)
         assert r.status_code == 200, r.text
-        assert seen["then"] is None
+        assert seen["then"] == ["repair"], "no DMS follow-on, but repair still rides along on any real run"
         assert "MAIL_ONLY_WITH_LINKS" not in (seen["env"] or {})
 
     def test_an_unknown_mode_is_refused_rather_than_guessed(self, cp, monkeypatch):

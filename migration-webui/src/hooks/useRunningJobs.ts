@@ -181,22 +181,28 @@ export function useRunningJobs() {
       // this page exists to answer. It is labelled for what it is instead.
       const jobIsMine = !!job?.running && !!job.name
       if (jobIsMine && job) {
-        const jobDomain = (jobKind(job.name) === 'reset' && job.name.includes('target'))
-          ? tgtCfg?.domain : srcCfg?.domain
+        const kind = jobKind(job.name)
+        const jobDomain = kind === 'reset' && job.name.includes('target')
+          ? tgtCfg?.domain
+          // A migration (or delta) reads the source and writes the target -- naming only
+          // one tenant left "where is this going?" answered nowhere on the card or the
+          // detail view it opens onto.
+          : kind === 'migrate' && srcCfg?.domain && tgtCfg?.domain
+            ? `${srcCfg.domain} → ${tgtCfg.domain}`
+            : srcCfg?.domain
         // A helper node running seed_sandbox.py directly reports its own
         // seed_domain via fleet_agent.py's --seed-log flag -- matched here
         // by domain, not job name, since the helper's own label is
         // whatever --seed-domain was given it, not this job's name.
-        const seedNodes = jobKind(job.name) === 'seed' && jobDomain
+        const seedNodes = kind === 'seed' && jobDomain
           ? nodes.filter((n) => n.seed_domain === jobDomain && n.healthy)
           : undefined
         found.push({
           key: `webui-${job.name}`,
-          kind: jobKind(job.name),
-          // A seed and a reset both act on the SOURCE tenant; the target
-          // side is only touched by reset target. Naming the tenant is the
-          // difference between "a job is running" and "something is
-          // happening to this domain".
+          kind,
+          // A seed and a reset both act on the SOURCE tenant, so naming just one is the
+          // whole answer; a migration or delta reads one and writes the other, so
+          // jobDomain above already carries both.
           domain: jobDomain,
           label: job.name,
           // "1928s elapsed" was the whole description of a 32-minute run.
@@ -222,7 +228,16 @@ export function useRunningJobs() {
       // node that stopped reporting kept its last active_job forever, so
       // this page listed a migration that finished hours earlier -- with a
       // Stop button for a pid that no longer exists.
-      const fleet = nodes.find((n) => n.active_job && n.job_pid && n.healthy)
+      //
+      // Not the same job as the webui entry above, though: fleet_agent.py's ps scan runs
+      // on every node, INCLUDING this one, so a migrate this account started (found via
+      // fetchJob, already pushed above with its own rich detail) is also found here, by
+      // the same scan, as a second card for the identical pid. Skipped by pid, not by
+      // kind or domain -- a genuinely different node running a genuinely different
+      // migration must still show.
+      const myPids = jobIsMine && job ? (job.pids ?? (job.pid != null ? [job.pid] : [])) : []
+      const fleet = nodes.find((n) => n.active_job && n.job_pid && n.healthy
+                                     && !myPids.includes(n.job_pid))
       if (fleet) {
         found.push({
           key: `fleet-${fleet.job_pid}`, kind: jobKind(fleet.active_job!),

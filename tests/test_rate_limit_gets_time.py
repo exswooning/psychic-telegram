@@ -63,3 +63,50 @@ class TestItIsActuallyApplied:
         with pytest.raises(Exception):
             boom()
         assert calls["n"] <= 2, "a permanent 403 was retried"
+
+
+class TestTheLimiterLearnsFromTheFirstRejectionNotOnlyTheLast:
+    """A single call's own ladder took up to ~4 minutes to give up, deaf to its own
+    rejections the whole time -- a concurrent sibling under the same project limiter
+    kept sending at the pre-rejection rate until this call finally raised. Live, that
+    read as 425 permanently failed grants during one burst. on_quota_rejection fires on
+    every rejected attempt, not just the final one, so a limiter wired to it hears the
+    very first."""
+
+    def _call_that_always_429s(self, reason, on_quota_rejection=None):
+        calls = {"n": 0}
+
+        @R.retry_on_google_error(max_retries=6, base_delay=0, max_delay=0,
+                                 on_quota_rejection=on_quota_rejection)
+        def boom():
+            calls["n"] += 1
+            raise R.HttpError(
+                resp=type("R", (), {"status": 403, "reason": "Forbidden",
+                                    "get": lambda self, k, d=None: None})(),
+                content=('{"error":{"errors":[{"reason":"%s"}],'
+                         '"message":"quota"}}' % reason).encode())
+
+        return boom, calls
+
+    def test_it_fires_once_per_rejection_including_the_one_that_exhausts_the_budget(self, monkeypatch):
+        monkeypatch.setattr(R.time, "sleep", lambda *_: None)
+        seen = []
+        boom, calls = self._call_that_always_429s("rateLimitExceeded", on_quota_rejection=lambda: seen.append(1))
+        with pytest.raises(RuntimeError, match="exhausted"):
+            boom()
+        assert len(seen) == calls["n"] == R.RATE_LIMIT_RETRY_BUDGET + 1
+
+    def test_it_is_not_called_for_a_permanent_403(self, monkeypatch):
+        monkeypatch.setattr(R.time, "sleep", lambda *_: None)
+        seen = []
+        boom, _ = self._call_that_always_429s("insufficientPermissions", on_quota_rejection=lambda: seen.append(1))
+        with pytest.raises(Exception):
+            boom()
+        assert seen == []
+
+    def test_omitting_it_changes_nothing_for_every_existing_caller(self, monkeypatch):
+        monkeypatch.setattr(R.time, "sleep", lambda *_: None)
+        boom, calls = self._call_that_always_429s("rateLimitExceeded")
+        with pytest.raises(RuntimeError, match="exhausted"):
+            boom()
+        assert calls["n"] == R.RATE_LIMIT_RETRY_BUDGET + 1

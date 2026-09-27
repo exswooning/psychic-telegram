@@ -1268,7 +1268,8 @@ def _spawn(argv: list[str], env: dict[str, str] | None = None) -> tuple[bool, st
 
 
 def _run_admitted(argv: list[str], account_id: int | None, job_name: str,
-                  env: dict[str, str] | None = None, then: str | None = None) -> tuple[bool, str]:
+                  env: dict[str, str] | None = None,
+                  then: str | list[str] | None = None) -> tuple[bool, str]:
     """Like _spawn, but resource-aware -- for migrate_start and
     full_setup_start only (see job_admission.py's module docstring for why
     just these two, not every _spawn caller).
@@ -1333,10 +1334,11 @@ def _queue_starter(account_id: int | None, job_name: str,
 
 
 def _start_admitted(argv: list[str], account_id: int | None, job_name: str,
-                    env: dict[str, str] | None = None, then: str | None = None) -> tuple[bool, str]:
+                    env: dict[str, str] | None = None,
+                    then: str | list[str] | None = None) -> tuple[bool, str]:
     """Spawn into a slot admission has already granted. `then` names what to do once it
-    has exited cleanly (see _follow_on); it travels with a queued job so a job that waited
-    for a slot still does it."""
+    has exited cleanly (see _follow_on) -- one kind, or several, run in the order given;
+    it travels with a queued job so a job that waited for a slot still does it."""
     out = _child_output(job_name, account_id)
     try:
         proc = subprocess.Popen(argv, cwd=HERE, stdout=out,
@@ -1357,13 +1359,18 @@ def _start_admitted(argv: list[str], account_id: int | None, job_name: str,
 
     def _wait_then_release() -> None:
         proc.wait()
+        # getattr, not proc.returncode: a real Popen always has it after wait(), but a test
+        # double standing in for one is not obliged to, and this is now read whenever `then`
+        # is set -- which, since repair started riding along on every real migrate, is most
+        # of the time. A fake missing it should read as "unknown", not crash a daemon thread.
+        rc = getattr(proc, "returncode", None)
         # The one place an API-launched job's real exit code is known. Recorded
         # before the slot is released, so the watcher never sees "gone" without
         # the code. (After a restart of this process the waiter is gone too,
         # and the watcher records the exit as not observed rather than guessing.)
         try:
             import run_watch
-            run_watch.record_finished(account_id, job_name, proc.returncode, proc.pid)
+            run_watch.record_finished(account_id, job_name, rc, proc.pid)
         except Exception as exc:      # noqa: BLE001 - recording must never block the release
             print(f"could not record the exit of {job_name!r}: {exc}", flush=True)
         job_admission.release(account_id, job_name)
@@ -1373,11 +1380,12 @@ def _start_admitted(argv: list[str], account_id: int | None, job_name: str,
             job_queue.dispatch_one(_queue_starter, job_queue.RUNNER_API)
         except Exception as exc:      # noqa: BLE001 - never wedge the waiter
             print(f"queue dispatch after {job_name!r} failed: {exc}", flush=True)
-        if then and proc.returncode == 0:
-            try:
-                _follow_on(then, account_id)
-            except Exception as exc:      # noqa: BLE001 - a follow-on must never wedge the waiter
-                print(f"follow-on {then!r} after {job_name!r} failed: {exc}", flush=True)
+        if then and rc == 0:
+            for kind in ([then] if isinstance(then, str) else then):
+                try:
+                    _follow_on(kind, account_id)
+                except Exception as exc:      # noqa: BLE001 - one follow-on must never wedge the waiter,
+                    print(f"follow-on {kind!r} after {job_name!r} failed: {exc}", flush=True)  # or block the next
     threading.Thread(target=_wait_then_release, daemon=True).start()
     return True, f"started pid {proc.pid}: {' '.join(argv[1:4])}"
 
@@ -1571,9 +1579,55 @@ def _discover_when_mapped(proc, account_id: int | None) -> None:
     log.info("discovery after the identity map (account %s): %s %s", account_id, "started" if ok else "not started", detail)
 
 
+def _start_repair(account_id: int | None, why: str, *,
+                  actor: str = "auto", role: str = "system") -> tuple[bool, str]:
+    """Fix what can be fixed without guessing -- the same work /api/v2/repair/{id} does
+    by hand (repair.run_all), backgrounded because the ACL reconcile takes minutes. The
+    two share this one implementation so they cannot drift (see _repair_payload's own
+    comment on exactly that, above).
+
+    Called with no guard of its own: the only caller is _follow_on, which only reaches
+    here the instant after a job_admission slot this account held has been released, so
+    there is nothing left running to collide with. The manual endpoint keeps its own
+    check (a migration in progress) because a person can press it at any time.
+    """
+    from config import Settings
+    from auth import AuthManager
+    from db import MigrationDB
+    import repair
+
+    def _go() -> None:
+        try:
+            st = Settings(account_id=account_id)
+            d = MigrationDB(st.db_path)
+            run_id = d.repair_started()
+            try:
+                out = repair.run_all(d, AuthManager(st), st, apply=True)
+                d.repair_finished(run_id, repair.summarise(out))
+            except Exception as exc:      # noqa: BLE001
+                d.repair_finished(run_id, "", str(exc)[:500])
+                raise
+            finally:
+                _DETAIL_CACHE.invalidate(("migration_detail", account_id))
+                d.close()
+        except Exception as exc:      # noqa: BLE001
+            log.warning("repair failed for account %s: %s", account_id, exc)
+
+    action = cpdb.begin_action(actor, role, "repair.start", why, str(account_id), {}, None, account_id)
+    threading.Thread(target=_go, name=f"repair-{account_id}", daemon=True).start()
+    cpdb.finish_action(action, "OK", "repair started")
+    _DETAIL_CACHE.invalidate(("migration_detail", account_id))
+    return True, "repair started; it checks each grant against the target and takes a few minutes"
+
+
 def _follow_on(kind: str, account_id: int | None) -> None:
     """What a job that just exited cleanly asked to have done next."""
-    if kind == "dms":
+    if kind == "repair":
+        _start_repair(account_id, why="started automatically: the migration finished cleanly, so any "
+                                      "failures it left (a rate-limit burst, a grantee not yet on Google "
+                                      "when it was tried, ...) are checked against the target and fixed now, "
+                                      "without waiting for anyone to press Repair")
+    elif kind == "dms":
         _start_dms(account_id, require_clean=True, why="started automatically: the split migration finished cleanly, "
                                                        "so the mail it left for the DMS is now owed")
 
@@ -1619,7 +1673,10 @@ async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
     # moved the link mail), beside a dms run (it moves all the mail, nothing waits on it). Only
     # for a whole-tenant, real run -- a sample or a few users leave most mail unmoved either way.
     dms = body.dms_after and not body.dry_run and not body.users and body.sample is None
-    then = "dms" if dms and body.mail_mode == "split" else None
+    # Repair after any real run, never a dry one (it writes; a dry run touched nothing to
+    # fix). Before the DMS, not that it matters which order -- repair only reconciles
+    # what this tool's own engine did, unrelated to Google's mail import.
+    then = ([] if body.dry_run else ["repair"]) + (["dms"] if dms and body.mail_mode == "split" else [])
     beside = dms and body.mail_mode == "dms"
 
     def launch() -> tuple[bool, str]:
@@ -4047,37 +4104,9 @@ async def repair_apply(account_id: int, body: WriteAction,
         return {"ok": False,
                 "detail": "a migration is running on this tenant; repair runs "
                           "automatically when it finishes"}
-
-    def _go() -> None:
-        try:
-            from config import Settings
-            from auth import AuthManager
-            from db import MigrationDB
-            import repair
-            st = Settings(account_id=account_id)
-            d = MigrationDB(st.db_path)
-            run_id = d.repair_started()
-            try:
-                out = repair.run_all(d, AuthManager(st), st, apply=True)
-                d.repair_finished(run_id, repair.summarise(out))
-            except Exception as exc:      # noqa: BLE001
-                d.repair_finished(run_id, "", str(exc)[:500])
-                raise
-            finally:
-                _DETAIL_CACHE.invalidate(("migration_detail", account_id))
-                d.close()
-        except Exception as exc:      # noqa: BLE001
-            log.warning("repair failed for account %s: %s", account_id, exc)
-
-    await _off_loop(cpdb.begin_action, op.name, op.role, "repair",
-                    body.reason, str(account_id), body.model_dump(), None,
-                    op.account_id)
-    threading.Thread(target=_go, name=f"repair-{account_id}",
-                     daemon=True).start()
-    _DETAIL_CACHE.invalidate(("migration_detail", account_id))
-    return {"ok": True,
-            "detail": "repair started; it checks each grant against the "
-                      "target and takes a few minutes"}
+    ok, detail = await _off_loop(_start_repair, account_id, body.reason,
+                                 actor=op.name, role=op.role)
+    return {"ok": ok, "detail": detail}
 
 
 

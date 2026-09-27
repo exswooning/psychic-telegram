@@ -442,6 +442,12 @@ class DriveMigrator:
                 base_delay=self.settings.base_backoff,
                 max_delay=self.settings.max_backoff,
                 label=label or "drive",
+                # Learn from the FIRST rejection inside this call's own retry ladder, not
+                # only from a ladder that gave up. A single grant's ladder runs ~4 minutes
+                # deaf to its own rejections otherwise, and a concurrent sibling under the
+                # same project limiter keeps sending at the pre-rejection rate the whole
+                # time -- see resilience.retry_on_google_error's own docstring.
+                on_quota_rejection=project.penalise,
             )(fn)()
         except Exception as exc:
             # The limiter cannot adapt to pushback it never hears about.

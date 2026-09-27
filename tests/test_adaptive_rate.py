@@ -404,3 +404,100 @@ class TestItRecordsTheSawtooth:
         drained = lim.drain_events()
         assert len(drained) == 2000
         assert drained[-1][0] == 4999.0        # the newest survive
+
+
+class TestTheLimiterHearsTheFirstRejectionThroughDriveEngine:
+    """The integration this whole module exists to keep honest: _retry wires
+    resilience.retry_on_google_error's on_quota_rejection straight to the project
+    limiter's own penalise(), so a burst of concurrent grants backs off within the
+    first rejection instead of each running its own ~4-minute ladder deaf to the
+    others. Live: 425 permanently failed before the limiter had cut the rate far
+    enough, because it only learned once each ladder finally gave up."""
+
+    def test_penalise_fires_on_every_rejection_not_only_the_final_one(self, auth, db, settings, quota, monkeypatch):
+        import resilience
+        import drive_engine
+        from tests.conftest import SRC_USER, TGT_USER
+
+        monkeypatch.setattr(resilience.time, "sleep", lambda *_: None)
+        mig = drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota)
+        seen = []
+        monkeypatch.setattr(mig._project_limiter, "penalise", lambda: seen.append(1))
+
+        def always_rate_limited():
+            raise resilience.HttpError(
+                resp=type("R", (), {"status": 403, "reason": "Forbidden",
+                                    "get": lambda self, k, d=None: None})(),
+                content=b'{"error":{"errors":[{"reason":"rateLimitExceeded"}],"message":"quota"}}')
+
+        with pytest.raises(RuntimeError, match="exhausted"):
+            mig._retry(always_rate_limited, label="test")
+        # More than once: the old behaviour (penalise only in the except block around
+        # the whole call) would have left this at exactly 1.
+        assert len(seen) > 1
+        assert len(seen) == resilience.RATE_LIMIT_RETRY_BUDGET + 1 + 1  # + the outer except's own call
+
+
+class TestItRemembersWhereItBrokeLastTime:
+    """Without this, every recovery climbed straight back to (and a step past) the exact
+    rate that just got it rejected -- a permanent sawtooth against the real ceiling, never
+    a stable rate. Live: a pushback every ~37s, forever, each one a real burst of failures."""
+
+    def test_it_holds_below_the_rejection_point_instead_of_charging_through_it(self):
+        """The climb reaches the 95% plateau and sits there for two clean probes -- it
+        must not blow straight through 300 (the exact rate that just broke) on the way."""
+        lim = AdaptiveRateLimiter(300, floor=5, ceiling=1200, probe_after=0)
+        lim.penalise()                       # rejected at 300 -> backs off, remembers 300
+        cap = 300 * 0.95
+        reached_cap = False
+        for _ in range(6):                   # climb to the cap, then two held probes -- see the hand trace above
+            before = lim.rate
+            lim.acquire()
+            if lim.rate == before:
+                reached_cap = True           # holding: proof it stopped climbing at the cap
+            assert lim.rate <= cap + 1e-6, f"climbed to {lim.rate} before ever holding at the cap"
+        assert reached_cap
+
+    def test_it_eventually_risks_one_step_past_and_forgets_the_hint(self):
+        lim = AdaptiveRateLimiter(300, floor=5, ceiling=1200, probe_after=0)
+        lim.penalise()
+        for _ in range(50):
+            lim.acquire()
+            if lim.rate > 300 * 0.95 + 1e-6:
+                break
+        else:
+            pytest.fail("never risked a step past the held plateau")
+        assert lim._ceiling_hint is None
+
+    def test_a_fresh_rejection_near_the_old_hint_lowers_it_again(self):
+        lim = AdaptiveRateLimiter(300, floor=5, ceiling=1200, probe_after=0)
+        lim.penalise()
+        for _ in range(50):
+            lim.acquire()
+            if lim._ceiling_hint is None:
+                break
+        rate_before_second_burst = lim.rate
+        lim.penalise()
+        assert lim._ceiling_hint == pytest.approx(rate_before_second_burst)
+
+    def test_a_limiter_that_has_never_been_rejected_grows_exactly_as_before(self):
+        """No hint, no change in behaviour -- this must not slow down a clean run."""
+        lim = AdaptiveRateLimiter(40, floor=1, ceiling=1200, step=5, probe_after=0)
+        lim.acquire()
+        assert lim.rate == 45.0 and lim._ceiling_hint is None
+
+    def test_holding_the_plateau_records_no_events_only_the_real_step_does(self):
+        lim = AdaptiveRateLimiter(300, floor=5, ceiling=1200, probe_after=0)
+        lim.penalise()
+        lim.drain_events()
+        held = 0
+        for _ in range(50):
+            before = lim.rate
+            lim.acquire()
+            if lim.rate == before:
+                held += 1
+            elif lim._ceiling_hint is None:
+                break
+        assert held >= 1
+        kinds = [k for _, _, k in lim.drain_events()]
+        assert kinds.count("probe") == sum(1 for _ in kinds)   # every recorded event was a real change

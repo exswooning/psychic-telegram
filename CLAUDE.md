@@ -186,6 +186,30 @@ unrewritten — and says why as a `dms_not_started` incident. Never for a sample
 dry run, or a chosen few users. Its identities come from the account's own ledger
 (`_export_identities_csv`), not the repo-root `identities.csv` the seeder leaves.
 
+**Repair also rides along on its own, on any real (non-dry) run** — `then` on
+`_run_admitted`/`_start_admitted` is a list of follow-on kinds now, not one, run in
+order (`_wait_then_release` iterates it; one failing does not block the next): a
+whole-tenant split run gets `["repair", "dms"]`, everything else that is not a dry
+run gets `["repair"]`. `repair.run_all`'s own docstring already promised this
+("Called automatically at the end of a migration") and the manual endpoint's
+refusal already claimed it too ("repair runs automatically when it finishes") —
+neither was actually wired up before `api_server._start_repair`/`_follow_on`. The
+manual `/api/v2/repair/{id}` now calls the same function (so the two can never
+drift) and keeps its own guard (refuses while a migration is running); the
+automatic path has none of its own, because `_follow_on` only ever runs the
+instant after this account's job_admission slot has been released.
+
+**The rate limiter now learns from the first quota rejection, not only the
+last** (`resilience.retry_on_google_error`'s new `on_quota_rejection` hook, wired
+to `drive_engine._retry`'s `project.penalise`): a single call's own retry ladder
+used to run up to ~4 minutes deaf to its own rejections, so a burst of concurrent
+grants each ground through their own ladder in ignorance of the others before the
+`AdaptiveRateLimiter` ever heard about it — live, 425 ACL grants permanently
+failed during one such burst while the limiter's own "no pushback" reading (still
+mid-ladder, nothing had reached exhaustion) read as nothing being wrong. The hook
+fires on every attempt Google rejects for pacing, immediately, so concurrent
+siblings under the same project limiter see the reduced rate within seconds.
+
 **The source is indexed when a pair is ready** (`api_server._start_discovery`, a `discover` job: `main.py discover --include-mail`, the ETA baseline): after `link-domains`, and after an identity-map build ends cleanly (`_discover_when_mapped`) -- but only when the account's ledger maps THIS pair's users. A ledger outlives the pair it was built for, so a scan over whatever is mapped could read the previous pair's tenant; it says why it did not start instead.
 
 **`reset_target` also trashes Google's own welcome mail** (`from:mail-noreply@google.com`, `trash_google_welcome_mail`): the seeder's reset only trashes `@seed.test` mail, the source mailboxes hold the same two welcome messages and a migration copies them, so each reset-and-rerun cycle used to stack another pair on the target. The listing excludes the trash, so its count is also the check.

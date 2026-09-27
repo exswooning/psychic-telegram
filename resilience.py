@@ -314,6 +314,7 @@ def retry_on_google_error(
     max_retries: int = 6, base_delay: float = 1.0, max_delay: float = 60.0,
     before_retry: Callable[[], T | None] | None = None,
     label: str | None = None,
+    on_quota_rejection: Callable[[], None] | None = None,
 ) -> Callable[[Callable[..., T]], Callable[..., T]]:
     """
     Decorator: retry transient Google API failures with full-jitter exponential
@@ -342,6 +343,23 @@ def retry_on_google_error(
     Not called for 429/rate-limit or 403 quota failures: those mean the
     request was rejected before it was processed, so there is nothing to
     adopt and a lookup would just spend quota confirming it.
+
+    on_quota_rejection
+    -------------------
+    Called once per attempt Google rejected for pacing (rateLimitExceeded,
+    userRateLimitExceeded, quotaExceeded) -- immediately, before the sleep.
+
+    Without it, an AdaptiveRateLimiter only learns a project is overshot when a
+    call's own retry ladder finally gives up (drive_engine.py penalises it then,
+    around the whole call) -- as late as ~4 minutes after the FIRST rejection,
+    and deaf to every one of the intervening ones. Live, a burst of many
+    concurrent grants each ran their own ~4-minute ladder in ignorance of the
+    others: 425 permanently failed before the limiter had cut the rate far
+    enough, while the limiter's own "no pushback" reading (nothing had reached
+    exhaustion yet) made it look like nothing was wrong. This callback lets the
+    limiter hear the FIRST rejection instead of only the last, so concurrent
+    siblings under the same project limiter see the reduced rate within
+    seconds, not minutes.
     """
 
     def decorator(fn: Callable[..., T]) -> Callable[..., T]:
@@ -410,6 +428,11 @@ def retry_on_google_error(
                         # warns against is spending minutes on errors that
                         # will never clear, and these always clear.
                         budget = max(max_retries, RATE_LIMIT_RETRY_BUDGET)
+                        # Every rejection, including the one that is about to exhaust the
+                        # budget below -- a limiter told late is a limiter that told a whole
+                        # burst of siblings nothing.
+                        if on_quota_rejection is not None:
+                            on_quota_rejection()
                     if attempt > budget:
                         raise RuntimeError(
                             f"exhausted {budget} retries on HTTP {status} "
@@ -550,6 +573,15 @@ class AdaptiveRateLimiter(RateLimiter):
     The floor matters as much as the ceiling: a burst of 429s from a
     genuinely unrelated cause must not be able to drive the rate to zero
     and wedge the migration.
+
+    AIMD alone has no memory, though: every recovery climbs straight back to (and a
+    step past) the exact rate that just got it rejected, gets rejected again, and
+    repeats -- a permanent sawtooth against the real ceiling, never a rate it holds.
+    Live, that read as a pushback every ~37s, forever. `_ceiling_hint` (set by
+    `penalise`, read by `_next_rate`) is the fix: the climb eases up to 95% of the
+    last rejection point, holds there for two clean probes, and only then risks one
+    real step past it -- proven clear, the hint is forgotten and it climbs on at
+    normal speed; rejected again, a fresh (by then lower) hint is set immediately.
     """
 
     def __init__(self, rate_per_sec: float, *, floor: float, ceiling: float,
@@ -581,6 +613,12 @@ class AdaptiveRateLimiter(RateLimiter):
         self._last_change = time.monotonic()
         self._rejections = 0
         self._backoffs = 0
+        # Where Google most recently said no. Without this, every recovery climbs back to
+        # (and a step past) the exact rate that just got it rejected, gets rejected again,
+        # and repeats forever -- a permanent sawtooth, never a stable rate, and every peak
+        # is a real burst of failures. See _near_hint_growth below.
+        self._ceiling_hint: float | None = None
+        self._clean_probes_at_hint = 0
         # Every rate change, (wall clock, rate after, "probe"|"backoff"), until
         # someone drains it. This is what draws the sawtooth: the climb is
         # probes, each drop is a pushback, and a snapshot every 15 s cannot
@@ -624,12 +662,38 @@ class AdaptiveRateLimiter(RateLimiter):
             self._last_change = time.monotonic()
             if self.rate < before:
                 self._backoffs += 1
+                # The rate a moment ago is where it broke -- remembered so the climb back
+                # eases up to it instead of charging straight through at full speed again.
+                self._ceiling_hint = before
+                self._clean_probes_at_hint = 0
             changed = self.rate != before
             if changed:
                 self._events.append((time.time(), self.rate, "backoff"))
         if changed and self._on_change:
             self._on_change("backoff", before, self.rate)
         return self.rate
+
+    def _next_rate(self, inc: float) -> float:
+        """Where the next probe lands: `self.rate + inc`, unless a recent rejection is
+        remembered nearby, in which case the climb is eased -- see the class docstring
+        and _ceiling_hint's own comment in __init__.
+
+        Held at 95% of the hint (never quite touching it) for two clean probes -- long
+        enough that the plateau itself is evidence, not a fluke -- then one real step is
+        allowed through at normal speed either way, and the hint is forgotten: proven
+        clear, it climbs on; rejected again, penalise() sets a fresh (and by then lower)
+        one immediately.
+        """
+        if self._ceiling_hint is None:
+            return min(self.ceiling, self.rate + inc)
+        cap = self._ceiling_hint * 0.95
+        if self.rate < cap:
+            return min(cap, self.rate + inc)
+        self._clean_probes_at_hint += 1
+        if self._clean_probes_at_hint <= 2:
+            return self.rate                      # hold the plateau; nothing changed yet
+        self._ceiling_hint = None
+        return min(self.ceiling, self.rate + inc)
 
     def acquire(self, cost: float = 1.0) -> None:
         # Probe upward only from inside the wait path, so an idle process
@@ -640,10 +704,11 @@ class AdaptiveRateLimiter(RateLimiter):
                 before = self.rate
                 inc = (self.step if self.step is not None
                        else max(1.0, self.rate * self.growth))
-                self.rate = min(self.ceiling, self.rate + inc)
+                self.rate = self._next_rate(inc)
                 self._last_change = time.monotonic()
-                grew = (before, self.rate)
-                self._events.append((time.time(), self.rate, "probe"))
+                grew = (before, self.rate) if self.rate != before else None
+                if self.rate != before:
+                    self._events.append((time.time(), self.rate, "probe"))
             else:
                 grew = None
         if grew and self._on_change:
@@ -654,7 +719,9 @@ class AdaptiveRateLimiter(RateLimiter):
         with self._lock:
             return {"rate": round(self.rate, 2), "floor": self.floor,
                     "ceiling": self.ceiling, "rejections": self._rejections,
-                    "backoffs": self._backoffs, "decrease": self.decrease}
+                    "backoffs": self._backoffs, "decrease": self.decrease,
+                    "ceilingHint": (round(self._ceiling_hint, 2)
+                                    if self._ceiling_hint is not None else None)}
 
 
 # ======================================================================

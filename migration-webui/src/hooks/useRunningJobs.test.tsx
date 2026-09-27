@@ -176,6 +176,42 @@ describe('Running Now', () => {
     render(<RunningNow />)
     await waitFor(() => expect(screen.getByText('migrate')).toBeTruthy())
   })
+
+  describe('the fleet scan finding its own migrate', () => {
+    /* fleet_agent.py's ps scan runs on every node, including this one -- so a migrate
+       this account started (already found via fetchJob, with its own rich detail: elapsed,
+       ETA, the newest log line) is ALSO found by the scan, as a second card for the
+       identical pid. Live: "Running Now" showed the one real migration twice. */
+    beforeEach(() => {
+      cp.fetchMe.mockResolvedValue({ id: 1 })
+      cp.fetchTenantConfigStatus.mockImplementation((t: string) => Promise.resolve(
+        t === 'source' ? { domain: 'source.example.com' } : { domain: 'target.example.com' }))
+      client.fetchJob.mockResolvedValue({
+        running: true, name: 'migrate', elapsed: 60, lines: [], pid: 100, pids: [100],
+      })
+    })
+
+    it('shows the one real migration once, not twice', async () => {
+      cp.fetchFleet.mockResolvedValue([node({ job_pid: 100 })])
+      render(<RunningNow />)
+      await waitFor(() => expect(screen.getAllByTestId('running-job-migrate')).toHaveLength(1))
+    })
+
+    it('still shows a DIFFERENT node running a DIFFERENT migration', async () => {
+      cp.fetchFleet.mockResolvedValue([node({ node_id: 'n2', job_pid: 200 })])
+      render(<RunningNow />)
+      await waitFor(() => expect(screen.getAllByTestId('running-job-migrate')).toHaveLength(2))
+    })
+  })
+
+  it('names both tenants for a migration, not only the source', async () => {
+    cp.fetchMe.mockResolvedValue({ id: 1 })
+    cp.fetchTenantConfigStatus.mockImplementation((t: string) => Promise.resolve(
+      t === 'source' ? { domain: 'source.example.com' } : { domain: 'target.example.com' }))
+    client.fetchJob.mockResolvedValue({ running: true, name: 'migrate', elapsed: 60, lines: [] })
+    render(<RunningNow />)
+    await waitFor(() => expect(screen.getByText('source.example.com → target.example.com')).toBeTruthy())
+  })
 })
 
 /**

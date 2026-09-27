@@ -121,20 +121,26 @@ class TestTheEndpointHandsItOn:
         r = self._go(cp, wired, monkeypatch, mail_mode="split")
         assert r.status_code == 200
         migrate = next(j for j in wired["jobs"] if j["name"] == "migrate")
-        assert migrate["then"] == "dms" and len(wired["jobs"]) == 1, "the DMS must wait for the run, not start with it"
+        # repair always rides along on a real run (see TestRepairRidesAlong below); dms is
+        # the part that is conditional here, and it must wait for the run, not start with it.
+        assert migrate["then"] == ["repair", "dms"] and len(wired["jobs"]) == 1
 
-    @pytest.mark.parametrize("body", [{"dms_after": False}, {"dry_run": True}, {"users": ["u0@a.com"]}])
-    def test_but_not_when_told_not_to_or_when_it_is_not_a_whole_real_run(self, cp, wired, monkeypatch, body):
+    @pytest.mark.parametrize("body", [{"dms_after": False}, {"users": ["u0@a.com"]}])
+    def test_but_no_dms_follow_on_when_told_not_to_or_a_few_users_only(self, cp, wired, monkeypatch, body):
         self._go(cp, wired, monkeypatch, mail_mode="split", **body)
+        assert wired["jobs"][0]["then"] == ["repair"]
+
+    def test_and_neither_follow_on_for_a_dry_run(self, cp, wired, monkeypatch):
+        self._go(cp, wired, monkeypatch, mail_mode="split", dry_run=True)
         assert wired["jobs"][0]["then"] is None
 
-    def test_a_sample_never_starts_it(self, cp, wired, monkeypatch):
+    def test_a_sample_still_gets_a_repair_follow_on(self, cp, wired, monkeypatch):
         self._go(cp, wired, monkeypatch, sample=5)
-        assert wired["jobs"][0]["then"] is None
+        assert wired["jobs"][0]["then"] == ["repair"]
 
-    def test_the_engine_mode_never_does(self, cp, wired, monkeypatch):
+    def test_the_engine_mode_gets_a_repair_follow_on_but_no_dms(self, cp, wired, monkeypatch):
         self._go(cp, wired, monkeypatch, mail_mode="engine")
-        assert wired["jobs"][0]["then"] is None and len(wired["jobs"]) == 1
+        assert wired["jobs"][0]["then"] == ["repair"] and len(wired["jobs"]) == 1
 
     def test_a_dms_run_starts_it_beside_the_migration(self, cp, wired, monkeypatch):
         r = self._go(cp, wired, monkeypatch, mail_mode="dms")
@@ -226,3 +232,105 @@ class TestTheWaiterRunsItOnlyAfterACleanExit:
 
     def test_a_job_with_no_follow_on_is_unchanged(self, monkeypatch, tmp_path):
         assert self._run(monkeypatch, tmp_path, 0, then=None) == []
+
+    def test_several_follow_ons_run_in_the_order_given(self, monkeypatch, tmp_path):
+        assert self._run(monkeypatch, tmp_path, 0, then=["repair", "dms"]) == [("repair", 3), ("dms", 3)]
+
+    def test_one_follow_on_failing_does_not_block_the_next(self, monkeypatch, tmp_path):
+        import threading
+        import job_admission
+        import job_queue
+        done, asked = threading.Event(), []
+
+        class Proc:
+            pid, returncode = 4242, 0
+
+            def wait(self):
+                return 0
+        monkeypatch.setattr(A.subprocess, "Popen", lambda *a, **k: Proc())
+        monkeypatch.setattr(A, "_child_output", lambda name, aid: open(tmp_path / "out.log", "ab"))
+        monkeypatch.setattr(job_admission, "record_launch", lambda *a, **k: None)
+        monkeypatch.setattr(job_admission, "release", lambda *a, **k: None)
+        monkeypatch.setattr(job_queue, "dispatch_one", lambda *a, **k: None)
+        import run_watch
+        monkeypatch.setattr(run_watch, "record_finished", lambda *a, **k: None)
+
+        def boom_then_record(kind, aid):
+            if kind == "repair":
+                raise RuntimeError("repair blew up")
+            asked.append((kind, aid))
+            done.set()
+        monkeypatch.setattr(A, "_follow_on", boom_then_record)
+        A._start_admitted(["x"], 3, "migrate", None, ["repair", "dms"])
+        done.wait(2)
+        assert asked == [("dms", 3)]
+
+
+class TestRepairRidesAlong:
+    """A migration's own docstring already promised this (repair.run_all: 'Called
+    automatically at the end of a migration...') and the manual endpoint's refusal
+    already claimed it too ('repair runs automatically when it finishes') -- neither
+    was actually wired up before this."""
+
+    def test_a_real_run_gets_a_repair_follow_on(self):
+        import repair
+        assert "automatically" in repair.run_all.__doc__
+
+    def test_the_follow_on_starts_repair_in_the_background(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(A, "_start_repair", lambda aid, why, **k: calls.append((aid, why)) or (True, "started"))
+        A._follow_on("repair", 3)
+        assert calls and calls[0][0] == 3 and "automatically" in calls[0][1]
+
+    def test_start_repair_launches_in_the_background_and_records_the_action(self, monkeypatch, tmp_path):
+        import threading
+        import config
+        import repair as repair_mod
+
+        class S:
+            db_path = str(tmp_path / "l.db")
+        monkeypatch.setattr(config, "Settings", lambda account_id=None: S())
+        done = threading.Event()
+
+        def fake_run_all(*a, **k):
+            done.set()
+            return {}
+        monkeypatch.setattr(repair_mod, "run_all", fake_run_all)
+        seen = {}
+
+        def fake_begin(*a, **k):
+            seen["began"] = a
+            return 1
+        def fake_finish(*a, **k):
+            seen["finished"] = a
+        monkeypatch.setattr(A.cpdb, "begin_action", fake_begin)
+        monkeypatch.setattr(A.cpdb, "finish_action", fake_finish)
+        ok, detail = A._start_repair(3, "because a migration just finished")
+        assert ok and "started" in detail
+        done.wait(2)
+        assert seen["began"][2:5] == ("repair.start", "because a migration just finished", "3")
+        assert seen["finished"][0] == 1 and seen["finished"][1] == "OK"
+
+    def test_the_manual_endpoint_delegates_to_the_same_function(self, cp, monkeypatch):
+        import job_admission
+        aid = _signup(cp)
+        monkeypatch.setattr(job_admission, "list_active", lambda: [])
+        seen = {}
+
+        def fake_start_repair(account_id, why, **kw):
+            seen.update(aid=account_id, why=why, kw=kw)
+            return True, "started"
+        monkeypatch.setattr(A, "_start_repair", fake_start_repair)
+        r = cp.post(f"/api/v2/repair/{aid}", json={"reason": "checking after the burst"})
+        assert r.status_code == 200 and r.json()["ok"] is True
+        assert seen["why"] == "checking after the burst" and "actor" in seen["kw"]
+
+    def test_the_manual_endpoint_still_refuses_while_something_is_running(self, cp, monkeypatch):
+        import job_admission
+        aid = _signup(cp)
+        monkeypatch.setattr(job_admission, "list_active", lambda: [{"account_id": aid, "job_name": "migrate"}])
+        called = []
+        monkeypatch.setattr(A, "_start_repair", lambda *a, **k: called.append(1) or (True, ""))
+        r = cp.post(f"/api/v2/repair/{aid}", json={"reason": "checking"})
+        assert r.json()["ok"] is False and "automatically when it finishes" in r.json()["detail"]
+        assert not called
