@@ -847,6 +847,27 @@ def test_server_side_copies_without_streaming_bytes(auth, db, settings, identity
     assert auth.target_drive(TGT_USER).by_name("big.bin")
 
 
+def test_server_side_staging_move_is_labelled_for_metrics(auth, db, settings,
+                                                          identity, quota):
+    """The move out of staging was the one per-file server_side step with no
+    label of its own, folded into the generic "drive" catch-all -- which
+    also carries once-per-user staging-drive setup and once-per-folder
+    traversal calls, so it could never answer "how long does moving a file
+    out of staging actually take" on its own. resources.MIGRATE_FILE_SECONDS
+    needs that number specifically; this is what makes it measurable."""
+    import metrics
+    import drive_engine
+
+    _server_side(settings)
+    auth.source_drive(SRC_USER).add_binary("f.bin", data=b"x" * 10)
+    metrics.METRICS.reset()
+
+    drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota).run()
+
+    by_label = metrics.METRICS.snapshot()["by_label"]
+    assert by_label.get("drive.files.move", {}).get("calls", 0) >= 1
+
+
 def test_server_side_keeps_native_docs_native(auth, db, settings, identity, quota):
     """No OOXML round trip means no fidelity loss and no 10 MB export ceiling."""
     import drive_engine

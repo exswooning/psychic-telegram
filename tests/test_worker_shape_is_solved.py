@@ -150,8 +150,10 @@ class TestRecommendUsesIt:
         assert "quota" in rec["seed_reason"]
 
     def test_the_migration_pool_is_derived_not_frozen(self, monkeypatch):
-        """4 at the default 1.33s, and it moves with a measured latency."""
-        assert R.migrate_file_workers() == 4
+        """7 at the default 2.47s (measured against a live server_side run --
+        see resources.py's own comment), and it moves with a measured
+        latency."""
+        assert R.migrate_file_workers() == 7
         monkeypatch.setattr(R, "MIGRATE_FILE_SECONDS", 2.0)
         assert R.migrate_file_workers() == 6
 
@@ -165,11 +167,13 @@ class TestRecommendUsesIt:
         different service. Seeding CREATES each file (an upload per leaf);
         migration COPIES server-side. Different work, different ceiling."""
         monkeypatch.setattr(R, "DRIVE_WRITES_PER_SEC", 0.1)
-        assert R.migrate_file_workers() == 4, (
+        assert R.migrate_file_workers() == 7, (
             "the seed ceiling still drives the migration pool")
 
     def test_the_migration_ceiling_does_reach_it(self, monkeypatch):
         """The other half: migration's own constant must still be live, or
-        the split traded one frozen number for another."""
-        monkeypatch.setattr(R, "MIGRATE_WRITES_PER_SEC", 6.0)
-        assert R.migrate_file_workers() == 8
+        the split traded one frozen number for another. 4.0, not 6.0: at the
+        now-higher MIGRATE_FILE_SECONDS default, 6.0 would already be capped
+        at 12 and prove nothing about liveness."""
+        monkeypatch.setattr(R, "MIGRATE_WRITES_PER_SEC", 4.0)
+        assert R.migrate_file_workers() == 10

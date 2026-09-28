@@ -59,12 +59,43 @@ def _retry(fn):
     return fn
 
 
+class _NoopLimiter:
+    """Stands in for the real AdaptiveRateLimiter in every test that is not
+    specifically about pacing (see test_seed_rate_limiter.py for those) --
+    these tests exercise corpus logic, not Drive's write ceiling, and a real
+    limiter would mean a stray sqlite open per test for no assertion any of
+    them make."""
+    ceiling = 999.0
+
+    def acquire(self, n: int = 1) -> None:
+        pass
+
+    def penalise(self) -> float:
+        return 0.0
+
+
+@pytest.fixture(autouse=True)
+def _no_real_drive_pacing(monkeypatch):
+    """Every test in this file drives Drive-shaped calls through fakes that
+    return instantly -- top_up_storage and trim_filler are called directly
+    here (not only through the `seed` fixture below), so a real
+    AdaptiveRateLimiter would still sleep to enforce resources.
+    DRIVE_WRITES_PER_SEC (0.9/sec) regardless of what `retry` itself was
+    stubbed to. A handful of filler-file loops at a fixed 1.1s/call turned
+    this file from seconds into a multi-minute hang the first time this was
+    wired in live. Real pacing behaviour has its own tests, in
+    test_seed_rate_limiter.py, which resets this global itself and does not
+    use this fixture's stub."""
+    import seed_sandbox as s
+    monkeypatch.setattr(s, "_seed_drive_limiter", lambda settings: _NoopLimiter())
+
+
 @pytest.fixture
 def seed(monkeypatch):
     import seed_sandbox as s
 
     monkeypatch.setattr(s, "_media", _media)
-    monkeypatch.setattr(s, "_retry_factory", lambda settings: _retry)
+    monkeypatch.setattr(s, "_retry_factory", lambda settings, limiter=None: _retry)
     return s
 
 

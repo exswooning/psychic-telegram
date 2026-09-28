@@ -414,3 +414,72 @@ Mid-pass concurrency changes (a single drive pass against 300 users runs for
 days) would need the dispatch loop restructured to a resizable gate instead
 of submit-all, and that has not been done — scoped out as bigger surgery
 than this pass-boundary fix, not as an oversight.
+
+**The seeder's own Drive write pacing got the same fix the migration side
+already had — proactive and cross-run, not just reactive.** `resources.
+DRIVE_WRITES_PER_SEC` (a real measurement, but corrected by hand three
+times already — see `SEED_LEAF_SECONDS`'s own comment, 1.18s → 5.4s →
+15.0s round trips) sized how many leaf threads to run, and that was *all*
+the pacing that existed: `retry_on_google_error` only reacted to a 429
+after Google had already sent one, with no `AdaptiveRateLimiter` and no
+cross-run memory the way `drive_engine._project_limiter` has. `seed_
+sandbox._seed_drive_limiter` is that same fix, ported: one process-global
+`AdaptiveRateLimiter` (Drive's write ceiling is per ACCOUNT — the tenant
+being seeded — not per user, so every seeded user's leaf threads share the
+one real budget regardless of how the seeder divides its own worker pool),
+seeded from a previous run's discovery in the account's own ledger
+(`rate_limiter_ceiling`, `tenant="seed"` — the same table and methods
+migration's ceiling uses, a different row), `min()`'d against `SEED_
+DRIVE_CEILING` the same way migration's never starts hotter than its
+configured guard. `_retry_factory(settings, limiter=...)` is the one
+place this is wired in — passed only at Drive call sites (`trim_filler`,
+the storage top-up, the corpus builder, the corpus reset); Gmail/Calendar/
+Chat/Contacts/Tasks call `_retry_factory(settings)` exactly as before, no
+behaviour change, because none of them has a documented ceiling finding
+behind it. `drive_write_qps`'s own migration-side counterpart (`config.py`,
+a **fixed**, non-adaptive 3.0/sec `RateLimiter` for the per-account write
+bucket, distinct from `_project_limiter`'s per-project one) is the same
+shape on the migration side, and was checked against a live `server_side`
+run and left alone deliberately: 97,340 `files.copy` calls, zero target-side
+rejections, and per-user request rate around a fifth of the 3/sec it gates.
+Nothing is near it, so an adaptive version would discover a ceiling nobody
+is touching. Revisit only if per-user rate ever climbs toward 3/sec.
+
+**What a live `server_side` run showed, and what changed because of it.**
+Three things were measured against the running production migration
+(`db.latest_metrics` on the account's own ledger, `ps -o nlwp`, `free -h`)
+rather than reasoned about:
+- **`metrics.py` reported "workers" as every thread name it had ever seen**
+  (a `set` that only grew), not live concurrency: 304 against 195 real
+  threads on the same process, because `drive_engine._open_file_pool`
+  builds a fresh `ThreadPoolExecutor` per user and each pool's threads get
+  new names. Now `threading.active_count()` at snapshot time.
+- **`db._mapping_cache` held every user's whole `id_mapping` for the life of
+  the process** — 834,937 rows across 235 users on that ledger, plausibly
+  250–400 MB resident. Now a bounded LRU (`MAPPING_CACHE_USER_CAP`, 100
+  users, `OrderedDict` touched on preload/hit/write). Per-user eviction on
+  completion would be *wrong* (an ordered run's mail pass reads other
+  users' Drive mappings hours later); a cap is *safe* only because
+  `get_target_id` already falls through to SQL for an uncached user, so
+  eviction costs a query, never a false "not migrated". The hit path now
+  decides membership under `_cache_lock` — an unlocked check followed by an
+  eviction was a `KeyError` in the first version (see
+  `test_readers_racing_eviction_never_raise_or_answer_wrong`).
+- **`resources.MIGRATE_FILE_SECONDS` was never a measurement** (1.33s, backed
+  out algebraically from the old frozen `drive_file_workers=4`). Re-derived
+  from per-label p50s weighted by calls-per-`files.copy`: 2.47s, so
+  `migrate_file_workers()` now sizes 7 threads per user, not 4. The staging
+  move (`files.update ... removeParents=staging`) had no label of its own and
+  was proxied by `drive.files.update.mtime`'s p50; it is now labelled
+  `drive.files.move`, so the next run can replace the proxy with a real
+  number. The generic `drive` label is excluded — it mixes once-per-user
+  staging setup and once-per-folder traversal with per-file work.
+`HARD_CAP` (48) was checked and left alone: this box had ~1.6 GB available,
+~40 workers at `server_side`'s 40 MB each — RAM binds below the cap already.
+
+**`data-generator/conftest.py`'s `settings` must track `tests/conftest.py`'s.**
+It had fallen behind by two lines (`drive_write_qps = 10_000`,
+`mtime_settle_sec = 0`), so its one real-`DriveMigrator` test paced faked
+writes at 3/sec and then sat in a real 240s `_verify_modified_times` sleep —
+minutes at ~0% CPU that read as a hang. `pytest -o faulthandler_timeout=45`
+is what found it; reach for that before guessing at a "stuck" test.

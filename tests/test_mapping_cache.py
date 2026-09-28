@@ -167,6 +167,141 @@ class TestItAgreesWithTheDatabase:
         assert ledger.get_target_id(USER, "src-1", "file") == "tgt-second"
 
 
+class TestTheCacheIsBoundedNotUnbounded:
+    """preload_mappings never evicted a user until an explicit reset, so an
+    ordered run (drive for every user, then mail) held every user's whole
+    Drive mapping resident for the run's entire life -- 834,937 rows across
+    235 users on one real account's ledger, roughly 300-400 MB by the size
+    of a (source_id, type)->target_id entry. A cap with LRU behind it is
+    safe only because get_target_id's SQL fallback is already correct for
+    an uncached user (see TestItIsAReadThroughCacheNotASnapshot and
+    test_the_cache_never_answers_for_an_unpreloaded_user above) -- eviction
+    can only cost a query, never a wrong answer."""
+
+    def test_the_cap_actually_bounds_resident_users(self, ledger, monkeypatch):
+        import db as dbmod
+        monkeypatch.setattr(dbmod, "MAPPING_CACHE_USER_CAP", 3)
+
+        for i in range(10):
+            ledger.preload_mappings(f"user{i}@tenanta.com")
+
+        assert len(ledger._mapping_cache) <= 3
+        assert len(ledger._mapping_cached_users) <= 3
+
+    def test_an_evicted_user_still_answers_correctly_via_sql(self, ledger, monkeypatch):
+        """The whole safety argument, proven: evict someone with real data
+        and confirm their next lookup is still right, not a false miss."""
+        import db as dbmod
+        monkeypatch.setattr(dbmod, "MAPPING_CACHE_USER_CAP", 2)
+
+        ledger.preload_mappings(USER)
+        ledger.record_mapping(USER, "src-1", "tgt-1", "file")
+        # Push two more users in, evicting USER (the LRU one -- untouched
+        # since its own preload/record above).
+        ledger.preload_mappings("b@tenanta.com")
+        ledger.preload_mappings("c@tenanta.com")
+
+        assert USER not in ledger._mapping_cached_users, (
+            "test is not exercising eviction -- raise the pressure")
+        assert ledger.get_target_id(USER, "src-1", "file") == "tgt-1"
+
+    def test_reading_a_user_keeps_them_off_the_eviction_list(self, ledger, monkeypatch):
+        """A user read from recently is not the LRU entry, even if their own
+        preload happened first."""
+        import db as dbmod
+        monkeypatch.setattr(dbmod, "MAPPING_CACHE_USER_CAP", 2)
+
+        ledger.preload_mappings(USER)
+        ledger.record_mapping(USER, "src-1", "tgt-1", "file")
+        ledger.preload_mappings("b@tenanta.com")
+        ledger.get_target_id(USER, "src-1", "file")     # touches USER again
+        ledger.preload_mappings("c@tenanta.com")        # would evict the LRU
+
+        # "b" was never touched again after its own preload, so it -- not
+        # USER -- should be the one evicted.
+        assert USER in ledger._mapping_cached_users
+        assert "b@tenanta.com" not in ledger._mapping_cached_users
+
+    def test_writing_to_a_user_keeps_them_off_the_eviction_list(self, ledger, monkeypatch):
+        import db as dbmod
+        monkeypatch.setattr(dbmod, "MAPPING_CACHE_USER_CAP", 2)
+
+        ledger.preload_mappings(USER)
+        ledger.preload_mappings("b@tenanta.com")
+        ledger.record_mapping(USER, "src-1", "tgt-1", "file")   # touches USER
+        ledger.preload_mappings("c@tenanta.com")
+
+        assert USER in ledger._mapping_cached_users
+        assert "b@tenanta.com" not in ledger._mapping_cached_users
+
+    def test_readers_racing_eviction_never_raise_or_answer_wrong(self, ledger, monkeypatch):
+        """The race eviction introduced: an unlocked membership check, then
+        an eviction, then a read of a user who is no longer there -- KeyError
+        in the first version of this change. Readers hammer one user's
+        mappings while another thread churns enough other users through a
+        cap of 2 to evict it over and over."""
+        import db as dbmod
+        monkeypatch.setattr(dbmod, "MAPPING_CACHE_USER_CAP", 2)
+
+        for i in range(50):
+            ledger.record_mapping(USER, f"src-{i}", f"tgt-{i}", "file")
+        ledger.preload_mappings(USER)
+
+        errors: list[BaseException] = []
+        wrong: list[int] = []
+        done = threading.Event()
+
+        def churn():
+            try:
+                n = 0
+                while not done.is_set():
+                    ledger.preload_mappings(f"churn{n % 5}@tenanta.com")
+                    ledger.preload_mappings(USER)
+                    n += 1
+            except BaseException as exc:      # noqa: BLE001
+                errors.append(exc)
+
+        def read():
+            try:
+                for _ in range(20):
+                    for i in range(50):
+                        if ledger.get_target_id(USER, f"src-{i}", "file") != f"tgt-{i}":
+                            wrong.append(i)
+            except BaseException as exc:      # noqa: BLE001
+                errors.append(exc)
+
+        churner = threading.Thread(target=churn)
+        readers = [threading.Thread(target=read) for _ in range(4)]
+        churner.start()
+        for t in readers:
+            t.start()
+        for t in readers:
+            t.join(timeout=60)
+        done.set()
+        churner.join(timeout=10)
+
+        assert not errors, f"raised under eviction: {errors[0]!r}"
+        assert wrong == [], f"{len(wrong)} lookups answered wrong under eviction"
+
+    def test_a_record_after_eviction_still_reaches_the_database(self, ledger, monkeypatch):
+        """record_mapping's cache write-through is skipped for an evicted
+        user (there is no cache dict left to update), but the row itself
+        must still land -- the cache is an optimisation, never the ledger."""
+        import db as dbmod
+        monkeypatch.setattr(dbmod, "MAPPING_CACHE_USER_CAP", 1)
+
+        ledger.preload_mappings(USER)
+        ledger.preload_mappings("b@tenanta.com")   # evicts USER
+        assert USER not in ledger._mapping_cached_users
+
+        ledger.record_mapping(USER, "src-1", "tgt-1", "file")
+        row = ledger.conn.execute(
+            "SELECT target_id FROM id_mapping WHERE source_user=? AND source_id=?",
+            (USER, "src-1")).fetchone()
+        assert row["target_id"] == "tgt-1"
+        assert ledger.get_target_id(USER, "src-1", "file") == "tgt-1"
+
+
 class TestIdentityCache:
     """identity_map is written before a run and never during one, so a plain
     snapshot is safe here in a way it is not for id_mapping -- but it must

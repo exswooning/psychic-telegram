@@ -258,15 +258,47 @@ MIGRATE_WRITES_PER_SEC = float(os.getenv("MIGRATE_WRITES_PER_SEC", "3.0"))
 # its own SEED_LEAF_SECONDS rather than share this one.
 SEED_LEAF_SECONDS = float(os.getenv("SEED_LEAF_SECONDS", "15.0"))
 
-# The same question on the migration side, and the honest answer is that
-# nobody has measured it. drive_file_workers has been 4 since "~3
-# target-account writes per file against 3/sec needs about that many in
-# flight" -- which implies about 1.33s of latency per file. That implied
-# value is the default here, so sizing behaviour does not change on the
-# strength of a number nobody took: it only becomes derived rather than
-# frozen. Measure a real migration and set this, and the pools resize
-# themselves the way the seeder's just did.
-MIGRATE_FILE_SECONDS = float(os.getenv("MIGRATE_FILE_SECONDS", "1.33"))
+# The same question on the migration side, and it has now been measured once.
+#
+# 1.33 was never a measurement -- it was "~3 target-account writes per file
+# against 3/sec needs about that many in flight" backed out algebraically
+# from the OLD frozen drive_file_workers=4, the same shape SEED_LEAF_SECONDS
+# was in before it got measured (and corrected twice more after that).
+#
+# Measured against a live server_side run (~4,200s, 97,340 files copied,
+# metrics snapshotted via db.latest_metrics -- see CLAUDE.md): p50 latency
+# per labelled call, weighted by how often that call actually happens per
+# file copied (calls / files.copy count, since files.copy is exactly 1:1) --
+#
+#   drive.files.copy            1.000 x 1.483s = 1.483s
+#   drive.files.move  (staging) 1.000 x 0.687s = 0.687s  (proxied: this
+#     label did not exist yet in the run measured -- see drive_engine.py's
+#     files().update(...removeParents=self._staging_drive_id...) -- so its
+#     cost is stood in by drive.files.update.mtime's p50, the closest
+#     same-shape call (a parents-only files.update, no payload). Re-measure
+#     once a run has accumulated real drive.files.move samples.
+#   drive.permissions.list      0.649 x 0.263s = 0.171s
+#   drive.permissions.create    0.048 x 0.821s = 0.040s
+#   drive.permissions.create.batch 0.008 x 1.568s = 0.012s
+#   drive.files.update.mtime    0.104 x 0.687s = 0.072s
+#   drive.files.get.mtime       0.014 x 0.265s = 0.004s
+#                                              ------
+#                                                2.47s
+#
+# Deliberately excludes the generic "drive" catch-all label (4.1 calls/file
+# in that same run): it mixes once-per-USER setup (staging drive create/
+# list/grant/delete) and once-per-FOLDER traversal calls with whatever
+# per-file cost it also carries, and there is no way to separate them
+# without labelling every call individually -- which is what this change
+# does for the one per-file call that was missing a label. Folding it in
+# anyway would have produced a bigger, less trustworthy number; 2.47s is the
+# part of this that is actually accountable to specific, known, per-file
+# steps.
+#
+# 2.47, not 1.33 -- close to double. Measure again once drive.files.move has
+# real samples of its own, and once a full corpus (not one 70-minute window)
+# has gone through.
+MIGRATE_FILE_SECONDS = float(os.getenv("MIGRATE_FILE_SECONDS", "2.47"))
 
 # What one migrated user costs beyond the file pool: the mailbox, metered
 # per account whatever the pool asks for. Keeps the solver from answering
@@ -1041,11 +1073,11 @@ def recommend(r: SystemResources | None = None,
         # Derived from the same division as the seeder's, against the
         # migration's own latency: enough in flight to keep Drive's
         # per-account ceiling fed while each request waits on its round
-        # trip. It still comes out 4 -- 3/sec x ~1.33s -- because 4 was
-        # correctly derived HERE, unlike the seeder's, whose latency had
-        # gone stale by 4.6x. What changes is that it is a division now, so
-        # a measured MIGRATE_FILE_SECONDS moves it instead of contradicting
-        # the comment beside it.
+        # trip. Came out 4 -- 3/sec x an assumed 1.33s -- for the same
+        # reason the seeder's own number went stale: nobody had measured it
+        # either, only backed it out algebraically from the worker count it
+        # then justified. Now measured against a live server_side run (see
+        # MIGRATE_FILE_SECONDS's own comment): 2.47s, and it comes out 7.
         #
         # Not run through best_shape, deliberately: that solver trades
         # threads against users, which is only honest where threads cost

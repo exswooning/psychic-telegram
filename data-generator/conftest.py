@@ -35,6 +35,15 @@ def settings(tmp_path) -> Settings:
     s.base_backoff = 0.001
     s.max_backoff = 0.004
     s.per_user_qps = 10_000.0
+    # Both mirror tests/conftest.py, which this fixture had fallen behind.
+    # The one test here that drives the real DriveMigrator (test_five_user_
+    # org_migrates_without_duplicating_shared_files) otherwise paced every
+    # faked write at Google's real 3/sec AND, because user 0's corpus has
+    # comments, sat in _verify_modified_times' real 240s MTIME_SETTLE_SEC
+    # sleep -- minutes at ~0% CPU, indistinguishable from a hang until a
+    # faulthandler dump pointed at drive_engine._verify_modified_times.
+    s.drive_write_qps = 10_000.0
+    s.mtime_settle_sec = 0
     s.dry_run = False
     s.owned_only = True
     os.makedirs(s.scratch_dir, exist_ok=True)

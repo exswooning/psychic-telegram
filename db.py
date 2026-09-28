@@ -24,11 +24,39 @@ import logging
 import os
 import sqlite3
 import threading
+from collections import OrderedDict
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Iterable, Iterator, Optional
 
 log = logging.getLogger(__name__)
+
+# preload_mappings() caches a user's WHOLE id_mapping in RAM the first time
+# their engine touches them, and until this existed nothing ever evicted a
+# user once cached -- correct for one user at a time, but an ordered run
+# preloads Drive's mapping for every user in the drive pass and cannot know
+# yet which of them mail's LATER pass will still need it for (a shared
+# file's owner can be migrated hours before the peer whose mail links to it).
+# So the honest fix is not "evict once a user finishes" -- that would evict
+# users mail still needs -- it is a cap with real LRU behind it.
+#
+# That is safe specifically because get_target_id() already has a correct,
+# authoritative fallback: a user not in _mapping_cached_users is answered by
+# a live SQL query, not "assumed unmapped" (see get_target_id's own comment).
+# Eviction can never make a lookup wrong, only slower -- trading a dict hit
+# for an indexed query on a user this run has not touched in a while.
+#
+# Measured against a live account's ledger: 834,937 id_mapping rows across
+# 235 distinct users, ~3,553 rows/user average. A (source_id, type) tuple key
+# plus a target_id string value costs roughly 300-500 bytes per entry once
+# Python's own object and dict overhead is counted, so caching every user on
+# a tenant this size at once is very plausibly 250-400 MB resident for this
+# structure alone, on boxes that run this whole process in under 4 GB. 100
+# users caps that around 140 MB at the same average, while staying well
+# above what one ordered pass's own worker count (well under 50) would ever
+# need resident from CONCURRENT users alone -- eviction should mostly only
+# bite users this run has not touched in some time, not ones still active.
+MAPPING_CACHE_USER_CAP = int(os.getenv("MAPPING_CACHE_USER_CAP", "100"))
 
 # --- Schema ----------------------------------------------------------------
 SCHEMA = """
@@ -285,8 +313,10 @@ class MigrationDB:
         # worker on a user must see what the others have already recorded, so
         # a thread-local cache would reintroduce the duplication it exists to
         # prevent. Populated by preload_mappings, kept current by
-        # record_mapping.
-        self._mapping_cache: dict[str, dict[tuple[str, str], str]] = {}
+        # record_mapping. Bounded LRU (see MAPPING_CACHE_USER_CAP above) --
+        # an OrderedDict so the least-recently-TOUCHED user (moved to the end
+        # on every preload/read-hit/write) is always the one popped first.
+        self._mapping_cache: OrderedDict[str, dict[tuple[str, str], str]] = OrderedDict()
         self._mapping_cached_users: set[str] = set()
         # Guards structural changes to the caches above.
         #
@@ -295,9 +325,12 @@ class MigrationDB:
         # preload does setdefault-then-merge, which is a read-modify-write and
         # is atomic under neither. Relying on interpreter internals for that
         # would be a bet rather than a decision, and this CI matrix already
-        # runs 3.14. The lock is uncontended in practice: preload happens once
-        # per user per engine, and the write-through holds it for one
-        # assignment.
+        # runs 3.14. Since the cache became a bounded LRU, every get_target_id
+        # hit takes it too (to touch the entry, and because eviction can now
+        # remove a user between an unlocked check and the read) -- held for
+        # one move_to_end and one dict lookup, so contention is real but each
+        # hold is a few hundred nanoseconds against a call site whose miss
+        # path is a SQL round trip.
         self._cache_lock = threading.Lock()
         # identity_map is written before a run and never during one, so a
         # straight snapshot is safe here in a way it is not for id_mapping.
@@ -533,6 +566,20 @@ class MigrationDB:
 
     # -- id_mapping ----------------------------------------------------------
     # -- the resume cache ----------------------------------------------------
+    def _evict_lru_mapping_users_locked(self) -> None:
+        """Pop the least-recently-touched user(s) until back under the cap.
+
+        Caller must already hold `_cache_lock`. Safe at any point in a
+        user's own processing, not only once they are fully done -- see
+        MAPPING_CACHE_USER_CAP's own comment: an evicted user's next lookup
+        falls through to a live, authoritative SQL query rather than
+        answering wrong, so this can never turn a real mapping into a false
+        "not migrated".
+        """
+        while len(self._mapping_cache) > MAPPING_CACHE_USER_CAP:
+            evicted, _ = self._mapping_cache.popitem(last=False)
+            self._mapping_cached_users.discard(evicted)
+
     def preload_mappings(self, source_user: str) -> int:
         """
         Pull this user's whole id_mapping into memory, once.
@@ -578,14 +625,29 @@ class MigrationDB:
             loaded.update(existing)
             existing.update(loaded)
             self._mapping_cached_users.add(source_user)
+            # setdefault only inserts at the end for a genuinely NEW key --
+            # a re-preload of an already-cached user (the shortcut-fixup
+            # pass, a re-entrant call) needs its own explicit touch or it
+            # would look like the LRU's stalest entry despite being read
+            # just now.
+            self._mapping_cache.move_to_end(source_user)
+            self._evict_lru_mapping_users_locked()
             return len(existing)
 
     def get_target_id(self, source_user: str, source_id: str,
                       item_type: str) -> Optional[str]:
         # A cached user's map is complete, so a miss means "not migrated" and
-        # needs no query to confirm it.
-        if source_user in self._mapping_cached_users:
-            return self._mapping_cache[source_user].get((source_id, item_type))
+        # needs no query to confirm it. Decided under the lock, not before it:
+        # eviction can now remove a user between an unlocked membership check
+        # and the read, which would raise KeyError -- or, reading a dict
+        # reference taken before eviction, miss a write that landed after it
+        # (record_mapping skips the write-through for an evicted user) and
+        # answer "not migrated" for work that was done.
+        with self._cache_lock:
+            cache = self._mapping_cache.get(source_user)
+            if cache is not None:
+                self._mapping_cache.move_to_end(source_user)
+                return cache.get((source_id, item_type))
         row = self.conn.execute(
             """SELECT target_id FROM id_mapping
                WHERE source_user=? AND source_id=? AND type=?""",
@@ -935,12 +997,16 @@ class MigrationDB:
             )
         # Write through, after the transaction commits. Ordering matters: a
         # cache updated before the commit would answer "already migrated" for
-        # work that a crash then rolled back. Dict assignment is atomic under
-        # the GIL, so this needs no lock of its own.
+        # work that a crash then rolled back.
         with self._cache_lock:
             cache = self._mapping_cache.get(source_user)
             if cache is not None:
                 cache[(source_id, item_type)] = target_id
+                # A user still being actively written to is, by definition,
+                # not the LRU's stalest entry -- keep them off the eviction
+                # list rather than let a long-idle preload from earlier
+                # outlive someone genuinely in flight right now.
+                self._mapping_cache.move_to_end(source_user)
 
     # -- audit_log -----------------------------------------------------------
     def log_audit(self, source_user: str, item_id: str, item_type: str,

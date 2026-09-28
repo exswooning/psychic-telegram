@@ -89,7 +89,6 @@ class Metrics:
         self._calls: dict[str, int] = defaultdict(int)
         self._retries: dict[str, int] = defaultdict(int)
         self._failures: dict[str, int] = defaultdict(int)
-        self._threads: set[str] = set()
         self._started = time.monotonic()
         self.enabled = True
 
@@ -105,7 +104,6 @@ class Metrics:
                 self._retries[label] += 1
             if not ok:
                 self._failures[label] += 1
-            self._threads.add(threading.current_thread().name)
 
     def recent(self, label: str | None = None) -> dict:
         """
@@ -137,7 +135,6 @@ class Metrics:
             self._calls.clear()
             self._retries.clear()
             self._failures.clear()
-            self._threads.clear()
             self._started = time.monotonic()
 
     # -- reading -------------------------------------------------------------
@@ -154,10 +151,20 @@ class Metrics:
         # reservoir, and record() takes the same lock on every API call -- so
         # computing in here would block every worker on fourteen sorted
         # arrays each time anything asked for a reading.
+        # Live, not accumulated: threading.active_count() is every thread
+        # alive in the process *right now*, unlike the set of every distinct
+        # thread name record() had ever seen -- which never shrank, so a run
+        # that keeps recreating short-lived per-user pools (see
+        # drive_engine._open_file_pool) reported "workers" that only ever
+        # climbed, past the process's own real, currently-configured
+        # concurrency (a live run showed 304 there against 195 real threads
+        # alive). A handful of always-present daemon threads (watchdog,
+        # metrics flusher, ...) are counted too; that overcount is small and
+        # constant, unlike the one this replaces.
+        workers = max(threading.active_count(), 1)
         with self._lock:
             elapsed = max(time.monotonic() - self._started, 1e-6)
             total = sum(self._calls.values())
-            workers = max(len(self._threads), 1)
             raw = {label: (list(res.samples), self._calls[label],
                            self._retries[label], self._failures[label])
                    for label, res in self._lat.items()}

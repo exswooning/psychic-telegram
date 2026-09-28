@@ -1361,7 +1361,7 @@ class DriveMigrator:
                 fileId=copy_id, addParents=tgt_parent,
                 removeParents=self._staging_drive_id,
                 body=move_body or None, supportsAllDrives=True, fields="id",
-            ).execute())
+            ).execute(), label="drive.files.move")
         except (PermanentAPIError, RuntimeError) as exc:
             if size:
                 self.quota.refund(size)

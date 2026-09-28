@@ -83,7 +83,7 @@ from datetime import datetime, timedelta, timezone
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import Settings  # noqa: E402
-from resilience import retry_on_google_error  # noqa: E402
+from resilience import retry_on_google_error, AdaptiveRateLimiter  # noqa: E402
 from corpus import ORG, SCALES, CorpusBuilder  # noqa: E402
 
 # The labels seed_gmail() creates. Reset removes exactly these -- deleting
@@ -373,7 +373,7 @@ def trim_filler(drive, settings: Settings, user: str, share_bytes: int | None,
     """
     from config import FOLDER_MIME
 
-    retry = _retry_factory(settings)
+    retry = _retry_factory(settings, limiter=_seed_drive_limiter(settings))
     m = {"usage_bytes": 0, "excess_bytes": 0, "files": 0, "bytes": 0, "note": "",
          "planned_files": 0, "planned_bytes": 0}
     if not share_bytes:
@@ -542,7 +542,7 @@ def top_up_storage(drive, settings: Settings, user: str, target_gb: float | None
     from config import FOLDER_MIME
 
     media_fn = media_fn or _media
-    retry = _retry_factory(settings)
+    retry = _retry_factory(settings, limiter=_seed_drive_limiter(settings))
     m = {"filler_files": 0, "filler_bytes": 0, "usage_before_gb": 0.0,
         "usage_after_gb": 0.0, "note": ""}
     try:
@@ -632,13 +632,110 @@ def top_up_storage(drive, settings: Settings, user: str, target_gb: float | None
     return m
 
 
-def _retry_factory(settings: Settings):
+_SEED_DRIVE_LIMITER: AdaptiveRateLimiter | None = None
+_SEED_DRIVE_LIMITER_LOCK = threading.Lock()
+
+
+def _seed_drive_limiter(settings: Settings) -> AdaptiveRateLimiter:
+    """One process-global, adaptive budget for every Drive call this seed
+    run makes, however many users' leaf threads happen to be issuing them.
+
+    Drive's write ceiling is per ACCOUNT (the tenant being seeded), not per
+    user, so sizing leaf threads from `resources.DRIVE_WRITES_PER_SEC` and
+    then never pacing them was only half the fix -- and that constant is
+    itself a correction made by hand three times already (1.18s -> 5.4s ->
+    15.0s round trips, per resources.SEED_LEAF_SECONDS's own comment), the
+    exact shape drive_engine._project_limiter already fixed on the
+    migration side: a guess, discovered and then remembered instead.
+
+    Unlike a fixed RateLimiter, acquire() here is what makes pacing
+    proactive -- _retry_factory's retry_on_google_error only reacted to a
+    429 after Google had already sent it. A burst of leaf threads across
+    several concurrent users now shares one real budget instead of each
+    independently firing at the assumed rate and letting the retry ladder
+    absorb whatever it undercounted.
+    """
+    global _SEED_DRIVE_LIMITER
+    with _SEED_DRIVE_LIMITER_LOCK:
+        if _SEED_DRIVE_LIMITER is None:
+            import resources
+            guess = resources.DRIVE_WRITES_PER_SEC
+            # A runaway guard, not the intended operating point -- same
+            # reasoning as drive_engine._project_limiter's own ceiling.
+            # DRIVE_WRITES_PER_SEC is already a real measurement (not a
+            # cold guess), so the starting RATE is trusted; the ceiling
+            # just has to be generously above it for AIMD to have room to
+            # discover a higher real number, the way the migration side's
+            # did (200 -> confirmed several hundred).
+            starting_ceiling = float(os.getenv("SEED_DRIVE_CEILING", "20.0"))
+            db_conn = None
+            try:
+                import db as db_module
+                db_conn = db_module.MigrationDB(settings.db_path)
+                learned = db_conn.load_rate_ceiling("seed")
+                if learned is not None:
+                    # min(), never above the configured guard -- a stale or
+                    # bogus learned value must not start a run hotter than
+                    # the deliberately conservative default would.
+                    starting_ceiling = min(starting_ceiling, learned)
+            except Exception as exc:  # noqa: BLE001 - advisory only; a
+                # broken read must never stop a seed from starting.
+                print(f"  ! could not read a learned seed rate ceiling: {exc}")
+
+            def _on_change(kind: str, before: float, after: float,
+                          d=db_conn) -> None:
+                if kind == "backoff" and d is not None:
+                    try:
+                        d.save_rate_ceiling("seed", _SEED_DRIVE_LIMITER.ceiling)
+                    except Exception as exc:  # noqa: BLE001 - advisory only
+                        print(f"  ! could not persist the learned seed rate "
+                              f"ceiling: {exc}")
+
+            _SEED_DRIVE_LIMITER = AdaptiveRateLimiter(
+                guess, floor=max(0.2, guess / 8.0),
+                ceiling=starting_ceiling, on_change=_on_change)
+    return _SEED_DRIVE_LIMITER
+
+
+def _retry_factory(settings: Settings, limiter: AdaptiveRateLimiter | None = None):
+    """Wrap a Drive/Gmail/Calendar/Chat/Contacts/Tasks call with retry.
+
+    `limiter`, when given, also paces the call proactively (see
+    _seed_drive_limiter) and feeds it both a mid-ladder quota rejection
+    (retry_on_google_error's own on_quota_rejection hook, so a burst of
+    concurrent leaf threads all learn from the FIRST rejection rather than
+    each grinding through their own ladder deaf to it -- see
+    resilience.retry_on_google_error's docstring) and a final one the
+    ladder gave up on. Left unset for every non-Drive call site: Drive is
+    the one service with a documented, correction-by-hand write ceiling
+    behind it (see resources.DRIVE_WRITES_PER_SEC); Gmail/Calendar/Chat/
+    Contacts/Tasks have no such finding and keep exactly their old,
+    reactive-only behaviour.
+    """
     def wrap(fn):
-        return retry_on_google_error(
+        wrapped = retry_on_google_error(
             max_retries=settings.max_retries,
             base_delay=settings.base_backoff,
             max_delay=settings.max_backoff,
+            on_quota_rejection=limiter.penalise if limiter else None,
         )(fn)
+        if limiter is None:
+            return wrapped
+
+        def paced():
+            limiter.acquire()
+            try:
+                return wrapped()
+            except Exception as exc:
+                # The limiter cannot adapt to pushback it never hears
+                # about. Only a real quota rejection counts -- a 404 or a
+                # permission error says nothing about pacing.
+                from drive_engine import _is_quota_rejection
+                if _is_quota_rejection(exc):
+                    limiter.penalise()
+                raise
+
+        return paced
 
     return wrap
 
@@ -1704,7 +1801,7 @@ def reset_drive(drive, settings: Settings) -> int:
     MIGRATION-TEST root, so removing those roots removes exactly the corpus
     and nothing else.
     """
-    retry = _retry_factory(settings)
+    retry = _retry_factory(settings, limiter=_seed_drive_limiter(settings))
     deleted = 0
     while True:
         resp = retry(lambda: drive.files().list(
@@ -2439,7 +2536,7 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
 
     drive, gmail, cal = build_services(settings, user)
     chat = build_chat(settings, user)
-    retry = _retry_factory(settings)
+    retry = _retry_factory(settings, limiter=_seed_drive_limiter(settings))
 
     # `only` narrows the run to one or more services -- everything not named
     # is skipped and reports zeroes, so a partial pass is visibly partial
