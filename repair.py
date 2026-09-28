@@ -60,7 +60,12 @@ BACKEND_5XX = "backendError"
 # that "32 failures" and "1 worth retrying, 31 that cannot move" are very
 # different instructions, and only the second one is actionable.
 RETRYABLE_FAMILIES = {"acl_quota", "drive_scope_403", "auth_session_invalid",
-                      "gmail_invalid_label", "transient_backend"}
+                      "gmail_invalid_label", "transient_backend", "drive_stragglers"}
+
+# A file/folder/shortcut that permanently failed its copy -- not 'acl' (a grant
+# failure, handled separately: the file and its mapping already exist) and not
+# 'user' (the whole user errored, which demote_false_done/resolve_users handle).
+DRIVE_STRAGGLER_TYPES = ("file", "folder", "shortcut")
 
 
 def survey(db) -> dict:
@@ -106,6 +111,13 @@ def survey(db) -> dict:
                                   (f"%{SESSION_INVALID}%",)),
         "acl_organizer_role": n("error_message LIKE ?", (f"%{ORGANIZER_ROLE}%",)),
         "transient_backend": n("error_message LIKE ?", (f"%{BACKEND_5XX}%",)),
+        # NOT the two patterns above: those are file-type failures too, and already
+        # counted under their own, more specific family -- counting them again here
+        # would inflate triage()'s "retryable" total by double-counting the same rows.
+        "drive_stragglers": n(
+            f"item_type IN ({','.join('?' for _ in DRIVE_STRAGGLER_TYPES)}) "
+            "AND error_message NOT LIKE ? AND error_message NOT LIKE ?",
+            (*DRIVE_STRAGGLER_TYPES, f"%{SCOPE_403}%", f"%{BACKEND_5XX}%")),
     }
 
 
@@ -174,6 +186,67 @@ def stale_grantee_failures(db, directory=None) -> list:
         if seen[grantee]:
             out.append(r)
     return out
+
+
+def stranded_drive_users(db) -> list[str]:
+    """Source users with a file/folder/shortcut that permanently failed its copy,
+    scoped to the current corpus and excluding the two families that already have
+    their own repair path (scope-403 and the transient backend error) -- same
+    exclusion as the `drive_stragglers` count in survey(), so the two never disagree
+    about how many there are.
+    """
+    marks = ",".join("?" for _ in DRIVE_STRAGGLER_TYPES)
+    rows = db.conn.execute(
+        f"""SELECT DISTINCT source_user FROM audit_log a
+             WHERE status='FAILED' AND item_type IN ({marks})
+               AND error_message NOT LIKE ? AND error_message NOT LIKE ?
+               AND EXISTS (SELECT 1 FROM identity_map m
+                            WHERE m.source_email = a.source_user)""",
+        (*DRIVE_STRAGGLER_TYPES, f"%{SCOPE_403}%", f"%{BACKEND_5XX}%")).fetchall()
+    return [r["source_user"] for r in rows]
+
+
+def retry_drive_stragglers(auth, db, settings, apply: bool = False,
+                          users: list[str] | None = None, _migrate_user=None) -> dict:
+    """Re-run just Drive for users with a stranded file/folder/shortcut.
+
+    Unlike Gmail and Calendar (retry_failed.py's whole reason for existing), Drive
+    lists every file on every run and skips anything already mapped -- drive_engine's
+    own get_target_id check, at the top of both the folder and file branches of the
+    walk. So a plain re-run of Drive for just the affected users retries exactly what
+    is still missing, at the cost of walking their tree again to find it; no bespoke
+    per-item re-fetch needed, unlike the message/event case.
+
+    Deliberately reuses main.migrate_user (services={'drive'}) rather than
+    constructing DriveMigrator directly, so this reads and writes the SAME
+    identity_map status the ordered pass loop itself depends on. That is only
+    correct because every caller here runs it at a PASS BOUNDARY (see
+    main._repair_between_passes and run_all below) -- after the previous pass's
+    own worker pool has fully drained and before the next one starts, never
+    concurrently with another pass touching the same user.
+    """
+    from main import migrate_user as _default_migrate_user
+    migrate_user = _migrate_user or _default_migrate_user
+    targets = dict(db.conn.execute(
+        "SELECT source_email, target_email FROM identity_map").fetchall())
+    stats = {"attempted": 0, "retried": 0, "unmapped_users": 0, "errors": []}
+    for src in (users if users is not None else stranded_drive_users(db)):
+        tgt = targets.get(src)
+        if not tgt:
+            # No target account: nothing for a re-walk to write into.
+            stats["unmapped_users"] += 1
+            continue
+        stats["attempted"] += 1
+        if not apply:
+            continue
+        try:
+            result = migrate_user(auth, db, settings, src, tgt, {"drive"},
+                                  delta=False, delta_days=0)
+            if result.get("status") not in ("FAILED", "BLOCKED"):
+                stats["retried"] += 1
+        except Exception as exc:      # noqa: BLE001 - report, never abort the caller
+            stats["errors"].append(f"{src} drive: {str(exc)[:120]}")
+    return stats
 
 
 def broken_folder_grants(db, since: str | None = None) -> dict:
@@ -400,6 +473,17 @@ def run_all(db, auth, settings, apply: bool = False,
         except Exception as exc:      # noqa: BLE001
             out["errors"].append(f"user rollup: {str(exc)[:160]}")
 
+    # Before the ACL passes below: a file ACLs would apply to has to exist first,
+    # and a stranded file is exactly what an ACL grant has nothing to attach to.
+    if out["survey"].get("drive_stragglers"):
+        try:
+            dr = retry_drive_stragglers(auth, db, settings, apply=apply)
+            out["stragglers"] = dr["attempted"]
+            out["stragglers_retried"] = dr["retried"]
+            out["errors"].extend(dr["errors"])
+        except Exception as exc:      # noqa: BLE001
+            out["errors"].append(f"drive stragglers: {str(exc)[:160]}")
+
     # Folders first, always. Their grants are what everything inside
     # inherits, so repairing a folder can restore access to hundreds of
     # files at once -- and repairing the files first would spend the rate
@@ -461,6 +545,9 @@ def summarise(result: dict) -> str:
     if result.get("stranded_retried"):
         parts.append(f"{result['stranded_retried']:,} stranded item(s) "
                      f"re-imported")
+    if result.get("stragglers_retried"):
+        parts.append(f"{result['stragglers_retried']:,}/{result.get('stragglers', 0):,} "
+                     f"drive straggler(s) re-copied")
     if result.get("reapplied"):
         parts.append(f"{result['reapplied']:,} grant(s) re-applied in "
                      f"{result.get('reapply_passes', 0)} pass(es)")

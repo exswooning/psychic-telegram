@@ -991,6 +991,13 @@ def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
                 # asked it to stop, is the opposite of what either means.
                 if MEMORY_PAUSE.is_set() or SHUTDOWN.is_set():
                     break
+                # This pass's own worker pool has now fully drained -- the one moment
+                # touching these users' state is provably safe, and the one moment
+                # that matters: the NEXT pass (mail/calendar) is about to read this
+                # pass's id_mapping to rewrite Drive links in it. See
+                # _repair_between_passes for why this is narrower than _auto_repair.
+                if "drive" in one and i < len(plan):
+                    _repair_between_passes(db, auth, settings)
             # The users verified as they finished are part of the run too: it is not over
             # until they are, or the job would read as finished while checks were running.
             left = VERIFY.drain(lambda: SHUTDOWN.is_set() or MEMORY_PAUSE.is_set())
@@ -1294,6 +1301,49 @@ def _auto_repair(db, auth, settings) -> None:
             log.info("post-run repair: %s", line)
     except Exception as exc:      # noqa: BLE001
         log.warning("post-run repair skipped: %s", str(exc)[:200])
+
+
+def _repair_between_passes(db, auth, settings) -> None:
+    """Between a Drive pass and whatever an ordered run does next.
+
+    link_rewrite.py leaves an id it cannot map exactly as it found it -- never
+    corrupted, but a message whose only Drive link points at a file that
+    permanently failed to copy keeps that link pointed at the SOURCE tenant
+    forever, because _auto_repair (like the API's own automatic follow-on) only
+    runs once, after the WHOLE ordered run exits. By then the mail pass has
+    already read whatever id_mapping existed when it started.
+
+    Deliberately narrower than a full repair.run_all: only the two families that
+    are safe to touch mid-run because neither writes identity_map.status --
+    acl_reconcile/acl_repair (grant-level; the file and its mapping already
+    exist) and the drive-straggler retry (this pass boundary is the one place
+    calling it is provably safe: run_batch has fully drained, so no other
+    thread is touching the same user's status right now). The false-done /
+    stale-user / stale-grantee families in run_all are end-of-run housekeeping
+    about a run's FINAL state and do not belong here.
+
+    Same rule as _auto_repair: never allowed to raise, and skipped by the same
+    setting.
+    """
+    if not getattr(settings, "auto_repair", True):
+        return
+    try:
+        import repair
+        stranded = repair.stranded_drive_users(db)
+        if stranded:
+            dr = repair.retry_drive_stragglers(auth, db, settings, apply=True,
+                                               users=stranded)
+            log.info("between passes: retried %d/%d drive straggler(s), %d error(s)",
+                     dr["retried"], dr["attempted"], len(dr["errors"]))
+        if repair.survey(db).get("acl_quota"):
+            import acl_reconcile
+            import acl_repair
+            stats = acl_reconcile.reconcile(auth, db, settings, dry_run=False)
+            applied = acl_repair.repair_until_settled(auth, db, settings)
+            log.info("between passes: acl reconciled=%s reapplied=%s",
+                     stats.get("resolved", 0), applied.get("applied", 0))
+    except Exception as exc:      # noqa: BLE001 - advisory; must never break the run
+        log.warning("between-passes repair skipped: %s", str(exc)[:200])
 
 
 def cmd_repair(args, settings: Settings, db: MigrationDB,

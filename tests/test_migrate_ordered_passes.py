@@ -201,3 +201,106 @@ class TestTheCheckAfterTheRun:
         main.cmd_migrate(argparse.Namespace(services="drive,gmail", user=None, ordered=True, verify_after=True), settings, db, None)
         assert got["users"] == ["a@x.com", "b@x.com"] and got["services"] == ("drive", "gmail")
 
+
+class TestRepairBetweenPasses:
+    """Narrower than _auto_repair (see main._repair_between_passes' own docstring for
+    why): only the two families that never write identity_map.status, so calling this
+    mid-run -- after the pass that just drained, before the next one starts reading its
+    results -- cannot race the ordered loop's own bookkeeping."""
+
+    def test_it_retries_stragglers_when_there_are_any(self, db, settings, monkeypatch):
+        import repair
+        seen = {}
+        monkeypatch.setattr(repair, "stranded_drive_users", lambda d: ["a@src"])
+        monkeypatch.setattr(
+            repair, "retry_drive_stragglers",
+            lambda a, d, s, apply=False, users=None: seen.update(users=users)
+            or {"attempted": 1, "retried": 1, "unmapped_users": 0, "errors": []})
+        monkeypatch.setattr(repair, "survey", lambda d: {"acl_quota": 0})
+        main._repair_between_passes(db, None, settings)
+        assert seen["users"] == ["a@src"]
+
+    def test_it_skips_the_straggler_retry_when_there_are_none(self, db, settings, monkeypatch):
+        import repair
+        monkeypatch.setattr(repair, "stranded_drive_users", lambda d: [])
+        called = []
+        monkeypatch.setattr(repair, "retry_drive_stragglers", lambda *a, **k: called.append(1))
+        monkeypatch.setattr(repair, "survey", lambda d: {"acl_quota": 0})
+        main._repair_between_passes(db, None, settings)
+        assert not called
+
+    def test_it_settles_acl_quota_when_present(self, db, settings, monkeypatch):
+        import acl_reconcile
+        import acl_repair
+        import repair
+        monkeypatch.setattr(repair, "stranded_drive_users", lambda d: [])
+        monkeypatch.setattr(repair, "survey", lambda d: {"acl_quota": 5})
+        seen = {}
+        monkeypatch.setattr(acl_reconcile, "reconcile",
+                            lambda a, d, s, dry_run=True: seen.update(reconciled=True)
+                            or {"resolved": 2})
+        monkeypatch.setattr(acl_repair, "repair_until_settled",
+                            lambda a, d, s: seen.update(reapplied=True)
+                            or {"applied": 3, "passes": 1})
+        main._repair_between_passes(db, None, settings)
+        assert seen == {"reconciled": True, "reapplied": True}
+
+    def test_it_skips_the_acl_settle_when_nothing_is_quota_refused(self, db, settings, monkeypatch):
+        import acl_reconcile
+        import repair
+        monkeypatch.setattr(repair, "stranded_drive_users", lambda d: [])
+        monkeypatch.setattr(repair, "survey", lambda d: {"acl_quota": 0})
+        called = []
+        monkeypatch.setattr(acl_reconcile, "reconcile", lambda *a, **k: called.append(1))
+        main._repair_between_passes(db, None, settings)
+        assert not called
+
+    def test_it_is_skipped_entirely_when_auto_repair_is_off(self, db, settings, monkeypatch):
+        import repair
+        settings.auto_repair = False
+        called = []
+        monkeypatch.setattr(repair, "survey", lambda d: called.append(1) or {"acl_quota": 0})
+        main._repair_between_passes(db, None, settings)
+        assert not called
+
+    def test_a_failure_there_never_breaks_the_run(self, db, settings, monkeypatch):
+        import repair
+        monkeypatch.setattr(repair, "stranded_drive_users",
+                            lambda d: (_ for _ in ()).throw(RuntimeError("db locked")))
+        main._repair_between_passes(db, None, settings)   # must not raise
+
+
+class TestRepairRidesBetweenDriveAndWhateverComesNext:
+    ALL = {"drive", "gmail", "calendar", "contacts", "tasks", "chat"}
+
+    def _stub(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(main, "_repair_between_passes", lambda *a: calls.append(1))
+        return calls
+
+    def test_it_runs_once_after_drive_when_more_passes_follow(self, runner, monkeypatch):
+        calls = self._stub(monkeypatch)
+        runner(self.ALL, main.ordered_passes(self.ALL))
+        assert calls == [1]   # after drive (pass 1) only -- not after gmail or the rest
+
+    def test_it_does_not_run_after_the_final_pass(self, runner, monkeypatch):
+        calls = self._stub(monkeypatch)
+        runner({"drive"}, [{"drive"}])   # a single-pass plan that IS drive, but the last one
+        assert calls == []
+
+    def test_it_does_not_run_for_an_unordered_single_pass_run(self, runner, monkeypatch):
+        calls = self._stub(monkeypatch)
+        runner(self.ALL)   # no plan: everything in one pass
+        assert calls == []
+
+    def test_it_does_not_run_between_two_passes_that_never_touch_drive(self, runner, monkeypatch):
+        calls = self._stub(monkeypatch)
+        runner({"gmail", "calendar"}, [{"gmail"}, {"calendar"}])
+        assert calls == []
+
+    def test_a_stop_during_the_drive_pass_skips_it(self, runner, monkeypatch):
+        calls = self._stub(monkeypatch)
+        runner.hook.append(lambda n: main.SHUTDOWN.set() if n == 1 else None)
+        runner(self.ALL, main.ordered_passes(self.ALL))
+        assert calls == []
+

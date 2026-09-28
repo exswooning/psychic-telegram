@@ -199,6 +199,28 @@ drift) and keeps its own guard (refuses while a migration is running); the
 automatic path has none of its own, because `_follow_on` only ever runs the
 instant after this account's job_admission slot has been released.
 
+**An ordered run also repairs itself between the Drive pass and whatever comes
+next** (`main._repair_between_passes`, called from the pass loop when a pass just
+run was `drive` and another pass follows) — the gap `_auto_repair`/the API's
+automatic follow-on cannot close, because both only run once, after the WHOLE
+run exits. Without this, a file that permanently failed to copy left its Drive
+links pointed at the source tenant forever once mail started rewriting them
+(`link_rewrite.py` leaves an id it cannot map exactly as it found it — safe,
+never corrupted, but wrong once the source is later decommissioned). Deliberately
+narrower than `repair.run_all`: only `repair.retry_drive_stragglers` (a plain
+Drive re-run for the affected users — `drive_engine`'s own `get_target_id` check
+means a fresh walk skips everything already mapped and retries only what is
+still missing, no bespoke per-item re-fetch needed, unlike Gmail/Calendar's
+stranded items) and the ACL quota reconcile-then-reapply cycle, because neither
+writes `identity_map.status` — safe to call mid-run only because this always runs
+at a pass boundary, after `run_batch`'s own worker pool has fully drained. The
+false-done/stale-user/stale-grantee families in `run_all` are end-of-run
+housekeeping about a run's FINAL state and stay there. `retry_drive_stragglers`
+is also wired into `run_all` itself now, as a new `drive_stragglers` family —
+previously a generic copy failure (a stray 500, a 404) matched nothing in
+`RETRYABLE_FAMILIES` and stayed permanently failed even after the automatic
+end-of-run repair.
+
 **The rate limiter now learns from the first quota rejection, not only the
 last** (`resilience.retry_on_google_error`'s new `on_quota_rejection` hook, wired
 to `drive_engine._retry`'s `project.penalise`): a single call's own retry ladder

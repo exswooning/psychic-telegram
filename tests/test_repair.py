@@ -822,6 +822,201 @@ class TestRepairCoversStrandedItems:
         assert "2 stranded item(s) re-imported" in line
 
 
+class TestStrandedDriveUsers:
+    """The users a plain Drive re-run would actually fix -- item_type
+    file/folder/shortcut only, and never the two patterns that already have
+    their own, more specific family (scope-403, the transient backend error),
+    or double-counting would inflate triage()'s retryable total."""
+
+    def _db(self, tmp_path):
+        d = dbmod.MigrationDB(str(tmp_path / "m.db"))
+        d.conn.execute("INSERT INTO identity_map(source_email,target_email) "
+                       "VALUES('u@src','u@tgt')")
+        d.conn.commit()
+        return d
+
+    def test_a_plain_copy_failure_is_a_straggler(self, tmp_path):
+        d = self._db(tmp_path)
+        d.log_audit("u@src", "f1", "file", "FAILED",
+                    "exhausted 6 retries on HTTP 500 (internalError)")
+        assert repair.stranded_drive_users(d) == ["u@src"]
+        assert repair.survey(d)["drive_stragglers"] == 1
+        d.close()
+
+    def test_a_folder_or_shortcut_failure_counts_too(self, tmp_path):
+        d = self._db(tmp_path)
+        d.log_audit("u@src", "d1", "folder", "FAILED", "some transient thing")
+        d.log_audit("u@src", "s1", "shortcut", "FAILED", "some transient thing")
+        assert repair.survey(d)["drive_stragglers"] == 2
+        d.close()
+
+    def test_an_acl_failure_is_not_a_straggler(self, tmp_path):
+        """A grant failure has nothing to do with whether the file itself
+        copied -- the file and its mapping already exist."""
+        d = self._db(tmp_path)
+        d.log_audit("u@src", "f1:a@tgt", "acl", "FAILED", "Quota exceeded")
+        assert repair.stranded_drive_users(d) == []
+        assert repair.survey(d)["drive_stragglers"] == 0
+        d.close()
+
+    def test_a_scope_403_is_not_double_counted_as_a_straggler(self, tmp_path):
+        d = self._db(tmp_path)
+        d.log_audit("u@src", "f1", "file", "FAILED",
+                    'exhausted 6 retries on HTTP 403 (insufficientPermissions): '
+                    'returned "Request had insufficient authentication scopes."')
+        s = repair.survey(d)
+        assert s["drive_scope_403"] == 1
+        assert s["drive_stragglers"] == 0
+        d.close()
+
+    def test_a_backend_error_is_not_double_counted_either(self, tmp_path):
+        d = self._db(tmp_path)
+        d.log_audit("u@src", "f1", "file", "FAILED",
+                    "exhausted 6 retries on HTTP 503: backendError")
+        s = repair.survey(d)
+        assert s["transient_backend"] == 1
+        assert s["drive_stragglers"] == 0
+        d.close()
+
+    def test_a_user_appears_once_however_many_files_of_theirs_failed(self, tmp_path):
+        d = self._db(tmp_path)
+        d.log_audit("u@src", "f1", "file", "FAILED", "boom")
+        d.log_audit("u@src", "f2", "file", "FAILED", "boom")
+        assert repair.stranded_drive_users(d) == ["u@src"]
+        d.close()
+
+    def test_the_family_is_retryable(self):
+        assert "drive_stragglers" in repair.RETRYABLE_FAMILIES
+
+
+class TestRetryDriveStragglers:
+    """A plain re-run of Drive for the affected user -- see the module's own
+    docstring on why that alone fixes it, unlike Gmail/Calendar's stranded
+    items."""
+
+    def _db(self, tmp_path, *users):
+        d = dbmod.MigrationDB(str(tmp_path / "m.db"))
+        for src, tgt in users:
+            d.conn.execute("INSERT INTO identity_map(source_email,target_email) "
+                           "VALUES(?,?)", (src, tgt))
+        d.conn.commit()
+        return d
+
+    def test_it_re_runs_drive_only_for_each_affected_user(self, tmp_path):
+        d = self._db(tmp_path, ("a@src", "a@tgt"), ("b@src", "b@tgt"))
+        seen = []
+
+        def fake_migrate_user(auth, db, settings, src, tgt, services, delta, delta_days):
+            seen.append((src, tgt, services))
+            return {"status": "DONE"}
+        out = repair.retry_drive_stragglers(
+            None, d, None, apply=True, users=["a@src", "b@src"],
+            _migrate_user=fake_migrate_user)
+        assert out == {"attempted": 2, "retried": 2, "unmapped_users": 0, "errors": []}
+        assert seen == [("a@src", "a@tgt", {"drive"}), ("b@src", "b@tgt", {"drive"})]
+        d.close()
+
+    def test_a_dry_run_only_counts_them(self, tmp_path):
+        d = self._db(tmp_path, ("a@src", "a@tgt"))
+        called = []
+        out = repair.retry_drive_stragglers(
+            None, d, None, apply=False, users=["a@src"],
+            _migrate_user=lambda *a, **k: called.append(1) or {"status": "DONE"})
+        assert out["attempted"] == 1 and not called
+        d.close()
+
+    def test_a_user_with_no_target_is_not_attempted(self, tmp_path):
+        d = self._db(tmp_path)
+        out = repair.retry_drive_stragglers(
+            None, d, None, apply=True, users=["ghost@src"],
+            _migrate_user=lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not run")))
+        assert out == {"attempted": 0, "retried": 0, "unmapped_users": 1, "errors": []}
+        d.close()
+
+    def test_a_retry_that_still_fails_is_not_counted_as_retried(self, tmp_path):
+        d = self._db(tmp_path, ("a@src", "a@tgt"))
+        out = repair.retry_drive_stragglers(
+            None, d, None, apply=True, users=["a@src"],
+            _migrate_user=lambda *a, **k: {"status": "FAILED"})
+        assert out["attempted"] == 1 and out["retried"] == 0
+        d.close()
+
+    def test_an_exception_is_reported_not_raised(self, tmp_path):
+        d = self._db(tmp_path, ("a@src", "a@tgt"))
+
+        def boom(*a, **k):
+            raise RuntimeError("token expired")
+        out = repair.retry_drive_stragglers(None, d, None, apply=True,
+                                            users=["a@src"], _migrate_user=boom)
+        assert out["retried"] == 0
+        assert any("token expired" in e for e in out["errors"])
+        d.close()
+
+    def test_with_no_users_argument_it_finds_them_itself(self, tmp_path):
+        d = self._db(tmp_path, ("a@src", "a@tgt"))
+        d.log_audit("a@src", "f1", "file", "FAILED", "boom")
+        seen = []
+        repair.retry_drive_stragglers(
+            None, d, None, apply=True,
+            _migrate_user=lambda *a, **k: seen.append(a[3]) or {"status": "DONE"})
+        assert seen == ["a@src"]
+        d.close()
+
+
+class TestRepairCoversDriveStragglers:
+    """Wired into run_all exactly like the ACL and stranded-item families --
+    covered separately from TestRunAllFixesOnlyWhatItCanConfirm because it
+    needs its own file-type fixture."""
+
+    class _Auth:
+        def directory(self, tenant):
+            raise AssertionError("drive stragglers do not need the directory")
+
+    def _db(self, tmp_path):
+        d = dbmod.MigrationDB(str(tmp_path / "m.db"))
+        d.conn.execute("INSERT INTO identity_map(source_email,target_email) "
+                       "VALUES('u@src','u@tgt')")
+        d.conn.commit()
+        d.log_audit("u@src", "f1", "file", "FAILED", "exhausted 6 retries on HTTP 500")
+        return d
+
+    def test_applying_retries_them(self, tmp_path, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(
+            repair, "retry_drive_stragglers",
+            lambda a, d, s, apply=False, **k: seen.update(apply=apply)
+            or {"attempted": 1, "retried": 1, "unmapped_users": 0, "errors": []})
+        d = self._db(tmp_path)
+        out = repair.run_all(d, self._Auth(), None, apply=True)
+        assert out["stragglers_retried"] == 1 and seen["apply"] is True
+        d.close()
+
+    def test_a_dry_run_only_counts_them(self, tmp_path, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(
+            repair, "retry_drive_stragglers",
+            lambda a, d, s, apply=False, **k: seen.update(apply=apply)
+            or {"attempted": 1, "retried": 0, "unmapped_users": 0, "errors": []})
+        d = self._db(tmp_path)
+        out = repair.run_all(d, self._Auth(), None, apply=False)
+        assert seen["apply"] is False and out["stragglers"] == 1
+        d.close()
+
+    def test_a_failure_there_does_not_break_the_pass(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            repair, "retry_drive_stragglers",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("api down")))
+        d = self._db(tmp_path)
+        out = repair.run_all(d, self._Auth(), None, apply=True)
+        assert any("drive stragglers" in e for e in out["errors"])
+        d.close()
+
+    def test_the_summary_names_them(self):
+        line = repair.summarise({"survey": {"total": 4}, "stragglers": 4,
+                                 "stragglers_retried": 3, "errors": []})
+        assert "3/4 drive straggler(s) re-copied" in line
+
+
 class TestWhoIsInFlight:
     """The headline counters go still for hours on a real run.
 
