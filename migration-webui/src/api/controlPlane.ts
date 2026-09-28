@@ -276,9 +276,18 @@ export interface ActionResult { ok: boolean; actionId: number; detail: string }
  *  it, and the DMS moves the rest AFTER the run. */
 export type MailMode = 'engine' | 'dms' | 'split'
 
+/** How Drive content moves. Left out, the account gets the server's own default.
+ *  `download_upload` streams every file's bytes through the migration host itself --
+ *  works between any two tenants, but is bounded by that host's own CPU/network.
+ *  `server_side` asks Drive to copy the file itself, never touching this host, but
+ *  needs a per-user staging shared drive that depends on the target tenant's
+ *  external-sharing settings actually allowing it. */
+export type TransferMode = 'download_upload' | 'server_side'
+
 export const startMigration = (
   reason: string, services: string[], users: string[], dryRun = false,
-  accountId?: number, mailMode?: MailMode, sample?: number, dmsAfter?: boolean) =>
+  accountId?: number, mailMode?: MailMode, sample?: number, dmsAfter?: boolean,
+  transferMode?: TransferMode) =>
   cpFetch<ActionResult>('/api/v2/migrate/start', {
     method: 'POST',
     // accountId is the migration on screen. Without it the server falls back
@@ -291,7 +300,8 @@ export const startMigration = (
                            ...(mailMode ? { mail_mode: mailMode } : {}),
                            ...(sample ? { sample } : {}),
                            // off only when asked; the server starts the DMS on its own otherwise
-                           ...(dmsAfter === false ? { dms_after: false } : {}) }),
+                           ...(dmsAfter === false ? { dms_after: false } : {}),
+                           ...(transferMode ? { transfer_mode: transferMode } : {}) }),
   })
 
 // force is SIGKILL, for a run that took the interrupt and is still going.

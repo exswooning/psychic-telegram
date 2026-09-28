@@ -240,6 +240,24 @@ mid-ladder, nothing had reached exhaustion) read as nothing being wrong. The hoo
 fires on every attempt Google rejects for pacing, immediately, so concurrent
 siblings under the same project limiter see the reduced rate within seconds.
 
+**The production default for how Drive content moves is `server_side`, not `download_upload`**
+— set as `TRANSFER_MODE=server_side` in `systemd/bitport-api.service`, not in `config.py`
+itself (whose own fallback stays `download_upload`, for a bare/local run with no unit).
+`download_upload` streams every file's bytes through the box running `api_server.py`;
+confirmed live, that host's own CPU/network was the actual bottleneck, not Google's quota
+— the rate limiter sat at its own configured ceiling (1,200 calls/sec, near-zero pushback)
+while only ~34.5 calls/sec were ever achieved. `server_side` asks Drive to copy the file
+itself (`files.copy`), so no bytes cross this host at all — but it needs a per-user staging
+shared drive on the target (`drive_engine._ensure_staging_drive`) that grants the
+**source**-domain user organizer access to it, which depends on the target tenant's own
+external-sharing settings actually allowing that cross-domain grant. `StartMigration.
+transfer_mode` (`Literal["download_upload", "server_side"]`, `link_flip` deliberately never
+offered here — deprecated, benchmark-only, briefly makes the source file public) overrides
+this per launch, passed as an env var to just that subprocess; the Start Migration dialog's
+"How does Drive content move?" section defaults to leaving it unset (this server's own
+config) rather than assuming every target tenant's sharing settings allow the staging-drive
+grant.
+
 **The source is indexed when a pair is ready** (`api_server._start_discovery`, a `discover` job: `main.py discover --include-mail`, the ETA baseline): after `link-domains`, and after an identity-map build ends cleanly (`_discover_when_mapped`) -- but only when the account's ledger maps THIS pair's users. A ledger outlives the pair it was built for, so a scan over whatever is mapped could read the previous pair's tenant; it says why it did not start instead.
 
 **`reset_target` also trashes Google's own welcome mail** (`from:mail-noreply@google.com`, `trash_google_welcome_mail`): the seeder's reset only trashes `@seed.test` mail, the source mailboxes hold the same two welcome messages and a migration copies them, so each reset-and-rerun cycle used to stack another pair on the target. The listing excludes the trash, so its count is also the check.

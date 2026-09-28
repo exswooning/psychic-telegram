@@ -181,6 +181,50 @@ class TestASampleRun:
         assert '"sample": 7' in row[0]
 
 
+class TestTransferMode:
+    """How Drive content moves for this run, without touching every other
+    account's -- unlike the TRANSFER_MODE the box's own environment sets, this
+    is per-launch, passed only to the child this request starts."""
+
+    def test_left_out_the_child_gets_no_override_at_all(self, cp, monkeypatch):
+        r, seen = _start(cp, monkeypatch, services=["drive"])
+        assert "TRANSFER_MODE" not in (seen["env"] or {})
+
+    def test_server_side_is_passed_through_as_an_env_override(self, cp, monkeypatch):
+        r, seen = _start(cp, monkeypatch, services=["drive"], transfer_mode="server_side")
+        assert r.status_code == 200 and r.json()["ok"] is True, r.text
+        assert seen["env"]["TRANSFER_MODE"] == "server_side"
+
+    def test_the_child_still_gets_the_whole_environment_alongside_it(self, cp, monkeypatch):
+        r, seen = _start(cp, monkeypatch, services=["drive"], transfer_mode="server_side")
+        assert seen["env"]["PATH"] == os.environ["PATH"]
+
+    def test_download_upload_can_be_named_explicitly_too(self, cp, monkeypatch):
+        r, seen = _start(cp, monkeypatch, services=["drive"], transfer_mode="download_upload")
+        assert seen["env"]["TRANSFER_MODE"] == "download_upload"
+
+    def test_combines_with_split_mail_mode_without_either_overriding_the_other(self, cp, monkeypatch):
+        r, seen = _start(cp, monkeypatch, services=["all"], mail_mode="split", transfer_mode="server_side")
+        assert seen["env"]["TRANSFER_MODE"] == "server_side"
+        assert seen["env"]["MAIL_ONLY_WITH_LINKS"] == "true"
+
+    def test_the_deprecated_benchmark_only_mode_is_not_offered_at_all(self, cp, monkeypatch):
+        """link_flip briefly makes the source file public -- not something a request
+        body should be able to reach for."""
+        r, seen = _start(cp, monkeypatch, services=["drive"], transfer_mode="link_flip")
+        assert r.status_code == 422 and not seen
+
+    def test_an_unknown_mode_is_refused_rather_than_guessed(self, cp, monkeypatch):
+        r, seen = _start(cp, monkeypatch, services=["drive"], transfer_mode="teleport")
+        assert r.status_code == 422 and not seen
+
+    def test_it_is_in_the_audit_record(self, cp, monkeypatch):
+        _start(cp, monkeypatch, services=["drive"], transfer_mode="server_side")
+        with cpdb.ro() as c:
+            row = c.execute("SELECT params_json FROM operator_actions_log WHERE action='migrate.start' ORDER BY id DESC LIMIT 1").fetchone()
+        assert '"transfer_mode": "server_side"' in row[0]
+
+
 class TestASampleChecksItself:
     def test_a_sample_run_is_started_with_the_check_on_the_end_of_it(self, cp, monkeypatch):
         r, seen = _start(cp, monkeypatch, services=["drive"], sample=5)

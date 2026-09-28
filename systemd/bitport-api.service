@@ -5,6 +5,24 @@ After=network.target xvfb.service
 [Service]
 WorkingDirectory=/root/migration
 Environment=DISPLAY=:99
+# Every migrate/delta this server launches inherits this unless a request's own
+# transfer_mode overrides it (StartMigration.transfer_mode, per-launch env in
+# api_server.migrate_start) -- so this is the fallback for a run that names none,
+# not a ceiling on what any one run can pick.
+#
+# download_upload (the config.py default when this is unset) streams every
+# file's bytes through the box running this unit -- confirmed live on a real
+# migration: the rate limiter was sitting at its own configured ceiling (1,200
+# calls/sec, near-zero pushback) while only ~34.5 calls/sec were actually
+# achieved. That gap is this host's own CPU/network, not Google's quota.
+# server_side asks Drive to copy the file itself (files.copy), never touching
+# this box at all -- verified live against a real cross-tenant pair (staging
+# shared drive created on the target, the SOURCE-domain user granted organizer
+# on it, both succeeded) before this was made the default. It depends on the
+# TARGET tenant's own external-sharing settings allowing that cross-domain
+# grant; a tenant that blocks it needs TRANSFER_MODE=download_upload for that
+# one run (or account) until its sharing settings are confirmed to allow it.
+Environment=TRANSFER_MODE=server_side
 # CP_OPERATORS is deliberately NOT set here.
 #
 # It maps an X-Operator header to a role, and a name is not a secret. With

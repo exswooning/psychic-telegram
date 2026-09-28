@@ -351,6 +351,58 @@ describe('MigrationDetail: who moves the mail', () => {
   })
 })
 
+/**
+ * How Drive content moves. Left at "Default", nothing is sent -- the account keeps
+ * whatever the server is configured for, same as before this existed.
+ */
+describe('MigrationDetail: how Drive content moves', () => {
+  beforeEach(() => { vi.clearAllMocks(); startMigration.mockResolvedValue({ ok: true, actionId: 1, detail: 'started' }) })
+
+  const openDialog = async () => {
+    show(detail())
+    fireEvent.click(await screen.findByTestId('run-full'))
+    await screen.findByText('How does Drive content move?')
+  }
+  const confirm = async () => {
+    fireEvent.change(screen.getByLabelText('Reason Code'), { target: { value: 'full migration' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+    await waitFor(() => expect(startMigration).toHaveBeenCalled())
+  }
+
+  it('defaults to leaving it up to the server', async () => {
+    await openDialog()
+    expect(screen.getByTestId('transfer-mode-default').querySelector('input')).toBeChecked()
+  })
+
+  it('sends nothing at all when left at the default', async () => {
+    await openDialog(); await confirm()
+    expect(startMigration.mock.calls[0][8]).toBeUndefined()
+  })
+
+  it('sends server_side when chosen', async () => {
+    await openDialog()
+    fireEvent.click(screen.getByTestId('transfer-mode-server-side').querySelector('input')!)
+    await confirm()
+    expect(startMigration.mock.calls[0][8]).toBe('server_side')
+  })
+
+  it('sends download_upload when chosen explicitly', async () => {
+    await openDialog()
+    fireEvent.click(screen.getByTestId('transfer-mode-download-upload').querySelector('input')!)
+    await confirm()
+    expect(startMigration.mock.calls[0][8]).toBe('download_upload')
+  })
+
+  it('does not touch which mail mode gets sent', async () => {
+    await openDialog()
+    fireEvent.click(screen.getByTestId('mail-by-dms').querySelector('input')!)
+    fireEvent.click(screen.getByTestId('transfer-mode-server-side').querySelector('input')!)
+    await confirm()
+    expect(startMigration.mock.calls[0][5]).toBe('dms')
+    expect(startMigration.mock.calls[0][8]).toBe('server_side')
+  })
+})
+
 describe('MigrationDetail: what a split run says about itself', () => {
   beforeEach(() => { vi.clearAllMocks() })
 

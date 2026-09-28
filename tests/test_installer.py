@@ -330,3 +330,15 @@ def test_installer_verifies_playwright_actually_imports():
     # After pip install, before "venv ready" is declared.
     assert SH.index("requirements.txt'\"") < SH.index("import playwright.sync_api") \
         < SH.index('ok "venv ready"')
+
+
+def test_the_production_default_is_server_side_transfer():
+    """config.py's own fallback stays download_upload (a bare/local run with no
+    unit) -- the production default lives here instead, so a future edit that
+    quietly drops the line silently reverts every account's migrations back to
+    streaming bytes through this box. Confirmed live before this was set: the
+    rate limiter sat at its own configured ceiling (1,200 calls/sec, near-zero
+    pushback) while only ~34.5 calls/sec were ever achieved -- this host's own
+    CPU/network was the bottleneck, not Google's quota."""
+    unit = open(os.path.join(ROOT, "systemd", "bitport-api.service"), encoding="utf-8").read()
+    assert "Environment=TRANSFER_MODE=server_side" in unit

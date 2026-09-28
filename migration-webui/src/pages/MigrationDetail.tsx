@@ -17,7 +17,7 @@ import {
   fetchMigrationDetail, startDelta, startMigration, runRepair,
   MigrationDetail as Detail, RepairSurvey,
 } from '@/api/controlPlane'
-import type { MailMode } from '@/api/controlPlane'
+import type { MailMode, TransferMode } from '@/api/controlPlane'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
 import RunReports from '@/components/RunReports'
 import QuickVerification from '@/components/QuickVerification'
@@ -70,6 +70,9 @@ export const MigrationDetail: React.FC = () => {
   const [mailBy, setMailBy] = useState<MailMode>('split')
   // Start Google's DMS on its own (api_server._start_dms); on unless switched off.
   const [dmsAuto, setDmsAuto] = useState(true)
+  // '' = the server's own default (config.TRANSFER_MODES via TRANSFER_MODE) --
+  // most runs never need to touch this.
+  const [transferMode, setTransferMode] = useState<TransferMode | ''>('')
   const [fullBusy, setFullBusy] = useState(false)
   // Quick migrate: a small slice of each user's data, small enough to check one to
   // one. See the dialog.
@@ -731,6 +734,49 @@ export const MigrationDetail: React.FC = () => {
                   </Typography>} />
               )}
             </Box>
+            <Box sx={{ mt: 2 }}>
+              <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 0.5 }}>
+                How does Drive content move?
+              </Typography>
+              {/* '' (the default) is left out of the request entirely, so this account
+                  keeps getting the server's own configured mode -- same as before this
+                  existed. Confirmed live: a run using this box to stream every file's
+                  bytes had its rate limiter sitting at its own ceiling (1,200 calls/s
+                  allowed) while only 34.5/s were actually achieved -- the box's own
+                  CPU/network was the bottleneck, not Google's quota. */}
+              <RadioGroup value={transferMode}
+                          onChange={(e) => setTransferMode(e.target.value as TransferMode | '')}>
+                <FormControlLabel
+                  value="" control={<Radio size="small" />}
+                  data-testid="transfer-mode-default"
+                  label={<Typography variant="body2">
+                    <strong>Default (recommended)</strong> — whatever this server is configured for.
+                  </Typography>} />
+                <FormControlLabel
+                  value="download_upload" control={<Radio size="small" />}
+                  data-testid="transfer-mode-download-upload"
+                  label={
+                    <Typography variant="body2">
+                      <strong>This tool moves the bytes</strong> — downloads each file
+                      from the source and uploads it to the target through this server.
+                      Works between any two tenants, but is bounded by this server&apos;s
+                      own CPU and network, not Google&apos;s API limits.
+                    </Typography>
+                  } />
+                <FormControlLabel
+                  value="server_side" control={<Radio size="small" />}
+                  data-testid="transfer-mode-server-side"
+                  label={
+                    <Typography variant="body2">
+                      <strong>Drive copies it directly</strong> — asks Google to copy the
+                      file itself; no bytes pass through this server. Needs a per-user
+                      staging shared drive on the target that the source-domain user is
+                      granted access to, which depends on the target tenant&apos;s
+                      external-sharing settings allowing it.
+                    </Typography>
+                  } />
+              </RadioGroup>
+            </Box>
           </>
         }
         onCancel={() => { setAskFull(false); setFullError(null) }}
@@ -743,7 +789,8 @@ export const MigrationDetail: React.FC = () => {
             // dmsAfter goes only when it was switched off; the server's default is on.
             const r = await startMigration(reason, ['all'], [], false,
                                            Number(accountId), mailBy, undefined,
-                                           dmsAuto ? undefined : false)
+                                           dmsAuto ? undefined : false,
+                                           transferMode || undefined)
             if (!r.ok) throw new Error(r.detail || 'could not start')
             setAskFull(false)
             setStarted(r.detail || 'migration started')

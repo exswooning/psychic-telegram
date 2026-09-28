@@ -337,6 +337,19 @@ class StartMigration(WriteAction):
     # approve a connection and waits (dms_migrate.py --apply --watch); nothing moves
     # until they do. Ignored for `engine`, a sample, a dry run or a chosen few users.
     dms_after: bool = True
+    # How Drive content moves. Left out, this account gets the server's own default
+    # (config.TRANSFER_MODES via TRANSFER_MODE), same as every caller got before this
+    # field existed. `download_upload` streams every file's bytes through THIS host
+    # (works across any two tenants, but is bounded by this box's own CPU/network --
+    # confirmed live: a rate limiter sitting at its own ceiling with 34 calls/sec
+    # actually achieved out of 1,200 allowed). `server_side` asks Drive to copy the
+    # file itself (files.copy), never touching this host -- but needs a staging shared
+    # drive per user (drive_engine._ensure_staging_drive) that grants the SOURCE-domain
+    # user organizer access to a drive on the TARGET tenant, which depends on that
+    # tenant's external-sharing settings actually allowing it. `link_flip` (deprecated,
+    # benchmark-only -- briefly makes the source file public) is deliberately not
+    # offered here at all.
+    transfer_mode: Literal["download_upload", "server_side"] | None = None
 
 
 class TrimFillerRequest(WriteAction):
@@ -1655,6 +1668,8 @@ async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
     if body.sample is not None:
         env = {**(env or os.environ), "SAMPLE_LIMIT": str(body.sample)}
         ordered = True      # Drive first, so links in the sampled mail can resolve
+    if body.transfer_mode:
+        env = {**(env or os.environ), "TRANSFER_MODE": body.transfer_mode}
     argv = [PY, "main.py"] + _account_argv(account_id)
     if body.dry_run:
         argv.append("--dry-run")
