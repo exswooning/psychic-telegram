@@ -3,7 +3,7 @@
  * of the components so the shaping -- which is where a chart quietly lies --
  * has a test that does not depend on a browser laying out an SVG.
  */
-import type { LimiterPoint, MetricsSnapshot } from '@/api/controlPlane'
+import type { LimiterPoint, MetricsSnapshot, MigrationFailure } from '@/api/controlPlane'
 
 const GB = 1024 ** 3
 const two = (n: number) => String(n).padStart(2, '0')
@@ -157,6 +157,36 @@ export function volumeShareRows(v: MetricsSnapshot['volume'] | undefined) {
     const pct = (x: number) => (total > 0 ? round1((x / total) * 100) : 0)
     return { itemType: r.itemType, done: pct(r.done), skipped: pct(r.skipped), failed: pct(r.failed) }
   })
+}
+
+export interface FailureCauseRow { name: string; value: number; reason: string; itemType: string }
+
+/**
+ * Failures already grouped by cause on the server (ids and URLs stripped, so the same
+ * underlying error from a thousand different files is one slice, not a thousand) --
+ * capped here to the busiest `topN` plus a single "other" slice. A pie is read as a
+ * picture, at a glance; twenty-five wedges is not a picture, it is the table again with
+ * extra steps. `topN` defaults to 5 so the total (5 + "other") never exceeds a 6-color
+ * palette with no repeats.
+ */
+export function failureCauseRows(failures: MigrationFailure[] | undefined, topN = 5) {
+  const list = [...(failures ?? [])].sort((a, b) => b.count - a.count)
+  const top = list.slice(0, topN)
+  const rest = list.slice(topN)
+  const rows = top.map((f) => ({
+    name: f.reason.length > 48 ? `${f.reason.slice(0, 45)}...` : f.reason,
+    value: f.count, reason: f.reason, itemType: f.itemType,
+  }))
+  const restTotal = rest.reduce((a, f) => a + f.count, 0)
+  if (restTotal > 0) {
+    rows.push({
+      name: `${rest.length} other cause${rest.length === 1 ? '' : 's'}`,
+      value: restTotal, itemType: '',
+      reason: rest.map((f) => f.reason).slice(0, 5).join('; ')
+        + (rest.length > 5 ? `, and ${rest.length - 5} more` : ''),
+    })
+  }
+  return rows
 }
 
 export const dayRows = (t: MetricsSnapshot['throughput'] | undefined) =>

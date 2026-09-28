@@ -30,6 +30,16 @@ def test_failure_breakdown_is_corpus_scoped():
     assert "EXISTS (SELECT 1 FROM identity_map" in b
 
 
+def test_metrics_page_failure_breakdown_is_also_corpus_scoped():
+    """The Metrics page's pie chart reuses the same grouped-by-cause query (a second
+    `out["failures"] = _group_failures` call site, inside the metrics endpoint) -- it must
+    not lose the scoping the Migrations page's copy has, or a reseed's deleted users would
+    inflate the pie with causes from a run that no longer exists."""
+    i = SRC.index('out["failures"] = _group_failures')
+    j = SRC.index('out["failures"] = _group_failures', i + 1)
+    assert "EXISTS (SELECT 1 FROM identity_map" in SRC[j:j + 1300]
+
+
 def test_skip_breakdown_is_corpus_scoped():
     b = _block('out["skipped"] = [')
     assert "FROM audit_log" in b and "EXISTS (SELECT 1 FROM identity_map" in b

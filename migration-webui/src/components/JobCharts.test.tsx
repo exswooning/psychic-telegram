@@ -29,6 +29,10 @@ const RICH = {
                 remainingItems: 11 },
   transfer: { bytesToday: 1024, dailyCapBytes: 4096 },
   mappings: [{ type: 'file', count: 9 }],
+  failures: [
+    { reason: 'quota exceeded', itemType: 'file', count: 5, users: ['a@x.com'], userCount: 1 },
+    { reason: 'not found', itemType: 'file', count: 1, users: ['b@x.com'], userCount: 1 },
+  ],
   limiterHistory: { target: [
     { t: 1000, rate: 40, kind: 'probe' }, { t: 1020, rate: 44, kind: 'probe' },
     { t: 1040, rate: 31, kind: 'backoff' }, { t: 1160, rate: 34, kind: 'backoff' }] },
@@ -48,6 +52,7 @@ describe('migrate charts', () => {
     expect(within(frame('Items done and remaining')).getByText(/No expected total/)).toBeInTheDocument()
     expect(within(frame('Uploaded today against the daily cap')).getByText('No daily cap configured.'))
       .toBeInTheDocument()
+    expect(within(frame('Failure causes')).getByText(/No failures recorded/)).toBeInTheDocument()
   })
 
   it('gives each limiter its own sawtooth, so a 1,200/s bucket cannot flatten a 45/s one', () => {
@@ -62,8 +67,9 @@ describe('migrate charts', () => {
     render(<MigrateMetricsCharts m={RICH} />)
     for (const t of ['Requests per second', 'Latency percentiles', 'Tail latency spread (p99 − p50)',
                      'Retry and failure rate', 'Latency by operation', 'Retry/failure rate by operation',
-                     'Rate limiters', 'Work per day', 'Outcome by item type', 'Outcome share by item type',
-                     'Items done and remaining', 'Live mappings on the target', 'Workers against cores']) {
+                     'Failure causes', 'Rate limiters', 'Work per day', 'Outcome by item type',
+                     'Outcome share by item type', 'Items done and remaining',
+                     'Live mappings on the target', 'Workers against cores']) {
       expect(frame(t).textContent).not.toMatch(/Needs two|No calls|Nothing recorded|No expected|No mappings/)
     }
     // The sawtooth names what it shows: pushbacks, their spacing, the range.

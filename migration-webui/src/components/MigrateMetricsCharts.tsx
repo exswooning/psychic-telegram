@@ -11,11 +11,11 @@ import React from 'react'
 import { Box, Paper, Stack, Typography } from '@mui/material'
 import type { MetricsSnapshot } from '@/api/controlPlane'
 import { useChartStyle } from '@/hooks/useChartStyle'
-import { BarsChart, ChartFrame, SeriesChart } from '@/components/Charts'
+import { BarsChart, ChartFrame, PieChartFrame, SeriesChart } from '@/components/Charts'
 import { Stat } from '@/pages/Metrics'
 import {
-  clockAt, dayRows, historyRows, historyStats, limiterRows, operationRows, progressRow,
-  sawtoothRows, transferRow, volumeRows, volumeShareRows,
+  clockAt, dayRows, failureCauseRows, historyRows, historyStats, limiterRows, operationRows,
+  progressRow, sawtoothRows, transferRow, volumeRows, volumeShareRows,
 } from '@/utils/metricsSeries'
 
 const n = (v: number) => v.toLocaleString()
@@ -37,6 +37,10 @@ export const MigrateMetricsCharts: React.FC<{ m: MetricsSnapshot }> = ({ m }) =>
   const sawColors = [c.primary, c.info, c.success, c.warning]
   const vol = volumeRows(m.volume)
   const volShare = volumeShareRows(m.volume)
+  const causes = failureCauseRows(m.failures)
+  // 6 distinct colors for up to 5 named causes + one "other" slice -- exactly enough
+  // that no two slices in the same pie ever share a color.
+  const causeColors = [c.error, c.warning, c.info, c.primary, c.success, c.muted]
   const days = dayRows(m.throughput)
   const prog = progressRow(m.throughput)
   const xfer = transferRow(m.transfer)
@@ -135,6 +139,12 @@ export const MigrateMetricsCharts: React.FC<{ m: MetricsSnapshot }> = ({ m }) =>
           <BarsChart data={ops} xKey="label" horizontal fmt={pct} labelWidth={165}
                      series={[{ key: 'retryPct', name: 'retry rate', color: c.warning },
                               { key: 'failurePct', name: 'failure rate', color: c.error }]} />
+        </ChartFrame>
+        <ChartFrame title="Failure causes" height={280}
+                    hint="which OPERATION failed is above; this is WHY -- grouped by the underlying error with file ids and links stripped, so one cause repeated across a thousand files is one slice, not a thousand"
+                    empty={none(causes, 'No failures recorded — a clean run.')}>
+          <PieChartFrame data={causes} nameKey="name" valueKey="value" colors={causeColors}
+                         fmt={n} label={(row) => String(row.reason)} />
         </ChartFrame>
 
         {/* One chart PER limiter, full width. They differ by orders of

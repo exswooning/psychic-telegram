@@ -4684,6 +4684,20 @@ async def migration_metrics(account_id: int, history: int = 60,
                     for r in conn.execute(
                         "SELECT type, COUNT(*) n FROM id_mapping "
                         "GROUP BY type ORDER BY n DESC")]
+                # Same grouped-by-cause failures the Migrations detail page already shows
+                # as a table (see _migration_detail, same query) -- reused here for the
+                # Metrics page's pie chart, so both name the same causes the same way and
+                # neither invents its own idea of what a "cause" is. Corpus-scoped for the
+                # same reason as itemsFailed there: a previous run's deleted users must not
+                # count against this one.
+                out["failures"] = _group_failures(conn.execute(
+                    "SELECT item_type, error_message, source_user, "
+                    "       COUNT(*) AS n "
+                    "FROM audit_log a WHERE a.status LIKE 'FAILED%' "
+                    "AND EXISTS (SELECT 1 FROM identity_map m "
+                    "            WHERE m.source_email = a.source_user) "
+                    "GROUP BY item_type, error_message, source_user "
+                    "LIMIT 200000"))
                 row = conn.execute(
                     "SELECT COALESCE(SUM(bytes_sent),0) b FROM upload_ledger "
                     "WHERE day_utc = date('now')").fetchone()

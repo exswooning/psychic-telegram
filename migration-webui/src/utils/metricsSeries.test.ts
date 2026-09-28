@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
-  clock, dayRows, historyRows, historyStats, limiterRows, operationRows, progressRow,
-  sawtoothRows, transferRow, volumeRows, volumeShareRows,
+  clock, dayRows, failureCauseRows, historyRows, historyStats, limiterRows, operationRows,
+  progressRow, sawtoothRows, transferRow, volumeRows, volumeShareRows,
 } from './metricsSeries'
 
 describe('the clock', () => {
@@ -166,6 +166,46 @@ describe('volumeShareRows', () => {
 
   it('is 0/0/0 rather than NaN for a type with no items at all', () => {
     expect(volumeShareRows([])).toEqual([])
+  })
+})
+
+describe('failureCauseRows', () => {
+  const cause = (reason: string, count: number, itemType = 'file') =>
+    ({ reason, count, itemType, users: ['a@x.com'], userCount: 1 })
+
+  it('is empty rather than a chart of nothing when there are no failures', () => {
+    expect(failureCauseRows(undefined)).toEqual([])
+    expect(failureCauseRows([])).toEqual([])
+  })
+
+  it('passes the busiest causes through untouched when there are few enough', () => {
+    const r = failureCauseRows([cause('quota exceeded', 10), cause('not found', 2)], 5)
+    expect(r).toEqual([
+      { name: 'quota exceeded', value: 10, reason: 'quota exceeded', itemType: 'file' },
+      { name: 'not found', value: 2, reason: 'not found', itemType: 'file' },
+    ])
+  })
+
+  it('collapses everything past topN into one "other" slice, sorted busiest first', () => {
+    const r = failureCauseRows([
+      cause('c', 1), cause('a', 30), cause('b', 20), cause('d', 5), cause('e', 4), cause('f', 3),
+    ], 2)
+    // Busiest two kept by name; the remaining four (1+5+4+3=13) collapse into one slice.
+    expect(r.map((x) => x.name)).toEqual(['a', 'b', '4 other causes'])
+    expect(r[2].value).toBe(13)
+  })
+
+  it('has no "other" slice at all when nothing was left over', () => {
+    const r = failureCauseRows([cause('only one', 7)], 5)
+    expect(r).toHaveLength(1)
+  })
+
+  it('truncates a long normalised reason for the slice name, but keeps it in full for the tooltip', () => {
+    const long = 'x'.repeat(80)
+    const r = failureCauseRows([cause(long, 1)])
+    expect(r[0].name).toHaveLength(48)
+    expect(r[0].name.endsWith('...')).toBe(true)
+    expect(r[0].reason).toBe(long)
   })
 })
 

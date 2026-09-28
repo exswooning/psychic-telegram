@@ -9,8 +9,8 @@
 import React from 'react'
 import { Box, Paper, Typography } from '@mui/material'
 import {
-  Area, Bar, BarChart, CartesianGrid, ComposedChart, Legend, Line,
-  ResponsiveContainer, Tooltip, XAxis, YAxis,
+  Area, Bar, BarChart, CartesianGrid, Cell, ComposedChart, Legend, Line, Pie,
+  PieChart as RPieChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts'
 import { useChartStyle } from '@/hooks/useChartStyle'
 
@@ -108,6 +108,35 @@ export const SeriesChart: React.FC<{
                     stackId={x.stackId} isAnimationActive={false} />
       })}
     </ComposedChart>
+  )
+}
+
+/** One ring, proportioned by value -- for "what share of this is each cause", which a
+ *  bar chart answers by scanning for the tallest bar and a pie answers as one picture.
+ *  Colors cycle through the palette handed in, not a fixed list, so the caller decides
+ *  how many distinct slices it actually has (and never repeats a color within them).
+ *  `label` overrides the tooltip's own text per slice -- a normalised cause can run to
+ *  200 characters, too long for the truncated legend name to stand in for. */
+export const PieChartFrame: React.FC<{
+  data: Row[]; nameKey: string; valueKey: string; colors: string[]
+  fmt?: (v: number) => string; label?: (row: Row) => string
+  width?: number; height?: number   // injected by ResponsiveContainer
+}> = ({ data, nameKey, valueKey, colors, fmt, label, width, height }) => {
+  const s = useChartStyle()
+  return (
+    <RPieChart width={width} height={height}>
+      <Tooltip contentStyle={s.tooltip}
+               formatter={(v: number) => (fmt ? fmt(v) : v)}
+               labelFormatter={(_v, payload) => {
+                 const row = payload?.[0]?.payload as Row | undefined
+                 return row ? (label ? label(row) : String(row[nameKey])) : ''
+               }} />
+      <Legend wrapperStyle={{ fontSize: 11 }} layout="horizontal" align="center" verticalAlign="bottom" />
+      <Pie data={data} dataKey={valueKey} nameKey={nameKey} cx="50%" cy="45%" outerRadius="75%"
+           isAnimationActive={false}>
+        {data.map((_, i) => <Cell key={i} fill={colors[i % colors.length]} />)}
+      </Pie>
+    </RPieChart>
   )
 }
 

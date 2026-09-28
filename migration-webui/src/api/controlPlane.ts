@@ -1361,6 +1361,10 @@ export interface MetricsSnapshot {
   }[]
   /** Each limiter's rate over the same window, oldest first -- the sawtooth. */
   limiterHistory?: Record<string, LimiterPoint[]>
+  /** Grouped by cause (server-normalised: file ids and URLs stripped), commonest first --
+   *  the same shape and the same query the Migrations detail page's failures table already
+   *  uses, so the two never disagree about what a "cause" is. */
+  failures?: MigrationFailure[]
 }
 
 export interface TestFileRow {
