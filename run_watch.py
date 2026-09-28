@@ -137,6 +137,46 @@ def mark_handled(event_id: int) -> None:
         c.execute("UPDATE run_events SET handled_at=? WHERE id=?", (_now_iso(), event_id))
 
 
+def list_runs(account_id, limit: int = 200) -> list[dict]:
+    """Every run this account has had, newest first -- for a History page, not for
+    anything that decides an incident (open_runs/unhandled_finished above still own
+    that). Paired the same way a finished event is matched to its own started one
+    elsewhere in this module: same (job_name, pid), oldest unmatched started row
+    first -- a pid can only have one run open at a time, so the events nest in
+    order. A started row with no finished match yet is included as still running,
+    whether that is genuinely true or this watcher's own process was restarted
+    mid-run and never saw the exit (see reap_dead's docstring in job_admission.py
+    for the same situation from the admission table's side).
+    """
+    with cpdb.ro() as c:
+        rows = [dict(r) for r in c.execute(
+            "SELECT id, at, job_name, event, pid, rc, started_at, detail FROM run_events "
+            "WHERE COALESCE(account_id,-1)=COALESCE(?,-1) ORDER BY id", (account_id,)).fetchall()]
+    open_by_key: dict[tuple, list[dict]] = {}
+    runs: list[dict] = []
+    for r in rows:
+        key = (r["job_name"], r["pid"])
+        if r["event"] == "started":
+            open_by_key.setdefault(key, []).append(r)
+            continue
+        pending = open_by_key.get(key)
+        started = pending.pop(0) if pending else None
+        runs.append({
+            "jobName": r["job_name"], "pid": r["pid"],
+            "startedAt": (started or {}).get("started_at") or (started or {}).get("at") or r["started_at"],
+            "finishedAt": r["at"], "rc": r["rc"], "detail": r["detail"], "running": False,
+        })
+    for pending in open_by_key.values():
+        for started in pending:
+            runs.append({
+                "jobName": started["job_name"], "pid": started["pid"],
+                "startedAt": started["started_at"] or started["at"],
+                "finishedAt": None, "rc": None, "detail": "", "running": True,
+            })
+    runs.sort(key=lambda x: x["startedAt"] or "", reverse=True)
+    return runs[:limit]
+
+
 # ---------------------------------------------------------------------------
 # Incidents
 # ---------------------------------------------------------------------------

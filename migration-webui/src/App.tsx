@@ -19,6 +19,7 @@ import SystemHealth from '@/pages/SystemHealth'
 import Verification from '@/pages/Verification'
 import OneToOne from '@/pages/OneToOne'
 import Tally from '@/pages/Tally'
+import History from '@/pages/History'
 import FinalReport from '@/pages/FinalReport'
 import Settings from '@/pages/Settings'
 import ActivityFeed from '@/pages/ActivityFeed'
@@ -109,6 +110,7 @@ const App: React.FC = () => {
             <Route path="/verification" element={<Verification />} />
             <Route path="/one-to-one" element={<OneToOne />} />
             <Route path="/tally" element={<Tally />} />
+            <Route path="/history" element={<History />} />
             <Route path="/report" element={<FinalReport />} />
             <Route path="/activity" element={<ActivityFeed />} />
             <Route path="/errors" element={<ErrorHandling />} />

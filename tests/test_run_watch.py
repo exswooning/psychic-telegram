@@ -162,6 +162,66 @@ class TestFinishedRuns:
         assert b.made[0][2] == "seed"
 
 
+class TestListRuns:
+    """A History page's whole data source: every run, paired and newest first --
+    unlike open_runs/unhandled_finished above, which only ever look at what an
+    incident needs to decide."""
+
+    def test_a_finished_run_is_one_paired_entry(self, cp):
+        W.record_started(2, "migrate", 100, "2026-09-26T01:00:00Z")
+        W.record_finished(2, "migrate", 0, 100, detail="all clean")
+        runs = W.list_runs(2)
+        assert len(runs) == 1
+        r = runs[0]
+        assert r["jobName"] == "migrate" and r["rc"] == 0 and r["running"] is False
+        assert r["startedAt"] == "2026-09-26T01:00:00Z" and r["detail"] == "all clean"
+        assert r["finishedAt"]   # the 'finished' event's own timestamp, not blank
+
+    def test_a_started_run_with_no_finish_yet_is_shown_as_running(self, cp):
+        W.record_started(2, "migrate", 100)
+        r, = W.list_runs(2)
+        assert r["running"] is True and r["finishedAt"] is None and r["rc"] is None
+
+    def test_only_this_accounts_runs_come_back(self, cp):
+        W.record_started(2, "migrate", 100); W.record_finished(2, "migrate", 0, 100)
+        W.record_started(3, "seed", 200); W.record_finished(3, "seed", 0, 200)
+        assert [r["jobName"] for r in W.list_runs(2)] == ["migrate"]
+        assert [r["jobName"] for r in W.list_runs(3)] == ["seed"]
+
+    def test_newest_first(self, cp):
+        W.record_started(2, "migrate", 100, "2026-09-26T01:00:00Z")
+        W.record_finished(2, "migrate", 0, 100)
+        W.record_started(2, "seed", 101, "2026-09-27T01:00:00Z")
+        W.record_finished(2, "seed", 0, 101)
+        assert [r["jobName"] for r in W.list_runs(2)] == ["seed", "migrate"]
+
+    def test_a_recycled_pid_pairs_each_run_with_its_own_started_event(self, cp):
+        """Two separate runs of the same job, same pid, one after another -- not one
+        run matched to the wrong started event, and not the two collapsed into one."""
+        W.record_started(2, "migrate", 100, "2026-09-26T01:00:00Z")
+        W.record_finished(2, "migrate", 0, 100, detail="first")
+        W.record_started(2, "migrate", 100, "2026-09-26T02:00:00Z")
+        W.record_finished(2, "migrate", 1, 100, detail="second")
+        runs = sorted(W.list_runs(2), key=lambda r: r["startedAt"])
+        assert [r["startedAt"] for r in runs] == ["2026-09-26T01:00:00Z", "2026-09-26T02:00:00Z"]
+        assert [r["detail"] for r in runs] == ["first", "second"]
+
+    def test_a_negative_rc_is_carried_through_not_folded_into_zero(self, cp):
+        W.record_started(2, "migrate", 100)
+        W.record_finished(2, "migrate", -6, 100)
+        r, = W.list_runs(2)
+        assert r["rc"] == -6
+
+    def test_the_limit_is_honoured(self, cp):
+        for i in range(5):
+            W.record_started(2, "migrate", i, f"2026-09-26T0{i}:00:00Z")
+            W.record_finished(2, "migrate", 0, i)
+        assert len(W.list_runs(2, limit=2)) == 2
+
+    def test_no_runs_is_an_empty_list_not_an_error(self, cp):
+        assert W.list_runs(2) == []
+
+
 class TestIncidents:
     def _open(self, fp="fp1", **kw):
         return W.open_incident(kind="crashed", title="t", summary="s", account_id=2, job_name="migrate",

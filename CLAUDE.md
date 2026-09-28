@@ -140,7 +140,15 @@ benchmarks, a burst of new failures, or a stall. Each incident has a brief in
 `logs/incidents/<id>.md` (also `GET /api/v2/incidents/<id>/brief`, the
 "Copy brief" button, and `incidents.py show <id>`), plus an append-only
 `logs/incidents/feed.log` — tail it, or run a `Monitor` on it, to be told the
-moment one opens.
+moment one opens. `run_watch.list_runs` reads that same `run_events` table back
+out as a full history (paired started/finished by `(job_name, pid)`, newest
+first) for the **History** page (`GET /api/v2/history`) — every run of every
+kind this account has ever had, not a recent window. `repair` is the one job
+kind absent from `run_events`: `_start_repair` runs as a plain background
+thread rather than an admitted subprocess, so it never registers with
+`job_admission` and keeps its own small `repair_runs` table in the account's
+own ledger instead — merged in by the same History endpoint rather than
+changing how repair is launched.
 Benchmarks (`benchmarks.py`) have four outcomes; **a check nobody could make is
 `unknown`, and a report with any required `unknown` is `UNVERIFIED`, never
 `PASS`.** The ledger alone cannot say the tenants agree, so fidelity

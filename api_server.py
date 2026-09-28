@@ -1695,6 +1695,40 @@ def _ledger_path(account_id: int | None) -> str:
     return Settings(account_id=account_id).db_path
 
 
+def _history_view(account_id: int | None, limit: int = 200) -> dict:
+    """Every run this account has ever had -- migrate, delta, seed, reset, wipe,
+    full-setup, verify, tally, dms, trim-filler, repair -- newest first.
+
+    Almost all of it comes from run_watch.list_runs: every job that has ever passed
+    through job admission registers in run_events regardless of which process
+    launched it (see CLAUDE.md), so nothing here had to change for webui.py's own
+    jobs to show up. repair is the one exception -- _start_repair runs as a plain
+    background thread rather than an admitted subprocess, so it keeps its own small
+    table (repair_runs, in the account's own ledger) instead; merged in here rather
+    than changing how repair is launched.
+    """
+    import run_watch
+    runs = run_watch.list_runs(account_id, limit=limit)
+    path = _ledger_path(account_id)
+    if os.path.isfile(path):
+        try:
+            with cpdb.ro(path) as conn:
+                for r in conn.execute(
+                        "SELECT started_at, finished_at, summary, error FROM repair_runs "
+                        "ORDER BY id DESC LIMIT ?", (limit,)).fetchall():
+                    runs.append({
+                        "jobName": "repair", "pid": None,
+                        "startedAt": r["started_at"], "finishedAt": r["finished_at"],
+                        "rc": None if r["finished_at"] is None else (1 if r["error"] else 0),
+                        "detail": r["error"] or r["summary"] or "",
+                        "running": r["finished_at"] is None,
+                    })
+        except Exception:      # noqa: BLE001 - a ledger from before repair_runs existed
+            pass
+    runs.sort(key=lambda r: r["startedAt"] or "", reverse=True)
+    return {"accountId": account_id, "runs": runs[:limit]}
+
+
 def _verification_view(account_id: int | None) -> dict:
     """Every user's last one-to-one verification, from that account's own ledger, through a
     true read-only connection so polling this never contends with a running migration for
@@ -1810,6 +1844,19 @@ async def tally_run(body: RunVerification, op: Operator = Depends(operator)):
     target = ",".join(body.users) if body.users else "ALL"
     return await _gated(op, "tally.run", body, target,
                         lambda: _run_admitted(argv, account_id, "user-tally"))
+
+
+@app.get("/api/v2/history")
+async def history(account_id: int | None = None, op: Operator = Depends(operator)):
+    """Every run this account has ever had, newest first -- migrate, delta, seed,
+    reset, wipe, full-setup, verify, tally, dms, trim-filler, repair. See
+    _history_view for where each of those comes from."""
+    require_login(op)
+    aid = account_id if account_id is not None else op.account_id
+    if not aid:
+        return {"accountId": None, "runs": []}
+    _require_account_access(aid, op)
+    return await _off_loop(_history_view, aid)
 
 
 @app.get("/api/v2/quick/latest")

@@ -28,6 +28,7 @@ import {
   CheckCircle as VerifyIcon,
   CompareArrows as OneToOneIcon,
   Calculate as TallyIcon,
+  History as HistoryIconNav,
   Assessment as ReportIcon,
   ListAlt as ActivityIcon,
   Menu as MenuIcon,
@@ -108,6 +109,9 @@ const NAV_ITEMS = [
   // An exhaustive per-user count on both tenants, not a sample -- distinct from
   // one-to-one just above, which opens and compares a bounded slice of items.
   { path: '/tally', label: 'Tally', icon: <TallyIcon /> , group: 'Check' },
+  // Every run this account has ever had, whatever kind -- distinct from Jobs
+  // (what is running now) and from any one run's own report (what it did).
+  { path: '/history', label: 'History', icon: <HistoryIconNav /> , group: 'Check' },
   { path: '/errors', label: 'Failures', icon: <ErrorsIconNav /> , group: 'Check' },
   { path: '/report', label: 'Final Report', icon: <ReportIcon /> , group: 'Check' },
   { path: '/help', label: 'Help', icon: <HelpIconNav /> , group: 'Admin' },

@@ -1583,6 +1583,23 @@ export const runTally = (reason: string, opts: { accountId?: number; users?: str
     body: JSON.stringify({ reason, account_id: opts.accountId ?? null, users: opts.users ?? [] }),
   })
 
+/** One past run of any kind -- migrate, delta, seed, reset, wipe, full-setup, verify,
+ *  tally, dms, trim-filler, repair. `rc` is the real exit code where one was observed
+ *  (a negative number is a signal death, judged `!= 0`, never `> 0`) and null where it
+ *  was not -- an unobserved exit must never read as a clean one. */
+export interface HistoryRun {
+  jobName: string
+  pid: number | null
+  startedAt: string | null
+  finishedAt: string | null
+  rc: number | null
+  detail: string
+  running: boolean
+}
+export interface HistoryView { accountId: number | null; runs: HistoryRun[] }
+export const fetchHistory = (accountId?: number) =>
+  cpFetch<HistoryView>(`/api/v2/history${accountId ? `?account_id=${accountId}` : ''}`)
+
 /* Trim filler: the reverse of a fill (seed_sandbox.py --trim-filler). */
 export interface TrimStatus {
   hasRun: boolean
