@@ -4139,6 +4139,15 @@ def spa_users_payload(account_id: int | None = None) -> dict:
 
 
 def _ledger_progress_fraction(account_id: int | None = None) -> float | None:
+    """Cached: /api/job and /api/spa/activity (left uncached as a "64 ms"
+    reader) both reach this on every poll, and tui.collect_snapshot is a
+    full-ledger scan. Live, 1.73M audit_log rows: py-spy caught three request
+    threads inside it at once while one tab held webui.py at ~80% of a core."""
+    return _cached_payload("ledger_progress_fraction",
+                           _ledger_progress_fraction_uncached, account_id)
+
+
+def _ledger_progress_fraction_uncached(account_id: int | None = None) -> float | None:
     """The same items_done/items_expected fraction the header progress bar
     and snapshot_payload() already compute from the ledger -- reused here
     rather than re-derived, since tui.collect_snapshot() is the one place

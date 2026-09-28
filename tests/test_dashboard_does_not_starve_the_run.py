@@ -129,6 +129,19 @@ class TestAnExpensiveScanWaitsInProportionToItsCost:
         assert len(calls) == 1, f"a {len(calls)}-scan burst inside a 5s window"
 
 
+class TestTheProgressBarDoesNotRescanTheLedgerPerPoll:
+    """/api/job and /api/spa/activity reached tui.collect_snapshot on every
+    poll, uncached -- py-spy caught three concurrent full-ledger scans live."""
+
+    def test_repeated_progress_reads_scan_once(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(webui, "_ledger_progress_fraction_uncached",
+                            lambda a: calls.append(a) or 0.5)
+        for _ in range(5):
+            assert webui._ledger_progress_fraction(66) == 0.5
+        assert len(calls) == 1, f"scanned the ledger {len(calls)} times for 5 polls"
+
+
 class TestAButtonPressIsVisibleImmediately:
     def test_invalidation_drops_the_entries(self):
         webui._cached_payload("x", lambda a: 1, 66)
