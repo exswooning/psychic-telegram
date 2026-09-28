@@ -335,15 +335,23 @@ class TestBackoffIsGentlerThanHalving:
         assert lim.rate == 5.0
 
     def test_recovery_is_faster_than_under_halving(self):
-        """The whole point: fewer probes back to a rate already proven."""
+        """The whole point: fewer probes back to a rate already proven.
+
+        Recovering to 80 itself is no longer the target: penalise() now tightens
+        the ceiling to 95% of the rate that broke (76 here), permanently -- see
+        TestTheCeilingTightensOnARealRejection -- so 80 can never be reached
+        again. That is the new correct behaviour, not a bug this test should
+        paper over; it targets the new ceiling instead.
+        """
         from resilience import AdaptiveRateLimiter
 
         def probes_to_recover(decrease):
             lim = AdaptiveRateLimiter(80, floor=1, ceiling=1200,
                                       probe_after=0, decrease=decrease)
             lim.penalise()
+            target = 80 * 0.95
             n = 0
-            while lim.rate < 80 and n < 100:
+            while lim.rate < target and n < 100:
                 lim.acquire()
                 n += 1
             return n
@@ -458,16 +466,21 @@ class TestItRemembersWhereItBrokeLastTime:
             assert lim.rate <= cap + 1e-6, f"climbed to {lim.rate} before ever holding at the cap"
         assert reached_cap
 
-    def test_it_eventually_risks_one_step_past_and_forgets_the_hint(self):
+    def test_the_hint_never_needs_forgetting_once_the_ceiling_itself_matches_it(self):
+        """Before the ceiling also tightened (see TestTheCeilingTightensOnARealRejection),
+        forgetting the hint after two clean probes was what let the rate risk stepping past
+        the plateau and rediscover the same limit the slow way. Now self.ceiling caps it at
+        that identical 95% point on its own -- acquire()'s own outer guard (`rate < ceiling`)
+        stops calling _next_rate at all the instant the rate reaches it, so the hint simply
+        never gets a chance to be forgotten, forever. That is fine: nothing downstream reads
+        a stale hint as though it still mattered, and what actually has to hold -- the rate
+        never exceeding the cap -- is what this pins, not an internal counter's fate."""
         lim = AdaptiveRateLimiter(300, floor=5, ceiling=1200, probe_after=0)
         lim.penalise()
         for _ in range(50):
             lim.acquire()
-            if lim.rate > 300 * 0.95 + 1e-6:
-                break
-        else:
-            pytest.fail("never risked a step past the held plateau")
-        assert lim._ceiling_hint is None
+        assert lim.rate <= 300 * 0.95 + 1e-6
+        assert lim._ceiling_hint is not None, "frozen, not cleared -- see the docstring above"
 
     def test_a_fresh_rejection_near_the_old_hint_lowers_it_again(self):
         lim = AdaptiveRateLimiter(300, floor=5, ceiling=1200, probe_after=0)
@@ -501,3 +514,59 @@ class TestItRemembersWhereItBrokeLastTime:
         assert held >= 1
         kinds = [k for _, _, k in lim.drain_events()]
         assert kinds.count("probe") == sum(1 for _ in kinds)   # every recorded event was a real change
+
+
+class TestTheCeilingTightensOnARealRejection:
+    """The constructor's `ceiling` is a guess made before anything about this project's
+    real limit was known -- set deliberately high so it is never the binding constraint
+    (drive_engine._project_limiter: 1,200, chosen when a live run sat there for hours,
+    zero rejections, using a fraction of even that). The first real rejection is the
+    first actual fact this project has ever handed back, so it replaces the guess."""
+
+    def test_a_single_rejection_tightens_the_ceiling_to_95_percent_of_where_it_broke(self):
+        lim = AdaptiveRateLimiter(300, floor=5, ceiling=1200)
+        lim.penalise()
+        assert lim.ceiling == pytest.approx(300 * 0.95)
+
+    def test_it_never_climbs_back_past_the_new_ceiling_however_long_it_runs(self):
+        """Not just held for two probes (TestItRemembersWhereItBrokeLastTime already
+        covers that) -- genuinely permanent, checked over far more probes than the
+        hint alone was ever good for."""
+        lim = AdaptiveRateLimiter(300, floor=5, ceiling=1200, probe_after=0)
+        lim.penalise()
+        for _ in range(500):
+            lim.acquire()
+            assert lim.rate <= 300 * 0.95 + 1e-6
+
+    def test_a_second_lower_rejection_tightens_it_further(self):
+        lim = AdaptiveRateLimiter(300, floor=5, ceiling=1200)
+        lim.penalise()                          # ceiling -> 285
+        lim.rate = 200                          # a lower rate breaks the second time
+        lim.penalise()
+        assert lim.ceiling == pytest.approx(200 * 0.95)
+
+    def test_it_never_loosens_the_ceiling_back_up(self):
+        """A clean stretch is not evidence the true limit rose -- only a rejection is
+        ever allowed to move this number, and only downward."""
+        lim = AdaptiveRateLimiter(300, floor=5, ceiling=1200, probe_after=0)
+        lim.penalise()                          # ceiling -> 285
+        tightened = lim.ceiling
+        for _ in range(200):
+            lim.acquire()
+        assert lim.ceiling == tightened
+
+    def test_the_floor_still_wins_even_if_a_rejection_lands_right_at_it(self):
+        lim = AdaptiveRateLimiter(6, floor=5, ceiling=100)
+        lim.penalise()
+        assert lim.ceiling >= lim.floor == 5.0
+
+    def test_stats_reports_the_tightened_ceiling_not_the_original_guess(self):
+        lim = AdaptiveRateLimiter(300, floor=5, ceiling=1200)
+        lim.penalise()
+        assert lim.stats()["ceiling"] == pytest.approx(300 * 0.95)
+
+    def test_a_clean_run_that_is_never_rejected_keeps_the_original_ceiling(self):
+        lim = AdaptiveRateLimiter(40, floor=1, ceiling=1200, step=5, probe_after=0)
+        for _ in range(20):
+            lim.acquire()
+        assert lim.ceiling == 1200

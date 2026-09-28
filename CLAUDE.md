@@ -240,6 +240,24 @@ mid-ladder, nothing had reached exhaustion) read as nothing being wrong. The hoo
 fires on every attempt Google rejects for pacing, immediately, so concurrent
 siblings under the same project limiter see the reduced rate within seconds.
 
+**The rate limiter's ceiling is discovered once and then permanent, not a number it
+keeps probing past.** The constructor's `ceiling` (`DRIVE_PROJECT_QPS_CEILING`, 1200)
+is a guess made before anything about a project's real limit is known, deliberately set
+high so it is never the binding constraint — confirmed live, a run can sit flat against
+it for hours, zero rejections, using a fraction of even that. `AdaptiveRateLimiter.
+penalise()` now tightens `self.ceiling` itself, permanently, to 95% of the rate that just
+broke, the first time Google actually says no — not only the pre-existing `_ceiling_hint`
+(same 95% margin), which only ever softened the climb *back up* to a rejection point and
+forgot itself after two clean probes, letting the rate walk straight past the real limit
+toward the old guessed one again. Ratchets down only: a second, lower rejection tightens
+it further; nothing ever loosens it back up, because a clean stretch is not evidence the
+true limit rose. One structural consequence: once the tightened ceiling converges with the
+hint's own cap, `acquire()`'s own guard (`rate < ceiling`) stops calling into the
+hint-forgetting logic at all, so `_ceiling_hint` can end up permanently set rather than
+returning to `None` — harmless (nothing downstream reads it as though a fresh probe were
+still due), but worth knowing if `stats()["ceilingHint"]` on the Metrics page never clears
+after a real rejection.
+
 **The production default for how Drive content moves is `server_side`, not `download_upload`**
 — set as `TRANSFER_MODE=server_side` in `systemd/bitport-api.service`, not in `config.py`
 itself (whose own fallback stays `download_upload`, for a bare/local run with no unit).

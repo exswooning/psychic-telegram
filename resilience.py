@@ -582,6 +582,15 @@ class AdaptiveRateLimiter(RateLimiter):
     last rejection point, holds there for two clean probes, and only then risks one
     real step past it -- proven clear, the hint is forgotten and it climbs on at
     normal speed; rejected again, a fresh (by then lower) hint is set immediately.
+
+    That still lets the climb walk back past a real, known limit toward the
+    constructor's own `ceiling` -- a guess made before anything about this project
+    was known, deliberately set high so it is never the binding constraint (see
+    drive_engine._project_limiter). `penalise` tightens `self.ceiling` itself the
+    first time Google actually says no, permanently, to just under the rate that
+    broke -- the class's own name finally meaning what it says: not "starts high
+    and gets told off forever," but "finds the real number once and stops
+    overshooting it."
     """
 
     def __init__(self, rate_per_sec: float, *, floor: float, ceiling: float,
@@ -654,11 +663,27 @@ class AdaptiveRateLimiter(RateLimiter):
         cutting recovery to roughly three probes. Still multiplicative, so a
         genuinely over-driven rate still collapses quickly: three
         consecutive rejections take it to a third.
+
+        The constructor's `ceiling` is a runaway guard, a number picked before this
+        project's real limit was known -- see drive_engine._project_limiter's own
+        comment on exactly that. It is deliberately set far above any expected real
+        limit, so a run can sit flat against it for hours, never once pushed back,
+        never finding out the real number is lower (confirmed live: 1,200/1,200,
+        zero rejections, using ~7% of even that). The FIRST real rejection is the
+        first fact this project has ever handed back about its own limit, so it
+        tightens the hard ceiling itself, permanently, to just under it (the same
+        95% margin `_next_rate` already holds a recovery to) -- not only the
+        temporary `_ceiling_hint` below, which softens the climb back up but
+        forgets itself after two clean probes and lets the rate walk straight back
+        past the real limit toward the old guessed one. Ratchets down only: a
+        second, lower rejection tightens it further; nothing ever loosens it back
+        up, because a clean stretch is not evidence the true limit rose.
         """
         with self._lock:
             self._rejections += 1
             before = self.rate
             self.rate = max(self.floor, self.rate * self.decrease)
+            self.ceiling = max(self.floor, min(self.ceiling, before * 0.95))
             self._last_change = time.monotonic()
             if self.rate < before:
                 self._backoffs += 1
