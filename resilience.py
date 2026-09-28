@@ -596,7 +596,8 @@ class AdaptiveRateLimiter(RateLimiter):
     def __init__(self, rate_per_sec: float, *, floor: float, ceiling: float,
                  step: float | None = None, growth: float = 0.10,
                  probe_after: float = 20.0,
-                 burst: int = 1, on_change=None, decrease: float = 0.7):
+                 burst: int = 1, on_change=None, decrease: float = 0.7,
+                 debounce_window: float = 2.0):
         super().__init__(rate_per_sec, burst=burst)
         self.floor = max(float(floor), 0.001)
         self.ceiling = max(float(ceiling), self.floor)
@@ -622,6 +623,18 @@ class AdaptiveRateLimiter(RateLimiter):
         self._last_change = time.monotonic()
         self._rejections = 0
         self._backoffs = 0
+        # Calls already in flight when the first rejection in a burst lands keep
+        # arriving for a moment after -- every one of them blaming the SAME crossing,
+        # not a fresh one. Without this, a genuinely concurrent migration compounds:
+        # measured live, 11 different workers each called penalise() within 1.3s of
+        # each other (14:25:56.403 to 14:25:57.738), each multiplying an ALREADY-JUST-CUT
+        # rate by 0.7 again -- 278 to 5.0, one real crossing punished eleven times over
+        # (0.7**11 =~ 2%), then a climb back from 5 instead of from a sensibly-reduced
+        # number. `_rejections` still counts every one of them (that count is honest
+        # reporting of how many calls Google actually refused); only the RATE and
+        # CEILING changes are debounced to the first in the window.
+        self.debounce_window = max(float(debounce_window), 0.0)
+        self._last_penalty: float | None = None
         # Where Google most recently said no. Without this, every recovery climbs back to
         # (and a step past) the exact rate that just got it rejected, gets rejected again,
         # and repeats forever -- a permanent sawtooth, never a stable rate, and every peak
@@ -678,13 +691,24 @@ class AdaptiveRateLimiter(RateLimiter):
         past the real limit toward the old guessed one. Ratchets down only: a
         second, lower rejection tightens it further; nothing ever loosens it back
         up, because a clean stretch is not evidence the true limit rose.
+
+        Debounced against the same rejection being blamed eleven times over: see
+        `debounce_window`'s own comment in __init__. `_rejections` always counts the
+        call; the rate/ceiling change is applied only to the first one inside the
+        window, everything closer than that to the last real change is the SAME
+        crossing arriving late, not a fresh one.
         """
         with self._lock:
             self._rejections += 1
+            now = time.monotonic()
+            if (self._last_penalty is not None
+                    and now - self._last_penalty < self.debounce_window):
+                return self.rate
+            self._last_penalty = now
             before = self.rate
             self.rate = max(self.floor, self.rate * self.decrease)
             self.ceiling = max(self.floor, min(self.ceiling, before * 0.95))
-            self._last_change = time.monotonic()
+            self._last_change = now
             if self.rate < before:
                 self._backoffs += 1
                 # The rate a moment ago is where it broke -- remembered so the climb back

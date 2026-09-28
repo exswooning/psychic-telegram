@@ -258,6 +258,17 @@ returning to `None` — harmless (nothing downstream reads it as though a fresh 
 still due), but worth knowing if `stats()["ceilingHint"]` on the Metrics page never clears
 after a real rejection.
 
+**A real crossing is one event, not one per concurrent worker that happened to be mid-flight
+when it landed.** Measured live: 11 different workers each called `penalise()` within 1.3s of
+each other, all blaming the SAME ceiling crossing — each one multiplying an already-just-cut
+rate by 0.7 again, so the multiplicative decrease meant for ONE correction compounded eleven
+times (`0.7**11 ≈ 2%`; 278 calls/s to 5.0), and the climb back afterward starts from a rate far
+lower than the one real correction ever justified. `penalise()`'s new `debounce_window`
+(default 2.0s) coalesces this: `_rejections` still counts every call Google actually refused
+(honest reporting of how often it happened), but the rate/ceiling change applies only to the
+first call inside the window — everything closer than that to the last real change is the
+same crossing arriving late, not a fresh one.
+
 **The production default for how Drive content moves is `server_side`, not `download_upload`**
 — set as `TRANSFER_MODE=server_side` in `systemd/bitport-api.service`, not in `config.py`
 itself (whose own fallback stays `download_upload`, for a bare/local run with no unit).

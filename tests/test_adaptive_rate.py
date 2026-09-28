@@ -26,16 +26,23 @@ class TestItBacksOffWhenPushedBack:
         """Additive backoff would spend one rejection per step on the way
         down from a badly over-driven rate. Multiplicative decrease makes
         overshoot cheap to correct -- three rejections must cost most of the
-        rate, whatever the exact factor is."""
-        lim = AdaptiveRateLimiter(200, floor=1, ceiling=200)
+        rate, whatever the exact factor is.
+
+        debounce_window=0: three SEPARATE real rejections compounding is exactly
+        what this pins, not the burst-of-concurrent-calls debouncing exists for
+        (see TestDebouncesConcurrentRejectionsAsOneEvent)."""
+        lim = AdaptiveRateLimiter(200, floor=1, ceiling=200, debounce_window=0)
         for _ in range(3):
             lim.penalise()
         assert lim.rate < 200 / 2.5
 
     def test_it_never_falls_below_the_floor(self):
-        """A burst of 429s from an unrelated cause must not be able to drive
-        the rate to zero and wedge the migration."""
-        lim = AdaptiveRateLimiter(40, floor=5, ceiling=200)
+        """Repeated real rejections must not be able to drive the rate below the
+        floor and wedge the migration. debounce_window=0: this is about the
+        clamp holding over many SEPARATE compounding decreases, not about a
+        burst of concurrent in-flight calls (which debouncing collapses to one
+        decrease regardless -- see TestDebouncesConcurrentRejectionsAsOneEvent)."""
+        lim = AdaptiveRateLimiter(40, floor=5, ceiling=200, debounce_window=0)
         for _ in range(40):
             lim.penalise()
         assert lim.rate == 5.0
@@ -320,9 +327,11 @@ class TestBackoffIsGentlerThanHalving:
 
     def test_it_stays_multiplicative(self):
         """An additive decrease would take far too long to escape a rate that
-        is genuinely too high. Three rejections should still cost most of it."""
+        is genuinely too high. Three rejections should still cost most of it.
+        debounce_window=0: three separate real rejections, not a concurrent burst
+        (see TestDebouncesConcurrentRejectionsAsOneEvent)."""
         from resilience import AdaptiveRateLimiter
-        lim = AdaptiveRateLimiter(80, floor=1, ceiling=1200)
+        lim = AdaptiveRateLimiter(80, floor=1, ceiling=1200, debounce_window=0)
         for _ in range(3):
             lim.penalise()
         assert lim.rate < 80 / 2.5
@@ -483,7 +492,9 @@ class TestItRemembersWhereItBrokeLastTime:
         assert lim._ceiling_hint is not None, "frozen, not cleared -- see the docstring above"
 
     def test_a_fresh_rejection_near_the_old_hint_lowers_it_again(self):
-        lim = AdaptiveRateLimiter(300, floor=5, ceiling=1200, probe_after=0)
+        # debounce_window=0: this is a second, separate rejection after the rate has
+        # recovered, not a concurrent burst against the first one.
+        lim = AdaptiveRateLimiter(300, floor=5, ceiling=1200, probe_after=0, debounce_window=0)
         lim.penalise()
         for _ in range(50):
             lim.acquire()
@@ -539,7 +550,8 @@ class TestTheCeilingTightensOnARealRejection:
             assert lim.rate <= 300 * 0.95 + 1e-6
 
     def test_a_second_lower_rejection_tightens_it_further(self):
-        lim = AdaptiveRateLimiter(300, floor=5, ceiling=1200)
+        # debounce_window=0: a genuinely separate, later rejection, not a burst.
+        lim = AdaptiveRateLimiter(300, floor=5, ceiling=1200, debounce_window=0)
         lim.penalise()                          # ceiling -> 285
         lim.rate = 200                          # a lower rate breaks the second time
         lim.penalise()
@@ -570,3 +582,68 @@ class TestTheCeilingTightensOnARealRejection:
         for _ in range(20):
             lim.acquire()
         assert lim.ceiling == 1200
+
+
+class TestDebouncesConcurrentRejectionsAsOneEvent:
+    """Calls already in flight when the first rejection in a burst lands keep
+    arriving for a moment after -- every one of them blaming the SAME crossing,
+    not a fresh one each. Measured live: 11 different workers each called
+    penalise() within 1.3s of each other (14:25:56.403 to 14:25:57.738), each
+    multiplying an ALREADY-JUST-CUT rate by 0.7 again -- 278 to 5.0, one real
+    crossing punished eleven times over (0.7**11 =~ 2%)."""
+
+    def test_a_second_rejection_inside_the_window_does_not_compound_the_rate(self):
+        lim = AdaptiveRateLimiter(300, floor=1, ceiling=1200, debounce_window=2.0)
+        lim.penalise()
+        after_first = lim.rate
+        lim.penalise()                       # arrives an instant later, same crossing
+        assert lim.rate == after_first
+
+    def test_it_still_counts_toward_rejections_for_honest_reporting(self):
+        """_rejections is how many calls Google actually refused -- that must stay
+        true even though only one of them moved the rate."""
+        lim = AdaptiveRateLimiter(300, floor=1, ceiling=1200, debounce_window=2.0)
+        lim.penalise()
+        lim.penalise()
+        lim.penalise()
+        assert lim.stats()["rejections"] == 3
+
+    def test_only_the_first_in_a_burst_counts_as_a_backoff(self):
+        lim = AdaptiveRateLimiter(300, floor=1, ceiling=1200, debounce_window=2.0)
+        for _ in range(5):
+            lim.penalise()
+        assert lim.stats()["backoffs"] == 1
+
+    def test_eleven_concurrent_rejections_cost_one_decrease_not_eleven_compounded(self):
+        """The live measurement, reproduced directly."""
+        lim = AdaptiveRateLimiter(278, floor=1, ceiling=1200, debounce_window=2.0)
+        for _ in range(11):
+            lim.penalise()
+        assert lim.rate == pytest.approx(278 * 0.7)
+
+    def test_the_ceiling_tightening_is_also_debounced_not_just_the_rate(self):
+        """Without this, 11 concurrent rejections would also ratchet the ceiling
+        down eleven times on the way to the floor, not once to a sensible 95% of
+        the real crossing."""
+        lim = AdaptiveRateLimiter(278, floor=1, ceiling=1200, debounce_window=2.0)
+        for _ in range(11):
+            lim.penalise()
+        assert lim.ceiling == pytest.approx(278 * 0.95)
+
+    def test_a_rejection_after_the_window_has_passed_is_a_fresh_one(self, monkeypatch):
+        import resilience
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(resilience.time, "monotonic", lambda: clock["t"])
+        lim = AdaptiveRateLimiter(300, floor=1, ceiling=1200, debounce_window=2.0)
+        lim.penalise()
+        after_first = lim.rate
+        clock["t"] += 3.0                    # past the debounce window
+        lim.penalise()
+        assert lim.rate == pytest.approx(after_first * 0.7)
+
+    def test_zero_disables_debouncing_entirely(self):
+        lim = AdaptiveRateLimiter(300, floor=1, ceiling=1200, debounce_window=0)
+        lim.penalise()
+        after_first = lim.rate
+        lim.penalise()
+        assert lim.rate == pytest.approx(after_first * 0.7)
