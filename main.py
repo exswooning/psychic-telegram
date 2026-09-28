@@ -51,6 +51,7 @@ from chat_engine import ChatMigrator
 from contacts_engine import ContactsMigrator
 import memtrace
 import user_claims
+import config
 from config import Settings
 from db import MigrationDB
 from discovery import print_report, scan_user
@@ -729,6 +730,30 @@ def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
         log.warning("could not auto-provision missing target accounts: %s", exc)
 
     _warn_if_ledger_is_stale(db, auth, pairs)
+
+    # Worker count used to be decided ONCE, when Settings() was built at
+    # process startup, and frozen for the rest of the process -- including
+    # every later pass of an --ordered run (drive, then mail, then the
+    # rest), each of which calls run_batch fresh. A pass that started while
+    # the memory watchdog's own probe read low usable RAM stayed stuck at
+    # that size even after a later pass had room to grow into, and a mail
+    # pass paid whatever pool size drive's heavier download_upload budget
+    # needed. This does not resize a pool already dispatching --
+    # ThreadPoolExecutor only spawns threads at submit() time, and every
+    # pair for a pass is submitted in one batch below, so a mid-pass resize
+    # would be a no-op. Re-probing here, once per pass, is real and costs
+    # nothing new: it is the same resources.recommend() Settings() already
+    # calls, just called again at the one place a fresh pool IS built.
+    #
+    # An operator who pinned USER_WORKERS (env or --workers, which mirrors
+    # into the same env var) has decided; re-probing would silently
+    # override that choice on the very next pass.
+    if not os.getenv("USER_WORKERS"):
+        fresh = config._auto("user_workers", settings.user_workers)
+        if fresh != settings.user_workers:
+            log.info("worker count re-sized %d -> %d for this pass (services=%s)",
+                     settings.user_workers, fresh, ",".join(sorted(services)))
+            settings.user_workers = fresh
 
     log.info("dispatching %d users across %d workers (services=%s, delta=%s)",
              len(pairs), settings.user_workers, ",".join(sorted(services)), delta)
@@ -2375,6 +2400,11 @@ def main(argv: list[str] | None = None) -> int:
         settings.dry_run = True
     if args.workers:
         settings.user_workers = args.workers
+        # Mirrored into the env var _auto()'s own default_factory checks, so
+        # it is the one signal run_batch's per-pass re-probe also respects --
+        # an operator who typed --workers has decided, same as one who set
+        # USER_WORKERS directly.
+        os.environ["USER_WORKERS"] = str(args.workers)
 
     setup_logging(settings)
     _install_signal_handlers()

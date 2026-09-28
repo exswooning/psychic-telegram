@@ -392,3 +392,25 @@ model**: `api/client.ts` (polling, talks to webui.py's `/api/*`) and
 `/api/v2/*`). A page or hook often has to read both (see
 `hooks/useRunningJobs.ts`) and reconcile them itself — there is no unified
 job-status endpoint yet.
+
+**Worker count is re-probed once per pass, not just once per process.**
+`Settings.user_workers` used to be decided exactly once, at `Settings()`
+construction (`resources.recommend()` against RAM measured at that instant),
+and frozen for the rest of the process — including every later pass of an
+`--ordered` run (drive, then mail, then the rest), each a separate
+`run_batch()` call. A pass that started under memory pressure stayed stuck
+small even after a later pass had room to grow into, and a mail/calendar
+pass paid whatever pool size drive's heavier `download_upload` budget had
+needed. `run_batch()` now re-probes via `config._auto("user_workers", ...)`
+at the top of every call, unless the operator pinned it (`USER_WORKERS` env,
+or `--workers`, which `main()` mirrors into that same env var so both paths
+share one override signal). This does **not** resize a pool already
+dispatching: `ThreadPoolExecutor` only spawns threads at `submit()` time,
+and every pair for a pass is submitted in one batch in `run_batch()` —
+mutating a running pool's `_max_workers` would be a no-op with nothing left
+to submit. Re-probing between passes was the one place a fresh pool is
+already built, so it was real, free adaptivity that nothing was claiming.
+Mid-pass concurrency changes (a single drive pass against 300 users runs for
+days) would need the dispatch loop restructured to a resizable gate instead
+of submit-all, and that has not been done — scoped out as bigger surgery
+than this pass-boundary fix, not as an oversight.
