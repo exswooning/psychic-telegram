@@ -9,6 +9,7 @@ import MigrateMetricsCharts from '@/components/MigrateMetricsCharts'
 import {
   fetchMetrics, fetchMyMetrics, MetricsSnapshot, LimiterState,
 } from '@/api/controlPlane'
+import { bytes } from '@/utils/metricsSeries'
 
 /** Past this, the page says so rather than presenting an old run as current.
  *  A migration can legitimately be quiet for a while; three days cannot. */
@@ -49,13 +50,6 @@ const describeAge = (sec: number): string => {
 
 const ms = (seconds: number) =>
   seconds >= 1 ? `${seconds.toFixed(2)}s` : `${Math.round(seconds * 1000)}ms`
-
-const bytes = (n: number) => {
-  if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1)} GB`
-  if (n >= 1024 ** 2) return `${(n / 1024 ** 2).toFixed(0)} MB`
-  if (n >= 1024) return `${(n / 1024).toFixed(0)} KB`
-  return `${n} B`
-}
 
 /** Statuses that are not failures, so the volume table can colour honestly.
  *  SKIPPED_* covers a family (unexportable, too large, no permission) that

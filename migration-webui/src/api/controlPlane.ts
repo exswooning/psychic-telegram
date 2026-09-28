@@ -1320,6 +1320,11 @@ export interface MetricsSnapshot {
     itemsPerMin: number
     expectedItems: number
     remainingItems: number
+    /** The tenant's real, measured size from discovery's own per-user Drive walk --
+     *  not estimated from item counts (files vary from empty to gigabytes each). 0
+     *  with the same meaning as expectedItems==0: discovery has never run. */
+    expectedBytes: number
+    remainingBytes: number
     /** null whenever it cannot be computed honestly; etaReason says why.
      *  This is the number people plan a cutover around, so a fabricated one
      *  is worse than a blank. */

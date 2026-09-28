@@ -7,6 +7,17 @@ import type { LimiterPoint, MetricsSnapshot, MigrationFailure } from '@/api/cont
 
 const GB = 1024 ** 3
 const two = (n: number) => String(n).padStart(2, '0')
+
+/** Bytes at whatever scale reads best -- TB for a whole tenant, down to a bare
+ *  count for something tiny. Shared rather than reimplemented per component:
+ *  a page and a dialog disagreeing on where "GB" becomes "TB" is its own bug. */
+export const bytes = (n: number) => {
+  if (n >= 1024 ** 4) return `${(n / 1024 ** 4).toFixed(2)} TB`
+  if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1)} GB`
+  if (n >= 1024 ** 2) return `${(n / 1024 ** 2).toFixed(0)} MB`
+  if (n >= 1024) return `${(n / 1024).toFixed(0)} KB`
+  return `${n} B`
+}
 const round1 = (n: number) => Math.round(n * 10) / 10
 const mean = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length
 const stdev = (xs: number[], m: number) => Math.sqrt(mean(xs.map((x) => (x - m) ** 2)))

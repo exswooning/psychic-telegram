@@ -1,18 +1,23 @@
 import React from 'react'
-import { describe, it, expect, vi } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import RunningJobDetail from './RunningJobDetail'
 import { projectedEta } from './RunningJobDetail.utils'
 import RunningJobCard from './RunningJobCard'
 import type { RunningJob } from '@/hooks/useRunningJobs'
 
 // controlPlane reads localStorage at module load, and the hook imports it.
-// These components only need describeElapsed from that module graph.
+// These components only need describeElapsed from that module graph, plus
+// fetchMyMetrics for a migrate job's own "Data" stat and charts.
+const fetchMyMetrics = vi.hoisted(() => vi.fn())
 vi.mock('@/api/controlPlane', () => ({
   fetchTenantConfigStatus: vi.fn(), fetchFullSetupStatus: vi.fn(),
   fetchFleet: vi.fn(), fetchActiveJobs: vi.fn(), fetchMe: vi.fn(),
   stopJob: vi.fn(), fetchProvisionStatus: vi.fn(),
+  fetchMyMetrics,
 }))
+
+beforeEach(() => { fetchMyMetrics.mockReset() })
 vi.mock('@/api/client', () => ({ fetchJob: vi.fn(), stopJob: vi.fn() }))
 
 /* The card is a glance. Everything it cannot fit -- ETA, observed
@@ -124,6 +129,47 @@ describe('what the dialog has to say', () => {
     render(<RunningJobDetail onClose={() => {}}
                              job={job({ pct: null, done: true })} />)
     expect(bar()).toBeNull()
+  })
+})
+
+describe('a running migrate job\'s own metrics', () => {
+  const snapshot = (throughput?: Partial<{
+    bytesMovedTotal: number; expectedBytes: number
+  }>) => ({
+    accountId: 1, error: '', latest: null, operations: [], limiters: {}, history: [],
+    throughput: {
+      byDay: [], busiestDayItems: 0, grantsPerFile: 0, grants: 0, files: 0,
+      itemsPerMin: 0, expectedItems: 0, remainingItems: 0, etaSeconds: null, etaReason: '',
+      bytesMovedTotal: 0, expectedBytes: 0, remainingBytes: 0, ...throughput,
+    },
+  })
+
+  it('does not fetch metrics at all for a job that is not a migration', () => {
+    render(<RunningJobDetail job={job({ kind: 'seed' })} onClose={() => {}} />)
+    expect(fetchMyMetrics).not.toHaveBeenCalled()
+  })
+
+  it('shows the measured total and the done amount once discovery has a baseline', async () => {
+    fetchMyMetrics.mockResolvedValue(snapshot({
+      bytesMovedTotal: 3 * 1024 ** 3, expectedBytes: 2 * 1024 ** 4,
+    }))
+    render(<RunningJobDetail job={job({ kind: 'migrate' })} onClose={() => {}} />)
+    expect(await screen.findByText('Data')).toBeInTheDocument()
+    expect(screen.getByText('3.0 GB')).toBeInTheDocument()
+    expect(screen.getByText('of 2.00 TB discovered total')).toBeInTheDocument()
+  })
+
+  it('shows no Data stat when discovery has never run, rather than a fabricated total', async () => {
+    fetchMyMetrics.mockResolvedValue(snapshot())
+    render(<RunningJobDetail job={job({ kind: 'migrate' })} onClose={() => {}} />)
+    await waitFor(() => expect(fetchMyMetrics).toHaveBeenCalled())
+    expect(screen.queryByText('Data')).not.toBeInTheDocument()
+  })
+
+  it('says when metrics could not be read, rather than showing nothing', async () => {
+    fetchMyMetrics.mockRejectedValue(new Error('ledger locked'))
+    render(<RunningJobDetail job={job({ kind: 'migrate' })} onClose={() => {}} />)
+    expect(await screen.findByText(/Metrics unavailable: ledger locked/)).toBeInTheDocument()
   })
 })
 

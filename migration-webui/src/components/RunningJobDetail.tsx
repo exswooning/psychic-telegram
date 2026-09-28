@@ -11,18 +11,39 @@
  * -- has only a percentage and a clock, so it gets an ETA derived from
  * those, clearly labelled as the projection it is rather than a measurement.
  */
-import React from 'react'
+import React, { useEffect, useState } from 'react'
 import {
-  Box, Chip, Dialog, DialogContent, DialogTitle, Divider, IconButton,
-  LinearProgress, Stack, Typography,
+  Alert, Box, Chip, CircularProgress, Dialog, DialogContent, DialogTitle, Divider,
+  IconButton, LinearProgress, Stack, Typography,
 } from '@mui/material'
 import { Close as CloseIcon } from '@mui/icons-material'
 import type { RunningJob } from '@/hooks/useRunningJobs'
 import { describeElapsed } from '@/hooks/useRunningJobs'
 import SeedRunDashboard from '@/components/SeedRunDashboard'
-import MigrateJobMetrics from '@/components/MigrateJobMetrics'
+import MigrateMetricsCharts from '@/components/MigrateMetricsCharts'
+import { fetchMyMetrics, MetricsSnapshot } from '@/api/controlPlane'
+import { bytes } from '@/utils/metricsSeries'
 import { formatPct } from '@/utils/formatPct'
 import { projectedEta } from './RunningJobDetail.utils'
+
+/** Fetched here, once, rather than inside the charts section below: the top
+ *  "glance" row wants the same snapshot the charts render from, and fetching
+ *  it twice would let the two disagree about what "now" means. */
+const useMigrateMetrics = (enabled: boolean, live: boolean) => {
+  const [m, setM] = useState<MetricsSnapshot | null>(null)
+  const [err, setErr] = useState('')
+  useEffect(() => {
+    if (!enabled) return undefined
+    let on = true
+    const load = () => fetchMyMetrics(120)
+      .then((r) => { if (on) { setM(r); setErr('') } })
+      .catch((e) => { if (on) setErr(e instanceof Error ? e.message : String(e)) })
+    load()
+    const t = live ? window.setInterval(load, 5_000) : undefined
+    return () => { on = false; if (t) window.clearInterval(t) }
+  }, [enabled, live])
+  return { m, err }
+}
 
 const Stat: React.FC<{ label: string; value: string; hint?: string }> = ({
   label, value, hint,
@@ -40,8 +61,13 @@ export const RunningJobDetail: React.FC<{
   job: RunningJob | null
   onClose: () => void
 }> = ({ job, onClose }) => {
+  // Called unconditionally (hooks can't follow the early return below): a job
+  // that isn't a running migrate just never enables the fetch.
+  const isMigrate = job?.kind === 'migrate'
+  const { m, err: metricsErr } = useMigrateMetrics(isMigrate, isMigrate && !job?.done)
   if (!job) return null
   const eta = projectedEta(job.pct, job.elapsedSec)
+  const t = m?.throughput
   return (
     <Dialog open onClose={onClose} maxWidth="md" fullWidth>
       <DialogTitle sx={{ pr: 6 }}>
@@ -83,6 +109,15 @@ export const RunningJobDetail: React.FC<{
                   : job.finishedAt
                     ? new Date(job.finishedAt * 1000).toLocaleString()
                     : 'no finish time recorded'} />
+          {/* expectedBytes is discovery's own measured Drive walk, never estimated
+              from item counts -- files vary from empty to gigabytes each, so an
+              average would be fiction. Absent entirely (not a zero) when discovery
+              has never run, same reasoning as the ETA above having no baseline. */}
+          {isMigrate && t && t.expectedBytes > 0 && (
+            <Stat label="Data"
+                  value={bytes(t.bytesMovedTotal)}
+                  hint={`of ${bytes(t.expectedBytes)} discovered total`} />
+          )}
         </Stack>
 
         {/* An indeterminate bar means "working, can't say how far". On a
@@ -96,8 +131,18 @@ export const RunningJobDetail: React.FC<{
         {/* A migration records far more than a percentage -- rates,
             latencies, limiter state, volume -- and all of it is on the
             metrics endpoint. */}
-        {job.kind === 'migrate' && (
-          <Box sx={{ mb: 2 }}><MigrateJobMetrics live={!job.done} /></Box>
+        {isMigrate && (
+          <Box sx={{ mb: 2 }}>
+            {metricsErr ? (
+              <Alert severity="warning" sx={{ mb: 2 }}>Metrics unavailable: {metricsErr}</Alert>
+            ) : !m ? (
+              <CircularProgress size={18} />
+            ) : m.error ? (
+              <Typography variant="body2" color="text.secondary">{m.error}</Typography>
+            ) : (
+              <MigrateMetricsCharts m={m} />
+            )}
+          </Box>
         )}
         {/* A seed measures itself far better than a percentage can: observed
             writes per minute, per-user results, and an ETA from the run

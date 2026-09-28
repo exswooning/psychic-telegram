@@ -3805,12 +3805,17 @@ def _throughput(conn) -> dict:
     # blank, because it is the number people plan a cutover around.
     exp = conn.execute(
         "SELECT COALESCE(SUM(file_count),0) f, COALESCE(SUM(folder_count),0) d, "
-        "       COALESCE(SUM(messages_total),0) m FROM ("
+        "       COALESCE(SUM(messages_total),0) m, COALESCE(SUM(total_bytes),0) b FROM ("
         "  SELECT d.* FROM discovery d JOIN ("
         "    SELECT source_user, MAX(scanned_at) ts FROM discovery "
         "     GROUP BY source_user) x"
         "   ON d.source_user=x.source_user AND d.scanned_at=x.ts)").fetchone()
     expected = (exp["f"] + exp["d"] + exp["m"]) if exp else 0
+    # The tenant's real, measured size -- discovery's own per-user Drive walk, not an
+    # estimate from item counts (files vary from empty to gigabytes each, so an average
+    # would be fiction). 0 with the same meaning as expectedItems==0: nobody has run
+    # discovery, so there is nothing honest to show, not a fabricated total.
+    expected_bytes = exp["b"] if exp else 0
     done = conn.execute(
         "SELECT COUNT(*) c FROM id_mapping "
         " WHERE type IN ('file','folder','message')").fetchone()["c"]
@@ -3842,6 +3847,8 @@ def _throughput(conn) -> dict:
         "itemsPerMin": per_min,
         "expectedItems": expected,
         "remainingItems": remaining,
+        "expectedBytes": expected_bytes,
+        "remainingBytes": max(0, expected_bytes - total_bytes) if expected_bytes else 0,
         "etaSeconds": eta_seconds,
         "etaReason": eta_reason,
     }
