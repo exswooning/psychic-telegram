@@ -3511,6 +3511,18 @@ def status_payload(account_id: int | None = None) -> dict:
 # ----------------------------------------------------------------------
 SPA_TTL = float(os.getenv("SPA_CACHE_TTL", "15"))
 
+# The 15s above was sized against a 200k-row audit_log. The scans grow with
+# the ledger and that number did not: at 1.73M rows (live, account 3) one
+# open tab held webui.py at ~92% of a core, the 2-vCPU box at 0% idle and the
+# migration at ~72%; closing every tab took webui to ~0%, the box to 42% idle
+# and the migration to ~107% within one 15s sample. So a refresh now waits
+# SPA_COST_MULTIPLE times its own last measured cost as well: seven payloads
+# refreshing independently then cost at most ~7/30 of a core however big the
+# ledger gets, and a cheap payload still refreshes every SPA_TTL.
+# ponytail: bounds the cost, does not reduce it -- the real fix is scans that
+# do not grow with audit_log (incremental counts), if staleness ever matters.
+SPA_COST_MULTIPLE = float(os.getenv("SPA_COST_MULTIPLE", "30"))
+
 _spa_cache: dict = {}
 _spa_lock = threading.Lock()
 _spa_busy: set = set()
@@ -3530,12 +3542,14 @@ def _cached_payload(name: str, fn, account_id: int | None):
         entry = _spa_cache.get(key)
 
     if entry is None:
+        t0 = time.monotonic()
         data = fn(account_id)
         with _spa_lock:
-            _spa_cache[key] = {"data": data, "at": time.time()}
+            _spa_cache[key] = {"data": data, "at": time.time(),
+                               "cost": time.monotonic() - t0}
         return data
 
-    if now - entry["at"] > SPA_TTL:
+    if now - entry["at"] > max(SPA_TTL, entry.get("cost", 0.0) * SPA_COST_MULTIPLE):
         with _spa_lock:
             start = key not in _spa_busy
             if start:
@@ -3543,9 +3557,11 @@ def _cached_payload(name: str, fn, account_id: int | None):
 
         def _refresh() -> None:
             try:
+                t0 = time.monotonic()
                 data = fn(account_id)
                 with _spa_lock:
-                    _spa_cache[key] = {"data": data, "at": time.time()}
+                    _spa_cache[key] = {"data": data, "at": time.time(),
+                                       "cost": time.monotonic() - t0}
             except Exception as exc:      # noqa: BLE001
                 # Keep serving the stale entry: a failed refresh is not a
                 # reason to blank a dashboard that was working a moment ago.

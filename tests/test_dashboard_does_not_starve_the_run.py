@@ -25,7 +25,10 @@ import webui
 
 
 @pytest.fixture(autouse=True)
-def _clear():
+def _clear(monkeypatch):
+    # Tests that set SPA_TTL=0 are about concurrency, not cost; 30x a 1us
+    # payload is a window they would otherwise race. The cost test sets it.
+    monkeypatch.setattr(webui, "SPA_COST_MULTIPLE", 0.0)
     webui.invalidate_spa_cache()
     webui._spa_busy.clear()
     yield
@@ -103,6 +106,27 @@ class TestItNeverBlocksAPoll:
         time.sleep(0.2)
         assert webui._cached_payload("x", boom, 66) == {"v": "good"}, (
             "a failed refresh blanked a dashboard that was working")
+
+
+class TestAnExpensiveScanWaitsInProportionToItsCost:
+    """The fixed TTL was sized for a 200k-row ledger; at 1.73M one tab pinned
+    a core. An expensive refresh now waits SPA_COST_MULTIPLE x its own cost."""
+
+    def test_a_slow_refresh_is_not_repeated_at_the_base_ttl(self, monkeypatch):
+        monkeypatch.setattr(webui, "SPA_TTL", 0.0)
+        monkeypatch.setattr(webui, "SPA_COST_MULTIPLE", 100.0)
+        calls = []
+
+        def slow(a):
+            calls.append(1)
+            time.sleep(0.05)       # 0.05s x 100 = a 5s window
+            return len(calls)
+
+        webui._cached_payload("x", slow, 66)
+        for _ in range(10):
+            webui._cached_payload("x", slow, 66)
+        time.sleep(0.2)
+        assert len(calls) == 1, f"a {len(calls)}-scan burst inside a 5s window"
 
 
 class TestAButtonPressIsVisibleImmediately:
