@@ -275,6 +275,13 @@ class TestSideTables:
                               # was taken. A ledger reset does not change the
                               # tenants, and a report already discards any
                               # tally older than the run it judges
+            "rate_limiter_ceiling",  # not per-user at all: one row per TENANT
+                              # SIDE ('source'/'target'), what a run proved
+                              # about Google's own project-wide Drive quota.
+                              # Resetting a user's drive ledger so they get
+                              # re-migrated says nothing about whether the
+                              # project's real rate limit changed, so there
+                              # is no reason for a reset to forget it
         }
         unaccounted = tables - reset - exempt
         assert not unaccounted, (

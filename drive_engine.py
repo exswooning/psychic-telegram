@@ -47,7 +47,7 @@ _PROJECT_LIMITERS: dict = {}
 _PROJECT_LIMITER_LOCK = threading.Lock()
 
 
-def _project_limiter(qps: float, tenant: str = "target"):
+def _project_limiter(qps: float, tenant: str = "target", db=None):
     """One bucket per PROCESS **per tenant**, not per migrator.
 
     Every worker thread runs its own DriveMigrator with its own per-user
@@ -63,6 +63,12 @@ def _project_limiter(qps: float, tenant: str = "target"):
     spent twice over while the other sat partly idle -- exactly the mistake
     _src_write_limiter and _tgt_write_limiter were split apart to fix, one
     level further out and against a far larger quota.
+
+    `db` (the account's own ledger, when given) is where a previous run's
+    discovery survives: see `starting_ceiling` below and
+    `AdaptiveRateLimiter.penalise`'s permanent ceiling tightening. Advisory
+    only -- a read or write that fails here must never stop a migration
+    starting or running.
     """
     with _PROJECT_LIMITER_LOCK:
         if tenant not in _PROJECT_LIMITERS:
@@ -88,10 +94,34 @@ def _project_limiter(qps: float, tenant: str = "target"):
             # Set high enough that AIMD is what binds. Overshoot is bounded
             # by halving on the first rejection; being stuck 5x low is not
             # bounded by anything, and reports nothing.
+            guess = float(os.getenv("DRIVE_PROJECT_QPS_CEILING", "1200"))
+            starting_ceiling = guess
+            # A PREVIOUS run on this exact tenant may already have proven the
+            # real number -- confirmed live, restarting the same migration
+            # five times in one day made it re-crash into the same ~78-280/s
+            # range from scratch every single time, each rediscovery costing
+            # real failed items on the way down. min(), not a straight use:
+            # never START above the configured safety guess, only below it.
+            if db is not None:
+                try:
+                    learned = db.load_rate_ceiling(tenant)
+                    if learned is not None:
+                        starting_ceiling = min(guess, learned)
+                except Exception as exc:      # noqa: BLE001 - advisory only
+                    log.warning("could not read a learned %s ceiling: %s", tenant, exc)
+
+            def _on_change(kind: str, before: float, after: float,
+                          t: str = tenant, d=db) -> None:
+                _log_rate_change(kind, before, after, t)
+                if kind == "backoff" and d is not None:
+                    try:
+                        d.save_rate_ceiling(t, _PROJECT_LIMITERS[t].ceiling)
+                    except Exception as exc:      # noqa: BLE001 - advisory only
+                        log.warning("could not persist the learned %s ceiling: %s", t, exc)
+
             _PROJECT_LIMITERS[tenant] = AdaptiveRateLimiter(
                 qps, floor=max(4.0, qps / 8.0),
-                ceiling=float(os.getenv("DRIVE_PROJECT_QPS_CEILING", "1200")),
-                on_change=lambda k, a, b, t=tenant: _log_rate_change(k, a, b, t))
+                ceiling=starting_ceiling, on_change=_on_change)
         return _PROJECT_LIMITERS[tenant]
 
 
@@ -303,9 +333,9 @@ class DriveMigrator:
         # operations in a single run, all of them rateLimitExceeded that had
         # exhausted their retries.
         self._project_limiter = _project_limiter(settings.drive_project_qps,
-                                                 "target")
+                                                 "target", db=self.db)
         self._src_project_limiter = _project_limiter(
-            settings.drive_project_qps, "source")
+            settings.drive_project_qps, "source", db=self.db)
         # The ceiling that actually bounds a migration -- one bucket PER
         # ACCOUNT, because that is the unit Google enforces it on.
         #

@@ -647,3 +647,119 @@ class TestDebouncesConcurrentRejectionsAsOneEvent:
         after_first = lim.rate
         lim.penalise()
         assert lim.rate == pytest.approx(after_first * 0.7)
+
+
+class TestTheLedgerRemembersWhatARunProved:
+    """MigrationDB.save_rate_ceiling / load_rate_ceiling: the storage half of
+    persisting a discovered ceiling across separate runs on the same tenant."""
+
+    def _db(self, tmp_path):
+        import db as dbmod
+        return dbmod.MigrationDB(str(tmp_path / "m.db"))
+
+    def test_nothing_saved_yet_reads_as_none_not_zero(self, tmp_path):
+        d = self._db(tmp_path)
+        assert d.load_rate_ceiling("target") is None
+        d.close()
+
+    def test_a_saved_ceiling_round_trips(self, tmp_path):
+        d = self._db(tmp_path)
+        d.save_rate_ceiling("target", 285.5)
+        assert d.load_rate_ceiling("target") == pytest.approx(285.5)
+        d.close()
+
+    def test_source_and_target_are_independent(self, tmp_path):
+        d = self._db(tmp_path)
+        d.save_rate_ceiling("source", 1000.0)
+        d.save_rate_ceiling("target", 78.0)
+        assert d.load_rate_ceiling("source") == pytest.approx(1000.0)
+        assert d.load_rate_ceiling("target") == pytest.approx(78.0)
+        d.close()
+
+    def test_saving_again_overwrites_rather_than_adding_a_second_row(self, tmp_path):
+        d = self._db(tmp_path)
+        d.save_rate_ceiling("target", 300.0)
+        d.save_rate_ceiling("target", 78.0)          # a later, lower measurement
+        assert d.load_rate_ceiling("target") == pytest.approx(78.0)
+        n = d.conn.execute("SELECT COUNT(*) c FROM rate_limiter_ceiling").fetchone()["c"]
+        assert n == 1
+        d.close()
+
+
+class TestAFreshRunStartsFromWhatALastOneProved:
+    """_project_limiter(db=...): the wiring half. Without this, restarting the
+    same migration re-guesses 1,200 every time and has to rediscover the same
+    real number the hard way -- confirmed live, five restarts in one day, each
+    one re-crashing into roughly the same ~78-280/s range from scratch."""
+
+    def setup_method(self):
+        import drive_engine
+        drive_engine._PROJECT_LIMITERS.clear()
+
+    teardown_method = setup_method
+
+    def _db(self, tmp_path):
+        import db as dbmod
+        return dbmod.MigrationDB(str(tmp_path / "m.db"))
+
+    def test_a_learned_ceiling_is_used_as_the_starting_point(self, tmp_path):
+        import drive_engine
+        d = self._db(tmp_path)
+        d.save_rate_ceiling("target", 78.0)
+        lim = drive_engine._project_limiter(40, "target", db=d)
+        assert lim.ceiling == pytest.approx(78.0)
+        d.close()
+
+    def test_with_nothing_learned_yet_it_falls_back_to_the_configured_guess(self, tmp_path):
+        import drive_engine
+        d = self._db(tmp_path)
+        lim = drive_engine._project_limiter(40, "target", db=d)
+        assert lim.ceiling >= 1000          # the configured safety guess, not 78
+        d.close()
+
+    def test_a_learned_ceiling_never_starts_ABOVE_the_configured_safety_guess(self, tmp_path, monkeypatch):
+        """min(), not a straight use -- a stale or bogus learned value must not
+        be able to start a run higher than the deliberately-conservative guess."""
+        import drive_engine
+        monkeypatch.setenv("DRIVE_PROJECT_QPS_CEILING", "500")
+        d = self._db(tmp_path)
+        d.save_rate_ceiling("target", 9000.0)
+        lim = drive_engine._project_limiter(40, "target", db=d)
+        assert lim.ceiling == pytest.approx(500.0)
+        d.close()
+
+    def test_no_db_given_behaves_exactly_as_before(self):
+        import drive_engine
+        lim = drive_engine._project_limiter(40, "target")
+        assert lim.ceiling >= 1000
+
+    def test_a_real_backoff_persists_the_new_ceiling_for_the_next_run(self, tmp_path):
+        import drive_engine
+        d = self._db(tmp_path)
+        lim = drive_engine._project_limiter(300, "target", db=d)
+        lim.penalise()
+        assert d.load_rate_ceiling("target") == pytest.approx(lim.ceiling)
+        d.close()
+
+    def test_a_broken_ledger_read_never_stops_a_migration_starting(self, tmp_path):
+        """Advisory only -- a bad read must fall back to the guess, not raise."""
+        import drive_engine
+
+        class Broken:
+            def load_rate_ceiling(self, tenant):
+                raise RuntimeError("disk full")
+        lim = drive_engine._project_limiter(40, "target", db=Broken())
+        assert lim.ceiling >= 1000
+
+    def test_a_broken_ledger_write_never_breaks_a_running_migration(self, tmp_path):
+        import drive_engine
+
+        class Broken:
+            def load_rate_ceiling(self, tenant):
+                return None
+
+            def save_rate_ceiling(self, tenant, ceiling):
+                raise RuntimeError("disk full")
+        lim = drive_engine._project_limiter(300, "target", db=Broken())
+        lim.penalise()          # must not raise
+        assert lim.rate < 300.0

@@ -269,6 +269,20 @@ lower than the one real correction ever justified. `penalise()`'s new `debounce_
 first call inside the window — everything closer than that to the last real change is the
 same crossing arriving late, not a fresh one.
 
+**A discovered ceiling survives the process that found it.** Every one of the fixes above
+still starts a *fresh* process back at the guessed 1,200 — confirmed live, restarting the
+same migration five times in one day made every single one re-crash into roughly the same
+~78–280/s range from scratch, each rediscovery costing real failed items on the way down.
+`drive_engine._project_limiter(qps, tenant, db=...)` now reads the account's own ledger
+(`MigrationDB.load_rate_ceiling`) for a previously-proven ceiling on this exact tenant side
+and starts there instead — `min()` against the configured safety guess, never *above* it, so
+a stale or bogus learned value can't start a run more aggressively than the deliberately
+conservative default would. Every real `penalise()` backoff writes the new ceiling back
+(`save_rate_ceiling`, one row per `tenant` in `rate_limiter_ceiling`, newest wins) so the
+*next* run on this tenant starts warm. Both directions are advisory only — a read or write
+that fails logs a warning and falls back to the old guess-and-discover behavior; it must
+never be able to stop a migration starting or running.
+
 **The production default for how Drive content moves is `server_side`, not `download_upload`**
 — set as `TRANSFER_MODE=server_side` in `systemd/bitport-api.service`, not in `config.py`
 itself (whose own fallback stays `download_upload`, for a bare/local run with no unit).

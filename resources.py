@@ -43,7 +43,7 @@ WORKER_BASE_MB = 40
 CHUNK_BUFFERS_PER_WORKER = 3
 
 
-def mb_per_worker(chunk_bytes: int | None = None) -> int:
+def mb_per_worker(chunk_bytes: int | None = None, transfer_mode: str | None = None) -> int:
     """Peak resident memory one worker needs, in MB.
 
     This was the constant 320, derived when a download drained through the
@@ -61,7 +61,23 @@ def mb_per_worker(chunk_bytes: int | None = None) -> int:
     Still deliberately generous. Under-estimating this is the swap stall the
     module exists to prevent, and that failure (30 minutes of socket
     timeouts) is far worse than running a few workers short.
+
+    CHUNK_BUFFERS_PER_WORKER only ever modelled download_upload's own chunk
+    buffering (drive_engine._download_via draining a chunk while another
+    uploads) -- server_side's _sync_server_side never streams a file's bytes
+    through this process at all, files.copy() is a small JSON request/response,
+    so charging it the same buffer budget as a real byte-mover was sizing every
+    server_side worker for memory it never touches. It still gets the fixed
+    per-thread overhead (WORKER_BASE_MB: the discovery documents, the two API
+    client objects, the TLS session), just none of the chunk-buffer inflation.
     """
+    if transfer_mode is None:
+        # Same reasoning as chunk_bytes below: read the environment directly,
+        # not via Settings(), to avoid re-entering this module before
+        # recommend() exists.
+        transfer_mode = os.getenv("TRANSFER_MODE", "download_upload")
+    if transfer_mode == "server_side":
+        return WORKER_BASE_MB
     if chunk_bytes is None:
         # Read from the environment, NOT via Settings().
         #

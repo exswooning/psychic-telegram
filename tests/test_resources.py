@@ -399,6 +399,35 @@ class TestTheBudgetsTrackTheirOwnInputs:
         assert resources.mb_per_worker(0) >= 64
         assert resources.mb_per_seed_worker(1) >= 64
 
+    def test_server_side_needs_none_of_the_chunk_buffer_budget(self):
+        """files.copy() is a small JSON request/response -- no bytes of the
+        file itself ever pass through this process, so the chunk-buffer
+        inflation download_upload needs is pure waste here."""
+        assert (resources.mb_per_worker(8 * 1024 * 1024, transfer_mode="server_side")
+                == resources.WORKER_BASE_MB)
+
+    def test_server_side_still_gets_the_fixed_per_thread_overhead(self):
+        """The discovery documents, the two API client objects and the TLS
+        session are real regardless of which transfer mode moves the bytes."""
+        assert resources.mb_per_worker(transfer_mode="server_side") == 40
+
+    def test_server_side_is_smaller_than_download_upload(self):
+        """The whole point: more workers fit in the same RAM budget."""
+        assert (resources.mb_per_worker(transfer_mode="server_side")
+                < resources.mb_per_worker(transfer_mode="download_upload"))
+
+    def test_the_chunk_size_is_irrelevant_once_transfer_mode_is_server_side(self):
+        assert (resources.mb_per_worker(8 * 1024 * 1024, transfer_mode="server_side")
+                == resources.mb_per_worker(100 * 1024 * 1024, transfer_mode="server_side"))
+
+    def test_transfer_mode_left_unset_reads_it_from_the_environment(self, monkeypatch):
+        monkeypatch.setenv("TRANSFER_MODE", "server_side")
+        assert resources.mb_per_worker() == resources.WORKER_BASE_MB
+
+    def test_an_unset_environment_still_defaults_to_download_upload(self, monkeypatch):
+        monkeypatch.delenv("TRANSFER_MODE", raising=False)
+        assert resources.mb_per_worker() > resources.WORKER_BASE_MB
+
 
 class TestAutoSizingCannotFailQuietly:
     """`_auto` catches everything and returns a hardcoded fallback, which is

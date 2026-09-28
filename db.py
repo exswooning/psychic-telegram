@@ -251,6 +251,20 @@ CREATE TABLE IF NOT EXISTS label_map (
     label_name      TEXT,
     PRIMARY KEY (source_user, source_label_id)
 );
+
+-- What drive_engine._project_limiter last proved this tenant's real Drive quota
+-- to be (AdaptiveRateLimiter.penalise's own permanent ceiling tightening,
+-- persisted here so it survives the process). Without this, every fresh run
+-- re-guesses the configured ceiling (1,200) and has to rediscover the same real
+-- number the hard way -- one real crash -- even though a previous run on this
+-- exact tenant already proved it. One row per side ('source' | 'target');
+-- newest measurement wins, and nothing here ever raises a ceiling back up on
+-- its own, matching the limiter's own "ratchets down only" rule.
+CREATE TABLE IF NOT EXISTS rate_limiter_ceiling (
+    tenant      TEXT PRIMARY KEY,
+    ceiling     REAL NOT NULL,
+    updated_at  TEXT NOT NULL
+);
 """
 
 
@@ -855,6 +869,25 @@ class MigrationDB:
     def last_repair(self) -> dict | None:
         """The most recent repair, running or finished."""
         return last_repair_from(self.conn)
+
+    def save_rate_ceiling(self, tenant: str, ceiling: float) -> None:
+        """A fresh run's project limiter just proved this tenant's real Drive
+        quota -- kept so the NEXT run on this same tenant starts already knowing
+        it instead of guessing 1,200 and crashing into the real number again."""
+        with self.write() as conn:
+            conn.execute(
+                "INSERT INTO rate_limiter_ceiling(tenant, ceiling, updated_at) "
+                "VALUES(?,?,?) ON CONFLICT(tenant) DO UPDATE "
+                "SET ceiling=excluded.ceiling, updated_at=excluded.updated_at",
+                (tenant, ceiling, utc_now()))
+
+    def load_rate_ceiling(self, tenant: str) -> float | None:
+        """The last proven ceiling for this tenant, or None if nothing has ever
+        been measured (a fresh account, or a ledger from before this existed)."""
+        row = self.conn.execute(
+            "SELECT ceiling FROM rate_limiter_ceiling WHERE tenant=?",
+            (tenant,)).fetchone()
+        return row["ceiling"] if row else None
 
     def forget_label(self, source_user: str, source_label_id: str) -> None:
         """Drop one label mapping so the next sync re-creates it.
