@@ -483,3 +483,16 @@ It had fallen behind by two lines (`drive_write_qps = 10_000`,
 writes at 3/sec and then sat in a real 240s `_verify_modified_times` sleep —
 minutes at ~0% CPU that read as a hang. `pytest -o faulthandler_timeout=45`
 is what found it; reach for that before guessing at a "stuck" test.
+
+**A pass skips a user only on ledger evidence, never on an assumption**
+(`main._services_already_done`). A DONE user with an empty `services_done`
+used to be assumed to have run whatever was asked -- with a warning nobody
+read -- and on account 3 that left 22 users with Drive migrated and zero rows
+of mail, calendar, contacts, tasks or chat, indistinguishable on the Tally
+page from users merely waiting on the DMS. Evidence is `SERVICE_EVIDENCE`
+(SUCCESS rows of each service's item types), shared with `backfill-services`.
+Shared drives now run inside every whole-tenant run (after Drive, before
+mail) and repair re-creates a FAILED, unmapped one. The automatic DMS
+follow-on cannot complete on a headless box: `dms_migrate.py` waits for a
+human to sign in to a browser window the VPS does not have, then exits 1 --
+the import has to be started by hand in the target Admin Console.

@@ -671,6 +671,51 @@ def _renew_until(stop: threading.Event, account_id, source_user: str) -> None:
             log.warning("could not renew lease for %s: %s", source_user, exc)
 
 
+# What proves a service ran for a user: SUCCESS rows of these item types.
+# One definition for the skip check and for `backfill-services`.
+SERVICE_EVIDENCE = {
+    "drive": ("file", "folder"),
+    "gmail": ("message", "label", "draft"),
+    "calendar": ("event", "calendar"),
+    "chat": ("chat_space", "chat_message"),
+    "contacts": ("contact", "contact_group"),
+    "tasks": ("task",),
+}
+
+
+def _services_proven(db, source_email: str) -> set:
+    have = db.summary(source_email) or {}
+    done_types = {k.split(":", 1)[0] for k, v in have.items()
+                  if k.endswith(":SUCCESS") and v["count"] > 0}
+    return {s for s, types in SERVICE_EVIDENCE.items() if done_types & set(types)}
+
+
+def _services_already_done(db, r, services) -> bool:
+    """Skip this user for these services only if the ledger says they ran.
+
+    A DONE user with no per-service record (a ledger older than
+    services_done) used to be ASSUMED to have run whatever was asked, with a
+    warning nobody read. Twice that skipped real work: five users of a
+    Gmail/Calendar/Chat run, and later 22 users of a whole-tenant run whose
+    mail, calendar, contacts, tasks and chat were never attempted -- Drive
+    migrated, everything else zero rows, and the tally reading the same
+    "Short" as users merely waiting on the DMS. Now the ledger's own evidence
+    decides, the same rule backfill-services already used. Erring this way
+    costs a re-walk (items are skipped by mapping), never a skipped user.
+    """
+    if r["status"] != "DONE":
+        return False
+    done = db.services_done(r["source_email"])
+    if not done:
+        done = _services_proven(db, r["source_email"])
+        missing = set(services) - done
+        if missing:
+            log.warning("%s is DONE with no per-service record; the ledger shows "
+                        "no work for %s, so running it", r["source_email"],
+                        ",".join(sorted(missing)))
+    return set(services) <= done
+
+
 def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
               services: set[str], delta: bool, delta_days: int,
               only: list[str] | None = None) -> list[dict]:
@@ -687,25 +732,7 @@ def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
         98.8% shortfall it could not explain. Restarts still need to be cheap,
         so the check is now per-service rather than removed.
         """
-        if r["status"] != "DONE":
-            return False
-        done = db.services_done(r["source_email"])
-        # A ledger written before services_done existed has an empty set; fall
-        # back to the old behaviour rather than re-migrating everything.
-        #
-        # Say so, loudly. This fallback silently skipped all five users of a
-        # Gmail/Calendar/Chat run against a ledger the Drive A/B had left
-        # DONE, and the run reported a clean batch summary having migrated
-        # nothing at all. Skipping on an assumption is defensible; skipping
-        # without saying which assumption is not.
-        if not done:
-            log.warning(
-                "%s is DONE in a ledger with no per-service record — assuming "
-                "%s already ran and skipping. If they did not, run "
-                "`backfill-services` or reset this user to PENDING.",
-                r["source_email"], ",".join(sorted(services)))
-            return True
-        return set(services) <= done
+        return _services_already_done(db, r, services)
 
     pairs = [
         (r["source_email"], r["target_email"])
@@ -1968,12 +1995,6 @@ def cmd_backfill_services(args, settings: Settings, db: MigrationDB,
     backfilled for a user who has SUCCESS rows of the matching item types, so
     a wrong --services cannot mark work done that never happened.
     """
-    evidence = {
-        "drive": ("file", "folder"),
-        "gmail": ("message", "label", "draft"),
-        "calendar": ("event", "calendar"),
-        "chat": ("space", "chat_message"),
-    }
     changed = skipped = 0
     for r in db.all_identities():
         if r["entity_type"] != "user" or r["status"] != "DONE":
@@ -1981,11 +2002,8 @@ def cmd_backfill_services(args, settings: Settings, db: MigrationDB,
         # summary() keys are "<item_type>:<status>", so a bare item type never
         # matches. Only SUCCESS counts as evidence -- a user whose entire Drive
         # phase failed must not be recorded as having completed it.
-        have = db.summary(r["source_email"]) or {}
-        done_types = {k.split(":", 1)[0] for k, v in have.items()
-                      if k.endswith(":SUCCESS") and v["count"] > 0}
-        confirmed = [s for s in args.services
-                     if done_types & set(evidence.get(s, ()))]
+        proven = _services_proven(db, r["source_email"])
+        confirmed = [s for s in args.services if s in proven]
         missing = sorted(set(args.services) - set(confirmed))
         if missing:
             print(f"  {r['source_email']}: no ledger evidence for "

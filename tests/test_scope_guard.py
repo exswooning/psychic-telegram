@@ -1620,8 +1620,9 @@ class TestBlockedIsNotFailed:
 
         import main
 
-        src = inspect.getsource(main.run_batch)
+        src = inspect.getsource(main._services_already_done)
         assert 'r["status"] != "DONE"' in src
+        assert "_services_already_done" in inspect.getsource(main.run_batch)
 
 
 class TestDriveFallsBackBetweenCopyStrategies:

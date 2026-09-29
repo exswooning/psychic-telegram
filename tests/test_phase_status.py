@@ -62,14 +62,11 @@ class TestSkipIsPerService:
     """The behaviour that broke: what run_batch decides to skip."""
 
     def _already_done(self, db, status, services_requested):
+        # The real function, not a copy of it -- a local copy is how the
+        # assume-it-ran fallback stayed pinned while it skipped real users.
+        import main
         row = {"status": status, "source_email": "alice@c.com"}
-
-        done = db.services_done(row["source_email"])
-        if row["status"] != "DONE":
-            return False
-        if not done:
-            return True
-        return set(services_requested) <= done
+        return main._services_already_done(db, row, services_requested)
 
     def test_a_user_who_finished_drive_is_not_skipped_for_gmail(self, ledger):
         """The exact live failure."""
@@ -94,10 +91,23 @@ class TestSkipIsPerService:
         ledger.mark_services_done("alice@c.com", ["drive"])
         assert self._already_done(ledger, "PENDING", {"drive"}) is False
 
-    def test_a_legacy_ledger_keeps_the_old_behaviour(self, ledger):
-        """Databases written before this column existed have an empty set;
-        treating that as "nothing done" would re-migrate whole tenants."""
-        assert self._already_done(ledger, "DONE", {"gmail"}) is True
+    def test_a_legacy_ledger_is_judged_by_evidence_not_assumed(self, ledger):
+        """An empty per-service record used to mean "assume it all ran" -- live,
+        22 users kept Drive and never got mail, calendar, contacts, tasks or
+        chat. With no evidence, a DONE user runs."""
+        assert self._already_done(ledger, "DONE", {"gmail"}) is False
+
+    def test_a_legacy_ledger_skips_what_it_can_prove(self, ledger):
+        """The live shape: Drive rows, nothing else. Drive is skipped (restarts
+        stay cheap), mail and the rest run."""
+        ledger.log_audit("alice@c.com", "f-1", "file", "SUCCESS")
+        assert self._already_done(ledger, "DONE", {"drive"}) is True
+        assert self._already_done(ledger, "DONE", {"gmail"}) is False
+        assert self._already_done(ledger, "DONE", {"calendar", "contacts", "tasks", "chat"}) is False
+
+    def test_failed_rows_are_not_evidence(self, ledger):
+        ledger.log_audit("alice@c.com", "m-1", "message", "FAILED")
+        assert self._already_done(ledger, "DONE", {"gmail"}) is False
 
 
 class TestWiring:
@@ -114,7 +124,8 @@ class TestWiring:
 
         import main
 
-        src = inspect.getsource(main.run_batch)
+        assert "_services_already_done" in inspect.getsource(main.run_batch)
+        src = inspect.getsource(main._services_already_done)
         assert "services_done" in src
         assert "<= done" in src
 
