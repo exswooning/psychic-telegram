@@ -97,12 +97,15 @@ export async function runAction(
    *  every action ran against whichever account the session happened to
    *  resolve to, with nothing on screen naming it. */
   accountId?: number | string,
+  /** Per-run settings the server honours for this action only -- today just
+   *  `workers` for `discover`. */
+  extra?: Record<string, unknown>,
 ): Promise<{ ok: boolean; error: string | null; queued?: boolean; msg?: string }> {
   const res = await fetch('/api/run', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action: name, confirm,
-                           account_id: accountId ?? null }),
+                           account_id: accountId ?? null, ...(extra ?? {}) }),
   })
   return res.json()
 }

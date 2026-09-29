@@ -1693,6 +1693,10 @@ def cmd_preflight(args, settings: Settings, db: MigrationDB, auth: AuthManager):
         sys.exit(1)
 
 
+def _discovery_workers(settings) -> int:
+    return int(os.getenv("DISCOVERY_WORKERS", "0") or 0) or settings.user_workers
+
+
 def cmd_discover(args, settings: Settings, db: MigrationDB, auth: AuthManager):
     rows = db.all_identities()
     users = [r["source_email"] for r in rows]
@@ -1700,7 +1704,11 @@ def cmd_discover(args, settings: Settings, db: MigrationDB, auth: AuthManager):
         users = [u for u in users if u in {x.lower() for x in args.user}]
 
     totals = {"files": 0, "folders": 0, "bytes": 0}
-    with futures.ThreadPoolExecutor(max_workers=settings.user_workers) as pool:
+    # Its own count, not the migration's: discovery is read-bound (the ~200/s
+    # read pool), migration write-bound, and sizing one from the other left
+    # discovery's headroom unused. DISCOVERY_WORKERS is the discover action's
+    # per-run setting; unset, it is the migration's count as before.
+    with futures.ThreadPoolExecutor(max_workers=_discovery_workers(settings)) as pool:
         jobs = {
             pool.submit(scan_user, auth, db, settings, u, args.include_mail): u
             for u in users

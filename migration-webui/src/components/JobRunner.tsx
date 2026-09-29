@@ -34,6 +34,9 @@ const JobRunner: React.FC<{
   const [error, setError] = useState<string | null>(null)
   const [queued, setQueued] = useState<string | null>(null)
   const [blockedBy, setBlockedBy] = useState<string | null>(null)
+  // Discovery's own worker count (blank = the migration's, as before). Only
+  // `discover` takes it: it is read-bound, the migration write-bound.
+  const [workers, setWorkers] = useState('')
   const sinceRef = useRef(0)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -80,7 +83,8 @@ const JobRunner: React.FC<{
     setQueued(null)
     setLines([])
     sinceRef.current = 0
-    const res = await runAction(name, confirm, accountId)
+    const res = await runAction(name, confirm, accountId,
+                                name === 'discover' && workers ? { workers: Number(workers) } : undefined)
     if (!res.ok) {
       setError(res.error || 'could not start')
       return
@@ -95,7 +99,7 @@ const JobRunner: React.FC<{
     setRunning(true)
     pollRef.current = setInterval(poll, 1000)
     poll()
-  }, [name, poll, accountId])
+  }, [name, poll, accountId, workers])
 
   const handleClick = () => {
     if (spec.destructive) {
@@ -126,6 +130,13 @@ const JobRunner: React.FC<{
         >
           {running ? 'Stop' : spec.label}
         </Button>
+        {name === 'discover' && !running && (
+          <TextField size="small" type="number" label="Workers" value={workers}
+                     onChange={(e) => setWorkers(e.target.value)}
+                     placeholder="same as migration"
+                     inputProps={{ min: 1, max: 64, 'data-testid': 'discover-workers' }}
+                     sx={{ width: 150 }} />
+        )}
         {rc !== null && !running && (
           <Chip
             size="small"

@@ -1528,6 +1528,20 @@ def _external_processes() -> list[dict]:
 # job_admission.py job names this process itself admits (see get_job()'s own
 # /api/seed, /api/reset_target, /api/reset_drive_ledger call sites) -- the
 # only ones _reconcile_active_jobs() below has any business releasing.
+def _discover_env(body: dict, env: dict) -> tuple[dict, str | None]:
+    """The discover action's one per-run setting, DISCOVERY_WORKERS, or why not."""
+    raw = body.get("workers")
+    if raw in (None, ""):
+        return env, None
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        n = 0
+    if not 1 <= n <= 64:
+        return env, "workers must be 1-64"
+    return {**env, "DISCOVERY_WORKERS": str(n)}, None
+
+
 def _external_stop_targets(jobs: list[dict], want) -> list[dict]:
     """Which listed external process(es) a Stop is for: the caller's own pid,
     or -- for an older client that sends none -- the one /api/job describes
@@ -6027,6 +6041,15 @@ class Handler(BaseHTTPRequestHandler):
         # a fixed argv and no business inheriting a per-run choice.
         if name in _LAUNCH_KEYS:
             env = _launch_env(env)
+
+        # The one per-run setting an action takes: how many users discovery
+        # scans at once (the perf plan's test 9). Discovery is read-bound and
+        # used to borrow the migration's write-bound worker count.
+        if name == "discover":
+            env, err = _discover_env(body, env)
+            if err:
+                self._json({"ok": False, "error": err}, 400)
+                return
 
         if spec.get("parallel"):
             # A dedicated Job instance so it does not collide with the

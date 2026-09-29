@@ -73,6 +73,11 @@ export const MigrationDetail: React.FC = () => {
   // '' = the server's own default (config.TRANSFER_MODES via TRANSFER_MODE) --
   // most runs never need to touch this.
   const [transferMode, setTransferMode] = useState<TransferMode | ''>('')
+  // Testing only (the perf plan): blank = the job sizes itself / every user.
+  const [fullUsers, setFullUsers] = useState('')
+  const [tuneUserWorkers, setTuneUserWorkers] = useState('')
+  const [tuneFileWorkers, setTuneFileWorkers] = useState('')
+  const [tuneCacheCap, setTuneCacheCap] = useState('')
   const [fullBusy, setFullBusy] = useState(false)
   // Quick migrate: a small slice of each user's data, small enough to check one to
   // one. See the dialog.
@@ -777,6 +782,31 @@ export const MigrationDetail: React.FC = () => {
                   } />
               </RadioGroup>
             </Box>
+            <Box sx={{ mt: 2 }} data-testid="run-full-tuning">
+              <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 0.5 }}>
+                For measured runs (leave blank normally)
+              </Typography>
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+                Each blank means the run sizes itself, exactly as without these.
+              </Typography>
+              <Stack spacing={1.5}>
+                <TextField size="small" fullWidth label="Only these users" value={fullUsers}
+                           onChange={(e) => setFullUsers(e.target.value)}
+                           placeholder="blank = every user; comma-separated source addresses"
+                           inputProps={{ 'data-testid': 'run-full-users' }} />
+                <Stack direction="row" spacing={1.5}>
+                  <TextField size="small" type="number" label="User workers" value={tuneUserWorkers}
+                             onChange={(e) => setTuneUserWorkers(e.target.value)}
+                             inputProps={{ min: 1, max: 64, 'data-testid': 'run-full-user-workers' }} />
+                  <TextField size="small" type="number" label="File workers per user" value={tuneFileWorkers}
+                             onChange={(e) => setTuneFileWorkers(e.target.value)}
+                             inputProps={{ min: 1, max: 16, 'data-testid': 'run-full-file-workers' }} />
+                  <TextField size="small" type="number" label="Mapping cache users (0 = no cap)"
+                             value={tuneCacheCap} onChange={(e) => setTuneCacheCap(e.target.value)}
+                             inputProps={{ min: 0, max: 100000, 'data-testid': 'run-full-cache-cap' }} />
+                </Stack>
+              </Stack>
+            </Box>
           </>
         }
         onCancel={() => { setAskFull(false); setFullError(null) }}
@@ -787,10 +817,15 @@ export const MigrationDetail: React.FC = () => {
             // ordering and the rewriting (see _mail_plan in api_server.py). Sending
             // the services here as well is what let "DMS" and "engine" drift apart.
             // dmsAfter goes only when it was switched off; the server's default is on.
-            const r = await startMigration(reason, ['all'], [], false,
+            const num = (v: string) => (v.trim() === '' ? undefined : Number(v))
+            const users = fullUsers.split(',').map((u) => u.trim()).filter(Boolean)
+            const r = await startMigration(reason, ['all'], users, false,
                                            Number(accountId), mailBy, undefined,
                                            dmsAuto ? undefined : false,
-                                           transferMode || undefined)
+                                           transferMode || undefined,
+                                           { userWorkers: num(tuneUserWorkers),
+                                             driveFileWorkers: num(tuneFileWorkers),
+                                             mappingCacheUserCap: num(tuneCacheCap) })
             if (!r.ok) throw new Error(r.detail || 'could not start')
             setAskFull(false)
             setStarted(r.detail || 'migration started')

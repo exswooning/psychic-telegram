@@ -350,6 +350,23 @@ class StartMigration(WriteAction):
     # benchmark-only -- briefly makes the source file public) is deliberately not
     # offered here at all.
     transfer_mode: Literal["download_upload", "server_side"] | None = None
+    # Tuning for measured runs (the perf plan): each overrides the job's own
+    # sizing for this launch only, as an env var, like transfer_mode. None =
+    # the job sizes itself. USER_WORKERS is also main.run_batch's explicit pin,
+    # so a value here is never re-sized away between passes.
+    user_workers: int | None = Field(default=None, ge=1, le=64)
+    drive_file_workers: int | None = Field(default=None, ge=1, le=16)
+    # 0 = no cap (every user's mappings stay cached), the "unlimited" arm.
+    mapping_cache_user_cap: int | None = Field(default=None, ge=0, le=100_000)
+
+
+def _tuning_env(body: StartMigration, env: dict | None) -> dict | None:
+    """StartMigration's tuning fields as the env vars the job reads."""
+    extra = {name: str(val) for name, val in (
+        ("USER_WORKERS", body.user_workers),
+        ("DRIVE_FILE_WORKERS", body.drive_file_workers),
+        ("MAPPING_CACHE_USER_CAP", body.mapping_cache_user_cap)) if val is not None}
+    return {**(env or os.environ), **extra} if extra else env
 
 
 class TrimFillerRequest(WriteAction):
@@ -1680,6 +1697,7 @@ async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
         ordered = True      # Drive first, so links in the sampled mail can resolve
     if body.transfer_mode:
         env = {**(env or os.environ), "TRANSFER_MODE": body.transfer_mode}
+    env = _tuning_env(body, env)
     argv = [PY, "main.py"] + _account_argv(account_id)
     if body.dry_run:
         argv.append("--dry-run")
@@ -2416,11 +2434,11 @@ async def benchmark_start(body: StartBenchmark, op: Operator = Depends(operator)
         extra = (" -- that is the SOURCE domain" if typed and typed == source else "")
         raise HTTPException(400, f"{typed!r} does not match the target domain "
                                  f"{target!r}{extra}")
-    if not body.skip_wipe and body.drive_file_workers > 4:
-        # Untested territory: >4 cannot help (the account is already at
-        # Google's 3 writes/sec ceiling at 4) and only adds 429 risk.
-        raise HTTPException(400, "drive_file_workers > 4 buys nothing above "
-                                 "the 3 writes/sec/account ceiling; refusing")
+    # No ceiling of 4 here any more. Its reason -- "the account is already at
+    # Google's 3 writes/sec ceiling at 4" -- assumed ~1.33 s per file; the
+    # measured figure is 2.47 s (resources.MIGRATE_FILE_SECONDS), which puts
+    # the saturation point near 7. Measuring above it is the point of the
+    # benchmark; StartBenchmark's own le=16 still bounds it.
 
     def _launch() -> tuple[bool, str]:
         argv = [PY, "benchmark_run.py", "--label", body.label,

@@ -17,6 +17,9 @@ vi.mock('@/api/controlPlane', () => ({
   fetchTenantInventory: (...a: unknown[]) => tenantInventory(...a),
   fetchAllDomains: () => allDomains(),
   linkDomains: () => Promise.resolve({ ok: true, detail: '' }),
+  fetchDomainGuardStatus: () => Promise.resolve({ protected: true }),
+  revokeDomainGuard: () => Promise.resolve({ ok: true }),
+  restoreDomainGuard: () => Promise.resolve({ ok: true }),
 }))
 const removeTenantSetup = vi.fn()
 vi.mock('@/api/client', () => ({
@@ -339,5 +342,32 @@ describe('choosing the active source and target from all domains', () => {
     // the shared picker's selects appear
     expect(await screen.findByTestId('link-source')).toBeInTheDocument()
     expect(screen.getByTestId('link-target')).toBeInTheDocument()
+  })
+})
+
+
+describe('wiping another account\'s tenant', () => {
+  it('wipes the card\'s own account, not the signed-in one', async () => {
+    render(<MemoryRouter><Identities /></MemoryRouter>)
+    fireEvent.click(await screen.findByTestId('config-open-66-target'))
+    fireEvent.click(await screen.findByTestId('wipe-config-66-target'))
+    fireEvent.change(await screen.findByTestId('confirm-domain'),
+                     { target: { value: 'target.rohit.com.np' } })
+    fireEvent.click(screen.getByTestId('confirm-act'))
+    await waitFor(() => expect(removeTenantSetup)
+      .toHaveBeenCalledWith('target', 'target.rohit.com.np', '', 'wipe', 66))
+  })
+
+  it('offers the sandbox switch on the card', async () => {
+    render(<MemoryRouter><Identities /></MemoryRouter>)
+    fireEvent.click(await screen.findByTestId('config-open-66-target'))
+    expect(await screen.findByTestId('sandbox-toggle')).toBeInTheDocument()
+  })
+
+  it('is not offered without a key to act with', async () => {
+    render(<MemoryRouter><Identities /></MemoryRouter>)
+    fireEvent.click(await screen.findByTestId('config-open-68-target'))
+    await screen.findByTestId('delete-config-68-target')
+    expect(screen.queryByTestId('wipe-config-68-target')).toBeNull()
   })
 })

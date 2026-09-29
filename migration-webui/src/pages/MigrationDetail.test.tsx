@@ -403,6 +403,39 @@ describe('MigrationDetail: how Drive content moves', () => {
   })
 })
 
+describe('MigrationDetail: settings for measured runs', () => {
+  beforeEach(() => { vi.clearAllMocks(); startMigration.mockResolvedValue({ ok: true, actionId: 1, detail: 'started' }) })
+
+  const open = async () => {
+    show(detail())
+    fireEvent.click(await screen.findByTestId('run-full'))
+    await screen.findByTestId('run-full-tuning')
+  }
+  const confirm = async () => {
+    fireEvent.change(screen.getByLabelText('Reason Code'), { target: { value: 'perf test 1' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+    await waitFor(() => expect(startMigration).toHaveBeenCalled())
+  }
+
+  it('left blank, every user and nothing overridden', async () => {
+    await open(); await confirm()
+    const call = startMigration.mock.calls[0]
+    expect(call[2]).toEqual([])
+    expect(call[9]).toEqual({ userWorkers: undefined, driveFileWorkers: undefined, mappingCacheUserCap: undefined })
+  })
+
+  it('sends the users and each number that was filled in', async () => {
+    await open()
+    fireEvent.change(screen.getByTestId('run-full-users'), { target: { value: 'a@s.test, b@s.test' } })
+    fireEvent.change(screen.getByTestId('run-full-file-workers'), { target: { value: '12' } })
+    fireEvent.change(screen.getByTestId('run-full-cache-cap'), { target: { value: '0' } })
+    await confirm()
+    const call = startMigration.mock.calls[0]
+    expect(call[2]).toEqual(['a@s.test', 'b@s.test'])
+    expect(call[9]).toEqual({ userWorkers: undefined, driveFileWorkers: 12, mappingCacheUserCap: 0 })
+  })
+})
+
 describe('MigrationDetail: what a split run says about itself', () => {
   beforeEach(() => { vi.clearAllMocks() })
 

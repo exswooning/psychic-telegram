@@ -276,3 +276,61 @@ class TestReadingTheVerification:
     def test_another_accounts_verification_is_not_yours(self, cp, saved):
         me = self._me(cp)
         assert cp.get("/api/v2/quick/latest", params={"account_id": me + 500}).status_code == 403
+
+
+class TestTuningForMeasuredRuns:
+    """The perf plan's knobs, per launch, as env vars -- like transfer_mode."""
+
+    def test_nothing_named_nothing_added(self, cp, monkeypatch):
+        r, seen = _start(cp, monkeypatch, services=["drive"])
+        env = seen["env"] or {}
+        for k in ("USER_WORKERS", "DRIVE_FILE_WORKERS", "MAPPING_CACHE_USER_CAP"):
+            assert k not in env
+
+    def test_each_reaches_the_child(self, cp, monkeypatch):
+        r, seen = _start(cp, monkeypatch, services=["drive"], user_workers=16,
+                         drive_file_workers=12, mapping_cache_user_cap=0)
+        assert r.status_code == 200 and r.json()["ok"] is True, r.text
+        assert seen["env"]["USER_WORKERS"] == "16"
+        assert seen["env"]["DRIVE_FILE_WORKERS"] == "12"
+        assert seen["env"]["MAPPING_CACHE_USER_CAP"] == "0"      # 0 = no cap
+
+    @pytest.mark.parametrize("field,value", [("user_workers", 0), ("user_workers", 65),
+                                             ("drive_file_workers", 17), ("mapping_cache_user_cap", -1)])
+    def test_out_of_range_is_refused(self, cp, monkeypatch, field, value):
+        r, seen = _start(cp, monkeypatch, services=["drive"], **{field: value})
+        assert r.status_code == 422
+
+
+class TestNoMappingCacheCap:
+    def test_zero_means_every_user_stays_cached(self, tmp_path, monkeypatch):
+        import db as dbmod
+        monkeypatch.setattr(dbmod, "MAPPING_CACHE_USER_CAP", 0)
+        d = dbmod.MigrationDB(str(tmp_path / "m.db"))
+        for i in range(30):
+            d.preload_mappings(f"u{i}@a.com")
+        assert len(d._mapping_cache) == 30
+        d.close()
+
+
+class TestTheBenchmarkTakesMoreThanFourFileWorkers:
+    """It refused drive_file_workers > 4 on a wipe run: "buys nothing above the
+    3 writes/sec ceiling" -- a claim built on ~1.33 s per file; measured, 2.47 s."""
+
+    def test_seven_is_launched_not_refused(self, cp, monkeypatch, tmp_path):
+        import types
+        import config
+        r = cp.post("/api/v2/auth/signup", json={"email": "a@example.com", "password": "hunter22222", "name": "Tester"})
+        assert r.status_code == 200, r.text
+        real = config.Settings
+        monkeypatch.setattr(config, "Settings", lambda account_id=None: types.SimpleNamespace(
+            target_domain="b.test", source_domain="a.test") if account_id is not None else real())
+        monkeypatch.setattr(A, "HERE", str(tmp_path))
+        launched = []
+        monkeypatch.setattr(A.subprocess, "Popen",
+                            lambda argv, **k: launched.append((argv, k.get("env"))) or types.SimpleNamespace(pid=9))
+        r = cp.post("/api/v2/benchmark/start", json={"reason": "perf plan test 1", "label": "T1",
+                                                     "confirm_domain": "b.test", "drive_file_workers": 7})
+        assert r.status_code == 200 and "buys nothing" not in r.text, r.text
+        bench = [env for argv, env in launched if "benchmark_run.py" in " ".join(map(str, argv))]
+        assert bench and bench[0]["DRIVE_FILE_WORKERS"] == "7"

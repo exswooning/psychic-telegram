@@ -9,6 +9,7 @@ import {
   Refresh as RefreshIcon, People as IdentitiesIcon,
   Language as DomainIcon, ExpandMore as ExpandIcon,
   DeleteOutline as DeleteIcon, SwapHoriz as SwapIcon,
+  DeleteSweep as WipeIcon,
 } from '@mui/icons-material'
 import {
   fetchActions, fetchIdentities, saveIdentityPair, IdentityRow, ActionSpec,
@@ -21,6 +22,8 @@ import {
 } from '@/api/controlPlane'
 import JobRunner from '@/components/JobRunner'
 import LinkDomainsDialog from '@/components/LinkDomainsDialog'
+import { TenantActionDialog } from '@/components/TenantActionDialog'
+import { DomainSandboxToggle } from '@/components/DomainSandboxToggle'
 
 /**
  * Operator/superadmin-only: what init-db has actually loaded
@@ -245,6 +248,7 @@ const DomainCard: React.FC<{ d: VerifiedDomain }> = ({ d }) => {
 const ConfigDomainCard: React.FC<{ d: ConfiguredDomain }> = ({ d }) => {
   const [open, setOpen] = useState(false)
   const [delOpen, setDelOpen] = useState(false)
+  const [wipeOpen, setWipeOpen] = useState(false)
   // A superseded domain's live stats can't be read: the inventory endpoint
   // reads the slot's ACTIVE domain, which is the one that replaced this. So
   // its card explains what happened instead of fetching a stranger's numbers.
@@ -299,14 +303,35 @@ const ConfigDomainCard: React.FC<{ d: ConfiguredDomain }> = ({ d }) => {
         )}
         {!d.superseded && (
           <Box sx={{ px: 2, pb: 2 }}>
-            <Button size="small" color="error" startIcon={<DeleteIcon />}
-                    data-testid={`delete-config-${d.accountId}-${d.side}`}
-                    onClick={() => setDelOpen(true)}>
-              Delete this setup
-            </Button>
+            {/* This list spans accounts, and the Jobs page's Wipe acts only on
+                the signed-in account's own tenants -- so this is the one place
+                a superadmin can wipe another account's. Same switch and same
+                typed-domain dialog as there. */}
+            <DomainSandboxToggle domain={d.domain} />
+            <Stack direction="row" spacing={1}>
+              {d.hasKey && (
+                <Button size="small" color="warning" startIcon={<WipeIcon />}
+                        data-testid={`wipe-config-${d.accountId}-${d.side}`}
+                        onClick={() => setWipeOpen(true)}>
+                  Wipe data
+                </Button>
+              )}
+              <Button size="small" color="error" startIcon={<DeleteIcon />}
+                      data-testid={`delete-config-${d.accountId}-${d.side}`}
+                      onClick={() => setDelOpen(true)}>
+                Delete this setup
+              </Button>
+            </Stack>
           </Box>
         )}
       </Collapse>
+      <TenantActionDialog
+        target={wipeOpen ? { domain: d.domain, mode: 'wipe' } : null}
+        onCancel={() => setWipeOpen(false)}
+        onConfirm={async (password) => {
+          const r = await removeTenantSetup(d.side, d.domain, password, 'wipe', d.accountId)
+          if (!r.ok) throw new Error(r.error || 'could not wipe the tenant')
+        }} />
       <DeleteSetupDialog open={delOpen} onClose={() => setDelOpen(false)}
                          side={d.side} domain={d.domain} accountId={d.accountId} />
     </Card>

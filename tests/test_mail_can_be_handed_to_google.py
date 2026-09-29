@@ -84,7 +84,7 @@ class TestChoosingDmsExcludesMailFromTheRun:
     def test_the_dialog_leaves_the_service_list_to_the_server(self):
         """It used to build the list itself, which is how the modes could drift."""
         src = _detail()
-        assert "startMigration(reason, ['all'], [], false," in src
+        assert "startMigration(reason, ['all'], users, false," in src
         assert "const services = mailBy" not in src
 
 

@@ -284,10 +284,18 @@ export type MailMode = 'engine' | 'dms' | 'split'
  *  external-sharing settings actually allowing it. */
 export type TransferMode = 'download_upload' | 'server_side'
 
+/** Per-launch overrides for measured runs; each omitted = the job sizes itself. */
+export interface MigrationTuning {
+  userWorkers?: number
+  driveFileWorkers?: number
+  /** 0 = no cap. */
+  mappingCacheUserCap?: number
+}
+
 export const startMigration = (
   reason: string, services: string[], users: string[], dryRun = false,
   accountId?: number, mailMode?: MailMode, sample?: number, dmsAfter?: boolean,
-  transferMode?: TransferMode) =>
+  transferMode?: TransferMode, tuning?: MigrationTuning) =>
   cpFetch<ActionResult>('/api/v2/migrate/start', {
     method: 'POST',
     // accountId is the migration on screen. Without it the server falls back
@@ -301,7 +309,11 @@ export const startMigration = (
                            ...(sample ? { sample } : {}),
                            // off only when asked; the server starts the DMS on its own otherwise
                            ...(dmsAfter === false ? { dms_after: false } : {}),
-                           ...(transferMode ? { transfer_mode: transferMode } : {}) }),
+                           ...(transferMode ? { transfer_mode: transferMode } : {}),
+                           ...(tuning?.userWorkers !== undefined ? { user_workers: tuning.userWorkers } : {}),
+                           ...(tuning?.driveFileWorkers !== undefined ? { drive_file_workers: tuning.driveFileWorkers } : {}),
+                           ...(tuning?.mappingCacheUserCap !== undefined
+                             ? { mapping_cache_user_cap: tuning.mappingCacheUserCap } : {}) }),
   })
 
 // force is SIGKILL, for a run that took the interrupt and is still going.

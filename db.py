@@ -576,7 +576,8 @@ class MigrationDB:
         answering wrong, so this can never turn a real mapping into a false
         "not migrated".
         """
-        while len(self._mapping_cache) > MAPPING_CACHE_USER_CAP:
+        # 0 = no cap: the "unlimited" arm of the perf plan's cache test.
+        while MAPPING_CACHE_USER_CAP > 0 and len(self._mapping_cache) > MAPPING_CACHE_USER_CAP:
             evicted, _ = self._mapping_cache.popitem(last=False)
             self._mapping_cached_users.discard(evicted)
 
