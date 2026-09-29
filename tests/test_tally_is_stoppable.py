@@ -15,6 +15,15 @@ def test_a_running_tally_is_listed_so_it_can_be_stopped(monkeypatch):
     assert [(j["pid"], j["name"]) for j in found] == [(4242, "user-tally")]
 
 
+def test_a_dms_job_that_outlived_a_restart_is_listed(monkeypatch):
+    """It survived a deploy, still waiting on its approval, and the Jobs page
+    had no card for it and so no Stop."""
+    ps = "  5151   2900 /root/migration/.venv/bin/python dms_migrate.py --apply --watch 720\n"
+    monkeypatch.setattr(webui.subprocess, "run",
+                        lambda *a, **k: types.SimpleNamespace(stdout=ps))
+    assert [(j["pid"], j["name"]) for j in webui._external_processes()] == [(5151, "dms")]
+
+
 def test_a_stop_reaches_only_the_card_s_own_process():
     """/api/stop's external branch signalled EVERY listed process -- one
     account's tally Stop would also have stopped another account's migration."""

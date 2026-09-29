@@ -1420,7 +1420,11 @@ _EXT_SCRIPTS = {"seed_sandbox.py": "seed", "reset_target.py": "reset target",
                 # counts every item on both tenants (~6 h for 300 users) and
                 # holds the account's only job slot the whole time, and the
                 # Stop endpoint refuses any pid this function does not list.
-                "tally.py": "user-tally"}
+                "tally.py": "user-tally",
+                # A DMS job waits hours for its approval and days for the
+                # import, and outlives a webui restart -- after which nothing
+                # listed it, so it could be neither seen nor stopped.
+                "dms_migrate.py": "dms"}
 # Last-seen output tail per external pid, for the suffix-diff that turns the
 # unbounded migration.log into the same "just the new lines" contract the
 # webui-launched Job streams.
