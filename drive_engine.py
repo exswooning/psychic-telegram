@@ -376,6 +376,10 @@ class DriveMigrator:
         self._stats_lock = threading.Lock()
         self._pending_shortcuts: list[tuple[dict, str]] = []
         self._staging_drive_id: str | None = None
+        # Copies left in the staging drive by an earlier failed move, indexed
+        # once when the drive is first resolved (see _index_staged).
+        self._staged: dict[tuple, list[dict]] = {}
+        self._staging_lock = threading.Lock()
         # Set up properly by _open_file_pool() at the start of run(). Defined
         # here too so a caller that drives _sync_files() directly -- several
         # tests do -- gets the serial path rather than an AttributeError.
@@ -671,7 +675,20 @@ class DriveMigrator:
 
     def _ensure_staging_drive(self) -> None:
         """Find or create the target-org staging drive, with the source user
-        as an organizer so it can copy into it."""
+        as an organizer so it can copy into it.
+
+        Once per migrator. _sync_with_fallback calls this before EVERY file's
+        server-side attempt, and it had no early return: account 3's log says
+        "reusing staging drive" 469,122 times -- a drives.list plus an
+        organizer re-grant per file, ~940k needless calls and ~1 s of every
+        file's ~2.9 s.
+        """
+        with self._staging_lock:
+            if self._staging_drive_id:
+                return
+            self._ensure_staging_drive_locked()
+
+    def _ensure_staging_drive_locked(self) -> None:
         name = self._staging_drive_name()
 
         existing = self._retry(lambda: self.tgt.drives().list(
@@ -683,6 +700,7 @@ class DriveMigrator:
             self._staging_drive_id = match["id"]
             log.info("[%s] reusing staging drive %s", self.source_user,
                     self._staging_drive_id)
+            self._index_staged()
         else:
             created = self._retry(lambda: self.tgt.drives().create(
                 requestId=uuid.uuid4().hex, body={"name": name}, fields="id",
@@ -1264,6 +1282,50 @@ class DriveMigrator:
                           detail[:4000])
 
     # -- server-side copy path -------------------------------------------------
+    @staticmethod
+    def _staged_key(f: dict) -> tuple:
+        # modifiedTime to the second: the copy pinned it to the source's own,
+        # and the API may or may not echo milliseconds.
+        return (f.get("name"), f.get("mimeType"), (f.get("modifiedTime") or "")[:19])
+
+    def _index_staged(self) -> None:
+        """What an earlier failed move left in the (reused) staging drive.
+
+        A retry used to copy the file again, leaving the stranded copy as an
+        orphan: account 3 has 128 of them in 64 staging drives. One listing
+        per user, not per file -- the drive is normally empty.
+        """
+        token = None
+        try:
+            while True:
+                resp = self._retry(lambda: self.tgt.files().list(
+                    corpora="drive", driveId=self._staging_drive_id,
+                    includeItemsFromAllDrives=True, supportsAllDrives=True,
+                    q="trashed = false", pageSize=1000, pageToken=token,
+                    fields="nextPageToken,files(id,name,mimeType,modifiedTime,md5Checksum)",
+                ).execute(), write=False)
+                for f in resp.get("files", []):
+                    self._staged.setdefault(self._staged_key(f), []).append(f)
+                token = resp.get("nextPageToken")
+                if not token:
+                    return
+        except (PermanentAPIError, RuntimeError) as exc:
+            log.warning("[%s] could not list the staging drive; stranded copies "
+                        "will not be adopted this run: %s", self.source_user, exc)
+
+    def _take_staged(self, item: dict) -> dict | None:
+        """A stranded staged copy of this item, claimed so no other worker
+        takes it -- or None, and the caller copies as before."""
+        with self._staging_lock:
+            candidates = self._staged.get(self._staged_key(item)) or []
+            for i, f in enumerate(candidates):
+                if item.get("md5Checksum") and f.get("md5Checksum") != item["md5Checksum"]:
+                    continue
+                log.info("[%s] adopting stranded staged copy of %s instead of copying "
+                         "again", self.source_user, item.get("name"))
+                return candidates.pop(i)
+        return None
+
     def _sync_server_side(self, item: dict, tgt_parent: str) -> None:
         """
         Two hops, no bytes through this host:
@@ -1317,7 +1379,7 @@ class DriveMigrator:
                 return
 
         try:
-            copied = self._retry(lambda: self.src.files().copy(
+            copied = self._take_staged(item) or self._retry(lambda: self.src.files().copy(
                 fileId=item["id"], body=body, supportsAllDrives=True,
                 fields="id,md5Checksum",
             ).execute(), label="drive.files.copy", tenant="source")

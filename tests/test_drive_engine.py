@@ -1936,3 +1936,38 @@ def test_a_refusal_in_a_batch_is_still_a_failure(migrator, auth, db, settings, m
     migrator.run()
     failed = db.conn.execute("SELECT item_id FROM audit_log WHERE item_type='acl' AND status LIKE 'FAILED%'").fetchall()
     assert len(failed) == 1 and migrator.stats["acl_failed"] == 1
+
+
+def test_the_staging_drive_is_looked_up_once_not_per_file(auth, db, settings, identity, quota):
+    """_sync_with_fallback calls _ensure_staging_drive before every file's
+    server-side attempt; with no early return, account 3's log says "reusing
+    staging drive" 469,122 times -- a list plus an organizer re-grant per file."""
+    import drive_engine
+
+    _server_side(settings)
+    tgt = auth.target_drive(TGT_USER)
+    m = drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota)
+    for _ in range(5):
+        m._ensure_staging_drive()
+    assert tgt.call_count("drives.list") == 1
+
+
+def test_a_stranded_staged_copy_is_adopted_not_copied_again(auth, db, settings, identity, quota):
+    """A failed move left the copy in the staging drive; the retry copied the
+    file again and the first copy became an orphan (128 of them on account 3)."""
+    import drive_engine
+
+    _server_side(settings)
+    src = auth.source_drive(SRC_USER)
+    fid = src.add_binary("report.pdf")
+    tgt = auth.target_drive(TGT_USER)
+    m = drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota)
+    m._ensure_staging_drive()
+    stranded = tgt.add_binary("report.pdf", parent=m._staging_drive_id)   # same bytes, same mtime
+    m._index_staged()
+
+    m._sync_server_side(dict(src.store[fid]), tgt.root_id)
+
+    assert src.call_count("files.copy") == 0
+    assert db.get_target_id(SRC_USER, fid, "file") == stranded
+    assert m._staging_drive_id not in tgt.store[stranded]["parents"]      # moved out
