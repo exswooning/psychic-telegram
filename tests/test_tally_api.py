@@ -68,7 +68,7 @@ class TestTheView:
         by = {u["user"]: u for u in v["users"]}
         assert by["ann@a.com"]["verdict"] == "COMPLETE"
         assert by["bob@a.com"]["verdict"] == "NOT_TALLIED" and by["bob@a.com"]["countParity"] is None
-        assert v["totals"] == {"COMPLETE": 1, "SHORT": 0, "UNKNOWN": 0, "NOT_TALLIED": 1}
+        assert v["totals"] == {"COMPLETE": 1, "SHORT": 0, "OWED_TO_DMS": 0, "UNKNOWN": 0, "NOT_TALLIED": 1}
 
     def test_below_the_bar_is_short_not_complete(self, cp):
         aid = _signup(cp)
@@ -184,3 +184,31 @@ class TestNeverRaises:
             def conn(self):
                 raise RuntimeError("boom")
         assert T.tally_user_and_save(object(), _DB(), object(), "ann@a.com", "ann@b.com") is None
+
+
+class TestMailOwedToTheDmsIsNotShort:
+    """278 users waiting on the DMS and 22 whose mail never ran all read "Short",
+    so the 22 hid in the 300."""
+
+    def _mail(self, ledger, user, target, deferred):
+        ledger.save_user_tally(f"{user}@a.com", f"{user}@b.com", target / 100, {"services": {
+            "drive_files": {"source": 10, "target": 10, "expected": 10, "parity": 1.0},
+            "mail": {"source": 100, "target": target, "expected": 100, "parity": target / 100}}})
+        for i in range(deferred):
+            ledger.log_audit(f"{user}@a.com", f"m{i}", "message", "SKIPPED_NO_DRIVE_LINK")
+
+    def test_only_owed_mail_missing_is_owed_to_dms(self, cp):
+        aid = _signup(cp)
+        _users(cp.ledger, "ann", "bob")
+        self._mail(cp.ledger, "ann", 20, deferred=80)     # every missing message is owed
+        self._mail(cp.ledger, "bob", 20, deferred=0)      # the 22-user shape: mail never ran
+        v = cp.get("/api/v2/tally", params={"account_id": aid}).json()
+        by = {u["user"]: u["verdict"] for u in v["users"]}
+        assert by == {"ann@a.com": "OWED_TO_DMS", "bob@a.com": "SHORT"}
+        assert v["totals"]["OWED_TO_DMS"] == 1 and v["totals"]["SHORT"] == 1
+
+    def test_more_missing_than_owed_is_still_short(self, cp):
+        aid = _signup(cp)
+        _users(cp.ledger, "ann")
+        self._mail(cp.ledger, "ann", 20, deferred=50)     # 30 missing beyond what the DMS owes
+        assert cp.get("/api/v2/tally", params={"account_id": aid}).json()["users"][0]["verdict"] == "SHORT"

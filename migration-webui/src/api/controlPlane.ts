@@ -1548,7 +1548,7 @@ export const runOneToOne = (reason: string, opts: { accountId?: number; users?: 
 /** An exhaustive per-user count on both tenants (tally.py), not a sample -- distinct from
  *  one-to-one above. COMPLETE/SHORT read off count_parity against the same bar
  *  benchmarks.py's own count_parity check uses; UNKNOWN is a tally that measured nothing. */
-export type TallyVerdict = 'COMPLETE' | 'SHORT' | 'UNKNOWN' | 'NOT_TALLIED'
+export type TallyVerdict = 'COMPLETE' | 'SHORT' | 'OWED_TO_DMS' | 'UNKNOWN' | 'NOT_TALLIED'
 export interface TallyServiceCount {
   source: number
   target: number

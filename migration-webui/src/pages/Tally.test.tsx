@@ -56,6 +56,19 @@ describe('the verdicts', () => {
     expect(order).toEqual(['row-bob@a.com', 'row-cy@a.com', 'row-dee@a.com', 'row-ann@a.com'])
   })
 
+  it('shows mail owed to the DMS as its own verdict, not as red Short', async () => {
+    // 278 users waiting on the DMS and 22 whose mail never ran all read "Short".
+    cp.view.mockResolvedValue(view({ users: [
+      { user: 'eve@a.com', target: 'eve@b.com', status: 'DONE', verdict: 'OWED_TO_DMS', countParity: 0.2,
+        recordedAt: '2026-09-27T10:00:00Z', services: { mail: svc({ target: 20, expected: 100, parity: 0.2 }) },
+        worst: [] },
+    ] }))
+    show()
+    const chip = await screen.findByTestId('verdict-eve@a.com')
+    expect(chip).toHaveTextContent('Owed to DMS')
+    expect(chip.className).toMatch(/colorInfo/)
+  })
+
   it('shows unknown in amber, not green, and complete in green', async () => {
     expect(view().users[2].verdict).toBe('UNKNOWN')
     show()

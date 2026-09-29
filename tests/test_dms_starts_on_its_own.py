@@ -62,12 +62,12 @@ def wired(cp, monkeypatch):
     """A stubbed launcher, a stubbed Settings, and a recorder of what was asked."""
     import config
     import webui
-    seen = {"jobs": [], "incidents": []}
+    seen = {"jobs": [], "incidents": [], "env": {"DISPLAY": ":99", "DWD_PASSWORD": "x"}}
     real = config.Settings      # control_plane_db reads the real one, with no account, for its own path
     monkeypatch.setattr(config, "Settings", lambda account_id=None: _Settings() if account_id is not None else real())
     monkeypatch.setattr(A, "_migration_progress", lambda aid: seen["progress"])
     monkeypatch.setattr(A, "_export_identities_csv", lambda aid: (str(cp.tmp / "identities.csv"), 3))
-    monkeypatch.setattr(webui, "_dms_env", lambda aid: {"DISPLAY": ":99"})
+    monkeypatch.setattr(webui, "_dms_env", lambda aid: dict(seen["env"]))
     monkeypatch.setattr(A, "_run_admitted", lambda argv, aid, name, env=None, then=None: seen["jobs"].append(
         {"argv": argv, "name": name, "env": env, "then": then}) or (True, "started pid 9"))
     import run_watch
@@ -86,7 +86,8 @@ class TestAfterASplitRun:
             assert flag in job["argv"]
         assert job["argv"][job["argv"].index("--source-domain") + 1] == "a.com"
         assert job["argv"][job["argv"].index("--target-admin") + 1] == "admin@b.com"
-        assert job["env"] == {"DISPLAY": ":99"}, "the account's own DMS environment, with the admin login"
+        assert job["env"] == {"DISPLAY": ":99", "DWD_PASSWORD": "x"}, \
+            "the account's own DMS environment, with the admin login"
 
     @pytest.mark.parametrize("field", ["failed", "running", "blocked"])
     def test_it_does_not_start_over_a_user_who_failed_is_running_or_is_blocked(self, wired, field):
@@ -334,3 +335,23 @@ class TestRepairRidesAlong:
         r = cp.post(f"/api/v2/repair/{aid}", json={"reason": "checking"})
         assert r.json()["ok"] is False and "automatically when it finishes" in r.json()["detail"]
         assert not called
+
+
+class TestNoAdminLoginMeansAHumanNotACrash:
+    """Incident #6: launched a sign-in browser on a headless box with no login,
+    waited 200s for nobody, exited 1."""
+
+    def test_it_says_what_is_missing_instead_of_launching(self, wired):
+        wired["env"] = {"DISPLAY": ":99"}
+        ok, why = A._start_dms(3, require_clean=True, why="after the split")
+        assert not ok and not wired["jobs"]
+        assert "dwd.env" in why and "needs a human" in why
+        assert wired["incidents"][0]["kind"] == "dms_not_started"
+
+    def test_a_target_specific_password_is_enough(self, monkeypatch, tmp_path):
+        import webui
+        f = tmp_path / "dwd.env"
+        f.write_text("DWD_PASSWORD_TARGET=secret\n")
+        monkeypatch.setattr(webui, "DWD_ENV_FILE", str(f))
+        monkeypatch.setattr(webui, "_account_env", lambda aid: {"TARGET_ADMIN": "a@b.com"})
+        assert webui._dms_env(3)["DWD_PASSWORD"] == "secret"

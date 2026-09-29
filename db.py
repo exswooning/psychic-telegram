@@ -860,7 +860,7 @@ class MigrationDB:
         for the shared logic (also used by api_server._tally_view against a read-only
         connection)."""
         users = [r for r in self.all_identities() if r["entity_type"] == "user"]
-        return tally_rollup(users, self.user_tallies())
+        return tally_rollup(users, self.user_tallies(), deferred_mail_by_user(self.conn))
 
     def latest_fidelity(self) -> Optional[dict]:
         import json as _json
@@ -1231,14 +1231,38 @@ def parse_user_tally_rows(rows) -> list[dict]:
     return out
 
 
-def tally_rollup(users, tallies: list[dict]) -> dict:
+def deferred_mail_by_user(conn) -> dict[str, int]:
+    """Messages each user is owed by Google's DMS (config.DEFERRED_TO_DMS)."""
+    from config import DEFERRED_TO_DMS
+    return {r[0]: r[1] for r in conn.execute(
+        "SELECT source_user, COUNT(*) FROM audit_log WHERE status=? AND item_type='message' "
+        "GROUP BY source_user", (DEFERRED_TO_DMS,))}
+
+
+def _short_only_by_owed_mail(t: dict, owed: int) -> bool:
+    """Mail is the only service under the bar, and every missing message is one
+    the DMS still owes -- waiting on Google, not a gap in this tool's work."""
+    services = t.get("services") or {}
+    below = [s for s, v in services.items()
+             if isinstance(v, dict) and v.get("parity") is not None and v["parity"] < TALLY_PARITY_OK]
+    if below != ["mail"] or owed <= 0:
+        return False
+    m = services["mail"]
+    return (m.get("expected") or 0) - (m.get("target") or 0) <= owed
+
+
+def tally_rollup(users, tallies: list[dict], deferred: dict[str, int] | None = None) -> dict:
     """Every user rolled up to one tally verdict: COMPLETE (every service at or above the
     count_parity bar), SHORT (a service came up short), UNKNOWN (a tally ran but nothing
     could be counted -- e.g. every service errored), or NOT_TALLIED -- never a blank, the
     same rule verification_rollup follows. Shared by the Tally page (api_server._tally_view),
     MigrationDB.tally_summary, and (should a report ever want it) the run report."""
+    # OWED_TO_DMS apart from SHORT: on account 3, 278 users waiting on the DMS and
+    # 22 whose mail/calendar/contacts/tasks never ran all read the same red
+    # "Short", and the 22 hid in the 300.
     by_user = {t["user"]: t for t in tallies}
-    totals = {"COMPLETE": 0, "SHORT": 0, "UNKNOWN": 0, "NOT_TALLIED": 0}
+    deferred = deferred or {}
+    totals = {"COMPLETE": 0, "SHORT": 0, "OWED_TO_DMS": 0, "UNKNOWN": 0, "NOT_TALLIED": 0}
     out_users = []
     for u in users:
         t = by_user.get(u["source_email"])
@@ -1247,7 +1271,9 @@ def tally_rollup(users, tallies: list[dict]) -> dict:
         elif t.get("countParity") is None:
             verdict = "UNKNOWN"
         else:
-            verdict = "COMPLETE" if t["countParity"] >= TALLY_PARITY_OK else "SHORT"
+            verdict = ("COMPLETE" if t["countParity"] >= TALLY_PARITY_OK
+                       else "OWED_TO_DMS" if _short_only_by_owed_mail(t, deferred.get(u["source_email"], 0))
+                       else "SHORT")
         totals[verdict] += 1
         out_users.append({"user": u["source_email"], "target": u["target_email"], "status": u["status"],
                           "verdict": verdict, "countParity": (t or {}).get("countParity"),

@@ -221,7 +221,9 @@ export function useRunningJobs() {
           ].filter(Boolean).join(' · '),
           pct: job.progressPct ?? null, lines: job.lines, elapsedSec: job.elapsed,
           nodes: seedNodes,
-          stop: async (_reason, force) => { await stopSeedJob(undefined, force) },
+          stop: async (_reason, force) => {
+            await stopSeedJob(undefined, force, job.external ? job.pid ?? undefined : undefined)
+          },
         })
       }
       // healthy, or the claim is as old as the heartbeat that made it. A

@@ -1528,6 +1528,16 @@ def _external_processes() -> list[dict]:
 # job_admission.py job names this process itself admits (see get_job()'s own
 # /api/seed, /api/reset_target, /api/reset_drive_ledger call sites) -- the
 # only ones _reconcile_active_jobs() below has any business releasing.
+def _external_stop_targets(jobs: list[dict], want) -> list[dict]:
+    """Which listed external process(es) a Stop is for: the caller's own pid,
+    or -- for an older client that sends none -- the one /api/job describes
+    (jobs[0]). Never every listed process: with tally.py listed, one account's
+    tally Stop would have stopped another account's migration too."""
+    if want is not None:
+        return [j for j in jobs if str(j["pid"]) == str(want)]
+    return jobs[:1]
+
+
 _OWNED_JOB_NAMES = {"seed", "reset target", "reset drive ledger"}
 
 
@@ -4776,6 +4786,12 @@ def _dms_env(account_id: int | None) -> dict:
                     env[k.strip()] = v.strip()
     except FileNotFoundError:
         pass
+    # The Admin console the DMS signs in to is the TARGET's, and dwd_helper
+    # reads only the generic DWD_PASSWORD. Taking it from the side-specific key
+    # means the file need not carry a generic one -- which admin_secrets would
+    # also hand to a SOURCE-side sign-in as its fallback.
+    if not env.get("DWD_PASSWORD") and env.get("DWD_PASSWORD_TARGET"):
+        env["DWD_PASSWORD"] = env["DWD_PASSWORD_TARGET"]
     return env
 
 
@@ -5936,6 +5952,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "msg": msg})
             else:
                 jobs = _external_processes()
+                # Only the job the caller is looking at -- its own pid, or the
+                # one /api/job describes (jobs[0]) for an older client. This
+                # signalled EVERY listed process: with tally.py listed, one
+                # account's tally Stop would have stopped another account's
+                # migration too. A pid the scan does not list is never touched.
+                jobs = _external_stop_targets(jobs, body.get("pid"))
                 if not jobs:
                     _note("done", "nothing running")
                     self._json({"ok": True, "msg": "nothing running"})

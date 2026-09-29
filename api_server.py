@@ -1542,6 +1542,16 @@ def _start_dms(account_id: int | None, *, require_clean: bool, why: str) -> tupl
     st = Settings(account_id=account_id)
     if not (st.source_domain and st.target_admin):
         return decline("the account has no source domain or target admin set")
+    env = webui._dms_env(account_id)
+    if not env.get("DWD_PASSWORD"):
+        # It used to launch anyway: a sign-in browser on a headless box, 200s
+        # waiting for a human who could not see it, then exit 1 (incident #6).
+        # Say what is missing where an operator looks instead.
+        return decline("it needs a human: there is no Admin console login for the target "
+                       f"admin ({st.target_admin}). Put DWD_PASSWORD_TARGET (and DWD_EMAIL if "
+                       f"it is not {st.target_admin}) in {webui.DWD_ENV_FILE}, mode 600, then "
+                       "start the DMS from the Services page -- or run the import by hand in "
+                       "the target Admin console")
     csv_path, n = _export_identities_csv(account_id)
     if not n:
         return decline("there are no users to map")
@@ -1550,7 +1560,7 @@ def _start_dms(account_id: int | None, *, require_clean: bool, why: str) -> tupl
     if st.source_admin:
         argv += ["--source-admin", st.source_admin]
     action = cpdb.begin_action("auto", "system", "dms.start", why, st.target_domain, {"users": n}, None, account_id)
-    ok, detail = _run_admitted(argv, account_id, "dms", env=webui._dms_env(account_id))
+    ok, detail = _run_admitted(argv, account_id, "dms", env=env)
     cpdb.finish_action(action, "OK" if ok else "FAILED", detail)
     return ok, detail
 
@@ -1816,7 +1826,7 @@ def _tally_view(account_id: int | None) -> dict:
     import db as db_module
     st = Settings(account_id=account_id)
     out: dict = {"accountId": account_id, "onComplete": st.tally_on_complete, "users": [],
-                 "totals": {"COMPLETE": 0, "SHORT": 0, "UNKNOWN": 0, "NOT_TALLIED": 0}}
+                 "totals": {"COMPLETE": 0, "SHORT": 0, "OWED_TO_DMS": 0, "UNKNOWN": 0, "NOT_TALLIED": 0}}
     path = _ledger_path(account_id)
     if not os.path.isfile(path):
         return out
@@ -1827,8 +1837,9 @@ def _tally_view(account_id: int | None) -> dict:
             rows = conn.execute("SELECT * FROM user_tally ORDER BY source_user").fetchall()
         except sqlite3.OperationalError:          # a ledger from before this table existed
             rows = []
+        deferred = db_module.deferred_mail_by_user(conn)
     tallies = db_module.parse_user_tally_rows(rows)
-    rollup = db_module.tally_rollup(users, tallies)
+    rollup = db_module.tally_rollup(users, tallies, deferred)
     return {**out, **rollup}
 
 

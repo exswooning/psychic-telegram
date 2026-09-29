@@ -108,15 +108,18 @@ export async function runAction(
 }
 
 export async function stopJob(
-  accountId?: string, force = false
+  accountId?: string, force = false, pid?: number
 ): Promise<{ ok: boolean; msg: string }> {
   // force is SIGKILL, for a child that took the interrupt and hung anyway
   // -- see Job.stop. Never the first thing to try: the cooperative SIGINT
   // commits state so a re-run resumes cleanly.
+  // `pid`: the process the card describes. Without it the server used to
+  // signal EVERY external process it could see -- one account's tally Stop
+  // would have stopped another account's migration too.
   const res = await fetch('/api/stop', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ account_id: accountId, force }),
+    body: JSON.stringify({ account_id: accountId, force, pid }),
   })
   return res.json()
 }
