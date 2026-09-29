@@ -182,18 +182,32 @@ def test_both_launchers_wait_for_the_finish():
     assert '"--until-done"' in inspect.getsource(api_server._start_dms)
 
 
-def test_the_approval_link_is_picked_out_of_googles_mail():
+def test_the_link_to_follow_is_the_one_labelled_as_the_request():
+    """Live, every link was a c.gle redirect: only the label says which one
+    approves (what dms_read_auth_mail.py learned, by hand, on 2026-08-29)."""
     import dms_migrate
-    text = ('<a href="https://admin.google.com/ac/migrate/authorize?t=1&amp;x=2">Authorize</a> '
-            'help: https://support.google.com/a/answer/1 and https://www.google.com/x')
-    assert dms_migrate._approval_links_in(text) == [
-        "https://admin.google.com/ac/migrate/authorize?t=1&x=2"]
+    html = ('<a href="https://c.gle/help">Learn more</a> '
+            '<a href="https://c.gle/req">View authorization request</a> '
+            '<a href="https://c.gle/privacy">Privacy Policy</a>')
+    assert dms_migrate._approval_link_in(html) == "https://c.gle/req"
+
+
+def test_with_no_label_it_falls_back_to_the_last_link():
+    import dms_migrate
+    assert dms_migrate._approval_link_in("https://c.gle/a x https://c.gle/b y") == "https://c.gle/b"
+    assert dms_migrate._approval_link_in("no links here") is None
+
+
+def test_the_mail_is_found_by_its_subject():
+    """The live subject: "Data migration service: Request for authorization"."""
+    import dms_migrate
+    assert 'subject:"Request for authorization"' in dms_migrate.APPROVAL_QUERY
 
 
 def test_without_a_source_login_it_leaves_the_click_to_a_person(monkeypatch):
     import dms_migrate
     monkeypatch.delenv("DWD_PASSWORD_SOURCE", raising=False)
-    monkeypatch.setattr(dms_migrate, "approval_links",
+    monkeypatch.setattr(dms_migrate, "approval_link",
                         lambda *a: pytest.fail("read the mailbox with no login to use"))
     did = dms_migrate.approve_as_source(10, False)
     assert "waits for the source admin" in did[0]
@@ -203,7 +217,7 @@ def test_no_approval_mail_yet_is_said_not_raised(monkeypatch):
     import dms_migrate
     monkeypatch.setenv("DWD_EMAIL_SOURCE", "admin@src.test")
     monkeypatch.setenv("DWD_PASSWORD_SOURCE", "x")
-    monkeypatch.setattr(dms_migrate, "approval_links", lambda *a: [])
+    monkeypatch.setattr(dms_migrate, "approval_link", lambda *a: None)
     assert dms_migrate.approve_as_source(10, False) == ["no approval mail for admin@src.test yet"]
 
 

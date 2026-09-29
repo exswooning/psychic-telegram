@@ -734,10 +734,15 @@ def _start_blocked(page) -> tuple[str, str]:
                            "is still waiting on.")
 
 
-# The words a Google approval page puts on the button that grants it, tried in
-# this order; the page may take more than one (a consent, then a confirm).
-APPROVE_BUTTONS = ("Authorize", "Approve", "Allow", "Accept", "Grant access",
-                   "Confirm", "Continue")
+# The source-side approval, folded in from dms_read_auth_mail.py + dms_grant.py
+# (e8ebe3d, proven live 2026-08-29 but only ever run by hand, so a DMS job
+# still stopped at "Pending authorization"). What they learned, kept here:
+# every link in Google's mail is a c.gle redirect, so the one to follow is
+# the one LABELLED as the authorization request; it lands on an account
+# chooser; and the consent it resolves to has a page of its own.
+APPROVAL_QUERY = 'from:google.com subject:"Request for authorization" newer_than:3d'
+APPROVE_BUTTONS = ("Authorize", "Approve", "Grant", "Allow", "Accept",
+                   "Confirm", "Continue", "Agree")
 
 
 def _source_login() -> tuple[str, str]:
@@ -747,44 +752,46 @@ def _source_login() -> tuple[str, str]:
     return email.strip(), os.getenv("DWD_PASSWORD_SOURCE", "")
 
 
-def _approval_links_in(text: str) -> list[str]:
-    """Google-hosted links in a mail that look like the approval, in order."""
-    import html
+def _approval_link_in(html: str) -> str | None:
+    """The link labelled as the authorization request. Anchors are not plain
+    href="...", so each URL is matched to the text right after it; the last
+    labelled one wins, and with none labelled, the last link (the template's
+    call to action)."""
+    urls = list(dict.fromkeys(re.findall(r'https?://[^\s"\'<>)]+', html)))
+    found = None
+    for u in urls:
+        i = html.find(u)
+        label = re.sub(r"<[^>]+>", " ", html[i:i + 400])
+        label = re.sub(r"&nbsp;|&amp;|&#39;|&quot;|&rsquo;", " ", label)
+        label = re.sub(r"\s+", " ", label).replace(u, "").strip()
+        if re.search(r"view authorization|authorization request|approve|"
+                     r"grant|review request", label, re.I):
+            found = u
+    return found or (urls[-1] if urls else None)
 
-    out: list[str] = []
-    for url in re.findall(r"""https://[^\s"'<>]+""", html.unescape(text)):
-        if (re.match(r"https://(admin|accounts)\.google\.com/", url)
-                and re.search(r"migrat|import|authori[sz]|approv|consent", url, re.I)
-                and url not in out):
-            out.append(url)
-    return out
 
-
-def approval_links(source_admin: str) -> list[str]:
-    """Approval links in the mail Google sent the source super admin, newest
-    mail first, read with the source service account's own Gmail grant."""
+def approval_link(source_admin: str) -> str | None:
+    """The authorization link in the newest request mail to the source super
+    admin, read with the source service account's own Gmail grant."""
     import base64
 
     from auth import AuthManager
     from config import Settings
 
     g = AuthManager(Settings()).source_gmail(source_admin)
-    listed = g.users().messages().list(
-        userId="me", q="from:google.com newer_than:3d", maxResults=20).execute()
-    links: list[str] = []
-    for m in listed.get("messages", []):
-        msg = g.users().messages().get(userId="me", id=m["id"], format="full").execute()
-        parts, bodies = [msg.get("payload", {})], []
-        while parts:
-            part = parts.pop()
-            data = part.get("body", {}).get("data")
-            if data:
-                bodies.append(base64.urlsafe_b64decode(data).decode("utf-8", "replace"))
-            parts += part.get("parts") or []
-        for url in _approval_links_in(" ".join(bodies)):
-            if url not in links:
-                links.append(url)
-    return links
+    listed = g.users().messages().list(userId="me", q=APPROVAL_QUERY, maxResults=1).execute()
+    if not listed.get("messages"):
+        return None
+    msg = g.users().messages().get(userId="me", id=listed["messages"][0]["id"],
+                                   format="full").execute()
+    parts, bodies = [msg.get("payload", {})], []
+    while parts:
+        part = parts.pop()
+        data = part.get("body", {}).get("data")
+        if data:
+            bodies.append(base64.urlsafe_b64decode(data).decode("utf-8", "replace"))
+        parts += part.get("parts") or []
+    return _approval_link_in("\n".join(bodies))
 
 
 def approve_as_source(timeout: int, headful: bool) -> list[str]:
@@ -797,16 +804,15 @@ def approve_as_source(timeout: int, headful: bool) -> list[str]:
         return ["no source admin login (DWD_EMAIL_SOURCE/DWD_PASSWORD_SOURCE), so "
                 "the approval waits for the source admin to click it"]
     try:
-        links = approval_links(email)
+        link = approval_link(email)
     except Exception as exc:      # noqa: BLE001 - say why; the watch keeps going
         return [f"could not read {email}'s mail for the approval link: {str(exc)[:160]}"]
-    if not links:
+    if not link:
         return [f"no approval mail for {email} yet"]
     from playwright.sync_api import sync_playwright
 
     saved = {k: os.environ.get(k) for k in ("DWD_EMAIL", "DWD_PASSWORD")}
     os.environ["DWD_EMAIL"], os.environ["DWD_PASSWORD"] = email, password
-    did: list[str] = []
     p = sync_playwright().start()
     try:
         out = dwd_helper._open_dwd_console(
@@ -815,21 +821,36 @@ def approve_as_source(timeout: int, headful: bool) -> list[str]:
         if out is None:
             return [f"could not sign in as {email}"]
         _browser, page = out
-        page.goto(links[0], wait_until="domcontentloaded", timeout=max(timeout * 1000, 30000))
-        page.wait_for_timeout(6000)
+        page.goto(link, wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(8000)
+        # The c.gle redirect drops on an account chooser; pick the admin.
         for _ in range(3):
-            btn = _find_first(page, [f'button:has-text("{t}")' for t in APPROVE_BUTTONS]
-                              + [f'[role=button]:has-text("{t}")' for t in APPROVE_BUTTONS])
-            if btn is None:
+            if "accountchooser" not in page.url and \
+                    "Choose an account" not in page.inner_text("body"):
                 break
-            label = btn.inner_text().strip()
-            btn.click()
-            page.wait_for_timeout(5000)
-            did.append(f"pressed {label!r} as {email}")
+            acct = page.get_by_text(email, exact=False)
+            if not acct.count():
+                break
+            acct.first.click()
+            page.wait_for_timeout(8000)
+        # A consent id in the resolved URL has a page of its own; go there.
+        m = re.search(r"consents%23consents%2F(\w+)|consents/(\w+)", page.url)
+        if m:
+            direct = f"https://admin.google.com/ac/migrate/consents#consents/{m.group(1) or m.group(2)}"
+            if page.url.split("#")[0] != direct.split("#")[0]:
+                page.goto(direct, wait_until="domcontentloaded", timeout=60000)
+                page.wait_for_timeout(8000)
+        for label in APPROVE_BUTTONS:
+            btn = page.get_by_role("button", name=re.compile(f"^{label}$", re.I))
+            if btn.count() and btn.first.is_enabled():
+                btn.first.click()
+                page.wait_for_timeout(6000)
+                page.screenshot(path="/tmp/dms_approve.png", full_page=True)
+                return [f"pressed {label!r} as {email}"]
         page.screenshot(path="/tmp/dms_approve.png", full_page=True)
-        return did or [f"no approve button on {page.url} (see /tmp/dms_approve.png)"]
+        return [f"no approve button on {page.url.split('?')[0]} (see /tmp/dms_approve.png)"]
     except Exception as exc:      # noqa: BLE001
-        return did + [f"approving as {email} failed: {str(exc)[:160]}"]
+        return [f"approving as {email} failed: {str(exc)[:160]}"]
     finally:
         for k, v in saved.items():
             if v is None:

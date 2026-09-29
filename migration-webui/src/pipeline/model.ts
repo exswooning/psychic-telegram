@@ -199,7 +199,7 @@ export const NODES: PNode[] = [
     ['link_rewrite.py', 'check_link_rewrite.py']),
   N('dms', 'engines', 2, 'engine', 'Mail via Google DMS', 'dms_migrate.py', 'Browser',
     'An alternative mail leg: hands the mailbox to Google\'s own Data Migration Service, which copies inside Google and so spends none of our Gmail write quota. There is no API for it, so it drives the Admin console; it gives per-user status, not the per-item ledger.',
-    ['dms_migrate.py', 'dms_approve.py', 'dms_grant.py', 'dms_read_auth_mail.py'], { page: '/services' }),
+    ['dms_migrate.py', 'dms_approve.py'], { page: '/services' }),
 
   // ---- Ledger -------------------------------------------------------------
   N('id_mapping', 'ledger', 0, 'store', 'id_mapping', 'source id → target id', 'VPS',
