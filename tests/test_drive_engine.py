@@ -933,11 +933,12 @@ def test_server_side_keeps_staging_drive_when_a_file_is_stranded(auth, db, setti
     m = drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota)
     m.run()
 
-    # 0, not 1: download_upload recovers the file the stranded copy could
-    # not deliver. That is the cascade working, and it does not change what
-    # this test is about -- the staging drive must still survive, because
-    # the copy sitting inside it is bytes nobody else has.
-    assert m.stats["failed"] == 0
+    # 1, not 0: a copy stranded in staging is no longer "recovered" by an
+    # immediate download_upload -- that delivered a SECOND copy and orphaned
+    # this one (128 on account 3). The item waits, FAILED, for the retry to
+    # adopt the copy; the staging drive must survive to hold it.
+    assert m.stats["failed"] == 1
+    assert auth.source_drive(SRC_USER).call_count("files.get_media") == 0
     assert tgt.shared_drives, "staging drive must survive so the copy isn't lost"
 
 
@@ -1971,3 +1972,45 @@ def test_a_stranded_staged_copy_is_adopted_not_copied_again(auth, db, settings, 
     assert src.call_count("files.copy") == 0
     assert db.get_target_id(SRC_USER, fid, "file") == stranded
     assert m._staging_drive_id not in tgt.store[stranded]["parents"]      # moved out
+
+
+def test_a_stranded_copy_is_delivered_by_the_retry_with_no_second_copy(auth, db, settings,
+                                                                     identity, quota):
+    """The whole cycle: the move fails, nothing cascades, the retry adopts the
+    staged copy and moves it. One copy made, none left behind."""
+    import drive_engine
+
+    _server_side(settings)
+    src = auth.source_drive(SRC_USER)
+    fid = src.add_binary("stranded.pdf")
+    tgt = auth.target_drive(TGT_USER)
+    tgt.fail_next("files.update", status=403, reason="insufficientPermissions", times=9)
+    drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota).run()
+    assert db.get_target_id(SRC_USER, fid, "file") is None
+
+    tgt._faults.clear()
+    drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota).run()
+
+    assert db.get_target_id(SRC_USER, fid, "file")
+    assert src.call_count("files.copy") == 1
+    staged = [f for f in tgt.store.values()
+              if any(p in tgt.shared_drives for p in f.get("parents") or [])]
+    assert staged == [], "an orphan was left in the staging drive"
+
+
+def test_an_adopted_copy_that_still_will_not_move_falls_back(auth, db, settings,
+                                                           identity, quota):
+    """A move that fails permanently must not strand the file forever."""
+    import drive_engine
+
+    _server_side(settings)
+    src = auth.source_drive(SRC_USER)
+    fid = src.add_binary("stuck.pdf")
+    tgt = auth.target_drive(TGT_USER)
+    tgt.fail_next("files.update", status=403, reason="insufficientPermissions", times=9)
+    drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota).run()
+
+    tgt.fail_next("files.update", status=403, reason="insufficientPermissions", times=9)
+    drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota).run()
+
+    assert db.get_target_id(SRC_USER, fid, "file"), "the cascade must deliver it"

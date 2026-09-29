@@ -300,6 +300,10 @@ _QUOTA_MARKERS = (
 PROJECT_QUOTA_REASONS = frozenset({"rateLimitExceeded", "quotaExceeded"})
 
 
+# The audit prefix for a copy that landed in staging but did not move out.
+STRANDED_IN_STAGING = "copied to staging but move to My Drive failed"
+
+
 def _is_project_quota_rejection(exc: Exception) -> bool:
     text = str(exc).lower()
     return (_is_quota_rejection(exc) and "userratelimitexceeded" not in text
@@ -380,6 +384,8 @@ class DriveMigrator:
         # once when the drive is first resolved (see _index_staged).
         self._staged: dict[tuple, list[dict]] = {}
         self._staging_lock = threading.Lock()
+        # Items whose ADOPTED staged copy also failed to move: those may cascade.
+        self._adopted_move_failed: set[str] = set()
         # Set up properly by _open_file_pool() at the start of run(). Defined
         # here too so a caller that drives _sync_files() directly -- several
         # tests do -- gets the serial path rather than an AttributeError.
@@ -1185,6 +1191,14 @@ class DriveMigrator:
             # Nothing recorded: the strategy raised before it could log.
             return True
         status = row["status"]
+        if (status == "FAILED" and (row["error_message"] or "").startswith(STRANDED_IN_STAGING)
+                and item["id"] not in self._adopted_move_failed):
+            # The copy is already on the target, in staging. Cascading to
+            # download_upload delivered a SECOND copy within seconds and left
+            # this one an orphan -- 128 of them on account 3. The item stays
+            # FAILED for the retry (between passes, or repair) to adopt the
+            # staged copy and move it; if THAT move fails too, it cascades.
+            return False
         return status == "FAILED" or status in self._RETRYABLE_SKIPS
 
     def _sync_with_fallback(self, item: dict, tgt_parent: str,
@@ -1378,8 +1392,9 @@ class DriveMigrator:
                     self.quota.refund(size)
                 return
 
+        adopted = self._take_staged(item)
         try:
-            copied = self._take_staged(item) or self._retry(lambda: self.src.files().copy(
+            copied = adopted or self._retry(lambda: self.src.files().copy(
                 fileId=item["id"], body=body, supportsAllDrives=True,
                 fields="id,md5Checksum",
             ).execute(), label="drive.files.copy", tenant="source")
@@ -1443,9 +1458,18 @@ class DriveMigrator:
                 self.quota.refund(size)
             # Deliberately not deleting the stranded copy: the next run finds
             # it in the staging drive, and losing bytes is worse than a retry.
+            if adopted:
+                # Adopted and STILL would not move: let the cascade deliver it
+                # another way rather than leave it stuck (the copy stays behind).
+                self._adopted_move_failed.add(item["id"])
+            else:
+                # A fresh copy is now stranded: index it for the retry to adopt.
+                with self._staging_lock:
+                    self._staged.setdefault(self._staged_key(item), []).append(
+                        {"id": copy_id, "md5Checksum": copied.get("md5Checksum")})
             self.db.log_audit(
                 self.source_user, item["id"], "file", "FAILED",
-                f"copied to staging but move to My Drive failed: {exc}",
+                f"{STRANDED_IN_STAGING}: {exc}",
             )
             self._bump("failed")
             return
