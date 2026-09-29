@@ -360,6 +360,22 @@ export const MigrationDetail: React.FC = () => {
             </Paper>
           )}
 
+          {/* Repair also puts back modified times a copy did not keep -- drift no
+              failure row records -- so it stays reachable with nothing failed. */}
+          {repair && repair.total === 0 && (
+            <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 3 }}
+                   data-testid="repair-no-failures">
+              <Typography variant="body2" color="text.secondary" sx={{ flex: 1 }}>
+                No failures recorded. Repair still checks every copied Drive item and
+                puts back any modified time that did not carry across.
+              </Typography>
+              <Button size="small" variant="outlined" startIcon={<RepairIcon />}
+                      data-testid="run-repair" disabled={repairBusy || d.running}
+                      onClick={() => setAskRepair(true)}>
+                {d.running ? 'runs when the migration finishes' : 'Repair'}
+              </Button>
+            </Stack>
+          )}
           {repair && repair.total > 0 && (
             <Paper variant="outlined" sx={{ p: 2, mb: 3 }}
                    data-testid="repair-panel">

@@ -43,6 +43,10 @@ FOLDER_MIME = "application/vnd.google-apps.folder"
 # skipped total, the migrations page -- must treat this one apart, or a split
 # run that never reached the DMS reports mail parity as perfect.
 DEFERRED_TO_DMS = "SKIPPED_NO_DRIVE_LINK"
+# The same mail once Google's import has reported itself complete: neither owed
+# (DEFERRED_TO_DMS) nor declined (SKIPPED_*). Written by dms_migrate the moment a
+# status read says "complete", so "N messages are waiting for the DMS" clears.
+DELIVERED_BY_DMS = "DELIVERED_BY_DMS"
 SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
 
 # Native Google types this engine knows how to round-trip through an OOXML

@@ -587,3 +587,13 @@ describe('MigrationDetail: quick migrate', () => {
   })
 })
 
+
+describe('MigrationDetail: repair with nothing failed', () => {
+  it('still offers Repair, which puts back modified times a copy did not keep', async () => {
+    show(detail({ repair: { accountId: 7, total: 0, families: [], unclassified: 0, error: '' } }))
+    const row = await screen.findByTestId('repair-no-failures')
+    expect(row).toHaveTextContent('No failures recorded')
+    expect(row).toHaveTextContent('modified time')
+    expect(screen.getByTestId('run-repair')).toBeEnabled()
+  })
+})

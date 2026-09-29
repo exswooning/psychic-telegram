@@ -353,6 +353,25 @@ def read_metrics(page) -> dict:
             "read_at": int(time.time())}
 
 
+def _record_delivered() -> None:
+    """Google says the import is complete: the mail the engine left for it is on
+    the target now. Recorded, or the migration page goes on saying hundreds of
+    thousands of messages are still waiting for the DMS. Never fails a read."""
+    try:
+        from config import Settings
+        from db import MigrationDB
+
+        d = MigrationDB(Settings().db_path)
+        try:
+            n = d.mark_dms_delivered()
+        finally:
+            d.close()
+        if n:
+            log(f"the import is complete: {n:,} message(s) recorded as delivered by the DMS")
+    except Exception as exc:      # noqa: BLE001
+        log(f"could not record the DMS delivery in the ledger: {exc}")
+
+
 def status(timeout: int, headful: bool) -> dict:
     """Open the console, read the import metrics, cache them to a file."""
     out = {"ok": False, "status": "unknown", "metrics": {}, "detail": ""}
@@ -367,6 +386,8 @@ def status(timeout: int, headful: bool) -> dict:
         page.wait_for_timeout(7000)
         got = read_metrics(page)
         out.update(ok=True, **got)
+        if got.get("status") == "complete":
+            _record_delivered()
         try:
             with open(METRICS_FILE, "w", encoding="utf-8") as fh:
                 json.dump(got, fh)

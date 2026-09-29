@@ -975,6 +975,17 @@ class MigrationDB:
             (tenant,)).fetchone()
         return row["ceiling"] if row else None
 
+    def mark_dms_delivered(self) -> int:
+        """Mail left for the DMS, now that its import reports complete: delivered,
+        no longer owed. Returns how many rows changed."""
+        from config import DEFERRED_TO_DMS, DELIVERED_BY_DMS
+        with self.write() as conn:
+            return conn.execute(
+                "UPDATE audit_log SET status=?, error_message=? WHERE status=? "
+                "AND item_type='message'",
+                (DELIVERED_BY_DMS, "moved by Google's Data Migration Service",
+                 DEFERRED_TO_DMS)).rowcount
+
     def claim(self, kind: str, key: str, owner: str) -> str:
         """Take the tenant-wide claim on (kind, key) for `owner` if nobody holds it;
         return whoever holds it now. Idempotent for the holder."""
