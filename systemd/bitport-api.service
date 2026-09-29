@@ -23,11 +23,6 @@ Environment=DISPLAY=:99
 # grant; a tenant that blocks it needs TRANSFER_MODE=download_upload for that
 # one run (or account) until its sharing settings are confirmed to allow it.
 Environment=TRANSFER_MODE=server_side
-# TEMPORARY leak probe (2026-09-28) -- remove once attributed. A live soak
-# showed RSS growing ~1.8 KB per file copied, linearly, after the mapping-cache
-# cap; `full` makes memtrace log the top growing tracemalloc sites every 10
-# completed users into the migrate job's log. Roughly doubles allocation cost.
-Environment=BITPORT_MEMTRACE=full
 # CP_OPERATORS is deliberately NOT set here.
 #
 # It maps an X-Operator header to a role, and a name is not a secret. With
