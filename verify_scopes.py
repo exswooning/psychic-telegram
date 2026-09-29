@@ -249,6 +249,19 @@ def required_scopes(settings: Settings, tenant: str,
     from provision import DIRECTORY_WRITE_SCOPE
 
     want = set(scope_mod.oauth_scopes(settings)[tenant])
+    # And the baseline, every optional pass off. They are all on by default, but
+    # one a tenant cannot grant is switched off at run time (fidelity.
+    # drop_ungranted) and the run then asks for the read-only scope it replaced
+    # (calendar.readonly for calendar) -- which must be in the grant too:
+    # delegation matches the exact strings requested.
+    import dataclasses
+
+    import fidelity
+    try:
+        base = dataclasses.replace(settings, **{f: False for f in fidelity.OPTIONAL})
+        want |= set(scope_mod.oauth_scopes(base)[tenant])
+    except TypeError:      # a stand-in settings object, not the dataclass
+        pass
     want.add(DIRECTORY_WRITE_SCOPE)
     want.add("https://www.googleapis.com/auth/admin.directory.user.readonly")
     if include_seed:

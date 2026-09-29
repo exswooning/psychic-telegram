@@ -942,7 +942,22 @@ def _gate_on_delegation(settings: Settings) -> None:
         log.warning("scope preflight unavailable: %s", exc)
         return
     try:
-        repaired = scope_guard.ensure(settings)
+        try:
+            repaired = scope_guard.ensure(settings)
+        except scope_guard.ScopeGapError:
+            # Every optional pass is on by default. One the tenant has not granted
+            # (and the unattended re-grant above could not fix) is switched off by
+            # name instead of stopping the run -- and handed down to any process
+            # this run starts. Only a gap in what every run needs still stops it.
+            import fidelity
+            notes = fidelity.drop_ungranted(settings, fidelity.probe_for(settings),
+                                            export_env=True)
+            for note in notes:
+                log.warning("%s", note)
+                print(f"NOTE {note}", flush=True)
+            if not notes:
+                raise
+            repaired = scope_guard.ensure(settings, auto_repair=False)
     except scope_guard.ScopeGapError as gap:
         # Deliberately not a traceback: this is an operator-facing
         # instruction, and the stack tells them nothing they can act on.
@@ -1517,6 +1532,11 @@ def _before_passes(db, auth, settings, services: set) -> None:
         import calendar_resources
         _tenant_step("rooms", lambda: calendar_resources.ResourceMigrator(
             auth, db, settings).migrate())
+    if getattr(settings, "migrate_sso", False):
+        # Inbound SAML profiles, recreated UNASSIGNED: assigning one is left to a
+        # person, because a wrong assignment locks users out (sso.py).
+        import sso
+        _tenant_step("sso profiles", lambda: sso.SSOMigrator(auth, db, settings).migrate_profiles())
 
 
 def _sync_calendar_subscriptions(db, auth, settings, only=None) -> None:
@@ -1925,14 +1945,18 @@ def _enable_selected_services(settings: Settings, services: set[str]) -> None:
     for the full scope must not leave services doing nothing because a
     MIGRATE_* variable was unset.
     """
-    if "chat" in services:
+    # Not one the parent run switched off because the tenant has not granted its
+    # scope (fidelity.drop_ungranted): re-enabling it would fail every call.
+    import fidelity
+    off = fidelity.dropped()
+    if "chat" in services and "MIGRATE_CHAT" not in off:
         # Chat is a first-class service: selecting it opts the run in. That
         # widens the scopes (chat.spaces/chat.messages) and enables the
         # engine's import pass. See config.py for the fidelity caveat.
         settings.migrate_chat = True
-    if "contacts" in services:
+    if "contacts" in services and "MIGRATE_CONTACTS" not in off:
         settings.migrate_contacts = True
-    if "tasks" in services:
+    if "tasks" in services and "MIGRATE_TASKS" not in off:
         settings.migrate_tasks = True
 
 

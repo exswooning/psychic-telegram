@@ -466,9 +466,24 @@ def main(argv: list[str] | None = None) -> int:
         want = {u.lower() for u in a.user}
         pairs = [p for p in pairs if p[0].lower() in want]
     retry = retry_on_google_error(max_retries=settings.max_retries)
-    for i, (source_user, target_user) in enumerate(pairs, 1):
-        print(f"tally: {i}/{len(pairs)} {source_user}", flush=True)
-        tally_user_and_save(auth, db, settings, source_user, target_user, retry)
+    # Users side by side, as the migration runs them: a count is mostly waiting
+    # on Google, each user's reads spend that user's own quota, and one user at
+    # a time was ~6 minutes each -- 300 users, over a day, after every run.
+    import os
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    workers = max(1, int(os.getenv("TALLY_WORKERS", "8") or 8))
+    lock, done = threading.Lock(), [0]
+
+    def one(pair) -> None:
+        tally_user_and_save(auth, db, settings, pair[0], pair[1], retry)
+        with lock:
+            done[0] += 1
+            print(f"tally: {done[0]}/{len(pairs)} {pair[0]}", flush=True)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        list(pool.map(one, pairs))
     return 0
 
 

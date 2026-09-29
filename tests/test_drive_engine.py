@@ -1352,11 +1352,13 @@ def test_the_filter_reaches_the_query_not_just_the_results(migrator):
 # recipient must not copy it; a file owned by an external domain is carried
 # by nobody and is lost unless the recipient's run picks it up.
 # ======================================================================
-def test_external_share_flag_defaults_off(monkeypatch):
+def test_external_share_flag_defaults_on(monkeypatch):
+    """A file owned outside the org and shared in has no owner here to carry it:
+    with the flag off it is silently lost, so it is on by default."""
     monkeypatch.delenv("MIGRATE_EXTERNAL_SHARES", raising=False)
     from config import Settings
 
-    assert Settings().migrate_external_shares is False
+    assert Settings().migrate_external_shares is True
 
 
 def test_external_owned_shared_file_is_migrated_when_enabled(
@@ -1379,10 +1381,11 @@ def test_external_owned_shared_file_is_migrated_when_enabled(
         "external-org-owned shared file must be rescued"
 
 
-def test_external_owned_shared_file_is_not_migrated_by_default(
-        migrator, auth, db):
-    """Flag off: identical to today's behaviour -- external shares are left
-    alone, matching the owned_only invariant for same-org files."""
+def test_external_owned_shared_file_is_not_migrated_when_switched_off(
+        migrator, auth, db, settings):
+    """Flag off: external shares are left alone, matching the owned_only
+    invariant for same-org files."""
+    settings.migrate_external_shares = False
     src = auth.source_drive(SRC_USER)
     theirs = src.add_binary("their-deck.pptx")
     src.store[theirs]["owners"] = [{"emailAddress": "external@partner.com"}]

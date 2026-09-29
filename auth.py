@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 from typing import Any
 
@@ -101,8 +102,39 @@ class AuthManager:
         # Computed per run, not constant: server_side mode and the optional
         # Gmail-settings pass each widen the grant, and requesting a scope the
         # Admin Console has not authorised fails every call outright.
+        self._settle_optional_passes()
         return (source_scopes(self.settings) if tenant == "source"
                 else target_scopes(self.settings))
+
+    _settled = False
+    _settle_lock = threading.Lock()
+
+    def _settle_optional_passes(self) -> None:
+        """Every optional pass is on by default, and one scope a tenant has not
+        granted would fail every call this process makes. So before the first
+        credential: one combined token mint per side, and only if that fails,
+        each ungranted pass switched off (in this process's settings only) and
+        named in the log. Key auth only -- the probe mints with the key file --
+        and never when there is no key to probe with (tests, a half-set-up
+        account), which behave exactly as configured."""
+        if self._settled:
+            return
+        with self._settle_lock:
+            if self._settled:
+                return
+            self._settled = True
+            if getattr(self.settings, "auth_mode", "key") != "key":
+                return
+            if not (os.path.isfile(self.settings.source_sa_key or "")
+                    and os.path.isfile(self.settings.target_sa_key or "")):
+                return
+            try:
+                import fidelity
+                for note in fidelity.drop_ungranted(self.settings,
+                                                    fidelity.probe_for(self.settings)):
+                    log.warning("%s", note)
+            except Exception as exc:      # noqa: BLE001 - never blocks a credential
+                log.warning("could not check which optional passes are granted: %s", exc)
 
     def _oauth_credentials(self, tenant: str, user: str):
         """

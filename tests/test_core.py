@@ -375,15 +375,20 @@ def test_source_scopes_are_read_only():
         assert s.endswith(".readonly"), f"{s} is not read-only"
 
 
-def test_default_settings_do_not_widen_the_source_grant():
+def test_with_every_optional_pass_off_the_grant_is_the_baseline():
     """
     Adding a scope the Admin Console hasn't authorised breaks *every* call
-    with unauthorized_client, so an optional feature must never widen the
-    baseline grant a working deployment depends on.
+    with unauthorized_client. Every optional pass is on by default and widens
+    the grant; one a tenant has not granted is switched off at run time
+    (fidelity.drop_ungranted), which must put the run back on exactly the
+    baseline a working deployment depends on.
     """
+    import dataclasses
+
+    import fidelity
     from config import Settings, source_scopes, target_scopes
 
-    s = Settings()
+    s = dataclasses.replace(Settings(), **{f: False for f in fidelity.OPTIONAL})
     assert source_scopes(s) == scope_mod.oauth_scopes()["source"]
     assert target_scopes(s) == scope_mod.oauth_scopes()["target"]
 
@@ -398,10 +403,12 @@ def test_server_side_mode_swaps_in_the_drive_write_scope():
     assert "https://www.googleapis.com/auth/drive.readonly" not in scopes
 
 
-def test_gmail_settings_scope_only_when_opted_in():
+def test_gmail_settings_scope_only_when_the_pass_is_on():
+    """On by default now; switched off (or refused by the tenant), the scope goes too."""
     from config import GMAIL_SETTINGS_SCOPE, Settings, source_scopes, target_scopes
 
     s = Settings()
+    s.migrate_gmail_settings = False
     assert GMAIL_SETTINGS_SCOPE not in source_scopes(s)
     assert GMAIL_SETTINGS_SCOPE not in target_scopes(s)
 

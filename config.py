@@ -544,7 +544,7 @@ class Settings:
     # file once per recipient. Default off because on most tenants it is a
     # no-op (zero external-domain owners) and it costs an extra listing.
     migrate_external_shares: bool = field(
-        default_factory=lambda: _env_bool("MIGRATE_EXTERNAL_SHARES", False))
+        default_factory=lambda: _env_bool("MIGRATE_EXTERNAL_SHARES", True))
 
     # Most target tenants start with nothing but the admin account. Without
     # this, migrate discovers that the hard way: every user fails with
@@ -643,7 +643,7 @@ class Settings:
     # Gmail filters need gmail.settings.basic on both tenants, which the
     # baseline grant deliberately does not include. Off unless asked for.
     migrate_gmail_settings: bool = field(
-        default_factory=lambda: _env_bool("MIGRATE_GMAIL_SETTINGS", False)
+        default_factory=lambda: _env_bool("MIGRATE_GMAIL_SETTINGS", True)
     )
     # A Drive URL names a file by id alone -- there is no domain in it -- and
     # files.copy mints a new id, so every Drive link inside migrated mail
@@ -785,7 +785,7 @@ class Settings:
     # in the Cloud console. Original message timestamps cannot be preserved --
     # see chat_engine.py -- so this is a deliberate, documented trade.
     migrate_chat: bool = field(
-        default_factory=lambda: _env_bool("MIGRATE_CHAT", False)
+        default_factory=lambda: _env_bool("MIGRATE_CHAT", True)
     )
     chat_space_mode: str = field(
         default_factory=lambda: os.getenv("CHAT_SPACE_MODE", "import").strip().lower()
@@ -809,16 +809,16 @@ class Settings:
                                               str(8 * 1024 * 1024)))
     )
     migrate_contacts: bool = field(
-        default_factory=lambda: _env_bool("MIGRATE_CONTACTS", False)
+        default_factory=lambda: _env_bool("MIGRATE_CONTACTS", True)
     )
     migrate_tasks: bool = field(
-        default_factory=lambda: _env_bool("MIGRATE_TASKS", False)
+        default_factory=lambda: _env_bool("MIGRATE_TASKS", True)
     )
     # Off by default and deliberately separate from the per-user services:
     # writing an SSO profile changes how *everyone* signs in, including the
     # admin running the migration, and a mistake locks the tenant out.
     migrate_sso: bool = field(
-        default_factory=lambda: _env_bool("MIGRATE_SSO", False)
+        default_factory=lambda: _env_bool("MIGRATE_SSO", True)
     )
     # Creating groups on the target. Reading them needs nothing extra --
     # admin.directory.group.readonly is already in the base scopes, which is
@@ -829,24 +829,24 @@ class Settings:
     # and it failed at token-mint with unauthorized_client rather than
     # anywhere that named the missing scope.
     migrate_groups: bool = field(
-        default_factory=lambda: _env_bool("MIGRATE_GROUPS", False)
+        default_factory=lambda: _env_bool("MIGRATE_GROUPS", True)
     )
     # Secondary calendars: everything beyond 'primary'. Works with the
     # read-only baseline grant.
     migrate_secondary_calendars: bool = field(
-        default_factory=lambda: _env_bool("MIGRATE_SECONDARY_CALENDARS", False)
+        default_factory=lambda: _env_bool("MIGRATE_SECONDARY_CALENDARS", True)
     )
     # Calendar sharing rules. Separate flag because acl.list has no read-only
     # variant -- it needs the full `calendar` scope on the SOURCE tenant, so
     # turning this on gives up source read-only-ness for Calendar.
     migrate_calendar_acls: bool = field(
-        default_factory=lambda: _env_bool("MIGRATE_CALENDAR_ACLS", False)
+        default_factory=lambda: _env_bool("MIGRATE_CALENDAR_ACLS", True)
     )
     # Rooms and equipment, recreated on the target and mapped, so a meeting
     # booked in a room still names one (calendar_resources.py). Directory
     # scopes on both sides, hence a flag of its own.
     migrate_resources: bool = field(
-        default_factory=lambda: _env_bool("MIGRATE_RESOURCES", False)
+        default_factory=lambda: _env_bool("MIGRATE_RESOURCES", True)
     )
 
     # -- quota governance -----------------------------------------------------

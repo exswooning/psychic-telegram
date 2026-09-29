@@ -422,14 +422,14 @@ describe('MigrationDetail: settings for measured runs', () => {
     const call = startMigration.mock.calls[0]
     expect(call[2]).toEqual([])
     expect(call[9]).toEqual({ userWorkers: undefined, driveFileWorkers: undefined,
-                              mappingCacheUserCap: undefined, processes: undefined, fullFidelity: true })
+                              mappingCacheUserCap: undefined, processes: undefined })
   })
 
-  it('full fidelity is on unless it is switched off', async () => {
+  it('offers no way to migrate less than everything', async () => {
+    // Full scope, always: every optional pass is on, and one a tenant has not
+    // granted is switched off by the run itself and named, not by a checkbox.
     await open()
-    fireEvent.click(screen.getByTestId('run-full-fidelity'))
-    await confirm()
-    expect(startMigration.mock.calls[0][9].fullFidelity).toBe(false)
+    expect(screen.queryByTestId('run-full-fidelity')).toBeNull()
   })
 
   it('sends the users and each number that was filled in', async () => {
@@ -442,7 +442,7 @@ describe('MigrationDetail: settings for measured runs', () => {
     const call = startMigration.mock.calls[0]
     expect(call[2]).toEqual(['a@s.test', 'b@s.test'])
     expect(call[9]).toEqual({ userWorkers: undefined, driveFileWorkers: 12, mappingCacheUserCap: 0,
-                              processes: 2, fullFidelity: true })
+                              processes: 2 })
   })
 })
 

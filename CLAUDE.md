@@ -511,12 +511,17 @@ A DMS job survives a webui restart; `_EXT_SCRIPTS` lists it so the Jobs page can
 Before building anything browser-driven here, look for the one-off script that already
 did it (`dms_*.py`, `*_probe.py`) -- the approval was rebuilt once from guesses.
 
-**Full fidelity** (`fidelity.py`, `StartMigration.full_fidelity`, default on): every
-optional pass -- external-owned shares, secondary calendars, groups, Gmail settings,
-calendar ACLs, rooms, comments -- is turned on for a launch only after a token for
-exactly its extra scopes has been minted, because a run mints ONE token for every scope
-and one ungranted scope fails every call. What stayed off, and which scope was missing,
-is in the launch's detail. Groups (before Drive) and rooms (before Calendar) are created
+**Full scope, always** (`fidelity.py`): every optional pass -- external-owned shares,
+secondary calendars, groups, Gmail settings, calendar ACLs, rooms, comments, chat,
+contacts, tasks, SSO profiles -- defaults ON in config.py. A run mints ONE token for every
+scope and one ungranted scope fails every call, so: the launch probes each pass's extra
+scopes and writes it on or off (`plan`, named in the launch detail); the run's own gate
+(`main._gate_on_delegation`) tries scope_guard's unattended re-grant first and otherwise
+switches off only the ungranted passes (`drop_ungranted`, exported to child processes via
+`SCOPE_DROPPED`, which `_enable_selected_services` honours); and every other process's
+`AuthManager` does the same check once before its first credential, in its own settings
+only (never os.environ in the shared API process). There is no switch in the UI to
+migrate less. Groups (before Drive) and rooms (before Calendar) are created
 by the run itself (`main._before_passes`); calendar subscriptions are re-followed after
 the last pass. `verify_scopes.every_toggle_scopes` must list every flag, or no wizard
 grant ever includes its scope.

@@ -19,12 +19,17 @@ from tests.conftest import SRC_USER, TGT_USER
 
 
 class TestOptIn:
-    def test_off_by_default_so_upgrades_do_not_widen_the_grant(self, settings):
+    def test_on_by_default_and_switching_off_drops_the_scopes(self, settings):
+        """Full scope, always -- a tenant that has not granted them gets them
+        switched off at run time (fidelity.drop_ungranted), which must take the
+        scopes out of the request, or every call would fail."""
         from config import (CONTACTS_READONLY_SCOPE, TASKS_READONLY_SCOPE,
                             source_scopes)
 
-        assert settings.migrate_contacts is False
-        assert settings.migrate_tasks is False
+        assert settings.migrate_contacts is True
+        assert settings.migrate_tasks is True
+        assert CONTACTS_READONLY_SCOPE in source_scopes(settings)
+        settings.migrate_contacts = settings.migrate_tasks = False
         scopes = source_scopes(settings)
         assert CONTACTS_READONLY_SCOPE not in scopes
         assert TASKS_READONLY_SCOPE not in scopes

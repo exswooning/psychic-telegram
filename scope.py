@@ -66,7 +66,7 @@ DRIVE_SCOPE = [
     ScopeItem("drive", "Revision / version history", NONE,
               "No API to write revisions. Target files start at revision 1"),
     ScopeItem("drive", "Comments, replies, suggestions", PARTIAL,
-              "Migrated when MIGRATE_COMMENTS=true. The API cannot author a "
+              "On by default (MIGRATE_COMMENTS=false turns it off). The API cannot author a "
               "comment as someone else, so every migrated comment is written "
               "by the target user with the original author and date prefixed "
               "into the text. Suggestions (tracked changes) are not covered"),
@@ -215,7 +215,7 @@ GMAIL_SCOPE = [
               "aren't safe to pattern-match and rewrite. Label add/remove "
               "actions are remapped the same way message labels are"),
     ScopeItem("gmail", "Signatures", PARTIAL,
-              "Migrated when MIGRATE_GMAIL_SETTINGS=true. Addresses inside the "
+              "On by default (MIGRATE_GMAIL_SETTINGS=false turns it off). Addresses inside the "
               "signature that have an identity_map entry are rewritten to their "
               "target equivalents, so a signature no longer advertises a "
               "mailbox on the tenant being decommissioned; addresses without a "
@@ -228,11 +228,11 @@ GMAIL_SCOPE = [
               "Recreate aliases in the target tenant, then re-run with "
               "MIGRATE_GMAIL_SETTINGS=true to attach their signatures"),
     ScopeItem("gmail", "Vacation responder", FULL,
-              "Migrated when MIGRATE_GMAIL_SETTINGS=true, including its "
+              "On by default (MIGRATE_GMAIL_SETTINGS=false turns it off), including its "
               "schedule. Off is the default on a new mailbox, so a "
               "responder that was never enabled copies nothing"),
     ScopeItem("gmail", "Delegates and forwarding addresses", PARTIAL,
-              "Migrated when MIGRATE_GMAIL_SETTINGS=true. Delegate addresses "
+              "On by default (MIGRATE_GMAIL_SETTINGS=false turns it off). Delegate addresses "
               "go through the same identity map as signatures; one with no "
               "target mapping is dropped and counted rather than invented. "
               "Forwarding addresses are recreated but arrive UNVERIFIED by "
@@ -280,7 +280,7 @@ CALENDAR_SCOPE = [
               "Remapped through id_mapping. Dropped if the underlying file has "
               "not migrated — a dead link is worse than none. Migrate Drive first"),
     ScopeItem("calendar", "Secondary calendars owned by the user", FULL,
-              "Migrated when MIGRATE_SECONDARY_CALENDARS=true: each owned "
+              "On by default (MIGRATE_SECONDARY_CALENDARS=false turns it off): each owned "
               "calendar is recreated on the target and its events imported "
               "into it. Only calendars the user OWNS -- a subscribed calendar "
               "belongs to someone else and is left to be re-subscribed"),
@@ -291,7 +291,7 @@ CALENDAR_SCOPE = [
               "where the owner's calendar is shared with the user on the "
               "target -- which MIGRATE_CALENDAR_ACLS carries"),
     ScopeItem("calendar", "Calendar sharing ACLs", PARTIAL,
-              "Migrated when MIGRATE_CALENDAR_ACLS=true, identity-mapped the "
+              "On by default (MIGRATE_CALENDAR_ACLS=false turns it off), identity-mapped the "
               "same way Drive ACLs are and inserted with "
               "sendNotifications=false; unmapped internal users are dropped "
               "and logged rather than leaked. Costs read-only-ness on the "
@@ -346,7 +346,7 @@ IDENTITY_SCOPE = [
 # ======================================================================
 OTHER_SCOPE = [
     ScopeItem("other", "Google Contacts (personal)", PARTIAL,
-              "Migrated when MIGRATE_CONTACTS=true: names, emails, phones, "
+              "On by default (MIGRATE_CONTACTS=false turns it off): names, emails, phones, "
               "organisations, addresses, birthdays, URLs and contact-group "
               "membership, and each contact's own photo (not the drawn letter "
               "avatar). The auto-collected 'Other contacts' list cannot be "
@@ -355,13 +355,13 @@ OTHER_SCOPE = [
               "Not personal data; they come from the target tenant's own "
               "directory once accounts exist"),
     ScopeItem("other", "Google Tasks", PARTIAL,
-              "Migrated when MIGRATE_TASKS=true: lists, tasks, notes, due "
+              "On by default (MIGRATE_TASKS=false turns it off): lists, tasks, notes, due "
               "dates, completion state and parent/child nesting. `updated` is "
               "server-assigned, so every task shows today as last-modified — "
               "cosmetic, since the dates people read (due, completed) survive"),
     ScopeItem("other", "Google Keep", NONE, "Keep API is admin-export only"),
     ScopeItem("other", "Google Chat spaces and messages", PARTIAL,
-              "Migrated when MIGRATE_CHAT=true. Named spaces are recreated in "
+              "On by default (MIGRATE_CHAT=false turns it off). Named spaces are recreated in "
               "import mode and each message is replayed as its ORIGINAL "
               "sender, so a group conversation stays attributable rather than "
               "collapsing into one voice. In import mode each message keeps "

@@ -70,7 +70,6 @@ export const MigrationDetail: React.FC = () => {
   const [mailBy, setMailBy] = useState<MailMode>('split')
   // Start Google's DMS on its own (api_server._start_dms); on unless switched off.
   const [dmsAuto, setDmsAuto] = useState(true)
-  const [fullFidelity, setFullFidelity] = useState(true)
   // '' = the server's own default (config.TRANSFER_MODES via TRANSFER_MODE) --
   // most runs never need to touch this.
   const [transferMode, setTransferMode] = useState<TransferMode | ''>('')
@@ -784,19 +783,6 @@ export const MigrationDetail: React.FC = () => {
                   } />
               </RadioGroup>
             </Box>
-            <Box sx={{ mt: 2 }}>
-              <FormControlLabel
-                control={<Checkbox size="small" checked={fullFidelity}
-                                   onChange={(e) => setFullFidelity(e.target.checked)}
-                                   inputProps={{ 'aria-label': 'full fidelity',
-                                                 'data-testid': 'run-full-fidelity' } as never} />}
-                label={<Typography variant="body2">
-                  <strong>Full fidelity</strong> — also move external-owned shares,
-                  secondary calendars, calendar sharing, groups, rooms, comments and
-                  Gmail settings. Each is turned on only if its permission is granted;
-                  the ones that are not are named when the run starts.
-                </Typography>} />
-            </Box>
             <Box sx={{ mt: 2 }} data-testid="run-full-tuning">
               <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 0.5 }}>
                 For measured runs (leave blank normally)
@@ -844,8 +830,7 @@ export const MigrationDetail: React.FC = () => {
                                            { userWorkers: num(tuneUserWorkers),
                                              driveFileWorkers: num(tuneFileWorkers),
                                              mappingCacheUserCap: num(tuneCacheCap),
-                                             processes: num(tuneProcesses),
-                                             fullFidelity })
+                                             processes: num(tuneProcesses) })
             if (!r.ok) throw new Error(r.detail || 'could not start')
             setAskFull(false)
             setStarted(r.detail || 'migration started')

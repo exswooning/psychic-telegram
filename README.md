@@ -305,9 +305,12 @@ bytes is worse than leaving a drive behind.
 
 ### 2.2 Optional passes
 
-Four things are migrated only when asked for. Each is off by default because
-it either widens the OAuth grant or carries a fidelity caveat worth agreeing
-to explicitly.
+Every optional pass is **on by default** -- a migration moves everything it
+can. Each still widens the OAuth grant, and one scope a tenant has not granted
+would fail every call in a run, so a run first tries to re-grant a missing scope
+unattended and otherwise switches off just that pass and names it (the launch
+message and the run log say which, and which scope). Set a variable to `false`
+to switch a pass off deliberately.
 
 ```bash
 export MIGRATE_COMMENTS=true              # Drive comments + replies
