@@ -1,4 +1,4 @@
-import { createTheme, Shadows, ThemeOptions } from '@mui/material/styles'
+import { alpha, createTheme, Shadows, ThemeOptions } from '@mui/material/styles'
 
 // Google's own tokens, not a generic Material palette -- the exact blue,
 // grays, and type pairing Workspace Admin Console, Gmail, and Search
@@ -94,6 +94,10 @@ const baseOptions: ThemeOptions = {
         // outlined buttons (not a stylistic add-on) -- kept, not softened.
         root: { borderRadius: 999, padding: '9px 20px', fontWeight: 500 },
         contained: { boxShadow: 'none', '&:hover': { boxShadow: 'none' } },
+        // Google's outlined button has a neutral outline whatever its colour;
+        // an orange "Wipe data" and red "Delete users" border on every row
+        // shouted. The text keeps the colour, so destructive still reads.
+        outlined: ({ theme }) => ({ borderColor: theme.palette.divider }),
         sizeSmall: { padding: '6px 14px' },
       },
     },
@@ -105,7 +109,30 @@ const baseOptions: ThemeOptions = {
     },
     MuiChip: {
       styleOverrides: {
-        root: { borderRadius: 999, fontWeight: 500, fontSize: '0.8125rem' },
+        // Google's status chips are TONAL, not saturated: a pale tint of the
+        // colour behind darker text (Admin Console's red is #fce8e6 behind
+        // #c5221f), never white text on solid red. A page of solid red "exit 1"
+        // pills is what read as "ugly". Outlined chips keep their outline --
+        // pages use filled-vs-outlined to mark the active filter -- but it is
+        // the neutral #dadce0, with the colour carried by the text alone.
+        root: ({ ownerState, theme }) => {
+          const key = ownerState.color && ownerState.color !== 'default' ? ownerState.color : null
+          const c = key ? theme.palette[key] : null
+          const dark = theme.palette.mode === 'dark'
+          const ink = c ? (dark ? c.main : c.dark) : theme.palette.text.primary
+          const base = { borderRadius: 999, fontWeight: 500, fontSize: '0.75rem', height: 24, color: ink }
+          if (ownerState.variant === 'outlined') {
+            return { ...base, borderColor: theme.palette.divider, backgroundColor: 'transparent' }
+          }
+          return {
+            ...base,
+            border: 'none',
+            backgroundColor: c ? alpha(c.main, dark ? 0.24 : 0.12)
+                               : (dark ? alpha('#e8eaed', 0.12) : '#f1f3f4'),
+          }
+        },
+        icon: { color: 'inherit' },
+        deleteIcon: { color: 'inherit', opacity: 0.7 },
       },
     },
     MuiTableCell: {
