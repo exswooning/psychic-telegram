@@ -346,9 +346,10 @@ ACTIONS: dict[str, dict] = {
         # ledger. The repo-root identities.csv it used to name is the seeder's
         # file for whichever tenants were seeded last -- on the live box, a
         # different account's target domain. --watch: wait for the source
-        # admin's approval instead of stopping at Step 1.
+        # admin's approval instead of stopping at Step 1. --until-done: then
+        # wait for the import to finish and tally both tenants.
         "argv": [PY, "dms_migrate.py", "--apply", "--watch", "720",
-                 "--timeout", "200"],
+                 "--until-done", "4320", "--timeout", "200"],
         "browser": True,        # needs DISPLAY + DWD creds
         "parallel": True,       # exempt from the one-heavy-job admission
         "destructive": True,
@@ -2814,6 +2815,20 @@ def seed_argv(body: dict, account_id: int | None = None) -> tuple[list[str], dic
     return argv, _seed_env(st, account_id), ""
 
 
+def _user_args(body: dict) -> list[str]:
+    """`users` (a list, or one comma-separated string, of SOURCE addresses) as
+    --user flags. Both reset scripts already take them; resetting only the
+    users under test is minutes where a whole tenant is hours."""
+    users = body.get("users") or []
+    if isinstance(users, str):
+        users = users.split(",")
+    out: list[str] = []
+    for u in users:
+        if str(u).strip():
+            out += ["--user", str(u).strip()]
+    return out
+
+
 def reset_target_argv(body: dict, account_id: int | None = None) -> tuple[list[str], dict, str]:
     """
     Build the reset_target command, or return why it must not run.
@@ -2854,6 +2869,7 @@ def reset_target_argv(body: dict, account_id: int | None = None) -> tuple[list[s
     services = body.get("services")
     if services:
         argv += ["--services", services if isinstance(services, str) else ",".join(services)]
+    argv += _user_args(body)
     env = gcloud_env()
     env["SANDBOX_MODE"] = "true"
     if account_id is not None:
@@ -3000,6 +3016,7 @@ def reset_drive_ledger_argv(body: dict, account_id: int | None = None) -> tuple[
     services = body.get("services")
     if services:
         argv += ["--services", services if isinstance(services, str) else ",".join(services)]
+    argv += _user_args(body)
     env = dict(os.environ)
     if account_id is not None:
         env.update(SOURCE_DOMAIN=st.source_domain, MIGRATION_DB=st.db_path)

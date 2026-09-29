@@ -848,11 +848,15 @@ export const fetchStorageSummary = (accountId?: number) =>
 export async function runResetTarget(
   confirmDomain: string,
   accountId?: number,
+  // Blank = every mapped user and every service, as before.
+  only?: { users?: string; services?: string },
 ): Promise<SeedResult> {
   const res = await fetch('/api/reset_target', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ confirm_domain: confirmDomain, account_id: accountId }),
+    body: JSON.stringify({ confirm_domain: confirmDomain, account_id: accountId,
+                           users: only?.users || undefined,
+                           services: only?.services || undefined }),
   })
   return res.json()
 }
@@ -897,7 +901,7 @@ export async function runWipeTarget(
  *  in webui.py: it operates on source_email keys regardless of which
  *  tenant's files were actually wiped). */
 export async function runResetDriveLedger(
-  confirmDomain: string, services?: string, accountId?: string
+  confirmDomain: string, services?: string, accountId?: string, users?: string
 ): Promise<SeedResult> {
   const res = await fetch('/api/reset_drive_ledger', {
     method: 'POST',
@@ -907,7 +911,8 @@ export async function runResetDriveLedger(
     // which came back "set the source domain in step 2 first" rather than
     // saying the account was wrong.
     body: JSON.stringify({ confirm_domain: confirmDomain, services,
-                           account_id: accountId || null }),
+                           account_id: accountId || null,
+                           users: users || undefined }),
   })
   return res.json()
 }

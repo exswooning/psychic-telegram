@@ -758,8 +758,10 @@ const SeedStep: React.FC<{ domain?: string; accountId?: number }> =
  * re-checks it before building the command, and reset_target.py's own guard
  * checks a third time regardless.
  */
-const ResetTargetStep: React.FC<{ domain?: string }> = ({ domain }) => {
+export const ResetTargetStep: React.FC<{ domain?: string }> = ({ domain }) => {
   const [confirmDomain, setConfirmDomain] = useState('')
+  const [users, setUsers] = useState('')
+  const [services, setServices] = useState('')
   const [err, setErr] = useState<string | null>(null)
   const [queued, setQueued] = useState<string | null>(null)
   const [confirmOpen, setConfirmOpen] = useState(false)
@@ -770,7 +772,7 @@ const ResetTargetStep: React.FC<{ domain?: string }> = ({ domain }) => {
     setConfirmOpen(false)
     setErr(null)
     setJobActive(false)
-    const r = await runResetTarget(confirmDomain)
+    const r = await runResetTarget(confirmDomain, undefined, { users, services })
     // A queued run has no live output to watch yet -- turning JobProgress
     // on for one shows an empty transcript that reads as a stalled job.
     if (r.ok && !r.queued) setJobActive(true)
@@ -794,8 +796,25 @@ const ResetTargetStep: React.FC<{ domain?: string }> = ({ domain }) => {
           />
         </Grid>
         <Grid item xs={12} sm={4}>
+          <TextField
+            fullWidth size="small" label="Only these source users (optional)"
+            placeholder="a@src.com, b@src.com"
+            value={users} onChange={(e) => setUsers(e.target.value)}
+            inputProps={{ 'data-testid': 'reset-users' }}
+          />
+        </Grid>
+        <Grid item xs={12} sm={3}>
+          <TextField
+            fullWidth size="small" label="Only these services (optional)"
+            placeholder="drive"
+            value={services} onChange={(e) => setServices(e.target.value)}
+            inputProps={{ 'data-testid': 'reset-services' }}
+          />
+        </Grid>
+        <Grid item xs={12} sm={4}>
           <Button
             color="error" variant="outlined" size="small"
+            data-testid="reset-target"
             disabled={!confirmDomain || jobRunning}
             onClick={() => setConfirmOpen(true)}
           >
@@ -812,14 +831,16 @@ const ResetTargetStep: React.FC<{ domain?: string }> = ({ domain }) => {
         <DialogContent>
           <Typography variant="body2">
             This deletes the seeded Drive files, mail, calendar events and chat
-            spaces reset_target.py can find for every mapped user in this
-            tenant. It does not touch the source tenant or the migration
-            ledger.
+            spaces reset_target.py can find for {users.trim()
+              ? <strong>{users.trim()}</strong> : 'every mapped user in this tenant'}
+            {services.trim() ? <> ({services.trim()} only)</> : null}. It does
+            not touch the source tenant or the migration ledger.
           </Typography>
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setConfirmOpen(false)}>Cancel</Button>
-          <Button color="error" variant="contained" onClick={start}>
+          <Button color="error" variant="contained" onClick={start}
+                  data-testid="reset-target-go">
             Empty {confirmDomain}
           </Button>
         </DialogActions>

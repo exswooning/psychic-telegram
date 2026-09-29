@@ -1,5 +1,7 @@
 """The DMS import must run parallel to the migration and never take mail's
 place in the engine run."""
+import pytest
+
 import webui
 
 
@@ -106,3 +108,75 @@ def test_a_map_for_another_domain_is_refused_before_google_sees_it(monkeypatch, 
     monkeypatch.setattr(dms_migrate, "start",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("reached Google")))
     assert dms_migrate.main(["--apply", "--identities", str(wrong)]) == 2
+
+
+class _Loc:
+    def __init__(self, seen):
+        self.first, self._seen = self, seen
+
+    def wait_for(self, **kw):
+        if not self._seen:
+            raise TimeoutError
+
+
+class _Console:
+    """Just enough of a page for _find_first: which selectors are on it."""
+    def __init__(self, *shown):
+        self.shown = shown
+
+    def locator(self, sel):
+        return _Loc(any(t in sel for t in self.shown))
+
+
+def test_a_connection_it_just_requested_keeps_the_watch_going():
+    """It requested the connection, did Steps 2-3, found Start import disabled
+    and exited -- so nobody pressed Start import after the approval came."""
+    import dms_migrate
+    step, _ = dms_migrate._start_blocked(_Console(dms_migrate.STEP1_PENDING))
+    assert step == "step1-pending"
+    step, detail = dms_migrate._start_blocked(_Console())
+    assert step == "step4-start" and "still disabled" in detail
+
+
+def test_a_finished_import_is_tallied(monkeypatch):
+    import subprocess
+    import dms_migrate
+    reads = iter(["In progress", "complete"])
+    monkeypatch.setattr(dms_migrate, "status", lambda *a: {"status": next(reads)})
+    monkeypatch.setattr(dms_migrate.time, "sleep", lambda s: None)
+    calls = []
+    monkeypatch.setattr(subprocess, "call", lambda argv, **kw: calls.append(argv) or 0)
+    assert dms_migrate.wait_then_tally(60, 10, False) == 0
+    assert calls and calls[0][1] == "tally.py"
+
+
+def test_an_import_still_running_at_the_deadline_is_not_tallied(monkeypatch):
+    import subprocess
+    import dms_migrate
+    now = [1000.0]
+    monkeypatch.setattr(dms_migrate.time, "time", lambda: now[0])
+    monkeypatch.setattr(dms_migrate.time, "sleep", lambda s: now.__setitem__(0, now[0] + s))
+    monkeypatch.setattr(dms_migrate, "status", lambda *a: {"status": "In progress"})
+    monkeypatch.setattr(subprocess, "call", lambda *a, **k: pytest.fail("tallied early"))
+    assert dms_migrate.wait_then_tally(30, 10, False) == 1
+
+
+@pytest.mark.parametrize("started, waited", [(True, True), (False, False)])
+def test_it_waits_only_for_an_import_that_started(monkeypatch, started, waited):
+    import dms_migrate
+    monkeypatch.delenv("TARGET_DOMAIN", raising=False)
+    monkeypatch.setattr(dms_migrate, "start", lambda *a, **k: {
+        "ok": True, "step": "step4-start", "detail": "", "did": [], "manual": "",
+        "started": started})
+    seen = []
+    monkeypatch.setattr(dms_migrate, "wait_then_tally", lambda *a: seen.append(a) or 0)
+    dms_migrate.main(["--apply", "--until-done", "5", "--identities", "none.csv"])
+    assert bool(seen) is waited
+
+
+def test_both_launchers_wait_for_the_finish():
+    argv = webui.ACTIONS["dms_import"]["argv"]
+    assert "--until-done" in argv
+    import api_server
+    import inspect
+    assert '"--until-done"' in inspect.getsource(api_server._start_dms)

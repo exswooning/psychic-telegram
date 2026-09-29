@@ -1572,7 +1572,8 @@ def _start_dms(account_id: int | None, *, require_clean: bool, why: str) -> tupl
     csv_path, n = _export_identities_csv(account_id)
     if not n:
         return decline("there are no users to map")
-    argv = [PY, "dms_migrate.py", "--apply", "--watch", "720", "--timeout", "200", "--identities", csv_path,
+    argv = [PY, "dms_migrate.py", "--apply", "--watch", "720", "--until-done", "4320", "--timeout", "200",
+            "--identities", csv_path,
             "--source-domain", st.source_domain, "--target-admin", st.target_admin]
     if st.source_admin:
         argv += ["--source-admin", st.source_admin]

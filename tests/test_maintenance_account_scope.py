@@ -85,3 +85,32 @@ class TestTheResetItselfStaysAccountScoped:
         assert err == ""
         assert argv[argv.index("--services") + 1] == \
             "drive,gmail,calendar,chat,contacts,tasks"
+
+
+class TestResettingOnlyTheUsersUnderTest:
+    """A perf test re-runs a few users; emptying the whole tenant between
+    settings is hours, these users alone is minutes."""
+
+    def test_both_resets_pass_the_users_on(self, monkeypatch):
+        import config
+        import domain_guard
+
+        class _S:
+            def __init__(self, account_id=None):
+                self.source_domain = "src.example.com"
+                self.target_domain = "tgt.example.com"
+                self.target_admin = "admin@tgt.example.com"
+                self.target_sa_key = "k.json"
+                self.db_path = "/tmp/x.db"
+
+        monkeypatch.setattr(config, "Settings", _S)
+        monkeypatch.setattr(domain_guard, "refuse_reason", lambda *a, **k: "")
+        argv, _, err = webui.reset_target_argv(
+            {"confirm_domain": "tgt.example.com", "users": "a@src.example.com, b@src.example.com"}, 3)
+        assert err == "" and argv[-4:] == ["--user", "a@src.example.com", "--user", "b@src.example.com"]
+        argv, _, err = webui.reset_drive_ledger_argv(
+            {"confirm_domain": "src.example.com", "users": ["a@src.example.com"]}, 3)
+        assert err == "" and argv[-2:] == ["--user", "a@src.example.com"]
+
+    def test_no_users_still_means_everyone(self):
+        assert webui._user_args({}) == [] and webui._user_args({"users": " , "}) == []

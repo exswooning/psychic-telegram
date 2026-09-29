@@ -680,19 +680,20 @@ def start(source_domain: str, source_admin: str, timeout: int,
                 delta.click()
                 page.wait_for_timeout(5000)
                 result["ok"] = True
+                result["started"] = True
                 result["detail"] = "delta import started (continues the mail)"
                 result["did"].append("pressed Run delta import")
                 return result
             result["detail"] = f"no {STEP4_BUTTON!r} button found"
             result["ok"] = True     # everything up to here did happen
+            # No Start button because an import is already running: there is
+            # still a finish to wait for.
+            result["started"] = read_metrics(page)["status"] == "In progress"
             return result
         if not go.is_enabled():
             page.screenshot(path="/tmp/dms_step4_disabled.png", full_page=True)
             result["ok"] = True
-            result["detail"] = (
-                f"{STEP4_BUTTON!r} still disabled after Steps 1-3 -- see "
-                "/tmp/dms_step4_disabled.png for which field the console is "
-                "still waiting on.")
+            result["step"], result["detail"] = _start_blocked(page)
             return result
         if dry_run:
             result["ok"] = True
@@ -702,6 +703,7 @@ def start(source_domain: str, source_admin: str, timeout: int,
         go.click()
         page.wait_for_timeout(5000)
         result["ok"] = True
+        result["started"] = True
         result["detail"] = "import started"
         result["did"].append("pressed " + STEP4_BUTTON)
         return result
@@ -716,6 +718,48 @@ def start(source_domain: str, source_admin: str, timeout: int,
                 pass
 
 
+def _start_blocked(page) -> tuple[str, str]:
+    """Why Start import is still disabled after Steps 1-3, as (step, detail).
+
+    A connection this very run requested is still pending when it gets here,
+    and that is what Start import waits on. Reported as step1-pending so
+    --watch keeps checking and presses Start import once it is approved --
+    it used to exit here, having asked for approval and never started.
+    """
+    if _find_first(page, [f'text="{STEP1_PENDING}"'], timeout_ms=3000) is not None:
+        return "step1-pending", ("Steps 2-3 are done; Start import waits on the "
+                                 "source super admin approving the connection")
+    return "step4-start", (f"{STEP4_BUTTON!r} still disabled after Steps 1-3 -- see "
+                           "/tmp/dms_step4_disabled.png for which field the console "
+                           "is still waiting on.")
+
+
+# How often to read a running import. Each read is a fresh sign-in, and an
+# import runs for hours, so this is slow on purpose.
+DONE_POLL_SEC = 900
+
+
+def wait_then_tally(minutes: int, timeout: int, headful: bool) -> int:
+    """Read the import's status until Google says it has stopped running, then
+    tally both tenants (tally.py, every user) so the result is counted without
+    anyone asking. Each read also refreshes the cached metrics the UI shows.
+    Gives up, without tallying, at the deadline."""
+    import subprocess
+
+    deadline = time.time() + minutes * 60
+    while time.time() < deadline:
+        time.sleep(min(DONE_POLL_SEC, max(deadline - time.time(), 0)))
+        got = status(timeout, headful)
+        state = got.get("status", "unknown")
+        log(f"import status: {state} {got.get('metrics') or ''}")
+        if state in ("complete", "Stopped"):
+            log("the import has finished -- tallying both tenants")
+            return subprocess.call([sys.executable, "tally.py"],
+                                   cwd=os.path.dirname(os.path.abspath(__file__)))
+    log(f"gave up after {minutes} minutes; the import had not finished")
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--source-domain", default=os.getenv("SOURCE_DOMAIN", ""))
@@ -726,6 +770,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--watch", type=int, default=0, metavar="MINUTES",
                     help="keep checking until the source admin approves the "
                          "connection, then finish the setup unattended")
+    ap.add_argument("--until-done", type=int, default=0, metavar="MINUTES",
+                    help="once the import is running, wait for Google to finish "
+                         "it, then tally both tenants")
     ap.add_argument("--watch-interval", type=int, default=300,
                     help="seconds between checks (default 300)")
     ap.add_argument("--identities", default="",
@@ -796,6 +843,8 @@ def main(argv: list[str] | None = None) -> int:
               f"{out['detail']}")
         if not out["ok"]:
             print(out["manual"])
+    if args.until_done and out.get("started"):
+        return wait_then_tally(args.until_done, args.timeout, args.headful)
     return 0 if out["ok"] else 1
 
 

@@ -87,6 +87,7 @@ const ResetDriveLedgerCard: React.FC = () => {
   const [domain, setDomain] = useState('')
   const [confirmDomain, setConfirmDomain] = useState('')
   const [services, setServices] = useState('')
+  const [users, setUsers] = useState('')
   const [account, setAccount] = useState('')
   const [err, setErr] = useState<string | null>(null)
   const [ok, setOk] = useState(false)
@@ -98,7 +99,7 @@ const ResetDriveLedgerCard: React.FC = () => {
   const run = async () => {
     setErr(null); setOk(false)
     const r = await runResetDriveLedger(confirmDomain, services || undefined,
-                                        account || undefined)
+                                        account || undefined, users || undefined)
     if (r.ok) setOk(true)
     else setErr(r.error || 'could not start')
   }
@@ -124,6 +125,12 @@ const ResetDriveLedgerCard: React.FC = () => {
             size="small" label="Services (optional, e.g. drive)"
             value={services} onChange={(e) => setServices(e.target.value)}
             sx={{ width: 220 }}
+          />
+          <TextField
+            size="small" label="Only these source users (optional)"
+            value={users} onChange={(e) => setUsers(e.target.value)}
+            inputProps={{ 'data-testid': 'ledger-users' }}
+            sx={{ width: 280 }}
           />
           <TenantSelect value={account} onChange={setAccount} width={280} />
           <Button variant="outlined" color="warning" disabled={!confirmDomain} onClick={run}>
