@@ -17,6 +17,7 @@ walks through many users over a long run.
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from typing import Any
@@ -24,7 +25,7 @@ from typing import Any
 import google_auth_httplib2
 import httplib2
 from google.oauth2 import service_account
-from googleapiclient.discovery import build
+from googleapiclient.discovery import build, build_from_document
 
 from config import Settings, source_scopes, target_scopes
 
@@ -36,6 +37,48 @@ _API_VERSIONS = {"drive": "v3", "gmail": "v1", "calendar": "v3",
                  # is too large to export. Read-only on the source -- see
                  # native_api.py.
                  "sheets": "v4", "docs": "v1", "slides": "v1"}
+
+
+# One parsed discovery document per API, shared by every client built from it.
+#
+# build() parses the bundled document afresh for every client: measured 0.55 MB
+# per Drive client, against 0.01 MB built from a shared parsed copy. A live run
+# holds ~600 clients at once (per-thread caches across ~300 threads), and
+# tracemalloc put ~300 MiB of a 2.4 GB run in exactly these parses.
+#
+# Sharing is only safe because of the warm-up. googleapiclient WRITES into the
+# document the first time each nested resource's methods are built
+# (_fix_up_parameters: parameters[name] = ..., "body", "media_body") -- lazily,
+# when a thread first calls e.g. .permissions(). Two threads doing that first
+# touch at once would insert keys under each other's iteration. So every nested
+# resource is built once, under the lock, BEFORE the document is published;
+# after that, building another client only overwrites existing keys with equal
+# values, which never resizes a dict (tests/test_shared_discovery.py pins it).
+_DISCOVERY: dict[tuple[str, str], dict] = {}
+_DISCOVERY_LOCK = threading.Lock()
+
+
+def _warm(resource, desc: dict) -> None:
+    for name, sub in (desc.get("resources") or {}).items():
+        _warm(getattr(resource, name)(), sub)
+
+
+def shared_discovery_doc(api: str, version: str) -> dict | None:
+    key = (api, version)
+    doc = _DISCOVERY.get(key)
+    if doc is not None:
+        return doc
+    with _DISCOVERY_LOCK:
+        doc = _DISCOVERY.get(key)
+        if doc is None:
+            from googleapiclient import discovery_cache
+            content = discovery_cache.get_static_doc(api, version)
+            if content is None:
+                return None           # no bundled copy: build() as before
+            doc = json.loads(content)
+            _warm(build_from_document(doc, http=httplib2.Http()), doc)
+            _DISCOVERY[key] = doc
+    return doc
 
 
 class AuthManager:
@@ -189,7 +232,9 @@ class AuthManager:
         # static_discovery is left at its default: with no discoveryServiceUrl
         # set, the client already resolves that to True and uses the bundled
         # document, so there is no network fetch to avoid here.
-        svc = build(api, _API_VERSIONS[api], http=http, cache_discovery=False)
+        doc = shared_discovery_doc(api, _API_VERSIONS[api])
+        svc = (build_from_document(doc, http=http) if doc is not None
+               else build(api, _API_VERSIONS[api], http=http, cache_discovery=False))
 
         while len(cache) >= self._SERVICE_CACHE_MAX:
             # dicts are insertion-ordered, and a hit re-inserts its key above,
