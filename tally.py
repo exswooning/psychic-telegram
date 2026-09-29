@@ -104,9 +104,13 @@ def compare_drive(src: dict, tgt: dict, mapping: dict, examples: int = 10) -> di
             continue
         diffs = [] if s.get("name") == t.get("name") else ["name"]
         if s.get("mimeType") != FOLDER_MIME:
-            for f in ("size", "md5Checksum"):
-                if s.get(f) and s.get(f) != t.get(f):
-                    diffs.append(f)
+            # Size and checksum only for a file with bytes: a native Doc/Sheet
+            # reports its storage as size, which legitimately differs between a
+            # file and its copy (live: 1024 vs 1053 on identical documents).
+            if s.get("md5Checksum"):
+                for f in ("size", "md5Checksum"):
+                    if s.get(f) != t.get(f):
+                        diffs.append(f)
             if (s.get("modifiedTime") or "")[:19] != (t.get("modifiedTime") or "")[:19]:
                 diffs.append("modifiedTime")
         if diffs:

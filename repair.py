@@ -449,6 +449,63 @@ def retry_failed_shared_drives(auth, db, settings, apply: bool = False) -> int:
     return fixed
 
 
+def fix_modified_times(auth, db, settings, apply: bool = False,
+                       workers: int = 8) -> dict:
+    """Put back the modifiedTime of every migrated Drive item whose copy carries
+    another -- a drift no failure row records, so it has to be looked for.
+
+    Found by the item-by-item tally: a quarter of one 300-user run's files, native
+    Docs/Sheets copied server-side, kept the copy's time. Listing both sides is
+    what the tally already pays (a page per 1,000 items, not a call per file),
+    then only the drifted items are written. Users side by side; each patch
+    spends that user's own quota. Never raises.
+    """
+    import tally
+    from concurrent.futures import ThreadPoolExecutor
+
+    from resilience import retry_on_google_error
+
+    out = {"checked": 0, "drifted": 0, "fixed": 0, "failed": 0}
+    pairs = [(r["source_email"], r["target_email"]) for r in db.all_identities()
+             if r["entity_type"] == "user" and r["status"] == "DONE"]
+
+    def one(pair) -> dict:
+        got = {"checked": 0, "drifted": 0, "fixed": 0, "failed": 0}
+        try:
+            src_items, tgt_items = {}, {}
+            tally.count_drive(auth.source_drive(pair[0]), settings, keep=src_items)
+            tally.count_drive(auth.target_drive(pair[1]), settings, keep=tgt_items)
+            tgt = auth.target_drive(pair[1])
+            for sid, tid in db.mapped_ids(pair[0], ("file", "folder")).items():
+                s, t = src_items.get(sid), tgt_items.get(tid)
+                if not s or not t:
+                    continue
+                got["checked"] += 1
+                want = s.get("modifiedTime") or ""
+                if not want or want[:19] == (t.get("modifiedTime") or "")[:19]:
+                    continue
+                got["drifted"] += 1
+                if not apply:
+                    continue
+                try:
+                    retry_on_google_error(max_retries=settings.max_retries)(
+                        lambda f=tid, m=want: tgt.files().update(
+                            fileId=f, body={"modifiedTime": m}, supportsAllDrives=True,
+                            fields="id").execute())()
+                    got["fixed"] += 1
+                except Exception:      # noqa: BLE001 - a locked file, a deleted one
+                    got["failed"] += 1
+        except Exception as exc:      # noqa: BLE001
+            log.warning("[%s] modifiedTime check failed: %s", pair[0], exc)
+        return got
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        for got in pool.map(one, pairs):
+            for k, v in got.items():
+                out[k] += v
+    return out
+
+
 def run_all(db, auth, settings, apply: bool = False,
             reconcile_limit: int | None = None,
             reapply_passes: int = 6) -> dict:
@@ -474,6 +531,12 @@ def run_all(db, auth, settings, apply: bool = False,
     worse than no repair pass.
     """
     out = {"survey": {}, "resolved": 0, "reconciled": 0, "errors": []}
+    # Before the failure survey, and whatever it finds: a copy carrying the wrong
+    # modifiedTime is not a failure row, so a run with none still needs this.
+    try:
+        out["mtimes"] = fix_modified_times(auth, db, settings, apply=apply)
+    except Exception as exc:      # noqa: BLE001
+        out["errors"].append(f"modifiedTime: {str(exc)[:160]}")
     try:
         out["survey"] = survey(db)
     except Exception as exc:      # noqa: BLE001
@@ -592,9 +655,14 @@ def run_all(db, auth, settings, apply: bool = False,
 def summarise(result: dict) -> str:
     """One line per thing that happened, for a migration's closing log."""
     s = result.get("survey") or {}
+    m = result.get("mtimes") or {}
+    times = (f"{m['fixed']:,} of {m['drifted']:,} drifted modified time(s) put back"
+             if m.get("drifted") else "")
     if not s.get("total"):
-        return "no failed items recorded"
+        return "; ".join(p for p in ("no failed items recorded", times) if p)
     parts = [f"{s['total']:,} failed item(s)"]
+    if times:
+        parts.append(times)
     if result.get("resolved"):
         parts.append(f"{result['resolved']:,} resolved (grantee recreated)")
     if result.get("reconciled"):

@@ -1514,10 +1514,10 @@ class DriveMigrator:
         # Set here, as the target user, in the move it already makes: no extra call.
         move_body.update(carried_metadata(item))
         try:
-            with_carried_fallback(lambda b: self._retry(lambda: self.tgt.files().update(
+            moved = with_carried_fallback(lambda b: self._retry(lambda: self.tgt.files().update(
                 fileId=copy_id, addParents=tgt_parent,
                 removeParents=self._staging_drive_id,
-                body=b or None, supportsAllDrives=True, fields="id",
+                body=b or None, supportsAllDrives=True, fields="id,modifiedTime",
             ).execute(), label="drive.files.move"), move_body)
         except (PermanentAPIError, RuntimeError) as exc:
             if size:
@@ -1545,7 +1545,15 @@ class DriveMigrator:
         self.db.log_audit(self.source_user, item["id"], "file", "SUCCESS",
                           modified_time=item.get("modifiedTime"), bytes_moved=size)
         self._bump("files")
-        self._finish_item(item, copy_id)
+        # Found by the item-by-item tally: a native Doc/Sheet copied server-side
+        # keeps the COPY's time whatever the copy and the move ask for (live: a
+        # quarter of files on a 300-user run, every one unshared and uncommented,
+        # so nothing after the move ever restored it). The move says what Drive
+        # kept -- free, already asked for -- so a mismatch forces the restore.
+        kept = (moved or {}).get("modifiedTime") or ""
+        want = item.get("modifiedTime") or ""
+        self._finish_item(item, copy_id,
+                          force_mtime_restore=bool(want and kept and kept[:19] != want[:19]))
 
     def _sync_binary(self, item: dict, tgt_parent: str) -> None:
         size = int(item.get("size") or 0)

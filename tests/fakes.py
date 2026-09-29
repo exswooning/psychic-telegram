@@ -542,8 +542,11 @@ class _DriveFiles:
             new_meta["md5Checksum"] = hashlib.md5(data).hexdigest()
             result["md5Checksum"] = new_meta["md5Checksum"]
         if fileId in src.exports:
-            # Native stays native -- no OOXML round trip.
+            # Native stays native -- no OOXML round trip. And, measured live on a
+            # 300-user run, a native copy keeps the COPY's time whatever the copy
+            # asks for (the item-by-item tally found a quarter of files like this).
             dest.exports[new_id] = src.exports[fileId]
+            new_meta["modifiedTime"] = NATIVE_IMPORT_TIME
         dest.store[new_id] = new_meta
         return result
 
@@ -556,8 +559,11 @@ class _DriveFiles:
         if fileId not in self.s.store:
             raise http_error(404, "notFound", fileId)
         meta = self.s.store[fileId]
+        # The move out of staging does not take a native file's modifiedTime
+        # either (live); a plain update afterwards does.
+        moving_native = bool(removeParents) and fileId in self.s.exports
         for k in ("name", "modifiedTime", "description", "starred"):
-            if body and k in body:
+            if body and k in body and not (k == "modifiedTime" and moving_native):
                 meta[k] = body[k]
 
         # Re-parenting. Moving out of a shared drive is what confers real
@@ -575,7 +581,7 @@ class _DriveFiles:
                 meta["driveId"] = None
                 meta["owners"] = [{"emailAddress": self.s.owner}]
 
-        result = {"id": fileId}
+        result = {"id": fileId, "modifiedTime": meta.get("modifiedTime")}
         if media_body is not None:
             data = media_body.read_all()
             if str(meta.get("mimeType", "")).startswith(
