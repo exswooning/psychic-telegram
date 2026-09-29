@@ -1409,7 +1409,12 @@ from fleet_agent import MAIN_COMMANDS as _EXT_MAIN_CMDS
 _EXT_SCRIPTS = {"seed_sandbox.py": "seed", "reset_target.py": "reset target",
                 "deploy_remote.py": "deploy", "verify.py": "verify",
                 "resolve_failures.py": "resolve-failures",
-                "phases.py": "phases"}
+                "phases.py": "phases",
+                # Listed so it can be STOPPED: a whole-account user tally
+                # counts every item on both tenants (~6 h for 300 users) and
+                # holds the account's only job slot the whole time, and the
+                # Stop endpoint refuses any pid this function does not list.
+                "tally.py": "user-tally"}
 # Last-seen output tail per external pid, for the suffix-diff that turns the
 # unbounded migration.log into the same "just the new lines" contract the
 # webui-launched Job streams.
