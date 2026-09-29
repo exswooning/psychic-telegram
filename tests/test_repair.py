@@ -1156,3 +1156,14 @@ class TestAStaleServiceFailureIsResolved:
         st = d.conn.execute("SELECT item_type, status FROM audit_log ORDER BY item_type").fetchall()
         assert [tuple(r) for r in st] == [("drive", "SKIPPED_USER_LATER_MIGRATED"), ("gmail", "FAILED")]
         d.close()
+
+
+class TestANoAddressMemberFailureIsRefiled:
+    def test_the_empty_key_row_becomes_a_decision(self, tmp_path):
+        d = dbmod.MigrationDB(str(tmp_path / "m.db"))
+        d.log_audit("admin@src", "", "shared_drive_member", "FAILED",
+                    "400 The specified emailAddress is invalid")
+        repair.run_all(d, None, None, apply=True)
+        assert d.conn.execute("SELECT status FROM audit_log WHERE item_type="
+                              "'shared_drive_member'").fetchone()[0] == "SKIPPED_UNMAPPED_IDENTITY"
+        d.close()

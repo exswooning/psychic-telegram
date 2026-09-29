@@ -607,6 +607,18 @@ class TestExternalMembersKeepTheirAccess:
         assert sd.stats["unmapped_members"] == 1
         assert sd.stats["external_members"] == 0
 
+    def test_a_member_with_no_address_is_a_deleted_account_not_a_failure(self, sd, db):
+        """Live: SEEDED-SD-3 had a reader with a blank emailAddress. It fell into
+        the external branch, was granted to "", and stayed the run's last FAILED
+        row under an empty key. Same rule drive_engine._sync_acls already had."""
+        got = self._grant(sd, [{"id": "p9", "type": "user", "role": "reader", "emailAddress": ""}])
+
+        assert got == {}                      # nothing sent to Google
+        assert sd.stats["external_members"] == 0 and sd.stats["failed"] == 0
+        row = db.conn.execute("SELECT item_id, status FROM audit_log "
+                              "WHERE item_type='shared_drive_member'").fetchone()
+        assert (row["item_id"], row["status"]) == ("drv-1:p9", "SKIPPED_UNMAPPED_IDENTITY")
+
     def test_the_role_survives_for_an_external_member(self, sd):
         """Dropping them to reader would quietly demote a partner who had
         edit rights."""

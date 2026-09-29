@@ -344,6 +344,18 @@ class SharedDriveMigrator:
                 self._bump("skipped", 1)
                 continue
             email = (p.get("emailAddress") or "").lower()
+            if not email:
+                # Same guard drive_engine._sync_acls has for per-file grants: a
+                # member with no address is a deleted account's leftover. It fell
+                # into the external branch below, was granted to "", and sat as
+                # the run's last FAILED row (SEEDED-SD-3, a reader) under an
+                # empty key nobody could trace.
+                self.db.log_audit(self.admin_user, f"{src_id}:{p.get('id') or '(no-email)'}",
+                                  "shared_drive_member", "SKIPPED_UNMAPPED_IDENTITY",
+                                  f"member has no emailAddress (likely a deleted account); "
+                                  f"role={p.get('role')} on {name}")
+                self._bump("skipped", 1)
+                continue
             mapped = self.db.resolve_identity(email)
             if mapped:
                 grantee = mapped

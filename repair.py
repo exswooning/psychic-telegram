@@ -510,6 +510,19 @@ def run_all(db, auth, settings, apply: bool = False,
         except Exception as exc:      # noqa: BLE001
             out["errors"].append(f"user rollup: {str(exc)[:160]}")
 
+    # A shared-drive member FAILED under an empty key is the pre-fix no-address
+    # case (a deleted account's leftover grant, sent to Google as ""). No run
+    # can ever overwrite an empty key, so without this it reads as a failure
+    # forever -- live, the last FAILED row on account 3.
+    if apply:
+        for r in db.conn.execute(
+                "SELECT source_user FROM audit_log WHERE item_type='shared_drive_member' "
+                "AND status='FAILED' AND item_id=''").fetchall():
+            db.log_audit(r["source_user"], "", "shared_drive_member",
+                         "SKIPPED_UNMAPPED_IDENTITY",
+                         "member had no emailAddress (a deleted account); recorded as "
+                         "FAILED before shared_drives skipped these")
+
     if out["survey"].get("shared_drives"):
         try:
             out["shared_drives_retried"] = retry_failed_shared_drives(
