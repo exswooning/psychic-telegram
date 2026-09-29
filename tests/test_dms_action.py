@@ -180,3 +180,42 @@ def test_both_launchers_wait_for_the_finish():
     import api_server
     import inspect
     assert '"--until-done"' in inspect.getsource(api_server._start_dms)
+
+
+def test_the_approval_link_is_picked_out_of_googles_mail():
+    import dms_migrate
+    text = ('<a href="https://admin.google.com/ac/migrate/authorize?t=1&amp;x=2">Authorize</a> '
+            'help: https://support.google.com/a/answer/1 and https://www.google.com/x')
+    assert dms_migrate._approval_links_in(text) == [
+        "https://admin.google.com/ac/migrate/authorize?t=1&x=2"]
+
+
+def test_without_a_source_login_it_leaves_the_click_to_a_person(monkeypatch):
+    import dms_migrate
+    monkeypatch.delenv("DWD_PASSWORD_SOURCE", raising=False)
+    monkeypatch.setattr(dms_migrate, "approval_links",
+                        lambda *a: pytest.fail("read the mailbox with no login to use"))
+    did = dms_migrate.approve_as_source(10, False)
+    assert "waits for the source admin" in did[0]
+
+
+def test_no_approval_mail_yet_is_said_not_raised(monkeypatch):
+    import dms_migrate
+    monkeypatch.setenv("DWD_EMAIL_SOURCE", "admin@src.test")
+    monkeypatch.setenv("DWD_PASSWORD_SOURCE", "x")
+    monkeypatch.setattr(dms_migrate, "approval_links", lambda *a: [])
+    assert dms_migrate.approve_as_source(10, False) == ["no approval mail for admin@src.test yet"]
+
+
+def test_a_pending_request_is_approved_then_looked_at_again(monkeypatch):
+    import dms_migrate
+    monkeypatch.delenv("TARGET_DOMAIN", raising=False)
+    steps = iter(["step1-pending", "step4-start"])
+    runs = []
+    monkeypatch.setattr(dms_migrate, "start", lambda *a, **k: runs.append(1) or {
+        "ok": True, "step": next(steps), "detail": "", "did": [], "manual": ""})
+    approved = []
+    monkeypatch.setattr(dms_migrate, "approve_as_source",
+                        lambda *a: approved.append(1) or ["pressed 'Authorize'"])
+    dms_migrate.main(["--apply", "--identities", "none.csv"])
+    assert approved == [1] and len(runs) == 2
