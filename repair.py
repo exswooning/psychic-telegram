@@ -60,7 +60,18 @@ BACKEND_5XX = "backendError"
 # that "32 failures" and "1 worth retrying, 31 that cannot move" are very
 # different instructions, and only the second one is actionable.
 RETRYABLE_FAMILIES = {"acl_quota", "drive_scope_403", "auth_session_invalid",
-                      "gmail_invalid_label", "transient_backend", "drive_stragglers"}
+                      "gmail_invalid_label", "transient_backend", "drive_stragglers",
+                      "shared_drives"}
+
+# A shared drive whose create failed and that still has no mapping -- the whole
+# drive (members and contents) is missing on the target. Tenant-level, so NOT
+# corpus-scoped by user the way survey()'s n() is: the row belongs to the admin.
+# Live: SEEDED-SD-10's create hit a 409 "requestId has already been used" on a
+# transport resend, no drive resulted, and nothing ever tried it again.
+_UNMAPPED_FAILED_SHARED_DRIVES = (
+    "SELECT DISTINCT a.item_id FROM audit_log a WHERE a.status='FAILED' "
+    "AND a.item_type='shared_drive' AND NOT EXISTS (SELECT 1 FROM id_mapping m "
+    "WHERE m.source_id = a.item_id AND m.type = 'shared_drive')")
 
 # A file/folder/shortcut that permanently failed its copy -- not 'acl' (a grant
 # failure, handled separately: the file and its mapping already exist) and not
@@ -94,11 +105,8 @@ def survey(db) -> dict:
                   AND EXISTS (SELECT 1 FROM audit_log a
                                WHERE a.source_user = i.source_email
                                  AND a.status = 'FAILED')""").fetchone()["c"],
-        "user_stale": db.conn.execute(
-            """SELECT COUNT(*) c FROM audit_log a
-                 JOIN identity_map i ON i.source_email = a.source_user
-                WHERE a.status = 'FAILED' AND a.item_type = 'user'
-                  AND i.status = 'DONE'""").fetchone()["c"],
+        "user_stale": len(stale_user_failures(db)),
+        "shared_drives": len(db.conn.execute(_UNMAPPED_FAILED_SHARED_DRIVES).fetchall()),
         "acl_no_account": n("item_type='acl' AND error_message LIKE ?",
                             (f"%{NO_ACCOUNT}%",)),
         "acl_quota": n("item_type='acl' AND error_message LIKE ?",
@@ -377,11 +385,17 @@ def stale_user_failures(db) -> list:
     what the engine itself writes when the user finishes -- so no network
     call is needed to answer this.
     """
-    return db.conn.execute(
-        """SELECT a.source_user, a.item_id FROM audit_log a
+    # Service-level rows too (item_id is the user, item_type the service): live,
+    # yara's 09-26 'drive' unauthorized_client outlived 2,389 files migrated
+    # after it, and sat in every failure count and chart since. Only once that
+    # service is actually recorded done for the user.
+    rows = db.conn.execute(
+        """SELECT a.source_user, a.item_id, a.item_type FROM audit_log a
              JOIN identity_map i ON i.source_email = a.source_user
-            WHERE a.status = 'FAILED' AND a.item_type = 'user'
+            WHERE a.status = 'FAILED' AND a.item_id = a.source_user
               AND i.status = 'DONE'""").fetchall()
+    return [r for r in rows if r["item_type"] == "user"
+            or r["item_type"] in db.services_done(r["source_user"])]
 
 
 def resolve_users(db, rows, dry_run: bool = True) -> int:
@@ -389,7 +403,7 @@ def resolve_users(db, rows, dry_run: bool = True) -> int:
     if dry_run:
         return len(rows)
     for r in rows:
-        db.log_audit(r["source_user"], r["item_id"], "user",
+        db.log_audit(r["source_user"], r["item_id"], r["item_type"],
                      "SKIPPED_USER_LATER_MIGRATED",
                      "this user failed to start on an earlier pass and has "
                      "since migrated successfully")
@@ -410,6 +424,29 @@ def resolve(db, rows, status: str, note: str, dry_run: bool = True) -> int:
         db.log_audit(r["source_user"], r["item_id"], "acl", status, note)
         n += 1
     return n
+
+
+def retry_failed_shared_drives(auth, db, settings, apply: bool = False) -> int:
+    """Re-run the shared-drive migration for just the drives still missing.
+
+    The same SharedDriveMigrator the run uses, so a retry is exactly a first
+    attempt: create (fresh requestId), members, contents. Returns how many now
+    have a mapping (or, dry, how many would be tried).
+    """
+    failed = {r["item_id"] for r in db.conn.execute(_UNMAPPED_FAILED_SHARED_DRIVES)}
+    if not failed or not apply:
+        return len(failed)
+    import shared_drives
+    mig = shared_drives.SharedDriveMigrator(auth, db, settings, settings.source_admin,
+                                            settings.target_admin)
+    fixed = 0
+    for d in (d for d in mig.list_source_drives(True) if d["id"] in failed):
+        mig._safe_migrate_one(d)
+        if db.get_target_id(settings.source_admin, d["id"], "shared_drive"):
+            db.log_audit(settings.source_admin, d["id"], "shared_drive", "SUCCESS",
+                         "created on a repair retry")
+            fixed += 1
+    return fixed
 
 
 def run_all(db, auth, settings, apply: bool = False,
@@ -472,6 +509,13 @@ def run_all(db, auth, settings, apply: bool = False,
                 db, stale_user_failures(db), dry_run=not apply)
         except Exception as exc:      # noqa: BLE001
             out["errors"].append(f"user rollup: {str(exc)[:160]}")
+
+    if out["survey"].get("shared_drives"):
+        try:
+            out["shared_drives_retried"] = retry_failed_shared_drives(
+                auth, db, settings, apply=apply)
+        except Exception as exc:      # noqa: BLE001
+            out["errors"].append(f"shared drives: {str(exc)[:160]}")
 
     # Before the ACL passes below: a file ACLs would apply to has to exist first,
     # and a stranded file is exactly what an ACL grant has nothing to attach to.
@@ -545,6 +589,8 @@ def summarise(result: dict) -> str:
     if result.get("stranded_retried"):
         parts.append(f"{result['stranded_retried']:,} stranded item(s) "
                      f"re-imported")
+    if result.get("shared_drives_retried"):
+        parts.append(f"{result['shared_drives_retried']:,} shared drive(s) re-created")
     if result.get("stragglers_retried"):
         parts.append(f"{result['stragglers_retried']:,}/{result.get('stragglers', 0):,} "
                      f"drive straggler(s) re-copied")

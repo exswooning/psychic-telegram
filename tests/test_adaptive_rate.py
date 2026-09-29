@@ -132,6 +132,20 @@ class TestOnlyQuotaCounts:
         assert not drive_engine._is_quota_rejection(Exception(msg))
 
 
+class TestOnlyProjectQuotaTeachesTheProjectLimiter:
+    @pytest.mark.parametrize("msg,project", [
+        ('<HttpError 403 "User rate limit exceeded." reason: userRateLimitExceeded>', False),
+        ("exhausted 12 retries on HTTP 403 (userRateLimitExceeded): ...", False),
+        ("Quota exceeded for quota metric 'Queries'", True),
+        ("rateLimitExceeded", True),
+        ("429 Too Many Requests", True),
+        ("File not found: 1a2b3c", False),
+    ])
+    def test_a_per_user_limit_is_not_a_project_signal(self, msg, project):
+        import drive_engine
+        assert drive_engine._is_project_quota_rejection(Exception(msg)) is project
+
+
 class TestBatchesReportTheirOwnFailures:
     """A BatchHttpRequest returns HTTP 200 while grants inside it fail, so
     _retry never raises and the controller never learns it overshot. Live:

@@ -1016,6 +1016,11 @@ def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
                 # asked it to stop, is the opposite of what either means.
                 if MEMORY_PAUSE.is_set() or SHUTDOWN.is_set():
                     break
+                # Shared drives are tenant-level, so only a whole-tenant run owns them --
+                # and right after Drive, before mail, for the same reason the passes are
+                # ordered at all: a link in mail can name a shared-drive file too.
+                if "drive" in one and not only and not getattr(settings, "sample_limit", None):
+                    _migrate_shared_drives(db, auth, settings)
                 # This pass's own worker pool has now fully drained -- the one moment
                 # touching these users' state is provably safe, and the one moment
                 # that matters: the NEXT pass (mail/calendar) is about to read this
@@ -1326,6 +1331,29 @@ def _auto_repair(db, auth, settings) -> None:
             log.info("post-run repair: %s", line)
     except Exception as exc:      # noqa: BLE001
         log.warning("post-run repair skipped: %s", str(exc)[:200])
+
+
+def _migrate_shared_drives(db, auth, settings) -> None:
+    """Every shared drive in the tenant, as part of the run that owns the tenant.
+
+    This was a separate button (Other services -> Shared drives) that nothing
+    pressed for you: a whole-tenant migration finished "clean" with every
+    shared drive still on the source unless someone remembered. Idempotent --
+    SharedDriveMigrator skips drives it has already mapped -- so a resumed run
+    only creates what is still missing. Never fatal: what fails here is left
+    FAILED for repair's `shared_drives` family to retry.
+    """
+    if not (getattr(settings, "source_admin", "") and getattr(settings, "target_admin", "")):
+        log.warning("shared drives skipped: SOURCE_ADMIN/TARGET_ADMIN not set")
+        return
+    try:
+        import shared_drives
+        stats = shared_drives.SharedDriveMigrator(
+            auth, db, settings, settings.source_admin, settings.target_admin,
+        ).migrate_all(all_drives=True)
+        log.info("shared drives: %s", stats)
+    except Exception as exc:      # noqa: BLE001 - the per-user work is done; keep it
+        log.warning("shared drives failed: %s -- repair retries them", exc)
 
 
 def _repair_between_passes(db, auth, settings) -> None:

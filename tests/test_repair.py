@@ -1091,3 +1091,68 @@ class TestWhoIsInFlight:
         d = self._db(tmp_path)
         assert api_server._running_users(d.conn) == []
         d.close()
+
+
+class TestFailedSharedDrivesAreRetried:
+    """Live: SEEDED-SD-10's create hit a transient 409, no drive resulted, and
+    the automatic repair counted it and fixed nothing -- no family knew it."""
+
+    ADMIN = "admin@src"
+
+    def _db(self, tmp_path):
+        d = dbmod.MigrationDB(str(tmp_path / "m.db"))
+        d.log_audit(self.ADMIN, "sd-missing", "shared_drive", "FAILED", "409 requestId")
+        d.log_audit(self.ADMIN, "sd-done", "shared_drive", "FAILED", "409 requestId")
+        d.record_mapping(self.ADMIN, "sd-done", "tgt-done", "shared_drive")
+        return d
+
+    def test_only_a_still_unmapped_drive_counts(self, tmp_path):
+        d = self._db(tmp_path)
+        assert repair.survey(d)["shared_drives"] == 1
+        assert "shared_drives" in repair.RETRYABLE_FAMILIES
+        d.close()
+
+    def test_the_retry_recreates_only_the_missing_one(self, tmp_path, monkeypatch):
+        import shared_drives
+        d = self._db(tmp_path)
+        tried = []
+
+        class Fake:
+            def __init__(self, auth, db, settings, admin, tgt_admin):
+                self.db = db
+
+            def list_source_drives(self, all_drives):
+                return [{"id": "sd-missing", "name": "SD-10"}, {"id": "sd-done", "name": "SD-1"}]
+
+            def _safe_migrate_one(self, drive):
+                tried.append(drive["id"])
+                self.db.record_mapping(TestFailedSharedDrivesAreRetried.ADMIN, drive["id"],
+                                       "tgt-new", "shared_drive")
+
+        monkeypatch.setattr(shared_drives, "SharedDriveMigrator", Fake)
+        s = type("S", (), {"source_admin": self.ADMIN, "target_admin": "admin@tgt"})()
+        assert repair.retry_failed_shared_drives(None, d, s, apply=True) == 1
+        assert tried == ["sd-missing"]
+        assert repair.survey(d)["shared_drives"] == 0
+        d.close()
+
+
+class TestAStaleServiceFailureIsResolved:
+    """yara's 09-26 'drive' unauthorized_client outlived 2,389 files migrated
+    after it. A service-level row (item_id == the user) is stale once that
+    service is recorded done."""
+
+    def test_it_resolves_only_a_service_that_is_done(self, tmp_path):
+        d = dbmod.MigrationDB(str(tmp_path / "m.db"))
+        d.conn.execute("INSERT INTO identity_map(source_email,target_email,status) "
+                       "VALUES('y@src','y@tgt','DONE')")
+        d.conn.commit()
+        d.mark_services_done("y@src", {"drive"})
+        d.log_audit("y@src", "y@src", "drive", "FAILED", "unauthorized_client")
+        d.log_audit("y@src", "y@src", "gmail", "FAILED", "still broken")
+        rows = repair.stale_user_failures(d)
+        assert [(r["item_type"]) for r in rows] == ["drive"]
+        repair.resolve_users(d, rows, dry_run=False)
+        st = d.conn.execute("SELECT item_type, status FROM audit_log ORDER BY item_type").fetchall()
+        assert [tuple(r) for r in st] == [("drive", "SKIPPED_USER_LATER_MIGRATED"), ("gmail", "FAILED")]
+        d.close()

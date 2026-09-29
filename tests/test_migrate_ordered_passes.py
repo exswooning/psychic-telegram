@@ -68,8 +68,13 @@ def runner(monkeypatch, settings, db, capsys):
     monkeypatch.setattr(main, "_metrics_flusher", lambda stop, *a, **k: stop.wait(0.01))
     main.MEMORY_PAUSE.clear(); main.SHUTDOWN.clear()
 
-    def run(services, plan=None, delta=False, after=None):
-        return main._run_with_memory_pause(None, db, settings, services, delta=delta, delta_days=0, passes=plan, after=after)
+    shared = []
+    monkeypatch.setattr(main, "_migrate_shared_drives", lambda *a: shared.append(len(passes)))
+
+    def run(services, plan=None, delta=False, after=None, only=None):
+        return main._run_with_memory_pause(None, db, settings, services, delta=delta, delta_days=0,
+                                           passes=plan, after=after, only=only)
+    run.shared = shared
     run.passes, run.registered, run.hook, run.out = passes, registered, hook, capsys
     yield run
     main.MEMORY_PAUSE.clear(); main.SHUTDOWN.clear()
@@ -304,3 +309,21 @@ class TestRepairRidesBetweenDriveAndWhateverComesNext:
         runner(self.ALL, main.ordered_passes(self.ALL))
         assert calls == []
 
+
+
+class TestSharedDrivesRideTheWholeTenantRun:
+    """A separate button nothing pressed: a whole-tenant run finished 'clean' with
+    shared drives left on the source unless someone remembered."""
+    ALL = {"drive", "gmail", "calendar", "contacts", "tasks", "chat"}
+
+    def test_after_drive_and_before_mail(self, runner):
+        runner(self.ALL, main.ordered_passes(self.ALL))
+        assert runner.shared == [1]     # after pass 1 (drive), before pass 2 (gmail)
+
+    def test_not_for_a_few_named_users(self, runner):
+        runner(self.ALL, main.ordered_passes(self.ALL), only=["a@src"])
+        assert runner.shared == []
+
+    def test_not_without_drive(self, runner):
+        runner({"gmail"}, [{"gmail"}])
+        assert runner.shared == []

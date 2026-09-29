@@ -293,6 +293,19 @@ _QUOTA_MARKERS = (
 )
 
 
+# What a PROJECT-wide limiter may learn from. userRateLimitExceeded is one
+# account's own budget, not the project's: live, a single seeduser94 403
+# penalised the source project limiter (296 -> 207/s) and ratcheted its
+# persisted ceiling 977 -> 281 for every later run on that tenant.
+PROJECT_QUOTA_REASONS = frozenset({"rateLimitExceeded", "quotaExceeded"})
+
+
+def _is_project_quota_rejection(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return (_is_quota_rejection(exc) and "userratelimitexceeded" not in text
+            and "user rate limit" not in text)
+
+
 def _is_quota_rejection(exc: Exception) -> bool:
     """Did Google refuse this for pacing, as opposed to for any other reason?
 
@@ -478,13 +491,14 @@ class DriveMigrator:
                 # same project limiter keeps sending at the pre-rejection rate the whole
                 # time -- see resilience.retry_on_google_error's own docstring.
                 on_quota_rejection=project.penalise,
+                quota_reasons=PROJECT_QUOTA_REASONS,
             )(fn)()
         except Exception as exc:
             # The limiter cannot adapt to pushback it never hears about.
             # Only quota rejections count: a 404 or a permission error says
             # nothing about pacing, and treating them as congestion would
             # throttle a migration for reasons that have no relation to rate.
-            if _is_quota_rejection(exc):
+            if _is_project_quota_rejection(exc):
                 project.penalise()
             raise
 
@@ -2091,7 +2105,7 @@ class DriveMigrator:
         # pushback while 4,657 grants a minute were being rejected for
         # quota: the controller was climbing blind, because the failure path
         # that mattered most was the one it could not see.
-        if any(exc is not None and _is_quota_rejection(exc)
+        if any(exc is not None and _is_project_quota_rejection(exc)
                for exc in outcomes.values()):
             self._project_limiter.penalise()
 

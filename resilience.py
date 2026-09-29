@@ -315,6 +315,7 @@ def retry_on_google_error(
     before_retry: Callable[[], T | None] | None = None,
     label: str | None = None,
     on_quota_rejection: Callable[[], None] | None = None,
+    quota_reasons: frozenset | None = None,
 ) -> Callable[[Callable[..., T]], Callable[..., T]]:
     """
     Decorator: retry transient Google API failures with full-jitter exponential
@@ -348,6 +349,9 @@ def retry_on_google_error(
     -------------------
     Called once per attempt Google rejected for pacing (rateLimitExceeded,
     userRateLimitExceeded, quotaExceeded) -- immediately, before the sleep.
+    `quota_reasons` narrows which of those it hears: a limiter modelling a
+    whole PROJECT must not learn from userRateLimitExceeded, one account's own
+    budget (see drive_engine.PROJECT_QUOTA_REASONS).
 
     Without it, an AdaptiveRateLimiter only learns a project is overshot when a
     call's own retry ladder finally gives up (drive_engine.py penalises it then,
@@ -431,7 +435,8 @@ def retry_on_google_error(
                         # Every rejection, including the one that is about to exhaust the
                         # budget below -- a limiter told late is a limiter that told a whole
                         # burst of siblings nothing.
-                        if on_quota_rejection is not None:
+                        if on_quota_rejection is not None and (
+                                quota_reasons is None or reason in quota_reasons):
                             on_quota_rejection()
                     if attempt > budget:
                         raise RuntimeError(

@@ -73,11 +73,12 @@ class TestTheLimiterLearnsFromTheFirstRejectionNotOnlyTheLast:
     every rejected attempt, not just the final one, so a limiter wired to it hears the
     very first."""
 
-    def _call_that_always_429s(self, reason, on_quota_rejection=None):
+    def _call_that_always_429s(self, reason, on_quota_rejection=None, quota_reasons=None):
         calls = {"n": 0}
 
         @R.retry_on_google_error(max_retries=6, base_delay=0, max_delay=0,
-                                 on_quota_rejection=on_quota_rejection)
+                                 on_quota_rejection=on_quota_rejection,
+                                 quota_reasons=quota_reasons)
         def boom():
             calls["n"] += 1
             raise R.HttpError(
@@ -95,6 +96,25 @@ class TestTheLimiterLearnsFromTheFirstRejectionNotOnlyTheLast:
         with pytest.raises(RuntimeError, match="exhausted"):
             boom()
         assert len(seen) == calls["n"] == R.RATE_LIMIT_RETRY_BUDGET + 1
+
+    def test_a_project_limiter_does_not_hear_one_users_budget(self, monkeypatch):
+        """Live: one seeduser94 userRateLimitExceeded ratcheted the source
+        project ceiling 977 -> 281, persisted for every later run."""
+        import drive_engine
+        monkeypatch.setattr(R.time, "sleep", lambda *_: None)
+        seen = []
+        boom, _ = self._call_that_always_429s(
+            "userRateLimitExceeded", on_quota_rejection=lambda: seen.append(1),
+            quota_reasons=drive_engine.PROJECT_QUOTA_REASONS)
+        with pytest.raises(RuntimeError):
+            boom()
+        assert seen == []
+        boom, _ = self._call_that_always_429s(
+            "rateLimitExceeded", on_quota_rejection=lambda: seen.append(1),
+            quota_reasons=drive_engine.PROJECT_QUOTA_REASONS)
+        with pytest.raises(RuntimeError):
+            boom()
+        assert seen, "a project-level rejection must still reach the limiter"
 
     def test_it_is_not_called_for_a_permanent_403(self, monkeypatch):
         monkeypatch.setattr(R.time, "sleep", lambda *_: None)
