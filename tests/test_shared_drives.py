@@ -758,3 +758,51 @@ class TestConcurrencyIsActuallyThreadSafe:
         for t in threads: t.join()
 
         assert sd.stats["members"] == 1600, sd.stats["members"]
+
+
+class TestCreatingTheTargetDriveSurvivesAResend:
+    """SEEDED-SD-10: a bare create with a random requestId got a transient 409
+    ("requestId has already been used") on a resend, recorded FAILED and
+    returned before members or contents -- the whole drive was missing."""
+
+    def test_the_request_id_is_derived_not_random(self, sd):
+        sd._create_target_drive("drv-1", "Finance")
+        sd._create_target_drive("drv-1", "Finance")
+        ids = [c["requestId"] for c in sd.tgt.calls_to("drives.create")]
+        assert ids[0] == ids[1]                      # a resend is the same request
+
+    def test_a_409_adopts_the_drive_the_earlier_attempt_made(self, sd):
+        sd.tgt.shared_drives["made-earlier"] = {"id": "made-earlier", "name": "Finance"}
+        sd.tgt.fail_next("drives.create", status=409, reason="conflict")
+        assert sd._create_target_drive("drv-1", "Finance") == "made-earlier"
+        assert len(sd.tgt.calls_to("drives.create")) == 1
+
+    def test_a_409_with_nothing_to_adopt_retries_with_a_fresh_id(self, sd):
+        sd.tgt.fail_next("drives.create", status=409, reason="conflict")
+        got = sd._create_target_drive("drv-1", "Finance")
+        calls = sd.tgt.calls_to("drives.create")
+        assert got and len(calls) == 2 and calls[0]["requestId"] != calls[1]["requestId"]
+
+    def test_a_drive_another_source_owns_is_never_adopted(self, sd, db):
+        sd.tgt.shared_drives["taken"] = {"id": "taken", "name": "Finance"}
+        db.record_mapping(SRC_USER, "other-src", "taken", "shared_drive")
+        sd.tgt.fail_next("drives.create", status=409, reason="conflict")
+        assert sd._create_target_drive("drv-1", "Finance") != "taken"
+
+
+class TestAMappedDriveIsNotReGrantedMemberByMember:
+    """Measured live: re-creating every member of 20 already-mapped drives was
+    ~99% of a whole-tenant run's shared-drive step (36 min; each drive's content
+    walk took 2.5 s). Present members are now read once and skipped."""
+
+    def test_only_missing_or_changed_members_are_granted(self, sd):
+        src = [{"type": "user", "role": "writer", "emailAddress": "partner@othercorp.com"},
+               {"type": "user", "role": "reader", "emailAddress": "new@othercorp.com"},
+               {"type": "user", "role": "writer", "emailAddress": "promoted@othercorp.com"}]
+        tgt = [{"type": "user", "role": "writer", "emailAddress": "partner@othercorp.com"},
+               {"type": "user", "role": "reader", "emailAddress": "promoted@othercorp.com"}]
+        sd._members = lambda drive_id, svc=None: tgt if svc is not None else src
+        sd._sync_members("drv-1", "drv-2", "Finance")
+        granted = {c["body"]["emailAddress"] for c in sd.tgt.calls_to("permissions.create")}
+        assert granted == {"new@othercorp.com", "promoted@othercorp.com"}
+        assert sd.stats["members_present"] == 1

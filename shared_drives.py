@@ -93,7 +93,8 @@ class SharedDriveMigrator:
         self.target_admin = target_admin
         self.stats = {"drives": 0, "members": 0, "files": 0, "folders": 0,
                       "skipped": 0, "failed": 0, "unmapped_members": 0,
-                      "unreadable": 0, "external_members": 0}
+                      "unreadable": 0, "external_members": 0,
+                      "members_present": 0}
         # Mutated from every worker thread once drives migrate concurrently.
         # `stats[k] += 1` is read-modify-write, so without this two drives
         # finishing together silently lose a count -- and a number that
@@ -215,10 +216,10 @@ class SharedDriveMigrator:
             return None
         return users[0]["emailAddress"]
 
-    def _members(self, drive_id: str) -> list[dict]:
+    def _members(self, drive_id: str, svc=None) -> list[dict]:
         out, token = [], None
         while True:
-            resp = self.src.permissions().list(
+            resp = (svc or self.src).permissions().list(
                 fileId=drive_id, supportsAllDrives=True,
                 useDomainAdminAccess=True, pageSize=100, pageToken=token,
                 fields=("nextPageToken,permissions(id,type,role,"
@@ -305,14 +306,12 @@ class SharedDriveMigrator:
             return
         else:
             try:
-                created = self.tgt.drives().create(
-                    requestId=uuid.uuid4().hex, body={"name": name}).execute()
+                tgt_id = self._create_target_drive(src_id, name)
             except Exception as exc:  # noqa: BLE001
                 self.db.log_audit(self.admin_user, src_id, "shared_drive",
                                   "FAILED", str(exc))
                 self._bump("failed", 1)
                 return
-            tgt_id = created["id"]
             self.db.record_mapping(self.admin_user, src_id, tgt_id,
                                    "shared_drive", source_name=name)
             self._bump("drives", 1)
@@ -321,6 +320,54 @@ class SharedDriveMigrator:
         # nobody on the target can administer.
         self._sync_members(src_id, tgt_id, name)
         self._copy_contents(src_id, tgt_id, name, reader)
+
+    def _create_target_drive(self, src_id: str, name: str) -> str:
+        """Create the target drive, safely under a retry and a resend.
+
+        It was a bare create with a random requestId: a transport resend of a
+        create whose response was lost got 409 "requestId has already been
+        used", recorded FAILED, and returned before members or contents --
+        SEEDED-SD-10 lost that way. Now: through the retry wrapper, with a
+        requestId derived from the source drive (a resend is the SAME request),
+        and on a 409 the drive that request made is adopted -- an unmapped
+        target drive of the same name. None (the id was spent on a drive since
+        deleted, e.g. by a reset) -> one retry with a fresh id.
+        """
+        from resilience import PermanentAPIError, retry_on_google_error
+
+        def create(request_id: str) -> str:
+            return retry_on_google_error(
+                max_retries=self.settings.max_retries,
+                base_delay=self.settings.base_backoff,
+                max_delay=self.settings.max_backoff, label="drive.drives.create",
+            )(lambda: self.tgt.drives().create(
+                requestId=request_id, body={"name": name}).execute())()["id"]
+
+        derived = uuid.uuid5(uuid.NAMESPACE_URL, "bitport-shared-drive:"
+                             f"{self.settings.target_domain}:{src_id}").hex
+        try:
+            return create(derived)
+        except PermanentAPIError as exc:
+            if "HTTP 409" not in str(exc):
+                raise
+        adopted = self._unmapped_target_drive(name)
+        if adopted:
+            log.info("[%s] adopting target shared drive %s created by an earlier "
+                     "attempt", name, adopted)
+            return adopted
+        return create(uuid.uuid4().hex)
+
+    def _unmapped_target_drive(self, name: str) -> str | None:
+        """The newest target drive with this name that no source drive owns."""
+        esc = name.replace("\\", "\\\\").replace("'", "\\'")
+        drives = self.tgt.drives().list(
+            q=f"name = '{esc}'", useDomainAdminAccess=True, pageSize=100,
+            fields="drives(id,name,createdTime)").execute().get("drives", [])
+        free = [d for d in drives if not self.db.conn.execute(
+            "SELECT 1 FROM id_mapping WHERE type='shared_drive' AND target_id=?",
+            (d["id"],)).fetchone()]
+        free.sort(key=lambda d: d.get("createdTime") or "", reverse=True)
+        return free[0]["id"] if free else None
 
     def _sync_members(self, src_id: str, tgt_id: str, name: str) -> None:
         try:
@@ -333,6 +380,16 @@ class SharedDriveMigrator:
 
         members.sort(key=lambda p: ROLE_ORDER.index(p.get("role"))
                      if p.get("role") in ROLE_ORDER else len(ROLE_ORDER))
+        # Who already holds which role on the target, read once. Re-granting
+        # every member of an already-mapped drive was ~99% of every
+        # whole-tenant run's shared-drive step: measured live, ~300 creates and
+        # 2.5-3.5 min per drive against 2.5 s for its content walk -- 36 min
+        # for 20 drives that were already fully migrated. A list is ~3 calls.
+        try:
+            present = {((m.get("emailAddress") or "").lower(), m.get("role"))
+                       for m in self._members(tgt_id, self.tgt)}
+        except Exception:      # noqa: BLE001 - unknown means grant as before
+            present = set()
         for p in members:
             if p.get("type") != "user":
                 # Domain and group grants need the group to exist on the
@@ -381,6 +438,9 @@ class SharedDriveMigrator:
                 # the access that actually cascades.
                 grantee = email
                 self._bump("external_members", 1)
+            if (grantee.lower(), p.get("role", "reader")) in present:
+                self._bump("members_present", 1)
+                continue
             if self.settings.dry_run:
                 self._bump("members", 1)
                 continue
