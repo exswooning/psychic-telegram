@@ -421,7 +421,15 @@ describe('MigrationDetail: settings for measured runs', () => {
     await open(); await confirm()
     const call = startMigration.mock.calls[0]
     expect(call[2]).toEqual([])
-    expect(call[9]).toEqual({ userWorkers: undefined, driveFileWorkers: undefined, mappingCacheUserCap: undefined })
+    expect(call[9]).toEqual({ userWorkers: undefined, driveFileWorkers: undefined,
+                              mappingCacheUserCap: undefined, processes: undefined, fullFidelity: true })
+  })
+
+  it('full fidelity is on unless it is switched off', async () => {
+    await open()
+    fireEvent.click(screen.getByTestId('run-full-fidelity'))
+    await confirm()
+    expect(startMigration.mock.calls[0][9].fullFidelity).toBe(false)
   })
 
   it('sends the users and each number that was filled in', async () => {
@@ -429,10 +437,12 @@ describe('MigrationDetail: settings for measured runs', () => {
     fireEvent.change(screen.getByTestId('run-full-users'), { target: { value: 'a@s.test, b@s.test' } })
     fireEvent.change(screen.getByTestId('run-full-file-workers'), { target: { value: '12' } })
     fireEvent.change(screen.getByTestId('run-full-cache-cap'), { target: { value: '0' } })
+    fireEvent.change(screen.getByTestId('run-full-processes'), { target: { value: '2' } })
     await confirm()
     const call = startMigration.mock.calls[0]
     expect(call[2]).toEqual(['a@s.test', 'b@s.test'])
-    expect(call[9]).toEqual({ userWorkers: undefined, driveFileWorkers: 12, mappingCacheUserCap: 0 })
+    expect(call[9]).toEqual({ userWorkers: undefined, driveFileWorkers: 12, mappingCacheUserCap: 0,
+                              processes: 2, fullFidelity: true })
   })
 })
 

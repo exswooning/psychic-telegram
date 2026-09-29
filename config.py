@@ -142,6 +142,10 @@ DIRECTORY_WRITE_SCOPE = "https://www.googleapis.com/auth/admin.directory.user"
 # that names a group rather than a person -- so migrating files without them
 # lands sharing that points at addresses the target does not have.
 GROUP_WRITE_SCOPE = "https://www.googleapis.com/auth/admin.directory.group"
+# Rooms and equipment (calendar_resources.py): read on the source, create on
+# the target, with the buildings and features a room names.
+RESOURCE_READONLY_SCOPE = "https://www.googleapis.com/auth/admin.directory.resource.calendar.readonly"
+RESOURCE_WRITE_SCOPE = "https://www.googleapis.com/auth/admin.directory.resource.calendar"
 CHAT_SCOPES = [
     "https://www.googleapis.com/auth/chat.spaces",
     "https://www.googleapis.com/auth/chat.messages",
@@ -234,6 +238,8 @@ def source_scopes(settings: "Settings") -> list[str]:
         # requires the write scope.
         scopes = [CALENDAR_WRITE_SCOPE if s == CALENDAR_READONLY_SCOPE else s
                  for s in scopes]
+    if settings.migrate_resources:
+        scopes.append(RESOURCE_READONLY_SCOPE)
     return scopes
 
 
@@ -245,6 +251,8 @@ def target_scopes(settings: "Settings") -> list[str]:
         # TARGET_SCOPES, and the migration needs to create groups and add
         # members on this side only.
         scopes.append(GROUP_WRITE_SCOPE)
+    if settings.migrate_resources:
+        scopes.append(RESOURCE_WRITE_SCOPE)
     if settings.migrate_gmail_settings:
         scopes.append(GMAIL_SETTINGS_SCOPE)
         # The target needs it too: delegation is CREATED here, and a scope
@@ -348,7 +356,10 @@ def _auto(key: str, fallback):
     """
     try:
         import resources
-        return resources.recommend(concurrent_jobs=_concurrent_jobs())[key]
+        # A process of a pass split N ways owns 1/N of the machine, the same way a
+        # job sharing the box with others does (main._run_pass_in_processes).
+        share = max(1, int(os.getenv("PROCESS_SHARE", "1") or 1))
+        return resources.recommend(concurrent_jobs=_concurrent_jobs() * share)[key]
     except Exception as exc:  # noqa: BLE001 - probing must never break startup
         if key not in _AUTO_FAILED:
             _AUTO_FAILED[key] = str(exc)
@@ -703,7 +714,17 @@ class Settings:
     # exhaustive count instead of a sample: every item on both sides, not just 25 of
     # each kind. Heavier per user, so its own flag -- a tenant where that cost is too
     # much can turn it off and keep the sampled one-to-one check running.
-    tally_on_complete: bool = field(default_factory=lambda: _env_bool("TALLY_ON_COMPLETE", True))
+    # Off by default now: done inside the run it re-listed both tenants for each user
+    # after EVERY pass, on the one CPU core the copy itself needs. A run launched from
+    # the API tallies every user once it and its repair are over (api_server
+    # _start_tally_after_repair); TALLY_ON_COMPLETE=true brings the per-user hook back.
+    tally_on_complete: bool = field(default_factory=lambda: _env_bool("TALLY_ON_COMPLETE", False))
+    # How many OS processes each pass is split across (main._run_pass_in_processes).
+    # 1 keeps the whole run in one process, as always; more gets past the
+    # interpreter lock that holds a run to ~1.1 cores. Left at 1 until the perf
+    # test measures what a larger number buys on this box.
+    migrate_processes: int = field(
+        default_factory=lambda: max(1, int(os.getenv("MIGRATE_PROCESSES", "1") or 1)))
     # Redo mail that was migrated before rewriting was switched on.
     #
     # Off, and destructive, so it stays opt-in. A migrated message cannot be
@@ -820,6 +841,12 @@ class Settings:
     # turning this on gives up source read-only-ness for Calendar.
     migrate_calendar_acls: bool = field(
         default_factory=lambda: _env_bool("MIGRATE_CALENDAR_ACLS", False)
+    )
+    # Rooms and equipment, recreated on the target and mapped, so a meeting
+    # booked in a room still names one (calendar_resources.py). Directory
+    # scopes on both sides, hence a flag of its own.
+    migrate_resources: bool = field(
+        default_factory=lambda: _env_bool("MIGRATE_RESOURCES", False)
     )
 
     # -- quota governance -----------------------------------------------------

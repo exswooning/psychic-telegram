@@ -20,6 +20,8 @@ then `events.patch(sendUpdates='none')` it with the modified fields.
 from __future__ import annotations
 
 import logging
+import re
+import uuid
 
 from google.auth.exceptions import RefreshError
 
@@ -37,8 +39,53 @@ from link_rewrite import rewrite_text
 log = logging.getLogger(__name__)
 
 _COPY_KEYS = ("description", "location", "status", "recurrence", "reminders",
-              "visibility", "transparency", "colorId", "extendedProperties")
+              "visibility", "transparency", "colorId", "extendedProperties",
+              # What guests may do, and where the event came from: all writable,
+              # all dropped before because nothing named them.
+              "guestsCanModify", "guestsCanInviteOthers", "guestsCanSeeOtherGuests",
+              "anyoneCanAddSelf", "source")
 _PATCH_KEYS = ("summary", "description", "location", "start", "end", "status")
+
+# Event types import turns into ordinary events. Each is created as itself with
+# events.insert (no attendees, so nothing to notify) and its own properties;
+# primary calendar only, which is the only place Google allows them.
+TYPED_EVENTS = {"outOfOffice": "outOfOfficeProperties",
+                "focusTime": "focusTimeProperties",
+                "workingLocation": "workingLocationProperties"}
+
+# A calendar's per-user presentation: its colour, the name the user gave it,
+# whether it is shown, and its default reminders. calendarList, not the calendar.
+_LIST_KEYS = ("colorId", "backgroundColor", "foregroundColor", "summaryOverride",
+              "hidden", "selected", "defaultReminders", "notificationSettings")
+
+
+def list_settings(entry: dict) -> tuple[dict, bool]:
+    """A calendarList entry's presentation, and whether its colour is RGB. RGB
+    colours need colorRgbFormat, which then ignores colorId, so it is dropped."""
+    body = {k: entry[k] for k in _LIST_KEYS if k in entry}
+    rgb = "backgroundColor" in body or "foregroundColor" in body
+    if rgb:
+        body.pop("colorId", None)
+    return body, rgb
+
+
+def is_future(item: dict, now: str | None = None) -> bool:
+    """Does the event (or any of its series) still lie ahead? A series with no
+    UNTIL, or one past now, counts as ahead: a COUNT-bounded one is not worth
+    expanding to find out."""
+    from datetime import datetime, timezone
+
+    now = now or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    for rule in item.get("recurrence") or []:
+        if rule.startswith("RRULE"):
+            m = re.search(r"UNTIL=(\d{8})(T\d{6})?", rule)
+            if not m:
+                return True
+            until = m.group(1)
+            return f"{until[:4]}-{until[4:6]}-{until[6:]}" >= now[:10]
+    end = item.get("end") or {}
+    when = end.get("dateTime") or end.get("date") or ""
+    return when[:19] > now[:19] if "T" in when else when >= now[:10]
 
 
 class CalendarMigrator:
@@ -91,7 +138,14 @@ class CalendarMigrator:
         out = []
         for a in attendees or []:
             if a.get("resource"):
-                continue  # room/equipment resources are tenant-specific; drop
+                # A room's address is minted per tenant: kept only when the
+                # room was recreated on the target (calendar_resources.py).
+                import calendar_resources
+
+                room = calendar_resources.resource_target(self.db, a.get("email"))
+                if room:
+                    out.append({**a, "email": room})
+                continue
             email = a.get("email")
             mapped = self.db.resolve_identity(email) or email
             entry = {k: v for k, v in a.items() if k not in ("email", "resource")}
@@ -211,6 +265,7 @@ class CalendarMigrator:
     def run(self, delta: bool = False, updated_min: str | None = None) -> dict:
         self._migrate_calendar("primary", "primary",
                                updated_min if delta else None)
+        self._copy_list_settings(None, "primary")
         if self.settings.migrate_secondary_calendars:
             self._migrate_secondary_calendars(updated_min if delta else None)
         return dict(self.stats)
@@ -265,6 +320,7 @@ class CalendarMigrator:
                 self.stats["calendars"] = self.stats.get("calendars", 0) + 1
 
             self._migrate_calendar(cal_id, target_cal_id, updated_min)
+            self._copy_list_settings(entry, target_cal_id)
             if self.settings.migrate_calendar_acls:
                 self._sync_calendar_acl(cal_id, target_cal_id)
 
@@ -410,9 +466,7 @@ class CalendarMigrator:
             return
 
         try:
-            result = self._retry(lambda b=body: self.tgt.events().import_(
-                calendarId=tgt_cal_id, body=b, conferenceDataVersion=0,
-            ).execute())
+            result = self._write_event(item, body, tgt_cal_id)
         except (PermanentAPIError, RuntimeError) as exc:
             self.db.log_audit(self.source_user, eid, "event", "FAILED", str(exc))
             self.stats["failed"] += 1
@@ -421,6 +475,7 @@ class CalendarMigrator:
         self.db.record_mapping(self.source_user,
                                self._event_key(src_cal_id, eid),
                                result["id"], "event")
+        self._give_future_meeting_a_meet(item, result["id"], tgt_cal_id)
         # The source 'updated' stamp, so a later pass can tell an event
         # that has changed from one that has not. Drive has always recorded
         # this; calendar logged SUCCESS with no stamp, which is why an event
@@ -428,6 +483,120 @@ class CalendarMigrator:
         self.db.log_audit(self.source_user, eid, "event", "SUCCESS",
                           modified_time=item.get("updated"))
         self.stats["events"] += 1
+
+    def _write_event(self, item: dict, body: dict, tgt_cal_id: str) -> dict:
+        """events.import -- or, for an out-of-office, focus-time or working-location
+        event on the primary calendar, events.insert as that type, which import
+        cannot do. A typed insert Google refuses is imported as an ordinary event,
+        as every one of them used to be, rather than lost."""
+        prop = TYPED_EVENTS.get(item.get("eventType"))
+        if prop and tgt_cal_id == "primary" and item.get(prop) is not None:
+            typed = {k: body[k] for k in ("summary", "start", "end", "description",
+                                          "recurrence", "visibility", "transparency",
+                                          "colorId") if k in body}
+            typed.update(eventType=item["eventType"], **{prop: item[prop]})
+            try:
+                return self._retry(lambda: self.tgt.events().insert(
+                    calendarId="primary", body=typed, sendUpdates="none").execute())
+            except (PermanentAPIError, RuntimeError) as exc:
+                log.warning("[%s] could not create %s event %s as its own type (%s); "
+                            "importing it as an ordinary event", self.source_user,
+                            item["eventType"], item.get("id"), exc)
+        return self._retry(lambda b=body: self.tgt.events().import_(
+            calendarId=tgt_cal_id, body=b, conferenceDataVersion=0,
+        ).execute())
+
+    def _give_future_meeting_a_meet(self, item: dict, target_id: str,
+                                    tgt_cal_id: str) -> None:
+        """A source-tenant Meet link dies with the source, so import strips it. A
+        meeting still ahead gets a fresh one on its ORGANIZER's own copy -- the
+        one that owns the meeting -- so a recurring call still has a working
+        link after cutover. Anything that goes wrong is logged, never a failure."""
+        if not (item.get("conferenceData") or item.get("hangoutLink")) or self.settings.dry_run:
+            return
+        organizer = (item.get("organizer") or {}).get("email") or ""
+        if (self.db.resolve_identity(organizer) or organizer).lower() != self.target_user.lower():
+            return
+        if not is_future(item):
+            return
+        request_id = uuid.uuid5(uuid.NAMESPACE_URL, f"{self.source_user}/{item['id']}").hex
+        body = {"conferenceData": {"createRequest": {
+            "requestId": request_id, "conferenceSolutionKey": {"type": "hangoutsMeet"}}}}
+        try:
+            self._retry(lambda: self.tgt.events().patch(
+                calendarId=tgt_cal_id, eventId=target_id, body=body,
+                conferenceDataVersion=1, sendUpdates="none").execute())
+            self.stats["meet_links"] = self.stats.get("meet_links", 0) + 1
+        except (PermanentAPIError, RuntimeError) as exc:
+            log.warning("[%s] could not give %s a new Meet link: %s",
+                        self.source_user, item.get("id"), exc)
+
+    def _copy_list_settings(self, entry: dict | None, tgt_cal_id: str) -> None:
+        """The calendar's colour, the name the user gave it, whether it shows,
+        and its default reminders -- per-user settings on calendarList, which
+        nothing copied. entry None means the user's primary calendar."""
+        if self.settings.dry_run:
+            return
+        if entry is None:
+            try:
+                entry = self._retry(lambda: self.src.calendarList().get(
+                    calendarId="primary").execute())
+            except OPTIONAL_PASS_ERRORS as exc:
+                log.warning("[%s] could not read primary calendar settings: %s",
+                            self.source_user, exc)
+                return
+        body, rgb = list_settings(entry)
+        if not body:
+            return
+        try:
+            self._retry(lambda: self.tgt.calendarList().patch(
+                calendarId=tgt_cal_id, body=body, colorRgbFormat=rgb).execute())
+        except OPTIONAL_PASS_ERRORS as exc:
+            log.warning("[%s] could not copy settings of calendar %s: %s",
+                        self.source_user, tgt_cal_id, exc)
+
+    def sync_subscriptions(self) -> int:
+        """Re-follow the calendars the user followed but did not own -- a
+        colleague's, a team calendar, a public holiday one -- with the same colour
+        and name. Run after every calendar and its sharing have landed, or the
+        calendar being followed is not there, or not shared, yet. Idempotent."""
+        entries, token = [], None
+        try:
+            while True:
+                resp = self._retry(lambda t=token: self.src.calendarList().list(
+                    showHidden=True, pageToken=t).execute())
+                entries += resp.get("items", [])
+                token = resp.get("nextPageToken")
+                if not token:
+                    break
+        except OPTIONAL_PASS_ERRORS as exc:
+            log.warning("[%s] could not list followed calendars: %s", self.source_user, exc)
+            return 0
+        done = 0
+        for entry in entries:
+            cal_id = entry.get("id")
+            if not cal_id or entry.get("primary") or entry.get("accessRole") == "owner":
+                continue
+            key = f"subscription::{cal_id}"
+            if self.db.get_target_id(self.source_user, key, "subscription"):
+                continue
+            tgt = (self.db.target_for_source_id(cal_id, types=("calendar",))
+                   or self.db.resolve_identity(cal_id) or cal_id)
+            settings_body, rgb = list_settings(entry)
+            if self.settings.dry_run:
+                continue
+            try:
+                self._retry(lambda b={"id": tgt, **settings_body}: self.tgt.calendarList().insert(
+                    body=b, colorRgbFormat=rgb).execute())
+            except (PermanentAPIError, RuntimeError) as exc:
+                if "duplicate" not in str(exc).lower() and "409" not in str(exc):
+                    self.db.log_audit(self.source_user, key, "calendar_subscription",
+                                      "FAILED", str(exc))
+                    continue
+            self.db.record_mapping(self.source_user, key, tgt, "subscription")
+            done += 1
+        self.stats["subscriptions"] = self.stats.get("subscriptions", 0) + done
+        return done
 
     def fetch_event(self, eid: str, src_cal_id: str = "primary") -> dict | None:
         """One event by id, for a targeted retry."""

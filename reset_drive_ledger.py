@@ -77,9 +77,12 @@ SERVICE_TYPES: dict[str, tuple[str, ...]] = {
     # repointed. They must clear with the messages they describe, or a reset
     # leaves evidence of a rewrite for mail that is no longer there.
     "gmail": ("message", "draft", "filter", "signature", "link_rewrite",
-              "link_repair"),
-    "calendar": ("event", "calendar", "calendar_acl"),
-    "chat": ("chat_space", "chat_message", "chat_member"),
+              "link_repair", "thread"),
+    # subscription: a calendar the user follows, re-followed on the target;
+    # calendar_subscription is the audit row of one that could not be.
+    "calendar": ("event", "calendar", "calendar_acl", "subscription",
+                 "calendar_subscription"),
+    "chat": ("chat_space", "chat_message", "chat_member", "chat_thread"),
     "contacts": ("contact", "contact_group"),
     "tasks": ("task", "task_list"),
     # Groups are tenant-level, not per-user, so they are recorded against a
@@ -99,6 +102,9 @@ SERVICE_TYPES: dict[str, tuple[str, ...]] = {
 SERVICE_SIDE_TABLES: dict[str, tuple[tuple[str, str], ...]] = {
     # service -> ((table, user_column), ...)
     "gmail": (("label_map", "source_user"),),
+    # A chat space this user's run claimed (db.claim): kept, the space it
+    # names is gone from the ledger and no member's re-run would migrate it.
+    "chat": (("tenant_claims", "owner"),),
 }
 
 

@@ -190,7 +190,10 @@ def every_toggle_scopes(settings: Settings, tenant: str) -> set[str]:
          # and omitting it meant chat.delete never reached a written grant
          # -- so turning the flag on could only ever produce the
          # unauthorized_client this function exists to prevent.
-         "chat_allow_delete": cd}
+         "chat_allow_delete": cd,
+         # Groups and rooms: each widens only the directory grant, and a
+         # setup that never wrote them left "full fidelity" nothing to turn on.
+         "migrate_groups": gr, "migrate_resources": rs}
         for m in TRANSFER_MODES
         for g in (False, True)
         for c in (False, True)
@@ -200,6 +203,8 @@ def every_toggle_scopes(settings: Settings, tenant: str) -> set[str]:
         for ss in (False, True)
         for ca in (False, True)
         for cd in (False, True)
+        for gr in (False, True)
+        for rs in (False, True)
     ]
     for combo in combos:
         try:

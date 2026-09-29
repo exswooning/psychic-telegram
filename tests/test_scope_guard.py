@@ -491,10 +491,12 @@ class TestTheGate:
         order = []
         for node in ast.walk(fn):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-                if node.func.id in ("_gate_on_delegation", "run_batch"):
+                # _run_pass is where users are dispatched now (run_batch, or a
+                # pass split across processes that each run it).
+                if node.func.id in ("_gate_on_delegation", "_run_pass"):
                     order.append((node.lineno, node.func.id))
         names = [n for _, n in sorted(order)]
-        assert names[:2] == ["_gate_on_delegation", "run_batch"], names
+        assert names[:2] == ["_gate_on_delegation", "_run_pass"], names
 
 
 class TestIsComplete:
@@ -1376,10 +1378,10 @@ class TestStaleServiceMarkersAreReopened:
         order = []
         for node in ast.walk(fn):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-                if node.func.id in ("reconcile_service_markers", "run_batch"):
+                if node.func.id in ("reconcile_service_markers", "_run_pass"):
                     order.append((node.lineno, node.func.id))
         names = [n for _, n in sorted(order)]
-        assert names[:2] == ["reconcile_service_markers", "run_batch"], names
+        assert names[:2] == ["reconcile_service_markers", "_run_pass"], names
 
 
 class TestAclFailuresResolveAgainstTheTarget:

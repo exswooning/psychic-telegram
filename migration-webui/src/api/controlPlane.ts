@@ -290,6 +290,10 @@ export interface MigrationTuning {
   driveFileWorkers?: number
   /** 0 = no cap. */
   mappingCacheUserCap?: number
+  /** Every optional pass whose scopes are granted. The server's default is on. */
+  fullFidelity?: boolean
+  /** OS processes each pass is split across. */
+  processes?: number
 }
 
 export const startMigration = (
@@ -313,7 +317,9 @@ export const startMigration = (
                            ...(tuning?.userWorkers !== undefined ? { user_workers: tuning.userWorkers } : {}),
                            ...(tuning?.driveFileWorkers !== undefined ? { drive_file_workers: tuning.driveFileWorkers } : {}),
                            ...(tuning?.mappingCacheUserCap !== undefined
-                             ? { mapping_cache_user_cap: tuning.mappingCacheUserCap } : {}) }),
+                             ? { mapping_cache_user_cap: tuning.mappingCacheUserCap } : {}),
+                           ...(tuning?.fullFidelity === false ? { full_fidelity: false } : {}),
+                           ...(tuning?.processes !== undefined ? { processes: tuning.processes } : {}) }),
   })
 
 // force is SIGKILL, for a run that took the interrupt and is still going.
@@ -1560,7 +1566,7 @@ export const runOneToOne = (reason: string, opts: { accountId?: number; users?: 
 /** An exhaustive per-user count on both tenants (tally.py), not a sample -- distinct from
  *  one-to-one above. COMPLETE/SHORT read off count_parity against the same bar
  *  benchmarks.py's own count_parity check uses; UNKNOWN is a tally that measured nothing. */
-export type TallyVerdict = 'COMPLETE' | 'SHORT' | 'OWED_TO_DMS' | 'UNKNOWN' | 'NOT_TALLIED'
+export type TallyVerdict = 'COMPLETE' | 'DIFFERS' | 'SHORT' | 'OWED_TO_DMS' | 'UNKNOWN' | 'NOT_TALLIED'
 export interface TallyServiceCount {
   source: number
   target: number
@@ -1587,6 +1593,15 @@ export interface TallyUser {
   recordedAt: string | null
   services: Record<string, TallyServiceCount>
   worst: TallyWorst[]
+  /** Every mapped Drive item compared with its copy (tally.compare_drive). */
+  driveItems?: TallyDriveItems | null
+}
+export interface TallyDriveItems {
+  compared: number
+  matched: number
+  differ: number
+  missingOnTarget: number
+  examples: { name: string; id: string; why: string }[]
 }
 export interface TallyView {
   accountId: number | null

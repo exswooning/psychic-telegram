@@ -157,8 +157,10 @@ DRIVE_SCOPE = [
               "Excluded by the trashed=false query filter"),
     ScopeItem("drive", "DLP / copy-protected files", NONE,
               "capabilities.canDownload=false. Logged SKIPPED_NO_DOWNLOAD"),
-    ScopeItem("drive", "Drive labels and custom metadata", NONE,
-              "Drive Labels API not implemented"),
+    ScopeItem("drive", "Drive labels", NONE,
+              "Drive Labels API not implemented. Custom properties, the star, "
+              "folder colour, creation date, 'viewers cannot download', "
+              "'writers can share' and a file's lock ARE carried"),
     ScopeItem("drive", "Activity log / audit trail", NONE,
               "Source-tenant history is not transferable"),
 ]
@@ -191,10 +193,12 @@ GMAIL_SCOPE = [
               "System labels share immutable IDs across all mailboxes"),
     ScopeItem("gmail", "User labels, nesting and colours", FULL,
               "Created parent-first so 'Clients/Acme/2024' resolves correctly"),
-    ScopeItem("gmail", "Conversation threading", PARTIAL,
-              "Reassembles from Message-ID / In-Reply-To / References headers. "
-              "Near-identical in practice, but grouping is not guaranteed "
-              "byte-identical to the source"),
+    ScopeItem("gmail", "Conversation threading", FULL,
+              "Each message after a conversation's first is inserted into the "
+              "target thread that first copy started (threadId), one "
+              "conversation at a time, so the grouping is the source's. A "
+              "thread gone from the target falls back to Gmail's own header "
+              "grouping rather than losing the message"),
     ScopeItem("gmail", "Spam re-classification avoided", FULL,
               "messages.insert bypasses the delivery pipeline entirely — no "
               "spam scoring, no filters firing, no forwarding rules"),
@@ -280,8 +284,12 @@ CALENDAR_SCOPE = [
               "calendar is recreated on the target and its events imported "
               "into it. Only calendars the user OWNS -- a subscribed calendar "
               "belongs to someone else and is left to be re-subscribed"),
-    ScopeItem("calendar", "Subscribed / shared calendars", NONE,
-              "Belong to another principal; re-subscribe post-cutover"),
+    ScopeItem("calendar", "Subscribed / shared calendars", PARTIAL,
+              "Re-followed at the end of every run with the same colour and "
+              "name: a colleague's calendar through identity_map, a migrated "
+              "secondary through its mapping, a public one as it is. Only "
+              "where the owner's calendar is shared with the user on the "
+              "target -- which MIGRATE_CALENDAR_ACLS carries"),
     ScopeItem("calendar", "Calendar sharing ACLs", PARTIAL,
               "Migrated when MIGRATE_CALENDAR_ACLS=true, identity-mapped the "
               "same way Drive ACLs are and inserted with "
@@ -289,14 +297,21 @@ CALENDAR_SCOPE = [
               "and logged rather than leaked. Costs read-only-ness on the "
               "source: acl.list is rejected under calendar.readonly, so this "
               "flag upgrades the source grant to the full calendar scope"),
-    ScopeItem("calendar", "Room and equipment resources", NONE,
-              "Resource addresses are tenant-specific. Dropped from attendee "
-              "lists; migrate calendar resources separately and re-book"),
-    ScopeItem("calendar", "Google Meet conference data", NONE,
-              "Source-tenant Meet links do not resolve for target users. "
-              "Stripped deliberately (conferenceDataVersion=0)"),
-    ScopeItem("calendar", "Out-of-office / focus-time event types", PARTIAL,
-              "Imported as ordinary events; eventType is a read-only field"),
+    ScopeItem("calendar", "Room and equipment resources", PARTIAL,
+              "With MIGRATE_RESOURCES, rooms are recreated on the target -- "
+              "their buildings and features first -- and mapped, so a meeting "
+              "keeps its room. A room's address is minted per tenant, so it "
+              "changes. The room's own calendar is not back-filled"),
+    ScopeItem("calendar", "Google Meet conference data", PARTIAL,
+              "A source Meet link dies with the source, so it is stripped on "
+              "import. A meeting still ahead -- a series with no end, or one "
+              "ending later -- gets a fresh Meet link on its organizer's "
+              "copy. Past meetings keep none"),
+    ScopeItem("calendar", "Out-of-office / focus-time event types", FULL,
+              "Created as their own type (events.insert with their properties, "
+              "no attendees, no notification) on the primary calendar, which "
+              "import cannot do. One Google refuses is imported as an ordinary "
+              "event rather than lost"),
     ScopeItem("calendar", "Working hours, appointment schedules", NONE,
               "Not exposed for write via the Calendar API"),
     ScopeItem("calendar", "Cancelled events", NONE, "Excluded by design"),
@@ -333,9 +348,9 @@ OTHER_SCOPE = [
     ScopeItem("other", "Google Contacts (personal)", PARTIAL,
               "Migrated when MIGRATE_CONTACTS=true: names, emails, phones, "
               "organisations, addresses, birthdays, URLs and contact-group "
-              "membership. Photos are skipped, and the auto-collected 'Other "
-              "contacts' list cannot be written to at all — it refills on its "
-              "own as mail is sent"),
+              "membership, and each contact's own photo (not the drawn letter "
+              "avatar). The auto-collected 'Other contacts' list cannot be "
+              "written to at all — it refills on its own as mail is sent"),
     ScopeItem("other", "Directory contacts", NONE,
               "Not personal data; they come from the target tenant's own "
               "directory once accounts exist"),
@@ -349,14 +364,15 @@ OTHER_SCOPE = [
               "Migrated when MIGRATE_CHAT=true. Named spaces are recreated in "
               "import mode and each message is replayed as its ORIGINAL "
               "sender, so a group conversation stays attributable rather than "
-              "collapsing into one voice. What is lost is timestamps: a "
-              "historical createTime needs app authentication with "
-              "chat.import, which is rejected at token-mint (verified), so "
-              "every message is stamped at migration time. Order is "
-              "preserved, dates are not. Direct messages are skipped (a DM is "
-              "its participants, not a name), as are card/attachment-only "
-              "messages. Needs the Chat service switched ON for both "
-              "organisations plus a configured Chat app in each project"),
+              "collapsing into one voice. In import mode each message keeps "
+              "when it was written (createTime; if the tenant refuses it, the "
+              "rest of that user's chat is stamped at migration time and the "
+              "log says so), replies go back into their threads, reactions are "
+              "added back by whoever reacted, and direct messages and group "
+              "chats are created as themselves. A space every member sees is "
+              "migrated once. Card/attachment-only messages are skipped. Needs "
+              "the Chat service switched ON for both organisations plus a "
+              "configured Chat app in each project"),
     ScopeItem("other", "Google Vault holds, exports, retention rules", NONE,
               "Legal-hold obligations need their own export path. Confirm with "
               "counsel before decommissioning the source tenant"),

@@ -21,9 +21,6 @@ What does not
 -------------
   * The "Other contacts" auto-collected list -- readable, but the API has no
     way to write into it. They reappear on their own as people send mail.
-  * Contact photos. `updateContactPhoto` exists, so this is a limitation of
-    this pass rather than of the API; it is skipped because a photo costs a
-    request per contact and buys the least of anything here.
   * Directory contacts, which are not personal data at all -- they come from
     the target tenant's own directory once accounts exist.
 """
@@ -43,7 +40,7 @@ log = logging.getLogger(__name__)
 # returns almost nothing by default.
 PERSON_FIELDS = (
     "names,emailAddresses,phoneNumbers,organizations,addresses,biographies,"
-    "birthdays,urls,memberships,nicknames,occupations,relations,userDefined,"
+    "birthdays,urls,memberships,nicknames,occupations,relations,userDefined,photos,"
     # metadata carries sources[].updateTime, which is the only way to tell a
     # contact that has changed since it was copied from one that has not.
     # Without it every already-migrated contact looks identical forever.
@@ -343,6 +340,31 @@ class ContactsMigrator:
                           modified_time=_update_time(person))
         self.stats["contacts"] += 1
         self._apply_memberships(person, created, group_map)
+        self._copy_photo(person, created["resourceName"])
+
+    def _copy_photo(self, person: dict, target_rid: str) -> None:
+        """The contact's own photo -- not the letter avatar Google draws for every
+        contact without one. One download and one call per contact that has a
+        photo; a photo that cannot be copied is logged, never a failed contact."""
+        url = next((p.get("url") for p in person.get("photos") or []
+                    if p.get("url") and not p.get("default")), None)
+        if not url or self.settings.dry_run:
+            return
+        import base64
+        import urllib.request
+
+        try:
+            # "=s0" asks googleusercontent for the photo at its stored size.
+            with urllib.request.urlopen(url.split("=")[0] + "=s0", timeout=30) as resp:
+                data = resp.read()
+            self.limiter.acquire()
+            self._retry(lambda: self.tgt.people().updateContactPhoto(
+                resourceName=target_rid,
+                body={"photoBytes": base64.b64encode(data).decode("ascii")}).execute())
+            self.stats["photos"] = self.stats.get("photos", 0) + 1
+        except Exception as exc:      # noqa: BLE001
+            log.warning("[%s] photo of %s not copied: %s", self.source_user,
+                        person.get("resourceName"), exc)
 
     def _apply_memberships(self, person: dict, created: dict,
                            group_map: dict) -> None:

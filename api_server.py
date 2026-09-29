@@ -358,6 +358,13 @@ class StartMigration(WriteAction):
     drive_file_workers: int | None = Field(default=None, ge=1, le=16)
     # 0 = no cap (every user's mappings stay cached), the "unlimited" arm.
     mapping_cache_user_cap: int | None = Field(default=None, ge=0, le=100_000)
+    # OS processes each pass is split across (MIGRATE_PROCESSES): past the
+    # interpreter lock that holds one process to ~1.1 cores.
+    processes: int | None = Field(default=None, ge=1, le=8)
+    # Turn on every optional pass whose scopes are granted (fidelity.py): each
+    # one off is data a whole-tenant run leaves behind. Checked per launch with
+    # a token mint, because one ungranted scope fails every call in the run.
+    full_fidelity: bool = True
 
 
 def _tuning_env(body: StartMigration, env: dict | None) -> dict | None:
@@ -365,7 +372,8 @@ def _tuning_env(body: StartMigration, env: dict | None) -> dict | None:
     extra = {name: str(val) for name, val in (
         ("USER_WORKERS", body.user_workers),
         ("DRIVE_FILE_WORKERS", body.drive_file_workers),
-        ("MAPPING_CACHE_USER_CAP", body.mapping_cache_user_cap)) if val is not None}
+        ("MAPPING_CACHE_USER_CAP", body.mapping_cache_user_cap),
+        ("MIGRATE_PROCESSES", body.processes)) if val is not None}
     return {**(env or os.environ), **extra} if extra else env
 
 
@@ -1620,6 +1628,28 @@ def _discover_when_mapped(proc, account_id: int | None) -> None:
     log.info("discovery after the identity map (account %s): %s %s", account_id, "started" if ok else "not started", detail)
 
 
+# The repair each account last started, so a follow-on that must see its result
+# (the tally) can wait for it rather than count a target repair is still fixing.
+_REPAIR_THREADS: dict = {}
+
+
+def _start_tally_after_repair(account_id: int | None) -> tuple[bool, str]:
+    """Count every user on both tenants once the run -- and the repair behind it --
+    is over: the exhaustive per-user tally used to run inside the migration, after
+    every pass, re-listing both tenants for each user up to three times on the same
+    CPU the copy needed. Now it is one job, after, on the repaired state."""
+    def _go() -> None:
+        prior = _REPAIR_THREADS.get(account_id)
+        if prior is not None:
+            prior.join()
+        ok, detail = _run_admitted([PY, "tally.py"] + _account_argv(account_id),
+                                   account_id, "user-tally")
+        log.info("tally after the run for account %s: %s (%s)", account_id, ok, detail)
+
+    threading.Thread(target=_go, name=f"tally-after-{account_id}", daemon=True).start()
+    return True, "tally will run once repair finishes"
+
+
 def _start_repair(account_id: int | None, why: str, *,
                   actor: str = "auto", role: str = "system") -> tuple[bool, str]:
     """Fix what can be fixed without guessing -- the same work /api/v2/repair/{id} does
@@ -1655,7 +1685,9 @@ def _start_repair(account_id: int | None, why: str, *,
             log.warning("repair failed for account %s: %s", account_id, exc)
 
     action = cpdb.begin_action(actor, role, "repair.start", why, str(account_id), {}, None, account_id)
-    threading.Thread(target=_go, name=f"repair-{account_id}", daemon=True).start()
+    t = threading.Thread(target=_go, name=f"repair-{account_id}", daemon=True)
+    _REPAIR_THREADS[account_id] = t
+    t.start()
     cpdb.finish_action(action, "OK", "repair started")
     _DETAIL_CACHE.invalidate(("migration_detail", account_id))
     return True, "repair started; it checks each grant against the target and takes a few minutes"
@@ -1671,6 +1703,8 @@ def _follow_on(kind: str, account_id: int | None) -> None:
     elif kind == "dms":
         _start_dms(account_id, require_clean=True, why="started automatically: the split migration finished cleanly, "
                                                        "so the mail it left for the DMS is now owed")
+    elif kind == "tally":
+        _start_tally_after_repair(account_id)
 
 
 @app.post("/api/v2/migrate/start")
@@ -1699,6 +1733,16 @@ async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
     if body.transfer_mode:
         env = {**(env or os.environ), "TRANSFER_MODE": body.transfer_mode}
     env = _tuning_env(body, env)
+    left_off: list[str] = []
+    if body.full_fidelity and not body.dry_run:
+        import fidelity
+        try:
+            st = Settings(account_id=account_id)
+            extra, left_off = await _off_loop(fidelity.plan, st, fidelity.probe_for(st))
+        except Exception as exc:      # noqa: BLE001 - never blocks the launch itself
+            extra, left_off = {}, [f"full fidelity not checked ({exc}); optional passes stay off"]
+        if extra:
+            env = {**(env or os.environ), **extra}
     argv = [PY, "main.py"] + _account_argv(account_id)
     if body.dry_run:
         argv.append("--dry-run")
@@ -1720,7 +1764,12 @@ async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
     # Repair after any real run, never a dry one (it writes; a dry run touched nothing to
     # fix). Before the DMS, not that it matters which order -- repair only reconciles
     # what this tool's own engine did, unrelated to Google's mail import.
-    then = ([] if body.dry_run else ["repair"]) + (["dms"] if dms and body.mail_mode == "split" else [])
+    # Then a tally of every user -- except when the DMS follows, whose own job tallies
+    # once Google's import has finished (a tally before it would read mail as short).
+    dms_follows = dms and body.mail_mode == "split"
+    then = ([] if body.dry_run else ["repair"]) + (["dms"] if dms_follows else [])
+    if not body.dry_run and not dms_follows and body.sample is None and not body.users:
+        then.append("tally")
     beside = dms and body.mail_mode == "dms"
 
     def launch() -> tuple[bool, str]:
@@ -1730,6 +1779,8 @@ async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
             d_ok, d_detail = _start_dms(account_id, require_clean=False,
                                         why="started automatically alongside a mail_mode=dms migration")
             detail += f"; DMS {'started' if d_ok else 'not started'}: {d_detail}"
+        if ok and left_off:
+            detail += "; " + "; ".join(left_off)
         return ok, detail
     return await _gated(op, "migrate.start", body, target, launch)
 

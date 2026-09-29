@@ -25,15 +25,18 @@ def _drain():
 
 
 class TestTheDefault:
-    def test_on_unless_switched_off(self, monkeypatch):
+    def test_off_unless_switched_on(self, monkeypatch):
+        """Inside the run it re-listed both tenants for each user after every pass,
+        on the CPU the copy needs; a run launched from the API tallies everyone
+        once, after the run and its repair, instead."""
         from config import Settings
         monkeypatch.delenv("TALLY_ON_COMPLETE", raising=False)
-        assert Settings().tally_on_complete is True
-
-    def test_it_can_be_switched_off(self, monkeypatch):
-        from config import Settings
-        monkeypatch.setenv("TALLY_ON_COMPLETE", "0")
         assert Settings().tally_on_complete is False
+
+    def test_it_can_be_switched_back_on(self, monkeypatch):
+        from config import Settings
+        monkeypatch.setenv("TALLY_ON_COMPLETE", "1")
+        assert Settings().tally_on_complete is True
 
 
 class TestAUserIsTalliedWhenTheyFinish:

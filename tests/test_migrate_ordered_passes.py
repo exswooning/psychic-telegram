@@ -21,13 +21,16 @@ import main
 
 
 class TestThePasses:
-    def test_drive_then_mail_then_the_rest(self):
+    def test_drive_and_everything_without_links_then_mail_and_calendar(self):
+        """Only mail and calendar carry Drive links to rewrite; contacts, tasks and
+        chat never read id_mapping, so they run with Drive instead of after mail."""
         got = main.ordered_passes({"drive", "gmail", "calendar", "contacts", "tasks", "chat"})
-        assert got == [{"drive"}, {"gmail"}, {"calendar", "contacts", "tasks", "chat"}]
+        assert got == [{"drive", "contacts", "tasks", "chat"}, {"gmail", "calendar"}]
 
     def test_only_what_was_asked_for_and_never_an_empty_pass(self):
         assert main.ordered_passes({"gmail"}) == [{"gmail"}]
-        assert main.ordered_passes({"drive", "chat"}) == [{"drive"}, {"chat"}]
+        assert main.ordered_passes({"drive", "chat"}) == [{"drive", "chat"}]
+        assert main.ordered_passes({"drive", "gmail"}) == [{"drive"}, {"gmail"}]
         assert main.ordered_passes(set()) == []
 
     def test_a_service_is_in_exactly_one_pass(self):
@@ -85,8 +88,8 @@ class TestTheSharedRunner:
 
     def test_ordered_runs_the_passes_in_order_and_returns_every_passs_results(self, runner):
         results = runner(self.ALL, main.ordered_passes(self.ALL))
-        assert runner.passes == [{"drive"}, {"gmail"}, {"calendar", "contacts", "tasks", "chat"}]
-        assert [r["source"] for r in results] == ["u1", "u2", "u3"]
+        assert runner.passes == [{"drive", "contacts", "tasks", "chat"}, {"gmail", "calendar"}]
+        assert [r["source"] for r in results] == ["u1", "u2"]
 
     def test_the_whole_run_registers_once_not_once_per_pass(self, runner):
         """A pass registering and releasing would drop the run out of the admission
@@ -98,8 +101,8 @@ class TestTheSharedRunner:
     def test_it_says_which_pass_it_is_on_and_which_process_is_saying_so(self, runner):
         runner(self.ALL, main.ordered_passes(self.ALL))
         lines = [l for l in runner.out.readouterr().out.splitlines() if l.startswith("PASS ")]
-        assert lines == [f"PASS 1/3 pid={os.getpid()}: drive", f"PASS 2/3 pid={os.getpid()}: gmail",
-                         f"PASS 3/3 pid={os.getpid()}: calendar,chat,contacts,tasks"]
+        assert lines == [f"PASS 1/2 pid={os.getpid()}: chat,contacts,drive,tasks",
+                         f"PASS 2/2 pid={os.getpid()}: calendar,gmail"]
 
     def test_an_unordered_run_is_one_pass_and_prints_no_marker(self, runner):
         runner(self.ALL)
@@ -114,13 +117,14 @@ class TestTheSharedRunner:
         """The operator asked it to stop. Starting mail after that is the opposite."""
         runner.hook.append(lambda n: main.SHUTDOWN.set() if n == 1 else None)
         runner(self.ALL, main.ordered_passes(self.ALL))
-        assert runner.passes == [{"drive"}]
+        assert runner.passes == [{"drive", "contacts", "tasks", "chat"}]
 
     def test_a_memory_pause_ends_the_run_and_still_exits_paused(self, runner):
         runner.hook.append(lambda n: main.MEMORY_PAUSE.set() if n == 1 else None)
         with pytest.raises(SystemExit) as e:
             runner(self.ALL, main.ordered_passes(self.ALL))
-        assert e.value.code == main.EXIT_PAUSED and runner.passes == [{"drive"}]
+        assert e.value.code == main.EXIT_PAUSED and runner.passes == [
+            {"drive", "contacts", "tasks", "chat"}]
 
     def test_a_delta_still_registers_as_a_delta(self, runner, monkeypatch):
         names = []
@@ -136,7 +140,7 @@ class TestTheCommand:
         monkeypatch.setattr(main, "_print_batch_summary", lambda *a, **k: None)
         monkeypatch.setattr(main, "_auto_repair", lambda *a, **k: None)
         main.cmd_migrate(argparse.Namespace(services="all", user=None, ordered=True), settings, db, None)
-        assert seen["passes"] == [{"drive"}, {"gmail"}, {"calendar", "contacts", "tasks", "chat"}]
+        assert seen["passes"] == [{"drive", "contacts", "tasks", "chat"}, {"gmail", "calendar"}]
 
     def test_unordered_hands_it_none(self, monkeypatch, settings, db):
         seen = {}

@@ -91,6 +91,23 @@ describe('the verdicts', () => {
 })
 
 describe('what is found', () => {
+  it('shows counts that agree over items that do not as Differs, with which items', async () => {
+    cp.view.mockResolvedValue(view({ users: [
+      { user: 'fay@a.com', target: 'fay@b.com', status: 'DONE', verdict: 'DIFFERS', countParity: 1.0,
+        recordedAt: '2026-09-27T10:00:00Z', services: { drive_files: svc() }, worst: [],
+        driveItems: { compared: 3, matched: 2, differ: 1, missingOnTarget: 0,
+                      examples: [{ name: 'budget.xlsx', id: 's1', why: 'md5Checksum' }] } },
+    ] }))
+    show()
+    const chip = await screen.findByTestId('verdict-fay@a.com')
+    expect(chip).toHaveTextContent('Differs')
+    expect(chip.className).toMatch(/colorWarning/)
+    fireEvent.click(screen.getByLabelText('show fay@a.com'))
+    const items = await screen.findByTestId('items-fay@a.com')
+    expect(items).toHaveTextContent('2 of 3 match, 1 differ')
+    expect(items).toHaveTextContent('budget.xlsx: md5Checksum')
+  })
+
   it('opens a user to show which service came up short and by how much', async () => {
     show()
     fireEvent.click(await screen.findByLabelText('show bob@a.com'))
@@ -137,10 +154,10 @@ describe('Tally now', () => {
 })
 
 describe('the automatic check', () => {
-  it('says so when it is switched off', async () => {
+  it('says users are counted after the run when not counted as each finishes', async () => {
     cp.view.mockResolvedValue(view({ onComplete: false }))
     show()
-    expect(await screen.findByText(/switched off for this account/)).toBeInTheDocument()
+    expect(await screen.findByText(/once a migration and its repair are over/)).toBeInTheDocument()
   })
 
   it('otherwise says it is exhaustive, not a sample', async () => {

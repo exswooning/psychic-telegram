@@ -33,18 +33,21 @@ engines, because Chat does not allow it:
 * `spaces.completeImport` flips the space from import mode to a normal space.
   Until that call lands the space is invisible to its members.
 
-The unavoidable loss: **original timestamps**. Setting a historical
-`createTime` requires app authentication with the `chat.import` scope, and
-that combination is rejected at token-mint (`unauthorized_client`) --
-verified directly. Under user authentication every message is stamped at
-migration time. Chat history therefore arrives in the right order, from the
-right people, on the wrong date. That is a real fidelity loss and it is why
-Chat is PARTIAL in scope.py rather than FULL; it should be agreed with
-stakeholders before a cutover, not explained afterwards.
+Original timestamps: Google documents `createTime` as writable in an
+import-mode space, so under `import` every message (and the space) is sent
+with the time it was written. An earlier attempt recorded a refusal at
+token-mint (`unauthorized_client`) -- which is what a scope missing from the
+delegation looks like, not a hard limit. If the tenant refuses it anyway, the
+message is sent again without it and the rest of that user's Chat is stamped
+at migration time -- in order, from the right people, on the wrong date --
+and the log says so.
 
-Direct messages are skipped. A DM is defined by its two participants rather
-than by a name, and recreating one as a `SPACE` would silently turn a private
-conversation into something else.
+Direct messages and group chats are created as themselves under `import` (a
+DM is its participants, not a name). Under `direct` they are still skipped:
+recreating one as a named SPACE would turn a private conversation into
+something else. Replies go back into their thread, and reactions are added
+back by whoever reacted. A space every member sees in their own list is
+migrated once, by whichever member's run claims it first (db.claim).
 """
 
 from __future__ import annotations
@@ -77,6 +80,8 @@ class ChatMigrator:
         self.stats = {"spaces": 0, "messages": 0, "members": 0, "skipped": 0,
                       "failed": 0, "unmapped_senders": 0}
         self._email_cache: dict[str, str] = {}
+        # Historical createTime is sent until the tenant refuses it once.
+        self._keep_time = True
 
     def _retry(self, fn, label=None):
         return retry_on_google_error(
@@ -171,9 +176,10 @@ class ChatMigrator:
                            self.source_user, i, len(spaces))
                 break
             name = space.get("name")
-            if space.get("spaceType") != "SPACE":
+            if space.get("spaceType") != "SPACE" and self.settings.chat_space_mode != "import":
                 # A DM is its participants, not a name; recreating it as a
-                # named space would quietly change what it is.
+                # named space would quietly change what it is. Import mode
+                # creates it as a DM / group chat proper; direct mode cannot.
                 self.db.log_audit(self.source_user, name, "chat_space",
                                   "SKIPPED_NOT_A_SPACE",
                                   f"spaceType={space.get('spaceType')}")
@@ -191,6 +197,15 @@ class ChatMigrator:
                     self._finish_import(name, mapped)
                 else:
                     self.stats["skipped"] += 1
+                continue
+            # Every member sees a shared space in their own list, and each
+            # member's run used to migrate it again. The first to claim it
+            # migrates it, with every member; the rest skip it.
+            holder = self.db.claim("chat_space", name, self.source_user)
+            if holder != self.source_user:
+                self.db.log_audit(self.source_user, name, "chat_space", "SKIPPED_SHARED",
+                                  f"migrated once, by {holder}'s run, with every member")
+                self.stats["skipped"] += 1
                 continue
             self._migrate_space(space)
 
@@ -239,12 +254,17 @@ class ChatMigrator:
 
         import_mode = self.settings.chat_space_mode == "import"
         tgt = self.auth.target_chat(self.target_user)
-        body = {"spaceType": "SPACE", "displayName": f"{display}"}
+        stype = space.get("spaceType") or "SPACE"
+        # A DM / group chat has no name of its own: it is its members.
+        body = ({"spaceType": "SPACE", "displayName": f"{display}"} if stype == "SPACE"
+                else {"spaceType": stype})
         if import_mode:
             body["importMode"] = True
+            if space.get("createTime") and self._keep_time:
+                body["createTime"] = space["createTime"]
         try:
-            created = self._retry(lambda b=body: tgt.spaces().create(
-                body=b).execute())
+            created = self._with_time_fallback(lambda b: self._retry(
+                lambda: tgt.spaces().create(body=b).execute()), body)
         except OPTIONAL_PASS_ERRORS as exc:
             self.db.log_audit(self.source_user, name, "chat_space", "FAILED",
                               str(exc))
@@ -386,13 +406,24 @@ class ChatMigrator:
 
             body = {"text": text if attributed
                     else f"[originally from {sender.get('name', 'unknown')}] {text}"}
+            # When it was said, in an import-mode space -- the one place Chat
+            # accepts a historical createTime.
+            if self.settings.chat_space_mode == "import" and msg.get("createTime") \
+                    and self._keep_time:
+                body["createTime"] = msg["createTime"]
+            # A reply goes back into its thread, not to the top of the space.
+            src_thread = (msg.get("thread") or {}).get("name")
+            tgt_thread = (self.db.get_target_id(self.source_user, src_thread, "chat_thread")
+                          if src_thread else None)
+            kw = {}
+            if tgt_thread:
+                body["thread"] = {"name": tgt_thread}
+                kw["messageReplyOption"] = "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
 
             try:
-                result = self._retry(
-                    lambda b=body, p=poster: self.auth.target_chat(p)
-                    .spaces().messages().create(parent=target_space, body=b)
-                    .execute()
-                )
+                result = self._with_time_fallback(lambda b, p=poster: self._retry(
+                    lambda: self.auth.target_chat(p).spaces().messages().create(
+                        parent=target_space, body=b, **kw).execute()), body)
             except OPTIONAL_PASS_ERRORS as exc:
                 self.db.log_audit(self.source_user, mid, "chat_message",
                                   "FAILED", str(exc))
@@ -401,7 +432,62 @@ class ChatMigrator:
 
             self.db.record_mapping(self.source_user, mid, result["name"],
                                    "chat_message")
+            made_thread = (result.get("thread") or {}).get("name")
+            if src_thread and not tgt_thread and made_thread:
+                self.db.record_mapping(self.source_user, src_thread, made_thread, "chat_thread")
+            if msg.get("emojiReactionSummaries"):
+                self._replay_reactions(mid, result["name"])
             self.db.log_audit(self.source_user, mid, "chat_message", "SUCCESS")
             self.stats["messages"] += 1
             replayed += 1
         return replayed
+
+    def _with_time_fallback(self, send, body: dict):
+        """send(body); if it fails while carrying a historical createTime, once
+        more without it -- and if THAT works, stop sending createTime for the rest
+        of this user (the tenant does not accept it; an honest "now" beats a
+        message that never arrives)."""
+        try:
+            return send(body)
+        except OPTIONAL_PASS_ERRORS:
+            if "createTime" not in body:
+                raise
+            out = send({k: v for k, v in body.items() if k != "createTime"})
+            if self._keep_time:
+                log.warning("[%s] Chat refused historical createTime; the rest of this "
+                            "user's Chat is stamped at migration time", self.source_user)
+            self._keep_time = False
+            return out
+
+    def _replay_reactions(self, source_msg: str, target_msg: str) -> int:
+        """Each reaction, added back by the person who reacted (mapped). One
+        nobody on the target can be is skipped, never re-attributed."""
+        done = 0
+        try:
+            reactions, token = [], None
+            while True:
+                resp = self._retry(lambda t=token: self.auth.source_chat(self.source_user)
+                                   .spaces().messages().reactions().list(
+                                       parent=source_msg, pageSize=200, pageToken=t).execute())
+                reactions += resp.get("reactions", [])
+                token = resp.get("nextPageToken")
+                if not token:
+                    break
+        except OPTIONAL_PASS_ERRORS as exc:
+            log.warning("[%s] could not read reactions on %s: %s", self.source_user, source_msg, exc)
+            return 0
+        for r in reactions:
+            email = self._sender_email((r.get("user") or {}).get("name", ""))
+            who = self.db.resolve_identity(email) if email else None
+            if not who or not r.get("emoji"):
+                continue
+            try:
+                self._retry(lambda w=who, e=r["emoji"]: self.auth.target_chat(w).spaces()
+                            .messages().reactions().create(parent=target_msg,
+                                                           body={"emoji": e}).execute())
+                done += 1
+            except OPTIONAL_PASS_ERRORS as exc:
+                log.warning("[%s] reaction on %s not replayed: %s", self.source_user,
+                            source_msg, exc)
+        self.stats["reactions"] = self.stats.get("reactions", 0) + done
+        return done

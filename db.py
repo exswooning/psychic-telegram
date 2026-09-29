@@ -293,6 +293,19 @@ CREATE TABLE IF NOT EXISTS rate_limiter_ceiling (
     ceiling     REAL NOT NULL,
     updated_at  TEXT NOT NULL
 );
+
+-- Who does a thing shared between users, once. A chat space every member
+-- sees in their own list was migrated once PER MEMBER; the first user to claim
+-- it here migrates it (members and all), every other member's run skips it.
+-- A primary key, not a check-then-write, so two workers -- or two processes --
+-- racing for the same key cannot both win.
+CREATE TABLE IF NOT EXISTS tenant_claims (
+    kind        TEXT NOT NULL,
+    key         TEXT NOT NULL,
+    owner       TEXT NOT NULL,
+    claimed_at  TEXT NOT NULL,
+    PRIMARY KEY (kind, key)
+);
 """
 
 
@@ -667,18 +680,28 @@ class MigrationDB:
             "SELECT 1 FROM id_mapping WHERE type IN ('file','folder') LIMIT 1"
         ).fetchone() is not None
 
-    def target_for_source_id(self, source_id: str) -> Optional[str]:
+    def mapped_ids(self, source_user: str, types: tuple[str, ...]) -> dict[str, str]:
+        """source id -> target id for every item of these types this user has."""
+        marks = ",".join("?" * len(types))
+        return {r[0]: r[1] for r in self.conn.execute(
+            f"SELECT source_id, target_id FROM id_mapping WHERE source_user=? "
+            f"AND type IN ({marks})", (source_user, *types))}
+
+    def target_for_source_id(self, source_id: str,
+                             types: tuple[str, ...] = ("file", "folder")) -> Optional[str]:
         """The target id for a source file/folder, whoever owned it.
 
         Deliberately ignores the source_user half of the primary key.
         Rewriting a Drive link inside a message means resolving an id that
         belongs to whoever created the file, which is rarely the mailbox
-        the link is sitting in.
+        the link is sitting in. `types` widens it to other kinds -- a
+        colleague's calendar a user follows is found the same way.
         """
+        marks = ",".join("?" * len(types))
         row = self.conn.execute(
-            """SELECT target_id FROM id_mapping
-               WHERE source_id=? AND type IN ('file','folder') LIMIT 1""",
-            (source_id,),
+            f"""SELECT target_id FROM id_mapping
+               WHERE source_id=? AND type IN ({marks}) LIMIT 1""",
+            (source_id, *types),
         ).fetchone()
         return row["target_id"] if row else None
 
@@ -951,6 +974,15 @@ class MigrationDB:
             "SELECT ceiling FROM rate_limiter_ceiling WHERE tenant=?",
             (tenant,)).fetchone()
         return row["ceiling"] if row else None
+
+    def claim(self, kind: str, key: str, owner: str) -> str:
+        """Take the tenant-wide claim on (kind, key) for `owner` if nobody holds it;
+        return whoever holds it now. Idempotent for the holder."""
+        with self.write() as conn:
+            conn.execute("INSERT OR IGNORE INTO tenant_claims (kind, key, owner, claimed_at) "
+                         "VALUES (?,?,?,?)", (kind, key, owner, utc_now()))
+            return conn.execute("SELECT owner FROM tenant_claims WHERE kind=? AND key=?",
+                                (kind, key)).fetchone()[0]
 
     def forget_label(self, source_user: str, source_label_id: str) -> None:
         """Drop one label mapping so the next sync re-creates it.
@@ -1263,23 +1295,29 @@ def tally_rollup(users, tallies: list[dict], deferred: dict[str, int] | None = N
     # "Short", and the 22 hid in the 300.
     by_user = {t["user"]: t for t in tallies}
     deferred = deferred or {}
-    totals = {"COMPLETE": 0, "SHORT": 0, "OWED_TO_DMS": 0, "UNKNOWN": 0, "NOT_TALLIED": 0}
+    totals = {"COMPLETE": 0, "DIFFERS": 0, "SHORT": 0, "OWED_TO_DMS": 0, "UNKNOWN": 0,
+              "NOT_TALLIED": 0}
     out_users = []
     for u in users:
         t = by_user.get(u["source_email"])
+        items = (t or {}).get("driveItems") or {}
         if t is None:
             verdict = "NOT_TALLIED"
         elif t.get("countParity") is None:
             verdict = "UNKNOWN"
+        elif t["countParity"] >= TALLY_PARITY_OK:
+            # Counts at parity is not the same as every item matching: DIFFERS
+            # is a copy that is there but not the same (name, size, checksum,
+            # modifiedTime), or a mapped item that is no longer there.
+            verdict = "DIFFERS" if items.get("differ") or items.get("missingOnTarget") else "COMPLETE"
         else:
-            verdict = ("COMPLETE" if t["countParity"] >= TALLY_PARITY_OK
-                       else "OWED_TO_DMS" if _short_only_by_owed_mail(t, deferred.get(u["source_email"], 0))
+            verdict = ("OWED_TO_DMS" if _short_only_by_owed_mail(t, deferred.get(u["source_email"], 0))
                        else "SHORT")
         totals[verdict] += 1
         out_users.append({"user": u["source_email"], "target": u["target_email"], "status": u["status"],
                           "verdict": verdict, "countParity": (t or {}).get("countParity"),
                           "recordedAt": (t or {}).get("recordedAt"), "services": (t or {}).get("services") or {},
-                          "worst": (t or {}).get("worst") or []})
+                          "worst": (t or {}).get("worst") or [], "driveItems": items or None})
     return {"users": out_users, "totals": totals}
 
 

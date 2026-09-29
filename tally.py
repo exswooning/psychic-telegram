@@ -62,19 +62,60 @@ def classify(error: str) -> str:
 # Counting -- each takes a service and returns a number. Small and separate so
 # every one can be exercised without a tenant.
 # ---------------------------------------------------------------------------
-def count_drive(drive, settings, iter_items=None) -> tuple[int, int]:
+_COMPARED = ("name", "mimeType", "size", "md5Checksum", "modifiedTime")
+
+
+def count_drive(drive, settings, iter_items=None, keep: dict | None = None) -> tuple[int, int]:
     """(files, folders) under the same rule the engine enumerates by: the same
-    query, so 'an item' means the same thing on both sides."""
+    query, so 'an item' means the same thing on both sides. `keep` collects each
+    item by id, so the same listing can also be compared item by item."""
     from config import FOLDER_MIME
     if iter_items is None:
         from discovery import iter_all_drive_items as iter_items
     files = folders = 0
     for item in iter_items(drive, settings):
+        if keep is not None:
+            keep[item["id"]] = {k: item.get(k) for k in _COMPARED}
         if item.get("mimeType") == FOLDER_MIME:
             folders += 1
         else:
             files += 1
     return files, folders
+
+
+def compare_drive(src: dict, tgt: dict, mapping: dict, examples: int = 10) -> dict:
+    """Every mapped Drive item against its copy: name, and for a file its size,
+    checksum and modifiedTime to the second. Counts say the totals agree; this
+    says each item does. Nothing extra is fetched -- both sides were already
+    listed to count them. A folder is judged by name only: adding its children
+    moves its modifiedTime, and a native file has no size or checksum to compare."""
+    from config import FOLDER_MIME
+    out = {"compared": 0, "matched": 0, "differ": 0, "missingOnTarget": 0, "examples": []}
+    for sid, s in src.items():
+        tid = mapping.get(sid)
+        if not tid:
+            continue          # never migrated: the counts already say so
+        out["compared"] += 1
+        t = tgt.get(tid)
+        if t is None:
+            out["missingOnTarget"] += 1
+            if len(out["examples"]) < examples:
+                out["examples"].append({"name": s.get("name"), "id": sid, "why": "missing on target"})
+            continue
+        diffs = [] if s.get("name") == t.get("name") else ["name"]
+        if s.get("mimeType") != FOLDER_MIME:
+            for f in ("size", "md5Checksum"):
+                if s.get(f) and s.get(f) != t.get(f):
+                    diffs.append(f)
+            if (s.get("modifiedTime") or "")[:19] != (t.get("modifiedTime") or "")[:19]:
+                diffs.append("modifiedTime")
+        if diffs:
+            out["differ"] += 1
+            if len(out["examples"]) < examples:
+                out["examples"].append({"name": s.get("name"), "id": sid, "why": ", ".join(diffs)})
+        else:
+            out["matched"] += 1
+    return out
 
 
 def count_mail(gmail, retry=lambda f: f) -> int:
@@ -132,9 +173,10 @@ def count_tasks(tasks, retry=lambda f: f) -> int:
             return total
 
 
-def count_side(auth, settings, side: str, user: str, retry=lambda f: f) -> dict:
+def count_side(auth, settings, side: str, user: str, retry=lambda f: f,
+               keep: dict | None = None) -> dict:
     """Every service's count for one user on one side. A service that errors is
-    recorded as an error, not as zero."""
+    recorded as an error, not as zero. `keep` collects the Drive items listed."""
     pick = (lambda name: getattr(auth, f"{side}_{name}"))
     out: dict = {"counts": {}, "errors": {}}
 
@@ -147,7 +189,8 @@ def count_side(auth, settings, side: str, user: str, retry=lambda f: f) -> dict:
             for n in names:
                 out["errors"][n] = f"{type(exc).__name__}: {str(exc)[:160]}"
 
-    go(("drive_files", "drive_folders"), lambda: count_drive(pick("drive")(user), settings))
+    go(("drive_files", "drive_folders"), lambda: count_drive(pick("drive")(user), settings,
+                                                             keep=keep))
     go(("mail",), lambda: count_mail(pick("gmail")(user), retry))
     go(("calendar",), lambda: count_calendar(pick("calendar")(user), retry))
     go(("contacts",), lambda: count_contacts(pick("people")(user), retry))
@@ -370,10 +413,16 @@ def tally_user(auth, settings, db, source_user: str, target_user: str,
     services/parity -- the same counting and aggregation `run()` uses for the whole
     tenant, aggregate() just given a list of one."""
     skipped = skipped_by_user(db.conn).get(source_user, {})
+    src_items: dict = {}
+    tgt_items: dict = {}
     row = {"user": source_user, "target_user": target_user, "skipped": skipped,
-           "source": count_side(auth, settings, "source", source_user, retry),
-           "target": count_side(auth, settings, "target", target_user, retry)}
-    return aggregate([row])
+           "source": count_side(auth, settings, "source", source_user, retry, keep=src_items),
+           "target": count_side(auth, settings, "target", target_user, retry, keep=tgt_items)}
+    payload = aggregate([row])
+    if src_items:
+        payload["driveItems"] = compare_drive(
+            src_items, tgt_items, db.mapped_ids(source_user, ("file", "folder")))
+    return payload
 
 
 def tally_user_and_save(auth, db, settings, source_user: str, target_user: str,

@@ -78,9 +78,10 @@ def test_import_mode_space_is_completed(chat_migrator, auth, db):
     assert auth.target_chat(TGT_USER).call_count("spaces.completeImport") == 1
 
 
-def test_direct_messages_are_skipped(chat_migrator, auth, db):
-    """A DM is defined by its participants, not a name; recreating it as a
-    named space would quietly change what it is."""
+def test_direct_messages_are_skipped_in_direct_mode(chat_migrator, auth, db, settings):
+    """A DM is defined by its participants, not a name; direct mode could only
+    recreate it as a named space, which would quietly change what it is."""
+    settings.chat_space_mode = "direct"
     src = auth.source_chat(SRC_USER)
     dm = src.add_space("", space_type="DIRECT_MESSAGE")
     src.add_chat_message(dm, "hi", SRC_USER)
@@ -90,6 +91,19 @@ def test_direct_messages_are_skipped(chat_migrator, auth, db):
     assert auth.target_chat(TGT_USER).space_store == {}
     row = db.get_audit(SRC_USER, dm, "chat_space")
     assert row is not None and row["status"] == "SKIPPED_NOT_A_SPACE"
+
+
+def test_import_mode_recreates_a_direct_message_as_one(chat_migrator, auth, db, settings):
+    settings.chat_space_mode = "import"
+    src = auth.source_chat(SRC_USER)
+    dm = src.add_space("", space_type="DIRECT_MESSAGE")
+    src.add_chat_message(dm, "hi", SRC_USER)
+
+    chat_migrator.run()
+
+    made = list(auth.target_chat(TGT_USER).space_store.values())
+    assert [s["spaceType"] for s in made] == ["DIRECT_MESSAGE"]
+    assert not made[0]["importMode"]              # completed, visible to its members
 
 
 def test_unmapped_sender_is_attributed_in_text_not_silently_reassigned(
@@ -141,19 +155,81 @@ def test_dry_run_creates_nothing(auth, db, settings, identity):
     assert auth.target_chat(TGT_USER).call_count("spaces.create") == 0
 
 
-def test_historical_timestamps_are_not_attempted(chat_migrator, auth, db):
-    """
-    Setting createTime needs app auth with chat.import, which is rejected at
-    token-mint (verified live). The fake rejects createTime for the same
-    reason, so this test fails loudly if anyone "fixes" timestamps by passing
-    it anyway rather than by solving the auth problem.
-    """
+def test_import_mode_keeps_when_each_message_was_said(chat_migrator, auth, db, settings):
+    """Google documents createTime as writable in an import-mode space."""
+    settings.chat_space_mode = "import"
     _seed_conversation(auth, db)
     chat_migrator.run()
 
-    for kw in auth.target_chat(TGT_USER).calls_to("chat.messages.create"):
-        assert "createTime" not in (kw.get("body") or {})
+    posted = [m for msgs in auth.target_chat(TGT_USER).message_store.values() for m in msgs]
+    assert posted and all(m["createTime"] == "2024-01-01T00:00:00Z" for m in posted)
     assert chat_migrator.stats["failed"] == 0
+
+
+def test_a_refused_timestamp_costs_the_time_never_the_message(chat_migrator, auth, db,
+                                                               settings):
+    """Direct mode is not an import space, so createTime is refused there: the
+    engine never sends it in that mode, and if a tenant refuses it in import
+    mode the message is sent again without it."""
+    import chat_engine
+    settings.chat_space_mode = "import"
+    _seed_conversation(auth, db)
+    m = chat_engine.ChatMigrator(auth, db, settings, SRC_USER, TGT_USER)
+    sent = []
+
+    def send(b):
+        sent.append(dict(b))
+        if "createTime" in b:
+            raise chat_engine.PermanentAPIError("400 createTime not allowed")
+        return {"name": "x"}
+
+    assert m._with_time_fallback(send, {"text": "hi", "createTime": "2020"}) == {"name": "x"}
+    assert [("createTime" in s) for s in sent] == [True, False]
+    assert m._keep_time is False                     # not paid again for this user
+
+
+def test_replies_go_back_into_their_thread(chat_migrator, auth, db, settings):
+    settings.chat_space_mode = "import"
+    src = auth.source_chat(SRC_USER)
+    space = src.add_space("Ops")
+    src.add_chat_message(space, "deploy?", SRC_USER, thread=f"{space}/threads/a")
+    src.add_chat_message(space, "done", SRC_USER, thread=f"{space}/threads/a")
+    src.add_chat_message(space, "lunch?", SRC_USER, thread=f"{space}/threads/b")
+    chat_migrator.run()
+    posted = [m for msgs in auth.target_chat(TGT_USER).message_store.values() for m in msgs]
+    threads = [m["thread"]["name"] for m in posted]
+    assert threads[0] == threads[1] != threads[2]
+
+
+def test_reactions_are_added_back_by_whoever_reacted(chat_migrator, auth, db, settings):
+    from db import bulk_seed_identities
+
+    bulk_seed_identities(db, [("bob@tenanta.com", "bob@tenantb.com")])
+    src = auth.source_chat(SRC_USER)
+    space = src.add_space("Ops")
+    mid = src.add_chat_message(space, "shipped", SRC_USER,
+                               reactions=[("🎉", "bob@tenanta.com"), ("👀", "nobody@else.com")])
+    chat_migrator.run()
+    tgt_msg = db.get_target_id(SRC_USER, mid, "chat_message")
+    got = auth.target_chat(TGT_USER).reaction_store.get(tgt_msg, [])
+    assert [(r["emoji"]["unicode"], r["user"]["name"]) for r in got] == [
+        ("🎉", "users/bob@tenantb.com")]
+
+
+def test_a_shared_space_is_migrated_once_not_once_per_member(auth, db, settings, identity):
+    import chat_engine
+    from db import bulk_seed_identities
+
+    bulk_seed_identities(db, [("bob@tenanta.com", "bob@tenantb.com")])
+    settings.migrate_chat = True
+    src = auth.source_chat(SRC_USER)
+    space = src.add_space("Team", members=[SRC_USER, "bob@tenanta.com"])
+    src.add_chat_message(space, "hello", SRC_USER)
+    chat_engine.ChatMigrator(auth, db, settings, SRC_USER, TGT_USER).run()
+    bob = chat_engine.ChatMigrator(auth, db, settings, "bob@tenanta.com", "bob@tenantb.com")
+    bob.run()
+    assert len(auth.target_chat(TGT_USER).space_store) == 1
+    assert db.get_audit("bob@tenanta.com", space, "chat_space")["status"] == "SKIPPED_SHARED"
 
 
 def test_selecting_chat_opts_the_run_in(monkeypatch):

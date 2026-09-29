@@ -70,6 +70,7 @@ export const MigrationDetail: React.FC = () => {
   const [mailBy, setMailBy] = useState<MailMode>('split')
   // Start Google's DMS on its own (api_server._start_dms); on unless switched off.
   const [dmsAuto, setDmsAuto] = useState(true)
+  const [fullFidelity, setFullFidelity] = useState(true)
   // '' = the server's own default (config.TRANSFER_MODES via TRANSFER_MODE) --
   // most runs never need to touch this.
   const [transferMode, setTransferMode] = useState<TransferMode | ''>('')
@@ -78,6 +79,7 @@ export const MigrationDetail: React.FC = () => {
   const [tuneUserWorkers, setTuneUserWorkers] = useState('')
   const [tuneFileWorkers, setTuneFileWorkers] = useState('')
   const [tuneCacheCap, setTuneCacheCap] = useState('')
+  const [tuneProcesses, setTuneProcesses] = useState('')
   const [fullBusy, setFullBusy] = useState(false)
   // Quick migrate: a small slice of each user's data, small enough to check one to
   // one. See the dialog.
@@ -782,6 +784,19 @@ export const MigrationDetail: React.FC = () => {
                   } />
               </RadioGroup>
             </Box>
+            <Box sx={{ mt: 2 }}>
+              <FormControlLabel
+                control={<Checkbox size="small" checked={fullFidelity}
+                                   onChange={(e) => setFullFidelity(e.target.checked)}
+                                   inputProps={{ 'aria-label': 'full fidelity',
+                                                 'data-testid': 'run-full-fidelity' } as never} />}
+                label={<Typography variant="body2">
+                  <strong>Full fidelity</strong> — also move external-owned shares,
+                  secondary calendars, calendar sharing, groups, rooms, comments and
+                  Gmail settings. Each is turned on only if its permission is granted;
+                  the ones that are not are named when the run starts.
+                </Typography>} />
+            </Box>
             <Box sx={{ mt: 2 }} data-testid="run-full-tuning">
               <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 0.5 }}>
                 For measured runs (leave blank normally)
@@ -804,6 +819,9 @@ export const MigrationDetail: React.FC = () => {
                   <TextField size="small" type="number" label="Mapping cache users (0 = no cap)"
                              value={tuneCacheCap} onChange={(e) => setTuneCacheCap(e.target.value)}
                              inputProps={{ min: 0, max: 100000, 'data-testid': 'run-full-cache-cap' }} />
+                  <TextField size="small" type="number" label="Processes" value={tuneProcesses}
+                             onChange={(e) => setTuneProcesses(e.target.value)}
+                             inputProps={{ min: 1, max: 8, 'data-testid': 'run-full-processes' }} />
                 </Stack>
               </Stack>
             </Box>
@@ -825,7 +843,9 @@ export const MigrationDetail: React.FC = () => {
                                            transferMode || undefined,
                                            { userWorkers: num(tuneUserWorkers),
                                              driveFileWorkers: num(tuneFileWorkers),
-                                             mappingCacheUserCap: num(tuneCacheCap) })
+                                             mappingCacheUserCap: num(tuneCacheCap),
+                                             processes: num(tuneProcesses),
+                                             fullFidelity })
             if (!r.ok) throw new Error(r.detail || 'could not start')
             setAskFull(false)
             setStarted(r.detail || 'migration started')

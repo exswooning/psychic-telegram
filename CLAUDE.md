@@ -175,8 +175,9 @@ Google's Data Migration Service does, and the run migrates everything else.
 the rest is written `SKIPPED_NO_DRIVE_LINK` (`config.DEFERRED_TO_DMS`) and moved by
 the DMS **after** the run — before, and the DMS moves link mail unrewritten and the
 engine then adopts that copy. **Ordered passes are the rule for every mode, not only split**: `_mail_plan` orders any run that is rewriting links and has Drive plus mail or calendar (a calendar description carries Drive links too); with rewriting off ordering would only cost the interleaving. Two invariants make split safe, both decided in
-`api_server._mail_plan`: the run is `--ordered` (Drive for *every* user, then mail,
-then the rest — a link names whoever owned the file, and an interleaved run reads
+`api_server._mail_plan`: the run is `--ordered` (Drive -- with contacts, tasks and
+chat, which carry no rewritten links -- for *every* user, then mail and calendar
+together; `main.ORDERED_PASSES` — a link names whoever owned the file, and an interleaved run reads
 mail before other users' Drive has migrated, leaving those links on the source
 tenant forever), and rewriting is forced on. **Deferred mail is owed, not
 declined**: `tally`, the report and the migrations page count it apart from
@@ -323,8 +324,13 @@ CLI exits 0 whenever the check ran — a non-zero exit reads as a crash to
 report under `logs/quick/`. `reset_drive_ledger` clears a service's verification
 with the items it describes.
 
-**Every user is also tallied as they finish** (`tally.tally_user_and_save`, the same hook,
-the same `main.VERIFY` queue, gated by `TALLY_ON_COMPLETE`, default on): an *exhaustive*
+**Every user is also tallied -- after the run, not as they finish** (default): a run
+launched from the API ends with a `tally` follow-on (`api_server._start_tally_after_repair`)
+that waits for the repair follow-on, then runs `tally.py` for every user as one `user-tally`
+job; after a split run the DMS job tallies instead, once Google's import has finished
+(`dms_migrate.py --until-done`). Inside the run it re-listed both tenants for each user
+after every pass, on the one core the copy needed. `TALLY_ON_COMPLETE=true` brings back the
+per-user hook (`tally.tally_user_and_save`, the same `main.VERIFY` queue). Either way: an *exhaustive*
 count of every service on both tenants, not a sample — `tally.count_side` + `aggregate`
 scoped to one pair, reusing exactly what `main.py tally` uses for the whole tenant, but
 **never** writing `run_fidelity` (that stays the whole-tenant number the report's fidelity
@@ -492,7 +498,43 @@ of mail, calendar, contacts, tasks or chat, indistinguishable on the Tally
 page from users merely waiting on the DMS. Evidence is `SERVICE_EVIDENCE`
 (SUCCESS rows of each service's item types), shared with `backfill-services`.
 Shared drives now run inside every whole-tenant run (after Drive, before
-mail) and repair re-creates a FAILED, unmapped one. The automatic DMS
-follow-on cannot complete on a headless box: `dms_migrate.py` waits for a
-human to sign in to a browser window the VPS does not have, then exits 1 --
-the import has to be started by hand in the target Admin Console.
+mail) and repair re-creates a FAILED, unmapped one.
+
+**The DMS runs unattended end to end** when `/etc/bitport/dwd.env` (root, 600) holds
+both admins' console logins (`DWD_PASSWORD_TARGET`, `DWD_EMAIL_SOURCE`/`DWD_PASSWORD_SOURCE`):
+the job signs in as the target admin (Xvfb `:99`), requests the connection, approves it
+as the source admin (`dms_migrate.approve_as_source`: the "Request for authorization"
+mail read over the source Gmail grant, the link LABELLED as the request -- every link is
+a c.gle redirect -- an account chooser, then the consents page), presses Start import,
+reads status every 15 min (`--until-done`) and tallies when Google reports it finished.
+A DMS job survives a webui restart; `_EXT_SCRIPTS` lists it so the Jobs page can stop it.
+Before building anything browser-driven here, look for the one-off script that already
+did it (`dms_*.py`, `*_probe.py`) -- the approval was rebuilt once from guesses.
+
+**Full fidelity** (`fidelity.py`, `StartMigration.full_fidelity`, default on): every
+optional pass -- external-owned shares, secondary calendars, groups, Gmail settings,
+calendar ACLs, rooms, comments -- is turned on for a launch only after a token for
+exactly its extra scopes has been minted, because a run mints ONE token for every scope
+and one ungranted scope fails every call. What stayed off, and which scope was missing,
+is in the launch's detail. Groups (before Drive) and rooms (before Calendar) are created
+by the run itself (`main._before_passes`); calendar subscriptions are re-followed after
+the last pass. `verify_scopes.every_toggle_scopes` must list every flag, or no wizard
+grant ever includes its scope.
+
+**One-to-one details now carried**: Drive `createdTime`, star, folder colour, custom
+properties, download ban, "writers can share" (in the create/move call, with a retry
+without them if Drive refuses -- `with_carried_fallback`) and a lock (applied last);
+calendar guest permissions, `source`, typed out-of-office/focus/working-location events,
+calendar-list colour/name/reminders, a new Meet link for a future meeting on its
+organizer's copy; exact Gmail threads (`threadId`, one conversation at a time); Chat
+`createTime` in import mode (falls back to "now" if refused), threads, reactions, DMs and
+group chats, and a shared space migrated once (`db.claim`, the `tenant_claims` table);
+contact photos. The per-user tally compares every mapped Drive item and reads `DIFFERS`
+when counts agree but items do not.
+
+**A pass can be split across OS processes** (`MIGRATE_PROCESSES`, `StartMigration.
+processes`, default 1 until measured): `main._run_pass_in_processes` runs `main.py
+run-shard` children, each a disjoint slice of the users (`MIGRATE_SHARD=k/n`), each
+sized to 1/n of the RAM and of the learned project rate (`PROCESS_SHARE`). The parent
+keeps the admission slot, the PASS markers, the memory watchdog and Stop (forwarded as
+SIGINT); a child whose parent dies kills itself.

@@ -744,6 +744,13 @@ def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
         wanted = {u.lower() for u in only}
         pairs = [p for p in pairs if p[0] in wanted]
 
+    # One process of a pass split across several (_run_pass_in_processes): a
+    # disjoint, stable slice of the users, so no two processes ever hold one.
+    shard = os.getenv("MIGRATE_SHARD")
+    if shard:
+        k, n = (int(x) for x in shard.split("/"))
+        pairs = pairs[k::n]
+
     if not pairs:
         log.warning("no users to process — check identity_map")
         return []
@@ -1029,6 +1036,10 @@ def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
             # dashboard, the run watcher -- would see a run that had finished.
             results = []
             plan = passes or [services]
+            everything = set().union(*plan)
+            whole_tenant = not only and not getattr(settings, "sample_limit", None)
+            if whole_tenant and not delta:
+                _before_passes(db, auth, settings, everything)
             for i, one in enumerate(plan, 1):
                 if len(plan) > 1:
                     # Read back by the API to say which pass a live run is on. Carries
@@ -1036,8 +1047,7 @@ def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
                     # from the PREVIOUS run would otherwise read as this one's.
                     print(f"PASS {i}/{len(plan)} pid={os.getpid()}: {','.join(sorted(one))}",
                           flush=True)
-                results += run_batch(auth, db, settings, one, delta=delta,
-                                     delta_days=delta_days, only=only)
+                results += _run_pass(auth, db, settings, one, delta, delta_days, only)
                 # A pause or a Stop ends the RUN, not just the pass: starting the
                 # next one under sustained memory pressure, or after the operator
                 # asked it to stop, is the opposite of what either means.
@@ -1055,6 +1065,10 @@ def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
                 # _repair_between_passes for why this is narrower than _auto_repair.
                 if "drive" in one and i < len(plan):
                     _repair_between_passes(db, auth, settings)
+            if "calendar" in everything and not settings.dry_run and not getattr(
+                    settings, "sample_limit", None) and not (
+                    MEMORY_PAUSE.is_set() or SHUTDOWN.is_set()):
+                _sync_calendar_subscriptions(db, auth, settings, only)
             # The users verified as they finished are part of the run too: it is not over
             # until they are, or the job would read as finished while checks were running.
             left = VERIFY.drain(lambda: SHUTDOWN.is_set() or MEMORY_PAUSE.is_set())
@@ -1381,6 +1395,146 @@ def _migrate_shared_drives(db, auth, settings) -> None:
         log.info("shared drives: %s", stats)
     except Exception as exc:      # noqa: BLE001 - the per-user work is done; keep it
         log.warning("shared drives failed: %s -- repair retries them", exc)
+
+
+def _run_pass(auth, db, settings, services, delta, delta_days, only) -> list[dict]:
+    """One pass, in this process or split across several (MIGRATE_PROCESSES)."""
+    n = int(getattr(settings, "migrate_processes", 1) or 1)
+    if n <= 1 or settings.dry_run or os.getenv("MIGRATE_SHARD"):
+        return run_batch(auth, db, settings, services, delta=delta,
+                         delta_days=delta_days, only=only)
+    return _run_pass_in_processes(settings, services, delta, delta_days, only, n)
+
+
+def _run_pass_in_processes(settings, services, delta, delta_days, only, n: int) -> list[dict]:
+    """One pass split across n OS processes, each a disjoint slice of the users.
+
+    The run is one Python process, and measured live it sat at ~1.1 of the box's
+    cores: the interpreter lock, not Google, not the network. Threads cannot get
+    past that; processes can. This process keeps the run's one admission slot,
+    its PASS markers, its memory watchdog and its Stop: a Stop or a memory pause
+    here is passed on to every child as SIGINT, and a child whose parent vanishes
+    kills itself (_die_with_parent). Each child sizes its worker pool and its
+    share of the learned project rate to 1/n (PROCESS_SHARE), and hands its
+    per-user results back through a file.
+    ponytail: metrics rows come from whichever child flushed last; a per-process
+    tag on run_metrics would give the Metrics page one combined view.
+    """
+    import json
+    import shutil
+    import subprocess
+    import tempfile
+
+    tmp = tempfile.mkdtemp(prefix="migrate-shards-")
+    base = [sys.executable, os.path.abspath(__file__)]
+    if getattr(settings, "account_id", None):
+        base += ["--account-id", str(settings.account_id)]
+    procs = []
+    for k in range(n):
+        out = os.path.join(tmp, f"{k}.json")
+        argv = base + ["run-shard", "--services", ",".join(sorted(services)), "--results", out]
+        if delta:
+            argv += ["--delta", "--days", str(delta_days)]
+        for u in only or []:
+            argv += ["--user", u]
+        env = {**os.environ, "MIGRATE_SHARD": f"{k}/{n}", "PROCESS_SHARE": str(n),
+               "SHARD_PARENT": str(os.getpid())}
+        procs.append((subprocess.Popen(argv, env=env), out))
+    log.info("pass %s split across %d processes", ",".join(sorted(services)), n)
+    passed_on = False
+    while any(p.poll() is None for p, _ in procs):
+        if not passed_on and (SHUTDOWN.is_set() or MEMORY_PAUSE.is_set()):
+            for p, _ in procs:
+                if p.poll() is None:
+                    p.send_signal(signal.SIGINT)
+            passed_on = True
+        time.sleep(1)
+    results: list[dict] = []
+    for p, out in procs:
+        try:
+            with open(out, encoding="utf-8") as fh:
+                results += json.load(fh)
+        except (OSError, ValueError):
+            log.warning("a process of this pass left no results (rc=%s)", p.returncode)
+    shutil.rmtree(tmp, ignore_errors=True)
+    return results
+
+
+def _die_with_parent() -> None:
+    """A shard whose parent is gone -- force-stopped, killed -- must not go on
+    writing to the tenant alone, unstoppable from the Jobs page."""
+    parent = int(os.getenv("SHARD_PARENT", "0") or 0)
+    if not parent:
+        return
+
+    def watch() -> None:
+        while True:
+            if os.getppid() != parent:
+                os.kill(os.getpid(), signal.SIGKILL)
+            time.sleep(2)
+    threading.Thread(target=watch, name="shard-parent", daemon=True).start()
+
+
+def cmd_run_shard(args, settings: Settings, db: MigrationDB, auth: AuthManager):
+    """One slice of one pass of a run split across processes. Registers nothing
+    (the parent holds the run's admission slot) and writes its results where the
+    parent reads them."""
+    import json
+
+    _die_with_parent()
+    services = resolve_services(args.services)
+    _enable_selected_services(settings, services)
+    stop = threading.Event()
+    threading.Thread(target=_metrics_flusher, args=(stop, db), name="metrics", daemon=True).start()
+    try:
+        results = run_batch(auth, db, settings, services, delta=args.delta,
+                            delta_days=args.days, only=args.user)
+        VERIFY.drain(lambda: SHUTDOWN.is_set())
+    finally:
+        stop.set()
+    with open(args.results, "w", encoding="utf-8") as fh:
+        json.dump(results, fh, default=str)
+
+
+def _tenant_step(name: str, fn) -> None:
+    """A once-per-run, tenant-level step. Never fatal: the per-user work is the
+    run, and what fails here is logged and left for a re-run."""
+    try:
+        log.info("%s: %s", name, fn())
+    except Exception as exc:      # noqa: BLE001
+        log.warning("%s failed: %s -- a re-run retries it", name, exc)
+
+
+def _before_passes(db, auth, settings, services: set) -> None:
+    """Groups before Drive, rooms before Calendar -- each is what the per-user
+    work after it points at. MIGRATE_GROUPS used to do nothing in a run at all:
+    groups only moved when someone pressed a separate button, so every grant
+    naming a group reached a target where the group did not exist."""
+    if getattr(settings, "migrate_groups", False):
+        import groups_engine
+        _tenant_step("groups", lambda: groups_engine.GroupMigrator(auth, db, settings).migrate())
+    if "calendar" in services and getattr(settings, "migrate_resources", False):
+        import calendar_resources
+        _tenant_step("rooms", lambda: calendar_resources.ResourceMigrator(
+            auth, db, settings).migrate())
+
+
+def _sync_calendar_subscriptions(db, auth, settings, only=None) -> None:
+    """Re-follow the calendars each user followed but did not own. Last, because
+    it needs every owner's calendar -- and its sharing -- already on the target."""
+    import calendar_engine
+
+    wanted = {u.lower() for u in only} if only else None
+    total = 0
+    for row in db.identity_pairs():
+        src, tgt = row["source_email"], row["target_email"]
+        if wanted is not None and src.lower() not in wanted:
+            continue
+        try:
+            total += calendar_engine.CalendarMigrator(auth, db, settings, src, tgt).sync_subscriptions()
+        except Exception as exc:      # noqa: BLE001 - one user's list never stops the rest
+            log.warning("[%s] calendar subscriptions failed: %s", src, exc)
+    log.info("calendar subscriptions re-followed: %d", total)
 
 
 def _repair_between_passes(db, auth, settings) -> None:
@@ -1792,7 +1946,10 @@ def _enable_selected_services(settings: Settings, services: set[str]) -> None:
 # it -- and the run still reports success. One interleaved pass cannot promise
 # that; separate passes can. The engine's own guard only asks whether ANY Drive
 # has migrated, which the first user to finish satisfies.
-ORDERED_PASSES = (("drive",), ("gmail",), ("calendar", "contacts", "tasks", "chat"))
+# Only mail and calendar carry Drive links that get rewritten, so only they must
+# wait for every user's Drive. Contacts, tasks and chat never read id_mapping, so
+# they run alongside Drive instead of queueing behind mail for the whole run.
+ORDERED_PASSES = (("drive", "contacts", "tasks", "chat"), ("gmail", "calendar"))
 
 
 def ordered_passes(services: set[str]) -> list[set[str]]:
@@ -2373,6 +2530,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="look-back window for Gmail/Calendar delta queries")
     s.add_argument("--user", action="append")
     s.set_defaults(func=cmd_delta)
+
+    s = sub.add_parser("run-shard", help=argparse.SUPPRESS)
+    s.add_argument("--services", required=True)
+    s.add_argument("--results", required=True)
+    s.add_argument("--delta", action="store_true")
+    s.add_argument("--days", type=int, default=0)
+    s.add_argument("--user", action="append")
+    s.set_defaults(func=cmd_run_shard)
 
     s = sub.add_parser("syncacls", help="recreate per-file ACLs on migrated items")
     s.add_argument("--user", action="append")

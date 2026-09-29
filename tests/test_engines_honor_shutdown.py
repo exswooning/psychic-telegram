@@ -51,7 +51,9 @@ class TestChatStopsMidSpaceList:
         m.source_user = "u@src.test"
         m.stats = {"spaces": 0, "messages": 0, "members": 0, "skipped": 0,
                   "failed": 0, "unmapped_senders": 0}
-        m.db = type("DB", (), {"get_target_id": lambda *a, **k: None})()
+        # claim: every space is this user's to migrate (no other member got there first).
+        m.db = type("DB", (), {"get_target_id": lambda *a, **k: None,
+                               "claim": lambda self, kind, key, owner: owner})()
         return m
 
     def test_stops_before_the_next_space_once_flagged(self, monkeypatch):

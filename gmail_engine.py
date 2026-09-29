@@ -18,6 +18,7 @@ across automatically.
 from __future__ import annotations
 
 import base64
+import contextlib
 import logging
 import os
 import concurrent.futures as futures
@@ -113,6 +114,8 @@ class GmailMigrator:
         self._src_override = None
         self._tgt_override = None
         self._stats_lock = threading.Lock()
+        self._conv_locks: dict[str, threading.Lock] = {}
+        self._conv_locks_guard = threading.Lock()
         self.limiter = RateLimiter(settings.per_user_qps)
         self.stats = {
             "inserted": 0, "failed": 0, "skipped": 0,
@@ -539,7 +542,28 @@ class GmailMigrator:
             log.info("[DRY RUN] would insert message %s", mid)
             self._bump("inserted")
             return
+        # One conversation at a time: messages run on a pool, and two replies
+        # read together would each find no target thread and start their own.
+        # Different conversations still run side by side.
+        src_thread = full.get("threadId")
+        with self._conversation_lock(src_thread):
+            self._deliver(mid, raw, mapped_labels, approx_bytes, already, src_thread)
+
+    def _conversation_lock(self, src_thread: str | None):
+        if not src_thread:
+            return contextlib.nullcontext()
+        with self._conv_locks_guard:
+            return self._conv_locks.setdefault(src_thread, threading.Lock())
+
+    def _deliver(self, mid: str, raw: str, mapped_labels: list, approx_bytes: int,
+                 already, src_thread: str | None) -> None:
         body: dict = {"labelIds": mapped_labels}
+        # Into the conversation its thread's first copy started, by id. Gmail's
+        # own grouping from headers was close but not exact; this is exact.
+        tgt_thread = (self.db.get_target_id(self.source_user, src_thread, "thread")
+                      if src_thread else None)
+        if tgt_thread:
+            body["threadId"] = tgt_thread
         media = None
         path = None
         if approx_bytes > LARGE_MESSAGE_THRESHOLD:
@@ -555,7 +579,17 @@ class GmailMigrator:
             # `already` is set only on a link repair, and by here its copy has
             # been trashed. It keeps this exact Message-ID, so the adopt path
             # must not resume onto it.
-            result = self._insert_once(body, media, raw, replacing=already)
+            try:
+                result = self._insert_once(body, media, raw, replacing=already)
+            except PermanentAPIError:
+                if "threadId" not in body:
+                    raise
+                # The target thread is gone (trashed, purged). The message is
+                # worth more than its grouping: insert it on its own.
+                body.pop("threadId")
+                if path:
+                    media = MediaFileUpload(path, mimetype="message/rfc822", resumable=True)
+                result = self._insert_once(body, media, raw, replacing=already)
         except (PermanentAPIError, RuntimeError) as exc:
             self.db.log_audit(self.source_user, mid, "message", "FAILED", str(exc))
             self._bump("failed")
@@ -568,6 +602,8 @@ class GmailMigrator:
                     pass
 
         self.db.record_mapping(self.source_user, mid, result["id"], "message")
+        if src_thread and not tgt_thread and result.get("threadId"):
+            self.db.record_mapping(self.source_user, src_thread, result["threadId"], "thread")
         self.db.log_audit(self.source_user, mid, "message", "SUCCESS",
                           bytes_moved=approx_bytes)
         self._bump("inserted")

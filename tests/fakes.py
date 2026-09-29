@@ -784,12 +784,13 @@ class FakeGmail(FakeService):
 
     # -- seeding ---------------------------------------------------------
     def add_message(self, raw: bytes, labels: Optional[list[str]] = None,
-                    msg_id: Optional[str] = None) -> str:
+                    msg_id: Optional[str] = None, thread_id: Optional[str] = None) -> str:
         mid = msg_id or self._new_id("msg")
         self.messages[mid] = {
             "id": mid,
             "raw": base64.urlsafe_b64encode(raw).decode("ascii"),
             "labelIds": list(labels or ["INBOX"]),
+            "threadId": thread_id or mid,
         }
         return mid
 
@@ -916,11 +917,16 @@ class _GmailMessages:
         raw = body.get("raw")
         if raw is None and media_body is not None:
             raw = base64.urlsafe_b64encode(media_body.read_all()).decode("ascii")
+        # Threads as the real API has them: a message names an existing thread
+        # of this mailbox or starts its own; naming one that is not there fails.
+        thread = body.get("threadId")
+        if thread and not any(m.get("threadId") == thread for m in self.s.messages.values()):
+            raise http_error(404, "notFound", f"thread {thread}")
         self.s.messages[mid] = {
             "id": mid, "raw": raw, "labelIds": list(body.get("labelIds") or []),
-            "_internalDateSource": internalDateSource,
+            "_internalDateSource": internalDateSource, "threadId": thread or mid,
         }
-        return {"id": mid, "labelIds": body.get("labelIds")}
+        return {"id": mid, "threadId": thread or mid, "labelIds": body.get("labelIds")}
 
     # Guard rail: if the engine ever regresses to import, the test suite
     # should fail loudly rather than silently re-running spam classification.
@@ -1058,6 +1064,11 @@ class FakeCalendar(FakeService):
         self.calendar_store: dict[str, dict] = {}
         self.cal_events: dict[str, dict[str, dict]] = defaultdict(dict)
         self.acls: dict[str, list[dict]] = defaultdict(list)
+        # calendarList: the primary entry's own settings, what was patched onto
+        # entries, and the calendars this user follows but does not own.
+        self.primary_entry = {"id": owner, "primary": True, "accessRole": "owner"}
+        self.list_settings: dict[str, dict] = {}
+        self.followed: dict[str, dict] = {}
 
     def add_calendar(self, summary: str, cal_id: Optional[str] = None,
                      access_role: str = "owner", primary: bool = False) -> str:
@@ -1166,6 +1177,31 @@ class _CalList:
             rows = [c for c in rows if c.get("accessRole") == "owner"]
         return {"items": copy.deepcopy(rows)}
 
+    # The per-user presentation of a calendar (colour, name override, hidden).
+    def get(self, **kw):
+        return _Call(self.s, "calendarList.get", self._get, kw)
+
+    def _get(self, calendarId: str, **_):
+        if calendarId == "primary":
+            return copy.deepcopy(self.s.primary_entry)
+        return copy.deepcopy(self.s.calendar_store.get(calendarId, {"id": calendarId}))
+
+    def patch(self, **kw):
+        return _Call(self.s, "calendarList.patch", self._patch, kw)
+
+    def _patch(self, calendarId: str, body: dict, **_):
+        self.s.list_settings.setdefault(calendarId, {}).update(body)
+        return {"id": calendarId, **body}
+
+    def insert(self, **kw):
+        return _Call(self.s, "calendarList.insert", self._insert, kw)
+
+    def _insert(self, body: dict, **_):
+        if body["id"] in self.s.followed:
+            raise http_error(409, "duplicate", "already in the calendar list")
+        self.s.followed[body["id"]] = dict(body)
+        return dict(body)
+
 
 class _Calendars:
     def __init__(self, svc: FakeCalendar):
@@ -1255,12 +1291,24 @@ class _CalEvents:
         return copy.deepcopy(source[eventId])
 
     # The whole point of Module 4b. If anyone swaps this for insert, every
-    # attendee of every historical meeting gets an invitation.
+    # attendee of every historical meeting gets an invitation. The one allowed
+    # exception: an out-of-office / focus-time / working-location event, which
+    # import cannot create, has no attendees, and is sent with no notification.
     def insert(self, **kw):
-        raise AssertionError(
-            "calendar events.insert must not be used for migration — "
-            "it notifies attendees. Use events.import_."
-        )
+        body = kw.get("body") or {}
+        if (kw.get("sendUpdates") != "none" or body.get("attendees")
+                or body.get("eventType") not in ("outOfOffice", "focusTime",
+                                                 "workingLocation")):
+            raise AssertionError(
+                "calendar events.insert must not be used for migration — "
+                "it notifies attendees. Use events.import_."
+            )
+        return _Call(self.s, "events.insert", self._typed_insert, kw)
+
+    def _typed_insert(self, body: dict, calendarId: str = "primary", **_):
+        eid = self.s._new_id("typed")
+        self.s.store[eid] = {**copy.deepcopy(body), "id": eid}
+        return {"id": eid}
 
     def import_(self, **kw):
         return _Call(self.s, "events.import", self._import, kw)
@@ -1457,12 +1505,13 @@ class FakeChat(FakeService):
         super().__init__(owner, tenant)
         shared = FakeChat._SHARED.setdefault(tenant, {
             "spaces": {}, "messages": defaultdict(list), "directory": {},
-            "members": defaultdict(list),
+            "members": defaultdict(list), "reactions": {},
         })
         self.space_store: dict[str, dict] = shared["spaces"]
         self.message_store: dict[str, list[dict]] = shared["messages"]
         self.directory: dict[str, str] = shared["directory"]
         self.member_store: dict[str, list[dict]] = shared["members"]
+        self.reaction_store: dict[str, list[dict]] = shared["reactions"]
 
     @classmethod
     def reset_shared(cls) -> None:
@@ -1484,14 +1533,23 @@ class FakeChat(FakeService):
         return sid
 
     def add_chat_message(self, space: str, text: str, sender_email: str,
-                         create_time: str = "2024-01-01T00:00:00Z") -> str:
+                         create_time: str = "2024-01-01T00:00:00Z",
+                         thread: Optional[str] = None,
+                         reactions: Optional[list[tuple[str, str]]] = None) -> str:
         uid = f"users/{abs(hash(sender_email)) % 10**12}"
         self.directory[uid] = sender_email
         mid = f"{space}/messages/{self._new_id('msg')}"
-        self.message_store[space].append({
-            "name": mid, "text": text, "createTime": create_time,
-            "sender": {"name": uid, "type": "HUMAN"},
-        })
+        entry = {"name": mid, "text": text, "createTime": create_time,
+                 "sender": {"name": uid, "type": "HUMAN"}}
+        if thread:
+            entry["thread"] = {"name": thread}
+        for emoji, who in reactions or []:
+            ruid = f"users/{abs(hash(who)) % 10**12}"
+            self.directory[ruid] = who
+            self.reaction_store.setdefault(mid, []).append(
+                {"emoji": {"unicode": emoji}, "user": {"name": ruid}})
+            entry["emojiReactionSummaries"] = [{"emoji": {"unicode": emoji}}]
+        self.message_store[space].append(entry)
         return mid
 
     def spaces(self):
@@ -1597,19 +1655,49 @@ class _ChatMessages:
     def create(self, **kw):
         return _Call(self.s, "chat.messages.create", self._create, kw)
 
-    def _create(self, parent: str, body: dict, **_):
+    def _create(self, parent: str, body: dict, messageReplyOption: str = "", **_):
         if parent not in self.s.space_store:
             raise http_error(404, "notFound", parent)
-        # Real Chat rejects a historical createTime under user auth; mirroring
-        # that keeps the engine honest about what it can actually preserve.
-        if "createTime" in body:
+        # Google documents createTime as writable only in an import-mode space;
+        # anywhere else it is refused, as the real API refuses it.
+        if "createTime" in body and not self.s.space_store[parent].get("importMode"):
             raise http_error(400, "invalidArgument",
-                            "createTime requires app authentication")
+                            "createTime is only settable in an import-mode space")
         mid = f"{parent}/messages/{self.s._new_id('m')}"
+        thread = (body.get("thread") or {}).get("name")
+        known = {(m.get("thread") or {}).get("name") for m in self.s.message_store[parent]}
+        if thread and thread not in known:
+            if messageReplyOption != "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD":
+                raise http_error(404, "notFound", thread)
+            thread = None
         entry = {"name": mid, "text": body.get("text"),
+                 "createTime": body.get("createTime"),
+                 "thread": {"name": thread or f"{parent}/threads/{self.s._new_id('t')}"},
                  # attributed to whoever is posting -- i.e. this service's owner
                  "sender": {"name": f"users/{self.s.owner}", "type": "HUMAN"}}
         self.s.message_store[parent].append(entry)
+        return entry
+
+    def reactions(self):
+        return _ChatReactions(self.s)
+
+
+class _ChatReactions:
+    def __init__(self, svc: FakeChat):
+        self.s = svc
+
+    def list(self, **kw):
+        return _Call(self.s, "reactions.list", self._list, kw)
+
+    def _list(self, parent: str, **_):
+        return {"reactions": copy.deepcopy(self.s.reaction_store.get(parent, []))}
+
+    def create(self, **kw):
+        return _Call(self.s, "reactions.create", self._create, kw)
+
+    def _create(self, parent: str, body: dict, **_):
+        entry = {"emoji": body["emoji"], "user": {"name": f"users/{self.s.owner}"}}
+        self.s.reaction_store.setdefault(parent, []).append(entry)
         return entry
 
 
@@ -1712,6 +1800,13 @@ class _PeoplePeople:
         rec["resourceName"] = rid
         self.s.contacts[rid] = rec
         return rec
+
+    def updateContactPhoto(self, **kw):
+        return _Call(self.s, "people.updateContactPhoto", self._photo, kw)
+
+    def _photo(self, resourceName: str, body: dict, **_):
+        self.s.contacts[resourceName]["_photoBytes"] = body["photoBytes"]
+        return {"person": {"resourceName": resourceName}}
 
     def deleteContact(self, **kw):
         return _Call(self.s, "people.deleteContact", self._delete, kw)

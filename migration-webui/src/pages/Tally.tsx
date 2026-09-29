@@ -53,7 +53,8 @@ const Services: React.FC<{ u: TallyUser }> = ({ u }) => {
 const UserRow: React.FC<{ u: TallyUser; selected: boolean; onSelect: (on: boolean) => void }> = ({ u, selected, onSelect }) => {
   const [open, setOpen] = useState(false)
   const v = VERDICT[u.verdict]
-  const hasDetail = Object.keys(u.services).length > 0 || u.worst.length > 0
+  const hasDetail = Object.keys(u.services).length > 0 || u.worst.length > 0 || !!u.driveItems
+  const items = u.driveItems
   return (
     <>
       <TableRow hover data-testid={`row-${u.user}`}>
@@ -91,6 +92,21 @@ const UserRow: React.FC<{ u: TallyUser; selected: boolean; onSelect: (on: boolea
                       (source {w.source.toLocaleString()}, skipped {w.skipped.toLocaleString()}, target {w.target.toLocaleString()})
                     </Typography>
                   ))}
+                {items && (
+                  <Box sx={{ mt: 1 }} data-testid={`items-${u.user}`}>
+                    <Typography variant="body2">
+                      Drive, item by item: {items.matched.toLocaleString()} of {items.compared.toLocaleString()} match
+                      {items.differ ? `, ${items.differ.toLocaleString()} differ` : ''}
+                      {items.missingOnTarget ? `, ${items.missingOnTarget.toLocaleString()} missing on the target` : ''}
+                    </Typography>
+                    {items.examples.map((e) => (
+                      <Typography key={e.id} variant="body2"
+                                  sx={{ fontFamily: 'ui-monospace, monospace', fontSize: 12 }}>
+                        {e.name}: {e.why}
+                      </Typography>
+                    ))}
+                  </Box>
+                )}
               </Box>
             </Collapse>
           </TableCell>
@@ -151,9 +167,9 @@ const Tally: React.FC = () => {
         </Button>
       </Stack>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2, maxWidth: 780 }}>
-        {view?.onComplete === false
-          ? 'Automatic tallying is switched off for this account (TALLY_ON_COMPLETE=0); use Tally now.'
-          : 'Each user is counted on both tenants the moment their migration finishes: every item of every service, not a sample. Nothing is written to either tenant.'}
+        {view?.onComplete
+          ? 'Each user is counted on both tenants the moment their migration finishes: every item of every service, not a sample. Nothing is written to either tenant.'
+          : 'Every user is counted on both tenants once a migration and its repair are over (after a split run, once the DMS import has finished): every item of every service, not a sample. Nothing is written to either tenant. Tally now counts sooner.'}
       </Typography>
 
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}

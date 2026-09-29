@@ -129,7 +129,9 @@ class TestTheEndpointHandsItOn:
     @pytest.mark.parametrize("body", [{"dms_after": False}, {"users": ["u0@a.com"]}])
     def test_but_no_dms_follow_on_when_told_not_to_or_a_few_users_only(self, cp, wired, monkeypatch, body):
         self._go(cp, wired, monkeypatch, mail_mode="split", **body)
-        assert wired["jobs"][0]["then"] == ["repair"]
+        # A whole-tenant run with no DMS after it tallies every user once it ends;
+        # a run of a chosen few does not tally the whole account.
+        assert wired["jobs"][0]["then"] == (["repair"] if body.get("users") else ["repair", "tally"])
 
     def test_and_neither_follow_on_for_a_dry_run(self, cp, wired, monkeypatch):
         self._go(cp, wired, monkeypatch, mail_mode="split", dry_run=True)
@@ -141,7 +143,7 @@ class TestTheEndpointHandsItOn:
 
     def test_the_engine_mode_gets_a_repair_follow_on_but_no_dms(self, cp, wired, monkeypatch):
         self._go(cp, wired, monkeypatch, mail_mode="engine")
-        assert wired["jobs"][0]["then"] == ["repair"] and len(wired["jobs"]) == 1
+        assert wired["jobs"][0]["then"] == ["repair", "tally"] and len(wired["jobs"]) == 1
 
     def test_a_dms_run_starts_it_beside_the_migration(self, cp, wired, monkeypatch):
         r = self._go(cp, wired, monkeypatch, mail_mode="dms")

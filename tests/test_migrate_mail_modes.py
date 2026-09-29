@@ -83,7 +83,10 @@ def _start(cp, monkeypatch, **body):
     seen = {}
     monkeypatch.setattr(A, "_run_admitted", lambda argv, account, name, env=None, then=None: seen.update(
         argv=argv, env=env, then=then) or (True, "started"))
-    r = cp.post("/api/v2/migrate/start", json={"reason": "full migration", **body})
+    # Full fidelity off unless a test asks: its token probes add env of their
+    # own, and these tests are about what each mail mode does to the launch.
+    r = cp.post("/api/v2/migrate/start",
+                json={"reason": "full migration", "full_fidelity": False, **body})
     return r, seen
 
 
@@ -132,7 +135,10 @@ class TestTheEndpoint:
     def test_otherwise_it_is_the_engine_as_before(self, cp, monkeypatch, body):
         r, seen = _start(cp, monkeypatch, **body)
         assert r.status_code == 200, r.text
-        assert seen["then"] == ["repair"], "no DMS follow-on, but repair still rides along on any real run"
+        # No DMS follow-on, but repair rides along on any real run -- and a whole-tenant
+        # one then tallies every user (a few users or a sample does not).
+        whole = not body.get("users") and body.get("sample") is None
+        assert seen["then"] == (["repair", "tally"] if whole else ["repair"])
         assert "MAIL_ONLY_WITH_LINKS" not in (seen["env"] or {})
 
     def test_an_unknown_mode_is_refused_rather_than_guessed(self, cp, monkeypatch):

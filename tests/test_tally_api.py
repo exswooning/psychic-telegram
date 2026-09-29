@@ -68,7 +68,7 @@ class TestTheView:
         by = {u["user"]: u for u in v["users"]}
         assert by["ann@a.com"]["verdict"] == "COMPLETE"
         assert by["bob@a.com"]["verdict"] == "NOT_TALLIED" and by["bob@a.com"]["countParity"] is None
-        assert v["totals"] == {"COMPLETE": 1, "SHORT": 0, "OWED_TO_DMS": 0, "UNKNOWN": 0, "NOT_TALLIED": 1}
+        assert v["totals"] == {"COMPLETE": 1, "DIFFERS": 0, "SHORT": 0, "OWED_TO_DMS": 0, "UNKNOWN": 0, "NOT_TALLIED": 1}
 
     def test_below_the_bar_is_short_not_complete(self, cp):
         aid = _signup(cp)
@@ -102,7 +102,7 @@ class TestTheView:
     def test_it_reports_whether_it_runs_on_its_own(self, cp):
         aid = _signup(cp)
         v = cp.get("/api/v2/tally", params={"account_id": aid}).json()
-        assert v["onComplete"] is True
+        assert v["onComplete"] is False          # counted after the run, not per user
 
     def test_another_accounts_page_is_not_readable(self, cp):
         aid = _signup(cp)

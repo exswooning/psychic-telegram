@@ -42,6 +42,62 @@ log = logging.getLogger(__name__)
 
 LARGE_UPLOAD_THRESHOLD = 5 * 1024 * 1024  # switch to resumable above this size
 
+# files.list's own maximum. It was 200, so a big folder cost five round trips
+# where one would do; the fields asked for are what bound the response, not this.
+LIST_PAGE_SIZE = 1000
+
+# What the walk reads about every item. createdTime was already written on
+# create but never read, so it was never actually carried; the rest were not
+# read at all, so a star, a folder colour, a custom property, a download ban or
+# a lock simply did not exist on the target.
+ITEM_FIELDS = ("id,name,mimeType,parents,modifiedTime,createdTime,size,md5Checksum,"
+               "shared,capabilities(canDownload),shortcutDetails,description,starred,"
+               "folderColorRgb,properties,copyRequiresWriterPermission,writersCanShare,"
+               "contentRestrictions")
+
+# Writable metadata carried only when it differs from Drive's own default, so a
+# plain item's writes are exactly what they were before.
+_CARRIED_DEFAULTS = {"starred": False, "copyRequiresWriterPermission": False,
+                     "writersCanShare": True}
+
+
+def carried_metadata(item: dict) -> dict:
+    """The item's own writable metadata, to set as the TARGET user. starred is
+    per user, so it can never ride on the source user's copy call."""
+    out = {k: item[k] for k, default in _CARRIED_DEFAULTS.items()
+           if k in item and item[k] != default}
+    if item.get("properties"):
+        out["properties"] = item["properties"]
+    if item.get("mimeType") == FOLDER_MIME and item.get("folderColorRgb"):
+        out["folderColorRgb"] = item["folderColorRgb"]
+    return out
+
+
+CARRIED_KEYS = tuple(_CARRIED_DEFAULTS) + ("properties", "folderColorRgb", "createdTime")
+
+
+def with_carried_fallback(send, body: dict):
+    """send(body); if Drive refuses it while the body carries metadata beyond what
+    was always sent, once more without that metadata. Carrying a star or a
+    creation date must never cost the file itself."""
+    try:
+        return send(body)
+    except PermanentAPIError as exc:
+        extra = [k for k in CARRIED_KEYS if k in body]
+        if not extra:
+            raise
+        log.warning("Drive refused a write carrying %s (%s); retrying without them",
+                    ",".join(extra), exc)
+        return send({k: v for k, v in body.items() if k not in extra})
+
+
+def read_only_lock(item: dict) -> dict | None:
+    """The source item's lock (a readOnly content restriction), or None."""
+    for r in item.get("contentRestrictions") or []:
+        if r.get("readOnly"):
+            return {"readOnly": True, "reason": r.get("reason") or ""}
+    return None
+
 
 _PROJECT_LIMITERS: dict = {}
 _PROJECT_LIMITER_LOCK = threading.Lock()
@@ -110,18 +166,23 @@ def _project_limiter(qps: float, tenant: str = "target", db=None):
                 except Exception as exc:      # noqa: BLE001 - advisory only
                     log.warning("could not read a learned %s ceiling: %s", tenant, exc)
 
+            # The project's limit is one number however many processes spend it:
+            # a process of a pass split N ways (main._run_pass_in_processes) runs
+            # at 1/N of it, and what it learns is saved as the whole project's.
+            share = max(1, int(os.getenv("PROCESS_SHARE", "1") or 1))
+
             def _on_change(kind: str, before: float, after: float,
-                          t: str = tenant, d=db) -> None:
+                          t: str = tenant, d=db, n: int = share) -> None:
                 _log_rate_change(kind, before, after, t)
                 if kind == "backoff" and d is not None:
                     try:
-                        d.save_rate_ceiling(t, _PROJECT_LIMITERS[t].ceiling)
+                        d.save_rate_ceiling(t, _PROJECT_LIMITERS[t].ceiling * n)
                     except Exception as exc:      # noqa: BLE001 - advisory only
                         log.warning("could not persist the learned %s ceiling: %s", t, exc)
 
             _PROJECT_LIMITERS[tenant] = AdaptiveRateLimiter(
-                qps, floor=max(4.0, qps / 8.0),
-                ceiling=starting_ceiling, on_change=_on_change)
+                qps / share, floor=max(4.0, qps / 8.0) / share,
+                ceiling=starting_ceiling / share, on_change=_on_change)
         return _PROJECT_LIMITERS[tenant]
 
 
@@ -793,9 +854,7 @@ class DriveMigrator:
         if self.shared_drive:
             extra = {"corpora": "drive", "driveId": self.shared_drive,
                      "includeItemsFromAllDrives": True}
-        fields = ("nextPageToken, files(id,name,mimeType,parents,modifiedTime,"
-                  "size,md5Checksum,shared,capabilities(canDownload),"
-                  "shortcutDetails,description)")
+        fields = f"nextPageToken, files({ITEM_FIELDS})"
         # owners is only requested when the caller needs it (the external-share
         # walk, which has to inspect who owns each file). On the default hot
         # path -- the tree mirror -- it stays out of the response, exactly as
@@ -805,7 +864,7 @@ class DriveMigrator:
         token = None
         while True:
             resp = self._retry(lambda t=token: self.src.files().list(
-                q=q, pageSize=200, pageToken=t, fields=fields,
+                q=q, pageSize=LIST_PAGE_SIZE, pageToken=t, fields=fields,
                 spaces="drive", supportsAllDrives=True, **extra,
             ).execute(), label="drive.files.list", write=False,
                                tenant="source")
@@ -833,10 +892,8 @@ class DriveMigrator:
         token = None
         while True:
             resp = self._retry(lambda t=token: self.src.files().list(
-                q=q, pageSize=200, pageToken=t,
-                fields="nextPageToken, files(id,name,mimeType,parents,"
-                       "modifiedTime,size,md5Checksum,shared,owners,"
-                       "capabilities(canDownload),shortcutDetails,description)",
+                q=q, pageSize=LIST_PAGE_SIZE, pageToken=t,
+                fields=f"nextPageToken, files({ITEM_FIELDS},owners)",
                 spaces="drive", supportsAllDrives=True,
             ).execute(), label="drive.files.list.sharedWithMe", write=False,
                                tenant="source")
@@ -1046,10 +1103,13 @@ class DriveMigrator:
         body = {"name": item["name"], "mimeType": FOLDER_MIME, "parents": [tgt_parent]}
         if item.get("modifiedTime"):
             body["modifiedTime"] = item["modifiedTime"]
+        if item.get("createdTime"):
+            body["createdTime"] = item["createdTime"]
+        body.update(carried_metadata(item))
         try:
-            result = self._retry(lambda: self.tgt.files().create(
-                body=body, fields="id", supportsAllDrives=True,
-            ).execute())
+            result = with_carried_fallback(lambda b: self._retry(lambda: self.tgt.files().create(
+                body=b, fields="id", supportsAllDrives=True,
+            ).execute()), body)
         except (PermanentAPIError, RuntimeError) as exc:
             self.db.log_audit(self.source_user, item["id"], "folder", "FAILED", str(exc))
             self._bump("failed")
@@ -1365,6 +1425,9 @@ class DriveMigrator:
             body["modifiedTime"] = item["modifiedTime"]
         if item.get("description"):
             body["description"] = item["description"]
+        # Only on the copy: an update cannot set it afterwards.
+        if item.get("createdTime"):
+            body["createdTime"] = item["createdTime"]
 
         # link_flip: publish the source file for the duration of the copy.
         #
@@ -1394,10 +1457,11 @@ class DriveMigrator:
 
         adopted = self._take_staged(item)
         try:
-            copied = adopted or self._retry(lambda: self.src.files().copy(
-                fileId=item["id"], body=body, supportsAllDrives=True,
-                fields="id,md5Checksum",
-            ).execute(), label="drive.files.copy", tenant="source")
+            copied = adopted or with_carried_fallback(lambda b: self._retry(
+                lambda: self.src.files().copy(
+                    fileId=item["id"], body=b, supportsAllDrives=True,
+                    fields="id,md5Checksum",
+                ).execute(), label="drive.files.copy", tenant="source"), body)
         except (PermanentAPIError, RuntimeError) as exc:
             if size:
                 self.quota.refund(size)
@@ -1447,12 +1511,14 @@ class DriveMigrator:
         move_body = {}
         if item.get("modifiedTime"):
             move_body["modifiedTime"] = item["modifiedTime"]
+        # Set here, as the target user, in the move it already makes: no extra call.
+        move_body.update(carried_metadata(item))
         try:
-            self._retry(lambda: self.tgt.files().update(
+            with_carried_fallback(lambda b: self._retry(lambda: self.tgt.files().update(
                 fileId=copy_id, addParents=tgt_parent,
                 removeParents=self._staging_drive_id,
-                body=move_body or None, supportsAllDrives=True, fields="id",
-            ).execute(), label="drive.files.move")
+                body=b or None, supportsAllDrives=True, fields="id",
+            ).execute(), label="drive.files.move"), move_body)
         except (PermanentAPIError, RuntimeError) as exc:
             if size:
                 self.quota.refund(size)
@@ -1504,13 +1570,14 @@ class DriveMigrator:
             body["createdTime"] = item["createdTime"]
         if item.get("description"):
             body["description"] = item["description"]
+        body.update(carried_metadata(item))
         try:
             media = MediaFileUpload(path, mimetype=item.get("mimeType"),
                                     resumable=size > LARGE_UPLOAD_THRESHOLD)
-            result = self._retry(lambda: self.tgt.files().create(
-                body=body, media_body=media, fields="id,md5Checksum",
+            result = with_carried_fallback(lambda b: self._retry(lambda: self.tgt.files().create(
+                body=b, media_body=media, fields="id,md5Checksum",
                 supportsAllDrives=True,
-            ).execute(), label="drive.files.create")
+            ).execute(), label="drive.files.create"), body)
         except (PermanentAPIError, RuntimeError) as exc:
             self.quota.refund(size)
             self.db.log_audit(self.source_user, item["id"], "file", "FAILED", str(exc))
@@ -1632,12 +1699,13 @@ class DriveMigrator:
         # never asked for.
         if item.get("createdTime"):
             body["createdTime"] = item["createdTime"]
+        body.update(carried_metadata(item))
         try:
             media = MediaFileUpload(path, mimetype=export_mime,
                                     resumable=size > LARGE_UPLOAD_THRESHOLD)
-            result = self._retry(lambda: self.tgt.files().create(
-                body=body, media_body=media, fields="id,modifiedTime", supportsAllDrives=True,
-            ).execute())
+            result = with_carried_fallback(lambda b: self._retry(lambda: self.tgt.files().create(
+                body=b, media_body=media, fields="id,modifiedTime", supportsAllDrives=True,
+            ).execute()), body)
         except (PermanentAPIError, RuntimeError) as exc:
             self.db.log_audit(self.source_user, item["id"], "file", "FAILED", str(exc))
             self._bump("failed")
@@ -2337,8 +2405,27 @@ class DriveMigrator:
         # that raised half way through.
         writes_applied = touched or (1 if failed else 0) or (1 if force_mtime_restore else 0)
         self._restore_modified_time(target_id, item, writes_applied, late_bump=bool(commented))
+        self._apply_lock(target_id, item)
         if shareable and sharing_ran:
             self.db.clear_acl_pending(self.source_user, item["id"])
+
+    def _apply_lock(self, target_id: str, item: dict) -> None:
+        """Lock the copy the way the source is locked, last: a locked file refuses
+        the writes above. modifiedTime rides in the same update in case the lock
+        itself moves it. A lock that cannot be set is logged, never a failure."""
+        lock = read_only_lock(item)
+        if not lock or self.settings.dry_run:
+            return
+        body = {"contentRestrictions": [lock]}
+        if item.get("modifiedTime"):
+            body["modifiedTime"] = item["modifiedTime"]
+        try:
+            self._retry(lambda: self.tgt.files().update(
+                fileId=target_id, body=body, supportsAllDrives=True, fields="id",
+            ).execute(), label="drive.files.lock")
+        except Exception as exc:      # noqa: BLE001
+            log.warning("[%s] could not lock %s as the source is locked (%s: %s)",
+                        self.source_user, item.get("name"), type(exc).__name__, exc)
 
     def _verify_modified_times(self) -> None:
         """Put back the modifiedTime of files a late timestamp write moved, once it has landed.
