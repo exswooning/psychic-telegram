@@ -342,8 +342,13 @@ ACTIONS: dict[str, dict] = {
                  "project's Gmail quota, and runs alongside the engine "
                  "migration. Run the full-scope migration with Gmail OFF "
                  "first, so nothing is copied twice.",
-        "argv": [PY, "dms_migrate.py", "--apply",
-                 "--identities", "identities.csv", "--timeout", "200"],
+        # No --identities: dms_migrate builds the map from this account's own
+        # ledger. The repo-root identities.csv it used to name is the seeder's
+        # file for whichever tenants were seeded last -- on the live box, a
+        # different account's target domain. --watch: wait for the source
+        # admin's approval instead of stopping at Step 1.
+        "argv": [PY, "dms_migrate.py", "--apply", "--watch", "720",
+                 "--timeout", "200"],
         "browser": True,        # needs DISPLAY + DWD creds
         "parallel": True,       # exempt from the one-heavy-job admission
         "destructive": True,

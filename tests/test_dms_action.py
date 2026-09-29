@@ -75,3 +75,34 @@ def test_read_metrics_parses_labelled_counters():
     assert r["status"] == "In progress"
     assert r["metrics"]["Discovered tasks"] == 272327
     assert r["metrics"]["Emails imported"] == 20900
+
+
+def test_the_button_never_names_a_csv_and_waits_for_approval():
+    """It passed the repo-root identities.csv -- the seeder's file, which on the
+    live box mapped every user to ANOTHER account's target domain."""
+    argv = webui.ACTIONS["dms_import"]["argv"]
+    assert not any(a.endswith(".csv") for a in argv)
+    assert "--identities" not in argv
+    assert "--watch" in argv
+
+
+def test_the_map_comes_from_this_accounts_ledger(monkeypatch, tmp_path):
+    import csv
+    import dms_migrate
+    from db import MigrationDB, bulk_seed_identities
+    db_path = str(tmp_path / "m.db")
+    bulk_seed_identities(MigrationDB(db_path), [("a@src.test", "a@tgt2.test")])
+    monkeypatch.setenv("MIGRATION_DB", db_path)
+    path = dms_migrate.ledger_identities(str(tmp_path / "out"))
+    rows = list(csv.reader(open(path)))
+    assert rows[1:] == [["a@src.test", "a@tgt2.test"]]
+
+
+def test_a_map_for_another_domain_is_refused_before_google_sees_it(monkeypatch, tmp_path):
+    import dms_migrate
+    wrong = tmp_path / "identities.csv"
+    wrong.write_text("source_email,target_email\na@src.test,a@target.other.test\n")
+    monkeypatch.setenv("TARGET_DOMAIN", "tgt2.test")
+    monkeypatch.setattr(dms_migrate, "start",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("reached Google")))
+    assert dms_migrate.main(["--apply", "--identities", str(wrong)]) == 2

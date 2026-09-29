@@ -384,6 +384,42 @@ def status(timeout: int, headful: bool) -> dict:
                 pass
 
 
+def ledger_identities(out_dir: str = os.path.join("logs", "dms")) -> str | None:
+    """This account's user map, from its OWN ledger (the process runs under the
+    account's env, so Settings() is that account's MIGRATION_DB).
+
+    The Services-page button passed the repo-root identities.csv instead -- the
+    file the seeder leaves, describing whichever tenants were seeded last. On
+    this box it mapped all 300 users to target.sarafgloabalexim.com (another
+    account's, protected) while the account being imported was target2.
+    """
+    import csv
+    from config import Settings
+    from db import MigrationDB
+    rows = [(r["source_email"], r["target_email"])
+            for r in MigrationDB(Settings().db_path).all_identities()
+            if r["entity_type"] == "user"]
+    if not rows:
+        return None
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, "identities-from-ledger.csv")
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(("source_email", "target_email"))
+        w.writerows(rows)
+    return path
+
+
+def rows_off_domain(identities: str, target_domain: str) -> int:
+    """How many rows map to an address NOT on the target domain -- the check
+    that would have caught the repo-root file, whoever passes one in."""
+    import csv
+    want = "@" + target_domain.strip().lower()
+    with open(identities, newline="", encoding="utf-8") as fh:
+        return sum(1 for r in csv.reader(fh)
+                   if len(r) >= 2 and "@" in r[1] and not r[1].strip().lower().endswith(want))
+
+
 def start(source_domain: str, source_admin: str, timeout: int,
           headful: bool, dry_run: bool, identities: str | None = None) -> dict:
     """Drive the Google Workspace email data import as far as it can go.
@@ -718,10 +754,20 @@ def main(argv: list[str] | None = None) -> int:
                 print("  (could not read: " + out.get("detail", "") + ")")
         return 0 if out["ok"] else 1
 
+    identities = args.identities or ledger_identities()
+    target_domain = os.getenv("TARGET_DOMAIN", "")
+    if identities and target_domain:
+        off = rows_off_domain(identities, target_domain)
+        if off:
+            print(f"REFUSED: {off} row(s) in {identities} map to addresses not on "
+                  f"{target_domain} -- that file describes another tenant pair. "
+                  "Nothing was sent to Google.")
+            return 2
+
     def _run():
         return start(args.source_domain, args.source_admin or args.target_admin,
                      args.timeout, args.headful, dry_run=not args.apply,
-                     identities=args.identities or None)
+                     identities=identities)
 
     out = _run()
     if args.watch and out.get("step") == "step1-pending":
