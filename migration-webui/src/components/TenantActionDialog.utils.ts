@@ -4,17 +4,16 @@ export const COPY: Record<Mode, { title: string; verb: string; warn: string }> =
   wipe: {
     title: 'Wipe tenant data',
     verb: 'Wipe data',
-    // "the seeded Drive files ... contacts and tasks" was true only of a source.
-    // A target wipe (reset_target.py) empties Drive, mail and calendar -- chat
-    // only where chat.delete is granted -- and leaves contacts and tasks, so a
-    // ledger reset for every service would copy those twice on the next run.
-    warn: 'Keeps the accounts and deletes their data. A source loses its seeded '
-        + 'Drive files, mail, events, contacts, tasks and chat. A target loses '
-        + 'everything migrated into Drive, mail and calendar (and Chat, where '
-        + 'deleting chat is granted); its contacts and tasks stay, so reset the '
-        + 'ledger for only the services it emptied. The Cloud project, the '
-        + 'delegation grant and the saved configuration are kept, so the tenant '
-        + 'stays ready to seed or migrate again.',
+    // Everything (wipe_tenant.py), not only the seeded corpus: a wiped target used to
+    // keep its contacts, tasks, Chat spaces, shared drives and groups, and its ledger
+    // still called them migrated.
+    warn: 'Deletes everything in this tenant: every user\'s Drive, mail, calendars, '
+        + 'contacts, tasks and Chat spaces, every shared drive and every group. Mail goes '
+        + 'to each mailbox\'s bin, which Google empties after 30 days. On a target the '
+        + 'ledger forgets what was deleted, so the next migration copies it all again. '
+        + 'Anything whose permission is not granted is named and left, with its ledger. '
+        + 'The accounts, the Cloud project, the delegation grant and the saved '
+        + 'configuration are kept, so the tenant stays ready to seed or migrate again.',
   },
   // The one action here that adds rather than removes. It sits with these
   // because it is per-tenant and needs the same admin password, not because

@@ -62,3 +62,14 @@ def test_run_and_decide_both_start_the_mirror_job(api):
     assert names == ["mirror", "mirror"]
     assert api.started[0][0][-1] == "mirror"
     assert api.started[1][0][-3:] == ["mirror", "--decide", "apply"]
+
+
+def test_no_cycle_while_the_pair_is_migrating(api, monkeypatch):
+    import api_server
+    import job_admission
+    me = api.get("/api/v2/auth/me").json()["id"]
+    monkeypatch.setattr(job_admission, "list_active",
+                        lambda: [{"account_id": me, "job_name": "migrate", "pid": 1, "started_at": ""}])
+    r = api.post("/api/v2/mirror/run", json={"reason": "one now"}).json()
+    assert r["ok"] is False and "already running" in r["detail"]
+    assert api.started == []

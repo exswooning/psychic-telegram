@@ -41,11 +41,12 @@ class TestWhatItRefuses:
         assert "st.source_domain if args.side" in src
         assert "configured" in src
 
-    def test_the_ledger_is_not_touched(self):
-        """It records a migration that happened, and outlives the tenant it
-        happened to."""
+    def test_the_ledger_follows_the_wipe_not_the_teardown(self):
+        """A wiped target holds nothing, so its ledger must say so -- but that is the
+        wipe's own business (wipe_tenant.reset_ledger, only for what it emptied), never
+        something this orchestration does to the ledger itself."""
         src = inspect.getsource(rts)
-        assert "reset_drive_ledger" in src, "the docstring must say where"
+        assert "wipe_tenant" in src, "the docstring must say where"
         assert "id_mapping" not in inspect.getsource(rts.remove)
 
 

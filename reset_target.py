@@ -240,20 +240,13 @@ def main(argv: list[str] | None = None) -> int:
     #
     # So: ask. If the grant is there, use it, rather than requiring someone to
     # remember a second setting whose absence is invisible.
+    # This check never ran until 2026-09-30: it read `args.side`, which this
+    # script has no argument for, and imported seed_sandbox, which is not on its
+    # path -- both raised, and the except below reported either as "not
+    # granted". Every target reset skipped Chat on a check that was never made.
     if "chat" in services and not getattr(settings, "chat_allow_delete", False):
-        try:
-            from google.oauth2 import service_account
-            from google.auth.transport.requests import Request
-            from seed_sandbox import CHAT_DELETE_SCOPE
-
-            admin = (settings.source_admin if args.side == "source"
-                     else settings.target_admin)
-            key = (settings.source_sa_key if args.side == "source"
-                   else settings.target_sa_key)
-            creds = service_account.Credentials.from_service_account_file(
-                key, scopes=[CHAT_DELETE_SCOPE], subject=admin)
-            creds.refresh(Request())
-        except Exception:                              # noqa: BLE001
+        import wipe_tenant
+        if not wipe_tenant.granted(settings.target_sa_key, settings.target_admin, "chat"):
             # Drop it, do not merely announce it. The check has just proved
             # the work cannot succeed, and leaving "chat" in the list makes
             # every user attempt spaces.list, get 403, and burn the

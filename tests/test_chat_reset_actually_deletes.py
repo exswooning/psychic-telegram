@@ -102,17 +102,24 @@ class TestTheScopeIsAvailableButNotForced:
         src = open(os.path.join(ROOT, "reset_target.py"), encoding="utf-8").read()
         if "chat_allow_delete = True" not in src:
             return                      # not enabling it at all is still fine
-        # Everything from the probe to the assignment must sit in the `else`
-        # of a try that refreshes real credentials.
+        # The probe is wipe_tenant.granted -- the same one the full wipe uses -- and the
+        # flag may only be set in the branch where it answered yes. (It was inline here
+        # until 2026-09-30, and never actually ran: it read an argument this script does
+        # not have and imported a module not on its path, and reported either as "not
+        # granted".)
+        import inspect
+
+        import wipe_tenant
         head = src.split("chat_allow_delete = True")[0]
-        assert "creds.refresh(" in head, \
-            "the flag is set without minting a token to prove the scope"
-        assert "CHAT_DELETE_SCOPE" in head, \
-            "the token minted must be for chat.delete specifically"
-        tail = head.rsplit("creds.refresh(", 1)[1]
-        assert "else:" in tail, \
-            "the flag must be set in the else of the probe, not after it -- " \
-            "an exception path that still enables it is the original bug"
+        probe = head.rsplit("wipe_tenant.granted(", 1)
+        assert len(probe) == 2, "the flag is set without asking wipe_tenant.granted"
+        assert '"chat")' in probe[1].split("\n")[0], "the probe must be for chat specifically"
+        assert "if not wipe_tenant.granted(" in head and "else:" in probe[1], \
+            "the flag must be set only where the probe said yes"
+        granted = inspect.getsource(wipe_tenant.granted)
+        assert "creds.refresh(" in granted and "return False" in granted, \
+            "granted() must mint a real token, and say no when it cannot"
+        assert wipe_tenant.SCOPES["chat"] == ["https://www.googleapis.com/auth/chat.delete"]
 
 
 class TestAFailedDeleteIsNoLongerSilent:

@@ -1955,7 +1955,9 @@ def _mirror_busy(account_id: int | None) -> bool:
     """A mirror job running or queued for this pair. The cycle refuses to overlap
     itself anyway; this is what stops asking for one that would only be refused."""
     try:
-        if any(r["account_id"] == account_id and r["job_name"] == "mirror"
+        # A migration or delta of the same pair is writing to the same items: a cycle
+        # waits for it rather than racing it.
+        if any(r["account_id"] == account_id and r["job_name"] in ("mirror", "migrate", "delta")
                for r in job_admission.list_active()):
             return True
         return any(r["job_name"] == "mirror" for r in job_queue.waiting(account_id))
@@ -1965,7 +1967,8 @@ def _mirror_busy(account_id: int | None) -> bool:
 
 def _start_mirror(account_id: int | None, decide: str | None = None) -> tuple[bool, str]:
     if _mirror_busy(account_id):
-        return False, "a mirror cycle is already running or queued for this pair"
+        return False, ("a mirror cycle, a migration or a delta of this pair is already running "
+                       "or queued -- a cycle waits for it rather than racing it")
     argv = [PY, "main.py"] + _account_argv(account_id) + ["mirror"]
     if decide:
         argv += ["--decide", decide]

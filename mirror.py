@@ -294,6 +294,7 @@ class Cycle:
         self.errors: list[str] = []
         self.unknown: list[str] = []
         self.users: dict = {"new": [], "suspended": [], "gone": [], "provision_failed": []}
+        self.done: dict[str, set[str]] = {}
         self.applied = self.held = 0
 
     # -- bookkeeping, shared by every worker thread ---------------------------------
@@ -336,8 +337,15 @@ class Cycle:
         self.settings.mail_only_with_links = False
         self.settings.rewrite_drive_links = True
         try:
-            pairs = [(r["source_email"], r["target_email"]) for r in self.db.all_identities()
-                     if r["entity_type"] == "user" and r["status"] == "DONE"]
+            rows = [r for r in self.db.all_identities()
+                    if r["entity_type"] == "user" and r["status"] == "DONE"]
+            pairs = [(r["source_email"], r["target_email"]) for r in rows]
+            # A service is mirrored only for a user the ledger shows it done for. DONE
+            # alone is not enough: a ledger reset of Drive leaves a user DONE on the
+            # strength of contacts, tasks and chat, and mirroring their Drive would
+            # copy all of it again as "new".
+            self.done = {r["source_email"]: set(filter(None, (r["services_done"] or "").split(",")))
+                         for r in rows}
             if self.check_users:
                 self._check_users(pairs)
             self._each(pairs, self._drive_user)
@@ -462,6 +470,8 @@ class Cycle:
 
     # -- Drive --------------------------------------------------------------------------
     def _drive_user(self, src: str, tgt: str) -> None:
+        if "drive" not in self.done.get(src, set()):
+            return
         from drive_engine import DriveMigrator
         from resilience import DailyQuotaGuard
         quota = DailyQuotaGuard(self.db, tgt, self.settings.effective_upload_cap())
@@ -506,6 +516,8 @@ class Cycle:
 
     # -- Gmail --------------------------------------------------------------------------
     def _gmail_user(self, src: str, tgt: str) -> None:
+        if "gmail" not in self.done.get(src, set()):
+            return
         from gmail_engine import GmailMigrator
         gm = GmailMigrator(self.auth, self.db, self.settings, src, tgt)
         marker = self.db.mirror_marker(src, "gmail")
@@ -625,6 +637,8 @@ class Cycle:
 
     # -- Calendar -----------------------------------------------------------------------
     def _calendar_user(self, src: str, tgt: str) -> None:
+        if "calendar" not in self.done.get(src, set()):
+            return
         from calendar_engine import CalendarMigrator
         cm = CalendarMigrator(self.auth, self.db, self.settings, src, tgt)
         calendars = [("primary", "primary")]
@@ -697,6 +711,8 @@ class Cycle:
 
     # -- Contacts -----------------------------------------------------------------------
     def _contacts_user(self, src: str, tgt: str) -> None:
+        if "contacts" not in self.done.get(src, set()):
+            return
         if not self.settings.migrate_contacts:
             return
         from contacts_engine import ContactsMigrator, PERSON_FIELDS
@@ -755,6 +771,8 @@ class Cycle:
 
     # -- Tasks --------------------------------------------------------------------------
     def _tasks_user(self, src: str, tgt: str) -> None:
+        if "tasks" not in self.done.get(src, set()):
+            return
         if not self.settings.migrate_tasks:
             return
         from tasks_engine import TasksMigrator
@@ -801,6 +819,8 @@ class Cycle:
 
     # -- Chat ---------------------------------------------------------------------------
     def _chat_user(self, src: str, tgt: str) -> None:
+        if "chat" not in self.done.get(src, set()):
+            return
         if not self.settings.migrate_chat:
             return
         from chat_engine import ChatMigrator

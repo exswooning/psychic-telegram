@@ -37,6 +37,7 @@ def world(auth, db, settings, migrator):
     doc = src.add_native("Plan", parent=projects, export_bytes=b"doc v1")
     migrator.run()
     db.set_identity_status(SRC_USER, "DONE")
+    db.mark_services_done(SRC_USER, ["drive", "gmail", "calendar", "contacts", "tasks"])
     baseline = cycle(auth, db, settings)
     assert baseline["status"] == "ok", baseline
     return {"src": src, "tgt": auth.target_drive(TGT_USER), "projects": projects,
@@ -255,6 +256,22 @@ class TestDeletions:
         assert out["deletions"]["applied"] == 0
         assert not tgt.store[tid(db, world["pdf"])].get("trashed")
         assert db.mirror_deletions("kept")[0]["item_id"] == world["pdf"]
+
+
+class TestOnlyWhatTheLedgerSaysIsDone:
+    def test_a_service_reset_in_the_ledger_is_not_mirrored(self, auth, db, settings, migrator):
+        """After a ledger reset of Drive a user stays DONE on the strength of the other
+        services. Mirroring their Drive then would copy all of it again as new."""
+        settings.migrate_chat = False
+        src = auth.source_drive(SRC_USER)
+        src.add_binary("a.pdf", data=b"x")
+        db.set_identity_status(SRC_USER, "DONE")
+        db.mark_services_done(SRC_USER, ["contacts"])
+        src.reset_calls()
+        out = cycle(auth, db, settings)
+        assert out["status"] == "ok"
+        assert src.calls == [] and auth.target_drive(TGT_USER).count() == 0
+        assert db.mirror_marker(SRC_USER, "drive") is None
 
 
 class TestOneAtATime:

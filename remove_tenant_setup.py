@@ -1,15 +1,15 @@
 """
 remove_tenant_setup.py
 ======================
-Wipe a configured tenant's seeded data and remove the setup itself.
+Wipe a configured tenant's data and remove the setup itself.
 
 The most destructive thing in this product, and deliberately the one with
 the most explicit gate: it undoes a whole tenant setup in a single run.
 
 What it does, in order
 ----------------------
-  1. wipe the tenant's data       reset_target.py (target) or
-                                  seed_sandbox.py --reset (source)
+  1. wipe the tenant's data       wipe_tenant.py, either side: everything,
+                                  not only the seeded corpus
   2. remove the Cloud setup       teardown_tenant.run_teardown -- revoke the
                                   DWD grant, delete the GCP project
   3. forget the configuration     tenant_configs blanked, key file removed
@@ -25,9 +25,10 @@ that wipes the data and fails to delete the project leaves a tenant that is
 empty and still reachable -- annoying, and fixable by re-running. The
 reverse would not be.
 
-The ledger is NOT touched here. It records what was migrated, which is
-evidence about a migration that happened, and survives the tenant it
-happened to -- see reset_drive_ledger.py for clearing it deliberately.
+On a target, wipe_tenant resets the ledger for each service it emptied for
+every user: the ledger says what is ON the target, and after a wipe that is
+nothing. A service it could not empty keeps its ledger. A source wipe leaves
+the ledger alone -- the copies it describes are still on the target.
 """
 from __future__ import annotations
 
@@ -110,12 +111,11 @@ def remove(side: str, domain: str, admin_email: str, admin_password: str,
         env["MIGRATION_DB"] = st.db_path
 
     if wipe_data:
-        if side == "target":
-            ok, detail = _run([PY_EXE, "reset_target.py",
-                               "--confirm-domain", domain, "--yes"], env)
-        else:
-            ok, detail = _run([PY_EXE, "data-generator/seed_sandbox.py",
-                               "--confirm-domain", domain, "--reset", "--yes"], env)
+        # Everything, on either side (wipe_tenant.py). The seeder's own reset, which this
+        # used to run, deletes only the seeded corpus -- a wiped target kept its contacts,
+        # tasks, Chat spaces and shared drives, and the ledger still called them migrated.
+        ok, detail = _run([PY_EXE, "wipe_tenant.py", "--side", side,
+                           "--confirm-domain", domain, "--yes"], env)
         add(f"wipe {side} data ({domain})", ok, detail)
         if not ok:
             # Stop. Removing the credential now would leave data behind with

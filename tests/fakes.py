@@ -1080,8 +1080,10 @@ class _GmailMessages:
         return _Call(self.s, "messages.list", self._list, kw)
 
     def _list(self, maxResults: int = 100, pageToken: Optional[str] = None,
-              q: str = "", **_):
-        ids = sorted(self.s.messages)
+              q: str = "", includeSpamTrash: bool = False, **_):
+        # As Gmail does: the bin is left out unless asked for.
+        ids = sorted(i for i, m in self.s.messages.items()
+                     if includeSpamTrash or "TRASH" not in (m.get("labelIds") or []))
         start = int(pageToken or 0)
         page = ids[start: start + maxResults]
         out: dict[str, Any] = {"messages": [{"id": i} for i in page]}
@@ -1142,6 +1144,15 @@ class _GmailMessages:
                 labels.remove(l)
         return {"id": id, "labelIds": list(labels)}
 
+    def batchModify(self, **kw):
+        return _Call(self.s, "messages.batchModify", self._batch_modify, kw)
+
+    def _batch_modify(self, body: dict, **_):
+        for i in body.get("ids", []):
+            if i in self.s.messages:
+                self._modify(i, body)
+        return {}
+
     def untrash(self, **kw):
         return _Call(self.s, "messages.untrash", lambda id, **_: self._modify(
             id, {"removeLabelIds": ["TRASH"], "addLabelIds": ["INBOX"]}), kw)
@@ -1173,6 +1184,13 @@ class _GmailLabels:
 
     def create(self, **kw):
         return _Call(self.s, "labels.create", self._create, kw)
+
+    def delete(self, **kw):
+        return _Call(self.s, "labels.delete", self._delete, kw)
+
+    def _delete(self, id: str, **_):
+        self.s.labels = [l for l in self.s.labels if l["id"] != id]
+        return {}
 
     def _create(self, body: dict, **_):
         name = body["name"]
@@ -1220,6 +1238,9 @@ class _GmailDrafts:
             "id": did, "message": {"id": did, "raw": raw, "labelIds": ["DRAFT"]},
         }
         return {"id": did, "message": {"id": did}}
+
+    def delete(self, **kw):
+        return _Call(self.s, "drafts.delete", lambda id, **_: self.s.drafts.pop(id, None) and {}, kw)
 
     def update(self, **kw):
         return _Call(self.s, "drafts.update", self._update, kw)
@@ -1499,6 +1520,14 @@ class _Calendars:
 
     def insert(self, **kw):
         return _Call(self.s, "calendars.insert", self._insert, kw)
+
+    def delete(self, **kw):
+        return _Call(self.s, "calendars.delete", self._delete, kw)
+
+    def _delete(self, calendarId: str, **_):
+        self.s.calendar_store.pop(calendarId, None)
+        self.s.cal_events.pop(calendarId, None)
+        return {}
 
     def _insert(self, body: dict, **_):
         cid = self.s._new_id("cal")
@@ -2153,6 +2182,10 @@ class _PeoplePeople:
         self.s.contacts[resourceName].update({k: v for k, v in body.items() if k != "etag"})
         return copy.deepcopy(self.s.contacts[resourceName])
 
+    def batchDeleteContacts(self, **kw):
+        return _Call(self.s, "people.batchDeleteContacts",
+                     lambda body, **_: [self._delete(r) for r in body["resourceNames"]] and {}, kw)
+
     def deleteContact(self, **kw):
         return _Call(self.s, "people.deleteContact", self._delete, kw)
 
@@ -2299,6 +2332,13 @@ class _Tasks:
         if updatedMin:
             rows = [t for t in rows if (t.get("updated") or "") >= updatedMin]
         return {"items": copy.deepcopy(rows)}
+
+    def delete(self, **kw):
+        return _Call(self.s, "tasks.delete", self._delete, kw)
+
+    def _delete(self, tasklist: str, task: str, **_):
+        self.s.task_store[tasklist] = [t for t in self.s.task_store.get(tasklist, []) if t["id"] != task]
+        return {}
 
     def patch(self, **kw):
         return _Call(self.s, "tasks.patch", self._patch, kw)
