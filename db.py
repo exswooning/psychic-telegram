@@ -306,12 +306,112 @@ CREATE TABLE IF NOT EXISTS tenant_claims (
     claimed_at  TEXT NOT NULL,
     PRIMARY KEY (kind, key)
 );
+
+-- The mirror (mirror.py). A marker is where one user's service's change feed was
+-- last read: a Drive page token, a Gmail historyId, a Calendar/People syncToken, a
+-- Tasks updatedMin. Keyed by service, and a calendar or shared drive carries its
+-- id in the service name ("calendar:<id>", "drive:<id>").
+CREATE TABLE IF NOT EXISTS mirror_marker (
+    source_user TEXT NOT NULL,
+    service     TEXT NOT NULL,
+    marker      TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY (source_user, service)
+);
+-- What a mirrored Drive item looked like the last time the mirror wrote it, on
+-- both sides: the source's name, parents, content version and direct sharing,
+-- and the TARGET's version after Bitport's own last write -- a different target
+-- version next time means someone edited the mirror.
+CREATE TABLE IF NOT EXISTS mirror_fingerprint (
+    source_user TEXT NOT NULL,
+    item_id     TEXT NOT NULL,
+    unit        TEXT,
+    mime        TEXT,
+    name        TEXT,
+    parents     TEXT,
+    checksum    TEXT,
+    revision    TEXT,
+    src_mtime   TEXT,
+    share_hash  TEXT,
+    tgt_version TEXT,
+    deleted     INTEGER NOT NULL DEFAULT 0,
+    updated_at  TEXT,
+    PRIMARY KEY (source_user, item_id)
+);
+CREATE TABLE IF NOT EXISTS mirror_cycles (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at         TEXT NOT NULL,
+    finished_at        TEXT,
+    status             TEXT NOT NULL,
+    pid                INTEGER,
+    counts             TEXT,
+    by_service         TEXT,
+    calls              INTEGER,
+    errors             TEXT,
+    unknown            TEXT,
+    users              TEXT,
+    deletions_proposed INTEGER NOT NULL DEFAULT 0,
+    deletions_applied  INTEGER NOT NULL DEFAULT 0,
+    deletions_held     INTEGER NOT NULL DEFAULT 0,
+    conflicts          INTEGER NOT NULL DEFAULT 0
+);
+-- A deletion the mirror found. 'proposed' until the cycle decides: 'applied'
+-- (moved to the target's bin), 'awaiting' (held by the cap for a person),
+-- 'kept' (a person or keep mode said no), 'failed'.
+CREATE TABLE IF NOT EXISTS mirror_deletions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    cycle_id    INTEGER,
+    source_user TEXT NOT NULL,
+    target_user TEXT NOT NULL,
+    service     TEXT NOT NULL,
+    item_type   TEXT NOT NULL,
+    item_id     TEXT NOT NULL,
+    target_id   TEXT NOT NULL,
+    container   TEXT,
+    name        TEXT,
+    status      TEXT NOT NULL,
+    detail      TEXT,
+    created_at  TEXT NOT NULL,
+    decided_at  TEXT
+);
+CREATE TABLE IF NOT EXISTS mirror_conflicts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    cycle_id    INTEGER,
+    source_user TEXT NOT NULL,
+    service     TEXT NOT NULL,
+    item_id     TEXT NOT NULL,
+    target_id   TEXT,
+    name        TEXT,
+    detail      TEXT,
+    at          TEXT NOT NULL
+);
+-- A change the mirror read but could not apply. The marker still moves on, so
+-- the item is kept here and tried again at the start of the next cycle.
+CREATE TABLE IF NOT EXISTS mirror_retry (
+    source_user TEXT NOT NULL,
+    service     TEXT NOT NULL,
+    item_id     TEXT NOT NULL,
+    attempts    INTEGER NOT NULL DEFAULT 1,
+    last_error  TEXT,
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY (source_user, service, item_id)
+);
 """
 
 
 def utc_now() -> str:
     """RFC-3339 UTC string, matching Google's timestamp format."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:      # alive, owned by someone else
+        return True
+    return True
 
 
 class MigrationDB:
@@ -769,6 +869,13 @@ class MigrationDB:
             conn.execute(
                 "DELETE FROM id_mapping WHERE source_user=? AND source_id=? "
                 "AND type=?", (source_user, source_id, item_type))
+        # And from the cache: a cached user's map is taken as complete, so a stale
+        # entry would go on answering "migrated" with the forgotten target id, and
+        # the item would never be copied again.
+        with self._cache_lock:
+            cache = self._mapping_cache.get(source_user)
+            if cache is not None:
+                cache.pop((source_id, item_type), None)
 
     def forget_mappings(self, source_user: str) -> int:
         """Drop this user's mappings so the next run migrates them again.
@@ -1113,6 +1220,123 @@ class MigrationDB:
         if row and row["status"] == "SUCCESS":
             return row["modified_time"]
         return None
+
+    # -- mirror (mirror.py) -------------------------------------------------------
+    def mirror_marker(self, source_user: str, service: str) -> Optional[str]:
+        row = self.conn.execute(
+            "SELECT marker FROM mirror_marker WHERE source_user=? AND service=?",
+            (source_user, service)).fetchone()
+        return row["marker"] if row else None
+
+    def set_mirror_marker(self, source_user: str, service: str, marker: str) -> None:
+        with self.write() as conn:
+            conn.execute(
+                """INSERT INTO mirror_marker (source_user, service, marker, updated_at)
+                   VALUES (?,?,?,?) ON CONFLICT(source_user, service) DO UPDATE SET
+                   marker=excluded.marker, updated_at=excluded.updated_at""",
+                (source_user, service, str(marker), utc_now()))
+
+    def mirror_fingerprint(self, source_user: str, item_id: str) -> Optional[dict]:
+        row = self.conn.execute(
+            "SELECT * FROM mirror_fingerprint WHERE source_user=? AND item_id=?",
+            (source_user, item_id)).fetchone()
+        return dict(row) if row else None
+
+    def put_mirror_fingerprint(self, source_user: str, item_id: str, **fields) -> None:
+        cols = ["unit", "mime", "name", "parents", "checksum", "revision", "src_mtime",
+                "share_hash", "tgt_version", "deleted"]
+        known = self.mirror_fingerprint(source_user, item_id) or {}
+        row = {c: fields.get(c, known.get(c)) for c in cols}
+        row["deleted"] = int(row["deleted"] or 0)
+        with self.write() as conn:
+            conn.execute(
+                f"""INSERT INTO mirror_fingerprint (source_user, item_id, {', '.join(cols)}, updated_at)
+                    VALUES (?,?,{','.join('?' * len(cols))},?)
+                    ON CONFLICT(source_user, item_id) DO UPDATE SET
+                    {', '.join(f'{c}=excluded.{c}' for c in cols)}, updated_at=excluded.updated_at""",
+                (source_user, item_id, *[row[c] for c in cols], utc_now()))
+
+    def mirror_cycle_start(self, pid: int) -> Optional[int]:
+        """A new cycle's row, or None while another cycle is still running.
+
+        One cycle at a time per ledger, decided here rather than by the scheduler
+        alone: a manual "Run a cycle now" and a due scheduled one can both reach a
+        process. A 'running' row whose process has gone is marked interrupted."""
+        with self.write() as conn:
+            for r in conn.execute("SELECT id, pid FROM mirror_cycles WHERE status='running'").fetchall():
+                if r["pid"] and r["pid"] != pid and _pid_alive(r["pid"]):
+                    return None
+                conn.execute("UPDATE mirror_cycles SET status='interrupted', finished_at=? WHERE id=?",
+                             (utc_now(), r["id"]))
+            cur = conn.execute("INSERT INTO mirror_cycles (started_at, status, pid) VALUES (?,?,?)",
+                               (utc_now(), "running", pid))
+            return cur.lastrowid
+
+    def mirror_cycle_finish(self, cycle_id: int, **fields) -> None:
+        import json as _json
+        cols = {k: (_json.dumps(v) if isinstance(v, (dict, list)) else v) for k, v in fields.items()}
+        cols.setdefault("finished_at", utc_now())
+        with self.write() as conn:
+            conn.execute(f"UPDATE mirror_cycles SET {', '.join(f'{k}=?' for k in cols)} WHERE id=?",
+                         (*cols.values(), cycle_id))
+
+    def mirror_record_deletion(self, cycle_id: Optional[int], d: dict, status: str,
+                               detail: str = "") -> int:
+        with self.write() as conn:
+            cur = conn.execute(
+                """INSERT INTO mirror_deletions (cycle_id, source_user, target_user, service,
+                       item_type, item_id, target_id, container, name, status, detail, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (cycle_id, d["source_user"], d["target_user"], d["service"], d["item_type"],
+                 d["item_id"], d["target_id"], d.get("container"), d.get("name"), status,
+                 detail, utc_now()))
+            return cur.lastrowid
+
+    def mirror_deletions(self, status: str) -> list[dict]:
+        return [dict(r) for r in self.conn.execute(
+            "SELECT * FROM mirror_deletions WHERE status=? ORDER BY id", (status,)).fetchall()]
+
+    def set_mirror_deletion(self, deletion_id: int, status: str, detail: str = "") -> None:
+        with self.write() as conn:
+            conn.execute("UPDATE mirror_deletions SET status=?, detail=?, decided_at=? WHERE id=?",
+                         (status, detail, utc_now(), deletion_id))
+
+    def mirror_conflict(self, cycle_id: Optional[int], source_user: str, service: str,
+                        item_id: str, target_id: Optional[str], name: Optional[str],
+                        detail: str) -> None:
+        with self.write() as conn:
+            conn.execute(
+                """INSERT INTO mirror_conflicts (cycle_id, source_user, service, item_id,
+                       target_id, name, detail, at) VALUES (?,?,?,?,?,?,?,?)""",
+                (cycle_id, source_user, service, item_id, target_id, name, detail, utc_now()))
+
+    def mirror_retry_add(self, source_user: str, service: str, item_id: str, error: str) -> None:
+        with self.write() as conn:
+            conn.execute(
+                """INSERT INTO mirror_retry (source_user, service, item_id, last_error, updated_at)
+                   VALUES (?,?,?,?,?) ON CONFLICT(source_user, service, item_id) DO UPDATE SET
+                   attempts=attempts+1, last_error=excluded.last_error, updated_at=excluded.updated_at""",
+                (source_user, service, item_id, error[:500], utc_now()))
+
+    def mirror_retry_items(self, source_user: str, service: str) -> list[str]:
+        return [r["item_id"] for r in self.conn.execute(
+            "SELECT item_id FROM mirror_retry WHERE source_user=? AND service=?",
+            (source_user, service)).fetchall()]
+
+    def mirror_retry_clear(self, source_user: str, service: str, item_id: str) -> None:
+        with self.write() as conn:
+            conn.execute("DELETE FROM mirror_retry WHERE source_user=? AND service=? AND item_id=?",
+                         (source_user, service, item_id))
+
+    def source_for_target(self, source_user: str, target_id: str) -> Optional[tuple[str, str]]:
+        """(source id, item type) a target item was copied from, or None."""
+        row = self.conn.execute(
+            "SELECT source_id, type FROM id_mapping WHERE source_user=? AND target_id=?",
+            (source_user, target_id)).fetchone()
+        return (row["source_id"], row["type"]) if row else None
+
+    def mapping_count(self) -> int:
+        return self.conn.execute("SELECT COUNT(*) FROM id_mapping").fetchone()[0]
 
     def failed_items(self, source_user: str) -> list[sqlite3.Row]:
         return self.conn.execute(

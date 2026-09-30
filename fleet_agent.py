@@ -104,6 +104,8 @@ def _pct_cpu_ram_disk() -> tuple[float | None, float | None, float | None]:
 MAIN_COMMANDS = frozenset({
     "init-db", "preflight", "provision-users", "discover", "migrate",
     "delta", "syncacls", "report", "backfill-services", "scope",
+    # Listed so a cycle shows on Jobs and can be stopped there.
+    "mirror",
 })
 
 

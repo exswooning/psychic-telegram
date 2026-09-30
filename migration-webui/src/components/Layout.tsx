@@ -54,6 +54,7 @@ import {
   DeleteForever as TeardownIconNav,
   Hub as NodesIconNav,
   CompareArrows as MigrationsIconNav,
+  SyncAlt as MirrorIconNav,
   Speed as MetricsIconNav,
   FactCheck as TestsIconNav,
 } from '@mui/icons-material'
@@ -88,6 +89,9 @@ const NAV_ITEMS = [
   // Every account has a tenant pair, so this is not gated -- a client
   // sees only its own, which the endpoint enforces rather than the nav.
   { path: '/migrations', label: 'Migrations', icon: <MigrationsIconNav /> , group: 'Migrate' },
+  // The target kept as a live copy of the source, after the migration itself -- the
+  // same pair, carried on. Next to Migrations because it is what a migration becomes.
+  { path: '/mirror', label: 'Mirror', icon: <MirrorIconNav /> , group: 'Migrate' },
   // Not gated, and not nested under a migration: throughput, latency,
   // volume, transfer against the daily cap and host capacity are what
   // people check while a run is in flight, and making them find the run

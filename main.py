@@ -2043,6 +2043,37 @@ def cmd_delta(args, settings: Settings, db: MigrationDB, auth: AuthManager):
     _print_batch_summary(results, services)
 
 
+def cmd_mirror(args, settings: Settings, db: MigrationDB, auth: AuthManager) -> int:
+    """One mirror cycle, or a person's answer to the deletions a cycle held.
+
+    Both run as the job named "mirror", so an answer never lands mid-cycle. The
+    pair's settings are read here, from the control plane, not passed in: a cycle
+    that waited in the queue runs with what the page says now. Exits 0 unless the
+    cycle could not run at all -- an item that failed is kept for the next cycle,
+    and a non-zero exit reads as a crash to run_watch."""
+    import mirror
+    import mirror_scheduler as ms
+
+    aid = getattr(settings, "account_id", None)
+    with _registered("mirror", aid):
+        if args.decide:
+            out = mirror.decide_held(auth, db, args.decide)
+            ms.set_paused(aid, False)
+            print("MIRROR " + json.dumps({"decision": args.decide, **out}), flush=True)
+            return 0
+        cfg = ms.get_settings(aid)
+        out = mirror.Cycle(auth, db, settings, deletion_mode=cfg["deletion_mode"],
+                           cap_pct=cfg["cap_pct"], deletions_paused=cfg["deletions_paused"],
+                           on_hold=lambda n, cap: ms.hold_deletions(aid, n, cap)).run()
+    print("MIRROR " + json.dumps({k: out.get(k) for k in (
+        "status", "cycle", "seconds", "calls", "counts", "deletions", "conflicts")}), flush=True)
+    for line in out.get("errors") or []:
+        print(f"  ! {line}", flush=True)
+    for line in out.get("unknown") or []:
+        print(f"  ? {line}", flush=True)
+    return 1 if out["status"] == "failed" else 0
+
+
 def cmd_restore_direct_grants(args, settings: Settings, db: MigrationDB,
                               auth: AuthManager) -> int:
     """repair.restore_direct_grants, for every finished user or --user ones."""
@@ -2598,6 +2629,13 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("syncacls", help="recreate per-file ACLs on migrated items")
     s.add_argument("--user", action="append")
     s.set_defaults(func=cmd_syncacls)
+
+    s = sub.add_parser("mirror",
+                       help="one mirror cycle: carry every source change since the last one "
+                            "onto the same target items (mirror.py)")
+    s.add_argument("--decide", choices=["apply", "keep"],
+                   help="answer held deletions instead of running a cycle")
+    s.set_defaults(func=cmd_mirror)
 
     s = sub.add_parser("restore-direct-grants",
                        help="put back a direct grant a file held on top of an inherited one")

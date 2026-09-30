@@ -9,6 +9,7 @@ import Jobs from '@/pages/Jobs'
 import Pipeline from '@/pages/Pipeline'
 import Nodes from '@/pages/Nodes'
 import Migrations from '@/pages/Migrations'
+import Mirror from '@/pages/Mirror'
 import MigrationDetail from '@/pages/MigrationDetail'
 import Metrics from '@/pages/Metrics'
 import TestReport from '@/pages/TestReport'
@@ -97,6 +98,7 @@ const App: React.FC = () => {
             <Route path="/nodes" element={<Nodes />} />
             <Route path="/migrations" element={<Migrations />} />
             <Route path="/migrations/:accountId" element={<MigrationDetail />} />
+            <Route path="/mirror" element={<Mirror />} />
             <Route path="/metrics" element={<Metrics />} />
             <Route path="/migrations/:accountId/metrics" element={<Metrics />} />
             <Route path="/tests" element={<TestReport />} />

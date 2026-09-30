@@ -824,12 +824,14 @@ async def lifespan(_: FastAPI):
     task = asyncio.create_task(_tailer())
     watchdog = asyncio.create_task(_supervise_jobs())
     observer = asyncio.create_task(_watch_runs())
+    mirrors = asyncio.create_task(_mirror_loop())
     try:
         yield
     finally:
         task.cancel()
         watchdog.cancel()
         observer.cancel()
+        mirrors.cancel()
 
 
 app = FastAPI(title="Migration Command Center", version="1.0", lifespan=lifespan)
@@ -1940,6 +1942,201 @@ async def tally_run(body: RunVerification, op: Operator = Depends(operator)):
     target = ",".join(body.users) if body.users else "ALL"
     return await _gated(op, "tally.run", body, target,
                         lambda: _run_admitted(argv, account_id, "user-tally"))
+
+
+# -- Mirror ---------------------------------------------------------------------------
+# A target kept as a continuously updated copy of its source (mirror.py). Settings
+# live in the control plane (mirror_scheduler.py); cycles, held deletions and
+# conflicts in the account's own ledger. A cycle is always the job "mirror".
+MIRROR_POLL_SEC = 60
+
+
+def _mirror_busy(account_id: int | None) -> bool:
+    """A mirror job running or queued for this pair. The cycle refuses to overlap
+    itself anyway; this is what stops asking for one that would only be refused."""
+    try:
+        if any(r["account_id"] == account_id and r["job_name"] == "mirror"
+               for r in job_admission.list_active()):
+            return True
+        return any(r["job_name"] == "mirror" for r in job_queue.waiting(account_id))
+    except Exception:      # noqa: BLE001 - unknown is not busy; the cycle's own lock decides
+        return False
+
+
+def _start_mirror(account_id: int | None, decide: str | None = None) -> tuple[bool, str]:
+    if _mirror_busy(account_id):
+        return False, "a mirror cycle is already running or queued for this pair"
+    argv = [PY, "main.py"] + _account_argv(account_id) + ["mirror"]
+    if decide:
+        argv += ["--decide", decide]
+    return _run_admitted(argv, account_id, "mirror")
+
+
+def _mirror_last_cycles(account_id: int | None) -> dict:
+    import mirror_scheduler as ms
+    path = _ledger_path(account_id)
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with cpdb.ro(path) as conn:
+            last = conn.execute("SELECT started_at FROM mirror_cycles ORDER BY id DESC LIMIT 1").fetchone()
+            good = conn.execute("SELECT finished_at FROM mirror_cycles WHERE status IN ('ok','partial') "
+                                "AND finished_at IS NOT NULL ORDER BY id DESC LIMIT 1").fetchone()
+    except sqlite3.OperationalError:      # a ledger from before the mirror
+        return {}
+    return {"started": ms._epoch(last["started_at"]) if last else None,
+            "good": ms._epoch(good["finished_at"]) if good else None}
+
+
+def _mirror_view(account_id: int) -> dict:
+    """Everything the Mirror page shows for one pair. Counts, never a blended
+    percentage; lag with no good cycle yet is None, which the page reads as Unknown."""
+    import mirror
+    import mirror_scheduler as ms
+    from config import Settings
+    st = Settings(account_id=account_id)
+    cfg = ms.get_settings(account_id)
+    out: dict = {
+        "accountId": account_id, "sourceDomain": st.source_domain, "targetDomain": st.target_domain,
+        "settings": {"enabled": cfg["enabled"], "intervalMin": cfg["interval_min"],
+                     "deletionMode": cfg["deletion_mode"], "capPct": cfg["cap_pct"],
+                     "deletionsPaused": cfg["deletions_paused"], "enabledAt": cfg["enabled_at"],
+                     "updatedBy": cfg["updated_by"], "updatedAt": cfg["updated_at"]},
+        "minIntervalMin": ms.MIN_INTERVAL_MIN, "lagIntervals": ms.LAG_INTERVALS,
+        "running": _mirror_busy(account_id), "cycles": [], "lastCycle": None,
+        "lastGoodAt": None, "lagSeconds": None, "behind": None,
+        "waiting": {"retry": 0, "held": 0}, "held": [], "conflicts": [], "conflictCount": 0,
+        "cannotMirror": mirror.CANNOT_MIRROR,
+    }
+    path = _ledger_path(account_id)
+    if not os.path.isfile(path):
+        return out
+    try:
+        with cpdb.ro(path) as conn:
+            cycles = [dict(r) for r in conn.execute(
+                "SELECT * FROM mirror_cycles ORDER BY id DESC LIMIT 20").fetchall()]
+            held = [dict(r) for r in conn.execute(
+                "SELECT id, source_user, service, item_type, name, target_id, detail, created_at "
+                "FROM mirror_deletions WHERE status='awaiting' ORDER BY id LIMIT 200").fetchall()]
+            held_n = conn.execute("SELECT COUNT(*) FROM mirror_deletions WHERE status='awaiting'").fetchone()[0]
+            conflicts = [dict(r) for r in conn.execute(
+                "SELECT source_user, service, item_id, target_id, name, detail, at "
+                "FROM mirror_conflicts ORDER BY id DESC LIMIT 50").fetchall()]
+            conflict_n = conn.execute("SELECT COUNT(*) FROM mirror_conflicts").fetchone()[0]
+            retry_n = conn.execute("SELECT COUNT(*) FROM mirror_retry").fetchone()[0]
+    except sqlite3.OperationalError:      # a ledger from before the mirror
+        return out
+
+    def _parse(c: dict) -> dict:
+        for k in ("counts", "by_service", "errors", "unknown", "users"):
+            try:
+                c[k] = json.loads(c[k]) if c.get(k) else ({} if k in ("counts", "by_service", "users") else [])
+            except (TypeError, ValueError):
+                c[k] = {} if k in ("counts", "by_service", "users") else []
+        return {"id": c["id"], "startedAt": c["started_at"], "finishedAt": c["finished_at"],
+                "status": c["status"], "calls": c["calls"], "counts": c["counts"],
+                "byService": c["by_service"], "errors": c["errors"], "unknown": c["unknown"],
+                "users": c["users"], "deletionsProposed": c["deletions_proposed"],
+                "deletionsApplied": c["deletions_applied"], "deletionsHeld": c["deletions_held"],
+                "conflicts": c["conflicts"]}
+
+    out["cycles"] = [_parse(c) for c in cycles]
+    out["lastCycle"] = out["cycles"][0] if out["cycles"] else None
+    good = next((c for c in out["cycles"] if c["status"] in ("ok", "partial") and c["finishedAt"]), None)
+    if good:
+        out["lastGoodAt"] = good["finishedAt"]
+        lag = time.time() - (ms._epoch(good["finishedAt"]) or time.time())
+        out["lagSeconds"] = max(0, int(lag))
+        out["behind"] = lag > ms.LAG_INTERVALS * cfg["interval_min"] * 60
+    out["waiting"] = {"retry": retry_n, "held": held_n}
+    out["held"] = [{"id": h["id"], "sourceUser": h["source_user"], "service": h["service"],
+                    "itemType": h["item_type"], "name": h["name"], "targetId": h["target_id"],
+                    "detail": h["detail"], "createdAt": h["created_at"]} for h in held]
+    out["conflicts"] = [{"sourceUser": c["source_user"], "service": c["service"],
+                         "itemId": c["item_id"], "targetId": c["target_id"], "name": c["name"],
+                         "detail": c["detail"], "at": c["at"]} for c in conflicts]
+    out["conflictCount"] = conflict_n
+    return out
+
+
+class MirrorSettingsBody(WriteAction):
+    account_id: int | None = None
+    enabled: bool
+    interval_min: int = Field(ge=5, le=1440)
+    deletion_mode: Literal["mirror", "keep"]
+    cap_pct: float = Field(gt=0, le=100)
+
+
+class MirrorAccount(WriteAction):
+    account_id: int | None = None
+
+
+class MirrorDecision(WriteAction):
+    account_id: int | None = None
+    decision: Literal["apply", "keep"]
+
+
+@app.get("/api/v2/mirror")
+async def mirror_status(account_id: int | None = None, op: Operator = Depends(operator)):
+    """The pair's mirror: its settings, last cycles, lag, held deletions and conflicts."""
+    require_login(op)
+    aid = account_id if account_id is not None else op.account_id
+    if not aid:
+        return {"accountId": None}
+    _require_account_access(aid, op)
+    return await _off_loop(_mirror_view, aid)
+
+
+@app.put("/api/v2/mirror/settings")
+async def mirror_settings(body: MirrorSettingsBody, op: Operator = Depends(operator)):
+    """On/off, interval (at least 5 minutes), deletion mode and cap."""
+    import mirror_scheduler as ms
+    account_id = _resolve_account(body, op)
+
+    def go() -> tuple[bool, str]:
+        try:
+            saved = ms.save_settings(account_id, enabled=body.enabled, interval_min=body.interval_min,
+                                     deletion_mode=body.deletion_mode, cap_pct=body.cap_pct, by=op.name)
+        except ValueError as exc:
+            return False, str(exc)
+        return True, ("mirror on, every %d min" % saved["interval_min"]) if saved["enabled"] else "mirror off"
+    return await _gated(op, "mirror.settings", body, str(account_id), go)
+
+
+@app.post("/api/v2/mirror/run")
+async def mirror_run(body: MirrorAccount, op: Operator = Depends(operator)):
+    """One cycle now, as the job "mirror" -- queued behind other jobs like any other."""
+    account_id = _resolve_account(body, op)
+    return await _gated(op, "mirror.run", body, str(account_id), lambda: _start_mirror(account_id))
+
+
+@app.post("/api/v2/mirror/deletions")
+async def mirror_deletions(body: MirrorDecision, op: Operator = Depends(operator)):
+    """A person's answer to deletions a cycle held: apply them (each to the target's bin)
+    or keep them. Runs as the job "mirror", so it never lands mid-cycle; the pair's
+    deletions resume afterwards either way."""
+    account_id = _resolve_account(body, op)
+    return await _gated(op, f"mirror.deletions.{body.decision}", body, str(account_id),
+                        lambda: _start_mirror(account_id, decide=body.decision))
+
+
+async def _mirror_loop() -> None:
+    """Start due cycles, watch the lag, and tally each mirrored pair once a night."""
+    import mirror_scheduler as ms
+    import run_watch
+    sched = ms.Scheduler(
+        start_cycle=_start_mirror,
+        start_tally=lambda aid: _run_admitted([PY, "tally.py"] + _account_argv(aid), aid, "user-tally"),
+        is_busy=_mirror_busy, last_cycles=_mirror_last_cycles,
+        open_incident=run_watch.open_incident)
+    while True:
+        try:
+            await asyncio.sleep(MIRROR_POLL_SEC)
+            await _off_loop(sched.tick)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:      # noqa: BLE001 - the loop must outlive a bad look
+            log.warning("mirror scheduler pass failed: %r", exc)
 
 
 @app.get("/api/v2/history")

@@ -231,6 +231,29 @@ class TestSideTables:
         assert db.get_label_map(SRC) == {"Label_1": "Label_tgt_1"}
         db.close()
 
+    def test_a_reset_re_baselines_the_mirror(self, tmp_path):
+        """A mirror marker left behind reads on from where the ledger used to be; its
+        fingerprints describe items the reset just declared gone."""
+        import reset_drive_ledger as r
+
+        db = MigrationDB(str(tmp_path / "m.db"))
+        bulk_seed_identities(db, [(SRC, "alice@tenantb.com")])
+        for svc in ("drive", "drive-target", "gmail", "calendar:primary"):
+            db.set_mirror_marker(SRC, svc, "7")
+        db.put_mirror_fingerprint(SRC, "file-1", unit="drive", name="a")
+        db.put_mirror_fingerprint(SRC, "draft:d1", revision="m1")
+        db.mirror_retry_add(SRC, "drive", "file-2", "boom")
+        r.reset_service_ledger(db, SRC, ("drive",))
+        assert db.mirror_marker(SRC, "drive") is None and db.mirror_marker(SRC, "drive-target") is None
+        assert db.mirror_marker(SRC, "gmail") == "7" and db.mirror_marker(SRC, "calendar:primary") == "7"
+        assert db.mirror_fingerprint(SRC, "file-1") is None
+        assert db.mirror_fingerprint(SRC, "draft:d1") is not None
+        assert db.mirror_retry_items(SRC, "drive") == []
+        r.reset_service_ledger(db, SRC, ("gmail", "calendar"))
+        assert db.mirror_marker(SRC, "gmail") is None and db.mirror_marker(SRC, "calendar:primary") is None
+        assert db.mirror_fingerprint(SRC, "draft:d1") is None
+        db.close()
+
     def test_every_per_user_table_is_either_reset_or_deliberately_not(self):
         """A new per-user mapping table that no reset knows about repeats
         exactly the label_map bug. Listing the exemptions here forces that
@@ -275,6 +298,13 @@ class TestSideTables:
                               # was taken. A ledger reset does not change the
                               # tenants, and a report already discards any
                               # tally older than the run it judges
+            "mirror_marker",      # cleared BY SERVICE (MIRROR_MARKERS), so the mirror
+            "mirror_fingerprint", # re-baselines a reset service rather than reading on
+            "mirror_retry",       # against mappings that no longer exist -- see
+                                  # test_a_reset_re_baselines_the_mirror
+            "mirror_cycles",      # records of what the mirror did and what a person
+            "mirror_deletions",   # decided: nothing reads them to decide whether an
+            "mirror_conflicts",   # item still needs migrating, like repair_runs
             "rate_limiter_ceiling",  # not per-user at all: one row per TENANT
                               # SIDE ('source'/'target'), what a run proved
                               # about Google's own project-wide Drive quota.

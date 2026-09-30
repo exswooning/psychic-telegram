@@ -1853,12 +1853,22 @@ class DriveMigrator:
             log.info("[DRY RUN] would update changed file %s", item["name"])
             self._bump("files")
             return
+        self._replace_content(item, target_id, is_native)
 
+    def _replace_content(self, item: dict, target_id: str, is_native: bool) -> bool:
+        """New content for the SAME target file: the delta's update, and the mirror's.
+
+        Streams the bytes -- files.copy cannot overwrite an existing file, so an edit
+        never takes the server-side path. A native file is exported and re-imported
+        into the existing Doc/Sheet/Slide, which Drive converts; what that round trip
+        loses is the mirror's to report, not this method's. False when nothing was
+        written (no export format, or a read or write that failed and was recorded).
+        """
         if is_native:
             export_mime, _ext = EXPORT_MIME_MAP.get(item["mimeType"], (None, None))
             if not export_mime:
                 self._bump("skipped")
-                return
+                return False
             try:
                 path, size = self._download_via(
                     lambda: self.src.files().export_media(fileId=item["id"], mimeType=export_mime)
@@ -1866,7 +1876,7 @@ class DriveMigrator:
             except (PermanentAPIError, RuntimeError) as exc:
                 self.db.log_audit(self.source_user, item["id"], "file", "FAILED", str(exc))
                 self._bump("failed")
-                return
+                return False
             mimetype_for_upload = export_mime
         else:
             size = int(item.get("size") or 0)
@@ -1879,7 +1889,7 @@ class DriveMigrator:
                 self.quota.refund(size)
                 self.db.log_audit(self.source_user, item["id"], "file", "FAILED", str(exc))
                 self._bump("failed")
-                return
+                return False
             mimetype_for_upload = item.get("mimeType")
 
         body = {"modifiedTime": item.get("modifiedTime")}
@@ -1895,13 +1905,14 @@ class DriveMigrator:
                 self.quota.refund(size)
             self.db.log_audit(self.source_user, item["id"], "file", "FAILED", str(exc))
             self._bump("failed")
-            return
+            return False
         finally:
             self._cleanup(path)
 
         self.db.log_audit(self.source_user, item["id"], "file", "SUCCESS",
                           modified_time=item.get("modifiedTime"), bytes_moved=size)
         self._bump("files")
+        return True
 
     # -- shortcuts (two-pass) ---------------------------------------------------
     def _defer_shortcut(self, item: dict, tgt_parent: str) -> None:
@@ -2086,9 +2097,6 @@ class DriveMigrator:
                 self._bump("acl_failed")
             return 0
 
-        applied = 0
-        batch: list[tuple[dict, str]] = []
-
         # Counted before the loop decides anything, so the measurement is of
         # what this corpus actually contains rather than of what the current
         # setting happens to let through.
@@ -2098,6 +2106,15 @@ class DriveMigrator:
                 and any(d.get("inherited")
                         for d in (x.get("permissionDetails") or []))),
             self.settings)
+        return self._create_permissions_batched(
+            target_id, self._translate_grants(source_id, perms, resume=resume))
+
+    def _translate_grants(self, source_id: str, perms: list[dict],
+                          resume: bool = False) -> list[tuple[dict, str | None]]:
+        """The target grants a source file's permissions become, with each one's audit
+        key. Shared with the mirror's sharing diff (mirror.py), so a migrated file and a
+        mirrored one can never translate the same source sharing differently."""
+        batch: list[tuple[dict, str | None]] = []
         keep_inherited = _inherited_acls_affordable(self.settings)
 
         for p in perms:
@@ -2205,8 +2222,7 @@ class DriveMigrator:
                 if prior is not None and (prior["status"] == "SUCCESS" or str(prior["status"]).startswith("SKIPPED")):
                     continue
             batch.append((body, audit_key))
-
-        return self._create_permissions_batched(target_id, batch)
+        return batch
 
     def _create_permissions_batched(self, target_id: str,
                                     grants: list[tuple[dict, str]]) -> int:

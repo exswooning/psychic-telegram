@@ -1620,6 +1620,100 @@ export const runTally = (reason: string, opts: { accountId?: number; users?: str
     body: JSON.stringify({ reason, account_id: opts.accountId ?? null, users: opts.users ?? [] }),
   })
 
+/** The mirror (mirror.py): a target kept as a continuously updated copy of its source. */
+export type MirrorDeletionMode = 'mirror' | 'keep'
+export interface MirrorSettings {
+  enabled: boolean
+  intervalMin: number
+  deletionMode: MirrorDeletionMode
+  capPct: number
+  deletionsPaused: boolean
+  enabledAt: string | null
+  updatedBy: string | null
+  updatedAt: string | null
+}
+/** One cycle. `counts` is changes by kind (new, edited, renamed, moved, sharing, deleted,
+ *  ...) summed over services; `byService` keeps them apart. `unknown` lists the checks the
+ *  cycle could not make -- never a pass. */
+export interface MirrorCycle {
+  id: number
+  startedAt: string
+  finishedAt: string | null
+  status: 'running' | 'ok' | 'partial' | 'failed' | 'stopped' | 'interrupted' | string
+  calls: number | null
+  counts: Record<string, number>
+  byService: Record<string, Record<string, number>>
+  errors: string[]
+  unknown: string[]
+  users: { new?: string[]; suspended?: string[]; gone?: string[]; provision_failed?: string[] }
+  deletionsProposed: number
+  deletionsApplied: number
+  deletionsHeld: number
+  conflicts: number
+}
+export interface MirrorHeldDeletion {
+  id: number
+  sourceUser: string
+  service: string
+  itemType: string
+  name: string | null
+  targetId: string
+  detail: string | null
+  createdAt: string
+}
+export interface MirrorConflict {
+  sourceUser: string
+  service: string
+  itemId: string
+  targetId: string | null
+  name: string | null
+  detail: string | null
+  at: string
+}
+export interface MirrorView {
+  accountId: number | null
+  sourceDomain?: string
+  targetDomain?: string
+  settings?: MirrorSettings
+  minIntervalMin?: number
+  lagIntervals?: number
+  running?: boolean
+  cycles?: MirrorCycle[]
+  lastCycle?: MirrorCycle | null
+  lastGoodAt?: string | null
+  /** null: no good cycle yet, so the lag is unknown -- never read as fine. */
+  lagSeconds?: number | null
+  behind?: boolean | null
+  waiting?: { retry: number; held: number }
+  held?: MirrorHeldDeletion[]
+  conflicts?: MirrorConflict[]
+  conflictCount?: number
+  cannotMirror?: string[]
+}
+export const fetchMirror = (accountId?: number) =>
+  cpFetch<MirrorView>(`/api/v2/mirror${accountId ? `?account_id=${accountId}` : ''}`)
+
+export const saveMirrorSettings = (
+  reason: string,
+  s: { enabled: boolean; intervalMin: number; deletionMode: MirrorDeletionMode; capPct: number },
+  accountId?: number,
+) => cpFetch<ActionResult>('/api/v2/mirror/settings', {
+  method: 'PUT',
+  body: JSON.stringify({ reason, account_id: accountId ?? null, enabled: s.enabled,
+    interval_min: s.intervalMin, deletion_mode: s.deletionMode, cap_pct: s.capPct }),
+})
+
+export const runMirrorCycle = (reason: string, accountId?: number) =>
+  cpFetch<ActionResult>('/api/v2/mirror/run', {
+    method: 'POST', body: JSON.stringify({ reason, account_id: accountId ?? null }),
+  })
+
+/** Held deletions: "apply" moves each to the target's bin, "keep" leaves the target alone. */
+export const decideMirrorDeletions = (reason: string, decision: 'apply' | 'keep', accountId?: number) =>
+  cpFetch<ActionResult>('/api/v2/mirror/deletions', {
+    method: 'POST', body: JSON.stringify({ reason, account_id: accountId ?? null, decision }),
+  })
+
 /** One past run of any kind -- migrate, delta, seed, reset, wipe, full-setup, verify,
  *  tally, dms, trim-filler, repair. `rc` is the real exit code where one was observed
  *  (a negative number is a signal death, judged `!= 0`, never `> 0`) and null where it

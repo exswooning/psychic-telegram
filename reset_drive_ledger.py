@@ -108,6 +108,15 @@ SERVICE_SIDE_TABLES: dict[str, tuple[tuple[str, str], ...]] = {
 }
 
 
+# The mirror's markers each service owns (mirror.py). "drive%" covers the user's own
+# Drive, the target feed the mirror reads for edits made on the mirror, and a shared
+# drive's feed keyed to the same admin.
+MIRROR_MARKERS: dict[str, tuple[str, ...]] = {
+    "drive": ("drive%",), "gmail": ("gmail",), "calendar": ("calendar:%",),
+    "contacts": ("contacts",), "tasks": ("tasks",),
+}
+
+
 def reset_service_ledger(db: MigrationDB, source_email: str,
                          services: tuple[str, ...] = ("drive",)) -> dict:
     """Clear resume state for the named services on one user.
@@ -146,6 +155,26 @@ def reset_service_ledger(db: MigrationDB, source_email: str,
             for table, col in SERVICE_SIDE_TABLES.get(svc, ()):
                 side_deleted += conn.execute(
                     f"DELETE FROM {table} WHERE {col}=?", (source_email,)).rowcount
+        # The mirror's place in each change feed, and what it last wrote, describe items
+        # this reset just declared gone: without clearing them the next cycle would read
+        # on from an old marker against mappings that no longer exist. Cleared, the
+        # service is re-baselined. By service, like user_verification below.
+        for svc in services:
+            for pattern in MIRROR_MARKERS.get(svc, ()):
+                side_deleted += conn.execute(
+                    "DELETE FROM mirror_marker WHERE source_user=? AND service LIKE ?",
+                    (source_email, pattern)).rowcount
+                side_deleted += conn.execute(
+                    "DELETE FROM mirror_retry WHERE source_user=? AND service LIKE ?",
+                    (source_email, pattern)).rowcount
+        if "drive" in services:
+            side_deleted += conn.execute(
+                "DELETE FROM mirror_fingerprint WHERE source_user=? AND item_id NOT LIKE 'draft:%'",
+                (source_email,)).rowcount
+        if "gmail" in services:
+            side_deleted += conn.execute(
+                "DELETE FROM mirror_fingerprint WHERE source_user=? AND item_id LIKE 'draft:%'",
+                (source_email,)).rowcount
         # What the verifier last found describes items this reset just declared gone. By
         # service, unlike the tables above: another service's result is still true.
         side_deleted += conn.execute(

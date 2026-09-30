@@ -157,12 +157,71 @@ class FakeDrive(FakeService):
         # "already at target" or "licence cap below the requested target".
         self.storage_usage = 0
         self.storage_limit = 1099511627776   # 1 TiB, the previous constant
+        # The mirror reads Drive's changes feed: every write records the file
+        # with a rising sequence (a delete leaves a tombstone), bumps its
+        # `version`, and content gets a new revision -- a comment or a grant
+        # does not, which is exactly the distinction the mirror has to draw.
+        self._seq = 0
+        self._changed: dict[str, int] = {}
+        self._tomb_drive: dict[str, Optional[str]] = {}
+        self._revisions: dict[str, list[dict]] = defaultdict(list)
+        self.change_tokens_expired = False
         self.root_id = f"root-{tenant}"
         self.store[self.root_id] = {
             "id": self.root_id, "name": "My Drive", "mimeType": FOLDER_MIME,
             "parents": [], "trashed": False, "modifiedTime": "2020-01-01T00:00:00Z",
             "owners": [{"emailAddress": owner}],
         }
+
+    # -- change journal -------------------------------------------------
+    def _mark(self, fid: str) -> None:
+        self._seq += 1
+        self._changed[fid] = self._seq
+        meta = self.store.get(fid)
+        if meta is not None:
+            meta["version"] = str(int(meta.get("version") or 0) + 1)
+
+    def _new_revision(self, fid: str) -> None:
+        meta = self.store.get(fid) or {}
+        self._revisions[fid].append({"id": f"rev{len(self._revisions[fid]) + 1}",
+                                     "modifiedTime": meta.get("modifiedTime")})
+        if fid in self.store and fid in self.content:
+            meta["headRevisionId"] = self._revisions[fid][-1]["id"]
+
+    # -- source-side edits, as a person would make them (mirror tests) ------
+    def edit_native(self, fid: str, export_bytes: bytes, mtime: str) -> None:
+        self.exports[fid] = export_bytes
+        self.store[fid]["modifiedTime"] = mtime
+        self._new_revision(fid)
+        self._mark(fid)
+
+    def rename(self, fid: str, name: str) -> None:
+        self.store[fid]["name"] = name
+        self._mark(fid)
+
+    def move(self, fid: str, parent: str) -> None:
+        self.store[fid]["parents"] = [parent]
+        self._mark(fid)
+
+    def trash(self, fid: str) -> None:
+        self.store[fid]["trashed"] = True
+        self._mark(fid)
+
+    def comment_on(self, fid: str, content: str, mtime: str) -> None:
+        """A comment moves modifiedTime and version, never the revision."""
+        self.add_comment(fid, content)
+        self.store[fid]["modifiedTime"] = mtime
+        self._mark(fid)
+
+    def remove_permission(self, fid: str, email: str) -> None:
+        self.perms[fid] = [p for p in self.perms[fid] if p.get("emailAddress") != email]
+        self._mark(fid)
+
+    def changes(self):
+        return _DriveChanges(self)
+
+    def revisions(self):
+        return _DriveRevisions(self)
 
     # -- seeding helpers -------------------------------------------------
     def add_folder(self, name: str, parent: Optional[str] = None,
@@ -174,6 +233,7 @@ class FakeDrive(FakeService):
             "modifiedTime": mtime, "owners": [{"emailAddress": self.owner}],
             "capabilities": {"canDownload": True},
         }
+        self._mark(fid)
         return fid
 
     def add_binary(self, name: str, parent: Optional[str] = None,
@@ -191,6 +251,8 @@ class FakeDrive(FakeService):
             "owners": [{"emailAddress": self.owner}],
             "capabilities": {"canDownload": can_download},
         }
+        self._new_revision(fid)
+        self._mark(fid)
         return fid
 
     def add_native(self, name: str, parent: Optional[str] = None,
@@ -205,6 +267,8 @@ class FakeDrive(FakeService):
             "modifiedTime": mtime, "owners": [{"emailAddress": self.owner}],
             "capabilities": {"canDownload": True},
         }
+        self._new_revision(fid)
+        self._mark(fid)
         return fid
 
     def add_shortcut(self, name: str, target_id: str,
@@ -219,6 +283,7 @@ class FakeDrive(FakeService):
             "owners": [{"emailAddress": self.owner}],
             "capabilities": {"canDownload": True},
         }
+        self._mark(fid)
         return fid
 
     def add_permission(self, file_id: str, type_: str, role: str,
@@ -236,6 +301,8 @@ class FakeDrive(FakeService):
         if inherited:
             p["permissionDetails"] = [{"inherited": True}]
         self.perms[file_id].append(p)
+        if file_id in self.store:
+            self._mark(file_id)
         return p
 
     def touch(self, file_id: str, mtime: str,
@@ -246,6 +313,8 @@ class FakeDrive(FakeService):
             self.content[file_id] = data
             self.store[file_id]["size"] = str(len(data))
             self.store[file_id]["md5Checksum"] = hashlib.md5(data).hexdigest()
+            self._new_revision(file_id)
+        self._mark(file_id)
 
     # -- state assertions for tests --------------------------------------
     def children_of(self, parent_id: str) -> list[dict]:
@@ -492,6 +561,9 @@ class _DriveFiles:
             # deck) is still a real, exportable Google file — just empty.
             self.s.exports[fid] = b""
         self.s.store[fid] = meta
+        if fid in self.s.content or fid in self.s.exports:
+            self.s._new_revision(fid)
+        self.s._mark(fid)
         # Real Drive's create response echoes the field back whenever it's
         # requested, honoured or not -- the fake does too, so the engine's
         # own "did it stick" check has something real to compare against.
@@ -548,6 +620,9 @@ class _DriveFiles:
             dest.exports[new_id] = src.exports[fileId]
             new_meta["modifiedTime"] = NATIVE_IMPORT_TIME
         dest.store[new_id] = new_meta
+        if new_id in dest.content or new_id in dest.exports:
+            dest._new_revision(new_id)
+        dest._mark(new_id)
         return result
 
     def update(self, **kw):
@@ -562,7 +637,7 @@ class _DriveFiles:
         # The move out of staging does not take a native file's modifiedTime
         # either (live); a plain update afterwards does.
         moving_native = bool(removeParents) and fileId in self.s.exports
-        for k in ("name", "modifiedTime", "description", "starred"):
+        for k in ("name", "modifiedTime", "description", "starred", "trashed"):
             if body and k in body and not (k == "modifiedTime" and moving_native):
                 meta[k] = body[k]
 
@@ -594,6 +669,9 @@ class _DriveFiles:
                 meta["md5Checksum"] = hashlib.md5(data).hexdigest()
                 result["md5Checksum"] = meta["md5Checksum"]
                 result["size"] = meta["size"]
+            self.s._new_revision(fileId)
+        self.s._mark(fileId)
+        result["version"] = meta.get("version")
         return result
 
     def delete(self, **kw):
@@ -624,12 +702,63 @@ class _DriveFiles:
             to_remove.extend(children)
             frontier.extend(children)
         for fid in to_remove:
+            self.s._tomb_drive[fid] = (self.s.store.get(fid) or {}).get("driveId")
+            self.s._seq += 1
+            self.s._changed[fid] = self.s._seq
             self.s.store.pop(fid, None)
             self.s.content.pop(fid, None)
             self.s.exports.pop(fid, None)
             self.s.perms.pop(fid, None)
             self.s.comment_store.pop(fid, None)
         return {}
+
+
+class _DriveChanges:
+    """Drive's change feed: everything written since a page token, a delete as
+    `removed`. `change_tokens_expired` stands in for a token Drive will no longer
+    accept, which the mirror answers with a full re-scan."""
+
+    def __init__(self, svc: FakeDrive):
+        self.s = svc
+
+    def getStartPageToken(self, **kw):
+        return _Call(self.s, "changes.getStartPageToken",
+                     lambda **_: {"startPageToken": str(self.s._seq)}, kw)
+
+    def list(self, **kw):
+        return _Call(self.s, "changes.list", self._list, kw)
+
+    def _list(self, pageToken: str, pageSize: int = 100, driveId: Optional[str] = None, **_):
+        if self.s.change_tokens_expired:
+            raise http_error(400, "invalid", "Invalid Value: pageToken")
+        start = int(pageToken)
+        rows = sorted((seq, fid) for fid, seq in self.s._changed.items() if seq > start)
+        if driveId:
+            files = _DriveFiles(self.s)
+            rows = [(q, f) for q, f in rows
+                    if (f in self.s.store and files._within_drive(self.s.store[f], driveId))
+                    or (f not in self.s.store and self.s._tomb_drive.get(f) == driveId)]
+        page = rows[:pageSize]
+        out: dict[str, Any] = {"changes": [
+            {"fileId": f, "removed": f not in self.s.store,
+             **({"file": copy.deepcopy(self.s.store[f])} if f in self.s.store else {})}
+            for _q, f in page]}
+        if len(rows) > pageSize:
+            out["nextPageToken"] = str(page[-1][0])
+        else:
+            out["newStartPageToken"] = str(self.s._seq)
+        return out
+
+
+class _DriveRevisions:
+    def __init__(self, svc: FakeDrive):
+        self.s = svc
+
+    def list(self, **kw):
+        return _Call(self.s, "revisions.list", self._list, kw)
+
+    def _list(self, fileId: str, **_):
+        return {"revisions": copy.deepcopy(self.s._revisions.get(fileId, []))}
 
 
 class _DrivePermissions:
@@ -656,7 +785,29 @@ class _DrivePermissions:
         meta = self.s.store.get(fileId)
         if meta is not None:
             meta["modifiedTime"] = PERMISSION_BUMP_TIME
+            self.s._mark(fileId)
         return {"id": p["id"]}
+
+    def delete(self, **kw):
+        return _Call(self.s, "permissions.delete", self._delete, kw)
+
+    def _delete(self, fileId: str, permissionId: str, **_):
+        self.s.perms[fileId] = [p for p in self.s.perms[fileId] if p.get("id") != permissionId]
+        if fileId in self.s.store:
+            self.s._mark(fileId)
+        return {}
+
+    def update(self, **kw):
+        return _Call(self.s, "permissions.update", self._update, kw)
+
+    def _update(self, fileId: str, permissionId: str, body: dict, **_):
+        for p in self.s.perms[fileId]:
+            if p.get("id") == permissionId:
+                p.update(body)
+                if fileId in self.s.store:
+                    self.s._mark(fileId)
+                return dict(p)
+        raise http_error(404, "notFound", permissionId)
 
 
 class _DriveComments:
@@ -680,6 +831,7 @@ class _DriveComments:
         meta = self.s.store.get(fileId)
         if meta is not None:
             meta["modifiedTime"] = COMMENT_BUMP_TIME
+            self.s._mark(fileId)
         return {"id": cid}
 
 
@@ -787,6 +939,42 @@ class FakeGmail(FakeService):
         self.labels: list[dict] = [
             {"id": n, "name": n, "type": "system"} for n in SYSTEM_LABELS
         ]
+        # history.list, for the mirror. A start id below `history_floor` is one
+        # Gmail no longer keeps -- it answers 404 and the caller must re-scan.
+        self.history: list[dict] = []
+        self._hist = 0
+        self.history_floor = 0
+
+    def _h(self, kind: str, mid: str, labels: Optional[list[str]] = None) -> None:
+        self._hist += 1
+        m = self.messages.get(mid, {"id": mid})
+        entry: dict = {"message": {"id": mid, "threadId": m.get("threadId", mid),
+                                   "labelIds": list(m.get("labelIds") or [])}}
+        if labels is not None:
+            entry["labelIds"] = list(labels)
+        self.history.append({"id": str(self._hist), kind: [entry]})
+
+    def relabel(self, mid: str, add: tuple = (), remove: tuple = ()) -> None:
+        labels = self.messages[mid]["labelIds"]
+        for l in add:
+            if l not in labels:
+                labels.append(l)
+        for l in remove:
+            if l in labels:
+                labels.remove(l)
+        if add:
+            self._h("labelsAdded", mid, list(add))
+        if remove:
+            self._h("labelsRemoved", mid, list(remove))
+
+    def remove_message(self, mid: str) -> None:
+        self._h("messagesDeleted", mid)
+        self.messages.pop(mid, None)
+
+    def edit_draft(self, did: str, raw: bytes) -> None:
+        """Gmail gives an edited draft a new message id and keeps the draft id."""
+        self.drafts[did]["message"] = {"id": self._new_id("dmsg"), "labelIds": ["DRAFT"],
+                                       "raw": base64.urlsafe_b64encode(raw).decode("ascii")}
 
     # -- seeding ---------------------------------------------------------
     def add_message(self, raw: bytes, labels: Optional[list[str]] = None,
@@ -798,6 +986,7 @@ class FakeGmail(FakeService):
             "labelIds": list(labels or ["INBOX"]),
             "threadId": thread_id or mid,
         }
+        self._h("messagesAdded", mid)
         return mid
 
     def add_draft(self, raw: bytes, draft_id: Optional[str] = None) -> str:
@@ -864,7 +1053,11 @@ class _GmailUsers:
     def _profile(self, **_):
         return {"emailAddress": self.s.owner,
                 "messagesTotal": len(self.s.messages),
-                "threadsTotal": len(self.s.messages)}
+                "threadsTotal": len(self.s.messages),
+                "historyId": str(self.s._hist)}
+
+    def history(self):
+        return _GmailHistory(self.s)
 
     def messages(self):
         return _GmailMessages(self.s)
@@ -934,6 +1127,31 @@ class _GmailMessages:
         }
         return {"id": mid, "threadId": thread or mid, "labelIds": body.get("labelIds")}
 
+    def modify(self, **kw):
+        return _Call(self.s, "messages.modify", self._modify, kw)
+
+    def _modify(self, id: str, body: dict, **_):
+        if id not in self.s.messages:
+            raise http_error(404, "notFound", id)
+        labels = self.s.messages[id]["labelIds"]
+        for l in body.get("addLabelIds") or []:
+            if l not in labels:
+                labels.append(l)
+        for l in body.get("removeLabelIds") or []:
+            if l in labels:
+                labels.remove(l)
+        return {"id": id, "labelIds": list(labels)}
+
+    def untrash(self, **kw):
+        return _Call(self.s, "messages.untrash", lambda id, **_: self._modify(
+            id, {"removeLabelIds": ["TRASH"], "addLabelIds": ["INBOX"]}), kw)
+
+    def trash(self, **kw):
+        return _Call(self.s, "messages.trash", self._trash, kw)
+
+    def _trash(self, id: str, **_):
+        return self._modify(id, {"addLabelIds": ["TRASH"], "removeLabelIds": ["INBOX"]})
+
     # Guard rail: if the engine ever regresses to import, the test suite
     # should fail loudly rather than silently re-running spam classification.
     def import_(self, **kw):
@@ -975,7 +1193,9 @@ class _GmailDrafts:
         ids = sorted(self.s.drafts)
         start = int(pageToken or 0)
         page = ids[start: start + maxResults]
-        out: dict[str, Any] = {"drafts": [{"id": i, "message": {"id": i}} for i in page]}
+        out: dict[str, Any] = {"drafts": [
+            {"id": i, "message": {"id": (self.s.drafts[i].get("message") or {}).get("id", i)}}
+            for i in page]}
         if start + maxResults < len(ids):
             out["nextPageToken"] = str(start + maxResults)
         return out
@@ -1000,6 +1220,39 @@ class _GmailDrafts:
             "id": did, "message": {"id": did, "raw": raw, "labelIds": ["DRAFT"]},
         }
         return {"id": did, "message": {"id": did}}
+
+    def update(self, **kw):
+        return _Call(self.s, "drafts.update", self._update, kw)
+
+    def _update(self, id: str, body: dict, media_body=None, **_):
+        if id not in self.s.drafts:
+            raise http_error(404, "notFound", id)
+        raw = (body.get("message") or {}).get("raw")
+        if raw is None and media_body is not None:
+            raw = base64.urlsafe_b64encode(media_body.read_all()).decode("ascii")
+        mid = self.s._new_id("dmsg")
+        self.s.drafts[id]["message"] = {"id": mid, "raw": raw, "labelIds": ["DRAFT"]}
+        return {"id": id, "message": {"id": mid}}
+
+
+class _GmailHistory:
+    def __init__(self, svc: FakeGmail):
+        self.s = svc
+
+    def list(self, **kw):
+        return _Call(self.s, "history.list", self._list, kw)
+
+    def _list(self, startHistoryId: str, maxResults: int = 100,
+              pageToken: Optional[str] = None, **_):
+        if int(startHistoryId) < self.s.history_floor:
+            raise http_error(404, "notFound", "Requested entity was not found.")
+        rows = [h for h in self.s.history if int(h["id"]) > int(startHistoryId)]
+        start = int(pageToken or 0)
+        out: dict[str, Any] = {"history": copy.deepcopy(rows[start: start + maxResults]),
+                               "historyId": str(self.s._hist)}
+        if start + maxResults < len(rows):
+            out["nextPageToken"] = str(start + maxResults)
+        return out
 
 
 class _GmailSettings:
@@ -1075,6 +1328,29 @@ class FakeCalendar(FakeService):
         self.primary_entry = {"id": owner, "primary": True, "accessRole": "owner"}
         self.list_settings: dict[str, dict] = {}
         self.followed: dict[str, dict] = {}
+        # Sync tokens, for the mirror: each write stamps the event with a rising
+        # sequence; `sync_expired` makes the next token answer 410, as Google
+        # does when a full sync is required.
+        self._eseq = 0
+        self._event_seq: dict[tuple[str, str], int] = {}
+        self.sync_expired = False
+
+    def _emark(self, cal: str, eid: str) -> None:
+        self._eseq += 1
+        self._event_seq[(cal, eid)] = self._eseq
+
+    def _events_of(self, cal: str) -> dict:
+        return self.store if cal == "primary" else self.cal_events[cal]
+
+    def edit_event(self, eid: str, cal: str = "primary", **fields) -> None:
+        ev = self._events_of(cal)[eid]
+        ev.update(fields)
+        ev["updated"] = fields.get("updated") or "2030-01-01T00:00:00Z"
+        self._emark(cal, eid)
+
+    def cancel_event(self, eid: str, cal: str = "primary") -> None:
+        self._events_of(cal)[eid]["status"] = "cancelled"
+        self._emark(cal, eid)
 
     def add_calendar(self, summary: str, cal_id: Optional[str] = None,
                      access_role: str = "owner", primary: bool = False) -> str:
@@ -1106,6 +1382,7 @@ class FakeCalendar(FakeService):
             "end": {"dateTime": "2024-06-01T10:00:00Z"},
             "organizer": {"email": organizer or self.owner},
         }
+        self._emark(cal_id, eid)
         return eid
 
     def add_acl_rule(self, cal_id: str, scope_type: str, role: str,
@@ -1164,6 +1441,7 @@ class FakeCalendar(FakeService):
             ev["hangoutLink"] = "https://meet.google.com/abc-defg-hij"
             ev["conferenceData"] = {"conferenceId": "abc-defg-hij"}
         self.store[eid] = ev
+        self._emark("primary", eid)
         return eid
 
     def events(self):
@@ -1269,13 +1547,18 @@ class _CalEvents:
 
     def _list(self, calendarId: str = "primary", maxResults: int = 250,
               pageToken: Optional[str] = None, showDeleted: bool = False,
-              updatedMin: Optional[str] = None, **_):
+              updatedMin: Optional[str] = None, syncToken: Optional[str] = None, **_):
         # `store` is the primary calendar; secondary calendars keep their own
         # event dicts, so existing single-calendar tests are unaffected.
         source = (self.s.store if calendarId == "primary"
                  else self.s.cal_events[calendarId])
         rows = list(source.values())
-        if not showDeleted:
+        if syncToken is not None:
+            if self.s.sync_expired:
+                raise http_error(410, "fullSyncRequired", "Sync token is no longer valid")
+            rows = [e for e in rows
+                    if self.s._event_seq.get((calendarId, e["id"]), 0) > int(syncToken)]
+        elif not showDeleted:
             rows = [e for e in rows if e.get("status") != "cancelled"]
         if updatedMin:
             rows = [e for e in rows if (e.get("updated") or "") >= updatedMin]
@@ -1285,7 +1568,22 @@ class _CalEvents:
         out: dict[str, Any] = {"items": [copy.deepcopy(e) for e in page]}
         if start + maxResults < len(rows):
             out["nextPageToken"] = str(start + maxResults)
+        else:
+            out["nextSyncToken"] = str(self.s._eseq)
         return out
+
+    def delete(self, **kw):
+        return _Call(self.s, "events.delete", self._delete, kw)
+
+    def _delete(self, eventId: str, calendarId: str = "primary", sendUpdates: str = "", **_):
+        if sendUpdates != "none":
+            raise AssertionError("events.delete must pass sendUpdates='none'")
+        source = self.s._events_of(calendarId)
+        if eventId not in source:
+            raise http_error(404, "notFound", eventId)
+        source[eventId]["status"] = "cancelled"
+        self.s._emark(calendarId, eventId)
+        return {}
 
     def get(self, **kw):
         return _Call(self.s, "events.get", self._get, kw)
@@ -1747,6 +2045,24 @@ class FakePeople(FakeService):
         self.contacts: dict[str, dict] = {}
         self.groups: dict[str, dict] = {}
         self.group_members: dict[str, list[str]] = defaultdict(list)
+        # Sync tokens, for the mirror; an expired one answers 400 FAILED_PRECONDITION.
+        self._pseq = 0
+        self._contact_seq: dict[str, int] = {}
+        self.sync_expired = False
+
+    def _pmark(self, rid: str) -> None:
+        self._pseq += 1
+        self._contact_seq[rid] = self._pseq
+
+    def edit_contact(self, rid: str, given: str, updated: str = "2030-01-01T00:00:00Z") -> None:
+        c = self.contacts[rid]
+        c["names"] = [{"givenName": given, "displayName": given}]
+        c["metadata"] = {"sources": [{"type": "CONTACT", "updateTime": updated}]}
+        self._pmark(rid)
+
+    def remove_contact(self, rid: str) -> None:
+        self.contacts.pop(rid, None)
+        self._pmark(rid)
 
     def add_contact(self, given: str, email: Optional[str] = None,
                     groups: Optional[list[str]] = None) -> str:
@@ -1759,6 +2075,7 @@ class FakePeople(FakeService):
                 {"contactGroupMembership": {"contactGroupResourceName": g}}
                 for g in (groups or [])],
         }
+        self._pmark(rid)
         return rid
 
     def add_group(self, name: str) -> str:
@@ -1784,8 +2101,21 @@ class _PeoplePeople:
     def list(self, **kw):
         return _Call(self.s, "people.connections.list", self._list, kw)
 
-    def _list(self, **_):
-        return {"connections": [copy.deepcopy(v) for v in self.s.contacts.values()]}
+    def _list(self, syncToken: Optional[str] = None, requestSyncToken: bool = False, **_):
+        out: dict[str, Any]
+        if syncToken is not None:
+            if self.s.sync_expired:
+                raise http_error(400, "failedPrecondition", "Sync token is expired.")
+            changed = [r for r, q in self.s._contact_seq.items() if q > int(syncToken)]
+            out = {"connections": [
+                copy.deepcopy(self.s.contacts[r]) if r in self.s.contacts
+                else {"resourceName": r, "metadata": {"deleted": True}}
+                for r in changed]}
+        else:
+            out = {"connections": [copy.deepcopy(v) for v in self.s.contacts.values()]}
+        if syncToken is not None or requestSyncToken:
+            out["nextSyncToken"] = str(self.s._pseq)
+        return out
 
     def get(self, **kw):
         return _Call(self.s, "people.get", self._get, kw)
@@ -1813,6 +2143,15 @@ class _PeoplePeople:
     def _photo(self, resourceName: str, body: dict, **_):
         self.s.contacts[resourceName]["_photoBytes"] = body["photoBytes"]
         return {"person": {"resourceName": resourceName}}
+
+    def updateContact(self, **kw):
+        return _Call(self.s, "people.updateContact", self._update, kw)
+
+    def _update(self, resourceName: str, body: dict, **_):
+        if resourceName not in self.s.contacts:
+            raise http_error(404, "notFound", resourceName)
+        self.s.contacts[resourceName].update({k: v for k, v in body.items() if k != "etag"})
+        return copy.deepcopy(self.s.contacts[resourceName])
 
     def deleteContact(self, **kw):
         return _Call(self.s, "people.deleteContact", self._delete, kw)
@@ -1899,6 +2238,18 @@ class FakeTasks(FakeService):
         self.task_store[list_id].append(rec)
         return tid
 
+    def edit_task(self, list_id: str, task_id: str, updated: str = "2030-01-01T00:00:00Z",
+                  **fields) -> None:
+        for t in self.task_store[list_id]:
+            if t["id"] == task_id:
+                t.update(fields)
+                t["updated"] = updated
+
+    def delete_task(self, list_id: str, task_id: str,
+                    updated: str = "2030-01-01T00:00:00Z") -> None:
+        """Tasks keeps a deleted task, flagged, for a sync to see."""
+        self.edit_task(list_id, task_id, updated=updated, deleted=True)
+
     def tasklists(self):
         return _TaskLists(self)
 
@@ -1940,8 +2291,24 @@ class _Tasks:
     def list(self, **kw):
         return _Call(self.s, "tasks.list", self._list, kw)
 
-    def _list(self, tasklist: str, **_):
-        return {"items": copy.deepcopy(self.s.task_store.get(tasklist, []))}
+    def _list(self, tasklist: str, updatedMin: Optional[str] = None,
+              showDeleted: bool = False, **_):
+        rows = self.s.task_store.get(tasklist, [])
+        if not showDeleted:
+            rows = [t for t in rows if not t.get("deleted")]
+        if updatedMin:
+            rows = [t for t in rows if (t.get("updated") or "") >= updatedMin]
+        return {"items": copy.deepcopy(rows)}
+
+    def patch(self, **kw):
+        return _Call(self.s, "tasks.patch", self._patch, kw)
+
+    def _patch(self, tasklist: str, task: str, body: dict, **_):
+        for t in self.s.task_store.get(tasklist, []):
+            if t["id"] == task:
+                t.update(body)
+                return copy.deepcopy(t)
+        raise http_error(404, "notFound", task)
 
     def insert(self, **kw):
         return _Call(self.s, "tasks.insert", self._insert, kw)
