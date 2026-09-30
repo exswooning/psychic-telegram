@@ -518,7 +518,8 @@ def fix_modified_times(auth, db, settings, apply: bool = False,
 
 
 def restore_direct_grants(auth, db, settings, apply: bool = False,
-                          workers: int = 8, users: list[str] | None = None) -> dict:
+                          workers: int = 8, users: list[str] | None = None,
+                          stop=None) -> dict:
     """Put back a direct grant a file held on top of an inherited one.
 
     Found by the one-to-one check: when a corpus shares at folder level the
@@ -529,23 +530,31 @@ def restore_direct_grants(auth, db, settings, apply: bool = False,
     what was migrated before. One permissions.list per migrated item, a create
     only where the source mixes the two -- not a re-grant of everything.
     Users side by side. Never raises.
+
+    Owner and organizer grants are skipped exactly as the engine skips them.
+    Live, nearly every file listed its OWNER as mixed (owner directly, writer
+    through a folder), so the first run asked Drive to add each owner to their
+    own file as owner: ~184,000 creates in three hours, every one a 403.
+    `stop` (main.SHUTDOWN) is read between items, so Stop works without a kill.
     """
     from concurrent.futures import ThreadPoolExecutor
 
     from drive_engine import _role_rank
     from resilience import retry_on_google_error
 
-    out = {"users": 0, "items": 0, "mixed": 0, "granted": 0, "failed": 0}
+    out = {"users": 0, "items": 0, "unreadable": 0, "mixed": 0, "granted": 0, "failed": 0}
     pairs = [(r["source_email"], r["target_email"]) for r in db.all_identities()
              if r["entity_type"] == "user" and r["status"] == "DONE"
              and (not users or r["source_email"].lower() in {u.lower() for u in users})]
     retry = retry_on_google_error(max_retries=settings.max_retries)
 
     def one(pair) -> dict:
-        got = {"items": 0, "mixed": 0, "granted": 0, "failed": 0}
+        got = {"items": 0, "unreadable": 0, "mixed": 0, "granted": 0, "failed": 0}
         try:
             src, tgt = auth.source_drive(pair[0]), auth.target_drive(pair[1])
             for sid, tid in db.mapped_ids(pair[0], ("file", "folder")).items():
+                if stop is not None and stop.is_set():
+                    break
                 got["items"] += 1
                 try:
                     perms = retry(lambda f=sid: src.permissions().list(
@@ -553,8 +562,11 @@ def restore_direct_grants(auth, db, settings, apply: bool = False,
                         fields="permissions(type,role,emailAddress,domain,permissionDetails)"
                     ).execute())().get("permissions", [])
                 except Exception:      # noqa: BLE001 - gone since the migration
+                    got["unreadable"] += 1
                     continue
                 for p in perms:
+                    if p.get("role") in ("owner", "organizer", "fileOrganizer"):
+                        continue
                     details = p.get("permissionDetails") or []
                     direct = [d for d in details if not d.get("inherited")]
                     if not direct or len(direct) == len(details) or p.get("type") not in ("user", "group"):

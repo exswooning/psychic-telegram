@@ -2048,8 +2048,10 @@ def cmd_restore_direct_grants(args, settings: Settings, db: MigrationDB,
     """repair.restore_direct_grants, for every finished user or --user ones."""
     import repair
     out = repair.restore_direct_grants(auth, db, settings, apply=not settings.dry_run,
-                                       users=args.user)
-    print(f"Checked {out['items']:,} item(s) of {out['users']} user(s): "
+                                       users=args.user, stop=SHUTDOWN)
+    print(f"Checked {out['items']:,} item(s) of {out['users']} user(s)"
+          f"{' (stopped early)' if SHUTDOWN.is_set() else ''}: "
+          f"{out['unreadable']:,} unreadable, "
           f"{out['mixed']:,} direct grant(s) under an inherited one, "
           f"{out['granted']:,} put back, {out['failed']:,} failed.")
     return 0

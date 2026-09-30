@@ -2086,3 +2086,29 @@ class TestRestoreDirectGrants:
         tgt, tm, _ = self._world(auth, db)
         assert repair.restore_direct_grants(auth, db, settings)["mixed"] == 1
         assert tgt.perms[tm] == []
+
+    def test_the_owner_is_never_re_granted(self, auth, db, settings, identity):
+        """The live shape: owner directly, writer through the folder. The first
+        run tried to add every owner to their own file as owner -- a 403 each."""
+        import repair
+        tgt, tm, _ = self._world(auth, db)
+        src = auth.source_drive(SRC_USER)
+        owned = src.add_binary("owned.pdf")
+        p = src.add_permission(owned, "user", "owner", email=SRC_USER)
+        p["permissionDetails"] = [{"inherited": True, "role": "writer"},
+                                  {"inherited": False, "role": "owner"}]
+        to = tgt.add_binary("owned.pdf")
+        db.record_mapping(SRC_USER, owned, to, "file")
+        out = repair.restore_direct_grants(auth, db, settings, apply=True)
+        assert (out["mixed"], out["granted"], out["failed"]) == (1, 1, 0)
+        assert tgt.perms[to] == []
+
+    def test_stop_ends_the_walk(self, auth, db, settings, identity):
+        import threading
+        import repair
+        tgt, tm, _ = self._world(auth, db)
+        stop = threading.Event()
+        stop.set()
+        out = repair.restore_direct_grants(auth, db, settings, apply=True, stop=stop)
+        assert (out["items"], out["granted"]) == (0, 0)
+        assert tgt.perms[tm] == []
