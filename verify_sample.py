@@ -779,7 +779,7 @@ def verdict_of(users: dict, services: tuple[str, ...]) -> tuple[str, list[str]]:
 
 
 def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICES, retry=lambda f: f,
-        progress=print, limit: int | None = None) -> dict:
+        progress=print, limit: int | None = None, on_user=None) -> dict:
     ident = {r["source_email"]: r["target_email"] for r in db.all_identities() if r["entity_type"] == "user"}
     chosen = [u for u in (users or list(ident)) if u in ident]
     services = tuple(s for s in ALL_SERVICES if s in services)
@@ -788,7 +788,16 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
               "sourceDomain": settings.source_domain, "targetDomain": settings.target_domain,
               "sampleLimit": getattr(settings, "sample_limit", None), "verifyLimit": limit, "services": list(services),
               "users": {}, "evidence": [], "notes": []}
-    for u in chosen:
+    # Users side by side (VERIFY_WORKERS): a check is mostly waiting on Google, and
+    # one user at a time made "verify everything" on 300 users a matter of days.
+    # Each user is handed to on_user the moment it is done, so the page fills in
+    # as it goes and a run cut short keeps what it found.
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    lock, done = threading.Lock(), {}
+
+    def one(u: str) -> None:
         progress(f"verify: {u}")
         v = Verifier(auth, db, settings, u, ident[u], retry=retry, limit=limit)
         per = {}
@@ -799,8 +808,18 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
                 r = Verifier._blank()
                 r["errors"].append(f"{svc} could not be verified: {type(exc).__name__}: {str(exc)[:160]}")
                 per[svc] = r
-        report["users"][u] = per
-        report["evidence"] += [{"user": u, **e} for e in v.evidence]
+        with lock:
+            done[u] = (per, [{"user": u, **e} for e in v.evidence])
+        if on_user:
+            on_user(u, per)
+
+    workers = 1 if len(chosen) <= 1 else max(1, int(os.getenv("VERIFY_WORKERS", "8") or 8))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        list(pool.map(one, chosen))
+    for u in chosen:                  # the chosen order, not the finishing order
+        if u in done:
+            report["users"][u] = done[u][0]
+            report["evidence"] += done[u][1]
     report["verdict"], report["reasons"] = verdict_of(report["users"], services)
     for u, per in report["users"].items():
         for svc, r in per.items():
@@ -933,9 +952,9 @@ def verify_user(auth, db, settings, source_user: str, services, limit: int | Non
 
 def run_and_save(auth, db, settings, users=None, services=ALL_SERVICES, retry=lambda f: f, progress=print,
                  limit: int | None = None, base: str | None = None) -> dict:
-    report = run(auth, db, settings, users, services, retry, progress, limit)
+    report = run(auth, db, settings, users, services, retry, progress, limit,
+                 on_user=lambda u, per: save_user_results(db, {"users": {u: per}}))
     jp, mp = save(report, base)
-    save_user_results(db, report)
     progress(f"verification: {report['verdict']} -- {report['totals']['identical']} of {report['totals']['checked']} "
              f"identical; report saved to {os.path.relpath(mp, HERE)}")
     return report
@@ -961,8 +980,11 @@ def main(argv=None) -> int:
     settings.migrate_contacts = settings.migrate_contacts or "contacts" in services
     settings.migrate_tasks = settings.migrate_tasks or "tasks" in services
     db = MigrationDB(settings.db_path)
+    # flush: a job's output is a file, and a buffered "verify: <user>" line made a
+    # working run look frozen for half an hour.
     report = run_and_save(AuthManager(settings), db, settings, a.user, services,
                           retry=retry_on_google_error(max_retries=settings.max_retries),
+                          progress=lambda m: print(m, flush=True),
                           limit=a.limit, base=verify_dir(a.account_id))
     # 0 whenever the check RAN. The verdict is in the report, not the exit code: a
     # non-zero exit reads as a crash to everything that watches jobs (run_watch opens an

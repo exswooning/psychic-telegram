@@ -612,7 +612,10 @@ class TestTheCommandLineCanReadWhatItVerifies:
         assert config.CONTACTS_READONLY_SCOPE in scopes and config.TASKS_READONLY_SCOPE in scopes
 
     def test_and_are_not_requested_when_they_are_not(self, monkeypatch):
+        """Switched off (every pass is on by default now), and not asked for."""
         import config
+        monkeypatch.setenv("MIGRATE_CONTACTS", "false")
+        monkeypatch.setenv("MIGRATE_TASKS", "false")
         scopes = self._scopes_for(monkeypatch, "--services", "drive")
         assert config.CONTACTS_READONLY_SCOPE not in scopes and config.TASKS_READONLY_SCOPE not in scopes
 

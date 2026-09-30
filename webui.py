@@ -1432,7 +1432,10 @@ _EXT_SCRIPTS = {"seed_sandbox.py": "seed", "reset_target.py": "reset target",
                 # A DMS job waits hours for its approval and days for the
                 # import, and outlives a webui restart -- after which nothing
                 # listed it, so it could be neither seen nor stopped.
-                "dms_migrate.py": "dms"}
+                "dms_migrate.py": "dms",
+                # "Verify everything" reads every item on both tenants for hours;
+                # after a restart it was running with no card and no Stop.
+                "verify_sample.py": "verify"}
 # Last-seen output tail per external pid, for the suffix-diff that turns the
 # unbounded migration.log into the same "just the new lines" contract the
 # webui-launched Job streams.
