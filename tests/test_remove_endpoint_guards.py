@@ -77,8 +77,8 @@ class TestTheModeIsExplicit:
         """"remove tenant setup" against a run that only wiped data would
         misreport it on the Jobs page forever after."""
         blk = _block()
-        for name in ('"wipe tenant data"', '"remove tenant setup"',
-                     '"delete all users"'):
+        for name in ('f"wipe {side} data"', 'f"remove {side} setup"',
+                     'f"delete all {side} users"'):
             assert name in blk, name
 
     def test_deleting_users_runs_the_script_that_owns_that(self):

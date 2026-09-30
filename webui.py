@@ -5604,10 +5604,13 @@ class Handler(BaseHTTPRequestHandler):
             # Reproduced here on the first real call, in a file that already
             # carried the warning. The env above carries this account's
             # domain, admin and key, which is everything the child needs.
-            label = {"wipe": "wipe tenant data",
-                     "delete_users": "delete all users",
-                     "remove_setup": "remove tenant setup (keep data)",
-                     "remove": "remove tenant setup"}[mode]
+            # The side is in the name because the Jobs page takes a running
+            # job's domain from its name: "wipe tenant data" against target2
+            # was shown as the SOURCE domain for its whole run.
+            label = {"wipe": f"wipe {side} data",
+                     "delete_users": f"delete all {side} users",
+                     "remove_setup": f"remove {side} setup (keep data)",
+                     "remove": f"remove {side} setup"}[mode]
             ok, msg = get_job(account_id).start(label, argv, env=env)
             self._json({"ok": ok, "error": "" if ok else msg})
             return

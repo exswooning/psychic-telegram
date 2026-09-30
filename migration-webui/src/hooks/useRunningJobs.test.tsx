@@ -212,6 +212,19 @@ describe('Running Now', () => {
     render(<RunningNow />)
     await waitFor(() => expect(screen.getByText('source.example.com → target.example.com')).toBeTruthy())
   })
+
+  // Live: "wipe tenant data" against target2 was shown as the SOURCE domain for its
+  // whole run. The job's name now says its side, and any side-named job follows it.
+  it.each(['wipe target data', 'delete all target users', 'remove target setup'])(
+    'shows the target domain for %s', async (name) => {
+      cp.fetchMe.mockResolvedValue({ id: 1 })
+      cp.fetchTenantConfigStatus.mockImplementation((t: string) => Promise.resolve(
+        t === 'source' ? { domain: 'source.example.com' } : { domain: 'target.example.com' }))
+      client.fetchJob.mockResolvedValue({ running: true, name, elapsed: 60, lines: [] })
+      render(<RunningNow />)
+      await waitFor(() => expect(screen.getByText('target.example.com')).toBeTruthy())
+      expect(screen.queryByText('source.example.com')).toBeNull()
+    })
 })
 
 /**

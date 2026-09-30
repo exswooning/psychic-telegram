@@ -4,10 +4,17 @@ export const COPY: Record<Mode, { title: string; verb: string; warn: string }> =
   wipe: {
     title: 'Wipe tenant data',
     verb: 'Wipe data',
-    warn: 'Deletes the seeded Drive files, mail, calendar events, contacts '
-        + 'and tasks. The Cloud project, the delegation grant and the saved '
-        + 'configuration are kept, so the tenant stays ready to seed or '
-        + 'migrate again.',
+    // "the seeded Drive files ... contacts and tasks" was true only of a source.
+    // A target wipe (reset_target.py) empties Drive, mail and calendar -- chat
+    // only where chat.delete is granted -- and leaves contacts and tasks, so a
+    // ledger reset for every service would copy those twice on the next run.
+    warn: 'Keeps the accounts and deletes their data. A source loses its seeded '
+        + 'Drive files, mail, events, contacts, tasks and chat. A target loses '
+        + 'everything migrated into Drive, mail and calendar (and Chat, where '
+        + 'deleting chat is granted); its contacts and tasks stay, so reset the '
+        + 'ledger for only the services it emptied. The Cloud project, the '
+        + 'delegation grant and the saved configuration are kept, so the tenant '
+        + 'stays ready to seed or migrate again.',
   },
   // The one action here that adds rather than removes. It sits with these
   // because it is per-tenant and needs the same admin password, not because

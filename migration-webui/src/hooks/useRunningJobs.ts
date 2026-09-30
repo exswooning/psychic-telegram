@@ -182,7 +182,10 @@ export function useRunningJobs() {
       const jobIsMine = !!job?.running && !!job.name
       if (jobIsMine && job) {
         const kind = jobKind(job.name)
-        const jobDomain = kind === 'reset' && job.name.includes('target')
+        // A job that names its side acts on that side: "reset target", "wipe target
+        // data", "delete all target users". Resets alone used to be read this way, so
+        // deleting target2's users was shown against the source domain.
+        const jobDomain = kind !== 'migrate' && /\btarget\b/i.test(job.name)
           ? tgtCfg?.domain
           // A migration (or delta) reads the source and writes the target -- naming only
           // one tenant left "where is this going?" answered nowhere on the card or the
@@ -200,9 +203,9 @@ export function useRunningJobs() {
         found.push({
           key: `webui-${job.name}`,
           kind,
-          // A seed and a reset both act on the SOURCE tenant, so naming just one is the
-          // whole answer; a migration or delta reads one and writes the other, so
-          // jobDomain above already carries both.
+          // Every other job acts on one tenant, so naming it is the whole answer; a
+          // migration or delta reads one and writes the other, so jobDomain above
+          // already carries both.
           domain: jobDomain,
           label: job.name,
           // "1928s elapsed" was the whole description of a 32-minute run.

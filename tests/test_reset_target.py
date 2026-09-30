@@ -293,3 +293,19 @@ def test_a_service_it_could_not_reach_fails_the_reset(monkeypatch, capsys):
     monkeypatch.setattr(R, "AuthManager", lambda s: None)
     rc = R.main(["--confirm-domain", "x", "--yes", "--services", "drive"])
     assert rc == 1 and "NOT RESET" in capsys.readouterr().out
+
+
+def test_a_wipe_counts_users_for_the_jobs_page(monkeypatch, capsys):
+    """A 300-user wipe read Progress "--" and ETA "--" for its whole run: it
+    printed a line per user with nothing to count against. "[n/total]" is the
+    one thing the Jobs page turns into a percentage."""
+    import webui
+    monkeypatch.setattr(reset_target, "reset_one", lambda s, a, u, svc: {
+        "user": u, "drive": 1, "gmail": 2, "calendar": 0, "chat": 0})
+    totals, unreached = reset_target.reset_all(
+        None, None, ["a@t.com", "b@t.com", "c@t.com"], ("drive",), 2)
+    lines = capsys.readouterr().out.splitlines()
+    assert (totals["drive"], totals["gmail"], unreached) == (3, 6, [])
+    assert webui._counter_progress_pct(lines[:1]) == 0
+    assert webui._counter_progress_pct(lines[:2]) == 33.33
+    assert webui._counter_progress_pct(lines) == 100

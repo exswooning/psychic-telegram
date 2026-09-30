@@ -142,6 +142,32 @@ def trash_google_welcome_mail(gmail) -> int:
             return n
 
 
+def reset_all(settings: Settings, auth: AuthManager, users: list[str],
+              services: tuple[str, ...], workers: int) -> tuple[dict, list[str]]:
+    """Reset every user side by side; (totals, users it could not reach).
+
+    Each finished user prints "[done/total]", which the Jobs page turns into
+    Progress and an ETA -- without it a 300-user wipe read "--" for its whole
+    run. Completion order, not submission order, so one slow mailbox does not
+    hold the count back.
+    """
+    totals = {"drive": 0, "gmail": 0, "calendar": 0, "chat": 0}
+    unreached = []
+    print(f"  [0/{len(users)}] users reset", flush=True)
+    with futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        pending = [pool.submit(reset_one, settings, auth, u, services) for u in users]
+        for n, fut in enumerate(futures.as_completed(pending), 1):
+            r = fut.result()
+            print(f"  [{n}/{len(users)}] {r['user']}: {r['drive']} drive root(s), "
+                  f"{r['gmail']} mail, {r['calendar']} calendar, {r['chat']} chat",
+                  flush=True)
+            for k in totals:
+                totals[k] += r[k]
+            if r.get("unreachable"):
+                unreached.append(f"{r['user']} ({', '.join(r['unreachable'])})")
+    return totals, unreached
+
+
 def reset_one(settings: Settings, auth: AuthManager, user: str,
               services: tuple[str, ...] = ALL_SERVICES) -> dict:
     seed = _load_seeder()
@@ -289,17 +315,7 @@ def main(argv: list[str] | None = None) -> int:
             print("Aborted.")
             return 1
 
-    totals = {"drive": 0, "gmail": 0, "calendar": 0, "chat": 0}
-    unreached = []
-    with futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
-        for r in pool.map(lambda u: reset_one(settings, auth, u, services), users):
-            print(f"  {r['user']}: {r['drive']} drive root(s), {r['gmail']} mail, "
-                  f"{r['calendar']} calendar, {r['chat']} chat")
-            for k in totals:
-                totals[k] += r[k]
-            if r.get("unreachable"):
-                unreached.append(f"{r['user']} ({', '.join(r['unreachable'])})")
-
+    totals, unreached = reset_all(settings, auth, users, services, args.workers)
     print(f"\nRemoved: {totals['drive']} drive root(s), {totals['gmail']} mail "
           f"item(s), {totals['calendar']} calendar item(s), {totals['chat']} chat.")
     # A service it could not reach is not an empty one: "Removed: 0" with rc 0
