@@ -1230,9 +1230,27 @@ def _metrics_flusher(stop_event: threading.Event, db,
                 pass
             payload["workers_configured"] = getattr(
                 db, "_workers_configured", None) or 0
+            # What a perf test needs and nothing recorded: this process's resident
+            # memory, which process it is (a pass split N ways has N writers), and
+            # how often the mapping cache sent a lookup to SQL or evicted a user.
+            payload["pid"] = os.getpid()
+            payload["rss_mb"] = _rss_mb()
+            payload["mappingCache"] = dict(getattr(db, "mapping_cache_stats", {}) or {})
             db.record_metrics(payload)
         except Exception as exc:      # noqa: BLE001
             log.debug("metrics flush skipped: %s", exc)
+
+
+def _rss_mb() -> float | None:
+    """This process's resident memory now, in MB (Linux /proc; None elsewhere)."""
+    try:
+        with open(f"/proc/{os.getpid()}/status", encoding="ascii") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    return round(int(line.split()[1]) / 1024, 1)
+    except OSError:
+        pass
+    return None
 
 
 @contextlib.contextmanager

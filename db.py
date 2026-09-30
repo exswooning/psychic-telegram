@@ -331,6 +331,9 @@ class MigrationDB:
         # on every preload/read-hit/write) is always the one popped first.
         self._mapping_cache: OrderedDict[str, dict[tuple[str, str], str]] = OrderedDict()
         self._mapping_cached_users: set[str] = set()
+        # What the cap costs, for the metrics flusher: lookups that went to SQL
+        # because the user was not cached, and users evicted to stay under it.
+        self.mapping_cache_stats = {"sql": 0, "evicted": 0}
         # Guards structural changes to the caches above.
         #
         # A single `d[k] = v` is atomic under CPython's GIL, and PEP 703's
@@ -592,6 +595,7 @@ class MigrationDB:
         # 0 = no cap: the "unlimited" arm of the perf plan's cache test.
         while MAPPING_CACHE_USER_CAP > 0 and len(self._mapping_cache) > MAPPING_CACHE_USER_CAP:
             evicted, _ = self._mapping_cache.popitem(last=False)
+            self.mapping_cache_stats["evicted"] += 1
             self._mapping_cached_users.discard(evicted)
 
     def preload_mappings(self, source_user: str) -> int:
@@ -662,6 +666,7 @@ class MigrationDB:
             if cache is not None:
                 self._mapping_cache.move_to_end(source_user)
                 return cache.get((source_id, item_type))
+            self.mapping_cache_stats["sql"] += 1
         row = self.conn.execute(
             """SELECT target_id FROM id_mapping
                WHERE source_user=? AND source_id=? AND type=?""",

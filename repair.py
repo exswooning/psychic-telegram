@@ -468,6 +468,17 @@ def fix_modified_times(auth, db, settings, apply: bool = False,
     out = {"checked": 0, "drifted": 0, "fixed": 0, "failed": 0}
     pairs = [(r["source_email"], r["target_email"]) for r in db.all_identities()
              if r["entity_type"] == "user" and r["status"] == "DONE"]
+    # Only users whose Drive moved since the last finished repair: every run ends
+    # with a repair, and re-listing all 300 users (~20 minutes) after a run that
+    # touched five is work that finds nothing. The first repair checks everyone.
+    last = db.conn.execute("SELECT started_at FROM repair_runs WHERE finished_at IS NOT NULL "
+                           "ORDER BY id DESC LIMIT 1").fetchone()
+    if last and last[0]:
+        moved = {r[0] for r in db.conn.execute(
+            "SELECT DISTINCT source_user FROM audit_log WHERE item_type IN ('file','folder') "
+            "AND timestamp >= ?", (last[0],))}
+        pairs = [p for p in pairs if p[0] in moved]
+    out["users"] = len(pairs)
 
     def one(pair) -> dict:
         got = {"checked": 0, "drifted": 0, "fixed": 0, "failed": 0}

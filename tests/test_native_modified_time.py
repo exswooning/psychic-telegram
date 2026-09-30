@@ -82,3 +82,21 @@ class TestRepairPutsDriftedTimesBack:
         out = repair.run_all(db, auth, settings, apply=True)
         assert out["mtimes"]["fixed"] == 1
         assert "1 of 1 drifted modified time(s) put back" in repair.summarise(out)
+
+
+def test_after_a_repair_only_users_whose_drive_moved_are_rechecked(auth, db, settings, identity):
+    """Every run ends with a repair; re-listing every user after a run that touched
+    five was ~20 minutes that found nothing."""
+    import repair
+    from db import bulk_seed_identities
+
+    bulk_seed_identities(db, [("bob@tenanta.com", "bob@tenantb.com")])
+    db.set_identity_status(SRC_USER, "DONE")
+    db.set_identity_status("bob@tenanta.com", "DONE")
+    assert repair.fix_modified_times(auth, db, settings)["users"] == 2   # first repair: everyone
+    rid = db.repair_started()
+    db.repair_finished(rid, "done")
+    db.conn.execute("UPDATE repair_runs SET started_at='2020-01-01T00:00:00Z' WHERE id=?", (rid,))
+    db.conn.commit()
+    db.log_audit(SRC_USER, "f-new", "file", "SUCCESS")                  # alice's Drive moved since
+    assert repair.fix_modified_times(auth, db, settings)["users"] == 1
