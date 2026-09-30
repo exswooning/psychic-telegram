@@ -117,6 +117,14 @@ ACTIONS: dict[str, dict] = {
         "blurb": "Write the scope matrix to SCOPE.md for the approval ticket.",
         "argv": [PY, "main.py", "scope", "--format", "markdown", "--out", "SCOPE.md"],
     },
+    "restore_direct_grants": {
+        "label": "Restore direct sharing",
+        "blurb": "Put back a direct grant a file held on top of one inherited from "
+                 "its folder (commenter on the file, reader through the folder) -- "
+                 "dropped by runs before the fix. Reads every migrated file's "
+                 "sharing once; writes only the missing grants.",
+        "argv": [PY, "main.py", "restore-direct-grants"],
+    },
     "discover": {
         "label": "Discover",
         "blurb": "Read-only scan: counts, depth, size, duration estimate.",

@@ -2017,3 +2017,72 @@ def test_an_adopted_copy_that_still_will_not_move_falls_back(auth, db, settings,
     drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota).run()
 
     assert db.get_target_id(SRC_USER, fid, "file"), "the cascade must deliver it"
+
+
+def test_a_direct_grant_on_top_of_an_inherited_one_is_kept(migrator, auth, db, settings):
+    """One permission, two details: commenter directly on the file, reader through
+    its folder. Skipped whole for having an inherited part, the target was left
+    with the folder's reader -- the one-to-one check found one such file in
+    nearly every user's sample."""
+    from db import bulk_seed_identities
+
+    settings.recreate_inherited_acls = False
+    bulk_seed_identities(db, [("sarah@tenanta.com", "sarah@tenantb.com")])
+    src = auth.source_drive(SRC_USER)
+    fid = src.add_binary("spec.pdf")
+    p = src.add_permission(fid, "user", "commenter", email="sarah@tenanta.com")
+    p["permissionDetails"] = [{"inherited": True, "role": "reader"},
+                              {"inherited": False, "role": "commenter"}]
+    migrator.run()
+    got = [(x["emailAddress"], x["role"]) for x in _target_perms(auth, "spec.pdf")]
+    assert got == [("sarah@tenantb.com", "commenter")]
+
+
+def test_the_direct_role_is_granted_not_the_effective_one(migrator, auth, db, settings):
+    """Reader directly, writer through the folder: the folder carries the writer,
+    so the file gets reader -- the same grant the source file has on itself."""
+    from db import bulk_seed_identities
+
+    settings.recreate_inherited_acls = False
+    bulk_seed_identities(db, [("sarah@tenanta.com", "sarah@tenantb.com")])
+    src = auth.source_drive(SRC_USER)
+    fid = src.add_binary("plan.pdf")
+    p = src.add_permission(fid, "user", "writer", email="sarah@tenanta.com")
+    p["permissionDetails"] = [{"inherited": True, "role": "writer"},
+                              {"inherited": False, "role": "reader"}]
+    migrator.run()
+    assert [x["role"] for x in _target_perms(auth, "plan.pdf")] == ["reader"]
+
+
+class TestRestoreDirectGrants:
+    """Repair for runs before the fix: a direct grant under an inherited one is
+    put back; purely inherited and purely direct grants are left alone."""
+
+    def _world(self, auth, db):
+        from db import bulk_seed_identities
+        bulk_seed_identities(db, [("sarah@tenanta.com", "sarah@tenantb.com")])
+        src, tgt = auth.source_drive(SRC_USER), auth.target_drive(TGT_USER)
+        mixed, inh = src.add_binary("spec.pdf"), src.add_binary("inherited.pdf")
+        p = src.add_permission(mixed, "user", "commenter", email="sarah@tenanta.com")
+        p["permissionDetails"] = [{"inherited": True, "role": "reader"},
+                                  {"inherited": False, "role": "commenter"}]
+        src.add_permission(inh, "user", "reader", email="sarah@tenanta.com", inherited=True)
+        tm, ti = tgt.add_binary("spec.pdf"), tgt.add_binary("inherited.pdf")
+        db.record_mapping(SRC_USER, mixed, tm, "file")
+        db.record_mapping(SRC_USER, inh, ti, "file")
+        db.set_identity_status(SRC_USER, "DONE")
+        return tgt, tm, ti
+
+    def test_only_the_mixed_grant_is_put_back(self, auth, db, settings, identity):
+        import repair
+        tgt, tm, ti = self._world(auth, db)
+        out = repair.restore_direct_grants(auth, db, settings, apply=True)
+        assert (out["mixed"], out["granted"]) == (1, 1)
+        assert [(p["emailAddress"], p["role"]) for p in tgt.perms[tm]] == [("sarah@tenantb.com", "commenter")]
+        assert tgt.perms[ti] == []
+
+    def test_a_survey_writes_nothing(self, auth, db, settings, identity):
+        import repair
+        tgt, tm, _ = self._world(auth, db)
+        assert repair.restore_direct_grants(auth, db, settings)["mixed"] == 1
+        assert tgt.perms[tm] == []

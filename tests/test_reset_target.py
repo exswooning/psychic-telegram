@@ -275,3 +275,21 @@ class TestItDoesNotShadowTheRealVerify:
         src = inspect.getsource(reset_target._load_seeder)
         assert "spec_from_file_location" in src
         assert "sys.path.remove" in src
+
+
+def test_a_service_it_could_not_reach_fails_the_reset(monkeypatch, capsys):
+    """'Removed: 0' with rc 0 read as a clean reset while every token was refused."""
+    import reset_target as R
+
+    monkeypatch.setattr(R, "reset_one", lambda s, a, u, svc: {
+        "user": u, "drive": 0, "gmail": 0, "calendar": 0, "chat": 0, "unreachable": ["drive"]})
+    monkeypatch.setattr(R, "assert_sandbox", lambda *a, **k: None)
+
+    class DB:
+        def __init__(self, p): pass
+        def all_identities(self):
+            return [{"entity_type": "user", "source_email": "a@s.com", "target_email": "a@t.com"}]
+    monkeypatch.setattr(R, "MigrationDB", DB)
+    monkeypatch.setattr(R, "AuthManager", lambda s: None)
+    rc = R.main(["--confirm-domain", "x", "--yes", "--services", "drive"])
+    assert rc == 1 and "NOT RESET" in capsys.readouterr().out

@@ -2043,6 +2043,18 @@ def cmd_delta(args, settings: Settings, db: MigrationDB, auth: AuthManager):
     _print_batch_summary(results, services)
 
 
+def cmd_restore_direct_grants(args, settings: Settings, db: MigrationDB,
+                              auth: AuthManager) -> int:
+    """repair.restore_direct_grants, for every finished user or --user ones."""
+    import repair
+    out = repair.restore_direct_grants(auth, db, settings, apply=not settings.dry_run,
+                                       users=args.user)
+    print(f"Checked {out['items']:,} item(s) of {out['users']} user(s): "
+          f"{out['mixed']:,} direct grant(s) under an inherited one, "
+          f"{out['granted']:,} put back, {out['failed']:,} failed.")
+    return 0
+
+
 def cmd_syncacls(args, settings: Settings, db: MigrationDB,
                  auth: AuthManager) -> int:
     """
@@ -2584,6 +2596,11 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("syncacls", help="recreate per-file ACLs on migrated items")
     s.add_argument("--user", action="append")
     s.set_defaults(func=cmd_syncacls)
+
+    s = sub.add_parser("restore-direct-grants",
+                       help="put back a direct grant a file held on top of an inherited one")
+    s.add_argument("--user", action="append")
+    s.set_defaults(func=cmd_restore_direct_grants)
 
     s = sub.add_parser("tally",
                        help="count both tenants and spot-check a sample "

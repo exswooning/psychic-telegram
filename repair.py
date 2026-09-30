@@ -517,6 +517,76 @@ def fix_modified_times(auth, db, settings, apply: bool = False,
     return out
 
 
+def restore_direct_grants(auth, db, settings, apply: bool = False,
+                          workers: int = 8, users: list[str] | None = None) -> dict:
+    """Put back a direct grant a file held on top of an inherited one.
+
+    Found by the one-to-one check: when a corpus shares at folder level the
+    engine stops recreating inherited grants per file, and it skipped any
+    permission with an inherited part -- so a direct grant on top of one
+    (commenter on the file, reader through its folder) was dropped, and the
+    target kept only the folder's reader. Fixed in the engine; this repairs
+    what was migrated before. One permissions.list per migrated item, a create
+    only where the source mixes the two -- not a re-grant of everything.
+    Users side by side. Never raises.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from drive_engine import _role_rank
+    from resilience import retry_on_google_error
+
+    out = {"users": 0, "items": 0, "mixed": 0, "granted": 0, "failed": 0}
+    pairs = [(r["source_email"], r["target_email"]) for r in db.all_identities()
+             if r["entity_type"] == "user" and r["status"] == "DONE"
+             and (not users or r["source_email"].lower() in {u.lower() for u in users})]
+    retry = retry_on_google_error(max_retries=settings.max_retries)
+
+    def one(pair) -> dict:
+        got = {"items": 0, "mixed": 0, "granted": 0, "failed": 0}
+        try:
+            src, tgt = auth.source_drive(pair[0]), auth.target_drive(pair[1])
+            for sid, tid in db.mapped_ids(pair[0], ("file", "folder")).items():
+                got["items"] += 1
+                try:
+                    perms = retry(lambda f=sid: src.permissions().list(
+                        fileId=f, supportsAllDrives=True,
+                        fields="permissions(type,role,emailAddress,domain,permissionDetails)"
+                    ).execute())().get("permissions", [])
+                except Exception:      # noqa: BLE001 - gone since the migration
+                    continue
+                for p in perms:
+                    details = p.get("permissionDetails") or []
+                    direct = [d for d in details if not d.get("inherited")]
+                    if not direct or len(direct) == len(details) or p.get("type") not in ("user", "group"):
+                        continue
+                    email = p.get("emailAddress") or ""
+                    mapped = db.resolve_identity(email) or (
+                        email if email.split("@")[-1].lower() != settings.source_domain.lower() else None)
+                    if not mapped:
+                        continue
+                    got["mixed"] += 1
+                    if not apply:
+                        continue
+                    role = max((d.get("role") or p["role"] for d in direct), key=_role_rank)
+                    try:
+                        retry(lambda f=tid, b={"type": p["type"], "role": role, "emailAddress": mapped}:
+                              tgt.permissions().create(fileId=f, body=b, sendNotificationEmail=False,
+                                                       supportsAllDrives=True, fields="id").execute())()
+                        got["granted"] += 1
+                    except Exception:      # noqa: BLE001
+                        got["failed"] += 1
+        except Exception as exc:      # noqa: BLE001
+            log.warning("[%s] direct-grant check failed: %s", pair[0], exc)
+        return got
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        for got in pool.map(one, pairs):
+            out["users"] += 1
+            for k, v in got.items():
+                out[k] += v
+    return out
+
+
 def run_all(db, auth, settings, apply: bool = False,
             reconcile_limit: int | None = None,
             reapply_passes: int = 6) -> dict:

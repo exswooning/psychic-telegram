@@ -186,3 +186,23 @@ def test_a_run_creates_sso_profiles_unassigned(monkeypatch, db, settings):
     settings.migrate_sso = True
     main._before_passes(db, object(), settings, {"drive"})
     assert seen == ["sso"]
+
+
+def test_a_side_without_a_key_is_skipped_not_probed(settings, tmp_path):
+    """reset_target carries only the target's key: requiring both skipped the
+    check, every scope was requested, and the token was refused."""
+    settings.source_sa_key = str(tmp_path / "missing.json")
+    ok, why = fidelity.probe_for(settings)("source", ["x"])
+    assert ok and "no key" in why
+
+
+def test_one_key_is_enough_for_the_check(settings, monkeypatch, tmp_path):
+    import auth
+    called = []
+    monkeypatch.setattr(fidelity, "drop_ungranted", lambda *a, **k: called.append(1) or [])
+    p = tmp_path / "t.json"
+    p.write_text("{}")
+    settings.source_sa_key, settings.target_sa_key = str(tmp_path / "none.json"), str(p)
+    settings.auth_mode = "key"
+    auth.AuthManager(settings)._scopes("target")
+    assert called == [1]

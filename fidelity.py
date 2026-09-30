@@ -117,5 +117,9 @@ def probe_for(settings):
 
     def probe(tenant: str, scopes: list[str]) -> tuple[bool, str]:
         key, subject = verify_scopes._key_and_subject(settings, tenant)
+        # No key for this side: this process never talks to it (reset_target
+        # carries only the target's), so there is nothing to switch off for it.
+        if not (key and os.path.isfile(key)):
+            return True, "no key for this side"
         return verify_scopes.probe_scope(key, subject, scopes)
     return probe

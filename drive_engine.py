@@ -204,6 +204,14 @@ INHERIT_SAMPLE_FILES = 50
 INHERIT_DENSITY_LIMIT = 25.0
 
 
+_ROLES = ("reader", "commenter", "writer", "fileOrganizer", "organizer", "owner")
+
+
+def _role_rank(role: str) -> int:
+    """Drive roles from least to most access; an unknown one ranks lowest."""
+    return _ROLES.index(role) if role in _ROLES else -1
+
+
 def _inherited_acls_affordable(settings) -> bool:
     """Should this run keep recreating folder-inherited grants per file?
 
@@ -2117,10 +2125,23 @@ class DriveMigrator:
             # the corpus shares in. Off for very large tenants, where that
             # specificity costs a permissions.create per inherited grantee
             # per file.
-            if any(d.get("inherited") for d in details) and not keep_inherited:
+            #
+            # Skipped only when ALL of it is inherited. A grantee can hold a
+            # direct grant on the file on top of an inherited one (commenter on
+            # the file, reader through its folder) and Drive lists that as ONE
+            # permission with both details; skipping it for having an inherited
+            # part dropped the direct grant -- the one-to-one check found one
+            # such file in nearly every user's sample, reader on the target
+            # where the source had commenter.
+            direct = [d for d in details if not d.get("inherited")]
+            if details and not direct and not keep_inherited:
                 continue
 
-            body: dict = {"type": p["type"], "role": p["role"]}
+            role = p["role"]
+            if details and direct and not keep_inherited:
+                # The folder carries the inherited part; the file gets its own.
+                role = max((d.get("role") or role for d in direct), key=_role_rank)
+            body: dict = {"type": p["type"], "role": role}
             audit_key = None
 
             if p["type"] in ("user", "group"):

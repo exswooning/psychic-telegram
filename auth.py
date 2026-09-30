@@ -125,8 +125,11 @@ class AuthManager:
             self._settled = True
             if getattr(self.settings, "auth_mode", "key") != "key":
                 return
+            # Either side is enough: the probe skips a side with no key. Requiring
+            # both skipped the check in reset_target, which carries only the
+            # target's key -- every scope was requested and the token refused.
             if not (os.path.isfile(self.settings.source_sa_key or "")
-                    and os.path.isfile(self.settings.target_sa_key or "")):
+                    or os.path.isfile(self.settings.target_sa_key or "")):
                 return
             try:
                 import fidelity

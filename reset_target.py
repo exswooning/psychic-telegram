@@ -176,6 +176,7 @@ def reset_one(settings: Settings, auth: AuthManager, user: str,
             out["chat"] = seed.reset_chat(auth.target_chat(user), settings, local)
         except Exception as exc:  # noqa: BLE001 - Chat is frequently switched off
             print(f"    ! {user} chat: {str(exc)[:90]}")
+    out["unreachable"] = sorted(unreachable)
     return out
 
 
@@ -289,15 +290,23 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     totals = {"drive": 0, "gmail": 0, "calendar": 0, "chat": 0}
+    unreached = []
     with futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
         for r in pool.map(lambda u: reset_one(settings, auth, u, services), users):
             print(f"  {r['user']}: {r['drive']} drive root(s), {r['gmail']} mail, "
                   f"{r['calendar']} calendar, {r['chat']} chat")
             for k in totals:
                 totals[k] += r[k]
+            if r.get("unreachable"):
+                unreached.append(f"{r['user']} ({', '.join(r['unreachable'])})")
 
     print(f"\nRemoved: {totals['drive']} drive root(s), {totals['gmail']} mail "
           f"item(s), {totals['calendar']} calendar item(s), {totals['chat']} chat.")
+    # A service it could not reach is not an empty one: "Removed: 0" with rc 0
+    # read as a clean reset while every token was being refused.
+    if unreached:
+        print(f"NOT RESET -- could not reach: {'; '.join(unreached)}")
+        return 1
     return 0
 
 
