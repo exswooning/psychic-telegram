@@ -1536,7 +1536,10 @@ def _external_processes() -> list[dict]:
             name = fleet_agent.main_command(args)
         if name is None:
             continue
-        found.append({"pid": int(pid), "elapsed": elapsed, "name": name})
+        # A run for chosen users (--user ...) is measured against those users, not
+        # the tenant: live, 2 users of 300 read 0% for the whole of their run.
+        found.append({"pid": int(pid), "elapsed": elapsed, "name": name,
+                      "users": re.findall(r"--user[=\s]+(\S+)", args)})
     found.sort(key=lambda x: (x["name"] != "migrate", -x["elapsed"], x["pid"]))
     return found
 
@@ -1660,7 +1663,7 @@ def _external_job_snapshot(since: int = 0) -> dict | None:
         owner = None
     tail = _process_output_tail(job["pid"], job["name"], None)
     lines = tail[since:] if since < len(tail) else []
-    pct, eta = _job_progress(job["name"], tail, job["elapsed"], owner)
+    pct, eta = _job_progress(job["name"], tail, job["elapsed"], owner, job.get("users"))
     return {
         "name": job["name"],
         "running": True,
@@ -4204,16 +4207,38 @@ def spa_users_payload(account_id: int | None = None) -> dict:
         conn.close()
 
 
-def _ledger_progress_fraction(account_id: int | None = None) -> float | None:
+def _ledger_progress_fraction(account_id: int | None = None,
+                              users: list[str] | None = None) -> float | None:
     """Cached: /api/job and /api/spa/activity (left uncached as a "64 ms"
     reader) both reach this on every poll, and tui.collect_snapshot is a
     full-ledger scan. Live, 1.73M audit_log rows: py-spy caught three request
     threads inside it at once while one tab held webui.py at ~80% of a core."""
+    if users:
+        return _cached_payload("ledger_progress_fraction:" + ",".join(sorted(users)),
+                               lambda a: _ledger_progress_fraction_uncached(a, users),
+                               account_id)
     return _cached_payload("ledger_progress_fraction",
                            _ledger_progress_fraction_uncached, account_id)
 
 
-def _ledger_progress_fraction_uncached(account_id: int | None = None) -> float | None:
+def _users_progress_fraction(snap, users: list[str]) -> float | None:
+    """How far a run for these users is through their Drive and mail: items
+    REACHED (copied, failed or skipped -- a Split run leaves most mail to the DMS,
+    and copied-only would never reach 100%) over what discovery expected, each
+    service capped at its own expectation. None when nothing was discovered."""
+    want = {u.lower() for u in users}
+    reached = expected = 0
+    for u in snap.users:
+        if u.source.lower() not in want:
+            continue
+        reached += min(u.drive_done + u.drive_failed + u.drive_skipped, u.exp_drive)
+        reached += min(u.mail_done + u.mail_failed + u.mail_skipped, u.exp_mail)
+        expected += u.exp_drive + u.exp_mail
+    return reached / expected if expected > 0 else None
+
+
+def _ledger_progress_fraction_uncached(account_id: int | None = None,
+                                      users: list[str] | None = None) -> float | None:
     """The same items_done/items_expected fraction the header progress bar
     and snapshot_payload() already compute from the ledger -- reused here
     rather than re-derived, since tui.collect_snapshot() is the one place
@@ -4228,8 +4253,10 @@ def _ledger_progress_fraction_uncached(account_id: int | None = None) -> float |
     try:
         import tui
 
-        totals = tui.collect_snapshot(conn, Settings(account_id=account_id).effective_upload_cap()).totals
-        return totals.get("fraction")
+        snap = tui.collect_snapshot(conn, Settings(account_id=account_id).effective_upload_cap())
+        if users:
+            return _users_progress_fraction(snap, users)
+        return snap.totals.get("fraction")
     except sqlite3.Error:
         return None
     finally:
@@ -4237,7 +4264,8 @@ def _ledger_progress_fraction_uncached(account_id: int | None = None) -> float |
 
 
 def _job_progress(name: str, lines: list[str], elapsed: float,
-                  account_id: int | None = None) -> tuple[int | None, int | None]:
+                  account_id: int | None = None,
+                  users: list[str] | None = None) -> tuple[int | None, int | None]:
     """(progressPct, etaSeconds) for the running job, or (None, None) when
     there is no reliable source for either -- guessing a percentage from
     nothing but log lines is worse than showing none at all.
@@ -4268,7 +4296,8 @@ def _job_progress(name: str, lines: list[str], elapsed: float,
     elif name == "seed":
         pct = _seed_progress_pct(lines)
     elif name in ("migrate", "delta", "discover"):
-        frac = _ledger_progress_fraction(account_id)
+        frac = (_ledger_progress_fraction(account_id, users) if users
+                else _ledger_progress_fraction(account_id))
         pct = round(frac * 100) if frac is not None else None
     if pct is None or pct <= 0 or elapsed <= 0:
         return pct, None

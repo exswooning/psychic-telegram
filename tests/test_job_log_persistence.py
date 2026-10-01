@@ -269,3 +269,48 @@ class TestExternalSnapshotResolvesTheOwningAccount:
         monkeypatch.setattr(webui, "_ledger_progress_fraction", fake_fraction)
         snap = webui._external_job_snapshot()
         assert seen["account_id"] is None and snap["progressPct"] == 40
+
+
+class TestARunForChosenUsersIsMeasuredAgainstThem:
+    """Live: a repair run for 2 of 300 users read 0% for its whole run, because the
+    fraction was the tenant's. A --user run is measured against its own users."""
+
+    def test_the_users_on_the_command_line_reach_the_fraction(self, monkeypatch):
+        monkeypatch.setattr(webui, "_external_processes", lambda: [
+            {"pid": 4242, "elapsed": 10, "name": "migrate", "users": ["f@s.example"]}])
+        monkeypatch.setattr(webui, "_process_output_tail", lambda pid, name="", account_id=None: [])
+        monkeypatch.setattr(job_admission, "list_active", lambda: [])
+        seen = {}
+
+        def fake_fraction(account_id=None, users=None):
+            seen["users"] = users
+            return 0.25
+        monkeypatch.setattr(webui, "_ledger_progress_fraction", fake_fraction)
+        assert webui._external_job_snapshot()["progressPct"] == 25
+        assert seen["users"] == ["f@s.example"]
+
+    def test_only_those_users_count_and_each_service_is_capped(self):
+        import types
+        row = lambda src, **k: types.SimpleNamespace(**{**dict(
+            source=src, drive_done=0, drive_failed=0, drive_skipped=0, exp_drive=0,
+            mail_done=0, mail_failed=0, mail_skipped=0, exp_mail=0), **k})
+        snap = types.SimpleNamespace(users=[
+            row("F@s.example", drive_done=50, drive_failed=10, exp_drive=100,
+                mail_done=150, exp_mail=100),                  # mail over its estimate
+            row("other@s.example", drive_done=0, exp_drive=10_000)])
+        # (60 + min(150, 100)) / (100 + 100), the other user's 10,000 left out
+        assert webui._users_progress_fraction(snap, ["f@s.example"]) == 160 / 200
+
+    def test_nothing_discovered_is_no_fraction_not_zero(self):
+        import types
+        snap = types.SimpleNamespace(users=[])
+        assert webui._users_progress_fraction(snap, ["f@s.example"]) is None
+
+
+def test_the_ps_scan_reads_the_users_off_the_command_line(monkeypatch):
+    out = ("101 50 /v/python main.py --account-id 3 migrate --services drive --ordered "
+           "--user fiona@s.example --user seeduser160@s.example\n")
+    monkeypatch.setattr(webui.subprocess, "run",
+                        lambda *a, **k: type("R", (), {"stdout": out})())
+    job = webui._external_processes()[0]
+    assert job["users"] == ["fiona@s.example", "seeduser160@s.example"]
