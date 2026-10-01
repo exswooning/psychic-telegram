@@ -60,7 +60,7 @@ import {
 } from '@mui/icons-material'
 import { useMigrationStore } from '@/store'
 import { fetchConfig, fetchJob, ConfigPayload, HostInfo, JobStatus, stopJob } from '@/api/client'
-import { fetchMe, logout, Account } from '@/api/controlPlane'
+import { fetchMe, fetchOwedGrants, logout, Account, OwedGrants } from '@/api/controlPlane'
 import Menu from '@mui/material/Menu'
 import MenuItem from '@mui/material/MenuItem'
 import Logout from '@mui/icons-material/Logout'
@@ -235,6 +235,16 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
     const poll = () => fetchJob(1_000_000_000).then(setJob).catch(() => {})
     poll()
     const id = setInterval(poll, 3000)
+    return () => clearInterval(id)
+  }, [])
+
+  // Shares owed to colleagues with no target account yet. A minute is plenty: they
+  // change only as a run records them or a repair grants them.
+  const [owed, setOwed] = useState<OwedGrants['migrations']>([])
+  useEffect(() => {
+    const poll = () => fetchOwedGrants().then((r) => setOwed(r.migrations)).catch(() => {})
+    poll()
+    const id = setInterval(poll, 60_000)
     return () => clearInterval(id)
   }, [])
 
@@ -486,9 +496,18 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
             </Tooltip>
           )}
           {(() => {
-            const items: string[] = []
-            if (jobRunning) items.push(`${job!.name} is running (${progressIndeterminate ? 'in progress' : `${progressPct}%`})`)
-            if (memoryPct >= 85) items.push(`Memory at ${memoryPct}% — approaching the limit`)
+            const items: { text: string; to?: string }[] = []
+            if (jobRunning) items.push({ text: `${job!.name} is running (${progressIndeterminate ? 'in progress' : `${progressPct}%`})` })
+            if (memoryPct >= 85) items.push({ text: `Memory at ${memoryPct}% — approaching the limit` })
+            for (const o of owed) {
+              items.push({
+                to: `/migrations/${o.accountId}`,
+                text: `${o.accountName}: ${o.shares.toLocaleString()} share${o.shares === 1 ? '' : 's'} waiting for `
+                  + `${o.colleagues.toLocaleString()} colleague${o.colleagues === 1 ? '' : 's'} with no target account yet `
+                  + `(${o.examples.join(', ')}${o.colleagues > o.examples.length ? ', …' : ''}). `
+                  + 'They are granted automatically once those colleagues are migrated.',
+              })
+            }
             return (
               <>
                 <Badge badgeContent={items.length} color="error" invisible={items.length === 0}>
@@ -509,9 +528,11 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
                   <Divider />
                   {items.length === 0 ? (
                     <MenuItem disabled>Nothing to report</MenuItem>
-                  ) : items.map((text) => (
-                    <MenuItem key={text} onClick={() => setNotifAnchor(null)} sx={{ whiteSpace: 'normal', maxWidth: 300 }}>
-                      {text}
+                  ) : items.map((it) => (
+                    <MenuItem key={it.text} data-testid={it.to ? 'notif-owed' : undefined}
+                              onClick={() => { setNotifAnchor(null); if (it.to) navigate(it.to) }}
+                              sx={{ whiteSpace: 'normal', maxWidth: 360 }}>
+                      {it.text}
                     </MenuItem>
                   ))}
                 </Menu>

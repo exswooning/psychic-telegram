@@ -175,9 +175,9 @@ Google's Data Migration Service does, and the run migrates everything else.
 the rest is written `SKIPPED_NO_DRIVE_LINK` (`config.DEFERRED_TO_DMS`) and moved by
 the DMS **after** the run — before, and the DMS moves link mail unrewritten and the
 engine then adopts that copy. **Ordered passes are the rule for every mode, not only split**: `_mail_plan` orders any run that is rewriting links and has Drive plus mail or calendar (a calendar description carries Drive links too); with rewriting off ordering would only cost the interleaving. Two invariants make split safe, both decided in
-`api_server._mail_plan`: the run is `--ordered` (Drive -- with contacts, tasks and
-chat, which carry no rewritten links -- for *every* user, then mail and calendar
-together; `main.ORDERED_PASSES` — a link names whoever owned the file, and an interleaved run reads
+`api_server._mail_plan`: the run is `--ordered` (every target account the run needs
+created first -- `main._ensure_run_accounts` -- then Drive for *every* user, then mail,
+then calendar, contacts, tasks and chat; `main.ORDERED_PASSES` — a link names whoever owned the file, and an interleaved run reads
 mail before other users' Drive has migrated, leaving those links on the source
 tenant forever), and rewriting is forced on. **Deferred mail is owed, not
 declined**: `tally`, the report and the migrations page count it apart from
@@ -301,6 +301,19 @@ this per launch, passed as an env var to just that subprocess; the Start Migrati
 "How does Drive content move?" section defaults to leaving it unset (this server's own
 config) rather than assuming every target tenant's sharing settings allow the staging-drive
 grant.
+
+**A share with a colleague who has no target account yet is owed, not lost**
+(`config.OWED_GRANT`). A run for a few users shares their files with colleagues not
+migrated yet. The engine asks the target directory once per colleague
+(`drive_engine._target_account_exists`); a 404 records the grant as
+`OWED_GRANTEE_NO_ACCOUNT` at once, never through the retry ladder. Drive's own "no
+Google account" 400 gets two tries (`resilience.NO_ACCOUNT_RETRY_BUDGET`), then is
+owed too. `repair.reapply_owed_grants` (start of `run_all`, so every run's automatic
+repair) grants each owed share whose colleague now has an account, through the
+engine's `_sync_acls(only=...)`. The status does not start with `SKIPPED`, so the
+one-to-one check counts it missing until then; `GET /api/v2/owed-grants` feeds the
+header's notifications. An outsider with no Google account stays
+`SKIPPED_GRANTEE_NOT_ON_GOOGLE`.
 
 **The source is indexed when a pair is ready** (`api_server._start_discovery`, a `discover` job: `main.py discover --include-mail`, the ETA baseline): after `link-domains`, and after an identity-map build ends cleanly (`_discover_when_mapped`) -- but only when the account's ledger maps THIS pair's users. A ledger outlives the pair it was built for, so a scan over whatever is mapped could read the previous pair's tenant; it says why it did not start instead.
 

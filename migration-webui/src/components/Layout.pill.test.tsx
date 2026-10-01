@@ -24,6 +24,7 @@ vi.mock('@/api/client', () => ({
 vi.mock('@/api/controlPlane', () => ({
   fetchMe: vi.fn().mockResolvedValue({ id: 1, is_superadmin: true }),
   logout: vi.fn(),
+  fetchOwedGrants: vi.fn().mockResolvedValue({ migrations: [] }),
 }))
 
 import Layout from './Layout'

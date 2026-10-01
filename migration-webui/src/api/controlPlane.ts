@@ -323,6 +323,14 @@ export const startMigration = (
                            ...(tuning?.processes !== undefined ? { processes: tuning.processes } : {}) }),
   })
 
+export interface OwedGrants {
+  migrations: { accountId: number; accountName: string; shares: number;
+                colleagues: number; examples: string[] }[]
+}
+
+/** Shares waiting for colleagues who have no target account yet, per migration. */
+export const fetchOwedGrants = () => cpFetch<OwedGrants>('/api/v2/owed-grants')
+
 // force is SIGKILL, for a run that took the interrupt and is still going.
 export const stopJob = (pid: number, reason: string, force = false) =>
   cpFetch<ActionResult>(`/api/v2/jobs/${pid}/stop`, {

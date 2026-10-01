@@ -1071,6 +1071,10 @@ def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
             plan = passes or [services]
             everything = set().union(*plan)
             whole_tenant = not only and not getattr(settings, "sample_limit", None)
+            # Before groups (their members) and before any pass: a share or a link
+            # can only land on an account that exists, and a pass that created only
+            # its own users left everyone after it for the next pass.
+            _ensure_run_accounts(auth, db, settings, only)
             if whole_tenant and not delta:
                 _before_passes(db, auth, settings, everything)
             os.environ["DRIVE_FAILED_USERS"] = ""
@@ -1323,6 +1327,19 @@ def _registered(job_name: str, account_id):
                 job_admission.release(account_id, job_name)
             except Exception as exc:      # noqa: BLE001
                 log.debug("could not release the job slot: %s", exc)
+
+
+def _ensure_run_accounts(auth, db, settings, only=None) -> None:
+    """Every target account this run will write into -- its chosen users, or all of
+    them -- created, and waited on until usable, before anything moves."""
+    wanted = {u.lower() for u in only} if only else None
+    try:
+        pairs = [(r["source_email"], r["target_email"]) for r in db.all_identities()
+                 if r["entity_type"] == "user"
+                 and (wanted is None or r["source_email"].lower() in wanted)]
+        _ensure_target_accounts(auth, settings, pairs)
+    except Exception as exc:      # noqa: BLE001 - each pass tries again for its own users
+        log.warning("could not create the run's target accounts up front: %s", exc)
 
 
 def _ensure_target_accounts(auth: AuthManager, settings: Settings,
@@ -2053,7 +2070,10 @@ def _enable_selected_services(settings: Settings, services: set[str]) -> None:
 # Only mail and calendar carry Drive links that get rewritten, so only they must
 # wait for every user's Drive. Contacts, tasks and chat never read id_mapping, so
 # they run alongside Drive instead of queueing behind mail for the whole run.
-ORDERED_PASSES = (("drive", "contacts", "tasks", "chat"), ("gmail", "calendar"))
+# Drive first (every link names a Drive file), then mail, then everything else --
+# calendar's links resolve against the Drive pass the same way mail's do. Every
+# account the run needs is created before the first pass (_ensure_run_accounts).
+ORDERED_PASSES = (("drive",), ("gmail",), ("calendar", "contacts", "tasks", "chat"))
 
 
 def ordered_passes(services: set[str]) -> list[set[str]]:

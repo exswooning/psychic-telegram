@@ -160,3 +160,41 @@ class TestTheTokenScope403GetsALongerBudget:
                      for i in range(1, resilience.SCOPE_RETRY_BUDGET + 1))
         assert standard < 100
         assert scoped > 300
+
+
+
+class TestButOnlyTwice:
+    """A colleague with no account at all never clears: the full ladder cost ~40 s a
+    grant and left a live run copying nothing for 30 minutes. One retry covers an
+    account created moments ago; then it stops, and the grant is recorded as owed."""
+
+    def test_the_no_account_refusal_gets_two_tries(self, monkeypatch):
+        from tests.fakes import http_error
+        monkeypatch.setattr(resilience.time, "sleep", lambda s: None)
+        calls = []
+
+        @resilience.retry_on_google_error(max_retries=6, base_delay=0)
+        def grant():
+            calls.append(1)
+            raise http_error(400, "invalidSharingRequest",
+                             "Since there is no Google account associated with this email address")
+        try:
+            grant()
+        except Exception:      # noqa: BLE001
+            pass
+        assert len(calls) == 2
+
+    def test_other_transients_keep_their_ladder(self, monkeypatch):
+        from tests.fakes import http_error
+        monkeypatch.setattr(resilience.time, "sleep", lambda s: None)
+        calls = []
+
+        @resilience.retry_on_google_error(max_retries=3, base_delay=0)
+        def flaky():
+            calls.append(1)
+            raise http_error(503, "backendError")
+        try:
+            flaky()
+        except Exception:      # noqa: BLE001
+            pass
+        assert len(calls) == 4

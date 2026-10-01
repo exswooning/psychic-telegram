@@ -3968,6 +3968,47 @@ def _migration_progress(account_id: int | None) -> dict:
         return empty
 
 
+@app.get("/api/v2/owed-grants")
+async def owed_grants(op: Operator = Depends(operator)):
+    """Shares waiting for a colleague's target account, per migration this caller may
+    see -- for the header's notifications. A run for a few users shares their files
+    with colleagues who are not on the target yet; those shares are owed, and
+    repair.reapply_owed_grants grants them once the colleagues are migrated."""
+    require_login(op)
+
+    def _read() -> dict:
+        from config import OWED_GRANT
+        accounts = (accounts_auth.list_accounts() if op.is_superadmin
+                    else [a for a in [accounts_auth.get_account(op.account_id)] if a])
+        out = []
+        for acct in accounts:
+            aid = acct["id"]
+            domain = ((accounts_auth.get_tenant_config(aid, "target") or {}).get("domain") or "").lower()
+            try:
+                path = _ledger_path(aid)
+            except (ValueError, KeyError, OSError):
+                continue
+            if not domain or not os.path.isfile(path):
+                continue
+            try:
+                with cpdb.ro(path) as conn:
+                    rows = conn.execute(
+                        "SELECT item_id FROM audit_log WHERE status IN (?,?) AND item_type='acl'",
+                        (OWED_GRANT, "SKIPPED_GRANTEE_NOT_ON_GOOGLE")).fetchall()
+            except Exception:      # noqa: BLE001 - a ledger without the table owes nothing
+                continue
+            who = [r["item_id"].partition(":")[2].lower() for r in rows]
+            who = [w for w in who if w.endswith("@" + domain)]
+            if who:
+                out.append({"accountId": aid,
+                            "accountName": acct.get("name") or acct.get("email") or f"#{aid}",
+                            "shares": len(who), "colleagues": len(set(who)),
+                            "examples": sorted(set(who))[:3]})
+        return {"migrations": out}
+
+    return await _off_loop(_read)
+
+
 @app.get("/api/v2/migrations")
 async def list_migrations(op: Operator = Depends(operator)):
     """Every tenant pair this caller may see, with live progress.

@@ -117,6 +117,11 @@ RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 # email addressES" for several grantees and "no Google account ... this email
 # address" for one.
 TRANSIENT_400_FRAGMENTS = ("no google account",)
+# ...but only one retry. It covers a colleague whose account was created moments ago;
+# one with no account at all never clears, and the full ladder (~40 s a grant) left a
+# live run copying nothing for 30 minutes. A grant still refused after the second try
+# is recorded as owed (drive_engine) and granted by repair once the account exists.
+NO_ACCOUNT_RETRY_BUDGET = 1
 
 # A 403 insufficientPermissions is permanent by default and usually should
 # be: it is how Drive says a user may not touch a file, and retrying that
@@ -414,7 +419,9 @@ def retry_on_google_error(
                     # widening the budget for everything would spend minutes
                     # per file on errors that will never clear.
                     budget = max_retries
-                    if _is_transient_403(exc):
+                    if status == 400 and _is_transient_400(exc):
+                        budget = min(max_retries, NO_ACCOUNT_RETRY_BUDGET)
+                    elif _is_transient_403(exc):
                         budget = max(max_retries, SCOPE_RETRY_BUDGET)
                     elif reason in TRANSIENT_403_REASONS:
                         # A rate limit is transient BY DEFINITION -- it is

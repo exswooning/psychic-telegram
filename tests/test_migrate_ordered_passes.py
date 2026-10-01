@@ -21,15 +21,15 @@ import main
 
 
 class TestThePasses:
-    def test_drive_and_everything_without_links_then_mail_and_calendar(self):
-        """Only mail and calendar carry Drive links to rewrite; contacts, tasks and
-        chat never read id_mapping, so they run with Drive instead of after mail."""
+    def test_drive_then_mail_then_everything_else(self):
+        """The operator's order: Drive, then mail, then the rest. Calendar's links
+        resolve against the Drive pass the same way mail's do, so it is after both."""
         got = main.ordered_passes({"drive", "gmail", "calendar", "contacts", "tasks", "chat"})
-        assert got == [{"drive", "contacts", "tasks", "chat"}, {"gmail", "calendar"}]
+        assert got == [{"drive"}, {"gmail"}, {"calendar", "contacts", "tasks", "chat"}]
 
     def test_only_what_was_asked_for_and_never_an_empty_pass(self):
         assert main.ordered_passes({"gmail"}) == [{"gmail"}]
-        assert main.ordered_passes({"drive", "chat"}) == [{"drive", "chat"}]
+        assert main.ordered_passes({"drive", "chat"}) == [{"drive"}, {"chat"}]
         assert main.ordered_passes({"drive", "gmail"}) == [{"drive"}, {"gmail"}]
         assert main.ordered_passes(set()) == []
 
@@ -73,11 +73,15 @@ def runner(monkeypatch, settings, db, capsys):
 
     shared = []
     monkeypatch.setattr(main, "_migrate_shared_drives", lambda *a: shared.append(len(passes)))
+    accounts = []
+    monkeypatch.setattr(main, "_ensure_run_accounts",
+                        lambda auth, d, s, only=None: accounts.append((len(passes), only)))
 
     def run(services, plan=None, delta=False, after=None, only=None):
         return main._run_with_memory_pause(None, db, settings, services, delta=delta, delta_days=0,
                                            passes=plan, after=after, only=only)
     run.shared = shared
+    run.accounts = accounts
     run.passes, run.registered, run.hook, run.out = passes, registered, hook, capsys
     yield run
     main.MEMORY_PAUSE.clear(); main.SHUTDOWN.clear()
@@ -88,8 +92,8 @@ class TestTheSharedRunner:
 
     def test_ordered_runs_the_passes_in_order_and_returns_every_passs_results(self, runner):
         results = runner(self.ALL, main.ordered_passes(self.ALL))
-        assert runner.passes == [{"drive", "contacts", "tasks", "chat"}, {"gmail", "calendar"}]
-        assert [r["source"] for r in results] == ["u1", "u2"]
+        assert runner.passes == [{"drive"}, {"gmail"}, {"calendar", "contacts", "tasks", "chat"}]
+        assert [r["source"] for r in results] == ["u1", "u2", "u3"]
 
     def test_the_whole_run_registers_once_not_once_per_pass(self, runner):
         """A pass registering and releasing would drop the run out of the admission
@@ -101,8 +105,9 @@ class TestTheSharedRunner:
     def test_it_says_which_pass_it_is_on_and_which_process_is_saying_so(self, runner):
         runner(self.ALL, main.ordered_passes(self.ALL))
         lines = [l for l in runner.out.readouterr().out.splitlines() if l.startswith("PASS ")]
-        assert lines == [f"PASS 1/2 pid={os.getpid()}: chat,contacts,drive,tasks",
-                         f"PASS 2/2 pid={os.getpid()}: calendar,gmail"]
+        assert lines == [f"PASS 1/3 pid={os.getpid()}: drive",
+                         f"PASS 2/3 pid={os.getpid()}: gmail",
+                         f"PASS 3/3 pid={os.getpid()}: calendar,chat,contacts,tasks"]
 
     def test_an_unordered_run_is_one_pass_and_prints_no_marker(self, runner):
         runner(self.ALL)
@@ -117,14 +122,13 @@ class TestTheSharedRunner:
         """The operator asked it to stop. Starting mail after that is the opposite."""
         runner.hook.append(lambda n: main.SHUTDOWN.set() if n == 1 else None)
         runner(self.ALL, main.ordered_passes(self.ALL))
-        assert runner.passes == [{"drive", "contacts", "tasks", "chat"}]
+        assert runner.passes == [{"drive"}]
 
     def test_a_memory_pause_ends_the_run_and_still_exits_paused(self, runner):
         runner.hook.append(lambda n: main.MEMORY_PAUSE.set() if n == 1 else None)
         with pytest.raises(SystemExit) as e:
             runner(self.ALL, main.ordered_passes(self.ALL))
-        assert e.value.code == main.EXIT_PAUSED and runner.passes == [
-            {"drive", "contacts", "tasks", "chat"}]
+        assert e.value.code == main.EXIT_PAUSED and runner.passes == [{"drive"}]
 
     def test_a_delta_still_registers_as_a_delta(self, runner, monkeypatch):
         names = []
@@ -140,7 +144,7 @@ class TestTheCommand:
         monkeypatch.setattr(main, "_print_batch_summary", lambda *a, **k: None)
         monkeypatch.setattr(main, "_auto_repair", lambda *a, **k: None)
         main.cmd_migrate(argparse.Namespace(services="all", user=None, ordered=True), settings, db, None)
-        assert seen["passes"] == [{"drive", "contacts", "tasks", "chat"}, {"gmail", "calendar"}]
+        assert seen["passes"] == [{"drive"}, {"gmail"}, {"calendar", "contacts", "tasks", "chat"}]
 
     def test_unordered_hands_it_none(self, monkeypatch, settings, db):
         seen = {}
@@ -331,3 +335,38 @@ class TestSharedDrivesRideTheWholeTenantRun:
     def test_not_without_drive(self, runner):
         runner({"gmail"}, [{"gmail"}])
         assert runner.shared == []
+
+
+
+class TestEveryAccountIsCreatedBeforeAnythingMoves:
+    """The operator's rule: the users to be migrated are created first, then Drive,
+    then mail, then everything else -- a share or a link can only land on an account
+    that exists, and a pass that created only its own users left the rest for later."""
+    ALL = {"drive", "gmail", "calendar", "contacts", "tasks", "chat"}
+
+    def test_once_before_the_first_pass(self, runner):
+        runner(self.ALL, main.ordered_passes(self.ALL))
+        assert runner.accounts == [(0, None)]
+
+    def test_for_just_the_chosen_users(self, runner):
+        runner(self.ALL, main.ordered_passes(self.ALL), only=["a@src"])
+        assert runner.accounts == [(0, ["a@src"])]
+
+    def test_it_covers_every_chosen_user_even_one_already_done(self, db, settings, monkeypatch):
+        seen = []
+        monkeypatch.setattr(main, "_ensure_target_accounts", lambda auth, s, pairs: seen.extend(pairs))
+        monkeypatch.setattr(db, "all_identities", lambda: [
+            {"entity_type": "user", "source_email": "a@src", "target_email": "a@tgt", "status": "DONE"},
+            {"entity_type": "user", "source_email": "b@src", "target_email": "b@tgt", "status": "PENDING"},
+            {"entity_type": "group", "source_email": "g@src", "target_email": "g@tgt", "status": "PENDING"}])
+        main._ensure_run_accounts(None, db, settings, ["A@src"])
+        assert seen == [("a@src", "a@tgt")]
+        seen.clear()
+        main._ensure_run_accounts(None, db, settings)
+        assert seen == [("a@src", "a@tgt"), ("b@src", "b@tgt")]
+
+    def test_a_provisioning_failure_never_stops_the_run(self, db, settings, monkeypatch):
+        def boom(*a):
+            raise RuntimeError("directory down")
+        monkeypatch.setattr(main, "_ensure_target_accounts", boom)
+        main._ensure_run_accounts(None, db, settings)      # logs, does not raise
