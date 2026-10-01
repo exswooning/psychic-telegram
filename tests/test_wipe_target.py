@@ -95,3 +95,41 @@ class TestOneFailureDoesNotStrandTheRest:
         stats = wipe_target.delete_users(Counting(), ["a@t.com"], dry_run=True)
         assert calls == []
         assert stats["deleted"] == 1
+
+
+class TestWhatTheLedgerForgets:
+    """After deleting the accounts the One-to-one page still read "300 identical"
+    and Tally "300 complete": the checks of deleted mailboxes outlived them."""
+
+    def _ledger(self, tmp_path):
+        from db import MigrationDB, bulk_seed_identities
+        db = MigrationDB(str(tmp_path / "m.db"))
+        bulk_seed_identities(db, [("a@s.com", "a@t.com")])
+        db.set_identity_status("a@s.com", "DONE")
+        db.record_mapping("a@s.com", "f1", "t1", "file")
+        with db.write() as c:
+            c.execute("INSERT INTO user_verification (source_user, service, verified_at, verdict, "
+                      "payload) VALUES ('a@s.com','contacts','x','IDENTICAL','{}')")
+            c.execute("INSERT INTO user_tally (source_user, target_user, recorded_at, payload) "
+                      "VALUES ('a@s.com','a@t.com','x','{}')")
+            c.execute("INSERT INTO tenant_claims (kind, key, owner, claimed_at) VALUES ('chat_space','s1','a@s.com','x')")
+        db.set_mirror_marker("a@s.com", "drive", "7")
+        db.log_audit("a@s.com", "f1", "file", "SUCCESS")
+        return db
+
+    def test_checks_and_claims_about_deleted_accounts_go(self, tmp_path):
+        db = self._ledger(tmp_path)
+        wipe_target.invalidate_ledger(db, dry_run=False)
+        for table in wipe_target.DERIVED_PER_USER + ("id_mapping",):
+            assert db.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0, table
+        assert db.conn.execute("SELECT status FROM identity_map").fetchone()[0] == "PENDING"
+
+    def test_the_history_stays(self, tmp_path):
+        db = self._ledger(tmp_path)
+        wipe_target.invalidate_ledger(db, dry_run=False)
+        assert db.conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0] == 1
+
+    def test_a_dry_run_forgets_nothing(self, tmp_path):
+        db = self._ledger(tmp_path)
+        wipe_target.invalidate_ledger(db, dry_run=True)
+        assert db.conn.execute("SELECT COUNT(*) FROM user_verification").fetchone()[0] == 1

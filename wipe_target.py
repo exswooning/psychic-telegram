@@ -133,6 +133,13 @@ def delete_users(directory, emails: list[str], dry_run: bool = True,
     return stats
 
 
+# What the ledger concluded about the deleted accounts: verified identical,
+# counted complete, a Chat space claimed as migrated, where the mirror read up
+# to and what it last wrote. All of it describes objects that no longer exist.
+DERIVED_PER_USER = ("user_verification", "user_tally", "tenant_claims",
+                    "mirror_marker", "mirror_fingerprint", "mirror_retry")
+
+
 def invalidate_ledger(db, dry_run: bool = True) -> dict:
     """Forget everything that named a target object, and reopen every user.
 
@@ -147,6 +154,14 @@ def invalidate_ledger(db, dry_run: bool = True) -> dict:
     same act, at the same instant. audit_log is deliberately kept: it is the
     record of what was attempted and when, and a tool that erases its own
     history cannot explain afterwards what it did.
+
+    So is everything a check or a claim said about those accounts -- found
+    live: after 299 deletions the One-to-one page still read "300 identical"
+    from verification rows of the deleted mailboxes, the Tally page "300
+    complete", and the Chat claims would have skipped every shared space on
+    the next run as already migrated. Measurements of a tenant at a time
+    (run_fidelity) and the mirror's record of cycles and decisions stay, like
+    audit_log: they are history, not a claim about now.
     """
     counts = {
         "id_mapping": db.conn.execute(
@@ -162,6 +177,8 @@ def invalidate_ledger(db, dry_run: bool = True) -> dict:
     with db.write() as conn:
         conn.execute("DELETE FROM id_mapping")
         conn.execute("DELETE FROM label_map")
+        for table in DERIVED_PER_USER:
+            conn.execute(f"DELETE FROM {table}")
         conn.execute("UPDATE identity_map SET status='PENDING', "
                      "services_done='', status_at=?", (_now(),))
     db._mapping_cache.clear()
