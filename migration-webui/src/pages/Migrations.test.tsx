@@ -3,6 +3,12 @@ import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import Migrations from './Migrations'
 
+const navigate = vi.hoisted(() => vi.fn())
+vi.mock('react-router-dom', async () => {
+  const actual = await vi.importActual<typeof import('react-router-dom')>('react-router-dom')
+  return { ...actual, useNavigate: () => navigate }
+})
+
 const fetchMigrations = vi.fn()
 const fetchAllDomains = vi.fn()
 const linkDomains = vi.fn()
@@ -239,5 +245,22 @@ describe('the picker offers overwritten domains too', () => {
       'put the replaced domain back',
       { accountId: 68, side: 'source', supersededId: 5 },
       { accountId: 66, side: 'source', supersededId: undefined }))
+  })
+})
+
+
+describe('Migrate, from the list', () => {
+  beforeEach(() => { vi.clearAllMocks(); fetchAllDomains.mockResolvedValue({ superadmin: false, domains: [] }) })
+
+  it('opens the pair straight at "who to migrate", without opening the row first', async () => {
+    show([row({ running: false, jobs: [] })])
+    fireEvent.click(await screen.findByTestId('migrate-7'))
+    expect(navigate).toHaveBeenCalledTimes(1)
+    expect(navigate).toHaveBeenCalledWith('/migrations/7?run=full')
+  })
+
+  it('is not offered while that pair is already running', async () => {
+    show([row()])
+    expect(await screen.findByTestId('migrate-7')).toBeDisabled()
   })
 })

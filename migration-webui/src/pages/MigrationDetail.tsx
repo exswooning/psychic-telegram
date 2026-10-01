@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import {
-  Alert, Box, Button, Chip, CircularProgress, IconButton, Paper, Stack,
+  Alert, Autocomplete, Box, Button, Chip, CircularProgress, IconButton, Paper, Stack,
   Table, TableBody, TableCell, TableHead, TableRow, TextField, Typography,
   RadioGroup,
   Radio,
@@ -73,8 +73,14 @@ export const MigrationDetail: React.FC = () => {
   // '' = the server's own default (config.TRANSFER_MODES via TRANSFER_MODE) --
   // most runs never need to touch this.
   const [transferMode, setTransferMode] = useState<TransferMode | ''>('')
-  // Testing only (the perf plan): blank = the job sizes itself / every user.
-  const [fullUsers, setFullUsers] = useState('')
+  // Who to migrate: every user, or the ones chosen here. Chosen users move their mail
+  // through this tool -- the DMS only starts after a whole-tenant run, so Split or DMS
+  // for a few users would leave their mail undelivered (the server refuses it too).
+  const [who, setWho] = useState<'all' | 'some'>('all')
+  const [picked, setPicked] = useState<string[]>([])
+  // ?run=full -- the Migrate button on the Migrations list -- opens the dialog here.
+  const [params] = useSearchParams()
+  useEffect(() => { if (params.get('run') === 'full') setAskFull(true) }, [params])
   const [tuneUserWorkers, setTuneUserWorkers] = useState('')
   const [tuneFileWorkers, setTuneFileWorkers] = useState('')
   const [tuneCacheCap, setTuneCacheCap] = useState('')
@@ -680,11 +686,72 @@ export const MigrationDetail: React.FC = () => {
         open={askFull}
         busy={fullBusy}
         error={fullError}
-        title={`Run a full migration over ${d?.sourceDomain || 'this tenant'}`}
+        title={who === 'some'
+          ? `Migrate ${picked.length} chosen user${picked.length === 1 ? '' : 's'} from ${d?.sourceDomain || 'this tenant'}`
+          : `Run a full migration over ${d?.sourceDomain || 'this tenant'}`}
         description={
           <>
-            Copies everything the ledger does not already record, for all
-            {' '}{d?.progress?.users ?? 0} users. Use this after a ledger
+            <Box sx={{ mb: 2 }} data-testid="who">
+              <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 0.5 }}>
+                Who to migrate?
+              </Typography>
+              <RadioGroup value={who} onChange={(e) => {
+                const v = e.target.value as 'all' | 'some'
+                setWho(v)
+                if (v === 'some') setMailBy('engine')
+              }}>
+                <FormControlLabel value="all" control={<Radio size="small" />} data-testid="who-all"
+                  label={<Typography variant="body2"><strong>All {(d?.users?.length ?? d?.progress?.users ?? 0).toLocaleString()} users</strong> — anyone already finished is skipped.</Typography>} />
+                <FormControlLabel value="some" control={<Radio size="small" />} data-testid="who-some"
+                  label={<Typography variant="body2"><strong>Only the users I choose</strong></Typography>} />
+              </RadioGroup>
+              {who === 'some' && (() => {
+                const all = d?.users ?? []
+                const status = Object.fromEntries(all.map((u) => [u.sourceUser, u.status]))
+                const failed = all.filter((u) => u.status === 'FAILED' || u.status === 'BLOCKED').map((u) => u.sourceUser)
+                const notDone = all.filter((u) => u.status !== 'DONE').map((u) => u.sourceUser)
+                const add = (us: string[]) => setPicked((p) => Array.from(new Set([...p, ...us])))
+                return (
+                  <Box sx={{ pl: 4 }}>
+                    <Autocomplete multiple size="small" disableCloseOnSelect filterSelectedOptions
+                      options={all.map((u) => u.sourceUser)} value={picked}
+                      onChange={(_, v) => setPicked(v)}
+                      renderOption={(props, option) => (
+                        <li {...props} key={option}>
+                          <Typography variant="body2" sx={{ flexGrow: 1 }}>{option}</Typography>
+                          <Chip size="small" variant="outlined" label={(status[option] || '').toLowerCase()} />
+                        </li>
+                      )}
+                      renderInput={(p) => (
+                        <TextField {...p} label={`Users — ${picked.length} chosen`} placeholder="Type a name or address"
+                                   inputProps={{ ...p.inputProps, 'data-testid': 'run-full-users' }} />
+                      )} />
+                    <Stack direction="row" spacing={1} sx={{ mt: 0.5 }}>
+                      {failed.length > 0 && (
+                        <Button size="small" data-testid="pick-failed" onClick={() => add(failed)}>
+                          Add the {failed.length} failed
+                        </Button>
+                      )}
+                      {notDone.length > 0 && (
+                        <Button size="small" data-testid="pick-not-done" onClick={() => add(notDone)}>
+                          Add the {notDone.length} not finished
+                        </Button>
+                      )}
+                      {picked.length > 0 && (
+                        <Button size="small" onClick={() => setPicked([])}>Clear</Button>
+                      )}
+                    </Stack>
+                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                      Their mail goes through this tool unless you choose otherwise below:
+                      Google&apos;s Data Migration Service only starts on its own after a
+                      whole-tenant migration.
+                    </Typography>
+                  </Box>
+                )
+              })()}
+            </Box>
+            Copies everything the ledger does not already record, for
+            {who === 'some' ? ` the ${picked.length} chosen user(s)` : ` all ${d?.progress?.users ?? 0} users`}. Use this after a ledger
             reset, where a delta would not do: a delta asks the source what
             changed in a short window, so it would re-copy only recent mail
             and events and leave everything older unmigrated. Anything still
@@ -701,6 +768,14 @@ export const MigrationDetail: React.FC = () => {
               <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 0.5 }}>
                 Who moves the mail?
               </Typography>
+              {who === 'some' && mailBy !== 'engine' && (
+                <Alert severity="warning" sx={{ mb: 1 }} data-testid="who-dms-warning">
+                  For chosen users the Data Migration Service does not start on its own.
+                  {mailBy === 'split' ? ' Their mail without a Drive link' : ' All their mail'} waits,
+                  shown as &quot;mail awaiting DMS&quot;, until you start the import from Other
+                  services -- right for a migration done in batches, wrong if you forget it.
+                </Alert>
+              )}
               <RadioGroup value={mailBy}
                           onChange={(e) => setMailBy(e.target.value as MailMode)}>
                 <FormControlLabel
@@ -807,10 +882,6 @@ export const MigrationDetail: React.FC = () => {
                 Each blank means the run sizes itself, exactly as without these.
               </Typography>
               <Stack spacing={1.5}>
-                <TextField size="small" fullWidth label="Only these users" value={fullUsers}
-                           onChange={(e) => setFullUsers(e.target.value)}
-                           placeholder="blank = every user; comma-separated source addresses"
-                           inputProps={{ 'data-testid': 'run-full-users' }} />
                 <Stack direction="row" spacing={1.5}>
                   <TextField size="small" type="number" label="User workers" value={tuneUserWorkers}
                              onChange={(e) => setTuneUserWorkers(e.target.value)}
@@ -838,7 +909,10 @@ export const MigrationDetail: React.FC = () => {
             // the services here as well is what let "DMS" and "engine" drift apart.
             // dmsAfter goes only when it was switched off; the server's default is on.
             const num = (v: string) => (v.trim() === '' ? undefined : Number(v))
-            const users = fullUsers.split(',').map((u) => u.trim()).filter(Boolean)
+            if (who === 'some' && picked.length === 0) {
+              throw new Error('Choose at least one user, or pick All users.')
+            }
+            const users = who === 'some' ? picked : []
             const r = await startMigration(reason, ['all'], users, false,
                                            Number(accountId), mailBy, undefined,
                                            dmsAuto ? undefined : false,

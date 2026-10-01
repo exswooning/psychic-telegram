@@ -1,7 +1,8 @@
 /**
  * The reports panel is where a verdict is read, so what matters is that it
- * cannot flatter: UNVERIFIED is never shown as a pass, the downloads point at
- * the right files, and the panel is there when nothing else is.
+ * cannot flatter: UNVERIFIED is never shown as a pass, the one download points at
+ * the right file, and the panel is there when nothing else is -- collapsed, but
+ * still saying how many reports there are and the newest verdict.
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
@@ -17,6 +18,14 @@ vi.mock('@/api/controlPlane', () => ({
   },
 }))
 
+// The test runtime has no localStorage of its own; the card remembers open/closed in it.
+const store: Record<string, string> = {}
+vi.stubGlobal('localStorage', {
+  getItem: (k: string) => store[k] ?? null,
+  setItem: (k: string, v: string) => { store[k] = String(v) },
+  removeItem: (k: string) => { delete store[k] },
+})
+
 const rep = (over = {}) => ({
   id: 'migration-20260925T195855Z', kind: 'migration', generatedAt: '2026-09-25T19:58:55Z',
   verdict: 'UNVERIFIED', counts: { pass: 6, warn: 1, fail: 0, unknown: 5 },
@@ -27,6 +36,7 @@ const rep = (over = {}) => ({
 beforeEach(() => {
   api.fetchReports.mockReset(); api.generateReport.mockReset(); api.startTally.mockReset()
   api.fetchReports.mockResolvedValue({ accountId: 1, reports: [], error: '' })
+  localStorage.setItem('runReports.open', '1')   // most tests read the open card
 })
 
 describe('RunReports', () => {
@@ -79,20 +89,41 @@ describe('RunReports', () => {
     expect(screen.getByTestId('verdict-migration-20260102T000000Z').className).toMatch(/colorError/)
   })
 
-  it('links each download to the right file, as a download', async () => {
+  it('offers one download per report, the readable PDF, as a download', async () => {
     api.fetchReports.mockResolvedValue({ accountId: 1, reports: [rep()], error: '' })
     render(<RunReports />)
-    const human = await screen.findByTestId('pdf-human-migration-20260925T195855Z')
-    const claude = screen.getByTestId('pdf-claude-migration-20260925T195855Z')
-    expect(human).toHaveAttribute('href', '/api/v2/reports/migration-20260925T195855Z/pdf?audience=human')
-    expect(claude).toHaveAttribute('href', '/api/v2/reports/migration-20260925T195855Z/pdf?audience=claude')
-    expect(human).toHaveAttribute('download')
+    const dl = await screen.findByTestId('download-migration-20260925T195855Z')
+    expect(dl).toHaveTextContent('Download report')
+    expect(dl).toHaveAttribute('href', '/api/v2/reports/migration-20260925T195855Z/pdf?audience=human')
+    expect(dl).toHaveAttribute('download')
+    expect(screen.queryByText('Claude PDF')).toBeNull()
+    expect(screen.queryByText('JSON')).toBeNull()
+  })
+
+  it('falls back to the other PDF when a report only has that one', async () => {
+    api.fetchReports.mockResolvedValue({ accountId: 1, reports: [rep({ files: ['json', 'claude.pdf'] })], error: '' })
+    render(<RunReports />)
+    expect(await screen.findByTestId('download-migration-20260925T195855Z'))
+      .toHaveAttribute('href', '/api/v2/reports/migration-20260925T195855Z/pdf?audience=claude')
   })
 
   it('disables a download whose file does not exist rather than offering a dead link', async () => {
     api.fetchReports.mockResolvedValue({ accountId: 1, reports: [rep({ files: ['json'] })], error: '' })
     render(<RunReports />)
-    expect(await screen.findByTestId('pdf-human-migration-20260925T195855Z')).toHaveAttribute('aria-disabled', 'true')
+    expect(await screen.findByTestId('download-migration-20260925T195855Z')).toHaveAttribute('aria-disabled', 'true')
+  })
+
+  it('starts collapsed, still saying how many reports and the newest verdict, and opens', async () => {
+    localStorage.removeItem('runReports.open')
+    api.fetchReports.mockResolvedValue({ accountId: 1, reports: [rep(), rep({ id: 'older', verdict: 'FAIL' })], error: '' })
+    render(<RunReports />)
+    const summary = await screen.findByTestId('reports-summary')
+    await waitFor(() => expect(summary).toHaveTextContent('2 reports'))
+    expect(summary).toHaveTextContent('latest UNVERIFIED')
+    expect(screen.queryByTestId('report-migration-20260925T195855Z')).toBeNull()
+    fireEvent.click(screen.getByTestId('reports-toggle'))
+    expect(await screen.findByTestId('report-migration-20260925T195855Z')).toBeInTheDocument()
+    expect(localStorage.getItem('runReports.open')).toBe('1')
   })
 
   it('generates a report and shows it', async () => {
@@ -137,7 +168,7 @@ describe('RunReports', () => {
       render(<RunReports />)
       const row = await screen.findByTestId('report-migration-20260925T195855Z')
       expect(row).toHaveTextContent('account #2')
-      expect(screen.getByTestId('pdf-human-migration-20260925T195855Z'))
+      expect(screen.getByTestId('download-migration-20260925T195855Z'))
         .toHaveAttribute('href', '/api/v2/reports/migration-20260925T195855Z/pdf?audience=human&account_id=2')
     })
 

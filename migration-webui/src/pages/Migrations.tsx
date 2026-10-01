@@ -145,6 +145,12 @@ export const Migrations: React.FC = () => {
                   <Chip size="small" variant="outlined" label="idle" />
                 )}
                 <Box sx={{ flex: 1 }} />
+                {/* Straight to "who to migrate": every user, or the ones you choose. */}
+                <Button size="small" variant="outlined" data-testid={`migrate-${row.accountId}`}
+                        disabled={row.running}
+                        onClick={(e) => { e.stopPropagation(); navigate(`/migrations/${row.accountId}?run=full`) }}>
+                  Migrate…
+                </Button>
                 <Typography variant="caption" color="text.secondary">
                   {row.accountName}
                 </Typography>

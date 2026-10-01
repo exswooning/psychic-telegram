@@ -34,6 +34,11 @@ vi.mock('@/api/controlPlane', () => ({
  * one reason, and fifty identical HTTP 400s scrolled down a page hides that
  * entirely -- the count and one example are what anybody acts on.
  */
+// The heaviest page under test: every case opens dialogs full of controls. Alone each
+// takes well under a second, but under the full suite's parallel load several crossed
+// the 5 s default and failed as timeouts while being correct.
+vi.setConfig({ testTimeout: 20_000 })
+
 const detail = (over = {}) => ({
   accountId: 7,
   sourceDomain: 'source.example.com',
@@ -432,17 +437,84 @@ describe('MigrationDetail: settings for measured runs', () => {
     expect(screen.queryByTestId('run-full-fidelity')).toBeNull()
   })
 
-  it('sends the users and each number that was filled in', async () => {
+  it('sends each number that was filled in', async () => {
     await open()
-    fireEvent.change(screen.getByTestId('run-full-users'), { target: { value: 'a@s.test, b@s.test' } })
     fireEvent.change(screen.getByTestId('run-full-file-workers'), { target: { value: '12' } })
     fireEvent.change(screen.getByTestId('run-full-cache-cap'), { target: { value: '0' } })
     fireEvent.change(screen.getByTestId('run-full-processes'), { target: { value: '2' } })
     await confirm()
     const call = startMigration.mock.calls[0]
-    expect(call[2]).toEqual(['a@s.test', 'b@s.test'])
+    expect(call[2]).toEqual([])
     expect(call[9]).toEqual({ userWorkers: undefined, driveFileWorkers: 12, mappingCacheUserCap: 0,
                               processes: 2 })
+  })
+})
+
+describe('MigrationDetail: who to migrate', () => {
+  beforeEach(() => { vi.clearAllMocks(); startMigration.mockResolvedValue({ ok: true, actionId: 1, detail: 'started' }) })
+
+  const open = async () => {
+    show(detail())
+    fireEvent.click(await screen.findByTestId('run-full'))
+    await screen.findByText('Who to migrate?')
+  }
+  const reasonAndConfirm = () => {
+    fireEvent.change(screen.getByLabelText('Reason Code'), { target: { value: 'these users' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+  }
+  const radio = (id: string) => screen.getByTestId(id).querySelector('input')!
+
+  it('is every user by default, and sends no list', async () => {
+    await open()
+    expect(radio('who-all')).toBeChecked()
+    reasonAndConfirm()
+    await waitFor(() => expect(startMigration).toHaveBeenCalled())
+    expect(startMigration.mock.calls[0][2]).toEqual([])
+  })
+
+  it('says plainly what Split means for chosen users, and still allows it', async () => {
+    await open()
+    fireEvent.click(radio('who-some'))
+    expect(screen.queryByTestId('who-dms-warning')).toBeNull()
+    fireEvent.click(radio('mail-by-split'))
+    expect(screen.getByTestId('who-dms-warning')).toHaveTextContent('does not start on its own')
+  })
+
+  it('migrates only the users chosen, their mail through this tool by default', async () => {
+    await open()
+    fireEvent.click(radio('who-some'))
+    // the DMS only starts on its own after a whole-tenant run
+    expect(radio('mail-by-engine')).toBeChecked()
+    fireEvent.click(screen.getByTestId('pick-failed'))       // zane, the one failed user
+    reasonAndConfirm()
+    await waitFor(() => expect(startMigration).toHaveBeenCalled())
+    const call = startMigration.mock.calls[0]
+    expect(call[2]).toEqual(['zane@source.example.com'])
+    expect(call[5]).toBe('engine')
+  })
+
+  it('offers the users who are not finished in one click', async () => {
+    await open()
+    fireEvent.click(radio('who-some'))
+    expect(screen.getByTestId('pick-not-done')).toHaveTextContent('Add the 1 not finished')
+  })
+
+  it('will not start with nobody chosen', async () => {
+    await open()
+    fireEvent.click(radio('who-some'))
+    reasonAndConfirm()
+    expect(await screen.findByText('Choose at least one user, or pick All users.')).toBeInTheDocument()
+    expect(startMigration).not.toHaveBeenCalled()
+  })
+
+  it('opens straight to this when the Migrations list sends ?run=full', async () => {
+    fetchMigrationDetail.mockResolvedValue(detail())
+    render(
+      <MemoryRouter initialEntries={['/migrations/7?run=full']}>
+        <Routes><Route path="/migrations/:accountId" element={<MigrationDetail />} /></Routes>
+      </MemoryRouter>,
+    )
+    expect(await screen.findByText('Who to migrate?')).toBeInTheDocument()
   })
 })
 

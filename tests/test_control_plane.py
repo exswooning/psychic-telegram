@@ -3222,3 +3222,19 @@ class TestForceStop:
                     json={"reason": "still running", "force": True}, headers=ADMIN)
         assert r.json()["ok"] is False
         assert sent == [], "an unkillable-by-design signal went to a pid nothing here launched"
+
+
+class TestChosenUsersMoveTheirOwnMail:
+    """With no mode named, a few chosen users get the engine: the DMS is only started
+    after a whole-tenant run, so mail split off for them would not arrive on its own.
+    Split stays allowed when asked for -- a migration in batches with one DMS import at
+    the end -- and its mail is counted as owed (test_dms_starts_on_its_own)."""
+
+    def test_chosen_users_with_no_mode_get_the_engine(self, cp, monkeypatch):
+        import api_server
+        started = []
+        monkeypatch.setattr(api_server, "_run_admitted", lambda *a, **k: started.append(a) or (True, "x"))
+        r = cp.post("/api/v2/migrate/start", headers=ADMIN, json={
+            "reason": "two users", "services": ["all"], "users": ["a@s.test"]})
+        assert r.status_code == 200, r.text
+        assert started

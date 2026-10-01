@@ -21,6 +21,7 @@ vi.mock('@/components/ReasonCodeDialog', () => ({ default: () => null }))
 vi.mock('react-router-dom', () => ({
   useParams: () => ({ accountId: '7' }),
   useNavigate: () => vi.fn(),
+  useSearchParams: () => [new URLSearchParams(), vi.fn()],
 }))
 
 /**

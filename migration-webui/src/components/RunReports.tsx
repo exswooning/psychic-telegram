@@ -12,10 +12,10 @@
  */
 import React, { useCallback, useEffect, useState } from 'react'
 import {
-  Alert, Box, Button, Chip, CircularProgress, Paper, Stack, Tooltip, Typography,
+  Alert, Box, Button, Chip, CircularProgress, Collapse, IconButton, Paper, Stack, Tooltip, Typography,
 } from '@mui/material'
 import {
-  Description as JsonIcon, PictureAsPdf as PdfIcon, SmartToy as ClaudeIcon,
+  Download as DownloadIcon, ExpandLess as CloseIcon, ExpandMore as OpenIcon,
 } from '@mui/icons-material'
 import { fetchReports, generateReport, reportUrl, startTally } from '@/api/controlPlane'
 import type { ReportSummary, Verdict } from '@/api/controlPlane'
@@ -41,6 +41,15 @@ export const RunReports: React.FC<{
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [tally, setTally] = useState('')
+  // Collapsed unless this viewer left it open: every report ever made sat above the
+  // rest of the migration page. Remembered per browser only -- a convenience.
+  const [open, setOpen] = useState<boolean>(() => {
+    try { return localStorage.getItem('runReports.open') === '1' } catch { return false }
+  })
+  const toggle = () => setOpen((o) => {
+    try { localStorage.setItem('runReports.open', o ? '0' : '1') } catch { /* storage blocked */ }
+    return !o
+  })
 
   const load = useCallback(() => {
     fetchReports(accountId)
@@ -50,6 +59,7 @@ export const RunReports: React.FC<{
   useEffect(load, [load])
 
   const make = async () => {
+    setOpen(true)           // the new report, or why it failed, has to be visible
     setBusy(true)
     setError('')
     try {
@@ -63,6 +73,7 @@ export const RunReports: React.FC<{
   }
 
   const runTally = async () => {
+    setOpen(true)
     setTally('')
     setError('')
     try {
@@ -73,21 +84,38 @@ export const RunReports: React.FC<{
     }
   }
 
+  const latest = (reports ?? [])[0]
   return (
     <Paper variant="outlined" sx={{ p: 2, mb: 3 }} data-testid="run-reports">
-      <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.5 }}>
-        <Typography variant="h6" sx={{ fontWeight: 700, flexGrow: 1 }}>Run reports</Typography>
+      <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: open ? 0.5 : 0 }}>
+        <IconButton size="small" onClick={toggle} aria-expanded={open}
+                    aria-label={open ? 'hide run reports' : 'show run reports'} data-testid="reports-toggle">
+          {open ? <CloseIcon fontSize="small" /> : <OpenIcon fontSize="small" />}
+        </IconButton>
+        <Typography variant="h6" sx={{ fontWeight: 700, cursor: 'pointer' }} onClick={toggle}>
+          Run reports
+        </Typography>
+        {/* Closed, the card still says what matters: how many, and the newest verdict. */}
+        <Stack direction="row" spacing={1} alignItems="center" sx={{ flexGrow: 1 }} data-testid="reports-summary">
+          {reports !== null && (
+            <Typography variant="body2" color="text.secondary">
+              {reports.length} report{reports.length === 1 ? '' : 's'}
+            </Typography>
+          )}
+          {latest && (
+            <Chip size="small" label={`latest ${latest.verdict}`} color={VERDICT[latest.verdict].color}
+                  sx={{ fontWeight: 700 }} />
+          )}
+        </Stack>
         <Button variant="outlined" size="small" onClick={runTally}>Run tally</Button>
         <Button variant="contained" size="small" onClick={make} disabled={busy}
                 startIcon={busy ? <CircularProgress size={14} /> : undefined}>
           {busy ? 'Generating…' : 'Generate report now'}
         </Button>
       </Stack>
+      <Collapse in={open} unmountOnExit>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5, maxWidth: 780 }}>
         Each report is judged against benchmarks and saved, so it is still here after a restart.
-        Download the <strong>human</strong> PDF to read, or the <strong>Claude</strong> PDF to hand
-        to Claude Code — it carries the failing checks with exact values, the error families, the
-        configuration and the tail of the run&apos;s log.
       </Typography>
 
       <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5, maxWidth: 780 }}>
@@ -140,29 +168,26 @@ export const RunReports: React.FC<{
                 </Typography>
               )}
             </Box>
-            <Stack direction="row" spacing={0.75}>
-              {/* Different documents, not two copies: the human one is a summary to
-                  read; the Claude one is the evidence to fix from. */}
-              <Tooltip title="A summary to read: the numbers at a glance, every benchmark with its target, what went wrong, and what to do next.">
+            {/* One download. The two PDFs read the same to the people using them, so
+                offering both was a choice nobody could make; the second is the fallback
+                for a report that only has that one. */}
+            {(() => {
+              const kind = r.files.includes('human.pdf') ? 'human'
+                : r.files.includes('claude.pdf') ? 'claude' : null
+              return (
                 <span>
-                  <Button size="small" variant="outlined" startIcon={<PdfIcon />} component="a"
-                          href={reportUrl(r.id, 'human', r.accountId ?? accountId)} download disabled={!r.files.includes('human.pdf')}
-                          data-testid={`pdf-human-${r.id}`}>Human PDF</Button>
+                  <Button size="small" variant="outlined" startIcon={<DownloadIcon />} component="a"
+                          href={kind ? reportUrl(r.id, kind, r.accountId ?? accountId) : undefined}
+                          download disabled={!kind} data-testid={`download-${r.id}`}>
+                    Download report
+                  </Button>
                 </span>
-              </Tooltip>
-              <Tooltip title="The evidence to hand to Claude Code to fix a problem: exit code and timings, each failing benchmark with its metric and why it matters, the full error messages, ledger totals, configuration, environment, and the tail of the log.">
-                <span>
-                  <Button size="small" variant="outlined" startIcon={<ClaudeIcon />} component="a"
-                          href={reportUrl(r.id, 'claude', r.accountId ?? accountId)} download disabled={!r.files.includes('claude.pdf')}
-                          data-testid={`pdf-claude-${r.id}`}>Claude PDF</Button>
-                </span>
-              </Tooltip>
-              <Button size="small" startIcon={<JsonIcon />} component="a"
-                      href={reportUrl(r.id, 'json', r.accountId ?? accountId)} target="_blank" rel="noreferrer">JSON</Button>
-            </Stack>
+              )
+            })()}
           </Stack>
         ))}
       </Stack>
+      </Collapse>
     </Paper>
   )
 }
