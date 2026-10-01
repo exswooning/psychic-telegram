@@ -830,8 +830,12 @@ class GmailMigrator:
                 self.stats["forwarding_addresses"] = \
                     self.stats.get("forwarding_addresses", 0) + 1
             except OPTIONAL_PASS_ERRORS as exc:
+                if "alreadyExists" in str(exc):
+                    continue          # added by an earlier run of this user
+                # `addr`, not the lambda's `a`: live, this handler raised NameError
+                # on a 409 and took fiona's whole mail service down with it.
                 log.warning("[%s] forwarding address %s not migrated: %s",
-                            self.source_user, a.get("forwardingEmail"), exc)
+                            self.source_user, addr.get("forwardingEmail"), exc)
         if not self._settings_has(self.src, "getAutoForwarding"):
             return
         try:

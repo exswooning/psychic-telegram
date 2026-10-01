@@ -161,3 +161,44 @@ class TestAMissingApiMethodCannotLoseTheRun:
         src = _code(gmail_engine.GmailMigrator._settings_has)
         assert "users().settings()" in src
         assert "hasattr(" in src
+
+
+class TestAForwardingRefusalStaysInItsOwnPass:
+    """Live: a re-run's forwardingAddresses.create came back 409 alreadyExists, and the
+    handler logged `a.get(...)` -- the lambda's parameter, not the loop's -- so a
+    NameError took fiona's whole mail service down after her messages had landed."""
+
+    def _mig(self, exc):
+        from resilience import PermanentAPIError
+        m = object.__new__(gmail_engine.GmailMigrator)
+        m.source_user, m.stats = "f@s.example", {}
+        m._retry = lambda fn, **k: fn()
+        m._settings_has = lambda svc, name: name == "forwardingAddresses"
+
+        class Call:
+            def __init__(self, result=None, raises=None): self.result, self.raises = result, raises
+            def execute(self):
+                if self.raises:
+                    raise self.raises
+                return self.result
+
+        class Fwd:
+            def __init__(self, src): self.src = src
+            def list(self, userId): return Call({"forwardingAddresses": [{"forwardingEmail": "out@elsewhere.example"}]})
+            def create(self, userId, body): return Call(raises=PermanentAPIError(exc))
+
+        class Svc:
+            def __init__(self, src): self.src = src
+            def users(self): return self
+            def settings(self): return self
+            def forwardingAddresses(self): return Fwd(self.src)
+        m.src, m.tgt = Svc(True), Svc(False)
+        return m
+
+    def test_already_there_is_not_an_error(self, caplog):
+        self._mig("HTTP 409 (alreadyExists): Requested entity already exists")._migrate_forwarding()
+        assert "not migrated" not in caplog.text
+
+    def test_any_other_refusal_is_logged_with_the_address_and_does_not_raise(self, caplog):
+        self._mig("HTTP 400 (invalidArgument): nope")._migrate_forwarding()
+        assert "out@elsewhere.example not migrated" in caplog.text
