@@ -282,7 +282,12 @@ class Verifier:
         return self._retry(fn)()
 
     def _translate(self, addr: str) -> str:
-        return (self.db.resolve_identity(addr) or addr).lower() if addr else addr
+        # A secondary calendar named as a guest maps through its calendar mapping, as
+        # calendar_engine._map_address maps it.
+        if not addr:
+            return addr
+        return (self.db.resolve_identity(addr)
+                or self.db.target_for_source_id(addr.lower(), ("calendar",)) or addr).lower()
 
     def _pairs(self, type_: str, sample: bool = False) -> list[tuple[str, str, str | None]]:
         """Everything the ledger paired -- or, with `sample`, the part of it to open and compare.

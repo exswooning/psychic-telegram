@@ -134,6 +134,38 @@ class CalendarMigrator:
                 return
 
     # -- translation --------------------------------------------------------------
+    def _map_address(self, email: str | None) -> str | None:
+        """A person through the identity map; a secondary calendar
+        (c_...@group.calendar.google.com) through its own calendar mapping. Live, an
+        event on one listed the SOURCE calendar as a guest and the target calendar
+        beside it -- a guest nobody on the target can resolve."""
+        if not email:
+            return email
+        return (self.db.resolve_identity(email)
+                or self.db.target_for_source_id(email.lower(), ("calendar",)) or email)
+
+    def _calendar_guest_owed(self, item: dict) -> bool:
+        """A redo run (REDO_UNREWRITTEN_LINKS) re-patches the guests of an event copied
+        before calendar ids were mapped: true while any guest is a calendar that maps."""
+        if not self.settings.redo_unrewritten_links:
+            return False
+        return any(self.db.target_for_source_id((a.get("email") or "").lower(), ("calendar",))
+                   for a in item.get("attendees") or [] if not a.get("resource"))
+
+    def _attendees_for(self, item: dict, tgt_cal_id: str) -> list[dict]:
+        attendees = self._map_attendees(item.get("attendees"))
+        # Importing into a SECONDARY calendar is refused unless that calendar
+        # is itself the organizer or an attendee ("The owner of the calendar
+        # must either be the organizer or an attendee"). Adding it as an
+        # attendee satisfies that while leaving the real organizer intact --
+        # setting organizer to the calendar id also works but destroys the
+        # original organizer, which is the one thing this module exists to keep.
+        if tgt_cal_id != "primary":
+            if not any(a.get("email") == tgt_cal_id for a in attendees):
+                attendees = attendees + [{"email": tgt_cal_id,
+                                         "responseStatus": "accepted"}]
+        return attendees
+
     def _map_attendees(self, attendees: list[dict] | None) -> list[dict]:
         out = []
         for a in attendees or []:
@@ -147,7 +179,7 @@ class CalendarMigrator:
                     out.append({**a, "email": room})
                 continue
             email = a.get("email")
-            mapped = self.db.resolve_identity(email) or email
+            mapped = self._map_address(email)
             entry = {k: v for k, v in a.items() if k not in ("email", "resource")}
             entry["email"] = mapped
             out.append(entry)
@@ -189,6 +221,8 @@ class CalendarMigrator:
         """Carry a source-side edit onto the copy we already made."""
         body = {k: item[k] for k in _PATCH_KEYS if k in item}
         self._rewrite_links(body)
+        if self._calendar_guest_owed(item):
+            body["attendees"] = self._attendees_for(item, tgt_cal_id)
         if item.get("attachments") is not None:
             body["attachments"] = self._map_attachments(item.get("attachments"))
         try:
@@ -245,22 +279,10 @@ class CalendarMigrator:
 
         organizer_email = (item.get("organizer") or {}).get("email")
         if organizer_email:
-            body["organizer"] = {"email": self.db.resolve_identity(organizer_email) or organizer_email}
+            body["organizer"] = {"email": self._map_address(organizer_email)}
 
         self._rewrite_links(body)
-        attendees = self._map_attendees(item.get("attendees"))
-
-        # Importing into a SECONDARY calendar is refused unless that calendar
-        # is itself the organizer or an attendee ("The owner of the calendar
-        # must either be the organizer or an attendee"). Adding it as an
-        # attendee satisfies that while leaving the real organizer intact --
-        # setting organizer to the calendar id also works but destroys the
-        # original organizer, which is the one thing this module exists to keep.
-        if tgt_cal_id != "primary":
-            if not any(a.get("email") == tgt_cal_id for a in attendees):
-                attendees = attendees + [{"email": tgt_cal_id,
-                                         "responseStatus": "accepted"}]
-
+        attendees = self._attendees_for(item, tgt_cal_id)
         if attendees:
             body["attendees"] = attendees
 
@@ -461,7 +483,7 @@ class CalendarMigrator:
             # target -- and the ledger went on calling it DONE. A migration
             # runs for days and people keep using their calendars throughout,
             # so this is the common case, not an edge one.
-            if self._is_stale(eid, item) or self._links_owed(item):
+            if self._is_stale(eid, item) or self._links_owed(item) or self._calendar_guest_owed(item):
                 self._patch_existing(eid, existing, item, tgt_cal_id)
             else:
                 self.stats["skipped"] += 1

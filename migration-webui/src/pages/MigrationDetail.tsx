@@ -320,7 +320,7 @@ export const MigrationDetail: React.FC = () => {
                       <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
                         For mail and events that went in before the user&apos;s Drive did. A
                         message still naming a source file is put back with the link
-                        repointed (the old copy goes to the trash); an event is edited in place.
+                        repointed (the old copy goes to the trash); an event is edited in place, its links and any calendar it lists as a guest.
                       </Typography>
                       <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
                         Their mail goes through this tool unless you choose otherwise below:
