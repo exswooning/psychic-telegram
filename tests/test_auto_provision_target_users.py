@@ -32,6 +32,9 @@ class _FakeAuth:
         self.directory_calls.append((tenant, writable))
         return object()
 
+    def verify_delegation(self, tenant, user):
+        return True, "ok"
+
 
 class TestAutoProvisioningTargetUsers:
     def test_creates_missing_target_accounts_before_migrating(self, monkeypatch):

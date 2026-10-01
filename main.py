@@ -450,12 +450,25 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
             dm.consolidate_under = source_user
         return dm.run(delta=delta)
 
+    # A user whose Drive failed earlier in this ordered run: their mail and calendar would
+    # go in with every link still naming the source tenant, and an inserted message is
+    # skipped by every later pass -- so they wait, failed, for a run where Drive succeeds.
+    held = source_user.lower() in {u.lower() for u in os.getenv("DRIVE_FAILED_USERS", "").split(",") if u}
+
+    def _held(service: str) -> None:
+        if held:
+            raise RuntimeError(f"held: this user's Drive did not migrate in this run, so their "
+                               f"{service} would keep links to the source tenant. It runs once "
+                               f"Drive succeeds.")
+
     def _gmail():
+        _held("mail")
         return GmailMigrator(auth, db, settings, source_user, target_user).run(
             delta=delta, since_epoch_days=delta_days,
             drive_in_scope="drive" in services)
 
     def _calendar():
+        _held("calendar")
         updated_min = None
         if delta:
             updated_min = (
@@ -1055,6 +1068,7 @@ def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
             whole_tenant = not only and not getattr(settings, "sample_limit", None)
             if whole_tenant and not delta:
                 _before_passes(db, auth, settings, everything)
+            os.environ["DRIVE_FAILED_USERS"] = ""
             for i, one in enumerate(plan, 1):
                 if len(plan) > 1:
                     # Read back by the API to say which pass a live run is on. Carries
@@ -1062,7 +1076,17 @@ def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
                     # from the PREVIOUS run would otherwise read as this one's.
                     print(f"PASS {i}/{len(plan)} pid={os.getpid()}: {','.join(sorted(one))}",
                           flush=True)
-                results += _run_pass(auth, db, settings, one, delta, delta_days, only)
+                pass_results = _run_pass(auth, db, settings, one, delta, delta_days, only)
+                results += pass_results
+                if "drive" in one and i < len(plan):
+                    # Read by migrate_user, in this process and in every shard of the
+                    # next pass: a user whose Drive did not migrate keeps their mail
+                    # and calendar back rather than having links left on the source.
+                    held = _users_whose_drive_failed(pass_results)
+                    os.environ["DRIVE_FAILED_USERS"] = ",".join(held)
+                    if held:
+                        log.warning("holding mail and calendar for %d user(s) whose Drive did not "
+                                    "migrate in this run: %s", len(held), ", ".join(held[:10]))
                 # A pause or a Stop ends the RUN, not just the pass: starting the
                 # next one under sustained memory pressure, or after the operator
                 # asked it to stop, is the opposite of what either means.
@@ -1335,10 +1359,37 @@ def _ensure_target_accounts(auth: AuthManager, settings: Settings,
         more = f", +{len(created) - 10} more" if len(created) > 10 else ""
         log.info("auto-provisioned %d target account(s) that did not "
                  "exist yet: %s%s", len(created), ", ".join(created[:10]), more)
+        _wait_until_usable(auth, created)
     if result["failed"]:
         log.warning("%d target account(s) could not be auto-provisioned "
                     "and will fail migration: %s", len(result["failed"]),
                     ", ".join(e for e, _ in result["failed"][:10]))
+
+
+def _wait_until_usable(auth, emails: list[str], timeout_s: float = 600, every_s: float = 15,
+                       sleep=time.sleep, now=time.monotonic) -> list[str]:
+    """Wait, bounded, until each just-created target account can be used through delegation.
+
+    Google refuses a brand-new account's token for a while (unauthorized_client) -- found
+    live: Drive started one second after fiona@target2 was created and failed outright,
+    while contacts and tasks for the same user, later in the same pass, went through.
+    Each new account is probed with the same token-and-one-call check preflight uses.
+    Returns the accounts still refused at the deadline; they are migrated anyway and fail
+    visibly, rather than stopping everyone else's run.
+    """
+    waiting = list(dict.fromkeys(emails))
+    deadline = now() + timeout_s
+    while waiting:
+        waiting = [e for e in waiting if not auth.verify_delegation("target", e)[0]]
+        if not waiting or now() >= deadline:
+            break
+        log.info("waiting for %d new target account(s) to become usable: %s",
+                 len(waiting), ", ".join(waiting[:5]))
+        sleep(every_s)
+    if waiting:
+        log.warning("%d new target account(s) still refused after %ds; migrating them anyway: %s",
+                    len(waiting), int(timeout_s), ", ".join(waiting[:10]))
+    return waiting
 
 
 def _warn_if_ledger_is_stale(db, auth, pairs) -> None:
@@ -1573,6 +1624,12 @@ def _sync_calendar_subscriptions(db, auth, settings, only=None) -> None:
         except Exception as exc:      # noqa: BLE001 - one user's list never stops the rest
             log.warning("[%s] calendar subscriptions failed: %s", src, exc)
     log.info("calendar subscriptions re-followed: %d", total)
+
+
+def _users_whose_drive_failed(results: list[dict]) -> list[str]:
+    """Users a Drive pass attempted and failed: FAILED, with no Drive result."""
+    return sorted({r["source"] for r in results
+                   if r.get("status") == "FAILED" and "drive" not in (r.get("services") or {})})
 
 
 def _repair_between_passes(db, auth, settings) -> None:

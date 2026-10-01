@@ -80,7 +80,11 @@ export const MigrationDetail: React.FC = () => {
   const [picked, setPicked] = useState<string[]>([])
   // ?run=full -- the Migrate button on the Migrations list -- opens the dialog here.
   const [params] = useSearchParams()
-  useEffect(() => { if (params.get('run') === 'full') setAskFull(true) }, [params])
+  const wantCard = params.get('run') === 'full'
+  const loaded = d !== null
+  useEffect(() => {
+    if (wantCard && loaded) document.getElementById('migrate-card')?.scrollIntoView?.({ behavior: 'smooth', block: 'center' })
+  }, [wantCard, loaded])
   const [tuneUserWorkers, setTuneUserWorkers] = useState('')
   const [tuneFileWorkers, setTuneFileWorkers] = useState('')
   const [tuneCacheCap, setTuneCacheCap] = useState('')
@@ -237,6 +241,85 @@ export const MigrationDetail: React.FC = () => {
               One-to-one check
             </Button>
           </Stack>
+
+          {/* Who to migrate, on the page rather than inside a dialog: the choice is the
+              first thing anyone migrating a few users needs, and ?run=full (the Migrate...
+              button on the Migrations list) lands here, highlighted. */}
+          <Paper variant="outlined" id="migrate-card" data-testid="migrate-card"
+                 data-highlighted={wantCard ? 'true' : 'false'}
+                 sx={{ p: 2, mb: 2, borderColor: wantCard ? 'primary.main' : undefined,
+                       borderWidth: wantCard ? 2 : 1 }}>
+            <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
+              <Typography variant="subtitle1" sx={{ fontWeight: 700, flexGrow: 1 }}>Migrate users</Typography>
+              <Button variant="contained" size="small" data-testid="migrate-start"
+                      disabled={d.running || (who === 'some' && picked.length === 0)}
+                      onClick={() => setAskFull(true)}>
+                {d.running ? 'migration running'
+                  : who === 'some'
+                    ? `Migrate ${picked.length} chosen user${picked.length === 1 ? '' : 's'}…`
+                    : `Migrate all ${(d.users?.length ?? d.progress?.users ?? 0).toLocaleString()} users…`}
+              </Button>
+            </Stack>
+              <Box data-testid="who">
+                <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 0.5 }}>
+                  Who to migrate?
+                </Typography>
+                <RadioGroup value={who} onChange={(e) => {
+                  const v = e.target.value as 'all' | 'some'
+                  setWho(v)
+                  if (v === 'some') setMailBy('engine')
+                }}>
+                  <FormControlLabel value="all" control={<Radio size="small" />} data-testid="who-all"
+                    label={<Typography variant="body2"><strong>All {(d?.users?.length ?? d?.progress?.users ?? 0).toLocaleString()} users</strong> — anyone already finished is skipped.</Typography>} />
+                  <FormControlLabel value="some" control={<Radio size="small" />} data-testid="who-some"
+                    label={<Typography variant="body2"><strong>Only the users I choose</strong></Typography>} />
+                </RadioGroup>
+                {who === 'some' && (() => {
+                  const all = d?.users ?? []
+                  const status = Object.fromEntries(all.map((u) => [u.sourceUser, u.status]))
+                  const failed = all.filter((u) => u.status === 'FAILED' || u.status === 'BLOCKED').map((u) => u.sourceUser)
+                  const notDone = all.filter((u) => u.status !== 'DONE').map((u) => u.sourceUser)
+                  const add = (us: string[]) => setPicked((p) => Array.from(new Set([...p, ...us])))
+                  return (
+                    <Box sx={{ pl: 4 }}>
+                      <Autocomplete multiple size="small" disableCloseOnSelect filterSelectedOptions
+                        options={all.map((u) => u.sourceUser)} value={picked}
+                        onChange={(_, v) => setPicked(v)}
+                        renderOption={(props, option) => (
+                          <li {...props} key={option}>
+                            <Typography variant="body2" sx={{ flexGrow: 1 }}>{option}</Typography>
+                            <Chip size="small" variant="outlined" label={(status[option] || '').toLowerCase()} />
+                          </li>
+                        )}
+                        renderInput={(p) => (
+                          <TextField {...p} label={`Users — ${picked.length} chosen`} placeholder="Type a name or address"
+                                     inputProps={{ ...p.inputProps, 'data-testid': 'run-full-users' }} />
+                        )} />
+                      <Stack direction="row" spacing={1} sx={{ mt: 0.5 }}>
+                        {failed.length > 0 && (
+                          <Button size="small" data-testid="pick-failed" onClick={() => add(failed)}>
+                            Add the {failed.length} failed
+                          </Button>
+                        )}
+                        {notDone.length > 0 && (
+                          <Button size="small" data-testid="pick-not-done" onClick={() => add(notDone)}>
+                            Add the {notDone.length} not finished
+                          </Button>
+                        )}
+                        {picked.length > 0 && (
+                          <Button size="small" onClick={() => setPicked([])}>Clear</Button>
+                        )}
+                      </Stack>
+                      <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                        Their mail goes through this tool unless you choose otherwise below:
+                        Google&apos;s Data Migration Service only starts on its own after a
+                        whole-tenant migration.
+                      </Typography>
+                    </Box>
+                  )
+                })()}
+              </Box>
+          </Paper>
 
           {/* What the last quick migration found when it checked its own work. Fetched
               again when a run starts or ends. */}
@@ -691,65 +774,13 @@ export const MigrationDetail: React.FC = () => {
           : `Run a full migration over ${d?.sourceDomain || 'this tenant'}`}
         description={
           <>
-            <Box sx={{ mb: 2 }} data-testid="who">
-              <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 0.5 }}>
-                Who to migrate?
-              </Typography>
-              <RadioGroup value={who} onChange={(e) => {
-                const v = e.target.value as 'all' | 'some'
-                setWho(v)
-                if (v === 'some') setMailBy('engine')
-              }}>
-                <FormControlLabel value="all" control={<Radio size="small" />} data-testid="who-all"
-                  label={<Typography variant="body2"><strong>All {(d?.users?.length ?? d?.progress?.users ?? 0).toLocaleString()} users</strong> — anyone already finished is skipped.</Typography>} />
-                <FormControlLabel value="some" control={<Radio size="small" />} data-testid="who-some"
-                  label={<Typography variant="body2"><strong>Only the users I choose</strong></Typography>} />
-              </RadioGroup>
-              {who === 'some' && (() => {
-                const all = d?.users ?? []
-                const status = Object.fromEntries(all.map((u) => [u.sourceUser, u.status]))
-                const failed = all.filter((u) => u.status === 'FAILED' || u.status === 'BLOCKED').map((u) => u.sourceUser)
-                const notDone = all.filter((u) => u.status !== 'DONE').map((u) => u.sourceUser)
-                const add = (us: string[]) => setPicked((p) => Array.from(new Set([...p, ...us])))
-                return (
-                  <Box sx={{ pl: 4 }}>
-                    <Autocomplete multiple size="small" disableCloseOnSelect filterSelectedOptions
-                      options={all.map((u) => u.sourceUser)} value={picked}
-                      onChange={(_, v) => setPicked(v)}
-                      renderOption={(props, option) => (
-                        <li {...props} key={option}>
-                          <Typography variant="body2" sx={{ flexGrow: 1 }}>{option}</Typography>
-                          <Chip size="small" variant="outlined" label={(status[option] || '').toLowerCase()} />
-                        </li>
-                      )}
-                      renderInput={(p) => (
-                        <TextField {...p} label={`Users — ${picked.length} chosen`} placeholder="Type a name or address"
-                                   inputProps={{ ...p.inputProps, 'data-testid': 'run-full-users' }} />
-                      )} />
-                    <Stack direction="row" spacing={1} sx={{ mt: 0.5 }}>
-                      {failed.length > 0 && (
-                        <Button size="small" data-testid="pick-failed" onClick={() => add(failed)}>
-                          Add the {failed.length} failed
-                        </Button>
-                      )}
-                      {notDone.length > 0 && (
-                        <Button size="small" data-testid="pick-not-done" onClick={() => add(notDone)}>
-                          Add the {notDone.length} not finished
-                        </Button>
-                      )}
-                      {picked.length > 0 && (
-                        <Button size="small" onClick={() => setPicked([])}>Clear</Button>
-                      )}
-                    </Stack>
-                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
-                      Their mail goes through this tool unless you choose otherwise below:
-                      Google&apos;s Data Migration Service only starts on its own after a
-                      whole-tenant migration.
-                    </Typography>
-                  </Box>
-                )
-              })()}
-            </Box>
+            <Typography variant="body2" sx={{ mb: 2 }} data-testid="who-summary">
+              <strong>Who:</strong>{' '}
+              {who === 'some'
+                ? `${picked.length} chosen user${picked.length === 1 ? '' : 's'}: ${picked.slice(0, 5).join(', ')}${picked.length > 5 ? ` and ${picked.length - 5} more` : ''}`
+                : `all ${(d?.users?.length ?? d?.progress?.users ?? 0).toLocaleString()} users`}.
+              {' '}Change it in the Migrate users card on the page.
+            </Typography>
             Copies everything the ledger does not already record, for
             {who === 'some' ? ` the ${picked.length} chosen user(s)` : ` all ${d?.progress?.users ?? 0} users`}. Use this after a ledger
             reset, where a delta would not do: a delta asks the source what

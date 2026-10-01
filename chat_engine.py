@@ -179,7 +179,7 @@ class ChatMigrator:
             if space.get("spaceType") != "SPACE" and self.settings.chat_space_mode != "import":
                 # A DM is its participants, not a name; recreating it as a
                 # named space would quietly change what it is. Import mode
-                # creates it as a DM / group chat proper; direct mode cannot.
+                # creates it as a group chat of its members; direct mode cannot.
                 self.db.log_audit(self.source_user, name, "chat_space",
                                   "SKIPPED_NOT_A_SPACE",
                                   f"spaceType={space.get('spaceType')}")
@@ -255,6 +255,10 @@ class ChatMigrator:
         import_mode = self.settings.chat_space_mode == "import"
         tgt = self.auth.target_chat(self.target_user)
         stype = space.get("spaceType") or "SPACE"
+        # Import mode refuses DIRECT_MESSAGE ("Specify a space type of SPACE or
+        # GROUP_CHAT"); Google's own guidance is a two-member group chat.
+        if import_mode and stype == "DIRECT_MESSAGE":
+            stype = "GROUP_CHAT"
         # A DM / group chat has no name of its own: it is its members.
         body = ({"spaceType": "SPACE", "displayName": f"{display}"} if stype == "SPACE"
                 else {"spaceType": stype})

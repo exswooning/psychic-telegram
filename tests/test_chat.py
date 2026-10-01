@@ -93,7 +93,9 @@ def test_direct_messages_are_skipped_in_direct_mode(chat_migrator, auth, db, set
     assert row is not None and row["status"] == "SKIPPED_NOT_A_SPACE"
 
 
-def test_import_mode_recreates_a_direct_message_as_one(chat_migrator, auth, db, settings):
+def test_import_mode_recreates_a_direct_message_as_a_group_chat(chat_migrator, auth, db, settings):
+    """Import mode refuses DIRECT_MESSAGE (found live, every DM 400'd); Google's
+    guidance is a two-member GROUP_CHAT."""
     settings.chat_space_mode = "import"
     src = auth.source_chat(SRC_USER)
     dm = src.add_space("", space_type="DIRECT_MESSAGE")
@@ -102,7 +104,8 @@ def test_import_mode_recreates_a_direct_message_as_one(chat_migrator, auth, db, 
     chat_migrator.run()
 
     made = list(auth.target_chat(TGT_USER).space_store.values())
-    assert [s["spaceType"] for s in made] == ["DIRECT_MESSAGE"]
+    assert [s["spaceType"] for s in made] == ["GROUP_CHAT"]
+    assert db.get_audit(SRC_USER, dm, "chat_space")["status"] == "SUCCESS"
     assert not made[0]["importMode"]              # completed, visible to its members
 
 

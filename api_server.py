@@ -4519,6 +4519,24 @@ def _progress_since(conn, started_at: str | None) -> dict | None:
     return {"moved": row["moved"] or 0, "failed": row["failed"] or 0,
             "skipped": row["skipped"] or 0, "since": bound}
 
+def _this_run(samples: list[dict]) -> list[dict]:
+    """The newest run's samples only (newest first). run_metrics keeps the last
+    240 rows whoever wrote them, so the charts joined a run from two days ago to
+    this one -- and read the fresh limiter's 40/s after a 281/s sample as a
+    pushback. A sample without a readable time or elapsed_sec keeps everything."""
+    def at(s):
+        try:
+            return _dt.datetime.fromisoformat(
+                str(s.get("recordedAt")).replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    t0, elapsed = at(samples[0]), samples[0].get("elapsed_sec")
+    if t0 is None or not isinstance(elapsed, (int, float)):
+        return samples
+    start = t0 - elapsed - 60           # a minute's slack for the first flush
+    return [s for s in samples if (at(s) or 0) >= start]
+
+
 def _limiter_history(samples: list[dict]) -> dict:
     """{limiter: [{t, rate, kind}]}, oldest first -- the rate limiters'
     sawtooth over the window the snapshots cover.
@@ -4929,6 +4947,7 @@ async def migration_metrics(account_id: int, history: int = 60,
             out["error"] = ("no metrics recorded yet -- they are written "
                             "every 15s while a migration runs")
             return out
+        samples = _this_run(samples)
 
         latest = samples[0]
         out["latest"] = {

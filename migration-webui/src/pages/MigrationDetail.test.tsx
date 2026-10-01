@@ -453,10 +453,9 @@ describe('MigrationDetail: settings for measured runs', () => {
 describe('MigrationDetail: who to migrate', () => {
   beforeEach(() => { vi.clearAllMocks(); startMigration.mockResolvedValue({ ok: true, actionId: 1, detail: 'started' }) })
 
-  const open = async () => {
+  const card = async () => {
     show(detail())
-    fireEvent.click(await screen.findByTestId('run-full'))
-    await screen.findByText('Who to migrate?')
+    return await screen.findByTestId('migrate-card')
   }
   const reasonAndConfirm = () => {
     fireEvent.change(screen.getByLabelText('Reason Code'), { target: { value: 'these users' } })
@@ -464,28 +463,26 @@ describe('MigrationDetail: who to migrate', () => {
   }
   const radio = (id: string) => screen.getByTestId(id).querySelector('input')!
 
-  it('is every user by default, and sends no list', async () => {
-    await open()
+  it('is a card on the page, every user by default, and sends no list', async () => {
+    const c = await card()
+    expect(c).toHaveTextContent('Who to migrate?')
     expect(radio('who-all')).toBeChecked()
+    expect(screen.getByTestId('migrate-start')).toHaveTextContent('Migrate all 2 users…')
+    fireEvent.click(screen.getByTestId('migrate-start'))
+    expect(await screen.findByTestId('who-summary')).toHaveTextContent('all 2 users')
     reasonAndConfirm()
     await waitFor(() => expect(startMigration).toHaveBeenCalled())
     expect(startMigration.mock.calls[0][2]).toEqual([])
   })
 
-  it('says plainly what Split means for chosen users, and still allows it', async () => {
-    await open()
-    fireEvent.click(radio('who-some'))
-    expect(screen.queryByTestId('who-dms-warning')).toBeNull()
-    fireEvent.click(radio('mail-by-split'))
-    expect(screen.getByTestId('who-dms-warning')).toHaveTextContent('does not start on its own')
-  })
-
   it('migrates only the users chosen, their mail through this tool by default', async () => {
-    await open()
+    await card()
     fireEvent.click(radio('who-some'))
-    // the DMS only starts on its own after a whole-tenant run
-    expect(radio('mail-by-engine')).toBeChecked()
     fireEvent.click(screen.getByTestId('pick-failed'))       // zane, the one failed user
+    expect(screen.getByTestId('migrate-start')).toHaveTextContent('Migrate 1 chosen user…')
+    fireEvent.click(screen.getByTestId('migrate-start'))
+    expect(await screen.findByTestId('who-summary')).toHaveTextContent('1 chosen user: zane@source.example.com')
+    expect(radio('mail-by-engine')).toBeChecked()
     reasonAndConfirm()
     await waitFor(() => expect(startMigration).toHaveBeenCalled())
     const call = startMigration.mock.calls[0]
@@ -493,28 +490,38 @@ describe('MigrationDetail: who to migrate', () => {
     expect(call[5]).toBe('engine')
   })
 
+  it('says plainly what Split means for chosen users, and still allows it', async () => {
+    await card()
+    fireEvent.click(radio('who-some'))
+    fireEvent.click(screen.getByTestId('pick-failed'))
+    fireEvent.click(screen.getByTestId('migrate-start'))
+    await screen.findByTestId('who-summary')
+    expect(screen.queryByTestId('who-dms-warning')).toBeNull()
+    fireEvent.click(radio('mail-by-split'))
+    expect(screen.getByTestId('who-dms-warning')).toHaveTextContent('does not start on its own')
+  })
+
   it('offers the users who are not finished in one click', async () => {
-    await open()
+    await card()
     fireEvent.click(radio('who-some'))
     expect(screen.getByTestId('pick-not-done')).toHaveTextContent('Add the 1 not finished')
   })
 
-  it('will not start with nobody chosen', async () => {
-    await open()
+  it('cannot start with nobody chosen', async () => {
+    await card()
     fireEvent.click(radio('who-some'))
-    reasonAndConfirm()
-    expect(await screen.findByText('Choose at least one user, or pick All users.')).toBeInTheDocument()
-    expect(startMigration).not.toHaveBeenCalled()
+    expect(screen.getByTestId('migrate-start')).toBeDisabled()
   })
 
-  it('opens straight to this when the Migrations list sends ?run=full', async () => {
+  it('is where the Migrations list sends ?run=full, highlighted, with no dialog over it', async () => {
     fetchMigrationDetail.mockResolvedValue(detail())
     render(
       <MemoryRouter initialEntries={['/migrations/7?run=full']}>
         <Routes><Route path="/migrations/:accountId" element={<MigrationDetail />} /></Routes>
       </MemoryRouter>,
     )
-    expect(await screen.findByText('Who to migrate?')).toBeInTheDocument()
+    expect(await screen.findByTestId('migrate-card')).toHaveAttribute('data-highlighted', 'true')
+    expect(screen.queryByRole('dialog')).toBeNull()
   })
 })
 

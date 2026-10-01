@@ -59,3 +59,20 @@ def test_a_malformed_event_is_skipped():
 
 def test_no_snapshots_is_an_empty_timeline():
     assert api_server._limiter_history([]) == {}
+
+
+def test_only_the_newest_run_is_drawn():
+    """Found live: a run from 29 Sept (281/s) joined to today's fresh limiter (40/s)
+    drew a pushback Google never sent."""
+    new = {"recordedAt": "2026-10-01T07:30:00Z", "elapsed_sec": 120.0,
+           "limiters": {"source": {"rate": 40.0}}}
+    old = {"recordedAt": "2026-09-29T04:48:00Z", "elapsed_sec": 9000.0,
+           "limiters": {"source": {"rate": 281.0}}}
+    kept = api_server._this_run([new, old])
+    assert kept == [new]
+    assert [p["rate"] for p in api_server._limiter_history(kept)["source"]] == [40.0]
+
+
+def test_samples_without_elapsed_are_all_kept():
+    rows = [_snap("2026-10-01T07:30:00Z"), _snap("2026-09-29T04:48:00Z")]
+    assert api_server._this_run(rows) == rows

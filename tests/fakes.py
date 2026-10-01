@@ -1903,6 +1903,10 @@ class _ChatSpaces:
         return _Call(self.s, "spaces.create", self._create, kw)
 
     def _create(self, body: dict, **_):
+        # As Google does: import mode takes SPACE and GROUP_CHAT, never a DM.
+        if body.get("importMode") and body.get("spaceType") not in (None, "SPACE", "GROUP_CHAT"):
+            raise http_error(400, "invalidArgument", "Specify a space type of SPACE or "
+                             "GROUP_CHAT. Other space types aren't supported.")
         sid = f"spaces/{self.s._new_id('sp')}"
         self.s.space_store[sid] = {
             "name": sid, "displayName": body.get("displayName"),
