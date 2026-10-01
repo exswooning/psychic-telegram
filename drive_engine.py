@@ -33,7 +33,7 @@ import metrics
 
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload  # noqa: F401
 
-from config import EXPORT_MIME_MAP, FOLDER_MIME, SHORTCUT_MIME, Settings
+from config import EXPORT_MIME_MAP, FOLDER_MIME, OWED_GRANT, SHORTCUT_MIME, Settings
 from sample_budget import Budget
 from resilience import (AdaptiveRateLimiter, PermanentAPIError, QuotaExhausted,
                         RateLimiter, retry_on_google_error, shutdown_requested)
@@ -345,6 +345,33 @@ def _expiry_is_settable(stamp: str) -> bool:
 def _is_unreachable_grantee(exc: Exception) -> bool:
     text = str(exc).lower()
     return any(m in text for m in _NO_ACCOUNT_MARKERS)
+
+
+def _in_target_domain(email: str, settings) -> bool:
+    return email.rsplit("@", 1)[-1].lower() == (settings.target_domain or "").lower()
+
+
+# What the TARGET directory says of an address: True (a user), False (a 404), None
+# (it could not say). Process-wide -- every user of a run shares the same colleagues,
+# and a run creates the accounts it needs (_ensure_target_accounts) before a pass
+# starts, so nothing this caches goes stale within one.
+_TARGET_ACCOUNT: dict[str, bool | None] = {}
+_TARGET_ACCOUNT_LOCK = threading.Lock()
+
+
+def _target_account_exists(auth, email: str) -> bool | None:
+    key = email.lower()
+    with _TARGET_ACCOUNT_LOCK:
+        if key in _TARGET_ACCOUNT:
+            return _TARGET_ACCOUNT[key]
+    try:
+        auth.directory("target").users().get(userKey=email, fields="primaryEmail").execute()
+        found: bool | None = True
+    except Exception as exc:      # noqa: BLE001 - only a 404 says "no account"
+        found = False if getattr(getattr(exc, "resp", None), "status", None) == 404 else None
+    with _TARGET_ACCOUNT_LOCK:
+        _TARGET_ACCOUNT[key] = found
+    return found
 
 
 def _is_server_error(exc: Exception) -> bool:
@@ -2040,7 +2067,8 @@ class DriveMigrator:
 
     # -- ACL translation -----------------------------------------------------------
     def _sync_acls(self, source_id: str, target_id: str,
-                   shared: bool | None = None, resume: bool = False) -> int:
+                   shared: bool | None = None, resume: bool = False,
+                   only: set[str] | None = None) -> int:
         """
         Returns the number of grants actually applied -- the caller needs that
         to know whether modifiedTime has to be re-asserted.
@@ -2117,8 +2145,10 @@ class DriveMigrator:
                 and any(d.get("inherited")
                         for d in (x.get("permissionDetails") or []))),
             self.settings)
-        return self._create_permissions_batched(
-            target_id, self._translate_grants(source_id, perms, resume=resume))
+        grants = self._translate_grants(source_id, perms, resume=resume)
+        if only is not None:          # repair: just the grants it was asked to put back
+            grants = [g for g in grants if g[1] in only]
+        return self._create_permissions_batched(target_id, grants)
 
     def _translate_grants(self, source_id: str, perms: list[dict],
                           resume: bool = False) -> list[tuple[dict, str | None]]:
@@ -2251,6 +2281,7 @@ class DriveMigrator:
         Returns the number of grants actually applied, so the caller knows
         whether modifiedTime has to be re-asserted.
         """
+        grants = [g for g in grants if not self._owed_to_missing_account(*g)]
         if not grants:
             return 0
 
@@ -2260,6 +2291,21 @@ class DriveMigrator:
             chunk = grants[start:start + batch_size]
             applied += self._create_permissions_chunk(target_id, chunk)
         return applied
+
+    def _owed_to_missing_account(self, body: dict, audit_key: str | None) -> bool:
+        """A share with a colleague who has no account on the target yet: recorded as
+        owed at once, without the ~40 s window meant for an account this run just
+        created. Live, 63 such grants (colleagues not in a 2-user batch) cut a run to
+        0.5 calls/s. repair.reapply_owed_grants grants it once the account exists."""
+        email = body.get("emailAddress") or ""
+        if (body.get("type") != "user" or not audit_key
+                or not _in_target_domain(email, self.settings)
+                or _target_account_exists(self.auth, email) is not False):
+            return False
+        self.db.log_audit(self.source_user, audit_key, "acl", OWED_GRANT,
+                          f"{email} has no account on the target yet; "
+                          "repair grants it once it does")
+        return True
 
     def _create_permissions_chunk(self, target_id: str,
                                   chunk: list[tuple[dict, str]]) -> int:
@@ -2390,6 +2436,14 @@ class DriveMigrator:
                 self.db.log_audit(self.source_user, audit_key, "acl", "SUCCESS")
                 return 1
             except (PermanentAPIError, RuntimeError) as exc:
+                grantee = body.get("emailAddress") or (audit_key or "").partition(":")[2]
+                if _is_unreachable_grantee(exc) and _in_target_domain(grantee, self.settings):
+                    # A colleague, not an outsider: their account comes when they are
+                    # migrated, and repair grants this then.
+                    self.db.log_audit(self.source_user, audit_key, "acl", OWED_GRANT,
+                                      "no account on the target yet; repair grants it "
+                                      "once it does: " + str(exc))
+                    return 0
                 if _is_unreachable_grantee(exc):
                     # Not a failure to retry: no number of attempts creates a
                     # Google account for this address. Named so the report can

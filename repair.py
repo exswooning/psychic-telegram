@@ -196,6 +196,70 @@ def stale_grantee_failures(db, directory=None) -> list:
     return out
 
 
+def reapply_owed_grants(auth, db, settings, apply: bool = False) -> dict:
+    """Grant the shares that were owed to a colleague with no target account, now
+    that the account exists.
+
+    A run for a few users shares their files with colleagues who are not on the
+    target yet (live: fiona's and seeduser160's files, shared with 67 colleagues
+    Delete users had removed). Nothing put those back when the colleagues were
+    migrated later. Each one is granted through the engine's own _sync_acls, limited
+    to the owed keys, so the role, expiry and inheritance are translated exactly as
+    the migration translates them. Older runs recorded these as
+    SKIPPED_GRANTEE_NOT_ON_GOOGLE; a colleague's are taken too. Only a successful
+    directory lookup counts as "the account exists". Never raises.
+    """
+    from config import OWED_GRANT
+    from drive_engine import DriveMigrator, _in_target_domain
+    from resilience import DailyQuotaGuard
+
+    out = {"owed": 0, "ready": 0, "granted": 0, "errors": []}
+    by_user: dict[str, dict[str, set[str]]] = {}
+    for r in db.conn.execute(
+            "SELECT source_user, item_id FROM audit_log WHERE item_type='acl' AND status IN (?,?)",
+            (OWED_GRANT, "SKIPPED_GRANTEE_NOT_ON_GOOGLE")):
+        sid, _, grantee = r["item_id"].partition(":")
+        if "@" not in grantee or not _in_target_domain(grantee, settings):
+            continue                       # an outsider: no directory to ask
+        out["owed"] += 1
+        by_user.setdefault(r["source_user"], {}).setdefault(sid, set()).add(r["item_id"])
+    if not by_user:
+        return out
+    try:
+        directory = auth.directory("target")
+    except Exception as exc:      # noqa: BLE001
+        out["errors"].append(f"directory: {str(exc)[:160]}")
+        return out
+    exists: dict[str, bool] = {}
+
+    def has_account(email: str) -> bool:
+        if email not in exists:
+            try:
+                directory.users().get(userKey=email, fields="primaryEmail").execute()
+                exists[email] = True
+            except Exception:      # noqa: BLE001 - not found, or could not ask
+                exists[email] = False
+        return exists[email]
+
+    for user, files in by_user.items():
+        dm = None
+        for sid, keys in files.items():
+            ready = {k for k in keys if has_account(k.partition(":")[2])}
+            out["ready"] += len(ready)
+            target_id = db.target_for_source_id(sid) if ready else None
+            if not apply or not target_id:
+                continue
+            try:
+                if dm is None:
+                    target_user = db.resolve_identity(user) or user
+                    dm = DriveMigrator(auth, db, settings, user, target_user, DailyQuotaGuard(
+                        db, target_user, settings.effective_upload_cap()))
+                out["granted"] += dm._sync_acls(sid, target_id, only=ready)
+            except Exception as exc:      # noqa: BLE001
+                out["errors"].append(f"{user} {sid}: {str(exc)[:160]}")
+    return out
+
+
 def stranded_drive_users(db) -> list[str]:
     """Source users with a file/folder/shortcut that permanently failed its copy,
     scoped to the current corpus and excluding the two families that already have
@@ -636,6 +700,11 @@ def run_all(db, auth, settings, apply: bool = False,
         out["mtimes"] = fix_modified_times(auth, db, settings, apply=apply)
     except Exception as exc:      # noqa: BLE001
         out["errors"].append(f"modifiedTime: {str(exc)[:160]}")
+    # Also before the survey: an owed grant is not a failure row either.
+    try:
+        out["owed_grants"] = reapply_owed_grants(auth, db, settings, apply=apply)
+    except Exception as exc:      # noqa: BLE001
+        out["errors"].append(f"owed grants: {str(exc)[:160]}")
     try:
         out["survey"] = survey(db)
     except Exception as exc:      # noqa: BLE001
@@ -764,6 +833,10 @@ def summarise(result: dict) -> str:
         parts.append(times)
     if result.get("resolved"):
         parts.append(f"{result['resolved']:,} resolved (grantee recreated)")
+    og = result.get("owed_grants") or {}
+    if og.get("owed"):
+        parts.append(f"{og.get('granted', 0):,} owed share(s) granted; "
+                     f"{og['owed'] - og.get('ready', 0):,} still waiting for the colleague's account")
     if result.get("reconciled"):
         parts.append(f"{result['reconciled']:,} resolved (already on target)")
     if result.get("stranded_retried"):

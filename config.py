@@ -47,6 +47,11 @@ DEFERRED_TO_DMS = "SKIPPED_NO_DRIVE_LINK"
 # (DEFERRED_TO_DMS) nor declined (SKIPPED_*). Written by dms_migrate the moment a
 # status read says "complete", so "N messages are waiting for the DMS" clears.
 DELIVERED_BY_DMS = "DELIVERED_BY_DMS"
+# A share with a colleague whose TARGET account does not exist yet -- not in this
+# batch of users, or deleted. Owed, not declined: repair.reapply_owed_grants grants
+# it once the account exists, and it deliberately does not start with SKIPPED, so
+# the one-to-one check counts it missing until then.
+OWED_GRANT = "OWED_GRANTEE_NO_ACCOUNT"
 SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
 
 # Native Google types this engine knows how to round-trip through an OOXML
