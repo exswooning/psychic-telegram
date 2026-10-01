@@ -810,8 +810,10 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
                 per[svc] = r
         with lock:
             done[u] = (per, [{"user": u, **e} for e in v.evidence])
+            finished = len(done)
         if on_user:
             on_user(u, per)
+        progress(f"verify: [{finished}/{len(chosen)}] {u} checked")
 
     workers = 1 if len(chosen) <= 1 else max(1, int(os.getenv("VERIFY_WORKERS", "8") or 8))
     with ThreadPoolExecutor(max_workers=workers) as pool:

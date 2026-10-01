@@ -348,11 +348,11 @@ class Cycle:
                          for r in rows}
             if self.check_users:
                 self._check_users(pairs)
-            self._each(pairs, self._drive_user)
+            self._each(pairs, self._drive_user, "Drive")
             if not shutdown_requested():
                 self._shared_drives()
-            self._each(pairs, self._mail_and_calendar)
-            self._each(pairs, self._the_rest)
+            self._each(pairs, self._mail_and_calendar, "mail and calendar")
+            self._each(pairs, self._the_rest, "contacts, tasks and chat")
             if not shutdown_requested():
                 self._settle_deletions()
         except Exception as exc:      # noqa: BLE001 - recorded as the cycle's result
@@ -384,9 +384,13 @@ class Cycle:
             deletions_held=self.held, conflicts=self.conflicts)
         return out
 
-    def _each(self, pairs: list[tuple[str, str]], fn) -> None:
+    def _each(self, pairs: list[tuple[str, str]], fn, name: str = "") -> None:
         if not pairs or shutdown_requested():
             return
+        # "Mirror pass:" starts a phase on the Jobs page, and [done/total] is its
+        # Progress -- so a finished pass's [300/300] never reads as the cycle's.
+        print(f"Mirror pass: {name}\n  [0/{len(pairs)}] users", flush=True)
+        done = [0]
 
         def one(pair):
             if shutdown_requested():
@@ -395,6 +399,9 @@ class Cycle:
                 fn(*pair)
             except Exception as exc:      # noqa: BLE001 - one user must not stop the rest
                 self.error(pair[0], exc)
+            with self._lock:
+                done[0] += 1
+                print(f"  [{done[0]}/{len(pairs)}] {pair[0]}", flush=True)
 
         with futures.ThreadPoolExecutor(max_workers=min(self.workers, len(pairs)),
                                         thread_name_prefix="mirror") as pool:

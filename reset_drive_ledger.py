@@ -321,7 +321,8 @@ def main(argv: list[str] | None = None) -> int:
             print("Aborted.")
             return 1
 
-    for r in rows:
+    print(f"  [0/{len(rows)}] users", flush=True)
+    for n, r in enumerate(rows, 1):
         result = reset_service_ledger(db, r["source_email"], services)
         was = (f" (was marked done for {', '.join(result['cleared_services'])})"
                if result["cleared_services"] else "")
@@ -329,7 +330,7 @@ def main(argv: list[str] | None = None) -> int:
                 if result["side_table_rows"] else "")
         demoted = (" [status DONE -> PENDING]"
                    if result.get("status_reset_to_pending") else "")
-        print(f"  {result['user']}: {result['id_mapping_rows']} mapping row(s), "
+        print(f"  [{n}/{len(rows)}] {result['user']}: {result['id_mapping_rows']} mapping row(s), "
               f"{result['audit_log_rows']} audit row(s){side} cleared"
               f"{was}{demoted}")
     return 0

@@ -597,7 +597,7 @@ def _pct(done: int, total: int) -> float:
 # `reset && seed` is one process writing one transcript -- and a finished
 # phase leaves its counters behind in it.
 _PHASE_START_RE = re.compile(r"^\s*(?:Seeding \d+ users? in\b"
-                             r"|About to DELETE all\b)")
+                             r"|About to DELETE all\b|Mirror pass:)")
 
 
 def _current_phase(lines: list[str]) -> list[str]:

@@ -24,7 +24,7 @@ import MigrateMetricsCharts from '@/components/MigrateMetricsCharts'
 import { fetchMyMetrics, MetricsSnapshot } from '@/api/controlPlane'
 import { bytes } from '@/utils/metricsSeries'
 import { formatPct } from '@/utils/formatPct'
-import { projectedEta } from './RunningJobDetail.utils'
+import { jobFacts, projectedEta } from './RunningJobDetail.utils'
 
 /** Fetched here, once, rather than inside the charts section below: the top
  *  "glance" row wants the same snapshot the charts render from, and fetching
@@ -66,7 +66,10 @@ export const RunningJobDetail: React.FC<{
   const isMigrate = job?.kind === 'migrate'
   const { m, err: metricsErr } = useMigrateMetrics(isMigrate, isMigrate && !job?.done)
   if (!job) return null
-  const eta = projectedEta(job.pct, job.elapsedSec)
+  // Every job that has no dashboard of its own is measured from what it prints.
+  const facts = !isMigrate && job.kind !== 'seed' && job.lines?.length
+    ? jobFacts(job.lines, job.elapsedSec) : null
+  const eta = facts?.etaSec ?? projectedEta(job.pct, job.elapsedSec)
   const t = m?.throughput
   return (
     <Dialog open onClose={onClose} maxWidth="md" fullWidth>
@@ -97,9 +100,25 @@ export const RunningJobDetail: React.FC<{
                 value={typeof job.pct === 'number' ? formatPct(job.pct) : '--'}
                 hint={typeof job.pct === 'number' ? 'of the work attempted'
                   : 'not reported'} />
-          <Stat label="ETA (projected)"
+          {facts && (
+            <Stat label="Done"
+                  value={facts.done !== null && facts.total !== null
+                    ? `${facts.done.toLocaleString()} of ${facts.total.toLocaleString()}` : '--'}
+                  hint={facts.total !== null ? 'counted by the job itself' : 'this job prints no count'} />
+          )}
+          {facts && (
+            <Stat label="Rate"
+                  value={facts.perMinute !== null ? `${facts.perMinute.toFixed(facts.perMinute < 10 ? 1 : 0)} / min` : '--'}
+                  hint={facts.perMinute !== null ? 'measured since it started' : 'nothing done yet'} />
+          )}
+          <Stat label={facts?.etaSec != null ? 'ETA (measured)' : 'ETA (projected)'}
                 value={eta != null ? describeElapsed(Math.round(eta)) : '--'}
-                hint={eta != null ? 'at the current rate' : 'needs a percentage'} />
+                hint={eta != null ? 'at the current rate' : 'needs a count or a percentage'} />
+          {facts && (
+            <Stat label="Failures"
+                  value={facts.failures.length.toLocaleString()}
+                  hint={facts.failures.length ? 'lines the job reported as failed' : 'none reported'} />
+          )}
           <Stat label="State"
                 value={!job.done ? 'running'
                   : job.rc === 0 ? 'finished'
@@ -128,6 +147,27 @@ export const RunningJobDetail: React.FC<{
           : !job.done ? <LinearProgress /> : null}
 
         <Divider sx={{ my: 2 }} />
+        {facts && facts.results.length > 0 && (
+          <Alert severity={facts.failures.length ? 'warning' : 'success'} sx={{ mb: 2 }} data-testid="job-results">
+            {facts.results.map((r, i) => (
+              <Typography key={i} variant="body2" sx={{ fontFamily: 'ui-monospace, monospace', fontSize: 12 }}>
+                {r.trim()}
+              </Typography>
+            ))}
+          </Alert>
+        )}
+        {facts && facts.failures.length > 0 && (
+          <Alert severity="error" sx={{ mb: 2 }} data-testid="job-failures">
+            <Typography variant="body2" sx={{ fontWeight: 700 }}>
+              {facts.failures.length.toLocaleString()} failure line(s){facts.failures.length > 8 ? ' — the last 8:' : ':'}
+            </Typography>
+            {facts.failures.slice(-8).map((f, i) => (
+              <Typography key={i} variant="body2" sx={{ fontFamily: 'ui-monospace, monospace', fontSize: 12 }}>
+                {f.trim()}
+              </Typography>
+            ))}
+          </Alert>
+        )}
         {/* A migration records far more than a percentage -- rates,
             latencies, limiter state, volume -- and all of it is on the
             metrics endpoint. */}

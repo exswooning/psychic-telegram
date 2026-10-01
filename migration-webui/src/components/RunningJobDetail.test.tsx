@@ -64,7 +64,7 @@ describe('detail view', () => {
 
   it('says why there is no ETA rather than showing a zero', () => {
     render(<RunningJobDetail job={job({ pct: null })} onClose={() => {}} />)
-    expect(screen.getByText('needs a percentage')).toBeInTheDocument()
+    expect(screen.getByText('needs a count or a percentage')).toBeInTheDocument()
   })
 
   it('renders nothing when no job is selected', () => {

@@ -255,9 +255,19 @@ class SharedDriveMigrator:
         drives = self.list_source_drives(all_drives)
         n = max(1, int(workers if workers is not None
                        else getattr(self.settings, "shared_drive_workers", 2)))
+        # [done/total] per drive, for the Jobs page's Progress and ETA.
+        done, lock = [0], threading.Lock()
+        print(f"  [0/{len(drives)}] shared drives", flush=True)
+
+        def counted(drive: dict) -> None:
+            self._safe_migrate_one(drive)
+            with lock:
+                done[0] += 1
+                print(f"  [{done[0]}/{len(drives)}] {drive.get('name') or drive.get('id')}", flush=True)
+
         if n == 1 or len(drives) < 2:
             for drive in drives:
-                self._migrate_one(drive)
+                counted(drive)
             return dict(self.stats)
 
         from concurrent.futures import ThreadPoolExecutor
@@ -265,7 +275,7 @@ class SharedDriveMigrator:
         with ThreadPoolExecutor(max_workers=n) as pool:
             # list() so an exception surfaces here rather than being
             # swallowed by the iterator never being drained.
-            list(pool.map(self._safe_migrate_one, drives))
+            list(pool.map(counted, drives))
         return dict(self.stats)
 
     def _safe_migrate_one(self, drive: dict) -> None:

@@ -128,8 +128,8 @@ def delete_users(directory, emails: list[str], dry_run: bool = True,
             stats["failed"] += 1
             if len(stats["errors"]) < 10:
                 stats["errors"].append(f"{email}: {str(exc)[:120]}")
-        if on_progress and i % 25 == 0:
-            on_progress(i, len(emails))
+        if on_progress:
+            on_progress(i, len(emails), email)
     return stats
 
 
@@ -250,9 +250,13 @@ def main(argv: list[str] | None = None) -> int:
             print("Nothing changed. Re-run with --apply.")
             return 1
 
+        # [done/total] on stdout, for every account: the Jobs page turns it into
+        # Progress and an ETA. It went to the log file every 25th account, so the
+        # page showed "--" for the whole of a 299-account delete.
+        print(f"  [0/{len(users)}] accounts deleted", flush=True)
         stats = delete_users(
             directory, users, dry_run=False,
-            on_progress=lambda i, n: log.info("  deleted %d/%d", i, n))
+            on_progress=lambda i, n, e: print(f"  [{i}/{n}] {e}", flush=True))
         print(f"deleted {stats['deleted']:,}, failed {stats['failed']:,}")
         for e in stats["errors"]:
             print("   ", e)

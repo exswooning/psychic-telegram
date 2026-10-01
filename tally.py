@@ -351,7 +351,7 @@ def run(settings, db, auth, *, users: list[str] | None = None, sample_users: int
             rows.append(row)
             done[0] += 1
             if done[0] % 10 == 0 or done[0] == len(pairs):
-                progress(f"tally: {done[0]}/{len(pairs)} users counted")
+                progress(f"tally: [{done[0]}/{len(pairs)}] users counted")
 
     with futures.ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         list(pool.map(one, pairs))
@@ -484,7 +484,7 @@ def main(argv: list[str] | None = None) -> int:
         tally_user_and_save(auth, db, settings, pair[0], pair[1], retry)
         with lock:
             done[0] += 1
-            print(f"tally: {done[0]}/{len(pairs)} {pair[0]}", flush=True)
+            print(f"tally: [{done[0]}/{len(pairs)}] {pair[0]}", flush=True)
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         list(pool.map(one, pairs))

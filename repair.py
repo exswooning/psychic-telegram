@@ -519,7 +519,7 @@ def fix_modified_times(auth, db, settings, apply: bool = False,
 
 def restore_direct_grants(auth, db, settings, apply: bool = False,
                           workers: int = 8, users: list[str] | None = None,
-                          stop=None) -> dict:
+                          stop=None, progress=None) -> dict:
     """Put back a direct grant a file held on top of an inherited one.
 
     Found by the one-to-one check: when a corpus shares at folder level the
@@ -591,11 +591,17 @@ def restore_direct_grants(auth, db, settings, apply: bool = False,
             log.warning("[%s] direct-grant check failed: %s", pair[0], exc)
         return got
 
+    if progress:
+        progress(f"  [0/{len(pairs)}] users checked")
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        for got in pool.map(one, pairs):
+        for pair, got in zip(pairs, pool.map(one, pairs)):
             out["users"] += 1
             for k, v in got.items():
                 out[k] += v
+            if progress:
+                progress(f"  [{out['users']}/{len(pairs)}] {pair[0]}: {got['items']:,} item(s), "
+                         f"{got['mixed']:,} to put back, {got['granted']:,} put back, "
+                         f"{got['failed']:,} failed, {got['unreadable']:,} unreadable")
     return out
 
 
