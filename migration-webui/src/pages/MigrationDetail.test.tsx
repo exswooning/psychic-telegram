@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor, fireEvent } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent, within } from '@testing-library/react'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
 import MigrationDetail from './MigrationDetail'
 
@@ -499,6 +499,29 @@ describe('MigrationDetail: who to migrate', () => {
     expect(screen.queryByTestId('who-dms-warning')).toBeNull()
     fireEvent.click(radio('mail-by-split'))
     expect(screen.getByTestId('who-dms-warning')).toHaveTextContent('does not start on its own')
+  })
+
+  it('can repair the links in mail and events already copied for the chosen users', async () => {
+    await card()
+    fireEvent.click(radio('who-some'))
+    fireEvent.click(screen.getByTestId('pick-failed'))
+    fireEvent.click(within(screen.getByTestId('redo-links')).getByRole('checkbox'))
+    fireEvent.click(screen.getByTestId('migrate-start'))
+    await screen.findByTestId('who-summary')
+    reasonAndConfirm()
+    await waitFor(() => expect(startMigration).toHaveBeenCalled())
+    expect(startMigration.mock.calls[0][10]).toBe(true)
+  })
+
+  it('does not repair links unless asked', async () => {
+    await card()
+    fireEvent.click(radio('who-some'))
+    fireEvent.click(screen.getByTestId('pick-failed'))
+    fireEvent.click(screen.getByTestId('migrate-start'))
+    await screen.findByTestId('who-summary')
+    reasonAndConfirm()
+    await waitFor(() => expect(startMigration).toHaveBeenCalled())
+    expect(startMigration.mock.calls[0][10]).toBe(false)
   })
 
   it('offers the users who are not finished in one click', async () => {

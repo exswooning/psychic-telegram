@@ -108,3 +108,25 @@ class TestItIsWiredIn:
         src = inspect.getsource(calendar_engine.CalendarMigrator)
         assert 'modified_time=item.get("updated")' in src, (
             "nothing to compare against on the next pass")
+
+
+class TestRedoRepointsLinksAlreadyCopied:
+    """Found live: fiona's and seeduser160's calendars went in one second after their
+    Drive failed, every link still naming the source. A redo run repoints them."""
+    LINK = {"description": "doc https://docs.google.com/document/d/1SOURCEsourceSOURCEsource/edit"}
+
+    def test_a_redo_run_patches_an_event_whose_link_now_maps(self, settings):
+        settings.rewrite_drive_links = settings.redo_unrewritten_links = True
+        assert _mig(settings)._links_owed(self.LINK) is True
+
+    def test_an_ordinary_run_leaves_it_alone(self, settings):
+        settings.rewrite_drive_links, settings.redo_unrewritten_links = True, False
+        assert _mig(settings)._links_owed(self.LINK) is False
+
+    def test_an_event_with_no_drive_link_is_not_patched(self, settings):
+        settings.rewrite_drive_links = settings.redo_unrewritten_links = True
+        assert _mig(settings)._links_owed({"description": "lunch"}) is False
+
+    def test_the_skip_consults_it(self):
+        import inspect
+        assert "_links_owed" in inspect.getsource(calendar_engine.CalendarMigrator.migrate_event)

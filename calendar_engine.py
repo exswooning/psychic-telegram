@@ -203,6 +203,15 @@ class CalendarMigrator:
                           modified_time=item.get("updated"))
         self.stats["updated"] += 1
 
+    def _links_owed(self, item: dict) -> bool:
+        """A redo run (REDO_UNREWRITTEN_LINKS) repoints links in events copied before
+        their Drive files had migrated -- live, fiona's and seeduser160's calendars
+        went in one second after their Drive failed. Asked of the source text, so it
+        holds on every redo pass; the patch writes the same text again, harmless."""
+        if not self.settings.redo_unrewritten_links:
+            return False
+        return self._rewrite_links({k: item.get(k) for k in ("description", "location")}) > 0
+
     def _rewrite_links(self, body: dict) -> int:
         """Repoint Drive links in the text fields of an event.
 
@@ -452,7 +461,7 @@ class CalendarMigrator:
             # target -- and the ledger went on calling it DONE. A migration
             # runs for days and people keep using their calendars throughout,
             # so this is the common case, not an edge one.
-            if self._is_stale(eid, item):
+            if self._is_stale(eid, item) or self._links_owed(item):
                 self._patch_existing(eid, existing, item, tgt_cal_id)
             else:
                 self.stats["skipped"] += 1

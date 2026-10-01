@@ -93,3 +93,38 @@ def test_everyone_else_is_not_held(auth, db, settings, identity, monkeypatch):
     monkeypatch.setenv("DRIVE_FAILED_USERS", "someone.else@tenanta.com")
     out = main.migrate_user(auth, db, settings, SRC_USER, TGT_USER, {"gmail"}, False, 0)
     assert "gmail" in out["services"]
+
+
+class TestRedoRevisitsUsersAlreadyDone:
+    """fiona and seeduser160 read DONE with gmail,calendar recorded, their links still
+    naming the source. A redo run's mail pass skipped them as done, so the repair
+    never reached the one place it was asked for."""
+
+    def _run(self, monkeypatch, services, redo):
+        class DB:
+            def all_identities(self):
+                return [{"entity_type": "user", "source_email": "f@s.example",
+                         "target_email": "f@t.example", "status": "DONE"}]
+            def services_done(self, u):
+                return {"gmail", "calendar"}
+
+        class S:
+            user_workers = 2
+            account_id = 7
+            rewrite_drive_links = True
+            redo_unrewritten_links = redo
+
+        monkeypatch.setattr(main, "_coordination_enabled", lambda: False)
+        monkeypatch.setattr(main, "_warn_if_ledger_is_stale", lambda *a, **k: None)
+        monkeypatch.setattr(main, "_ensure_target_accounts", lambda *a, **k: None)
+        seen = []
+        monkeypatch.setattr(main, "migrate_user", lambda auth, db, st, s, *a, **k:
+                            seen.append(s) or {"source": s, "status": "DONE"})
+        main.run_batch(None, DB(), S(), services, delta=False, delta_days=0)
+        return seen
+
+    def test_a_redo_mail_pass_includes_them(self, monkeypatch):
+        assert self._run(monkeypatch, {"gmail", "calendar"}, redo=True) == ["f@s.example"]
+
+    def test_an_ordinary_pass_still_skips_them(self, monkeypatch):
+        assert self._run(monkeypatch, {"gmail", "calendar"}, redo=False) == []

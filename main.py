@@ -747,10 +747,15 @@ def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
         """
         return _services_already_done(db, r, services)
 
+    # A redo run (REDO_UNREWRITTEN_LINKS) exists to revisit mail and events already
+    # copied, so its mail/calendar pass cannot skip the users who have them.
+    redo = (getattr(settings, "redo_unrewritten_links", False)
+            and getattr(settings, "rewrite_drive_links", False)
+            and bool(set(services) & {"gmail", "calendar"}))
     pairs = [
         (r["source_email"], r["target_email"])
         for r in rows
-        if delta or not _already_done(r)
+        if delta or redo or not _already_done(r)
     ]
 
     if only:

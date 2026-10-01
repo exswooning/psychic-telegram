@@ -350,6 +350,11 @@ class StartMigration(WriteAction):
     # benchmark-only -- briefly makes the source file public) is deliberately not
     # offered here at all.
     transfer_mode: Literal["download_upload", "server_side"] | None = None
+    # Repoint Drive links in mail and events this tool already copied before their
+    # Drive files had migrated (REDO_UNREWRITTEN_LINKS): a message is trashed and
+    # inserted again, an event is edited in place, and anything with nothing to
+    # repoint is left alone. Re-reads every message, so it is for a chosen few users.
+    redo_links: bool = False
     # Tuning for measured runs (the perf plan): each overrides the job's own
     # sizing for this launch only, as an env var, like transfer_mode. None =
     # the job sizes itself. USER_WORKERS is also main.run_batch's explicit pin,
@@ -1734,6 +1739,8 @@ async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
         ordered = True      # Drive first, so links in the sampled mail can resolve
     if body.transfer_mode:
         env = {**(env or os.environ), "TRANSFER_MODE": body.transfer_mode}
+    if body.redo_links:
+        env = {**(env or os.environ), "REDO_UNREWRITTEN_LINKS": "true", "REWRITE_DRIVE_LINKS": "true"}
     env = _tuning_env(body, env)
     left_off: list[str] = []
     if body.full_fidelity and not body.dry_run:

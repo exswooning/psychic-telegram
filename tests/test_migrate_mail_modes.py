@@ -340,3 +340,19 @@ class TestTheBenchmarkTakesMoreThanFourFileWorkers:
         assert r.status_code == 200 and "buys nothing" not in r.text, r.text
         bench = [env for argv, env in launched if "benchmark_run.py" in " ".join(map(str, argv))]
         assert bench and bench[0]["DRIVE_FILE_WORKERS"] == "7"
+
+
+class TestRedoLinks:
+    """Repair the links in mail and events copied before the user's Drive was."""
+
+    def test_off_unless_asked(self, cp, monkeypatch):
+        r, seen = _start(cp, monkeypatch, services=["all"], users=["a@source.example"])
+        assert "REDO_UNREWRITTEN_LINKS" not in (seen["env"] or {})
+
+    def test_asked_it_turns_on_the_redo_and_the_rewriting_it_needs(self, cp, monkeypatch):
+        r, seen = _start(cp, monkeypatch, services=["all"], users=["a@source.example"],
+                         redo_links=True)
+        assert r.status_code == 200 and r.json()["ok"] is True, r.text
+        assert seen["env"]["REDO_UNREWRITTEN_LINKS"] == "true"
+        assert seen["env"]["REWRITE_DRIVE_LINKS"] == "true"
+        assert seen["env"]["PATH"] == os.environ["PATH"]

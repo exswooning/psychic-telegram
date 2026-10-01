@@ -299,7 +299,7 @@ export interface MigrationTuning {
 export const startMigration = (
   reason: string, services: string[], users: string[], dryRun = false,
   accountId?: number, mailMode?: MailMode, sample?: number, dmsAfter?: boolean,
-  transferMode?: TransferMode, tuning?: MigrationTuning) =>
+  transferMode?: TransferMode, tuning?: MigrationTuning, redoLinks = false) =>
   cpFetch<ActionResult>('/api/v2/migrate/start', {
     method: 'POST',
     // accountId is the migration on screen. Without it the server falls back
@@ -314,6 +314,7 @@ export const startMigration = (
                            // off only when asked; the server starts the DMS on its own otherwise
                            ...(dmsAfter === false ? { dms_after: false } : {}),
                            ...(transferMode ? { transfer_mode: transferMode } : {}),
+                           ...(redoLinks ? { redo_links: true } : {}),
                            ...(tuning?.userWorkers !== undefined ? { user_workers: tuning.userWorkers } : {}),
                            ...(tuning?.driveFileWorkers !== undefined ? { drive_file_workers: tuning.driveFileWorkers } : {}),
                            ...(tuning?.mappingCacheUserCap !== undefined

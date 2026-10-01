@@ -78,6 +78,7 @@ export const MigrationDetail: React.FC = () => {
   // for a few users would leave their mail undelivered (the server refuses it too).
   const [who, setWho] = useState<'all' | 'some'>('all')
   const [picked, setPicked] = useState<string[]>([])
+  const [redoLinks, setRedoLinks] = useState(false)
   // ?run=full -- the Migrate button on the Migrations list -- opens the dialog here.
   const [params] = useSearchParams()
   const wantCard = params.get('run') === 'full'
@@ -310,6 +311,17 @@ export const MigrationDetail: React.FC = () => {
                           <Button size="small" onClick={() => setPicked([])}>Clear</Button>
                         )}
                       </Stack>
+                      <FormControlLabel data-testid="redo-links"
+                        control={<Checkbox size="small" checked={redoLinks}
+                                           onChange={(e) => setRedoLinks(e.target.checked)} />}
+                        label={<Typography variant="body2">
+                          Also repair Drive links in their mail and events already copied
+                        </Typography>} />
+                      <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                        For mail and events that went in before the user&apos;s Drive did. A
+                        message still naming a source file is put back with the link
+                        repointed (the old copy goes to the trash); an event is edited in place.
+                      </Typography>
                       <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
                         Their mail goes through this tool unless you choose otherwise below:
                         Google&apos;s Data Migration Service only starts on its own after a
@@ -951,7 +963,8 @@ export const MigrationDetail: React.FC = () => {
                                            { userWorkers: num(tuneUserWorkers),
                                              driveFileWorkers: num(tuneFileWorkers),
                                              mappingCacheUserCap: num(tuneCacheCap),
-                                             processes: num(tuneProcesses) })
+                                             processes: num(tuneProcesses) },
+                                           who === 'some' && redoLinks)
             if (!r.ok) throw new Error(r.detail || 'could not start')
             setAskFull(false)
             setStarted(r.detail || 'migration started')
