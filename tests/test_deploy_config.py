@@ -1505,7 +1505,9 @@ class TestJobProgressAndEta:
         assert snap["etaSeconds"] is None
 
     def test_migrate_progress_reads_the_ledger_fraction_not_the_lines(self, monkeypatch):
-        monkeypatch.setattr(webui, "_ledger_progress_fraction", lambda account_id=None: 0.4)
+        webui._LEDGER_SEEN.clear()
+        frac = {"v": 0.4}
+        monkeypatch.setattr(webui, "_ledger_progress_fraction", lambda account_id=None: frac["v"])
         job = webui.Job()
         job.name = "migrate"
         job.started = 100.0
@@ -1514,8 +1516,12 @@ class TestJobProgressAndEta:
         monkeypatch.setattr(webui.time, "time", lambda: 140.0)  # 40s elapsed
         snap = job.snapshot()
         assert snap["progressPct"] == 40
-        # 40s for 40% -> 60s left for the remaining 60%.
-        assert snap["etaSeconds"] == 60
+        # The 40% includes earlier runs' work: no ETA until this run moves it.
+        assert snap["etaSeconds"] is None
+        frac["v"] = 0.5
+        monkeypatch.setattr(webui.time, "time", lambda: 240.0)
+        # 10 points in 100s -> the remaining 50 take 500s.
+        assert job.snapshot()["etaSeconds"] == 500
 
     def test_an_empty_ledger_reports_no_percentage_or_eta(self, monkeypatch):
         monkeypatch.setattr(webui, "_ledger_progress_fraction", lambda account_id=None: None)
@@ -1566,15 +1572,20 @@ class TestJobProgressAndEta:
         assert seen["account_id"] == 7
 
     def test_activity_entry_carries_progress_and_eta_through(self, monkeypatch):
-        monkeypatch.setattr(webui, "_ledger_progress_fraction", lambda account_id=None: 0.5)
+        webui._LEDGER_SEEN.clear()
+        frac = {"v": 0.4}
+        monkeypatch.setattr(webui, "_ledger_progress_fraction", lambda account_id=None: frac["v"])
         webui.JOB.name = "migrate"
         webui.JOB.started = 100.0
         webui.JOB.lines = ["some output"]
         webui.JOB.proc = _FakeRunningProc()
         monkeypatch.setattr(webui.time, "time", lambda: 120.0)
+        webui._job_activity_entry()
+        frac["v"] = 0.5
+        monkeypatch.setattr(webui.time, "time", lambda: 220.0)
         entry = webui._job_activity_entry()
         assert entry["progressPct"] == 50
-        assert entry["etaSeconds"] == 20
+        assert entry["etaSeconds"] == 500
 
 
 class TestInitDbRejectsAStaleCsv:

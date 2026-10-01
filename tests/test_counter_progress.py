@@ -60,3 +60,29 @@ class TestItBeatsTheHeuristics:
         # Previously anything not seed/migrate/delta/discover got None.
         pct, _ = webui._job_progress("wipe target", ["[3/4] x"], 10.0)
         assert pct == 75
+
+
+class TestLedgerEtaIsFromThisRunsOwnProgress:
+    """Live: a resumed run for 2 users read "55%, ~20s left" 25 seconds in -- the
+    fraction held earlier runs' work and the ETA divided it by this run's age."""
+
+    def test_no_eta_until_the_fraction_has_moved(self):
+        webui._LEDGER_SEEN.clear()
+        assert webui._ledger_eta("k", 0.55, 25.0, now=lambda: 1000.0) is None
+        assert webui._ledger_eta("k", 0.55, 85.0, now=lambda: 1060.0) is None
+
+    def test_eta_from_the_rate_since_first_seen(self):
+        webui._LEDGER_SEEN.clear()
+        webui._ledger_eta("k", 0.50, 25.0, now=lambda: 1000.0)
+        # 10 points in 100 s -> the remaining 40 points take 400 s
+        assert webui._ledger_eta("k", 0.60, 125.0, now=lambda: 1100.0) == 400
+
+    def test_a_new_run_starts_over(self):
+        webui._LEDGER_SEEN.clear()
+        webui._ledger_eta("k", 0.50, 25.0, now=lambda: 1000.0)
+        assert webui._ledger_eta("k", 0.70, 5.0, now=lambda: 5000.0) is None
+
+    def test_a_migrate_no_longer_extrapolates_from_elapsed(self, monkeypatch):
+        webui._LEDGER_SEEN.clear()
+        monkeypatch.setattr(webui, "_ledger_progress_fraction", lambda account_id=None: 0.55)
+        assert webui._job_progress("migrate", ["no counters"], 25.0) == (55, None)

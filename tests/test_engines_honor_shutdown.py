@@ -204,3 +204,41 @@ class TestDriveStopsMidTreeWalk:
         m._walk("src-root", "tgt-root", depth=1)
 
         assert synced == ["f0"]
+
+
+class TestDriveFilesAlreadyCollectedStopToo:
+    """Live: Stop at 09:13:43, and fiona's run copied 453 more files until 09:18 --
+    every folder on the walk's stack handed over what it had collected, and queued
+    tasks never looked. A file not copied is not in the ledger; the next run takes it."""
+
+    def _mig(self, settings):
+        m = object.__new__(drive_engine.DriveMigrator)
+        m.settings = settings
+        m.source_user = "u@src.test"
+        m._file_pool = None
+        m._quota_exc = None
+        m.copied = []
+        m._sync_file = lambda item, tgt_parent: m.copied.append(item["id"])
+        return m
+
+    def test_inline_stops_between_files(self, settings, monkeypatch):
+        m = self._mig(settings)
+        monkeypatch.setattr(drive_engine, "shutdown_requested", _after(1))
+        m._sync_files([{"id": f"f{i}"} for i in range(3)], "tgt")
+        assert m.copied == ["f0"]
+
+    def test_the_pool_is_handed_nothing_after_stop(self, settings, monkeypatch):
+        m = self._mig(settings)
+        submitted = []
+        m._file_pool = type("P", (), {"submit": lambda self, fn, *a: submitted.append(a)})()
+        monkeypatch.setattr(drive_engine, "shutdown_requested", lambda: True)
+        m._sync_files([{"id": "f0"}], "tgt")
+        assert submitted == []
+
+    def test_a_queued_task_skips_itself_and_frees_its_slot(self, settings, monkeypatch):
+        import threading
+        m = self._mig(settings)
+        m._file_slots = threading.Semaphore(0)
+        monkeypatch.setattr(drive_engine, "shutdown_requested", lambda: True)
+        m._run_file_task({"id": "f0"}, "tgt")
+        assert m.copied == [] and m._file_slots.acquire(blocking=False)

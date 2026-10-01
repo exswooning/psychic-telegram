@@ -4263,6 +4263,26 @@ def _ledger_progress_fraction_uncached(account_id: int | None = None,
         conn.close()
 
 
+_LEDGER_SEEN: dict = {}
+
+
+def _ledger_eta(key, frac: float, elapsed: float, now=None) -> int | None:
+    """Seconds left for a ledger-backed run, from progress made SINCE it was first
+    seen -- never from elapsed time alone. The ledger fraction includes everything
+    earlier runs did, so a resumed run read "55%, ~20s left" 25 seconds in. None
+    until this run has moved the fraction at all."""
+    t = (now or time.time)()
+    start = t - elapsed
+    seen = _LEDGER_SEEN.get(key)
+    if seen is None or abs(seen[0] - start) > 60:       # first look, or a new run
+        _LEDGER_SEEN[key] = (start, t, frac)
+        return None
+    _, t0, f0 = seen
+    if frac <= f0 or t <= t0:
+        return None
+    return round((1 - frac) * (t - t0) / (frac - f0))
+
+
 def _job_progress(name: str, lines: list[str], elapsed: float,
                   account_id: int | None = None,
                   users: list[str] | None = None) -> tuple[int | None, int | None]:
@@ -4299,6 +4319,8 @@ def _job_progress(name: str, lines: list[str], elapsed: float,
         frac = (_ledger_progress_fraction(account_id, users) if users
                 else _ledger_progress_fraction(account_id))
         pct = round(frac * 100) if frac is not None else None
+        if frac is not None:
+            return pct, _ledger_eta((account_id, tuple(users or ())), frac, elapsed)
     if pct is None or pct <= 0 or elapsed <= 0:
         return pct, None
     eta = round(elapsed * (100 - pct) / pct)

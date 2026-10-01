@@ -1047,6 +1047,10 @@ class DriveMigrator:
 
     def _run_file_task(self, item: dict, tgt_parent: str) -> None:
         try:
+            # Queued before Stop, run after it: skipped, so not in the ledger and
+            # picked up by the next run. Live, 453 files copied after the signal.
+            if shutdown_requested():
+                return
             self._sync_file(item, tgt_parent)
         except QuotaExhausted as exc:
             # The 750 GB/day cap is spent. Record it so the walk stops
@@ -1059,12 +1063,19 @@ class DriveMigrator:
             self._file_slots.release()
 
     def _sync_files(self, files: list[dict], tgt_parent: str) -> None:
-        """Hand one folder's files to the pool, or copy them inline at 1."""
+        """Hand one folder's files to the pool, or copy them inline at 1.
+
+        Not after Stop: _walk breaks out of every folder on the stack, and each
+        one then handed over the files it had already collected."""
         if self._file_pool is None:
             for item in files:
+                if shutdown_requested():
+                    return
                 self._sync_file(item, tgt_parent)
             return
         for item in files:
+            if shutdown_requested():
+                return
             if self._quota_exc is not None:
                 raise self._quota_exc
             self._file_slots.acquire()
