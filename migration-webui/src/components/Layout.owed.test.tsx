@@ -20,7 +20,7 @@ vi.mock('@/api/controlPlane', () => ({
   fetchMe: vi.fn().mockResolvedValue({ id: 1, is_superadmin: true }),
   logout: vi.fn(),
   fetchOwedGrants: vi.fn().mockResolvedValue({ migrations: [{
-    accountId: 3, accountName: 'Saraf', shares: 9354, colleagues: 67,
+    accountId: 3, accountName: 'Administrator', targetDomain: 'target2.example', shares: 9354, colleagues: 67,
     examples: ['seeduser141@t.example', 'seeduser214@t.example', 'seeduser231@t.example'] }] }),
 }))
 
@@ -32,7 +32,7 @@ describe('the notification for shares waiting on a colleague', () => {
     await waitFor(() => expect(document.querySelector('.MuiBadge-badge')?.textContent).toBe('1'))
     fireEvent.click(screen.getByTestId('NotificationsIcon').closest('button')!)
     const item = await screen.findByTestId('notif-owed')
-    expect(item).toHaveTextContent('Saraf: 9,354 shares waiting for 67 colleagues with no target account yet')
+    expect(item).toHaveTextContent('target2.example: 9,354 shares waiting for 67 colleagues with no target account yet')
     expect(item).toHaveTextContent('seeduser141@t.example, seeduser214@t.example, seeduser231@t.example, …')
     expect(item).toHaveTextContent('granted automatically once those colleagues are migrated')
     fireEvent.click(item)

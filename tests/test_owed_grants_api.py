@@ -52,7 +52,8 @@ def test_counts_owed_shares_and_colleagues_on_the_target_domain(cp, monkeypatch,
         ("s@tenanta.com", "f4:x@elsewhere.com", "SKIPPED_GRANTEE_NOT_ON_GOOGLE"),   # an outsider
         ("s@tenanta.com", "f5:e@tenantb.com", "SUCCESS")])
     got = cp.get("/api/v2/owed-grants").json()["migrations"]
-    assert got == [{"accountId": aid, "accountName": "Tester", "shares": 3, "colleagues": 2,
+    assert got == [{"accountId": aid, "accountName": "Tester", "targetDomain": "tenantb.com",
+                    "shares": 3, "colleagues": 2,
                     "examples": ["c@tenantb.com", "d@tenantb.com"]}]
 
 

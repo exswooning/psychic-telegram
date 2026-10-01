@@ -142,3 +142,22 @@ class TestRepairGrantsWhatWasOwed:
     def test_run_all_includes_it(self):
         import inspect
         assert "reapply_owed_grants" in inspect.getsource(repair.run_all)
+
+
+class TestTheRepairSummarySaysSo:
+    """Live: a repair with no failure rows said only 'no failed items recorded' while
+    10,173 shares were still owed -- the line came after the early return."""
+
+    def test_even_when_nothing_failed(self):
+        line = repair.summarise({"survey": {"total": 0},
+                                 "owed_grants": {"owed": 10173, "ready": 0, "granted": 0}})
+        assert line == ("no failed items recorded; 0 owed share(s) granted; "
+                        "10,173 still waiting for the colleague's account")
+
+    def test_alongside_failures(self):
+        line = repair.summarise({"survey": {"total": 4},
+                                 "owed_grants": {"owed": 10, "ready": 3, "granted": 3}})
+        assert "3 owed share(s) granted; 7 still waiting" in line
+
+    def test_silent_when_nothing_is_owed(self):
+        assert repair.summarise({"survey": {"total": 0}}) == "no failed items recorded"

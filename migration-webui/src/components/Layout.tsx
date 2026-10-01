@@ -502,7 +502,9 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
             for (const o of owed) {
               items.push({
                 to: `/migrations/${o.accountId}`,
-                text: `${o.accountName}: ${o.shares.toLocaleString()} share${o.shares === 1 ? '' : 's'} waiting for `
+                // The target domain, not the account's name: two migrations run by one
+                // "Administrator" read identically.
+                text: `${o.targetDomain}: ${o.shares.toLocaleString()} share${o.shares === 1 ? '' : 's'} waiting for `
                   + `${o.colleagues.toLocaleString()} colleague${o.colleagues === 1 ? '' : 's'} with no target account yet `
                   + `(${o.examples.join(', ')}${o.colleagues > o.examples.length ? ', …' : ''}). `
                   + 'They are granted automatically once those colleagues are migrated.',

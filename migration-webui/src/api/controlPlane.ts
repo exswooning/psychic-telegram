@@ -324,7 +324,7 @@ export const startMigration = (
   })
 
 export interface OwedGrants {
-  migrations: { accountId: number; accountName: string; shares: number;
+  migrations: { accountId: number; accountName: string; targetDomain: string; shares: number;
                 colleagues: number; examples: string[] }[]
 }
 

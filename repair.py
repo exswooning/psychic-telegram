@@ -826,17 +826,20 @@ def summarise(result: dict) -> str:
     m = result.get("mtimes") or {}
     times = (f"{m['fixed']:,} of {m['drifted']:,} drifted modified time(s) put back"
              if m.get("drifted") else "")
+    og = result.get("owed_grants") or {}
+    # Owed shares are not failure rows, so they are said even when nothing failed.
+    owed = (f"{og.get('granted', 0):,} owed share(s) granted; "
+            f"{og['owed'] - og.get('ready', 0):,} still waiting for the colleague's account"
+            if og.get("owed") else "")
     if not s.get("total"):
-        return "; ".join(p for p in ("no failed items recorded", times) if p)
+        return "; ".join(p for p in ("no failed items recorded", times, owed) if p)
     parts = [f"{s['total']:,} failed item(s)"]
     if times:
         parts.append(times)
     if result.get("resolved"):
         parts.append(f"{result['resolved']:,} resolved (grantee recreated)")
-    og = result.get("owed_grants") or {}
-    if og.get("owed"):
-        parts.append(f"{og.get('granted', 0):,} owed share(s) granted; "
-                     f"{og['owed'] - og.get('ready', 0):,} still waiting for the colleague's account")
+    if owed:
+        parts.append(owed)
     if result.get("reconciled"):
         parts.append(f"{result['reconciled']:,} resolved (already on target)")
     if result.get("stranded_retried"):

@@ -4002,6 +4002,7 @@ async def owed_grants(op: Operator = Depends(operator)):
             if who:
                 out.append({"accountId": aid,
                             "accountName": acct.get("name") or acct.get("email") or f"#{aid}",
+                            "targetDomain": domain,
                             "shares": len(who), "colleagues": len(set(who)),
                             "examples": sorted(set(who))[:3]})
         return {"migrations": out}
