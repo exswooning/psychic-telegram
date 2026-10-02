@@ -248,6 +248,15 @@ class TestEveryKindOfDamageIsFound:
         r = verify(migrated)
         assert r["users"][SRC_USER]["drive"]["extras"][0]["name"] == "welcome.txt" and r["verdict"] == "IDENTICAL"
 
+    def test_a_migrated_shortcut_is_not_a_stray(self, migrated):
+        """Live: fiona's one copied shortcut read as an extra on the target -- the
+        verifier knew only file and folder mappings."""
+        tgt = migrated.auth.target_drive(TGT_USER)
+        sid = tgt.add_binary("shortcut-to-deep-file", data=b"", mime="text/plain")
+        migrated.db.record_mapping(SRC_USER, "src-shortcut", sid, "shortcut")
+        r = verify(migrated)
+        assert r["users"][SRC_USER]["drive"]["extras"] == []
+
     def test_a_message_whose_body_changed(self, migrated):
         tg = migrated.auth.target_gmail(TGT_USER)
         mid = next(iter(tg.messages))

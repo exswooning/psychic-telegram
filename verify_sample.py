@@ -365,7 +365,9 @@ class Verifier:
         sc, tc = {}, {}
         # Every target the ledger knows -- not only the ones opened below -- so a sampled
         # run does not mistake the rest of the migration for strays.
-        seen_targets = {tid for kind in ("folder", "file") for _, tid, _ in self._pairs(kind)}
+        # Shortcuts too: a migrated shortcut is mapped as one, and leaving it out
+        # reported every copied shortcut as a stray (live: fiona's shortcut-to-deep-file).
+        seen_targets = {tid for kind in ("folder", "file", "shortcut") for _, tid, _ in self._pairs(kind)}
         target_keys = {}
         for kind in ("folder", "file"):
             for sid, tid, _ in self._pairs(kind, sample=True):
