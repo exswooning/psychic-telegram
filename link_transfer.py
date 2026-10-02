@@ -250,7 +250,7 @@ def main(argv: list[str] | None = None) -> int:
     ok = failed = 0
     for r in rows:
         try:
-            good, note = restore_one(auth.source_drive(r["source_user"]), db, r)
+            good, note = restore_one(auth.source_drive(r["source_user"], writable=True), db, r)
         except Exception as exc:  # noqa: BLE001
             good, note = False, str(exc)[:100]
         if good:

@@ -641,7 +641,7 @@ def test_five_user_org_migrates_without_duplicating_shared_files(
     # --- Seed all five, each sharing outward to the other four ---------
     owned_files = 0
     for i, (src, entry) in enumerate(zip(src_users, ORG)):
-        drive = auth.source_drive(src)
+        drive = auth.source_drive(src, writable=True)      # seeding writes the source
         peers = [u for u in src_users if u != src]
         b = CorpusBuilder(drive, settings, src, peers, "ext@example.com",
                           "tiny", _media, _retry, rng_seed=100 + i)

@@ -420,7 +420,7 @@ def probe_staging_acl_order(p: Probe, auth, settings, source_user: str,
 
     Creates one scratch file and one staging drive, and removes both.
     """
-    src = auth.source_drive(source_user)
+    src = auth.source_drive(source_user, writable=True)    # the probe writes test files
     tgt = auth.target_drive(target_user)
     stamp = "2019-01-01T00:00:00.000Z"
     drive_id = fid = copy_id = None

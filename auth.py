@@ -29,6 +29,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build, build_from_document
 
 from config import Settings, source_scopes, target_scopes
+from resilience import PermanentAPIError
 
 log = logging.getLogger(__name__)
 
@@ -80,6 +81,83 @@ def shared_discovery_doc(api: str, version: str) -> dict | None:
             _warm(build_from_document(doc, http=httplib2.Http()), doc)
             _DISCOVERY[key] = doc
     return doc
+
+
+class SourceWriteRefused(PermanentAPIError):
+    """A write to the SOURCE Drive that a migration has no business making."""
+
+
+# Every Drive v3 collection, and the calls on each that only read. A server-side
+# copy needs the full `drive` scope on the source, so Google itself would allow any
+# write there: this is what refuses them, before Google sees the request. A name that
+# is not a Drive collection (a test fake's helper, the client's own internals) passes
+# through untouched -- the real client exposes nothing else.
+_DRIVE_READS = {
+    "about": {"get"},
+    "accessproposals": {"get", "list", "list_next"},
+    "apps": {"get", "list"},
+    "approvals": {"get", "list", "list_next"},
+    "changes": {"getStartPageToken", "list", "list_next"},
+    "channels": set(),
+    "comments": {"get", "list", "list_next"},
+    "drives": {"get", "list", "list_next"},
+    "files": {"get", "list", "list_next", "export", "export_media", "get_media", "listLabels"},
+    "operations": {"get"},
+    "permissions": {"get", "list", "list_next"},
+    "replies": {"get", "list", "list_next"},
+    "revisions": {"get", "get_media", "list", "list_next"},
+    "teamdrives": {"get", "list", "list_next"},
+}
+
+
+class ReadOnlyDrive:
+    """The SOURCE Drive, reads only -- plus, when `copy_into` is set, files.copy into
+    that one folder: a server-side run's own staging drive on the target, the single
+    write a migration makes on the source. Anything else raises SourceWriteRefused."""
+
+    def __init__(self, svc, copy_into: str | None = None):
+        object.__setattr__(self, "_svc", svc)
+        object.__setattr__(self, "_copy_into", copy_into)
+
+    def __setattr__(self, name, value):      # transparent: a test fake's flags land on it
+        setattr(self._svc, name, value)
+
+    def __getattr__(self, name):
+        attr = getattr(self._svc, name)
+        if name not in _DRIVE_READS:
+            return attr
+        return lambda *a, **k: _ReadOnlyCollection(attr(*a, **k), name, self._copy_into)
+
+
+class _ReadOnlyCollection:
+    def __init__(self, res, name: str, copy_into: str | None):
+        self._res, self._name, self._copy_into = res, name, copy_into
+
+    def __getattr__(self, method):
+        fn = getattr(self._res, method)
+        if method in _DRIVE_READS[self._name]:
+            return fn
+        if self._name == "files" and method == "copy" and self._copy_into:
+            def copy(*a, **kw):
+                parents = (kw.get("body") or {}).get("parents")
+                if parents != [self._copy_into]:
+                    raise SourceWriteRefused(
+                        f"source Drive files.copy into {parents} refused: a migration "
+                        f"copies only into its own staging drive ({self._copy_into})")
+                return fn(*a, **kw)
+            return copy
+
+        def refused(*a, **k):
+            raise SourceWriteRefused(f"source Drive {self._name}.{method} refused: a "
+                                     "migration only reads the source")
+        return refused
+
+
+def allow_copy_into(svc, staging: str | None):
+    """The same source Drive, also allowed to copy into `staging`."""
+    if isinstance(svc, ReadOnlyDrive) and staging:
+        return ReadOnlyDrive(svc._svc, staging)
+    return svc
 
 
 class AuthManager:
@@ -293,8 +371,11 @@ class AuthManager:
         return self._service(tenant, name, user)
 
     # -- shorthands mirrored by tests/fakes.FakeAuth ------------------------
-    def source_drive(self, user: str):
-        return self._service("source", "drive", user)
+    def source_drive(self, user: str, writable: bool = False):
+        """Read-only unless the caller says otherwise, like directory(writable=).
+        Only link_flip and the contract probe ever do."""
+        svc = self._service("source", "drive", user)
+        return svc if writable else ReadOnlyDrive(svc)
 
     def target_drive(self, user: str):
         return self._service("target", "drive", user)

@@ -1772,8 +1772,12 @@ class FakeAuth:
                 t.peer = s          # type: ignore[attr-defined]
 
     # Explicit accessors mirroring AuthManager's shorthands.
-    def source_drive(self, user: str) -> FakeDrive:
-        return self._get("source", "drive", user)          # type: ignore[return-value]
+    def source_drive(self, user: str, writable: bool = False) -> FakeDrive:
+        # Guarded as AuthManager guards it, so every engine test runs with the
+        # source Drive read-only (plus copy into staging).
+        from auth import ReadOnlyDrive
+        svc = self._get("source", "drive", user)
+        return svc if writable else ReadOnlyDrive(svc)       # type: ignore[return-value]
 
     def target_drive(self, user: str) -> FakeDrive:
         return self._get("target", "drive", user)          # type: ignore[return-value]

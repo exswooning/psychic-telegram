@@ -99,6 +99,11 @@ def read_only_lock(item: dict) -> dict | None:
     return None
 
 
+# The native types a server-side copy keeps native, and the API that edits each.
+_NATIVE_KIND = {"application/vnd.google-apps.document": "docs",
+                "application/vnd.google-apps.spreadsheet": "sheets",
+                "application/vnd.google-apps.presentation": "slides"}
+
 _PROJECT_LIMITERS: dict = {}
 _PROJECT_LIMITER_LOCK = threading.Lock()
 
@@ -524,7 +529,13 @@ class DriveMigrator:
     # so this is not on any hot path worth optimising back into a bug.
     @property
     def src(self):
-        return self._src_override or self.auth.source_drive(self.source_user)
+        # Read-only (auth.ReadOnlyDrive), plus files.copy into this run's own staging
+        # drive once there is one. link_flip alone rewrites source sharing.
+        svc = self._src_override or (self.auth.source_drive(self.source_user, writable=True)
+                                     if self.link_flip
+                                     else self.auth.source_drive(self.source_user))
+        from auth import allow_copy_into
+        return allow_copy_into(svc, self._staging_drive_id)
 
     @src.setter
     def src(self, value):
@@ -669,6 +680,9 @@ class DriveMigrator:
         # (item, target id, export mime) for native files that mentioned a
         # Drive id. Drained at the end of the user, when every id is known.
         self._pending_link_rewrites: list[tuple[dict, str, str]] = []
+        # (item, target id) for native files copied SERVER-SIDE: repointed through
+        # each app's own API at the end of the user (_rewrite_native_links).
+        self._pending_native: list[tuple[dict, str]] = []
         # (target id, the modifiedTime it was restored to) -- read back at the end of the
         # user, see _verify_modified_times.
         self._mtime_checks: list[tuple[str, str]] = []
@@ -711,6 +725,7 @@ class DriveMigrator:
             # add mappings, and a rewrite is only correct once no more are
             # coming.
             self._rewrite_pending_links()
+            self._rewrite_native_links()
             self._verify_modified_times()
         finally:
             # `_staging_drive_id`, not `self.server_side`.
@@ -1591,6 +1606,8 @@ class DriveMigrator:
         self.db.log_audit(self.source_user, item["id"], "file", "SUCCESS",
                           modified_time=item.get("modifiedTime"), bytes_moved=size)
         self._bump("files")
+        if self.settings.rewrite_drive_links and item.get("mimeType") in _NATIVE_KIND:
+            self._pending_native.append((item, copy_id))
         # Found by the item-by-item tally: a native Doc/Sheet copied server-side
         # keeps the COPY's time whatever the copy and the move ask for (live: a
         # quarter of files on a 300-user run, every one unshared and uncommented,
@@ -1866,6 +1883,36 @@ class DriveMigrator:
                 self._cleanup(path)
         if fixed:
             log.info("[%s] repointed %d Drive link(s) inside migrated files",
+                     self.source_user, fixed)
+
+    def _rewrite_native_links(self) -> None:
+        """The server-side counterpart of _rewrite_pending_links. A server-side copy is
+        native -- that is its point -- so its links are repointed in place through each
+        app's own API on the TARGET copy (link_rewrite.rewrite_native), not through an
+        export and re-upload, which would be the Office round trip it exists to avoid.
+        Writes on the target only."""
+        if not self._pending_native:
+            return
+        import link_rewrite
+        fixed = 0
+        for item, tgt_id in self._pending_native:
+            kind = _NATIVE_KIND[item["mimeType"]]
+            try:
+                n = self._retry(lambda k=kind, t=tgt_id: link_rewrite.rewrite_native(
+                    k, self.auth.api("target", k, self.target_user), t,
+                    self.db.target_for_source_id), label=f"{kind}.links")
+            except Exception as exc:      # noqa: BLE001 - the file migrated; record, never raise
+                self.db.log_audit(self.source_user, item["id"], "link_rewrite",
+                                  "FAILED", str(exc)[:200])
+                continue
+            if n:
+                self.db.log_audit(self.source_user, item["id"], "link_rewrite", "SUCCESS",
+                                  f"{n} link update(s) in the native copy")
+                self._restore_modified_time(tgt_id, item, n, late_bump=True)
+                fixed += n
+                self._bump("links_rewritten", n)
+        if fixed:
+            log.info("[%s] repointed links inside %d native cop(ies) through their own API",
                      self.source_user, fixed)
 
     @staticmethod

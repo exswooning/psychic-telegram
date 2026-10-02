@@ -336,3 +336,137 @@ if __name__ == "__main__":
     assert got["Subject"] == "t" and got["From"] == "a@x.test"
 
     print("link_rewrite self-check ok")
+
+
+# ---------------------------------------------------------------------------
+# Native files, through each app's own API.
+#
+# A server-side copy (files.copy) is a native Doc/Sheet/Slides deck with every link
+# still naming SOURCE files. The download path repoints those through the OOXML it
+# already exported (rewrite_zip); a native copy has none, and exporting it would be the
+# Office round trip server-side exists to avoid. So the links are rewritten in place on
+# the TARGET copy: a link's URL by updateTextStyle, an id written out in text by
+# replaceAllText, a Sheets formula (IMPORTRANGE, HYPERLINK) by findReplace. Only an id
+# the lookup maps is touched -- the same rule as everywhere else in this module.
+# Not reachable through these APIs: smart chips (Docs rich links are read-only).
+# ---------------------------------------------------------------------------
+
+def _ids(text: str) -> set[str]:
+    b = (text or "").encode("utf-8", "surrogatepass")
+    return ({m.group(1).decode("ascii", "replace") for m in DRIVE_ID.finditer(b)}
+            | {m.group(2).decode("ascii", "replace") for m in IMPORTRANGE_ID.finditer(b)})
+
+
+def _replace_all(ids: set[str], lookup) -> list[dict]:
+    return [{"replaceAllText": {"containsText": {"text": s, "matchCase": True},
+                                "replaceText": t}}
+            for s in sorted(ids) if (t := lookup(s))]
+
+
+def doc_requests(doc: dict, lookup: Callable[[str], str | None]) -> list[dict]:
+    """Docs batchUpdate requests repointing every mapped link in `doc` (documents.get)."""
+    out: list[dict] = []
+    text_ids: set[str] = set()
+
+    def walk(node, seg: str) -> None:
+        if isinstance(node, dict):
+            run = node.get("textRun")
+            if run is not None and "endIndex" in node:
+                text_ids.update(_ids(run.get("content", "")))
+                url = ((run.get("textStyle") or {}).get("link") or {}).get("url")
+                new, n = rewrite_text(url, lookup) if url else (url, 0)
+                if n:
+                    rng = {"startIndex": node.get("startIndex", 0), "endIndex": node["endIndex"]}
+                    if seg:
+                        rng["segmentId"] = seg
+                    out.append({"updateTextStyle": {"range": rng, "textStyle": {"link": {"url": new}},
+                                                    "fields": "link"}})
+            for v in node.values():
+                walk(v, seg)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v, seg)
+
+    walk(doc.get("body"), "")
+    for key in ("headers", "footers", "footnotes"):
+        for seg, part in (doc.get(key) or {}).items():
+            walk(part, seg)
+    return out + _replace_all(text_ids, lookup)
+
+
+def slides_requests(pres: dict, lookup: Callable[[str], str | None]) -> list[dict]:
+    """Slides batchUpdate requests repointing every mapped link in `pres` (presentations.get)."""
+    out: list[dict] = []
+    text_ids: set[str] = set()
+
+    def text(elements, object_id: str, cell: dict | None) -> None:
+        for el in elements or []:
+            run = el.get("textRun")
+            if run is None:
+                continue
+            text_ids.update(_ids(run.get("content", "")))
+            url = ((run.get("style") or {}).get("link") or {}).get("url")
+            new, n = rewrite_text(url, lookup) if url else (url, 0)
+            if n:
+                req = {"objectId": object_id, "style": {"link": {"url": new}}, "fields": "link",
+                       "textRange": {"type": "FIXED_RANGE", "startIndex": el.get("startIndex", 0),
+                                     "endIndex": el["endIndex"]}}
+                if cell:
+                    req["cellLocation"] = cell
+                out.append({"updateTextStyle": req})
+
+    def element(pe: dict) -> None:
+        oid = pe.get("objectId")
+        text(((pe.get("shape") or {}).get("text") or {}).get("textElements"), oid, None)
+        for r, row in enumerate((pe.get("table") or {}).get("tableRows") or []):
+            for c, cell in enumerate(row.get("tableCells") or []):
+                text((cell.get("text") or {}).get("textElements"), oid,
+                     {"rowIndex": r, "columnIndex": c})
+        for child in (pe.get("elementGroup") or {}).get("children") or []:
+            element(child)
+
+    for slide in pres.get("slides") or []:
+        for pe in slide.get("pageElements") or []:
+            element(pe)
+    return out + _replace_all(text_ids, lookup)
+
+
+def sheet_requests(value_ranges: list[dict], lookup: Callable[[str], str | None]) -> list[dict]:
+    """Sheets batchUpdate findReplace requests for every mapped id in the formulas and
+    values of `value_ranges` (values.batchGet, valueRenderOption=FORMULA)."""
+    ids: set[str] = set()
+    for vr in value_ranges or []:
+        for row in vr.get("values") or []:
+            for cell in row:
+                if isinstance(cell, str):
+                    ids |= _ids(cell)
+    return [{"findReplace": {"find": s, "replacement": t, "matchCase": True,
+                             "includeFormulas": True, "allSheets": True}}
+            for s in sorted(ids) if (t := lookup(s))]
+
+
+def rewrite_native(kind: str, svc, file_id: str, lookup: Callable[[str], str | None]) -> int:
+    """Repoint the links in one native TARGET copy. kind: docs | sheets | slides; svc is
+    that API's client as the target user. Returns how many requests were applied."""
+    if kind == "docs":
+        reqs = doc_requests(svc.documents().get(documentId=file_id).execute(), lookup)
+        if reqs:
+            svc.documents().batchUpdate(documentId=file_id, body={"requests": reqs}).execute()
+    elif kind == "slides":
+        reqs = slides_requests(svc.presentations().get(presentationId=file_id).execute(), lookup)
+        if reqs:
+            svc.presentations().batchUpdate(presentationId=file_id,
+                                            body={"requests": reqs}).execute()
+    elif kind == "sheets":
+        meta = svc.spreadsheets().get(spreadsheetId=file_id,
+                                      fields="sheets.properties.title").execute()
+        ranges = ["'" + s["properties"]["title"].replace("'", "''") + "'"
+                  for s in meta.get("sheets") or []]
+        got = svc.spreadsheets().values().batchGet(
+            spreadsheetId=file_id, ranges=ranges, valueRenderOption="FORMULA").execute() if ranges else {}
+        reqs = sheet_requests(got.get("valueRanges") or [], lookup)
+        if reqs:
+            svc.spreadsheets().batchUpdate(spreadsheetId=file_id, body={"requests": reqs}).execute()
+    else:
+        return 0
+    return len(reqs)
