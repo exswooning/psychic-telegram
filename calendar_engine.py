@@ -145,8 +145,10 @@ class CalendarMigrator:
                 or self.db.target_for_source_id(email.lower(), ("calendar",)) or email)
 
     def _calendar_guest_owed(self, item: dict) -> bool:
-        """A redo run (REDO_UNREWRITTEN_LINKS) re-patches the guests of an event copied
-        before calendar ids were mapped: true while any guest is a calendar that maps."""
+        """A redo run (REDO_UNREWRITTEN_LINKS) re-imports an event copied before calendar
+        ids were mapped: true while any guest is a calendar that maps.
+        ponytail: asked of the source, so every redo run re-imports these again --
+        harmless (same copy), bounded to events naming a calendar as a guest."""
         if not self.settings.redo_unrewritten_links:
             return False
         return any(self.db.target_for_source_id((a.get("email") or "").lower(), ("calendar",))
@@ -221,8 +223,6 @@ class CalendarMigrator:
         """Carry a source-side edit onto the copy we already made."""
         body = {k: item[k] for k in _PATCH_KEYS if k in item}
         self._rewrite_links(body)
-        if self._calendar_guest_owed(item):
-            body["attendees"] = self._attendees_for(item, tgt_cal_id)
         if item.get("attachments") is not None:
             body["attachments"] = self._map_attachments(item.get("attachments"))
         try:
@@ -233,6 +233,25 @@ class CalendarMigrator:
             self.db.log_audit(self.source_user, eid, "event", "FAILED", str(exc))
             self.stats["failed"] += 1
             return
+        self.db.log_audit(self.source_user, eid, "event", "SUCCESS",
+                          modified_time=item.get("updated"))
+        self.stats["updated"] += 1
+
+    def _reimport_existing(self, eid: str, target_id: str, item: dict,
+                           tgt_cal_id: str, src_cal_id: str) -> None:
+        """Import again, to fix a copy's guests. Every imported event is a private copy,
+        and a private copy ignores a patched guest list -- live, the patch returned 200
+        and left the event untouched -- while events.import, keyed on iCalUID, rewrites
+        the same copy (its links too)."""
+        try:
+            result = self._write_event(item, self._build_import_body(item, tgt_cal_id), tgt_cal_id)
+        except (PermanentAPIError, RuntimeError) as exc:
+            self.db.log_audit(self.source_user, eid, "event", "FAILED", str(exc))
+            self.stats["failed"] += 1
+            return
+        if result.get("id") and result["id"] != target_id:
+            self.db.record_mapping(self.source_user, self._event_key(src_cal_id, eid),
+                                   result["id"], "event")
         self.db.log_audit(self.source_user, eid, "event", "SUCCESS",
                           modified_time=item.get("updated"))
         self.stats["updated"] += 1
@@ -483,7 +502,9 @@ class CalendarMigrator:
             # target -- and the ledger went on calling it DONE. A migration
             # runs for days and people keep using their calendars throughout,
             # so this is the common case, not an edge one.
-            if self._is_stale(eid, item) or self._links_owed(item) or self._calendar_guest_owed(item):
+            if self._calendar_guest_owed(item):
+                self._reimport_existing(eid, existing, item, tgt_cal_id, src_cal_id)
+            elif self._is_stale(eid, item) or self._links_owed(item):
                 self._patch_existing(eid, existing, item, tgt_cal_id)
             else:
                 self.stats["skipped"] += 1

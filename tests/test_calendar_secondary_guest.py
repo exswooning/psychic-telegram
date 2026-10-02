@@ -47,19 +47,33 @@ class TestARedoRunRepairsEventsAlreadyCopied:
         assert m._calendar_guest_owed({"attendees": [{"email": SRC_CAL}]}) is True
         assert m._calendar_guest_owed({"attendees": [{"email": "x@elsewhere.example"}]}) is False
 
-    def test_the_patch_carries_the_mapped_guests(self, db, settings):
+    def test_it_is_imported_again_not_patched(self, db, settings):
+        """A private copy ignores a patched guest list (live: 200, nothing changed);
+        events.import, keyed on iCalUID, rewrites the same copy."""
         m = _mig(db, settings)
         settings.redo_unrewritten_links = True
-        patched = []
+        db.record_mapping("u@tenanta.com", f"{SRC_CAL}::e1", "T1", "event")
+        imported, patched = [], []
+        m._write_event = lambda item, body, cal: imported.append((body, cal)) or {"id": "T1"}
+        m._patch_existing = lambda *a: patched.append(a)
+        item = {"id": "e1", "iCalUID": "e1@x", "summary": "s",
+                "start": {"dateTime": "2026-09-18T10:00:00Z"}, "end": {"dateTime": "2026-09-18T11:00:00Z"},
+                "attendees": [{"email": SRC_CAL}]}
+        m.migrate_event(item, TGT_CAL, SRC_CAL)
+        assert patched == [] and len(imported) == 1
+        body, cal = imported[0]
+        assert cal == TGT_CAL and [a["email"] for a in body["attendees"]] == [TGT_CAL]
+        assert m.stats["updated"] == 1
 
-        class Cal:
-            def events(self): return self
-            def patch(self, **kw):
-                patched.append(kw)
-                return type("R", (), {"execute": lambda s=None: {}})()
-        m.tgt = Cal()
-        m._patch_existing("e1", "T1", {"summary": "s", "attendees": [{"email": SRC_CAL}]}, TGT_CAL)
-        assert [a["email"] for a in patched[0]["body"]["attendees"]] == [TGT_CAL]
+    def test_a_new_id_from_the_import_is_recorded(self, db, settings):
+        m = _mig(db, settings)
+        settings.redo_unrewritten_links = True
+        db.record_mapping("u@tenanta.com", f"{SRC_CAL}::e1", "T1", "event")
+        m._write_event = lambda item, body, cal: {"id": "T2"}
+        m._reimport_existing("e1", "T1", {"id": "e1", "iCalUID": "e1@x", "summary": "s",
+                                          "start": {"date": "2026-09-18"}, "end": {"date": "2026-09-19"},
+                                          "attendees": [{"email": SRC_CAL}]}, TGT_CAL, SRC_CAL)
+        assert db.get_target_id("u@tenanta.com", f"{SRC_CAL}::e1", "event") == "T2"
 
 
 def test_the_one_to_one_check_maps_a_calendar_guest_the_same_way(db, settings):
