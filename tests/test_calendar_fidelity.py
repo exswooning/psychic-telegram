@@ -98,7 +98,9 @@ def test_the_calendars_own_settings_are_copied(auth, db, settings, identity):
                                                              "minutes": 5}])
     _, tgt = _run(auth, db, settings)
     patch = tgt.calls_to("calendarList.patch")[0]
-    assert patch["calendarId"] == "primary" and patch["colorRgbFormat"] is True
+    # The entry's real id: live, every patch through the "primary" alias came back
+    # 400 "Invalid resource id value".
+    assert patch["calendarId"] == TGT_USER and patch["colorRgbFormat"] is True
     assert patch["body"]["backgroundColor"] == "#ff0000" and "colorId" not in patch["body"]
     assert patch["body"]["defaultReminders"][0]["minutes"] == 5
 

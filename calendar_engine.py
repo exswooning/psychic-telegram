@@ -600,9 +600,13 @@ class CalendarMigrator:
         body, rgb = list_settings(entry)
         if not body:
             return
+        # The entry's real id, not the "primary" alias: live, every patch through the
+        # alias came back 400 "Invalid resource id value". A primary calendar's id is
+        # its owner's address.
+        cal_id = self.target_user if tgt_cal_id == "primary" else tgt_cal_id
         try:
             self._retry(lambda: self.tgt.calendarList().patch(
-                calendarId=tgt_cal_id, body=body, colorRgbFormat=rgb).execute())
+                calendarId=cal_id, body=body, colorRgbFormat=rgb).execute())
         except OPTIONAL_PASS_ERRORS as exc:
             log.warning("[%s] could not copy settings of calendar %s: %s",
                         self.source_user, tgt_cal_id, exc)

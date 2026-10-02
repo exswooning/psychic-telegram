@@ -1495,6 +1495,8 @@ class _CalList:
         return _Call(self.s, "calendarList.patch", self._patch, kw)
 
     def _patch(self, calendarId: str, body: dict, **_):
+        if calendarId == "primary":       # as Google answered every one, live
+            raise http_error(400, "invalid", "Invalid resource id value.")
         self.s.list_settings.setdefault(calendarId, {}).update(body)
         return {"id": calendarId, **body}
 
