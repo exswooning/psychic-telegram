@@ -17,7 +17,7 @@ def test_each_pass_names_only_the_scopes_it_adds(settings):
     assert fidelity.extra_scopes(settings, "migrate_resources") == {
         "source": [config.RESOURCE_READONLY_SCOPE], "target": [config.RESOURCE_WRITE_SCOPE]}
     assert fidelity.extra_scopes(settings, "migrate_calendar_acls")["source"] == [
-        config.CALENDAR_WRITE_SCOPE]
+        config.CALENDAR_ACLS_READONLY_SCOPE]
 
 
 def test_granted_passes_go_on_and_the_rest_say_why(settings):

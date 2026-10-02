@@ -413,7 +413,8 @@ def test_gmail_settings_scope_only_when_the_pass_is_on():
     assert GMAIL_SETTINGS_SCOPE not in target_scopes(s)
 
     s.migrate_gmail_settings = True
-    assert GMAIL_SETTINGS_SCOPE in source_scopes(s)
+    # Read under gmail.readonly on the source; written on the target.
+    assert GMAIL_SETTINGS_SCOPE not in source_scopes(s)
     assert GMAIL_SETTINGS_SCOPE in target_scopes(s)
 
 

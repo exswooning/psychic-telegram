@@ -108,12 +108,13 @@ class TestTheScopeIsActuallyGranted:
         assert config.GMAIL_SHARING_SCOPE != config.GMAIL_SETTINGS_SCOPE
         assert config.GMAIL_SHARING_SCOPE.endswith("settings.sharing")
 
-    def test_both_tenants_get_it_when_settings_are_on(self):
-        """Granted on one side only, it fails at the point of use rather
-        than at setup -- the pattern this file keeps having to undo."""
+    def test_the_target_writes_them_and_the_source_only_reads(self):
+        """Delegates are CREATED on the target, so it needs the sharing scope. The
+        source only reads, and every settings read accepts gmail.readonly."""
         import dataclasses
         s = dataclasses.replace(config.Settings(), migrate_gmail_settings=True)
-        assert config.GMAIL_SHARING_SCOPE in config.source_scopes(s)
+        assert config.GMAIL_SHARING_SCOPE not in config.source_scopes(s)
+        assert "https://www.googleapis.com/auth/gmail.readonly" in config.source_scopes(s)
         assert config.GMAIL_SHARING_SCOPE in config.target_scopes(s)
 
     def test_it_is_not_granted_when_settings_are_off(self):

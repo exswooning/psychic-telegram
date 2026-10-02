@@ -818,9 +818,11 @@ class TestSetupGrantsTheOptionalScopes:
 
         grant = set(verify_scopes.grant_scopes(Settings(), "source"))
         for scope in ("https://www.googleapis.com/auth/chat.memberships.readonly",
+                      "https://www.googleapis.com/auth/chat.spaces.readonly",
+                      "https://www.googleapis.com/auth/chat.messages.readonly",
+                      "https://www.googleapis.com/auth/calendar.acls.readonly",
                       "https://www.googleapis.com/auth/contacts.readonly",
-                      "https://www.googleapis.com/auth/tasks.readonly",
-                      "https://www.googleapis.com/auth/gmail.settings.basic"):
+                      "https://www.googleapis.com/auth/tasks.readonly"):
             assert scope in grant, scope
 
     def test_required_scopes_stays_narrow(self):

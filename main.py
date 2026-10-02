@@ -994,6 +994,20 @@ def _gate_on_delegation(settings: Settings) -> None:
                     gap.tenant, ", ".join(gap.missing))
 
 
+def _say_source_access(settings) -> None:
+    """One line in every run's log: can this run write to the source? After the gate,
+    so a pass it switched off is not counted -- the record a real client's run needs."""
+    from config import source_scopes
+    try:
+        writes = sorted(s.rsplit("/", 1)[-1] for s in source_scopes(settings)
+                        if not s.endswith(".readonly"))
+    except Exception as exc:      # noqa: BLE001 - a log line must never stop a run
+        log.warning("could not say what this run can do to the source: %s", exc)
+        return
+    print("SOURCE ACCESS: read-only" if not writes
+          else f"SOURCE ACCESS: can write ({', '.join(writes)})", flush=True)
+
+
 def demote_stale_running(db) -> int:
     """Mark users left RUNNING by a run that is no longer alive.
 
@@ -1033,6 +1047,7 @@ def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
     so no future command can forget.
     """
     _gate_on_delegation(settings)
+    _say_source_access(settings)
     try:
         stale = demote_stale_running(db)
         if stale:

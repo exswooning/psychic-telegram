@@ -239,7 +239,8 @@ GMAIL_SCOPE = [
               "Google's own design — auto-forwarding to one only turns on "
               "target-side once the target confirms it, which a migration "
               "cannot do on the owner's behalf. Needs gmail.settings.sharing "
-              "for delegates specifically, on both tenants"),
+              "for delegates on the target; the source reads them, like every "
+              "other setting, under gmail.readonly"),
     ScopeItem("gmail", "POP / IMAP settings", FULL,
               "Migrated verbatim when MIGRATE_GMAIL_SETTINGS=true"),
 ]
@@ -294,9 +295,8 @@ CALENDAR_SCOPE = [
               "On by default (MIGRATE_CALENDAR_ACLS=false turns it off), identity-mapped the "
               "same way Drive ACLs are and inserted with "
               "sendNotifications=false; unmapped internal users are dropped "
-              "and logged rather than leaked. Costs read-only-ness on the "
-              "source: acl.list is rejected under calendar.readonly, so this "
-              "flag upgrades the source grant to the full calendar scope"),
+              "and logged rather than leaked. The source reads them under "
+              "calendar.acls.readonly, so the source grant stays read-only"),
     ScopeItem("calendar", "Room and equipment resources", PARTIAL,
               "With MIGRATE_RESOURCES, rooms are recreated on the target -- "
               "their buildings and features first -- and mapped, so a meeting "

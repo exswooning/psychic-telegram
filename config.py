@@ -173,6 +173,12 @@ CHAT_DELETE_SCOPE = "https://www.googleapis.com/auth/chat.delete"
 # Contacts and Tasks. Both have a readonly variant, so the source keeps its
 # read-only property; the target needs the write scope to create anything.
 CONTACTS_READONLY_SCOPE = "https://www.googleapis.com/auth/contacts.readonly"
+# What the SOURCE reads Chat and calendar sharing with. Google's reference accepts
+# these for every call the source makes: spaces.list, spaces.members.list,
+# spaces.messages.list, spaces.messages.reactions.list, and calendar acl.list.
+CHAT_READONLY_SCOPES = ["https://www.googleapis.com/auth/chat.spaces.readonly",
+                        "https://www.googleapis.com/auth/chat.messages.readonly"]
+CALENDAR_ACLS_READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.acls.readonly"
 CONTACTS_WRITE_SCOPE = "https://www.googleapis.com/auth/contacts"
 TASKS_READONLY_SCOPE = "https://www.googleapis.com/auth/tasks.readonly"
 TASKS_WRITE_SCOPE = "https://www.googleapis.com/auth/tasks"
@@ -220,14 +226,12 @@ def source_scopes(settings: "Settings") -> list[str]:
         # same write scope covers.
         scopes = [DRIVE_WRITE_SCOPE if s == DRIVE_READONLY_SCOPE else s
                  for s in scopes]
-    if settings.migrate_gmail_settings:
-        # No read-only variant of this scope exists, so reading filters
-        # necessarily grants the ability to write them too.
-        scopes.append(GMAIL_SETTINGS_SCOPE)
-        scopes.append(GMAIL_SHARING_SCOPE)
+    # Gmail settings need nothing more here: every settings READ (filters,
+    # sendAs, vacation, forwarding, delegates) accepts gmail.readonly, already in
+    # the baseline. They are written on the target, which asks for its own.
     if settings.migrate_chat:
-        # No read-only variant exists for either scope.
-        scopes.extend(CHAT_SCOPES)
+        # Read-only, like everything else the source is asked for.
+        scopes.extend(CHAT_READONLY_SCOPES)
         scopes.append(CHAT_MEMBERSHIP_READONLY_SCOPE)
         # The seeder and reset_target both act on the SOURCE tenant, and
         # deleting a space needs its own scope -- chat.spaces does not
@@ -242,11 +246,9 @@ def source_scopes(settings: "Settings") -> list[str]:
     if settings.migrate_sso:
         scopes.extend([SSO_READONLY_SCOPE, TOKENS_READONLY_SCOPE])
     if settings.migrate_calendar_acls:
-        # acl.list is rejected under calendar.readonly (verified: 403
-        # insufficient authentication scopes), so reading sharing rules
-        # requires the write scope.
-        scopes = [CALENDAR_WRITE_SCOPE if s == CALENDAR_READONLY_SCOPE else s
-                 for s in scopes]
+        # acl.list is rejected under calendar.readonly (verified: 403), but
+        # accepted under calendar.acls.readonly -- no write scope needed.
+        scopes.append(CALENDAR_ACLS_READONLY_SCOPE)
     if settings.migrate_resources:
         scopes.append(RESOURCE_READONLY_SCOPE)
     return scopes

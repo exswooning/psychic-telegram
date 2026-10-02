@@ -46,8 +46,17 @@ def st():
 
 class TestTheSourceIsReadOnlyWhereTheUiSaysItIs:
     def test_the_default_mode_grants_the_source_no_write_scope(self, st):
-        st.transfer_mode = "download_upload"
+        # SSO is the one pass with no read-only scope (admin.directory.user.security);
+        # it is on by default, named in the wizard note and on every run's SOURCE
+        # ACCESS line. This passed only because an earlier test left MIGRATE_SSO in
+        # the environment -- run alone, it failed.
+        st.transfer_mode, st.migrate_sso = "download_upload", False
         assert writes(source_scopes(st)) == set()
+
+    def test_sso_is_the_one_pass_that_widens_it(self, st):
+        st.transfer_mode, st.migrate_sso = "download_upload", True
+        assert {s.split("/auth/")[-1] for s in writes(source_scopes(st))} == {
+            "admin.directory.user.security"}
 
     @pytest.mark.parametrize("mode", WRITE_MODES)
     def test_and_these_modes_really_do_grant_one(self, st, mode):
@@ -70,19 +79,20 @@ class TestTheSourceIsReadOnlyWhereTheUiSaysItIs:
         This is the record. A new entry means a feature just widened the
         source: either give it a read-only scope, or say so in the UI.
         """
+        # Gmail settings, Chat and calendar ACLs used to be here: each has a
+        # read-only scope after all (gmail.readonly, chat.*.readonly,
+        # calendar.acls.readonly -- Google's reference, per call the source makes).
         expected = {
-            "migrate_gmail_settings": {"gmail.settings.basic",
-                                       "gmail.settings.sharing"},
-            "migrate_chat": {"chat.messages", "chat.spaces"},
             "migrate_sso": {"admin.directory.user.security"},
-            "migrate_calendar_acls": {"calendar"},
         }
         found = {}
-        for flag in [f for f in vars(Settings()) if f.startswith("migrate_")]:
+        flags = [f for f, v in vars(Settings()).items()
+                 if f.startswith("migrate_") and isinstance(v, bool)]
+        for flag in flags:
             fresh = Settings()
             fresh.transfer_mode = "download_upload"
-            if not isinstance(getattr(fresh, flag, None), bool):
-                continue
+            for f in flags:           # one at a time, whatever the environment says
+                setattr(fresh, f, False)
             setattr(fresh, flag, True)
             w = {s.split("/auth/")[-1] for s in writes(source_scopes(fresh))}
             if w:
@@ -118,3 +128,21 @@ class TestTheTargetIsWritable:
     def test_and_still_reads_the_directory_read_only(self, st):
         assert any(s.endswith("admin.directory.user.readonly")
                    for s in target_scopes(st))
+
+
+class TestEveryRunSaysWhatItCanDoToTheSource:
+    def test_read_only(self, st, capsys):
+        import main
+        st.transfer_mode, st.migrate_sso = "download_upload", False
+        main._say_source_access(st)
+        assert capsys.readouterr().out.strip() == "SOURCE ACCESS: read-only"
+
+    def test_names_what_it_can_write(self, st, capsys):
+        import main
+        st.transfer_mode, st.migrate_sso = "server_side", False
+        main._say_source_access(st)
+        assert capsys.readouterr().out.strip() == "SOURCE ACCESS: can write (drive)"
+
+    def test_the_runner_says_it(self):
+        import inspect, main
+        assert "_say_source_access(settings)" in inspect.getsource(main._run_with_memory_pause)
