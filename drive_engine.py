@@ -1190,6 +1190,11 @@ class DriveMigrator:
         is_native = str(item.get("mimeType", "")).startswith("application/vnd.google-apps.")
         existing = self.db.get_target_id(self.source_user, item["id"], "file")
         if existing:
+            if (self.settings.redo_unrewritten_links and self.settings.rewrite_drive_links
+                    and item.get("mimeType") in _NATIVE_KIND and not self.settings.dry_run):
+                # A redo also repoints natives copied before the in-place rewrite
+                # existed; one already clean produces no request at all.
+                self._pending_native.append((item, existing))
             if self.db.acl_pending(self.source_user, item["id"]) and not self.settings.dry_run:
                 self._finish_item(item, existing, resume=True)
             if self.delta:

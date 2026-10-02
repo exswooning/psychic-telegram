@@ -156,3 +156,33 @@ class TestTheEngine:
         src = inspect.getsource(drive_engine.DriveMigrator._sync_server_side)
         assert "_pending_native.append" in src
         assert "_rewrite_native_links()" in inspect.getsource(drive_engine.DriveMigrator.run)
+
+
+class TestARedoRepointsNativesCopiedBefore:
+    def _engine(self, settings, db):
+        import threading, drive_engine
+        m = object.__new__(drive_engine.DriveMigrator)
+        m.settings, m.db, m.source_user = settings, db, "u@a"
+        m.stats, m._stats_lock, m.delta, m._pending_native = {}, threading.Lock(), False, []
+        db.record_mapping("u@a", "S1", "T1", "file")
+        return m
+
+    def test_queued_on_a_redo_run(self, settings, db):
+        settings.redo_unrewritten_links = settings.rewrite_drive_links = True
+        m = self._engine(settings, db)
+        m._sync_file({"id": "S1", "mimeType": "application/vnd.google-apps.document"}, "P")
+        assert m._pending_native == [({"id": "S1", "mimeType": "application/vnd.google-apps.document"}, "T1")]
+
+    def test_not_on_an_ordinary_run_and_never_for_a_binary(self, settings, db):
+        settings.rewrite_drive_links, settings.redo_unrewritten_links = True, False
+        m = self._engine(settings, db)
+        m._sync_file({"id": "S1", "mimeType": "application/vnd.google-apps.document"}, "P")
+        settings.redo_unrewritten_links = True
+        m._sync_file({"id": "S1", "mimeType": "application/pdf"}, "P")
+        assert m._pending_native == []
+
+
+def test_the_setup_check_requires_the_three_native_apis():
+    import ensure_apis
+    assert {"docs.googleapis.com", "sheets.googleapis.com", "slides.googleapis.com"} <= set(
+        ensure_apis.REQUIRED_APIS)

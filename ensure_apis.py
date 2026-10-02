@@ -78,6 +78,13 @@ REQUIRED_APIS = {
     # the console paste line. Enabled here so that the only remaining step
     # is the one no API can perform.
     "licensing.googleapis.com": "Enterprise Licence Manager (plans)",
+    # A native file's own API: read on the source to rebuild one too large to
+    # export, written on the target to repoint the links inside a server-side
+    # copy. Live, all three were off on the target project and every in-place
+    # rewrite came back 403 SERVICE_DISABLED.
+    "docs.googleapis.com": "Docs (native files)",
+    "sheets.googleapis.com": "Sheets (native files)",
+    "slides.googleapis.com": "Slides (native files)",
 }
 
 CLOUD_PLATFORM = "https://www.googleapis.com/auth/cloud-platform"
