@@ -128,6 +128,42 @@ def _sign_in_as_source_admin(st) -> None:
         os.environ.pop("DWD_PASSWORD", None)
 
 
+def _tick_overwrite(dialog, label) -> bool:
+    """Tick "Overwrite existing client ID" and PROVE it is ticked. A click on the
+    label text did not toggle it live, and Authorize then reads as an inline
+    error. The control itself first (a checkbox role or input), then the label;
+    each attempt is judged by the checked state, never by "the click did not raise"."""
+    import re as _re
+    tries = [dialog.get_by_role("checkbox", name=_re.compile("overwrite", _re.I)),
+             dialog.get_by_role("checkbox"),
+             dialog.locator('input[type="checkbox"]'),
+             dialog.get_by_label(_re.compile("overwrite existing client id", _re.I))]
+    for loc in tries:
+        try:
+            if loc.count() == 0:
+                continue
+            box = loc.first
+            for act in (lambda: box.check(force=True, timeout=5000),
+                        lambda: box.click(force=True, timeout=5000)):
+                try:
+                    act()
+                except Exception:      # noqa: BLE001 - try the next way
+                    pass
+                try:
+                    if box.is_checked():
+                        return True
+                except Exception:      # noqa: BLE001 - not a checkable element
+                    break
+        except Exception:      # noqa: BLE001
+            continue
+    try:
+        label.click(timeout=5000)
+        return "check the 'overwrite existing client id' box" not in (
+            dialog.inner_text() or "").lower()
+    except Exception:      # noqa: BLE001
+        return False
+
+
 def _row_scope_count(row_text: str) -> int | None:
     """How many scopes a delegation-table row lists: the scopes it shows plus its
     "+N More". None when the row reads neither."""
@@ -757,12 +793,17 @@ def run(client_id: str, scopes: str, timeout: int, headful: bool,
                 log("client already delegated -- ticking 'Overwrite existing "
                     "client ID' and re-authorizing (scope list is replaced "
                     "wholesale, and the full set was supplied)")
-                try:
-                    box.click()
-                except Exception:      # noqa: BLE001 - label may not be the hit target
-                    cb = dialog.locator('input[type="checkbox"]').first
-                    if cb.count() > 0:
-                        cb.check()
+                if not _tick_overwrite(dialog, box):
+                    # Live, a click on the label text left the box unticked, and
+                    # Authorize then sat on "Client ID already exists".
+                    log("REFUSING: could not tick 'Overwrite existing client ID' "
+                        "-- nothing was changed")
+                    try:
+                        page.screenshot(path="/tmp/dwd-overwrite-unticked.png")
+                    except Exception:      # noqa: BLE001 - diagnostics only
+                        pass
+                    browser.close()
+                    return 7
                 page.wait_for_timeout(500)
                 # Re-fill: some console builds clear the scope box when the
                 # duplicate error renders.

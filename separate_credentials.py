@@ -160,7 +160,10 @@ def separate(account_id: int | None, dry_run: bool = False, wait: int = PROPAGAT
         return 4
     # Seed first: narrowing the migrate entry takes the write scopes away from
     # whatever still seeds with it, so the seed entry has to exist before that.
-    if not _grant(account_id, seed_client, seed, key, login):
+    # Already live (a re-run), it is left as it is -- one console edit fewer.
+    if all(_probe(st, key, seed).values()):
+        log(f"the seed entry already holds all {len(seed)} seed scope(s)")
+    elif not _grant(account_id, seed_client, seed, key, login):
         log("FAILED to write the seed entry")
         return 5
     if not _grant(account_id, migrate_client, migrate, st.source_sa_key, login):

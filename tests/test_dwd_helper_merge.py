@@ -127,3 +127,63 @@ class TestTheRunsOwnRegrant:
                                    missing=["https://www.googleapis.com/auth/chat.spaces.readonly"])
         ok, _ = scope_guard.repair(gap, settings=settings)
         assert ok and seen["argv"][-2:] == ["--account-id", "7"]
+
+
+class TestTheOverwriteBoxIsProvenTicked:
+    """Live, a click on the label text left "Overwrite existing client ID"
+    unticked, and Authorize sat on "Client ID already exists"."""
+
+    class _Box:
+        def __init__(self, ticks_on):
+            self.checked, self.ticks_on = False, ticks_on
+        def check(self, **k):
+            if self.ticks_on == "check":
+                self.checked = True
+        def click(self, **k):
+            if self.ticks_on == "click":
+                self.checked = True
+        def is_checked(self):
+            return self.checked
+
+    class _Loc:
+        def __init__(self, box):
+            self.box = box
+        def count(self):
+            return 1 if self.box else 0
+        @property
+        def first(self):
+            return self.box
+
+    def _dialog(self, box, text="Check the 'Overwrite existing client ID' box"):
+        t = self
+        class D:
+            def get_by_role(self, role, name=None):
+                return t._Loc(box)
+            def locator(self, sel):
+                return t._Loc(None)
+            def get_by_label(self, lab):
+                return t._Loc(None)
+            def inner_text(self):
+                return text
+        return D()
+
+    def test_the_control_itself_is_ticked_and_checked(self):
+        import dwd_helper
+        box = self._Box("click")
+        assert dwd_helper._tick_overwrite(self._dialog(box), self._Loc(None).first or type(
+            "L", (), {"click": lambda s, **k: None})())
+        assert box.checked
+
+    def test_a_box_that_will_not_tick_is_reported_not_assumed(self):
+        import dwd_helper
+        box = self._Box("never")
+        label = type("L", (), {"click": lambda s, **k: None})()
+        assert not dwd_helper._tick_overwrite(self._dialog(box), label)
+
+    def test_authorize_is_not_pressed_on_an_unticked_box(self):
+        import inspect
+
+        import dwd_helper
+        src = inspect.getsource(dwd_helper.run)
+        assert src.index("if not _tick_overwrite(") < src.index("auth_btn.first.click()", src.index("_tick_overwrite"))
+        assert "return 7" in src

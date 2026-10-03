@@ -88,12 +88,20 @@ class TestSeparate:
 
     def test_it_creates_the_key_then_grants_seed_first_and_migrate_exactly(self, wired, monkeypatch):
         st, made, grants = wired
-        live = {"seed": set(sc.seed_scopes()), "migrate": set()}
+        # Live only once granted: the seed key's scopes after its entry is written,
+        # and the migrate key never holds a seed write scope after its own.
         monkeypatch.setattr(sc, "_probe", lambda s, key, scopes: {
-            x: x in (live["seed"] if key.endswith("seed-sa.json") else live["migrate"]) for x in scopes})
+            x: key.endswith("seed-sa.json") and any(g[0] == "222" for g in grants) for x in scopes})
         assert sc.separate(3, wait=0) == 0
         assert made and [g[0] for g in grants] == ["222", "111"]
         assert grants[0][1] == set(sc.seed_scopes()) and grants[1][1] == set(sc.migrate_scopes(st))
+
+    def test_a_rerun_leaves_a_live_seed_entry_alone(self, wired, monkeypatch):
+        st, made, grants = wired
+        monkeypatch.setattr(sc, "_probe", lambda s, key, scopes: {
+            x: key.endswith("seed-sa.json") for x in scopes})
+        assert sc.separate(3, wait=0) == 0
+        assert [g[0] for g in grants] == ["111"]
 
     def test_it_reports_a_write_scope_still_live_on_the_migrate_key(self, wired, monkeypatch):
         monkeypatch.setattr(sc, "_probe", lambda s, key, scopes: {x: True for x in scopes})
