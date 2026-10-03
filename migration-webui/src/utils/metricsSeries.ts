@@ -275,3 +275,8 @@ export function sawtoothRows(hist: Record<string, LimiterPoint[]> | undefined) {
 /** Axis ticks: seconds once they reach a second -- "4000ms" did not fit the axis
  *  and read as "000ms". Stat text keeps exact milliseconds. */
 export const msAxis = (v: number) => (Math.abs(v) >= 1000 ? `${+(v / 1000).toFixed(1)} s` : `${Math.round(v)}ms`)
+
+/** A rate with its count. Live, 2 failures in 17,186 calls rounded to "0%" and read
+ *  as a clean run; any failure at all now shows, and says how many. */
+export const ratePct = (v: number, n: number) =>
+  (n > 0 ? `${v < 0.1 ? '<0.1' : v}% (${n.toLocaleString()})` : `${v}%`)

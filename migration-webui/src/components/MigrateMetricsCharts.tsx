@@ -15,7 +15,7 @@ import { BarsChart, ChartFrame, PieChartFrame, SeriesChart } from '@/components/
 import { Stat } from '@/pages/Metrics'
 import {
   clockAt, dayRows, failureCauseRows, historyRows, historyStats, limiterRows, operationRows,
-  progressRow, sawtoothRows, transferRow, volumeRows, volumeShareRows, msAxis,
+  progressRow, sawtoothRows, transferRow, volumeRows, volumeShareRows, msAxis, ratePct,
 } from '@/utils/metricsSeries'
 
 const n = (v: number) => v.toLocaleString()
@@ -74,11 +74,12 @@ export const MigrateMetricsCharts: React.FC<{ m: MetricsSnapshot }> = ({ m }) =>
             <Stat id="p95-mean" label="p95 latency, mean ± stdev"
                   value={`${ms(stats.p95Ms.mean)} ± ${ms(stats.p95Ms.stdev)}`} />
             <Stat id="window-retry-rate" label="retry rate"
-                  value={pct(stats.retryRatePct)}
+                  value={ratePct(stats.retryRatePct, stats.totalRetries)}
+                  tone={stats.totalRetries > 0 ? 'warn' : undefined}
                   hint={`${stats.totalRetries.toLocaleString()} retries across ${stats.totalCalls.toLocaleString()} calls in this window`} />
             <Stat id="window-failure-rate" label="failure rate"
-                  value={pct(stats.failureRatePct)}
-                  tone={stats.failureRatePct > 0 ? 'error' : undefined}
+                  value={ratePct(stats.failureRatePct, stats.totalFailures)}
+                  tone={stats.totalFailures > 0 ? 'error' : undefined}
                   hint={`${stats.totalFailures.toLocaleString()} failures across ${stats.totalCalls.toLocaleString()} calls in this window`} />
           </Stack>
         </Paper>
