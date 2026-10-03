@@ -1,4 +1,4 @@
-import { alpha, createTheme, Shadows, ThemeOptions } from '@mui/material/styles'
+import { alpha, createTheme, Shadows, Theme, ThemeOptions } from '@mui/material/styles'
 
 // Google's own tokens, not a generic Material palette -- the exact blue,
 // grays, and type pairing Workspace Admin Console, Gmail, and Search
@@ -142,7 +142,8 @@ const baseOptions: ThemeOptions = {
       },
     },
     MuiLinearProgress: { styleOverrides: { root: { borderRadius: 999, height: 6 } } },
-    MuiCircularProgress: { styleOverrides: { root: { color: '#1a73e8' } } },
+    // The palette's own primary: a fixed #1a73e8 was light mode's blue on a dark ground too.
+    MuiCircularProgress: { styleOverrides: { root: ({ theme }) => ({ color: theme.palette.primary.main }) } },
     MuiListItemButton: {
       styleOverrides: { root: { borderRadius: 999 } },
     },
@@ -175,8 +176,11 @@ const lightPalette = {
 // much contrast against a dark ground to read as a real Google surface).
 const darkPalette = {
   mode: 'dark' as const,
-  primary: { main: '#8ab4f8', light: '#aecbfa', dark: '#669df6', contrastText: '#202124' },
-  secondary: { main: '#81c995', light: '#a8dab5', dark: '#5bb974', contrastText: '#202124' },
+  // .light is the tint a colour sits ON and .dark the ink on that tint -- the same
+  // roles as the light palette (#d2e3fc behind #185abc). These two held pale
+  // colours instead, so a selected nav item drew a light-mode pill in dark mode.
+  primary: { main: '#8ab4f8', light: '#22314f', dark: '#aecbfa', contrastText: '#202124' },
+  secondary: { main: '#81c995', light: '#2a3b2e', dark: '#a8dab5', contrastText: '#202124' },
   success: { main: '#81c995', light: '#2a3b2e', dark: '#5bb974' },
   warning: { main: '#fdd663', light: '#3a2e10', dark: '#f9ab00' },
   error: { main: '#f28b82', light: '#3a1f1f', dark: '#ee675c' },
@@ -195,3 +199,19 @@ export const darkTheme = createTheme({
   ...baseOptions,
   palette: darkPalette,
 })
+
+
+type Tone = 'primary' | 'secondary' | 'success' | 'warning' | 'error' | 'info'
+const TONES: readonly string[] = ['primary', 'secondary', 'success', 'warning', 'error', 'info']
+
+/** A badge in a colour that reads in both themes -- the rule the Chip override
+ *  above follows: the colour as a faint tint, the ink in its main shade on dark
+ *  and its dark shade on light. Anything not a palette colour is neutral. */
+export const tint = (tone: string) => (t: Theme) => {
+  const dark = t.palette.mode === 'dark'
+  if (!TONES.includes(tone)) {
+    return { bgcolor: dark ? alpha('#e8eaed', 0.12) : '#f1f3f4', color: t.palette.text.secondary }
+  }
+  const c = t.palette[tone as Tone]
+  return { bgcolor: alpha(c.main, dark ? 0.24 : 0.12), color: dark ? c.main : c.dark }
+}

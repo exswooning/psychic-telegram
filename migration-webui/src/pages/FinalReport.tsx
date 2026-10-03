@@ -25,6 +25,7 @@ import {
 import { useMigrationStore } from '@/store'
 import RunReports from '@/components/RunReports'
 import Incidents from '@/components/Incidents'
+import { tint } from '@/theme'
 
 const FinalReport: React.FC = () => {
   const { report } = useMigrationStore()
@@ -94,7 +95,7 @@ const FinalReport: React.FC = () => {
           <Grid item xs={6} sm={4} md={2} key={stat.label}>
             <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', textAlign: 'center' }}>
               <CardContent sx={{ p: 2 }}>
-                <Avatar sx={{ mx: 'auto', mb: 1, bgcolor: `${stat.color}.light`, color: `${stat.color}.contrastText` }}>
+                <Avatar sx={[{ mx: 'auto', mb: 1 }, tint(stat.color)]}>
                   {stat.icon}
                 </Avatar>
                 <Typography variant="h5" sx={{ fontWeight: 700 }}>{stat.value}</Typography>

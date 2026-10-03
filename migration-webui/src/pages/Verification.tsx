@@ -36,6 +36,7 @@ import { fetchVerifiedDomains, VerifiedDomain, fetchMe } from '@/api/controlPlan
 import JobRunner from '@/components/JobRunner'
 import { fetchActions, ActionSpec } from '@/api/client'
 import { VERIFICATION_KEYS } from '@/actionHomes'
+import { tint } from '@/theme'
 
 /**
  * Which domain(s) this account has actually finished setting up (via the
@@ -206,7 +207,7 @@ const Verification: React.FC = () => {
 
       <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 3 }}>
         <CardContent sx={{ p: 3, display: 'flex', alignItems: 'center', gap: 3 }}>
-          <Avatar sx={{ bgcolor: overallConfidence >= 95 ? 'success.light' : overallConfidence >= 80 ? 'warning.light' : 'error.light', width: 64, height: 64 }}>
+          <Avatar sx={[{ width: 64, height: 64 }, tint(overallConfidence >= 95 ? 'success' : overallConfidence >= 80 ? 'warning' : 'error')]}>
             <ScoreIcon sx={{ fontSize: 32 }} />
           </Avatar>
           <Box>

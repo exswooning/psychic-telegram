@@ -181,7 +181,7 @@ const GoogleStyleAuth: React.FC<{
       ) : (
         <>
           <Chip
-            avatar={<Avatar sx={{ bgcolor: 'primary.main', color: '#fff' }}>
+            avatar={<Avatar sx={{ bgcolor: 'primary.main', color: 'primary.contrastText' }}>
               {email.charAt(0).toUpperCase()}
             </Avatar>}
             label={email}

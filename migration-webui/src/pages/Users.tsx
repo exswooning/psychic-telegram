@@ -32,6 +32,7 @@ import { useMigrationStore } from '@/store'
 import { statusLabel, statusColor } from '@/utils/formatters'
 import { fetchFleet, FleetNode } from '@/api/controlPlane'
 import { fetchJob } from '@/api/client'
+import { tint } from '@/theme'
 
 interface ActiveJobInfo { label: string; detail: string; writesToLedger: boolean }
 
@@ -201,7 +202,7 @@ const Users: React.FC = () => {
                   >
                     <TableCell>
                       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-                        <Avatar sx={{ width: 32, height: 32, bgcolor: `${color}.light`, color: `${color}.contrastText`, fontSize: 14 }}>
+                        <Avatar sx={[{ width: 32, height: 32, fontSize: 14 }, tint(color)]}>
                           {user.name.charAt(0)}
                         </Avatar>
                         <Box>

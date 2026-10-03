@@ -14,6 +14,7 @@ import {
   connectCP, fetchFleet, fetchUsers, fetchPublicShares, fetchFailures,
 } from '@/api/controlPlane'
 import { useMigrationStore } from '@/store'
+import { tint } from '@/theme'
 import { MigrationStatus, ServiceProgress } from '@/types'
 import JobController from '@/components/JobController'
 import RunOptions from '@/components/RunOptions'
@@ -63,13 +64,12 @@ const SERVICES: { key: ServiceKey; label: string; icon: React.ReactElement }[] =
   { key: 'chat', label: 'Chat', icon: <ChatIcon /> },
   { key: 'permissions', label: 'Permissions', icon: <PermissionsIcon /> },
 ]
-const statusChipSx: Record<MigrationStatus, { bg: string; fg: string }> = {
-  completed: { bg: '#e6f4ea', fg: '#137333' }, verified: { bg: '#e6f4ea', fg: '#137333' },
-  in_progress: { bg: '#e6f4ea', fg: '#137333' }, retrying: { bg: '#fef7e0', fg: '#b06000' },
-  waiting: { bg: '#fef7e0', fg: '#b06000' }, mismatch: { bg: '#fef7e0', fg: '#b06000' },
-  failed: { bg: '#fce8e6', fg: '#c5221f' }, needs_attention: { bg: '#fce8e6', fg: '#c5221f' },
-  not_started: { bg: '#f1f0f4', fg: '#414754' }, pending: { bg: '#f1f0f4', fg: '#414754' },
-  paused: { bg: '#f1f0f4', fg: '#414754' },
+// The theme's colours, not light-only hex: these were pale tints that glowed in dark mode.
+const statusTone: Record<MigrationStatus, string> = {
+  completed: 'success', verified: 'success', in_progress: 'success',
+  retrying: 'warning', waiting: 'warning', mismatch: 'warning',
+  failed: 'error', needs_attention: 'error',
+  not_started: 'neutral', pending: 'neutral', paused: 'neutral',
 }
 function aggregateService(services: (ServiceProgress | undefined)[]) {
   const present = services.filter((s): s is ServiceProgress => !!s)
@@ -285,7 +285,7 @@ const MissionControl: React.FC = () => {
         <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr', md: '1fr 1fr 1fr' }, gap: 2, mt: 1 }}>
           {SERVICES.map(({ key, label, icon }) => {
             const agg = aggregateService(users.map((u) => u.details?.[key]))
-            const sx = statusChipSx[agg.status]
+            const tone = statusTone[agg.status]
             return (
               <Paper key={key} variant="outlined" sx={{ borderRadius: 2, p: 2 }}>
                 <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
@@ -293,8 +293,7 @@ const MissionControl: React.FC = () => {
                     <Box sx={{ color: 'text.secondary' }}>{icon}</Box>
                     <Typography variant="subtitle2" fontWeight={700}>{label}</Typography>
                   </Stack>
-                  <Box sx={{ px: 1, py: 0.25, borderRadius: 999, bgcolor: sx.bg, color: sx.fg,
-                             fontSize: 11, fontWeight: 700 }}>
+                  <Box sx={[{ px: 1, py: 0.25, borderRadius: 999, fontSize: 11, fontWeight: 700 }, tint(tone)]}>
                     {agg.status.replace('_', ' ')}
                   </Box>
                 </Stack>

@@ -33,6 +33,7 @@ import {
 import { useMigrationStore } from '@/store'
 import { fetchFleet, FleetNode } from '@/api/controlPlane'
 import ServicesPanel from '@/components/ServicesPanel'
+import { tint } from '@/theme'
 
 const SystemHealth: React.FC = () => {
   const { metrics } = useMigrationStore()
@@ -80,7 +81,7 @@ const SystemHealth: React.FC = () => {
               <CardContent sx={{ p: 2.5 }}>
                 <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
                   <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase' }}>{card.title}</Typography>
-                  <Avatar sx={{ bgcolor: `${card.color}.light`, color: `${card.color}.contrastText`, width: 32, height: 32 }}>{card.icon}</Avatar>
+                  <Avatar sx={[{ width: 32, height: 32 }, tint(card.color)]}>{card.icon}</Avatar>
                 </Box>
                 <Typography variant="h5" sx={{ fontWeight: 700, mb: 0.5 }}>{card.value}</Typography>
                 {card.subtitle && <Typography variant="caption" color="text.secondary">{card.subtitle}</Typography>}

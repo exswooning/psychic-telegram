@@ -27,6 +27,7 @@ import { ArrowBack as ArrowBackIcon, Refresh as RefreshIcon, PlayArrow as PlayIc
 import { useMigrationStore } from '@/store'
 import { statusLabel, statusColor, statusIcon } from '@/utils/formatters'
 import ReopenUser from '@/components/ReopenUser'
+import { tint } from '@/theme'
 
 const UserDetail: React.FC = () => {
   const { email } = useParams<{ email: string }>()
@@ -59,7 +60,7 @@ const UserDetail: React.FC = () => {
         <CardContent sx={{ p: 3 }}>
           <Grid container spacing={3} alignItems="center">
             <Grid item>
-              <Avatar sx={{ width: 56, height: 56, bgcolor: `${config.color}.light`, color: `${config.color}.contrastText`, fontSize: 24 }}>
+              <Avatar sx={[{ width: 56, height: 56, fontSize: 24 }, tint(config.color)]}>
                 {user.name.charAt(0)}
               </Avatar>
             </Grid>
