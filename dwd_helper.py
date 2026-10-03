@@ -83,6 +83,51 @@ def _load_payload(tenant: str) -> dict:
     return {"client_id": client_id, "scopes": ",".join(scopes)}
 
 
+def _every_known_scope() -> set[str]:
+    """Every OAuth scope this codebase names anywhere -- the seeder's write scopes,
+    the server-side Drive scope, every optional pass -- so the live set is probed in
+    full before an Overwrite. A scope left out of the probe is a scope the Overwrite
+    silently revokes: live, the probe covered only today's default toggles, which
+    would have dropped `drive` (server-side) and the seeder's write scopes.
+    ponytail: a regex over the source; a scope assembled from parts would be missed."""
+    import re
+    here = Path(__file__).resolve().parent
+    pat = re.compile(r"https://(?:www\.googleapis\.com/auth/[a-z0-9._]+|mail\.google\.com/)")
+    found: set[str] = set()
+    for path in list(here.glob("*.py")) + list((here / "data-generator").glob("*.py")):
+        found |= set(pat.findall(path.read_text(encoding="utf-8", errors="ignore")))
+    return {s.rstrip(".") for s in found}
+
+
+def _merge_with_live(st, tenant: str, scopes: str) -> tuple[list[str], list[str], set[str]]:
+    """(the merged line, what it adds, what is live now) -- live found the only way
+    there is, a token per scope, over every scope the code knows plus the request."""
+    import verify_scopes
+
+    want = [s.strip() for s in scopes.split(",") if s.strip()]
+    probe = sorted(set(want) | _every_known_scope()
+                   | set(verify_scopes.required_scopes(st, tenant)))
+    rows = verify_scopes.verify(st, tenant, probe)
+    live = {r["scope"] for r in rows if r["ok"]}
+    merged = sorted(set(want) | live)
+    return merged, sorted(set(merged) - live), live
+
+
+def _sign_in_as_source_admin(st) -> None:
+    """The source tenant's console is signed in with the SOURCE admin's login
+    (DWD_EMAIL_SOURCE / DWD_PASSWORD_SOURCE), as dms_migrate does -- never the
+    target admin's -- and only when that admin is on this account's own source
+    domain, so one tenant's login is never typed into another tenant's console."""
+    email = (os.getenv("DWD_EMAIL_SOURCE") or "").strip()
+    domain = (st.source_domain or "").lower()
+    if email and domain and email.lower().endswith("@" + domain):
+        os.environ["DWD_EMAIL"] = email
+        os.environ["DWD_PASSWORD"] = os.getenv("DWD_PASSWORD_SOURCE", "")
+    else:
+        os.environ.pop("DWD_EMAIL", None)        # sign in by hand, or not at all
+        os.environ.pop("DWD_PASSWORD", None)
+
+
 def _dialog_open(dialog) -> bool:
     """Is the Add/Authorize dialog still up?
 
@@ -827,6 +872,9 @@ def main(argv: list[str] | None = None) -> int:
                          "default and this opts out of it")
     ap.add_argument("--timeout", type=int, default=600,
                     help="seconds to wait for manual sign-in")
+    ap.add_argument("--account-id", type=int,
+                    help="whose tenant: its key, its domain and its live scopes "
+                         "(default: the legacy single-tenant settings)")
     ap.add_argument("--revoke", action="store_true",
                     help="remove this client ID's delegation entry entirely, "
                          "instead of adding/editing one. Needs only "
@@ -834,6 +882,10 @@ def main(argv: list[str] | None = None) -> int:
                          "service-account key on file) -- --scopes is not "
                          "read.")
     args = ap.parse_args(argv)
+    from config import Settings
+    st = Settings(account_id=args.account_id) if args.account_id else Settings()
+    if args.tenant == "source":
+        _sign_in_as_source_admin(st)
 
     if not args.client_id and not args.payload and not args.tenant:
         ap.error("need --client-id/--scopes, --payload, or --tenant")
@@ -884,28 +936,23 @@ def main(argv: list[str] | None = None) -> int:
     # which ones Google issues.
     if args.tenant and not args.no_merge:
         try:
-            import verify_scopes
-            from config import Settings
-
-            want = [s.strip() for s in scopes.split(",") if s.strip()]
-            known = verify_scopes.required_scopes(Settings(), args.tenant)
-            probe = sorted(set(want) | set(known))
-            rows = verify_scopes.verify(Settings(), args.tenant, probe)
-            live = {r["scope"] for r in rows if r["ok"]}
-            merged = sorted(set(want) | live)
-            added = sorted(set(merged) - live)
-            if not added:
-                log(f"nothing to do: all {len(want)} requested scope(s) are "
-                    f"already delegated on {args.tenant}.")
-                return 0
-            log(f"{len(live)} scope(s) already live; adding {len(added)}:")
-            for a in added:
-                log(f"  + {a}")
-            scopes = ",".join(merged)
+            merged, added, live = _merge_with_live(st, args.tenant, scopes)
         except Exception as exc:      # noqa: BLE001
-            log(f"could not read the live scope set ({str(exc)[:90]}). "
-                f"Submitting --scopes as given; anything already delegated "
-                f"and missing from it WILL be revoked.")
+            # Refuse rather than overwrite blind: the console's only edit is
+            # Overwrite, so a list submitted without the live set revokes every
+            # live scope missing from it. --no-merge is the explicit opt-out.
+            log(f"could not read the live scope set ({str(exc)[:90]}); refusing "
+                "to overwrite blind. Fix the probe, or pass --no-merge with the "
+                "complete list.")
+            return 1
+        if not added:
+            log(f"nothing to do: every requested scope is already delegated on "
+                f"{args.tenant}.")
+            return 0
+        log(f"{len(live)} scope(s) already live; adding {len(added)}:")
+        for a in added:
+            log(f"  + {a}")
+        scopes = ",".join(merged)
 
     try:
         import playwright  # noqa: F401, PLC0415
