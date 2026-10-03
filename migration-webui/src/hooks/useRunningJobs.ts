@@ -23,6 +23,8 @@ export function jobKind(name: string): JobKind {
 }
 
 export interface RunningJob {
+  /** The server already sent this job a Stop: the next one forces it. */
+  stopAsked?: boolean
   key: string; label: string; detail: string; pct: number | null
   /** seed | migrate | ... -- what the rectangle announces. */
   kind: JobKind
@@ -224,6 +226,8 @@ export function useRunningJobs() {
           ].filter(Boolean).join(' · '),
           pct: job.progressPct ?? null, lines: job.lines, elapsedSec: job.elapsed,
           nodes: seedNodes,
+          // Its own admission row: a Stop already sent from anywhere makes the next one force.
+          stopAsked: !!admission?.stop_asked_at,
           stop: async (_reason, force) => {
             await stopSeedJob(undefined, force, job.external ? job.pid ?? undefined : undefined)
           },
@@ -305,6 +309,13 @@ export function useRunningJobs() {
         })
       }
 
+      // A Stop already sent, by any page or browser, is on the job's admission row
+      // (job_admission.note_stop): the next press forces, and the card says so.
+      const asked = new Set(activeJobs.filter((a) => a.stop_asked_at && a.pid != null).map((a) => a.pid))
+      for (const j of found) {
+        const pid = Number((j.key.match(/(\d+)$/) || [])[1])
+        if (pid && asked.has(pid)) j.stopAsked = true
+      }
       setJobs(found)
     } finally {
       setLoading(false)

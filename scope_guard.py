@@ -185,8 +185,12 @@ def describe(gaps: list[ScopeGap]) -> str:
     return "\n".join(out)
 
 
-def can_repair() -> bool:
-    """Is an unattended re-grant possible at all?
+def can_repair(settings: Settings | None = None, tenant: str | None = None) -> bool:
+    """Is an unattended re-grant possible at all -- for this tenant, when given?
+
+    The source console signs in with the SOURCE admin's login (DWD_EMAIL_SOURCE),
+    and only when that admin is on this account's own source domain: one tenant's
+    login is never typed into another tenant's console (dwd_helper refuses too).
 
     dwd_helper drives the Admin Console in a real browser, so it needs a
     super-admin sign-in. It reads those from the environment (never argv --
@@ -194,11 +198,17 @@ def can_repair() -> bool:
     a human at a browser, and saying so beats a repair attempt that hangs
     for ten minutes waiting at a sign-in page nobody is watching.
     """
+    if tenant == "source":
+        email = os.getenv("DWD_EMAIL_SOURCE", "").strip().lower()
+        domain = ((settings.source_domain if settings else "") or "").lower()
+        return bool(email and domain and email.endswith("@" + domain)
+                    and os.getenv("DWD_PASSWORD_SOURCE", ""))
     return bool(os.getenv("DWD_EMAIL", "").strip()
                 and os.getenv("DWD_PASSWORD", ""))
 
 
-def repair(gap: ScopeGap, timeout: int = 900) -> tuple[bool, str]:
+def repair(gap: ScopeGap, timeout: int = 900,
+           settings: Settings | None = None) -> tuple[bool, str]:
     """Re-grant the missing scopes unattended. (repaired, detail).
 
     Merge, never overwrite: the console's only edit is Overwrite, which
@@ -210,13 +220,16 @@ def repair(gap: ScopeGap, timeout: int = 900) -> tuple[bool, str]:
         return False, gap.blocked or "nothing to grant"
     if not gap.client_id:
         return False, "no client_id in the service-account key"
-    if not can_repair():
-        return False, ("DWD_EMAIL/DWD_PASSWORD are not set — the Admin "
-                       "Console grant needs a super-admin sign-in")
+    if not can_repair(settings, gap.tenant):
+        return False, (f"no {gap.tenant} admin console login on file for this tenant "
+                       "— the Admin Console grant needs a super-admin sign-in")
 
     argv = [sys.executable, os.path.join(_HERE, "dwd_helper.py"),
             "--tenant", gap.tenant, "--client-id", gap.client_id,
             "--scopes", ",".join(gap.missing)]
+    if settings is not None and getattr(settings, "account_id", None):
+        # Its own key, domain and live scopes -- not the legacy tenant's.
+        argv += ["--account-id", str(settings.account_id)]
     log.info("scope_guard: attempting unattended re-grant of %d scope(s) "
              "on %s", len(gap.missing), gap.tenant)
     try:
@@ -259,7 +272,7 @@ def ensure(settings: Settings, tenants: tuple[str, ...] = ("source", "target"),
         for gap in list(gaps):
             if not gap.fixable_by_grant:
                 continue
-            ok, detail = repair(gap)
+            ok, detail = repair(gap, settings=settings)
             if not ok:
                 log.warning("scope_guard: could not repair %s: %s",
                             gap.tenant, detail)

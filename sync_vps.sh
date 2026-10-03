@@ -118,6 +118,27 @@ else
   RUNTIME_CHANGES="(could not compare with the target)"
 fi
 
+# Refuse, before a byte is copied, a deploy that would restart services under a
+# running job. Before the copy, not just before the restart: new code on disk under
+# old running services is its own mixed state. Live, a printed `ps` warning let a
+# deploy go out over a migration -- and later one cut off the repair that runs as a
+# THREAD inside bitport-api, which no `ps` can see, so an unfinished repair_runs row
+# (started in the last 12 h) counts as busy too. A frontend-only deploy restarts
+# nothing and is never refused. DEPLOY_OVER_JOBS=1 is the explicit override.
+if [[ ( -n "$RUNTIME_CHANGES" || "${FORCE_RESTART:-0}" == "1" ) && "${DEPLOY_OVER_JOBS:-0}" != "1" ]]; then
+  BUSY="$("${SSH[@]}" "$TARGET" "cd '$DEST' 2>/dev/null || exit 0
+ps -eo pid=,args= | grep -iE '^ *[0-9]+ +[^ ]*python[0-9.]* +([^ ]*/)?(main\.py .*(migrate|delta|mirror|discover|run-shard)|(seed_sandbox|reset_target|wipe_target|wipe_tenant|remove_tenant_setup|tally|verify_sample|dms_migrate|full_setup)\.py)'
+for db in data/accounts/*/migration.db; do [ -f \"\$db\" ] && .venv/bin/python -c 'import sqlite3,sys
+c = sqlite3.connect(\"file:\" + sys.argv[1] + \"?mode=ro\", uri=True)
+for r in c.execute(\"SELECT id, started_at FROM repair_runs WHERE finished_at IS NULL AND started_at >= strftime(\x27%Y-%m-%dT%H:%M:%SZ\x27, \x27now\x27, \x27-12 hours\x27)\"): print(\"repair\", r[0], \"unfinished since\", r[1], \"in\", sys.argv[1])' \"\$db\" 2>/dev/null; done; true" 2>/dev/null || true)"
+  if [[ -n "$BUSY" ]]; then
+    echo "  REFUSING to deploy: a restart now would kill what is running on the box:" >&2
+    echo "$BUSY" | sed 's/^/    /' >&2
+    echo "  Wait for it to finish, or set DEPLOY_OVER_JOBS=1 to deploy anyway." >&2
+    exit 3
+  fi
+fi
+
 try_rsync -az --partial --timeout=90 -e "${SSH[*]}" "${SYNC_EXCLUDES[@]}" \
   "$SRC_DIR/" "$TARGET:$DEST/" || exit 1
 echo "  synced to $TARGET:$DEST"

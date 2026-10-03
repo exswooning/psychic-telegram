@@ -128,6 +128,18 @@ def _sign_in_as_source_admin(st) -> None:
         os.environ.pop("DWD_PASSWORD", None)
 
 
+def _row_scope_count(row_text: str) -> int | None:
+    """How many scopes a delegation-table row lists: the scopes it shows plus its
+    "+N More". None when the row reads neither."""
+    import re
+    # A shown scope is either whole ("https://...") or truncated (".../auth/...").
+    shown = len(re.findall(r"https://|\.\.\./", row_text))
+    more = re.search(r"\+(\d+)\s*More", row_text)
+    if not shown and not more:
+        return None
+    return shown + (int(more.group(1)) if more else 0)
+
+
 def _dialog_open(dialog) -> bool:
     """Is the Add/Authorize dialog still up?
 
@@ -645,7 +657,7 @@ def revoke(client_id: str, timeout: int, headful: bool) -> int:
 
 
 def run(client_id: str, scopes: str, timeout: int, headful: bool,
-        tenant: str | None = None) -> int:
+        tenant: str | None = None, settings=None) -> int:
     """`tenant` is optional and only used to verify the result afterwards --
     the console work itself needs nothing but the client ID and scopes."""
     from playwright.sync_api import sync_playwright  # noqa: PLC0415
@@ -660,34 +672,19 @@ def run(client_id: str, scopes: str, timeout: int, headful: bool,
             return 2
         browser, page = opened
 
-        # Prefer Edit over Add new when the client is already delegated.
-        # Add new on an existing client can only be completed through the
-        # "Overwrite existing client ID" checkbox, which replaces the scope
-        # list wholesale; Edit opens the entry with its current scopes
-        # already in the box, which is both the intended route and the one
-        # that cannot silently drop a scope.
-        used_edit = False
-        if page.get_by_text(client_id, exact=False).count() > 0:
-            try:
-                page.get_by_text(client_id, exact=False).first.click()
-                page.wait_for_timeout(1200)
-                edit = page.get_by_role("button", name="Edit")
-                if edit.count() > 0 and edit.first.is_visible():
-                    edit.first.click()
-                    page.wait_for_timeout(2000)
-                    used_edit = True
-                    log("  client already delegated -- editing the existing "
-                        "entry rather than re-adding it")
-            except Exception:      # noqa: BLE001 - fall back to Add new
-                used_edit = False
-
-        if not used_edit:
-            log("console loaded. opening Add new...")
-            btn = page.get_by_role("button", name="Add new")
-            if btn.count() == 0:
-                btn = page.locator("text=Add new")
-            btn.first.click()
-            page.wait_for_timeout(1500)
+        # Always Add new, with the client ID typed in -- never a row's Edit button.
+        # Live, Edit opened the FIRST row's entry (`get_by_role("button",
+        # name="Edit").first`) -- Google's Data Migration client, not ours -- and
+        # its dialog has one input per scope, so the whole line went into one of
+        # them: that client was given our 33 scopes and ours got nothing. Add new
+        # is addressed by the ID we type; an already-delegated client completes
+        # through "Overwrite existing client ID" with the full merged list.
+        log("console loaded. opening Add new...")
+        btn = page.get_by_role("button", name="Add new")
+        if btn.count() == 0:
+            btn = page.locator("text=Add new")
+        btn.first.click()
+        page.wait_for_timeout(1500)
 
         # The "Add new" dialog has two editable fields (Client ID, OAuth
         # scopes). Scope to the dialog so we never match the table's "Client
@@ -707,12 +704,11 @@ def run(client_id: str, scopes: str, timeout: int, headful: bool,
                     return loc.first
             return None
 
-        if not used_edit:
-            cid_box = _field("Client ID")
-            if cid_box is None:
-                cid_box = dialog.locator(
-                    'input[type="text"]:not([disabled]), input:not([type])').first
-            cid_box.fill(client_id)
+        cid_box = _field("Client ID")
+        if cid_box is None:
+            cid_box = dialog.locator(
+                'input[type="text"]:not([disabled]), input:not([type])').first
+        cid_box.fill(client_id)
 
         sc = _field("OAuth scopes (comma-delimited)", "OAuth Scopes", "OAuth scopes")
         if sc is None:
@@ -720,12 +716,17 @@ def run(client_id: str, scopes: str, timeout: int, headful: bool,
             # ID, rather than to a fixed index.
             sc = dialog.locator(
                 'textarea:not([disabled]), input[type="text"]:not([disabled])').last
-        # Replace rather than append: Edit pre-populates the box with the
-        # current scopes, and `scopes` is already the merged superset of
-        # those plus whatever is being added.
+        # `scopes` is the complete line (merged with what is live): an
+        # already-delegated client completes through Overwrite below.
         sc.fill("")
         sc.fill(scopes)
 
+        # Refuse to authorize anything but the client we were asked for.
+        typed = (cid_box.input_value() or "").strip()
+        if typed != client_id:
+            log(f"REFUSING: the dialog's client ID reads {typed!r}, not {client_id!r}")
+            browser.close()
+            return 6
         log("filling done. clicking Authorize...")
         auth_btn = dialog.get_by_role("button", name="Authorize")
         if auth_btn.count() == 0:
@@ -812,6 +813,19 @@ def run(client_id: str, scopes: str, timeout: int, headful: bool,
             return 3
 
         log("Authorize accepted. verifying...")
+        # Read our own row back: the table shows two scopes and "+N More". A
+        # count that does not match what was submitted means the console did not
+        # save what we sent -- live, that is how a wrong-row edit was found.
+        try:
+            page.reload()
+            page.wait_for_timeout(3000)
+            shown = _row_scope_count(page.locator("tr", has_text=client_id).first.inner_text())
+            want_n = len([x for x in scopes.split(",") if x.strip()])
+            log(f"console lists {shown} scope(s) for {client_id}; submitted {want_n}")
+            if shown is not None and shown != want_n:
+                log("MISMATCH: the console did not save the submitted scope list")
+        except Exception as exc:      # noqa: BLE001 - diagnostics only
+            log(f"could not read the row back ({str(exc)[:90]})")
         page.wait_for_timeout(2000)
 
         # The old check here was `client_id appears in the list`, which is
@@ -830,7 +844,9 @@ def run(client_id: str, scopes: str, timeout: int, headful: bool,
                 from config import Settings
 
                 wanted = [s.strip() for s in scopes.split(",") if s.strip()]
-                rows = verify_scopes.verify(Settings(), tenant, wanted)
+                # The account's own key: bare Settings() is the legacy tenant, and
+                # live it looked for keys/source-sa.json and could not verify.
+                rows = verify_scopes.verify(settings or Settings(), tenant, wanted)
                 missing = [r["scope"] for r in rows if not r["ok"]]
                 live = len(rows) - len(missing)
                 if missing:
@@ -962,7 +978,7 @@ def main(argv: list[str] | None = None) -> int:
         log("  pip install playwright && playwright install chromium")
         return 1
 
-    return run(client_id, scopes, args.timeout, args.headful, args.tenant)
+    return run(client_id, scopes, args.timeout, args.headful, args.tenant, settings=st)
 
 
 if __name__ == "__main__":

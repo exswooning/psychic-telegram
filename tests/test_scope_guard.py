@@ -204,12 +204,12 @@ class TestRepair:
         means a migration that appears to hang for ten minutes."""
         settings, install = wired
         install(FakeProbe(missing={"scope/b"}))
-        monkeypatch.delenv("DWD_EMAIL", raising=False)
-        monkeypatch.delenv("DWD_PASSWORD", raising=False)
+        monkeypatch.delenv("DWD_EMAIL_SOURCE", raising=False)
+        monkeypatch.delenv("DWD_PASSWORD_SOURCE", raising=False)
         gap = scope_guard.audit(settings, ("source",))[0]
-        ok, detail = scope_guard.repair(gap)
+        ok, detail = scope_guard.repair(gap, settings=settings)
         assert not ok
-        assert "DWD_EMAIL" in detail
+        assert "admin console login" in detail
 
     def test_repair_never_puts_the_password_on_the_command_line(
             self, monkeypatch, wired):
@@ -217,8 +217,9 @@ class TestRepair:
         and this one would carry a super-admin password."""
         settings, install = wired
         install(FakeProbe(missing={"scope/b"}))
-        monkeypatch.setenv("DWD_EMAIL", "admin@example.com")
-        monkeypatch.setenv("DWD_PASSWORD", "hunter2")
+        # A source gap signs in as the SOURCE admin, on the source's own domain.
+        monkeypatch.setenv("DWD_EMAIL_SOURCE", f"admin@{settings.source_domain}")
+        monkeypatch.setenv("DWD_PASSWORD_SOURCE", "hunter2")
         seen = {}
 
         def fake_run(argv, **kw):
@@ -229,9 +230,9 @@ class TestRepair:
             return R()
 
         monkeypatch.setattr(scope_guard.subprocess, "run", fake_run)
-        scope_guard.repair(scope_guard.audit(settings, ("source",))[0])
+        scope_guard.repair(scope_guard.audit(settings, ("source",))[0], settings=settings)
         assert "hunter2" not in " ".join(seen["argv"])
-        assert "admin@example.com" not in " ".join(seen["argv"])
+        assert f"admin@{settings.source_domain}" not in " ".join(seen["argv"])
 
     def test_repair_submits_only_the_missing_scopes_to_a_merging_helper(
             self, monkeypatch, wired):
@@ -241,8 +242,8 @@ class TestRepair:
         pins the no --no-merge expectation too."""
         settings, install = wired
         install(FakeProbe(missing={"scope/b"}))
-        monkeypatch.setenv("DWD_EMAIL", "a@b.com")
-        monkeypatch.setenv("DWD_PASSWORD", "x")
+        monkeypatch.setenv("DWD_EMAIL_SOURCE", f"a@{settings.source_domain}")
+        monkeypatch.setenv("DWD_PASSWORD_SOURCE", "x")
         seen = {}
 
         def fake_run(argv, **kw):
@@ -253,7 +254,7 @@ class TestRepair:
             return R()
 
         monkeypatch.setattr(scope_guard.subprocess, "run", fake_run)
-        ok, _ = scope_guard.repair(scope_guard.audit(settings, ("source",))[0])
+        ok, _ = scope_guard.repair(scope_guard.audit(settings, ("source",))[0], settings=settings)
         assert ok
         argv = seen["argv"]
         assert "--scopes" in argv and "scope/b" in argv
@@ -263,8 +264,8 @@ class TestRepair:
             self, monkeypatch, wired):
         settings, install = wired
         install(FakeProbe(missing={"scope/b"}))
-        monkeypatch.setenv("DWD_EMAIL", "a@b.com")
-        monkeypatch.setenv("DWD_PASSWORD", "x")
+        monkeypatch.setenv("DWD_EMAIL_SOURCE", f"a@{settings.source_domain}")
+        monkeypatch.setenv("DWD_PASSWORD_SOURCE", "x")
 
         def fake_run(argv, **kw):
             class R:
@@ -274,7 +275,7 @@ class TestRepair:
             return R()
 
         monkeypatch.setattr(scope_guard.subprocess, "run", fake_run)
-        ok, detail = scope_guard.repair(scope_guard.audit(settings, ("source",))[0])
+        ok, detail = scope_guard.repair(scope_guard.audit(settings, ("source",))[0], settings=settings)
         assert not ok
         assert "console rejected the entry" in detail
 
@@ -302,7 +303,7 @@ class TestEnsure:
         probe = install(FakeProbe(missing={"scope/b"}))
         calls = {"n": 0}
 
-        def fake_repair(gap, timeout=900):
+        def fake_repair(gap, timeout=900, settings=None):
             calls["n"] += 1
             probe.missing = set()          # the grant took
             return True, "granted"
@@ -321,7 +322,7 @@ class TestEnsure:
         settings, install = wired
         install(FakeProbe(missing={"scope/b"}))
         monkeypatch.setattr(scope_guard, "repair",
-                            lambda gap, timeout=900: (True, "granted"))
+                            lambda gap, timeout=900, settings=None: (True, "granted"))
         with pytest.raises(scope_guard.ScopeGapError) as err:
             scope_guard.ensure(settings, ("source",))
         assert "scope/b" in str(err.value)

@@ -503,3 +503,20 @@ class TestSpaceModeValidation:
         monkeypatch.setenv("CHAT_SPACE_MODE", "improt")
         with pytest.raises(ValueError, match="CHAT_SPACE_MODE"):
             Settings()
+
+
+def test_a_sample_copies_a_slice_of_chat_not_all_of_it(chat_migrator, auth, db, settings):
+    """Quick migrate samples Chat now: one item per message, and no space is made once
+    the slice is spent."""
+    from sample_budget import Budget
+    src = auth.source_chat(SRC_USER)
+    first = src.add_space("First", space_type="SPACE")
+    second = src.add_space("Second", space_type="SPACE")
+    for i in range(3):
+        src.add_chat_message(first, f"m{i}", SRC_USER)
+    src.add_chat_message(second, "later", SRC_USER)
+    chat_migrator.budget = Budget(2)
+    chat_migrator.run()
+    made = auth.target_chat(TGT_USER).space_store
+    assert len(made) == 1
+    assert chat_migrator.stats["messages"] == 2

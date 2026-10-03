@@ -247,9 +247,33 @@ def list_active() -> list[dict]:
     """
     with cpdb.ro() as conn:
         rows = conn.execute(
-            "SELECT account_id, job_name, pid, started_at FROM active_jobs "
-            "ORDER BY started_at").fetchall()
-    return [dict(r) for r in rows]
+            "SELECT * FROM active_jobs ORDER BY started_at").fetchall()
+    keep = ("account_id", "job_name", "pid", "started_at", "stop_asked_at")
+    return [{k: r[k] for k in keep if k in r.keys()} for r in rows]
+
+
+def note_stop(pid: int) -> None:
+    """A Stop was sent to this job: remembered on its own row, so the next Stop --
+    from any page, browser or either server -- forces it. Advisory: never raises."""
+    try:
+        with cpdb.rw() as conn:
+            conn.execute(
+                "UPDATE active_jobs SET stop_asked_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') "
+                "WHERE pid=? AND stop_asked_at IS NULL", (pid,))
+    except Exception:      # noqa: BLE001 - the stop itself already went out
+        pass
+
+
+def stop_asked(pid: int | None) -> bool:
+    """Has this running job already been asked to stop? Then a further Stop forces."""
+    if not pid:
+        return False
+    try:
+        with cpdb.ro() as conn:
+            return conn.execute("SELECT 1 FROM active_jobs WHERE pid=? AND stop_asked_at "
+                                "IS NOT NULL", (pid,)).fetchone() is not None
+    except Exception:      # noqa: BLE001 - not knowing is a polite stop, as before
+        return False
 
 
 

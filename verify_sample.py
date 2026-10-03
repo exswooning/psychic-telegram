@@ -392,6 +392,11 @@ class Verifier:
                 if kind == "file":
                     target_keys[(tp, tm.get("name"), tm.get("md5Checksum"))] = tid
                     diffs += self._content(src, tgt, sid, tid, sm, tm, ev)
+                    if getattr(self.settings, "rewrite_drive_links", False):
+                        try:
+                            diffs += self._native_links(tid, sm)
+                        except Exception as exc:      # noqa: BLE001 - unread is INCOMPLETE, never a pass
+                            res["errors"].append(f"file {sid}: the links inside could not be read: {str(exc)[:120]}")
                 sharing = self._sharing(src, tgt, sid, tid, res)
                 diffs += sharing
                 self.evidence.append({"service": "drive", **ev})
@@ -489,6 +494,20 @@ class Verifier:
         except Exception as exc:      # noqa: BLE001
             ev["how"] = f"could not be opened: {str(exc)[:100]}"
             return [f"content could not be compared: {str(exc)[:100]}"]
+
+    def _native_links(self, tid, sm) -> list[str]:
+        """A Doc, Sheet or Slide's links live inside it, where no export comparison sees
+        them: ask the same builder the rewrite uses what it would still change on the
+        TARGET copy -- a link still naming a migrated source file. Reads only."""
+        from drive_engine import _NATIVE_KIND, _native_project_limiter
+        import link_rewrite
+        k = _NATIVE_KIND.get(sm.get("mimeType") or "")
+        if not k:
+            return []
+        n = self._x(lambda: link_rewrite.rewrite_native(
+            k, self.auth.api("target", k, self.tgt_user), tid, self.db.target_for_source_id,
+            pace=lambda op: _native_project_limiter(k, op).acquire(), apply=False))
+        return [f"links inside still point at the source ({n} rewrite(s) due)"] if n else []
 
     # -- Gmail ------------------------------------------------------------
     def _label_names(self, svc) -> dict:

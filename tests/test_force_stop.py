@@ -76,7 +76,8 @@ class TestTheRouteAndButton:
     def test_the_route_passes_force_through(self):
         b = self._block()
         assert 'body.get("force")' in b
-        assert "job.stop(force)" in b
+        # The explicit force, or a Stop already sent from any page (job_admission).
+        assert "force = force or job_admission.stop_asked(pid)" in b
 
     def test_the_external_branch_kills_too(self):
         # A run started from the CLI has no Job object here; if it wedges,

@@ -247,6 +247,8 @@ export const fetchFleet = () => cpFetch<FleetNode[]>('/api/v2/fleet')
 
 export interface ActiveJobRow {
   account_id: number | null; job_name: string; pid: number | null; started_at: string
+  /** When a Stop was first sent to it; the server forces the next Stop. */
+  stop_asked_at?: string | null
 }
 // job_admission.py's admission table, unscoped by caller -- the one place
 // that shows what's occupying the shared capacity slot regardless of which

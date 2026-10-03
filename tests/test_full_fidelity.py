@@ -49,7 +49,7 @@ def test_the_launch_turns_them_on(monkeypatch, tmp_path):
     import config
 
     monkeypatch.setattr(fidelity, "plan",
-                        lambda st, probe: ({"MIGRATE_GROUPS": "true"}, ["MIGRATE_RESOURCES left off"]))
+                        lambda st, probe, can_grant=None: ({"MIGRATE_GROUPS": "true"}, ["MIGRATE_RESOURCES left off"]))
     seen = {}
 
     async def gated(op, action, body, target, launch):
@@ -206,3 +206,23 @@ def test_one_key_is_enough_for_the_check(settings, monkeypatch, tmp_path):
     settings.auth_mode = "key"
     auth.AuthManager(settings)._scopes("target")
     assert called == [1]
+
+
+class TestARegrantableGapStaysOnForTheRunToGrant:
+    """Live: the launch switched off every pass whose scopes were missing, so the run's
+    start-up re-grant (scope_guard.ensure) never even saw them."""
+
+    def test_on_a_tenant_the_run_can_grant_the_pass_stays_on_and_says_so(self, settings):
+        import config
+        missing = {config.CALENDAR_ACLS_READONLY_SCOPE}
+        probe = lambda tenant, scopes: (not (set(scopes) & missing), "not delegated")
+        env, notes = fidelity.plan(settings, probe, can_grant=lambda t: t == "source")
+        assert env["MIGRATE_CALENDAR_ACLS"] == "true"
+        assert any("start-up check grants it" in n for n in notes)
+
+    def test_where_it_cannot_the_pass_is_left_off_as_before(self, settings):
+        import config
+        missing = {config.CALENDAR_ACLS_READONLY_SCOPE}
+        probe = lambda tenant, scopes: (not (set(scopes) & missing), "not delegated")
+        env, notes = fidelity.plan(settings, probe, can_grant=lambda t: False)
+        assert env["MIGRATE_CALENDAR_ACLS"] == "false"

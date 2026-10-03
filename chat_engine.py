@@ -58,6 +58,7 @@ import uuid
 from google.auth.exceptions import RefreshError
 
 from config import Settings
+from sample_budget import Budget
 from resilience import (PermanentAPIError, RateLimiter, retry_on_google_error,
                         shutdown_requested)
 
@@ -69,6 +70,11 @@ OPTIONAL_PASS_ERRORS = (PermanentAPIError, RuntimeError, RefreshError)
 
 
 class ChatMigrator:
+    # Unlimited by default, and shared: an unlimited Budget never changes, so this is
+    # safe for instances built without __init__ (tests do). A SAMPLE run spends one
+    # per message -- the quick check copies a slice of Chat, not all of it.
+    budget = Budget(None)
+
     def __init__(self, auth, db, settings: Settings, source_user: str,
                  target_user: str):
         self.auth = auth
@@ -79,6 +85,7 @@ class ChatMigrator:
         self.limiter = RateLimiter(settings.per_user_qps)
         self.stats = {"spaces": 0, "messages": 0, "members": 0, "skipped": 0,
                       "failed": 0, "unmapped_senders": 0}
+        self.budget = Budget(getattr(settings, "sample_limit", None))
         self._email_cache: dict[str, str] = {}
         # Historical createTime is sent until the tenant refuses it once.
         self._keep_time = True
@@ -162,6 +169,8 @@ class ChatMigrator:
             return dict(self.stats)
 
         for i, space in enumerate(spaces):
+            if self.budget.exhausted:      # a sample has its slice: no further space
+                break
             # migrate_user() only checks SHUTDOWN between whole services, so
             # a user with many spaces (real accounts have far more than the
             # sandbox ones this was found against) could otherwise run to
@@ -377,6 +386,8 @@ class ChatMigrator:
     def _replay_messages(self, source_space: str, target_space: str) -> int:
         replayed = 0
         for msg in self._iter_messages(source_space):
+            if not self.budget.take():
+                break
             mid = msg.get("name")
             if self.db.get_target_id(self.source_user, mid, "chat_message"):
                 self.stats["skipped"] += 1

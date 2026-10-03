@@ -35,7 +35,8 @@ import OneToOneSummary from '@/components/OneToOneSummary'
 
 /** Chat is left out of a quick run: it writes messages into spaces other people
  *  can see, which is not something to do for a sample. */
-const QUICK_SERVICES = ['drive', 'gmail', 'calendar', 'contacts', 'tasks']
+// Chat too: it honours the sample limit (one item per message), like the rest.
+const QUICK_SERVICES = ['drive', 'gmail', 'calendar', 'contacts', 'tasks', 'chat']
 
 const Stat: React.FC<{ id: string; label: string; value: number; tone?: 'error' }> =
   ({ id, label, value, tone }) => (
@@ -96,6 +97,7 @@ export const MigrationDetail: React.FC = () => {
   const [askQuick, setAskQuick] = useState(false)
   const [quickUsers, setQuickUsers] = useState('')
   const [quickLimit, setQuickLimit] = useState('20')
+  const [quickTransfer, setQuickTransfer] = useState<TransferMode | ''>('')
   const [quickServices, setQuickServices] = useState<string[]>(QUICK_SERVICES)
   const [quickBusy, setQuickBusy] = useState(false)
   const [quickError, setQuickError] = useState<string | null>(null)
@@ -1011,6 +1013,22 @@ export const MigrationDetail: React.FC = () => {
                         e.target.checked ? [...cur, svc] : cur.filter((x) => x !== svc))} />} />
                 ))}
               </Box>
+              <Box sx={{ mt: 1 }}>
+                <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>How does Drive content move?</Typography>
+                {/* The same choice as a full migration's, so a quick check can prove the
+                    mode the real run will use -- server-side included. */}
+                <RadioGroup row value={quickTransfer}
+                            onChange={(e) => setQuickTransfer(e.target.value as TransferMode | '')}>
+                  <FormControlLabel value="" control={<Radio size="small" />} data-testid="quick-transfer-default"
+                    label={<Typography variant="body2">Default</Typography>} />
+                  <FormControlLabel value="download_upload" control={<Radio size="small" />}
+                    data-testid="quick-transfer-download-upload"
+                    label={<Typography variant="body2">This tool moves the bytes</Typography>} />
+                  <FormControlLabel value="server_side" control={<Radio size="small" />}
+                    data-testid="quick-transfer-server-side"
+                    label={<Typography variant="body2">Drive copies it directly</Typography>} />
+                </RadioGroup>
+              </Box>
             </Box>
           </>
         }
@@ -1028,7 +1046,8 @@ export const MigrationDetail: React.FC = () => {
             const users = quickUsers.split(',').map((u) => u.trim()).filter(Boolean)
               .map((u) => (u.includes('@') ? u : `${u}@${d?.sourceDomain ?? ''}`))
             const r = await startMigration(reason, quickServices, users, false,
-                                           Number(accountId), 'engine', limit)
+                                           Number(accountId), 'engine', limit, undefined,
+                                           quickTransfer || undefined)
             if (!r.ok) throw new Error(r.detail || 'could not start')
             setAskQuick(false)
             setStarted(r.detail || 'quick migration started')

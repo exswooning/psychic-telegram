@@ -1743,13 +1743,20 @@ async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
         env = {**(env or os.environ), "REDO_UNREWRITTEN_LINKS": "true", "REWRITE_DRIVE_LINKS": "true"}
     env = _tuning_env(body, env)
     left_off: list[str] = []
+    if not body.dry_run:
+        left_off += await _off_loop(_apis_for_the_run, account_id)
     if body.full_fidelity and not body.dry_run:
         import fidelity
         try:
             st = Settings(account_id=account_id)
-            extra, left_off = await _off_loop(fidelity.plan, st, fidelity.probe_for(st))
+            import scope_guard
+            extra, left_off_p = await _off_loop(
+                fidelity.plan, st, fidelity.probe_for(st),
+                lambda tenant: scope_guard.can_repair(st, tenant))
+            left_off += left_off_p
         except Exception as exc:      # noqa: BLE001 - never blocks the launch itself
-            extra, left_off = {}, [f"full fidelity not checked ({exc}); optional passes stay off"]
+            extra = {}
+            left_off += [f"full fidelity not checked ({exc}); optional passes stay off"]
         if extra:
             env = {**(env or os.environ), **extra}
     argv = [PY, "main.py"] + _account_argv(account_id)
@@ -2340,11 +2347,17 @@ async def jobs_history(run: str, account_id: int, op: Operator = Depends(operato
 
 @app.post("/api/v2/jobs/{pid}/stop")
 async def job_stop(pid: int, body: JobSignal, op: Operator = Depends(operator)):
+    # The second Stop forces whoever sends it: the first one is remembered on the
+    # job's admission row, not in one page's memory -- a reload or another browser
+    # used to send a second polite stop to a run that had ignored the first.
+    force = body.force or await _off_loop(job_admission.stop_asked, pid)
+
     def _stop() -> tuple[bool, str]:
-        if not body.force:
+        if not force:
             # SIGINT, not SIGKILL: the engine handles it cooperatively, finishes
             # the item in flight and commits, so the ledger stays resumable.
             os.kill(pid, 2)
+            job_admission.note_stop(pid)
             return True, f"SIGINT -> {pid}"
         # The second resort, for a run that took the interrupt and is still
         # going: the engine only looks at its stop flag between items, so one
@@ -2356,8 +2369,8 @@ async def job_stop(pid: int, body: JobSignal, op: Operator = Depends(operator)):
         if pid not in {j["pid"] for j in webui._external_processes()}:
             return False, f"pid {pid} is not a migration job"
         os.kill(pid, 9)
-        return True, f"SIGKILL -> {pid}"
-    return await _gated(op, "job.force-stop" if body.force else "job.stop",
+        return True, f"SIGKILL -> {pid}" + ("" if body.force else " (second stop)")
+    return await _gated(op, "job.force-stop" if force else "job.stop",
                         body, str(pid), _stop)
 
 
@@ -4584,6 +4597,37 @@ def _this_run(samples: list[dict]) -> list[dict]:
         return samples
     start = t0 - elapsed - 60           # a minute's slack for the first flush
     return [s for s in samples if (at(s) or 0) >= start]
+
+
+def _apis_for_the_run(account_id: int | None) -> list[str]:
+    """Every required Cloud API on, before a run that needs it: enabled on the TARGET
+    project, only reported on the SOURCE one. Live, Docs/Sheets/Slides were off on
+    both, so every in-place link rewrite 403'd and nothing had said so.
+
+    The source is reported, not changed: its service account can live in the
+    client's own Cloud project, and switching an API on there is a change on the
+    client's side -- the one thing a migration must not make. Never blocks a launch.
+    """
+    try:
+        import ensure_apis
+        from config import Settings
+        st = Settings(account_id=account_id)
+        notes = []
+        tgt = ensure_apis.ensure(st, "target", do_enable=True)
+        on = [a for a, err in (tgt.get("enabled_now") or {}).items() if not err]
+        bad = [a for a, err in (tgt.get("enabled_now") or {}).items() if err]
+        if on:
+            notes.append(f"enabled on the target project: {', '.join(on)}")
+        if bad:
+            notes.append(f"could not enable on the target project: {', '.join(bad)}")
+        src = ensure_apis.ensure(st, "source", do_enable=False)
+        off = [a for a in ensure_apis.REQUIRED_APIS if a in (src.get("disabled") or [])]
+        if off:
+            notes.append(f"off on the source project (not changed -- press Enable missing "
+                         f"APIs if that project is ours): {', '.join(off)}")
+        return notes
+    except Exception as exc:      # noqa: BLE001 - never blocks the launch
+        return [f"Cloud APIs not checked ({str(exc)[:80]})"]
 
 
 def _limiter_history(samples: list[dict]) -> dict:

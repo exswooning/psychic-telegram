@@ -90,10 +90,14 @@ def extra_scopes(settings, flag: str) -> dict[str, list[str]]:
             "target": sorted(set(config.target_scopes(on)) - set(config.target_scopes(off)))}
 
 
-def plan(settings, probe) -> tuple[dict, list[str]]:
+def plan(settings, probe, can_grant=None) -> tuple[dict, list[str]]:
     """(env that turns the granted passes on, why each other one stayed off).
 
-    probe(tenant, scopes) -> (ok, detail) mints one token for the whole set."""
+    probe(tenant, scopes) -> (ok, detail) mints one token for the whole set.
+    can_grant(tenant) -> True where the run's own start-up check can re-grant
+    (scope_guard.can_repair): such a pass stays ON, and the check grants its scopes
+    -- or switches it off itself if it cannot. Live, the launch switched these off
+    first, so the re-grant never even saw them."""
     env, off = {}, []
     for flag, var in OPTIONAL.items():
         missing = []
@@ -101,8 +105,12 @@ def plan(settings, probe) -> tuple[dict, list[str]]:
             if scopes:
                 ok, detail = probe(tenant, scopes)
                 if not ok:
-                    missing.append(f"{tenant} {', '.join(s.rsplit('/', 1)[-1] for s in scopes)}"
-                                   f" ({detail})")
+                    names = ', '.join(s.rsplit('/', 1)[-1] for s in scopes)
+                    if can_grant is not None and can_grant(tenant):
+                        off.append(f"{var}: not granted on {tenant} yet ({names}); "
+                                   "the run's start-up check grants it")
+                        continue
+                    missing.append(f"{tenant} {names} ({detail})")
         if missing:
             env[var] = "false"
             off.append(f"{var} left off: not granted on {'; '.join(missing)}")

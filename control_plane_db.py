@@ -162,6 +162,10 @@ def _apply_column_upgrades(conn: sqlite3.Connection) -> None:
             # Bounded, or a job that wedges on its own first item relaunches
             # for ever and burns the tenant's quota doing nothing.
             ("resumes", "INTEGER NOT NULL DEFAULT 0"),
+            # When a Stop was first sent to this job. A second Stop from any page,
+            # browser or either server forces it (job_admission.stop_asked); it goes
+            # with the row when the job ends, so a reused pid never inherits it.
+            ("stop_asked_at", "TEXT"),
         ],
         # node_directives started life meaning exactly one thing --
         # "migrate this tenant" -- so its two columns (run, services) had

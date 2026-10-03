@@ -3223,6 +3223,25 @@ class TestForceStop:
         assert r.json()["ok"] is False
         assert sent == [], "an unkillable-by-design signal went to a pid nothing here launched"
 
+    def test_the_second_stop_forces_whoever_sends_it(self, monkeypatch, cp):
+        """Live: force needed two presses from the SAME open page -- a reload or
+        another browser sent a second polite stop to a run that ignored the first.
+        The first Stop is remembered on the job's admission row now."""
+        import control_plane_db as cpdb
+        sent = self._kills(monkeypatch)
+        with cpdb.rw() as conn:
+            conn.execute("INSERT INTO active_jobs (account_id, job_name, pid) VALUES (NULL, 'migrate', 4242)")
+        cp.post("/api/v2/jobs/4242/stop", json={"reason": "stop"}, headers=ADMIN)
+        r = cp.post("/api/v2/jobs/4242/stop", json={"reason": "again, new page"}, headers=ADMIN)
+        assert r.json()["ok"] is True and "second stop" in r.json()["detail"]
+        assert sent == [(4242, 2), (4242, 9)]
+
+    def test_a_job_with_no_admission_row_still_needs_the_explicit_force(self, monkeypatch, cp):
+        sent = self._kills(monkeypatch)
+        cp.post("/api/v2/jobs/4242/stop", json={"reason": "stop"}, headers=ADMIN)
+        cp.post("/api/v2/jobs/4242/stop", json={"reason": "again"}, headers=ADMIN)
+        assert sent == [(4242, 2), (4242, 2)]
+
 
 class TestChosenUsersMoveTheirOwnMail:
     """With no mode named, a few chosen users get the engine: the DMS is only started

@@ -68,3 +68,62 @@ class TestTheSourceConsoleSignsInAsTheSourceAdmin:
         monkeypatch.setenv("DWD_PASSWORD_SOURCE", "s")
         dwd_helper._sign_in_as_source_admin(settings)
         assert "DWD_EMAIL" not in os.environ and "DWD_PASSWORD" not in os.environ
+
+
+def test_the_after_check_verifies_against_the_accounts_own_key(monkeypatch):
+    import inspect
+    assert "settings or Settings()" in inspect.getsource(dwd_helper.run)
+    assert "settings=st" in inspect.getsource(dwd_helper.main)
+
+
+class TestItNeverEditsTheWrongEntry:
+    """Live: run() clicked our row, then the FIRST Edit button on the page -- Google's
+    Data Migration client's -- and gave that client our 33 scopes. Add new, addressed
+    by the client ID we type, cannot be pointed at another row."""
+
+    def test_no_row_edit_button_is_ever_used(self):
+        import inspect
+        code = "\n".join(l for l in inspect.getsource(dwd_helper.run).splitlines()
+                         if not l.strip().startswith("#"))
+        assert 'name="Edit"' not in code
+
+    def test_a_dialog_for_another_client_is_refused_before_authorize(self):
+        import inspect
+        src = inspect.getsource(dwd_helper.run)
+        assert src.index("REFUSING: the dialog's client ID") < src.index('clicking Authorize')
+
+    def test_the_row_is_read_back_after_authorize(self):
+        assert dwd_helper._row_scope_count(
+            "sa@x\t115128313431159674171\thttps://mail.google.com/.../auth/admin.directory.group+28 More") == 30
+        assert dwd_helper._row_scope_count("sa\t1\thttps://mail.google.com/\tView details") == 1
+        assert dwd_helper._row_scope_count("Name Client ID") is None
+
+
+class TestTheRunsOwnRegrant:
+    def test_a_source_regrant_needs_the_source_admin_on_its_own_domain(self, settings, monkeypatch):
+        import scope_guard
+        settings.source_domain = "source.example"
+        monkeypatch.setenv("DWD_EMAIL_SOURCE", "admin@source.example")
+        monkeypatch.setenv("DWD_PASSWORD_SOURCE", "s")
+        assert scope_guard.can_repair(settings, "source") is True
+        settings.source_domain = "client.example"
+        assert scope_guard.can_repair(settings, "source") is False
+
+    def test_it_runs_dwd_helper_for_the_account_given(self, settings, monkeypatch):
+        import scope_guard
+        settings.account_id = 7
+        settings.source_domain = "source.example"
+        monkeypatch.setenv("DWD_EMAIL_SOURCE", "admin@source.example")
+        monkeypatch.setenv("DWD_PASSWORD_SOURCE", "s")
+        seen = {}
+
+        class P:
+            returncode, stdout, stderr = 0, "", ""
+        def run(argv, **k):
+            seen["argv"] = argv
+            return P()
+        monkeypatch.setattr(scope_guard.subprocess, "run", run)
+        gap = scope_guard.ScopeGap(tenant="source", subject="admin@source.example", client_id="123",
+                                   missing=["https://www.googleapis.com/auth/chat.spaces.readonly"])
+        ok, _ = scope_guard.repair(gap, settings=settings)
+        assert ok and seen["argv"][-2:] == ["--account-id", "7"]

@@ -6047,7 +6047,12 @@ class Handler(BaseHTTPRequestHandler):
                     cpdb.finish_action(_stop_action, outcome, detail[:300])
 
             if job.running:
+                # A second Stop forces, from any page (job_admission.stop_asked).
+                pid = getattr(job.proc, "pid", None)
+                force = force or job_admission.stop_asked(pid)
                 msg = job.stop(force)
+                if pid:
+                    job_admission.note_stop(pid)
                 _note("done", msg)
                 self._json({"ok": True, "msg": msg})
             else:
@@ -6063,16 +6068,22 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"ok": True, "msg": "nothing running"})
                 else:
                     sent = []
+                    hard = False
                     for j in jobs:
+                        # A second Stop forces, from any page (job_admission).
+                        this_hard = force or job_admission.stop_asked(j["pid"])
+                        hard = hard or this_hard
                         try:
                             # Same cooperative SIGINT the webui's own Stop uses:
                             # the engine finishes in-flight items, then resumes.
-                            os.kill(j["pid"], signal.SIGKILL if force
+                            os.kill(j["pid"], signal.SIGKILL if this_hard
                                     else signal.SIGINT)
                             sent.append(str(j["pid"]))
+                            if not this_hard:
+                                job_admission.note_stop(j["pid"])
                         except (ProcessLookupError, PermissionError):
                             pass
-                    verb = "kill" if force else "interrupt"
+                    verb = "kill" if hard else "interrupt"
                     msg = (f"{verb} sent to {len(sent)} external "
                            f"process(es): {', '.join(sent)}") if sent \
                         else "external process(es) already gone"

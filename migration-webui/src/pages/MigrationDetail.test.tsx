@@ -622,7 +622,8 @@ describe('MigrationDetail: quick migrate', () => {
     await open(); await send()
     await waitFor(() => expect(startMigration).toHaveBeenCalled())
     const [, services, users, dry, account, mode, sample] = startMigration.mock.calls[0]
-    expect(services).toEqual(['drive', 'gmail', 'calendar', 'contacts', 'tasks'])       // chat is never sampled
+    // Chat too, now that it honours the sample limit (one item per message).
+    expect(services).toEqual(['drive', 'gmail', 'calendar', 'contacts', 'tasks', 'chat'])
     expect(users).toEqual(['zane@source.example.com', 'ada@source.example.com'])
     expect([dry, account, mode, sample]).toEqual([false, 7, 'engine', 20])
   })
@@ -643,6 +644,20 @@ describe('MigrationDetail: quick migrate', () => {
     await waitFor(() => expect(startMigration).toHaveBeenCalled())
     expect(startMigration.mock.calls[0][6]).toBe(5)
     expect(startMigration.mock.calls[0][1]).not.toContain('gmail')
+  })
+
+  it('can run the quick check in the mode the real run will use', async () => {
+    await open()
+    fireEvent.click(screen.getByTestId('quick-transfer-server-side').querySelector('input')!)
+    await send()
+    await waitFor(() => expect(startMigration).toHaveBeenCalled())
+    expect(startMigration.mock.calls[0][8]).toBe('server_side')
+  })
+
+  it('leaves the transfer mode to the server unless one is chosen', async () => {
+    await open(); await send()
+    await waitFor(() => expect(startMigration).toHaveBeenCalled())
+    expect(startMigration.mock.calls[0][8]).toBeUndefined()
   })
 
   it('says blank means every user, and creates accounts', async () => {
@@ -666,7 +681,7 @@ describe('MigrationDetail: quick migrate', () => {
 
   it('refuses no services', async () => {
     await open()
-    for (const svc of ['drive', 'gmail', 'calendar', 'contacts', 'tasks']) fireEvent.click(screen.getByTestId(`quick-svc-${svc}`))
+    for (const svc of ['drive', 'gmail', 'calendar', 'contacts', 'tasks', 'chat']) fireEvent.click(screen.getByTestId(`quick-svc-${svc}`))
     await send()
     expect(await screen.findByText(/Tick at least one service/)).toBeInTheDocument()
     expect(startMigration).not.toHaveBeenCalled()

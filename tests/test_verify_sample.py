@@ -649,3 +649,28 @@ class TestATrashedCopyIsNotACopy:
         auth.target_gmail(TGT_USER).add_message(MSG % (1, 1, 1), ["INBOX"])
         r = V.run(auth, db, settings, [SRC_USER], ("gmail",), progress=lambda *_: None)
         assert len(r["users"][SRC_USER]["gmail"]["duplicates"]) == 1 and r["verdict"] == "DIFFERENCES"
+
+
+class TestLinksInsideNativeFilesAreChecked:
+    """A Doc's links live inside it, where an export comparison never looks: the check asks
+    the rewrite's own builder, read-only, what it would still change on the target copy."""
+
+    @pytest.mark.parametrize("due, verdict", [(2, "DIFFERENCES"), (0, "IDENTICAL"), (None, "INCOMPLETE")])
+    def test_a_link_still_naming_the_source_is_found(self, migrated, monkeypatch, due, verdict):
+        import link_rewrite
+        migrated.settings.rewrite_drive_links = True
+        migrated.auth.api = lambda tenant, kind, user: (tenant, kind)
+        asked = []
+
+        def fake(kind, svc, fid, lookup, pace=None, apply=True):
+            asked.append((kind, svc, apply))
+            if due is None:
+                raise RuntimeError("403 docs API off")
+            return due
+        monkeypatch.setattr(link_rewrite, "rewrite_native", fake)
+        r = V.run(migrated.auth, migrated.db, migrated.settings, [SRC_USER], ("drive",), progress=lambda *_: None)
+        assert r["verdict"] == verdict, r["reasons"]
+        assert asked == [("docs", ("target", "docs"), False)]      # the target copy, reads only
+        if due:
+            d = r["users"][SRC_USER]["drive"]["differences"]
+            assert any("still point at the source (2" in x for e in d for x in e["diffs"])

@@ -385,7 +385,7 @@ const Jobs: React.FC = () => {
                 key={j.key} job={j}
                 onOpen={() => setDetail(j)}
                 action={j.stop ? (
-                  <Tooltip title={stopAsked.has(j.key)
+                  <Tooltip title={stopAsked.has(j.key) || j.stopAsked
                     ? 'Force stop -- it took the stop and is still running' : 'Stop this job'}>
                     <span>
                       <IconButton size="small" color="error"
@@ -439,8 +439,8 @@ const Jobs: React.FC = () => {
 
       <ReasonCodeDialog
         open={!!stopping}
-        title={stopping ? `${stopAsked.has(stopping.key) ? 'Force stop' : 'Stop'} ${stopping.label}` : ''}
-        description={stopping && stopAsked.has(stopping.key)
+        title={stopping ? `${stopAsked.has(stopping.key) || stopping.stopAsked ? 'Force stop' : 'Stop'} ${stopping.label}` : ''}
+        description={stopping && (stopAsked.has(stopping.key) || stopping.stopAsked)
           ? <>Kills the process now. Work already recorded is kept and a re-run
             resumes from it, but a file being copied is left half done.</>
           : <>This ends the running job. Work already done is kept —
@@ -451,7 +451,7 @@ const Jobs: React.FC = () => {
           const j = stopping
           setStopping(null)
           if (!j?.stop) return
-          const force = stopAsked.has(j.key)
+          const force = stopAsked.has(j.key) || !!j.stopAsked
           await j.stop(reason, force)
           if (!force) setStopAsked((prev) => new Set(prev).add(j.key))
         }}
