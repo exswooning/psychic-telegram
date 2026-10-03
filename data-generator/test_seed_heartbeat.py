@@ -132,3 +132,13 @@ class TestTheHeartbeatSaysWhoIsSayingNo:
         names = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
         assert "snapshot" in names or "report" in names, (
             "the seeder collects retry counts and still never reads them")
+
+
+def test_the_seeding_heartbeat_carries_the_fill_and_the_calls_so_far():
+    """A one-user seed is "0/1 users" until it ends; these are what move meanwhile."""
+    import inspect
+    import seed_sandbox
+    src = inspect.getsource(seed_sandbox.main)
+    beat = src[src.index("still seeding:"):][:400]
+    assert "fill_progress_line()" in beat and "_throttle_note()" in beat
+    assert "calls so far" in inspect.getsource(seed_sandbox._throttle_note)

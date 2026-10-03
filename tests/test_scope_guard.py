@@ -206,10 +206,50 @@ class TestRepair:
         install(FakeProbe(missing={"scope/b"}))
         monkeypatch.delenv("DWD_EMAIL_SOURCE", raising=False)
         monkeypatch.delenv("DWD_PASSWORD_SOURCE", raising=False)
+        import admin_secrets
+        monkeypatch.setattr(admin_secrets, "ENV_FILE", "/nonexistent/dwd.env")
         gap = scope_guard.audit(settings, ("source",))[0]
         ok, detail = scope_guard.repair(gap, settings=settings)
         assert not ok
         assert "admin console login" in detail
+
+    def test_a_login_kept_only_in_the_root_file_is_used(self, monkeypatch, wired, tmp_path):
+        """A migrate launch does not carry /etc/bitport/dwd.env in its environment.
+        Live, reading only os.environ reported "no login on file" while the login sat
+        in that file, and the run switched Chat off instead of granting it."""
+        settings, install = wired
+        install(FakeProbe(missing={"scope/b"}))
+        for k in ("DWD_EMAIL_SOURCE", "DWD_PASSWORD_SOURCE", "DWD_EMAIL", "DWD_PASSWORD"):
+            monkeypatch.delenv(k, raising=False)
+        f = tmp_path / "dwd.env"
+        f.write_text(f"DWD_EMAIL_SOURCE=admin@{settings.source_domain}\nDWD_PASSWORD_SOURCE=s3cret\n"
+                     "DWD_EMAIL=t@tgt.example\nDWD_PASSWORD=target-only\n")
+        import admin_secrets
+        monkeypatch.setattr(admin_secrets, "ENV_FILE", str(f))
+        seen = {}
+
+        def fake_run(argv, **kw):
+            seen.update(argv=argv, env=kw.get("env") or {})
+            class R:
+                returncode = 0
+                stdout = stderr = ""
+            return R()
+
+        monkeypatch.setattr(scope_guard.subprocess, "run", fake_run)
+        ok, _ = scope_guard.repair(scope_guard.audit(settings, ("source",))[0], settings=settings)
+        assert ok and seen["env"]["DWD_PASSWORD_SOURCE"] == "s3cret"
+        assert "s3cret" not in " ".join(seen["argv"])
+
+    def test_a_source_grant_never_signs_in_with_the_target_admin(self, monkeypatch, wired, tmp_path):
+        settings, _ = wired
+        for k in ("DWD_EMAIL_SOURCE", "DWD_PASSWORD_SOURCE"):
+            monkeypatch.delenv(k, raising=False)
+        f = tmp_path / "dwd.env"
+        f.write_text("DWD_EMAIL=t@tgt.example\nDWD_PASSWORD=target-only\n")
+        import admin_secrets
+        monkeypatch.setattr(admin_secrets, "ENV_FILE", str(f))
+        assert not scope_guard.can_repair(settings, "source")
+        assert scope_guard.can_repair(settings, "target")
 
     def test_repair_never_puts_the_password_on_the_command_line(
             self, monkeypatch, wired):

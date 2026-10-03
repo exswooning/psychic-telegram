@@ -327,13 +327,44 @@ _filler_blob_cache: bytes | None = None
 # that will take days reads as "690 GB of 107,000 GB" instead of "0/300" for
 # two hours -- which is indistinguishable from a hung one.
 _fill_lock = threading.Lock()
-_fill_totals = {"uploaded": 0, "planned": 0}
+# users: how many users' fills are planned (or settled), of users_total in the
+# job -- the planned bytes are this job's whole fill only once they are equal.
+_fill_totals = {"uploaded": 0, "planned": 0, "users_total": 0}
+_fill_users: set = set()
 
 
-def _fill_note(uploaded: int = 0, planned: int = 0) -> None:
+def _fill_note(uploaded: int = 0, planned: int = 0, user: str | None = None) -> None:
     with _fill_lock:
         _fill_totals["uploaded"] += uploaded
         _fill_totals["planned"] += planned
+        if user:
+            _fill_users.add(user)
+
+
+# The content half of the job, counted in steps: one per service this job seeds,
+# per user, known before anything starts. A user that ends -- done or failed --
+# settles its own, so a failure never leaves the count short of its total
+# (attempted, not succeeded: the same rule as the users count).
+_steps = {"per_user": 0, "users": 0, "done": {}}
+
+
+def _content_step(user: str, wanted: bool) -> None:
+    if wanted:
+        with _fill_lock:
+            _steps["done"][user] = _steps["done"].get(user, 0) + 1
+
+
+def _content_settle(user: str) -> None:
+    with _fill_lock:
+        _steps["done"][user] = _steps["per_user"]
+
+
+def content_progress_line() -> str:
+    """" -- content: 5 of 8 steps", or nothing when this job seeds no content."""
+    with _fill_lock:
+        total = _steps["per_user"] * _steps["users"]
+        done = sum(min(v, _steps["per_user"]) for v in _steps["done"].values())
+    return f" -- content: {done:,} of {total:,} steps" if total else ""
 
 
 # Trim -- the reverse of a fill, for accounts that ended up above their share.
@@ -460,7 +491,7 @@ def _throttle_note() -> str:
         if not calls:
             return ""
         retries = snap.get("retries") or 0
-        return (f", {snap['requests_per_sec']:.1f} req/s"
+        return (f", {calls:,} calls so far, {snap['requests_per_sec']:.1f} req/s"
                 f", {retries:,} retried ({100 * retries / calls:.1f}%)")
     except Exception:      # noqa: BLE001 - never break a heartbeat
         return ""
@@ -473,7 +504,10 @@ def fill_progress_line() -> str:
         up, plan = _fill_totals["uploaded"], _fill_totals["planned"]
     if not plan:
         return ""
-    return f" -- {up / 1e9:,.1f} GB uploaded of {plan / 1e9:,.0f} GB planned"
+    with _fill_lock:
+        users, of = len(_fill_users), _fill_totals["users_total"]
+    who = f", {users:,} of {of:,} user(s) planned" if of else ""
+    return f" -- {up / 1e9:,.1f} GB uploaded of {plan / 1e9:,.1f} GB planned{who}"
 
 
 def _filler_blob() -> bytes:
@@ -545,6 +579,7 @@ def top_up_storage(drive, settings: Settings, user: str, target_gb: float | None
     retry = _retry_factory(settings, limiter=_seed_drive_limiter(settings))
     m = {"filler_files": 0, "filler_bytes": 0, "usage_before_gb": 0.0,
         "usage_after_gb": 0.0, "note": ""}
+    planned = None
     try:
         about = retry(lambda: drive.about().get(
             fields="storageQuota").execute())()
@@ -579,7 +614,8 @@ def top_up_storage(drive, settings: Settings, user: str, target_gb: float | None
         if remaining <= 0:
             m["usage_after_gb"] = m["usage_before_gb"]
             return m
-        _fill_note(planned=remaining)
+        _fill_note(planned=remaining, user=user)
+        planned = remaining
 
         root = retry(lambda: drive.files().create(
             body={"name": "MIGRATION-TEST", "mimeType": FOLDER_MIME,
@@ -630,6 +666,11 @@ def top_up_storage(drive, settings: Settings, user: str, target_gb: float | None
     except Exception as exc:  # noqa: BLE001
         m["note"] = f"storage top-up failed: {exc}"
         print(f"  ! top-up for {user}: {exc}")
+        if planned is not None:
+            _fill_note(planned=-(planned - m["filler_bytes"]))
+    finally:
+        if planned is None:
+            _fill_note(user=user)        # nothing to add: planned, at zero
     return m
 
 
@@ -2570,6 +2611,7 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
         # The link targets the other services embed. See _existing_drive_items.
         items = _existing_drive_items(drive, settings) \
             if (want("gmail") or want("calendar") or want("chat")) else None
+    _content_step(user, base_want("drive"))
 
     if want("gmail"):
         gmail_m = seed_gmail(gmail, settings, user, peers, external, mail_count,
@@ -2577,10 +2619,12 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
         gmail_m.update(seed_drafts(gmail, settings, user, peers))
     else:
         gmail_m = dict(empty)
+    _content_step(user, base_want("gmail"))
 
     if want("gmail_settings"):
         gmail_settings = build_gmail_settings(settings, user)
         gmail_m.update(seed_gmail_settings(gmail_settings, settings, user, peers))
+    _content_step(user, base_want("gmail_settings"))
 
     if want("calendar"):
         cal_m = seed_calendar(cal, settings, user, peers, external, event_count,
@@ -2588,10 +2632,12 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
         cal_m.update(seed_secondary_calendars(cal, settings, user, peers))
     else:
         cal_m = dict(empty)
+    _content_step(user, base_want("calendar"))
 
     chat_m = seed_chat(chat, settings, user, peers, external,
                        user.split("@")[0], drive_items=items) \
         if want("chat") else dict(empty)
+    _content_step(user, base_want("chat"))
 
     # Separate credential (build_people_tasks, not build_services): contacts
     # and tasks write scopes are commonly granted on a different schedule
@@ -2604,6 +2650,8 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
         tasks_m = seed_tasks(tasks, settings) if want("tasks") else dict(empty)
     else:
         contacts_m = tasks_m = dict(empty)
+    _content_step(user, base_want("contacts"))
+    _content_step(user, base_want("tasks"))
 
     # Last: every other pass has to finish first so storageQuota.usage
     # reflects everything they wrote, not just some of it.
@@ -3210,6 +3258,7 @@ def main(argv: list[str] | None = None) -> int:
                      + fill_progress_line() + _throttle_note(), flush=True)
 
         threading.Thread(target=_heartbeat, daemon=True).start()
+        _fill_totals["users_total"] = len(all_users)
         try:
             with futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
                 jobs = {pool.submit(top_up_one_user, settings, u, fill_target,
@@ -3217,6 +3266,7 @@ def main(argv: list[str] | None = None) -> int:
                        for u in all_users}
                 for fut in futures.as_completed(jobs):
                     beat_done += 1
+                    _fill_note(user=jobs[fut])
                     try:
                         fut.result()
                     except Exception as exc:  # noqa: BLE001
@@ -3295,6 +3345,13 @@ def main(argv: list[str] | None = None) -> int:
         # Groups last: they are tenant-level, so one call rather than one
         # per user, and deleting them before the members' own accounts are
         # cleared would only make the per-user work noisier.
+        # Groups and the manifest belong to the whole tenant. A reset of named
+        # users leaves them: live, a one-user wipe deleted the tenant's 4 seeded
+        # groups out from under every other user's group-typed shares.
+        if args.users:
+            print("  groups and the seed manifest kept: they belong to the whole "
+                  "tenant, and this reset named its users")
+            return 0
         admin = os.getenv("SOURCE_ADMIN") or settings.source_admin
         if admin:
             try:
@@ -3417,7 +3474,10 @@ def main(argv: list[str] | None = None) -> int:
     # Deliberately not a percentage: a user is not partly seeded as far as
     # anything downstream can measure, and inventing a fraction from elapsed
     # time would be a guess wearing a progress bar. It says what is true --
-    # how many are finished, how many are in flight, how long it has been.
+    # how many are finished, how many are in flight, how long it has been --
+    # and, while a user is in flight, the two real counters it has: calls made
+    # so far, and during a fill, GB uploaded of GB planned. A one-user seed sat
+    # at "0/1 users" for all 38 minutes of a 30 GB run without them.
     stop_beat = threading.Event()
     beat_done = 0
 
@@ -3428,10 +3488,14 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  ... still seeding: {beat_done}/{len(entries)} users "
                   f"done after {int(waited) // 60}m{int(waited) % 60:02d}s "
                   f"({min(args.workers, len(entries) - beat_done)} in flight)"
-                  f"{_throttle_note()}",
+                  f"{_throttle_note()}{content_progress_line()}{fill_progress_line()}",
                   flush=True)
 
     threading.Thread(target=_heartbeat, daemon=True).start()
+    _steps["per_user"] = len([s for s in SEEDABLE if only is None or s in only])
+    _steps["users"] = len(entries)
+    if args.target_gb_per_user or args.fill_until_full:
+        _fill_totals["users_total"] = len(entries)
     with futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
         jobs = {
             pool.submit(
@@ -3450,6 +3514,9 @@ def main(argv: list[str] | None = None) -> int:
         }
         for fut in futures.as_completed(jobs):
             beat_done += 1
+            _content_settle(jobs[fut])
+            if _fill_totals["users_total"]:
+                _fill_note(user=jobs[fut])      # a user that died before its fill
             try:
                 results.append(fut.result())
             except Exception as exc:  # noqa: BLE001

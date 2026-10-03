@@ -10,6 +10,8 @@ import {
   fetchBenchmarkRunning,
 } from '@/api/controlPlane'
 import ReasonCodeDialog from './ReasonCodeDialog'
+import JobRunner from './JobRunner'
+import { fetchActions, ActionSpec } from '@/api/client'
 
 /**
  * Launch and compare benchmark runs.
@@ -128,6 +130,12 @@ const Metric: React.FC<{ label: string; value: string; bad?: boolean }> =
 interface Props { targetDomain?: string }
 
 const BenchmarkRunner: React.FC<Props> = ({ targetDomain }) => {
+  // The controlled A/B (ab_transfer.py): the other half of measuring a transfer mode.
+  const [abSpec, setAbSpec] = useState<ActionSpec | null>(null)
+  useEffect(() => {
+    Promise.resolve().then(() => fetchActions())
+      .then((a) => setAbSpec(a?.ab_transfer ?? null)).catch(() => {})
+  }, [])
   const [label, setLabel] = useState('B5')
   const [confirmDomain, setConfirmDomain] = useState('')
   const [workers, setWorkers] = useState(4)
@@ -319,6 +327,7 @@ const BenchmarkRunner: React.FC<Props> = ({ targetDomain }) => {
         onCancel={() => { setAsk(false); setError(null) }}
         onConfirm={launch}
       />
+      {abSpec && <Box sx={{ mt: 2 }}><JobRunner name="ab_transfer" spec={abSpec} /></Box>}
     </Paper>
   )
 }

@@ -207,3 +207,23 @@ class TestSoloAndNoSharedDrives(TestTheEndpointValidatesIt):
         argv = self._body(shared_drives="0")
         assert argv[argv.index("--shared-drives") + 1] == "0"
         assert "--shared-drives" not in self._body()
+
+
+class TestOutsideOwnedShares(TestTheEndpointValidatesIt):
+    def test_it_runs_the_outside_shares_seeder_for_the_named_users(self, monkeypatch):
+        import webui
+        monkeypatch.setattr(webui, "_seed_env", lambda st, a: {})
+        argv, env, err = webui.seed_argv({"confirm_domain": "src.example", "users": "bob",
+                                          "external_owned_per_user": "3"}, 7)
+        assert not err
+        assert argv[1:] == ["seed_external_shares.py", "--confirm-domain", "src.example",
+                            "--per-user", "3", "--users", "bob"]
+        assert env["TARGET_SA_KEY"] == "/k/t.json"
+
+    def test_a_protected_target_refuses(self, monkeypatch):
+        monkeypatch.setenv("PROTECTED_DOMAINS", "tgt.example")
+        assert "tgt.example" in self._argv_ext()[2]
+
+    def _argv_ext(self):
+        import webui
+        return webui.seed_argv({"confirm_domain": "src.example", "external_owned_per_user": 2}, 7)

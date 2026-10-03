@@ -103,6 +103,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="must match SOURCE_DOMAIN")
     ap.add_argument("--per-user", type=int, default=2)
     ap.add_argument("--reset", action="store_true")
+    ap.add_argument("--users", help="comma-separated localparts; default every mapped user")
     args = ap.parse_args(argv)
 
     settings = Settings()
@@ -122,6 +123,9 @@ def main(argv: list[str] | None = None) -> int:
     users = [r["source_email"] for r in
              MigrationDB(settings.db_path).all_identities()
              if r["entity_type"] == "user"]
+    if args.users:
+        want = {u.strip().lower() for u in args.users.split(",") if u.strip()}
+        users = [u for u in users if u.split("@")[0].lower() in want]
     if not users:
         sys.exit("no users in identity_map — run init-db first")
 

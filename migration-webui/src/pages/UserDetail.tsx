@@ -26,6 +26,7 @@ import {
 import { ArrowBack as ArrowBackIcon, Refresh as RefreshIcon, PlayArrow as PlayIcon, Pause as PauseIcon, Error as ErrorIcon } from '@mui/icons-material'
 import { useMigrationStore } from '@/store'
 import { statusLabel, statusColor, statusIcon } from '@/utils/formatters'
+import ReopenUser from '@/components/ReopenUser'
 
 const UserDetail: React.FC = () => {
   const { email } = useParams<{ email: string }>()
@@ -88,6 +89,8 @@ const UserDetail: React.FC = () => {
           </Stack>
         </CardContent>
       </Card>
+
+      <ReopenUser email={user.email} />
 
       <Typography variant="h6" sx={{ fontWeight: 600, mb: 2 }}>Service Progress</Typography>
       <Grid container spacing={2}>

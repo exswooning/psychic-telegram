@@ -146,6 +146,32 @@ export const setAccountSeedEnabled = (accountId: number, enabled: boolean, reaso
     body: JSON.stringify({ reason, enabled }),
   })
 
+/** A throwaway account: refused for a superadmin, your own, one with a tenant set up
+ *  or a job running. The email typed back is the confirmation. */
+export const deleteAccount = (accountId: number, confirmEmail: string, reason: string) =>
+  cpFetch<ActionResult>(`/api/v2/admin/accounts/${accountId}/delete`, {
+    method: 'POST',
+    body: JSON.stringify({ reason, confirm_email: confirmEmail }),
+  })
+
+export interface RateCeiling { tenant: string; ceiling: number; updated_at: string }
+/** The per-project Drive rate each tenant side has proven; a fresh run starts there. */
+export const fetchRateCeilings = (accountId: number) =>
+  cpFetch<{ accountId: number; ceilings: RateCeiling[] }>(`/api/v2/rate-ceilings/${accountId}`)
+export const forgetRateCeiling = (accountId: number, tenant: string, reason: string) =>
+  cpFetch<ActionResult>(`/api/v2/rate-ceilings/${accountId}/forget`, {
+    method: 'POST',
+    body: JSON.stringify({ reason, tenant }),
+  })
+
+/** The next migrate reattempts these services for this user; none named = the whole user. */
+export const reopenUser = (sourceEmail: string, services: string[], reason: string,
+                           accountId?: number) =>
+  cpFetch<ActionResult>('/api/v2/users/reopen', {
+    method: 'POST',
+    body: JSON.stringify({ reason, source_email: sourceEmail, services, account_id: accountId }),
+  })
+
 export const logout = () => cpFetch<{ ok: boolean }>('/api/v2/auth/logout', { method: 'POST' })
 
 export const fetchMe = () => cpFetch<Account>('/api/v2/auth/me')

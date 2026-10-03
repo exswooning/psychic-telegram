@@ -175,7 +175,9 @@ class TestADefaultSeedIncludesThem:
         argv, _e, err = webui.seed_argv({"confirm_domain": "src.example",
                                          "shared_drives": 0})
         assert not err
-        assert "--shared-drives" not in argv
+        # Passed as 0, not left out: left out means the seeder's default of 3,
+        # which is how "0" used to make three anyway.
+        assert argv[argv.index("--shared-drives") + 1] == "0"
 
     def test_omitting_it_no_longer_means_none(self):
         """The 200-user run produced zero shared drives for exactly this

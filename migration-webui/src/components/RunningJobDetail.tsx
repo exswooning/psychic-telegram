@@ -25,6 +25,7 @@ import { fetchMyMetrics, MetricsSnapshot } from '@/api/controlPlane'
 import { bytes } from '@/utils/metricsSeries'
 import { formatPct } from '@/utils/formatPct'
 import { jobFacts, projectedEta } from './RunningJobDetail.utils'
+import ProcessPanel from './ProcessPanel'
 
 /** Fetched here, once, rather than inside the charts section below: the top
  *  "glance" row wants the same snapshot the charts render from, and fetching
@@ -147,6 +148,7 @@ export const RunningJobDetail: React.FC<{
           : !job.done ? <LinearProgress /> : null}
 
         <Divider sx={{ my: 2 }} />
+        {!job.done && job.pid ? <ProcessPanel pid={job.pid} /> : null}
         {facts && facts.results.length > 0 && (
           <Alert severity={facts.failures.length ? 'warning' : 'success'} sx={{ mb: 2 }} data-testid="job-results">
             {facts.results.map((r, i) => (

@@ -198,13 +198,27 @@ def can_repair(settings: Settings | None = None, tenant: str | None = None) -> b
     a human at a browser, and saying so beats a repair attempt that hangs
     for ten minutes waiting at a sign-in page nobody is watching.
     """
+    return bool(_console_login(settings, tenant))
+
+
+def _console_login(settings: Settings | None, tenant: str | None) -> dict:
+    """The sign-in dwd_helper needs, as the env vars it reads -- or {} when there is
+    none. The environment first, then the root-only file admin_secrets reads
+    (/etc/bitport/dwd.env): a migrate launch does not carry the file's contents in
+    its environment, so reading only os.environ said "no login on file" while the
+    login sat in that file (live, the run switched Chat off instead of granting)."""
+    import admin_secrets
+    filed = admin_secrets._load()
+    pick = lambda k: (os.getenv(k) or filed.get(k) or "").strip()   # noqa: E731
     if tenant == "source":
-        email = os.getenv("DWD_EMAIL_SOURCE", "").strip().lower()
+        # Side-specific only: the generic pair is the TARGET admin's.
+        email, pw = pick("DWD_EMAIL_SOURCE").lower(), pick("DWD_PASSWORD_SOURCE")
         domain = ((settings.source_domain if settings else "") or "").lower()
-        return bool(email and domain and email.endswith("@" + domain)
-                    and os.getenv("DWD_PASSWORD_SOURCE", ""))
-    return bool(os.getenv("DWD_EMAIL", "").strip()
-                and os.getenv("DWD_PASSWORD", ""))
+        ok = bool(email and pw and domain and email.endswith("@" + domain))
+        return {"DWD_EMAIL_SOURCE": email, "DWD_PASSWORD_SOURCE": pw} if ok else {}
+    email = pick("DWD_EMAIL") or pick("DWD_EMAIL_TARGET")
+    pw = pick("DWD_PASSWORD") or pick("DWD_PASSWORD_TARGET")
+    return {"DWD_EMAIL": email, "DWD_PASSWORD": pw} if email and pw else {}
 
 
 def repair(gap: ScopeGap, timeout: int = 900,
@@ -220,9 +234,13 @@ def repair(gap: ScopeGap, timeout: int = 900,
         return False, gap.blocked or "nothing to grant"
     if not gap.client_id:
         return False, "no client_id in the service-account key"
-    if not can_repair(settings, gap.tenant):
+    login = _console_login(settings, gap.tenant)
+    if not login:
         return False, (f"no {gap.tenant} admin console login on file for this tenant "
                        "— the Admin Console grant needs a super-admin sign-in")
+    # In the child's environment only, never argv (`ps` shows argv to everyone).
+    env = {**os.environ, **login}
+    env.setdefault("DISPLAY", os.getenv("BITPORT_XVFB_DISPLAY", ":99"))
 
     argv = [sys.executable, os.path.join(_HERE, "dwd_helper.py"),
             "--tenant", gap.tenant, "--client-id", gap.client_id,
@@ -233,7 +251,7 @@ def repair(gap: ScopeGap, timeout: int = 900,
     log.info("scope_guard: attempting unattended re-grant of %d scope(s) "
              "on %s", len(gap.missing), gap.tenant)
     try:
-        proc = subprocess.run(argv, cwd=_HERE, timeout=timeout,
+        proc = subprocess.run(argv, cwd=_HERE, timeout=timeout, env=env,
                               capture_output=True, text=True)
     except subprocess.TimeoutExpired:
         return False, f"dwd_helper did not finish within {timeout}s"

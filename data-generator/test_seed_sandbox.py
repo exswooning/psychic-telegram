@@ -1242,7 +1242,7 @@ class TestThrottleNote:
 
         monkeypatch.setattr(metrics.METRICS, "snapshot", lambda: {
             "calls": 1000, "retries": 45, "requests_per_sec": 9.54})
-        assert s._throttle_note() == ", 9.5 req/s, 45 retried (4.5%)"
+        assert s._throttle_note() == ", 1,000 calls so far, 9.5 req/s, 45 retried (4.5%)"
 
     def test_a_broken_metrics_reader_never_breaks_a_heartbeat(self, monkeypatch):
         import metrics
@@ -1289,7 +1289,7 @@ class TestFillProgressIsReal:
         s.top_up_storage(drive, settings, "alice@tenanta.com", target_gb=None,
                          fill_percent=50.0, media_fn=_FakeMediaFn(),
                          account_limit_bytes=100 * 1024**2)
-        assert s._fill_totals == {"uploaded": 0, "planned": 0}
+        assert (s._fill_totals["uploaded"], s._fill_totals["planned"]) == (0, 0)
 
 
 class TestFillUntilFull:
@@ -2037,3 +2037,12 @@ def test_a_solo_user_shares_with_no_colleague_and_no_company(settings, seed, mon
     drive.storage_usage, drive.storage_limit = 0, 1024**4
     seed.top_up_storage(drive, settings, "alice@tenanta.com", 3e-6, media_fn=_FakeMediaFn())
     assert not [p for ps in drive.perms.values() for p in ps if p["type"] == "domain"]
+
+
+def test_a_reset_of_named_users_keeps_the_tenants_groups_and_manifest():
+    """Groups and the manifest are tenant-wide. Live, a one-user wipe deleted the
+    tenant's 4 seeded groups out from under every other user's shares."""
+    import seed_sandbox
+    src = inspect.getsource(seed_sandbox.main)
+    guard = src.index("if args.users:\n            print(\"  groups and the seed manifest kept")
+    assert guard < src.index("reset_groups(build_directory_groups") < src.index("os.remove(f)")

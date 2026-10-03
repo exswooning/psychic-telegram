@@ -1,15 +1,18 @@
 import React, { useEffect, useState } from 'react'
 import {
-  Alert, Box, Chip, CircularProgress, Paper, Stack, Switch, Table,
+  Alert, Box, Chip, CircularProgress, IconButton, Paper, Stack, Switch, Table,
   TableBody, TableCell, TableContainer, TableHead, TableRow, Typography,
 } from '@mui/material'
-import { AdminPanelSettings as AdminIcon } from '@mui/icons-material'
-import { Account, fetchAdminAccounts, setAccountSubscription, setAccountSeedEnabled } from '@/api/controlPlane'
+import { AdminPanelSettings as AdminIcon, DeleteOutline as DeleteIcon } from '@mui/icons-material'
+import {
+  Account, deleteAccount, fetchAdminAccounts, setAccountSubscription, setAccountSeedEnabled,
+} from '@/api/controlPlane'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
 
 type Pending = { id: number; email: string } & (
   | { kind: 'subscription'; active: boolean }
   | { kind: 'seed'; enabled: boolean }
+  | { kind: 'delete' }
 )
 
 /**
@@ -39,7 +42,9 @@ const AdminAccounts: React.FC = () => {
     try {
       const r = pending.kind === 'subscription'
         ? await setAccountSubscription(pending.id, pending.active, reason)
-        : await setAccountSeedEnabled(pending.id, pending.enabled, reason)
+        : pending.kind === 'seed'
+          ? await setAccountSeedEnabled(pending.id, pending.enabled, reason)
+          : await deleteAccount(pending.id, pending.email, reason)
       if (!r.ok) throw new Error(r.detail || 'could not update')
       setPending(null)
       refresh()
@@ -77,6 +82,7 @@ const AdminAccounts: React.FC = () => {
                 <TableCell align="center">Superadmin</TableCell>
                 <TableCell align="center">Subscription active</TableCell>
                 <TableCell align="center">Seed enabled</TableCell>
+                <TableCell />
               </TableRow>
             </TableHead>
             <TableBody>
@@ -109,10 +115,19 @@ const AdminAccounts: React.FC = () => {
                       })}
                     />
                   </TableCell>
+                  <TableCell align="center">
+                    {!a.is_superadmin && (
+                      <IconButton size="small" color="error" aria-label={`delete ${a.email}`}
+                                  data-testid={`delete-account-${a.id}`}
+                                  onClick={() => setPending({ id: a.id, email: a.email, kind: 'delete' })}>
+                        <DeleteIcon fontSize="small" />
+                      </IconButton>
+                    )}
+                  </TableCell>
                 </TableRow>
               ))}
               {accounts.length === 0 && (
-                <TableRow><TableCell colSpan={7}>No accounts yet.</TableCell></TableRow>
+                <TableRow><TableCell colSpan={8}>No accounts yet.</TableCell></TableRow>
               )}
             </TableBody>
           </Table>
@@ -128,7 +143,7 @@ const AdminAccounts: React.FC = () => {
             ? (pending.active ? `Reactivate ${pending.email}` : `Deactivate ${pending.email}`)
             : pending?.kind === 'seed'
               ? (pending.enabled ? `Enable seeding for ${pending.email}` : `Disable seeding for ${pending.email}`)
-              : ''
+              : pending?.kind === 'delete' ? `Delete ${pending.email}` : ''
         }
         description={
           pending?.kind === 'subscription' ? (
@@ -139,8 +154,13 @@ const AdminAccounts: React.FC = () => {
             pending.enabled
               ? <>Lets this account write fabricated test data into its own source tenant, from the Setup Wizard's Seed option.</>
               : <>Removes this account's ability to seed a tenant with fabricated data. Does not affect a real migration.</>
+          ) : pending?.kind === 'delete' ? (
+            <>Deletes the account and signs it out everywhere. Refused if it has a tenant set up
+              or a job running — for throwaway and test accounts. Type its email to confirm.</>
           ) : null
         }
+        confirmPhrase={pending?.kind === 'delete' ? pending.email : undefined}
+        destructive={pending?.kind === 'delete'}
         onCancel={() => { setPending(null); setActionError(null) }}
         onConfirm={confirm}
       />

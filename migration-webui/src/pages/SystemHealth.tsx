@@ -32,6 +32,7 @@ import {
 } from '@mui/icons-material'
 import { useMigrationStore } from '@/store'
 import { fetchFleet, FleetNode } from '@/api/controlPlane'
+import ServicesPanel from '@/components/ServicesPanel'
 
 const SystemHealth: React.FC = () => {
   const { metrics } = useMigrationStore()
@@ -69,6 +70,8 @@ const SystemHealth: React.FC = () => {
     <Box>
       <Typography variant="h4" sx={{ fontWeight: 700, mb: 0.5 }}>System Health</Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>Real-time infrastructure monitoring</Typography>
+
+      <ServicesPanel />
 
       <Grid container spacing={2} sx={{ mb: 3 }}>
         {metricCards.map((card) => (

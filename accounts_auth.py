@@ -511,6 +511,15 @@ def promote_to_superadmin(email: str) -> None:
             raise AccountError(f"no account with email {email!r} -- sign up first")
 
 
+def delete_account(account_id: int) -> None:
+    """The account, its sessions and its (empty) tenant rows. Callers check it
+    holds nothing first."""
+    with cpdb.rw() as conn:
+        conn.execute("DELETE FROM sessions WHERE account_id=?", (account_id,))
+        conn.execute("DELETE FROM tenant_configs WHERE account_id=?", (account_id,))
+        conn.execute("DELETE FROM accounts WHERE id=?", (account_id,))
+
+
 # ----------------------------------------------------------------------
 # Sessions
 # ----------------------------------------------------------------------

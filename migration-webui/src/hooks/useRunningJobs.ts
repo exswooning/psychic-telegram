@@ -25,6 +25,8 @@ export function jobKind(name: string): JobKind {
 export interface RunningJob {
   /** The server already sent this job a Stop: the next one forces it. */
   stopAsked?: boolean
+  /** Its process, when a source knows it -- the Jobs card reads its live stats. */
+  pid?: number
   key: string; label: string; detail: string; pct: number | null
   /** seed | migrate | ... -- what the rectangle announces. */
   kind: JobKind
@@ -130,7 +132,7 @@ export function useRunningJobs() {
       const found: RunningJob[] = []
       if (srcSetup?.running) {
         found.push({
-          key: 'setup-source', kind: 'setup', domain: srcCfg?.domain,
+          key: 'setup-source', kind: 'setup', domain: srcCfg?.domain, pid: srcSetup.pid ?? undefined,
           label: srcCfg?.domain || 'source',
           detail: srcSetup.progressLabel || 'setting up…', pct: srcSetup.progressPct ?? null,
           stop: async (reason, force) => {
@@ -142,7 +144,7 @@ export function useRunningJobs() {
       }
       if (tgtSetup?.running) {
         found.push({
-          key: 'setup-target', kind: 'setup', domain: tgtCfg?.domain,
+          key: 'setup-target', kind: 'setup', domain: tgtCfg?.domain, pid: tgtSetup.pid ?? undefined,
           label: tgtCfg?.domain || 'target',
           detail: tgtSetup.progressLabel || 'setting up…', pct: tgtSetup.progressPct ?? null,
           stop: async (reason, force) => {
@@ -204,7 +206,7 @@ export function useRunningJobs() {
           : undefined
         found.push({
           key: `webui-${job.name}`,
-          kind,
+          kind, pid: job.pid ?? undefined,
           // Every other job acts on one tenant, so naming it is the whole answer; a
           // migration or delta reads one and writes the other, so jobDomain above
           // already carries both.
@@ -249,7 +251,7 @@ export function useRunningJobs() {
                                      && !myPids.includes(n.job_pid))
       if (fleet) {
         found.push({
-          key: `fleet-${fleet.job_pid}`, kind: jobKind(fleet.active_job!),
+          key: `fleet-${fleet.job_pid}`, kind: jobKind(fleet.active_job!), pid: fleet.job_pid ?? undefined,
           domain: srcCfg?.domain, label: fleet.active_job!,
           detail: `pid ${fleet.job_pid} on ${fleet.hostname || fleet.node_id}`, pct: null,
           stop: async (reason, force) => {
@@ -273,7 +275,7 @@ export function useRunningJobs() {
         if (jobIsMine && sameJob(row)) continue
         found.push({
           key: `admission-${row.account_id}-${row.job_name}`,
-          kind: jobKind(row.job_name),
+          kind: jobKind(row.job_name), pid: row.pid ?? undefined,
           label: row.job_name,
           detail: `account #${row.account_id ?? 'legacy'} -- started ${new Date(row.started_at).toLocaleTimeString()}`,
           pct: null,
@@ -294,7 +296,7 @@ export function useRunningJobs() {
         if (!st?.running) continue
         found.push({
           key: `provision-${tenant}`,
-          kind: 'provision',
+          kind: 'provision', pid: st.pid ?? undefined,
           domain: tenant === 'target' ? tgtCfg?.domain : srcCfg?.domain,
           label: `provision users — ${tenant}`,
           detail: `${st.created} of ${st.total} created`

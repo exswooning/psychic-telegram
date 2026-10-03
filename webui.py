@@ -538,6 +538,59 @@ ACTIONS: dict[str, dict] = {
         "destructive": True,
         "confirm": "SSO",
     },
+    # Each of these was run by hand over SSH during a live migration, because
+    # nothing in the product could start it.
+    "acl_reconcile_dry": {
+        "label": "Sharing failures: which are still real (preview)",
+        "blurb": "Reads each FAILED share on the target. One the target already "
+                 "holds is listed as resolved; nothing is written.",
+        "argv": [PY, "acl_reconcile.py", "--dry-run"],
+    },
+    "acl_reconcile": {
+        "label": "Sharing failures: close the ones already done",
+        "blurb": "Marks a FAILED share resolved when the target already holds "
+                 "it. Changes the ledger only, never a file.",
+        "argv": [PY, "acl_reconcile.py"],
+    },
+    "acl_repair_dry": {
+        "label": "Re-apply missing shares (preview)",
+        "blurb": "Lists the shares that genuinely never landed and would be "
+                 "granted again. Nothing is written.",
+        "argv": [PY, "acl_repair.py"],
+    },
+    "acl_repair": {
+        "label": "Re-apply missing shares",
+        "blurb": "Grants again every share that genuinely never landed, pass "
+                 "after pass until nothing more settles.",
+        "argv": [PY, "acl_repair.py", "--apply", "--until-settled"],
+    },
+    "syncacls": {
+        "label": "Recreate sharing on migrated files",
+        "blurb": "Re-applies each migrated file's own grants on the target. "
+                 "Adds what is missing; removes nothing.",
+        "argv": [PY, "main.py", "syncacls"],
+    },
+    "link_check": {
+        "label": "Check Drive links survived",
+        "blurb": "Reads the seeded documents on the target and reports every "
+                 "link that still names a SOURCE file. Read-only.",
+        "argv": [PY, "check_link_rewrite.py"],
+    },
+    "contract_probe": {
+        "label": "Check Google's APIs still behave as assumed",
+        "blurb": "Calls the real APIs, read-only, and compares what they "
+                 "return with what the engine and its tests assume.",
+        "argv": [PY, "contract_probe.py"],
+    },
+    "ab_transfer": {
+        "label": "A/B: server-side vs download/upload",
+        "blurb": "Migrates the same corpus twice, once per transfer mode, "
+                 "RESETTING THE TARGET between the two, and reports the "
+                 "difference. Run it with nothing else touching the tenants.",
+        "argv": [PY, "ab_transfer.py", "--report", "logs/ab_results.md"],
+        "destructive": True,
+        "confirm": "RESET TARGET",
+    },
 }
 
 # ----------------------------------------------------------------------
@@ -631,6 +684,31 @@ def _counter_progress_pct(lines: list[str]) -> int | None:
             pct = _pct(done, total)
             best = pct if best is None else max(best, pct)
     return best
+
+
+_CONTENT_STEPS_RE = re.compile(r"content: ([\d,]+) of ([\d,]+) steps")
+_FILL_BYTES_RE = re.compile(r"([\d,.]+) GB uploaded of ([\d,.]+) GB planned"
+                            r"(?:, ([\d,]+) of ([\d,]+) user\(s\) planned)?")
+
+
+def _seed_job_pct(lines: list[str]) -> float | None:
+    """How far through ITS OWN work this seed is, from its newest heartbeat --
+    not users finished, which a one-user seed reads as 0% for all 38 minutes of a
+    30 GB run. Content steps (one per service per user, a total known before the
+    run starts) while any remain; then the fill in bytes, but only once every
+    user's fill is planned -- before that the planned total is still growing,
+    and a share of a growing total is not progress. None when neither applies."""
+    num = lambda x: float(x.replace(",", ""))      # noqa: E731
+    for ln in reversed(lines):
+        c, f = _CONTENT_STEPS_RE.search(ln), _FILL_BYTES_RE.search(ln)
+        if not (c or f):
+            continue
+        if c and num(c.group(1)) < num(c.group(2)):
+            return _pct(int(num(c.group(1))), int(num(c.group(2))))
+        if f and f.group(3) and num(f.group(3)) >= num(f.group(4)) and num(f.group(2)) > 0:
+            return min(100.0, round(100 * num(f.group(1)) / num(f.group(2)), 2))
+        return None
+    return None
 
 
 def _seed_progress_pct(lines: list[str]) -> int | None:
@@ -2586,6 +2664,28 @@ def seed_argv(body: dict, account_id: int | None = None) -> tuple[list[str], dic
     if refusal:
         return [], {}, refusal
 
+    per = body.get("external_owned_per_user")
+    if per not in (None, "", 0, "0"):
+        # Files owned OUTSIDE the source org, shared into its users
+        # (seed_external_shares.py). They are written as the TARGET admin, so
+        # the target has to be a declared sandbox as well.
+        try:
+            n = int(per)
+        except (TypeError, ValueError):
+            return [], {}, f"external_owned_per_user must be a whole number, got {per!r}"
+        if n < 1:
+            return [], {}, "external_owned_per_user must be at least 1"
+        refusal = domain_guard.refuse_reason((st.target_domain or "").strip().lower(), "Seeding")
+        if refusal:
+            return [], {}, refusal
+        argv = [PY, "seed_external_shares.py", "--confirm-domain", domain, "--per-user", str(n)]
+        users = (body.get("users") or "").strip()
+        if users:
+            argv += ["--users", users]
+        env = _seed_env(st, account_id)
+        env["TARGET_SA_KEY"] = st.target_sa_key
+        return argv, env, ""
+
     if trim:
         # Its own, narrow command: the seeder's --trim-filler removes filler
         # files (and only those) from accounts above their share, and nothing
@@ -4318,7 +4418,9 @@ def _job_progress(name: str, lines: list[str], elapsed: float,
     if pct is not None:
         pass
     elif name == "seed":
-        pct = _seed_progress_pct(lines)
+        pct = _seed_job_pct(lines)
+        if pct is None:
+            pct = _seed_progress_pct(lines)
     elif name in ("migrate", "delta", "discover"):
         frac = (_ledger_progress_fraction(account_id, users) if users
                 else _ledger_progress_fraction(account_id))
@@ -4571,8 +4673,42 @@ def available_job_logs() -> list[dict]:
     return out
 
 
-def logs_payload(job: str = "", account: str = "") -> dict:
-    """Tail of the engine's own log file (what main.py writes)."""
+def job_pids() -> set[int]:
+    """Every pid a job runs under: registered with job_admission, or one ps sees."""
+    pids = {r["pid"] for r in job_admission.list_active() if r.get("pid")}
+    return pids | {int(p["pid"]) for p in _external_processes() if p.get("pid")}
+
+
+def host_busy() -> list[str]:
+    """What a service restart would kill -- sync_vps.sh's rule, in one place here."""
+    import host_ops
+    busy = [f"{r['job_name']} (account {r['account_id']}, pid {r['pid']})"
+            for r in job_admission.list_active()]
+    seen = {r["pid"] for r in job_admission.list_active()}
+    busy += [f"{p.get('name')} (pid {p['pid']})" for p in _external_processes()
+             if int(p["pid"]) not in seen]
+    return busy + host_ops.unfinished_repairs()
+
+
+LOG_MATCH_CAP = 300
+
+
+def _search_log(lines: list[str], q: str, context: int = 2) -> dict:
+    """Every line holding q (case-insensitive), with a little context -- what
+    `grep -n -C2` over SSH answered, over the WHOLE file, not just its tail."""
+    needle = q.lower()
+    hits = [i for i, line in enumerate(lines) if needle in line.lower()]
+    return {"q": q, "total": len(hits),
+            "matches": [{"line": i + 1,
+                         "before": lines[max(0, i - context):i],
+                         "text": lines[i],
+                         "after": lines[i + 1:i + 1 + context]}
+                        for i in hits[-LOG_MATCH_CAP:]]}
+
+
+def logs_payload(job: str = "", account: str = "", q: str = "") -> dict:
+    """Tail of the engine's own log file (what main.py writes), or -- with q --
+    every matching line in the whole file."""
     from config import Settings
 
     # A named job reads its own transcript instead of the shared engine log.
@@ -4594,8 +4730,10 @@ def logs_payload(job: str = "", account: str = "") -> dict:
     except OSError:
         return {"path": path, "lines": ["(no log file yet)"],
                 "jobs": available_job_logs()}
-    return {"path": path, "lines": lines[-600:],
-            "jobs": available_job_logs()}
+    out = {"path": path, "lines": lines[-600:], "jobs": available_job_logs()}
+    if q.strip():
+        out["search"] = _search_log(lines, q.strip())
+    return out
 
 
 # ----------------------------------------------------------------------
@@ -5216,7 +5354,30 @@ class Handler(BaseHTTPRequestHandler):
             self._json(scope_payload(self._on_screen()))
         elif path == "/api/logs":
             self._json(logs_payload(query.get("job", [""])[0],
-                                    query.get("account", [""])[0]))
+                                    query.get("account", [""])[0],
+                                    query.get("q", [""])[0]))
+        elif path in ("/api/host/services", "/api/host/proc", "/api/host/stack"):
+            # The host itself, every tenant's jobs on it: superadmin only.
+            if not self._caller()[1]:
+                self._json({"ok": False, "msg": "superadmin only"}, 403)
+                return
+            import host_ops
+            if path == "/api/host/services":
+                self._json({"ok": True, **host_ops.services(), "busy": host_busy()})
+                return
+            try:
+                pid = int(query.get("pid", [""])[0])
+            except ValueError:
+                self._json({"ok": False, "msg": "pid must be a number"}, 400)
+                return
+            if pid not in job_pids():
+                self._json({"ok": False, "msg": f"{pid} is not a running job"}, 404)
+                return
+            if path == "/api/host/proc":
+                stats = host_ops.process_stats(pid)
+                self._json({"ok": bool(stats), **(stats or {"msg": "it has exited"})})
+            else:
+                self._json({"ok": True, "pid": pid, "dump": host_ops.stack_dump(pid)})
         elif path == "/api/groq":
             # The panel needs to know whether a key is saved (masked) so it
             # can prompt to enter one, without ever round-tripping the real
@@ -6011,6 +6172,15 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": ok, "error": "" if ok else msg})
             return
 
+        if self.path == "/api/host/restart":
+            if not self._caller()[1]:
+                self._json({"ok": False, "msg": "superadmin only"}, 403)
+                return
+            import host_ops
+            ok, msg = host_ops.restart(str(body.get("unit") or ""), host_busy())
+            log.warning("host restart %s by account %s: %s", body.get("unit"), self._account_id(), msg)
+            self._json({"ok": ok, "msg": msg}, 200 if ok else 409)
+            return
         if self.path == "/api/stop":
             # The account whose job this is. /api/run starts jobs under
             # get_job(account_id); stopping the global JOB instead meant a

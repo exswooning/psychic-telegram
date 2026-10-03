@@ -1148,6 +1148,135 @@ async def admin_set_seed_enabled(account_id: int, body: SetSeedEnabled,
                         f"account:{account_id}", _set, extra_check=require_superadmin)
 
 
+class DeleteAccount(WriteAction):
+    confirm_email: str
+
+
+@app.post("/api/v2/admin/accounts/{account_id}/delete")
+async def admin_delete_account(account_id: int, body: DeleteAccount,
+                               op: Operator = Depends(operator)):
+    """A throwaway account, gone -- done by hand over SSH some twenty times. Only an
+    account that holds nothing: no tenant set up, no job, not a superadmin."""
+    def _delete() -> tuple[bool, str]:
+        acct = accounts_auth.get_account(account_id)
+        if not acct:
+            return False, "no such account"
+        if body.confirm_email.strip().lower() != (acct.get("email") or "").lower():
+            return False, "type the account's email to confirm"
+        if account_id == op.account_id or acct.get("is_superadmin"):
+            return False, "a superadmin account, or your own, is not deleted from here"
+        if any((accounts_auth.get_tenant_config(account_id, side) or {}).get("domain")
+               for side in ("source", "target")):
+            return False, "it has a tenant set up -- remove that setup first (Identities)"
+        if [j for j in job_admission.list_active() if j.get("account_id") == account_id]:
+            return False, "it has a job running"
+        accounts_auth.delete_account(account_id)
+        return True, f"deleted account {account_id} ({acct.get('email')})"
+    return await _gated(op, "admin.delete_account", body, f"account:{account_id}",
+                        _delete, extra_check=require_superadmin)
+
+
+# Jobs that only read a ledger; anything else may rewrite a user's markers under us.
+_READ_ONLY_JOBS = frozenset({"verify", "user-tally", "tally", "discover"})
+
+
+def _ledger_writer_running(account_id: int | None) -> list[str]:
+    return [j["job_name"] for j in job_admission.list_active()
+            if j.get("account_id") == account_id and j.get("job_name") not in _READ_ONLY_JOBS]
+
+
+@app.get("/api/v2/rate-ceilings/{account_id}")
+async def rate_ceilings(account_id: int, op: Operator = Depends(operator)):
+    """The per-project rate each tenant side has proven it can take (rate_limiter_ceiling)
+    -- a fresh run starts there instead of the configured guess."""
+    require_login(op)
+    _require_account_access(account_id, op)
+
+    def _read() -> list[dict]:
+        path = _account_db_path(account_id)
+        if not path or not os.path.isfile(path):
+            return []
+        with cpdb.ro(path) as conn:
+            try:
+                return [dict(r) for r in conn.execute(
+                    "SELECT tenant, ceiling, updated_at FROM rate_limiter_ceiling ORDER BY tenant")]
+            except sqlite3.Error:
+                return []
+    return {"accountId": account_id, "ceilings": await _off_loop(_read)}
+
+
+class ForgetCeiling(WriteAction):
+    tenant: str
+
+
+@app.post("/api/v2/rate-ceilings/{account_id}/forget")
+async def forget_rate_ceiling(account_id: int, body: ForgetCeiling,
+                              op: Operator = Depends(operator)):
+    """Drop a learned ceiling, so the next run discovers it again from the configured
+    guess. Live, one learned from a per-user 403 (not a project limit) capped a run."""
+    _require_account_access(account_id, op)
+
+    def _forget() -> tuple[bool, str]:
+        path = _account_db_path(account_id)
+        if not path or not os.path.isfile(path):
+            return False, "this account has no migration ledger yet"
+        from db import MigrationDB
+        db = MigrationDB(path)
+        try:
+            with db.write() as conn:
+                n = conn.execute("DELETE FROM rate_limiter_ceiling WHERE tenant=?",
+                                 (body.tenant,)).rowcount
+        finally:
+            db.close()
+        return (n > 0), (f"forgot the learned {body.tenant} ceiling; the next run starts "
+                         "from the configured guess" if n else f"nothing learned for {body.tenant}")
+    return await _gated(op, "rate_ceiling.forget", body, f"account:{account_id}", _forget)
+
+
+class ReopenUser(WriteAction):
+    account_id: int | None = None
+    source_email: str
+    # [] reopens the whole user: status back to PENDING, every marker cleared.
+    services: list[str] = []
+
+
+@app.post("/api/v2/users/reopen")
+async def reopen_user_services(body: ReopenUser, op: Operator = Depends(operator)):
+    """main.py reopen-service for one user -- or, with no services named, the whole
+    user (db.reopen_identity): the next migrate genuinely reattempts what it would
+    otherwise skip as done."""
+    account_id = body.account_id if body.account_id is not None else op.account_id
+    _require_account_access(account_id, op)
+
+    def _reopen() -> tuple[bool, str]:
+        busy = _ledger_writer_running(account_id)
+        if busy:
+            return False, f"{', '.join(busy)} is running on this account; reopen once it ends"
+        path = _account_db_path(account_id)
+        if not path or not os.path.isfile(path):
+            return False, "this account has no migration ledger yet"
+        from db import MigrationDB
+        db = MigrationDB(path)
+        try:
+            email = body.source_email.strip().lower()
+            if not db.conn.execute("SELECT 1 FROM identity_map WHERE source_email=?",
+                                   (email,)).fetchone():
+                return False, f"{email} is not in this account's identity map"
+            asked = {x.strip() for x in body.services if x.strip()}
+            if not asked:
+                db.reopen_identity(email)
+                return True, f"reopened {email} whole: PENDING, every service to be reattempted"
+            done = db.services_done(email)
+            if not asked <= done:
+                return False, (f"{email} has {', '.join(sorted(done)) or 'no service'} marked done; "
+                               f"reopen only those")
+            db.set_services_done(email, done - asked)
+        finally:
+            db.close()
+        return True, f"reopened {', '.join(sorted(asked))} for {email}; the next migrate reattempts them"
+    return await _gated(op, "user.reopen", body, f"user:{body.source_email}", _reopen)
+
+
 # ======================================================================
 # Read endpoints
 # ======================================================================

@@ -25,6 +25,7 @@ export const VERIFICATION_KEYS = [
   'verify_scopes_source', 'verify_scopes_target',
   'external_shares', 'external_shares_notify',
   'check_seed_accounts', 'check_seed_scopes',
+  'link_check', 'contract_probe',
 ]
 
 /** Actions Maintenance renders explicitly, in a deliberate order. */
@@ -37,6 +38,7 @@ export const MAINTENANCE_KEYS = [
   'calendar_links_dry', 'calendar_links',
   'link_dupes_dry', 'link_dupes',
   'undo_dry', 'undo',
+  'acl_reconcile_dry', 'acl_reconcile', 'acl_repair_dry', 'acl_repair', 'syncacls',
 ]
 
 /** Keys other pages own, so the catch-all does not duplicate them. */
@@ -55,6 +57,7 @@ export const CLAIMED_ELSEWHERE = [
   // product could run a split DELTA and not a split MIGRATION.
   'scope', 'export_scope',
   'init_db', 'init_db_auto', 'phased_migrate', 'phased_count_only',
+  'ab_transfer',
 ]
 
 // Audited live after this list was written, and three of its entries were

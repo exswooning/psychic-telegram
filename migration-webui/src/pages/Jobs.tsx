@@ -821,6 +821,7 @@ const SeedPanel: React.FC<{ domain: string; onStarted: () => void }> = ({ domain
   const [workers, setWorkers] = useState('')
   const [externalEmail, setExternalEmail] = useState('')
   const [solo, setSolo] = useState(false)
+  const [externalOwned, setExternalOwned] = useState('')
   const [mail, setMail] = useState('')
   const [events, setEvents] = useState('')
   const [bigFileMb, setBigFileMb] = useState('')
@@ -858,6 +859,7 @@ const SeedPanel: React.FC<{ domain: string; onStarted: () => void }> = ({ domain
         workers: workers.trim() || undefined,
         externalEmail: externalEmail.trim() || undefined,
         solo: solo || undefined,
+        externalOwnedPerUser: externalOwned.trim() || undefined,
         mail: mail.trim() || undefined,
         events: events.trim() || undefined,
         bigFileMb: bigFileMb.trim() || undefined,
@@ -1026,6 +1028,11 @@ const SeedPanel: React.FC<{ domain: string; onStarted: () => void }> = ({ domain
                 onChange={(e) => setSolo(e.target.checked)}
                 inputProps={{ 'data-testid': 'seed-solo' } as never} />}
                 label={<Typography variant="body2">Alone in its tenant</Typography>} />
+            </Tooltip>
+            <Tooltip title="Files owned OUTSIDE the source org (by the target admin) shared into each user -- the shares a migration drops unless it copies external-owned files. Runs only this, not the corpus; the target must be a declared sandbox too.">
+              <TextField size="small" type="number" label="Outside-owned files / user" value={externalOwned}
+                         sx={{ width: 190 }} onChange={(e) => setExternalOwned(e.target.value)}
+                         inputProps={{ 'data-testid': 'seed-external-owned', min: 0 }} />
             </Tooltip>
             <Tooltip title="Full awkward-corpus set on the first user, everyone, or nobody.">
               <TextField select size="small" label="Edge cases" value={edgeCases}

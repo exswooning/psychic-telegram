@@ -82,7 +82,7 @@ describe('the advanced seed options are all present', () => {
     for (const t of ['seed-users', 'seed-prefix', 'seed-all-users', 'seed-fit',
                      'seed-until-full', 'seed-mail', 'seed-events', 'seed-bigfile',
                      'seed-shared-drives', 'seed-workers', 'seed-target-gb',
-                     'seed-topup', 'seed-external', 'seed-solo', 'seed-edge',
+                     'seed-topup', 'seed-external', 'seed-solo', 'seed-external-owned', 'seed-edge',
                      'seed-svc-drive', 'seed-svc-gmail', 'seed-svc-chat']) {
       expect(screen.getByTestId(t), t).toBeInTheDocument()
     }
@@ -120,10 +120,11 @@ describe('the advanced options reach runSeed', () => {
     fireEvent.change(screen.getByTestId('seed-external'),
                      { target: { value: 'you@gmail.com' } })
     fireEvent.click(screen.getByTestId('seed-solo'))
+    fireEvent.change(screen.getByTestId('seed-external-owned'), { target: { value: '2' } })
     const opts = await seed()
     expect(opts).toMatchObject({
       mail: '40', events: '12', bigFileMb: '25', sharedDrives: '3',
-      externalEmail: 'you@gmail.com', solo: true,
+      externalEmail: 'you@gmail.com', solo: true, externalOwnedPerUser: '2',
     })
   })
 

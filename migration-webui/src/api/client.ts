@@ -469,14 +469,57 @@ export interface LogsPayload {
    *  here, so a traceback that kills a migration is in one of these files
    *  and in no other. */
   jobs?: { account: string; job: string; bytes: number; modified: number }[]
+  /** With a search term: every matching line in the WHOLE file, not just the tail. */
+  search?: {
+    q: string
+    total: number
+    matches: { line: number; before: string[]; text: string; after: string[] }[]
+  }
 }
 
-export async function fetchLogs(job?: string, account?: string):
+export async function fetchLogs(job?: string, account?: string, search?: string):
     Promise<LogsPayload> {
-  const q = job ? `?job=${encodeURIComponent(job)}&account=${
-    encodeURIComponent(account || '')}` : ''
+  const params = new URLSearchParams()
+  if (job) { params.set('job', job); params.set('account', account || '') }
+  if (search) params.set('q', search)
+  const q = params.toString() ? `?${params}` : ''
   return getJSON<LogsPayload>(`/api/logs${q}`)
 }
+
+// -- the host, for a superadmin: what used to need SSH ------------------------
+async function hostJSON<T>(path: string, init?: RequestInit): Promise<T> {
+  // These answer refusals (403, 404, 409) as {ok:false,msg}, and the page shows
+  // the msg -- getJSON would turn it into a bare HTTP status.
+  const res = await fetch(path, init)
+  return res.json() as Promise<T>
+}
+
+export interface HostUnit {
+  unit: string; active: string; sub: string; since: string; restarts: number
+  /** Warnings and errors from its journal in the last 24 hours. */
+  recent: string[]
+}
+export interface HostServices {
+  ok: boolean; msg?: string
+  units: HostUnit[]; oom: string[]; deployed_commit: string
+  /** What a restart would kill right now; a restart is refused while non-empty. */
+  busy: string[]
+}
+export const fetchHostServices = () => hostJSON<HostServices>('/api/host/services')
+export const restartHostUnit = (unit: string) =>
+  hostJSON<{ ok: boolean; msg: string }>('/api/host/restart', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ unit }),
+  })
+
+export interface ProcStats {
+  ok: boolean; msg?: string
+  pid: number; processes: number; cmd: string
+  elapsed_s: number; rss_mb: number; threads: number; cpu_pct: number
+}
+export const fetchProcStats = (pid: number) => hostJSON<ProcStats>(`/api/host/proc?pid=${pid}`)
+export const fetchStackDump = (pid: number) =>
+  hostJSON<{ ok: boolean; msg?: string; dump?: string }>(`/api/host/stack?pid=${pid}`)
 
 export interface ConfigPayload {
   config: ConfigFields
@@ -752,6 +795,9 @@ export interface SeedOptions {
   /** Each user as if alone in a tenant of its own: no colleague and no
    *  company-wide share anywhere, only outside ones. */
   solo?: boolean
+  /** Files owned OUTSIDE the source org (by the target admin), shared into each
+   *  user -- runs seed_external_shares.py instead of the corpus. */
+  externalOwnedPerUser?: string
   /** Messages per user. Blank scales with the chosen size. */
   mail?: string
   /** Events per user. Blank scales with the chosen size. */
@@ -792,7 +838,7 @@ export async function runSeed(
 ): Promise<SeedResult> {
   const { allUsers, createUntilFull, workers, localpartPrefix,
           sharedDrives, users, groups, only, fitToLicenses,
-          externalEmail, solo, mail, events, bigFileMb, targetGbPerUser,
+          externalEmail, solo, externalOwnedPerUser, mail, events, bigFileMb, targetGbPerUser,
           topUpOnly, fillUntilFull, fillPercent, edgeCases, accountId } = opts
   const res = await fetch('/api/seed', {
     method: 'POST',
@@ -814,6 +860,7 @@ export async function runSeed(
       fit_to_licenses: fitToLicenses || undefined,
       external_email: externalEmail || undefined,
       solo: solo || undefined,
+      external_owned_per_user: externalOwnedPerUser || undefined,
       mail: mail || undefined,
       events: events || undefined,
       big_file_mb: bigFileMb || undefined,
