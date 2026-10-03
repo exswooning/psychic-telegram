@@ -680,7 +680,7 @@ const SeedStep: React.FC<{ domain?: string; accountId?: number }> =
             fullWidth size="small" label="Shared drives" placeholder="0"
             value={sharedDrives} inputProps={{ 'data-testid': 'shared-drives' }}
             onChange={(e) => setSharedDrives(e.target.value.replace(/[^0-9]/g, ''))}
-            helperText="A shared drive belongs to no user, so the per-user seed cannot make one — and the shared-drive migration then has nothing to move. Blank or 0 = none."
+            helperText="A shared drive belongs to no user, so the per-user seed cannot make one — and the shared-drive migration then has nothing to move. Blank = the seeder's default (3); 0 = none."
           />
         </Grid>
         <Grid item xs={12} sm={8}>

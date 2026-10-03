@@ -358,6 +358,8 @@ class CorpusBuilder:
 
     # -- sharing helpers --------------------------------------------------
     def share_domain(self, file_id: str, role: str = "reader") -> None:
+        if getattr(self.settings, "seed_solo", False):
+            return      # alone in its tenant: there is no company to share with
         self._grant(file_id, {"type": "domain", "role": role,
                               "domain": self.settings.source_domain,
                               "allowFileDiscovery": True}, "domain")

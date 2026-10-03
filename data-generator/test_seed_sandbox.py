@@ -2020,3 +2020,20 @@ class TestTrimFlags:
         monkeypatch.setattr(sys, "argv", ["seed_sandbox.py", "--confirm-domain", "x.com", "--trim-filler", *other])
         with pytest.raises(SystemExit, match="only removes filler"):
             s.main()
+
+
+def test_a_solo_user_shares_with_no_colleague_and_no_company(settings, seed, monkeypatch):
+    """--solo: the shape of one client user moved in from a tenant of its own. Nothing
+    reaches a colleague or the whole domain; the outside shares stay."""
+    settings.seed_solo = True
+    drive = FakeDrive("alice@tenanta.com", "source")
+    b = _builder(drive, settings, "alice@tenanta.com", [], scale="small")
+    m = b.build("Engineering", "PRJ-001-Apollo", edge_cases=True)
+    perms = [p for ps in drive.perms.values() for p in ps if p.get("role") != "owner"]
+    assert m["grants"]["domain"] == 0 and m["grants"]["external"] > 0
+    assert not [p for p in perms if p["type"] == "domain"
+                or (p.get("emailAddress") or "").endswith("@" + settings.source_domain)]
+    monkeypatch.setattr(seed, "_filler_blob", lambda: b"x" * 1024)
+    drive.storage_usage, drive.storage_limit = 0, 1024**4
+    seed.top_up_storage(drive, settings, "alice@tenanta.com", 3e-6, media_fn=_FakeMediaFn())
+    assert not [p for ps in drive.perms.values() for p in ps if p["type"] == "domain"]

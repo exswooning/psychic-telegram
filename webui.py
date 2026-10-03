@@ -2703,6 +2703,8 @@ def seed_argv(body: dict, account_id: int | None = None) -> tuple[list[str], dic
         argv.append("--all-users")
     if body.get("reset"):
         argv.append("--reset")
+    if body.get("solo"):
+        argv.append("--solo")
     # Shared drives belong to no user, so the per-user seed never creates one
     # and shared_drives.py has nothing to migrate without them. This was
     # opt-in, and the result was a 200-user corpus with none: the caller
@@ -2710,7 +2712,9 @@ def seed_argv(body: dict, account_id: int | None = None) -> tuple[list[str], dic
     # (see DEFAULT_SHARED_DRIVES), so omitting it here means "use that"
     # rather than "none" -- and 0 still explicitly disables.
     sd = body.get("shared_drives")
-    if sd not in (None, "", 0, "0", False):
+    if sd in (0, "0"):
+        argv += ["--shared-drives", "0"]       # omitted would mean the seeder's default, not none
+    elif sd not in (None, "", False):
         try:
             n_sd = int(sd)
         except (TypeError, ValueError):

@@ -749,6 +749,9 @@ export interface SeedOptions {
   /** The outside address every cross-domain share, invite and mail points
    *  at -- the case a migration most often gets wrong. */
   externalEmail?: string
+  /** Each user as if alone in a tenant of its own: no colleague and no
+   *  company-wide share anywhere, only outside ones. */
+  solo?: boolean
   /** Messages per user. Blank scales with the chosen size. */
   mail?: string
   /** Events per user. Blank scales with the chosen size. */
@@ -789,7 +792,7 @@ export async function runSeed(
 ): Promise<SeedResult> {
   const { allUsers, createUntilFull, workers, localpartPrefix,
           sharedDrives, users, groups, only, fitToLicenses,
-          externalEmail, mail, events, bigFileMb, targetGbPerUser,
+          externalEmail, solo, mail, events, bigFileMb, targetGbPerUser,
           topUpOnly, fillUntilFull, fillPercent, edgeCases, accountId } = opts
   const res = await fetch('/api/seed', {
     method: 'POST',
@@ -810,6 +813,7 @@ export async function runSeed(
       only: only || undefined,
       fit_to_licenses: fitToLicenses || undefined,
       external_email: externalEmail || undefined,
+      solo: solo || undefined,
       mail: mail || undefined,
       events: events || undefined,
       big_file_mb: bigFileMb || undefined,

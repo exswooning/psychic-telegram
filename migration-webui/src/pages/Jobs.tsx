@@ -820,6 +820,7 @@ const SeedPanel: React.FC<{ domain: string; onStarted: () => void }> = ({ domain
   const [sharedDrives, setSharedDrives] = useState('')
   const [workers, setWorkers] = useState('')
   const [externalEmail, setExternalEmail] = useState('')
+  const [solo, setSolo] = useState(false)
   const [mail, setMail] = useState('')
   const [events, setEvents] = useState('')
   const [bigFileMb, setBigFileMb] = useState('')
@@ -856,6 +857,7 @@ const SeedPanel: React.FC<{ domain: string; onStarted: () => void }> = ({ domain
         sharedDrives: sharedDrives.trim() || undefined,
         workers: workers.trim() || undefined,
         externalEmail: externalEmail.trim() || undefined,
+        solo: solo || undefined,
         mail: mail.trim() || undefined,
         events: events.trim() || undefined,
         bigFileMb: bigFileMb.trim() || undefined,
@@ -1018,6 +1020,12 @@ const SeedPanel: React.FC<{ domain: string; onStarted: () => void }> = ({ domain
                          sx={{ width: 240 }} placeholder="you@gmail.com"
                          onChange={(e) => setExternalEmail(e.target.value)}
                          inputProps={{ 'data-testid': 'seed-external' }} />
+            </Tooltip>
+            <Tooltip title="Each user as if alone in a tenant of its own, like one client moved in from elsewhere: no colleague and no company-wide share anywhere, no groups, no shared drives. Outside shares stay.">
+              <FormControlLabel control={<Switch size="small" checked={solo}
+                onChange={(e) => setSolo(e.target.checked)}
+                inputProps={{ 'data-testid': 'seed-solo' } as never} />}
+                label={<Typography variant="body2">Alone in its tenant</Typography>} />
             </Tooltip>
             <Tooltip title="Full awkward-corpus set on the first user, everyone, or nobody.">
               <TextField select size="small" label="Edge cases" value={edgeCases}

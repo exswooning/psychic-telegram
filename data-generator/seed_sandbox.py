@@ -592,11 +592,12 @@ def top_up_storage(drive, settings: Settings, user: str, target_gb: float | None
         # per file, which would multiply API calls by however many filler
         # files this run creates for no additional coverage.
         try:
-            retry(lambda: drive.permissions().create(
-                fileId=folder_id, sendNotificationEmail=False,
-                body={"type": "domain", "role": "reader",
-                     "domain": settings.source_domain,
-                     "allowFileDiscovery": True}).execute())()
+            if not getattr(settings, "seed_solo", False):
+                retry(lambda: drive.permissions().create(
+                    fileId=folder_id, sendNotificationEmail=False,
+                    body={"type": "domain", "role": "reader",
+                         "domain": settings.source_domain,
+                         "allowFileDiscovery": True}).execute())()
             retry(lambda: drive.permissions().create(
                 fileId=folder_id, sendNotificationEmail=False,
                 body={"type": "user", "role": "reader",
@@ -2530,7 +2531,7 @@ def seed_one_user(settings: Settings, entry: dict, all_users: list[str],
                   fill_percent: float = 100.0,
                   account_limit_bytes: int | None = None) -> dict:
     user = entry["email"]
-    peers = [u for u in all_users if u != user]
+    peers = [] if getattr(settings, "seed_solo", False) else [u for u in all_users if u != user]
     t0 = time.time()
     print(f"  [{user}] starting ({entry['dept']}, {entry['project']})")
 
@@ -2838,6 +2839,12 @@ def main(argv: list[str] | None = None) -> int:
                          f"role. Idempotent: re-running reuses a drive of the "
                          f"same name rather than making a second.")
     ap.add_argument("--reset", action="store_true", help="DELETE everything")
+    ap.add_argument("--solo", action="store_true",
+                    help="seed each listed user as if alone in a tenant of its "
+                         "own -- the shape of one client user moved in from "
+                         "elsewhere: no colleague in any share, invite, mail or "
+                         "chat, no company-wide (domain) share, no groups, no "
+                         "shared drives. Outside sharing (--external-email) stays.")
     ap.add_argument("--target-gb-per-user", type=float, default=None,
                     help="after normal seeding, add large filler files until "
                          "each user's total Workspace storage (Gmail+Drive+"
@@ -2934,6 +2941,9 @@ def main(argv: list[str] | None = None) -> int:
 
     settings = Settings()
     assert_sandbox(settings, args.confirm_domain)
+    settings.seed_solo = args.solo
+    if args.solo:
+        args.groups, args.shared_drives = False, 0
 
     if args.fit_to_licenses and not args.create_users:
         sys.exit("--fit-to-licenses requires --create-users: it decides how "

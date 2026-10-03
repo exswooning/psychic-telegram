@@ -193,3 +193,17 @@ class TestThePrefixIsSetBeforeAnyNameIsGenerated:
         src = self._main_src()
         head = src[:src.index("GENERATED_PREFIX = args.localpart_prefix")]
         assert "before any username is generated" in head.lower()
+
+
+class TestSoloAndNoSharedDrives(TestTheEndpointValidatesIt):
+    def _body(self, **kw):
+        import webui
+        return webui.seed_argv({"confirm_domain": "src.example", "scale": "huge", **kw}, 7)[0]
+
+    def test_solo_is_passed(self):
+        assert "--solo" in self._body(solo=True) and "--solo" not in self._body()
+
+    def test_zero_shared_drives_means_none_not_the_default(self):
+        argv = self._body(shared_drives="0")
+        assert argv[argv.index("--shared-drives") + 1] == "0"
+        assert "--shared-drives" not in self._body()
