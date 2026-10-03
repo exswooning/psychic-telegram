@@ -4350,12 +4350,7 @@ def _users_progress_fraction(snap, users: list[str]) -> float | None:
         reached += min(u.drive_done + u.drive_failed + u.drive_skipped, u.exp_drive)
         reached += min(u.mail_done + u.mail_failed + u.mail_skipped, u.exp_mail)
         expected += u.exp_drive + u.exp_mail
-    if expected <= 0:
-        return None
-    # Every service at or past what discovery expected, while the run goes on: the
-    # scan is older than the data (live, a user filled after it read "100%, ETA 0s"
-    # with Drive still copying). Nothing honest is left to say how far it is.
-    return reached / expected if reached < expected else None
+    return reached / expected if expected > 0 else None
 
 
 def _ledger_progress_fraction_uncached(account_id: int | None = None,
