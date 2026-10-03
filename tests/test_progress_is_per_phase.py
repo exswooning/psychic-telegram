@@ -67,3 +67,18 @@ class TestTheTrimIsNotOverEager:
         kept = webui._current_phase(RESET + SEED)
         assert any(ln.startswith("Seeding 200 users") for ln in kept)
         assert not any("[200/200]" in ln for ln in kept)
+
+
+def test_a_migration_run_starts_its_own_phase_and_verify_lines_are_not_its_progress():
+    """Live: one log file holds every run, and an earlier run's "verify: [1/1] ...
+    checked" made george's run read 100%, ETA 0s, with Drive still copying."""
+    import webui
+    lines = ["verify: [1/1] seeduser122@src checked", "  [3/3] users done",
+             "SOURCE ACCESS: can write (drive)", "PASS 1/3 pid=9: drive",
+             "verify: [1/1] george@src checked"]
+    cur = webui._current_phase(lines)
+    assert cur[0].startswith("SOURCE ACCESS")
+    pct, eta = webui._job_progress("migrate", lines, 600, None, None)
+    assert pct != 100.0 and eta != 0
+    # A verify job's own counter still is its progress.
+    assert webui._job_progress("verify", ["verify: [1/4] a@src checked"], 60)[0] == 25.0

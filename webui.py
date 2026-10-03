@@ -656,8 +656,16 @@ def _pct(done: int, total: int) -> float:
 # Where a phase of work begins. A single job can run more than one --
 # `reset && seed` is one process writing one transcript -- and a finished
 # phase leaves its counters behind in it.
+# SOURCE ACCESS opens every migrate/delta run (main._say_source_access): a run's
+# output is appended to the job's one log file, so without it the "current phase"
+# reached back into earlier runs -- live, an old "verify: [1/1] ... checked" made
+# george's run read "100%, ETA 0s" with his Drive pass still copying.
 _PHASE_START_RE = re.compile(r"^\s*(?:Seeding \d+ users? in\b"
-                             r"|About to DELETE all\b|Mirror pass:)")
+                             r"|About to DELETE all\b|Mirror pass:|SOURCE ACCESS:)")
+# Inside a migrate/delta run, the per-user verifier's [done/total] is how far IT
+# is, not the run: a user verified the moment one pass ends would put the bar at
+# 100% with passes to go. (A verify job's own lines ARE its progress.)
+_NOT_JOB_PROGRESS_RE = re.compile(r"^\s*verify:")
 
 
 def _current_phase(lines: list[str]) -> list[str]:
@@ -4426,6 +4434,8 @@ def _job_progress(name: str, lines: list[str], elapsed: float,
     # job's own statement of where it is, not an inference about it -- but
     # only about the phase it is in now, not one it finished an hour ago.
     lines = _current_phase(lines)
+    if name in ("migrate", "delta"):
+        lines = [ln for ln in lines if not _NOT_JOB_PROGRESS_RE.match(ln)]
     pct = _counter_progress_pct(lines)
     if pct is not None:
         pass
