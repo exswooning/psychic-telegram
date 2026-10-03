@@ -144,6 +144,32 @@ class TestRepairGrantsWhatWasOwed:
         assert "reapply_owed_grants" in inspect.getsource(repair.run_all)
 
 
+class TestAMailDelegateIsOwedToo:
+    """Live: george's delegate hannah had no target account (a one-user run) and
+    Gmail's 'Invalid delegate' 404 was only a warning -- the delegation was lost."""
+
+    def test_repair_adds_it_once_the_colleague_has_an_account(self, db, settings):
+        db.log_audit("u@tenanta.com", "h@tenantb.com", "delegate", OWED_GRANT, "Invalid delegate")
+        db.log_audit("u@tenanta.com", "z@tenantb.com", "delegate", OWED_GRANT, "Invalid delegate")
+        made = []
+
+        class Gmail:
+            def __init__(self, owner): self.owner = owner
+            def users(self): return self
+            def settings(self): return self
+            def delegates(self): return self
+            def create(self, userId, body):
+                made.append((self.owner, body["delegateEmail"]))
+                return type("X", (), {"execute": lambda s: {}})()
+        auth = type("A", (), {"directory": lambda self, t, **k: _Dir(have={"h@tenantb.com"}),
+                              "target_gmail": lambda self, u: Gmail(u)})()
+        out = repair.reapply_owed_grants(auth, db, settings, apply=True)
+        assert made == [("u@tenanta.com", "h@tenantb.com")]
+        assert out == {"owed": 2, "ready": 1, "granted": 1, "errors": []}
+        assert db.get_audit("u@tenanta.com", "h@tenantb.com", "delegate")["status"] == "SUCCESS"
+        assert db.get_audit("u@tenanta.com", "z@tenantb.com", "delegate")["status"] == OWED_GRANT
+
+
 class TestTheRepairSummarySaysSo:
     """Live: a repair with no failure rows said only 'no failed items recorded' while
     10,173 shares were still owed -- the line came after the early return."""

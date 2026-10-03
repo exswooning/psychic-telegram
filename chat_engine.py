@@ -464,13 +464,17 @@ class ChatMigrator:
         message that never arrives)."""
         try:
             return send(body)
-        except OPTIONAL_PASS_ERRORS:
+        except OPTIONAL_PASS_ERRORS as refused:
             if "createTime" not in body:
                 raise
             out = send({k: v for k, v in body.items() if k != "createTime"})
             if self._keep_time:
-                log.warning("[%s] Chat refused historical createTime; the rest of this "
-                            "user's Chat is stamped at migration time", self.source_user)
+                # With Google's own reason: live, george's refusal said only that it
+                # happened, so whether a fix exists could not be told.
+                log.warning("[%s] Chat refused historical createTime on %s (%s); the rest "
+                            "of this user's Chat is stamped at migration time",
+                            self.source_user, "a space" if "spaceType" in body else "a message",
+                            str(refused)[:300])
             self._keep_time = False
             return out
 

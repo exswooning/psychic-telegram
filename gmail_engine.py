@@ -29,7 +29,7 @@ import uuid
 from google.auth.exceptions import RefreshError
 from googleapiclient.http import MediaFileUpload  # noqa: F401
 
-from config import DEFERRED_TO_DMS, DELIVERED_BY_DMS, Settings
+from config import DEFERRED_TO_DMS, DELIVERED_BY_DMS, OWED_GRANT, Settings
 from sample_budget import Budget
 from link_rewrite import has_drive_link, rewrite_raw
 from resilience import (PermanentAPIError, RateLimiter, TransportExhausted,
@@ -904,6 +904,12 @@ class GmailMigrator:
             except OPTIONAL_PASS_ERRORS as exc:
                 log.warning("[%s] delegate %s not migrated: %s",
                             self.source_user, tgt_addr, exc)
+                # Live: george's delegate had no target account yet (a run for one
+                # user) and was simply lost. Owed, like a share to that colleague --
+                # repair.reapply_owed_grants adds it once their account exists.
+                if "Invalid delegate" in str(exc):
+                    self.db.log_audit(self.source_user, tgt_addr, "delegate",
+                                      OWED_GRANT, str(exc))
 
     # -- signatures --------------------------------------------------------
     def _rewrite_identities(self, html: str) -> str:

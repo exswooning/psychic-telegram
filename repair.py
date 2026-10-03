@@ -223,7 +223,11 @@ def reapply_owed_grants(auth, db, settings, apply: bool = False) -> dict:
             continue                       # an outsider: no directory to ask
         out["owed"] += 1
         by_user.setdefault(r["source_user"], {}).setdefault(sid, set()).add(r["item_id"])
-    if not by_user:
+    delegates = db.conn.execute(
+        "SELECT source_user, item_id FROM audit_log WHERE item_type='delegate' AND status=?",
+        (OWED_GRANT,)).fetchall()
+    out["owed"] += len(delegates)
+    if not by_user and not delegates:
         return out
     try:
         directory = auth.directory("target")
@@ -257,6 +261,21 @@ def reapply_owed_grants(auth, db, settings, apply: bool = False) -> dict:
                 out["granted"] += dm._sync_acls(sid, target_id, only=ready)
             except Exception as exc:      # noqa: BLE001
                 out["errors"].append(f"{user} {sid}: {str(exc)[:160]}")
+    # A mail delegate owed the same way: item_id is the delegate's target address.
+    for r in delegates:
+        if not has_account(r["item_id"]):
+            continue
+        out["ready"] += 1
+        if not apply:
+            continue
+        try:
+            owner = db.resolve_identity(r["source_user"]) or r["source_user"]
+            auth.target_gmail(owner).users().settings().delegates().create(
+                userId="me", body={"delegateEmail": r["item_id"]}).execute()
+            db.log_audit(r["source_user"], r["item_id"], "delegate", "SUCCESS")
+            out["granted"] += 1
+        except Exception as exc:      # noqa: BLE001 - stays owed for the next repair
+            out["errors"].append(f"{r['source_user']} delegate {r['item_id']}: {str(exc)[:160]}")
     return out
 
 
