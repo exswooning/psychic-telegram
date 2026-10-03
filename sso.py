@@ -124,7 +124,9 @@ class SSOMigrator:
         """
         directory = self.auth.source_directory()
         by_user: dict[str, list[dict]] = {}
-        for user in users:
+        for i, user in enumerate(users, 1):
+            if i % 10 == 0 or i == len(users):
+                print(f"  [{i}/{len(users)}] users read", flush=True)
             try:
                 resp = directory.tokens().list(userKey=user).execute()
             except Exception as exc:  # noqa: BLE001 - one user must not stop the scan

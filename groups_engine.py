@@ -114,7 +114,9 @@ class GroupMigrator:
     # -- writing -------------------------------------------------------------
     def migrate(self) -> dict:
         existing = {g.get("email", "").lower() for g in self.read_groups("target")}
-        for g in self.read_groups("source"):
+        source_groups = self.read_groups("source")
+        for i, g in enumerate(source_groups, 1):
+            print(f"  [{i}/{len(source_groups)}] {g.get('email', '?')}", flush=True)
             src_email = (g.get("email") or "").lower()
             tgt_email = self.target_email(src_email)
             if tgt_email.lower() in existing:
@@ -209,8 +211,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.inventory:
         groups = mig.read_groups("source")
         print(f"{len(groups)} group(s) in {s.source_domain}\n")
-        for g in groups:
+        for i, g in enumerate(groups, 1):
             email = g.get("email", "?")
+            print(f"  [{i}/{len(groups)}]", end="", flush=True)
             try:
                 n = len(mig.read_members("source", email))
             except Exception:  # noqa: BLE001

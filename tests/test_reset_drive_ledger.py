@@ -271,6 +271,8 @@ class TestSideTables:
             "id_mapping",     # cleared by type, not wholesale
             "audit_log",      # cleared by type, not wholesale
             "discovery",      # a read-only prescan, never consulted for skipping
+            "run_metric_summary",  # one row per RUN, not a mapping; never consulted for skipping
+            "tally_autofix",  # when a fix last ran for a user: a rate limit, not a mapping
             "upload_ledger",  # the 750 GB/day cap: real bytes were really sent,
                               # so a re-run must still be charged for them
             "audit_rollup",   # cleared by type alongside audit_log, in the

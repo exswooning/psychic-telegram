@@ -359,6 +359,32 @@ def _content_settle(user: str) -> None:
         _steps["done"][user] = _steps["per_user"]
 
 
+_SEED_RUN: dict = {}
+
+
+def _save_seed_metrics(settings: Settings) -> None:
+    """This seed's numbers kept in the account's ledger, as a migration's are,
+    labelled with the domain it seeds -- the Metrics page's run cards read them.
+    Never raises: a seed is not stopped for want of a statistic."""
+    try:
+        import metrics
+        from db import MigrationDB
+        snap = metrics.METRICS.snapshot()
+        if not snap.get("calls") or not getattr(settings, "db_path", None):
+            return
+        if not _SEED_RUN:
+            _SEED_RUN.update(kind="seed", pid=os.getpid(),
+                             started_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                             source_domain=settings.source_domain, target_domain=None)
+        db = MigrationDB(settings.db_path)
+        try:
+            db.record_run_summary(_SEED_RUN, snap)
+        finally:
+            db.close()
+    except Exception:      # noqa: BLE001
+        pass
+
+
 def content_progress_line() -> str:
     """" -- content: 5 of 8 steps", or nothing when this job seeds no content."""
     with _fill_lock:
@@ -3518,6 +3544,7 @@ def main(argv: list[str] | None = None) -> int:
                   f"({min(args.workers, len(entries) - beat_done)} in flight)"
                   f"{_throttle_note()}{content_progress_line()}{fill_progress_line()}",
                   flush=True)
+            _save_seed_metrics(settings)
 
     threading.Thread(target=_heartbeat, daemon=True).start()
     _steps["per_user"] = len([s for s in SEEDABLE if only is None or s in only])
@@ -3560,6 +3587,7 @@ def main(argv: list[str] | None = None) -> int:
                         print(f"      {sub}")
                 results.append({"user": jobs[fut], "error": str(exc)})
     stop_beat.set()
+    _save_seed_metrics(settings)
     try:
         import metrics
 

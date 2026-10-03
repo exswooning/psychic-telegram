@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle,
-  TextField, Typography,
+  LinearProgress, TextField, Typography,
 } from '@mui/material'
 import { PlayArrow as RunIcon, Stop as StopIcon } from '@mui/icons-material'
 import { runAction, stopJob, fetchJob, ActionSpec } from '@/api/client'
@@ -34,6 +34,10 @@ const JobRunner: React.FC<{
   const [error, setError] = useState<string | null>(null)
   const [queued, setQueued] = useState<string | null>(null)
   const [blockedBy, setBlockedBy] = useState<string | null>(null)
+  // The job's own [done/total] counter as a percentage (webui's _job_progress),
+  // or null when it prints none -- never a percentage made up from time.
+  const [pct, setPct] = useState<number | null>(null)
+  const [eta, setEta] = useState<number | null>(null)
   // Discovery's own worker count (blank = the migration's, as before). Only
   // `discover` takes it: it is read-bound, the migration write-bound.
   const [workers, setWorkers] = useState('')
@@ -62,6 +66,8 @@ const JobRunner: React.FC<{
       }
       setRunning(job.running)
       setRc(job.rc)
+      setPct(typeof job.progressPct === 'number' ? job.progressPct : null)
+      setEta(typeof job.etaSeconds === 'number' ? job.etaSeconds : null)
       // Why this panel is idle, when it is idle because something else has
       // the box. Without it the page reads as broken: buttons that do
       // nothing, counters at zero, no explanation anywhere.
@@ -149,6 +155,18 @@ const JobRunner: React.FC<{
       <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
         {spec.blurb}
       </Typography>
+      {running && (
+        <Box sx={{ mt: 1 }} data-testid={`action-progress-${name}`}>
+          {pct !== null ? (
+            <>
+              <LinearProgress variant="determinate" value={Math.min(100, pct)} />
+              <Typography variant="caption" color="text.secondary">
+                {pct.toFixed(pct < 10 ? 1 : 0)}%{eta !== null ? ` · about ${Math.max(1, Math.round(eta / 60))} min left` : ''}
+              </Typography>
+            </>
+          ) : <LinearProgress />}
+        </Box>
+      )}
       {error && (
         <Typography variant="caption" color="error" sx={{ display: 'block', mt: 0.5 }}>
           {error}

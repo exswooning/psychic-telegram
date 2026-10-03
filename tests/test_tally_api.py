@@ -113,7 +113,7 @@ class TestTallyNow:
     def _capture(self, monkeypatch):
         seen = {}
         monkeypatch.setattr(api_server, "_run_admitted",
-                            lambda argv, aid, name, env=None: (seen.update(argv=argv, name=name, aid=aid) or (True, "started")))
+                            lambda argv, aid, name, env=None, **k: (seen.update(argv=argv, name=name, aid=aid, then=k.get("then")) or (True, "started")))
         return seen
 
     def test_it_launches_as_its_own_job_never_the_whole_tenant_ones(self, cp, monkeypatch):

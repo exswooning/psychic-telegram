@@ -16,6 +16,8 @@ which counts both tenants item by item and catches drift a change feed cannot se
 """
 from __future__ import annotations
 
+import json
+
 import logging
 from datetime import datetime, timezone
 from typing import Callable, Optional
@@ -56,6 +58,10 @@ def _row(r) -> dict:
     out["deletions_paused"] = bool(out["deletions_paused"])
     out["cap_pct"] = float(out["cap_pct"])
     out["interval_min"] = int(out["interval_min"])
+    try:
+        out["users"] = json.loads(out["users"]) if out.get("users") else None
+    except ValueError:
+        out["users"] = None
     return out
 
 
@@ -72,7 +78,9 @@ def get_settings(account_id: Optional[int]) -> dict:
 
 
 def save_settings(account_id: int, *, enabled: bool, interval_min: int, deletion_mode: str,
-                  cap_pct: float, by: str) -> dict:
+                  cap_pct: float, by: str, users: Optional[list] = None) -> dict:
+    """`users`: the users this mirror follows -- one migration's -- or None for
+    every user a migration finished."""
     if interval_min < MIN_INTERVAL_MIN:
         raise ValueError(f"the interval is at least {MIN_INTERVAL_MIN} minutes")
     if deletion_mode not in ("mirror", "keep"):
@@ -85,13 +93,15 @@ def save_settings(account_id: int, *, enabled: bool, interval_min: int, deletion
     with cpdb.rw() as c:
         c.execute(
             """INSERT INTO mirror_settings (account_id, enabled, interval_min, deletion_mode,
-                   cap_pct, enabled_at, updated_at, updated_by) VALUES (?,?,?,?,?,?,?,?)
+                   cap_pct, enabled_at, updated_at, updated_by, users) VALUES (?,?,?,?,?,?,?,?,?)
                ON CONFLICT(account_id) DO UPDATE SET enabled=excluded.enabled,
                    interval_min=excluded.interval_min, deletion_mode=excluded.deletion_mode,
                    cap_pct=excluded.cap_pct, enabled_at=excluded.enabled_at,
-                   updated_at=excluded.updated_at, updated_by=excluded.updated_by""",
+                   updated_at=excluded.updated_at, updated_by=excluded.updated_by,
+                   users=excluded.users""",
             (account_id, int(enabled), int(interval_min), deletion_mode, float(cap_pct),
-             enabled_at, _now_iso(), by))
+             enabled_at, _now_iso(), by,
+             json.dumps(sorted({u.strip().lower() for u in users if u.strip()})) if users else None))
     return get_settings(account_id)
 
 

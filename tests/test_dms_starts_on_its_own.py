@@ -130,8 +130,10 @@ class TestTheEndpointHandsItOn:
     def test_but_no_dms_follow_on_when_told_not_to_or_a_few_users_only(self, cp, wired, monkeypatch, body):
         self._go(cp, wired, monkeypatch, mail_mode="split", **body)
         # A whole-tenant run with no DMS after it tallies every user once it ends;
-        # a run of a chosen few does not tally the whole account.
-        assert wired["jobs"][0]["then"] == (["repair"] if body.get("users") else ["repair", "tally"])
+        # a run of a chosen few tallies just those users -- never the whole account.
+        users = body.get("users")
+        assert wired["jobs"][0]["then"] == (["repair", "tally@" + ",".join(users)] if users
+                                            else ["repair", "tally"])
 
     def test_and_neither_follow_on_for_a_dry_run(self, cp, wired, monkeypatch):
         self._go(cp, wired, monkeypatch, mail_mode="split", dry_run=True)

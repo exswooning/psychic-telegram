@@ -135,10 +135,13 @@ class TestTheEndpoint:
     def test_otherwise_it_is_the_engine_as_before(self, cp, monkeypatch, body):
         r, seen = _start(cp, monkeypatch, **body)
         assert r.status_code == 200, r.text
-        # No DMS follow-on, but repair rides along on any real run -- and a whole-tenant
-        # one then tallies every user (a few users or a sample does not).
-        whole = not body.get("users") and body.get("sample") is None
-        assert seen["then"] == (["repair", "tally"] if whole else ["repair"])
+        # No DMS follow-on, but repair rides along on any real run -- then a tally: of
+        # every user after a whole-tenant run, of just its users after a chosen few,
+        # and none after a sample.
+        users = body.get("users")
+        expect = (["repair"] if body.get("sample") is not None
+                  else ["repair", "tally@" + ",".join(users)] if users else ["repair", "tally"])
+        assert seen["then"] == expect
         assert "MAIL_ONLY_WITH_LINKS" not in (seen["env"] or {})
 
     def test_an_unknown_mode_is_refused_rather_than_guessed(self, cp, monkeypatch):

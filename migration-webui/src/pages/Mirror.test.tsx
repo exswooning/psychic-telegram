@@ -10,13 +10,14 @@ import Mirror from './Mirror'
 import { duration } from '@/mirrorKinds'
 import type { MirrorCycle, MirrorView } from '@/api/controlPlane'
 
-const cp = vi.hoisted(() => ({ view: vi.fn(), save: vi.fn(), run: vi.fn(), decide: vi.fn() }))
+const cp = vi.hoisted(() => ({ view: vi.fn(), save: vi.fn(), run: vi.fn(), decide: vi.fn(), migs: vi.fn() }))
 vi.mock('@/api/controlPlane', () => ({
   fetchMe: () => Promise.resolve({ id: 3 }),
   fetchMirror: cp.view,
   saveMirrorSettings: cp.save,
   runMirrorCycle: cp.run,
   decideMirrorDeletions: cp.decide,
+  fetchMirrorMigrations: cp.migs,
 }))
 
 const settings = { enabled: true, intervalMin: 15, deletionMode: 'mirror' as const, capPct: 2,
@@ -42,6 +43,8 @@ const confirm = async (reason = 'because the owners asked') => {
 }
 
 beforeEach(() => {
+  cp.migs.mockReset().mockResolvedValue({ accountId: 3, migrations: [
+    { id: 41, startedAt: '2026-10-03T12:13:00Z', reason: 'chat for the rehearsal', users: ['seeduser200@src.example'] }] })
   cp.view.mockReset().mockResolvedValue(view())
   for (const f of [cp.save, cp.run, cp.decide]) f.mockReset().mockResolvedValue({ ok: true, actionId: 1, detail: 'started pid 9' })
 })
@@ -137,7 +140,7 @@ describe('settings', () => {
     fireEvent.click(screen.getByTestId('mirror-save'))
     await confirm('slower at night')
     await waitFor(() => expect(cp.save).toHaveBeenCalledWith('slower at night',
-      { enabled: true, intervalMin: 30, deletionMode: 'keep', capPct: 2 }, 3))
+      { enabled: true, intervalMin: 30, deletionMode: 'keep', capPct: 2, users: null }, 3))
   })
 
   it('runs a cycle now after a reason', async () => {
@@ -154,5 +157,19 @@ describe('duration', () => {
     expect(duration(600)).toBe('10 min')
     expect(duration(3 * 3600 + 120)).toBe('3 h 2 min')
     expect(duration(3 * 86400)).toBe('3 d 0 h')
+  })
+})
+
+
+describe('a mirror can follow one migration', () => {
+  it('saves the chosen migration\'s users with the settings', async () => {
+    show()
+    const select = await screen.findByTestId('mirror-follows')
+    fireEvent.mouseDown(select.parentElement!.querySelector('[role="combobox"]')!)
+    fireEvent.click(await screen.findByTestId('mirror-migration-41'))
+    fireEvent.click(screen.getByTestId('mirror-save'))
+    await confirm('follow the rehearsal')
+    await waitFor(() => expect(cp.save).toHaveBeenCalled())
+    expect(cp.save.mock.calls[0][1].users).toEqual(['seeduser200@src.example'])
   })
 })

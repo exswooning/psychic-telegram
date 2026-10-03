@@ -547,11 +547,11 @@ def cleanup_staging_drives(auth: AuthManager, settings: Settings,
         if not token:
             break
 
-    for d in drives:
+    staging = [d for d in drives if (d.get("name") or "").startswith(prefix)]
+    for d in staging:
         name = d.get("name") or ""
-        if not name.startswith(prefix):
-            continue
         out["found"] += 1
+        print(f"  [{out['found']}/{len(staging)}] {name}", flush=True)
         try:
             # Idempotent; "already exists" is the normal case.
             try:
@@ -626,8 +626,9 @@ def main(argv: list[str] | None = None) -> int:
         drives = mig.list_source_drives(args.all_drives)
         grand = {"files": 0, "folders": 0, "bytes": 0}
         print(f"{len(drives)} shared drive(s)\n")
-        for d in drives:
+        for i, d in enumerate(drives, 1):
             name = d.get("name") or "?"
+            print(f"  [{i}/{len(drives)}]", end="", flush=True)
             reader = mig.reader_for(d["id"], name)
             if reader is None:
                 print(f"  {name[:46]:48} {'unreadable':>7}  (no member to read it as)")

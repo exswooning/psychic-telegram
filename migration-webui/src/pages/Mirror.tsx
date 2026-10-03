@@ -13,13 +13,12 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import {
   Alert, Box, Button, Chip, FormControlLabel, Paper, Radio, RadioGroup, Stack, Switch, Table,
-  TableBody, TableCell, TableHead, TableRow, TextField, Typography,
+  TableBody, TableCell, TableHead, TableRow, TextField, Typography, MenuItem,
 } from '@mui/material'
 import { PlayArrow as RunIcon, Refresh as RefreshIcon } from '@mui/icons-material'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
 import {
-  decideMirrorDeletions, fetchMe, fetchMirror, runMirrorCycle, saveMirrorSettings,
-} from '@/api/controlPlane'
+  decideMirrorDeletions, fetchMe, fetchMirror, runMirrorCycle, saveMirrorSettings, fetchMirrorMigrations, MirrorMigration } from '@/api/controlPlane'
 import type { MirrorCycle, MirrorDeletionMode, MirrorView } from '@/api/controlPlane'
 import { KINDS, duration } from '@/mirrorKinds'
 
@@ -48,7 +47,9 @@ const Mirror: React.FC = () => {
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null)
   const [ask, setAsk] = useState<Ask>(null)
   const [busy, setBusy] = useState(false)
-  const [draft, setDraft] = useState<{ enabled: boolean; intervalMin: string; deletionMode: MirrorDeletionMode; capPct: string } | null>(null)
+  const [draft, setDraft] = useState<{ enabled: boolean; intervalMin: string; deletionMode: MirrorDeletionMode; capPct: string; users: string[] | null } | null>(null)
+  // The migrations this mirror can follow, newest first.
+  const [migrations, setMigrations] = useState<MirrorMigration[]>([])
 
   useEffect(() => {
     if (accountId) return
@@ -61,11 +62,16 @@ const Mirror: React.FC = () => {
       .catch((e) => setError(e instanceof Error ? e.message : String(e)))
   }, [accountId])
   useEffect(() => { load(); const t = setInterval(load, 20000); return () => clearInterval(t) }, [load])
+  useEffect(() => {
+    if (!accountId) return
+    Promise.resolve().then(() => fetchMirrorMigrations(accountId))
+      .then((r) => setMigrations(r?.migrations ?? [])).catch(() => setMigrations([]))
+  }, [accountId])
 
   const saved = view?.settings
   const form = draft ?? (saved ? {
     enabled: saved.enabled, intervalMin: String(saved.intervalMin),
-    deletionMode: saved.deletionMode, capPct: String(saved.capPct),
+    deletionMode: saved.deletionMode, capPct: String(saved.capPct), users: saved.users ?? null,
   } : null)
   const minInterval = view?.minIntervalMin ?? 5
   const intervalOk = form !== null && Number(form.intervalMin) >= minInterval
@@ -85,7 +91,7 @@ const Mirror: React.FC = () => {
       const r = ask === 'save' && form
         ? await saveMirrorSettings(reason, {
           enabled: form.enabled, intervalMin: Number(form.intervalMin),
-          deletionMode: form.deletionMode, capPct: Number(form.capPct),
+          deletionMode: form.deletionMode, capPct: Number(form.capPct), users: form.users,
         }, accountId)
         : ask === 'run'
           ? await runMirrorCycle(reason, accountId)
@@ -187,6 +193,21 @@ const Mirror: React.FC = () => {
               control={<Switch checked={form.enabled} inputProps={{ 'aria-label': 'mirror on' }}
                                onChange={(e) => setDraft({ ...form, enabled: e.target.checked })} />}
               label={form.enabled ? 'Mirror is on' : 'Mirror is off'} />
+            <TextField select size="small" label="What it follows"
+                       value={form.users ? JSON.stringify(form.users) : ''}
+                       SelectProps={{ displayEmpty: true }} InputLabelProps={{ shrink: true }}
+                       inputProps={{ 'data-testid': 'mirror-follows' }}
+                       helperText="One migration's users, kept in step after it; or every user a migration has finished."
+                       onChange={(e) => setDraft({ ...form, users: e.target.value ? JSON.parse(e.target.value) : null })}>
+              <MenuItem value="">Every migrated user</MenuItem>
+              {form.users && !migrations.some((m) => JSON.stringify(m.users) === JSON.stringify(form.users)) && (
+                <MenuItem value={JSON.stringify(form.users)}>{form.users.length} chosen user(s)</MenuItem>)}
+              {migrations.filter((m) => m.users.length).map((m) => (
+                <MenuItem key={m.id} value={JSON.stringify(m.users)} data-testid={`mirror-migration-${m.id}`}>
+                  {new Date(m.startedAt).toLocaleString()} · {m.users.length === 1 ? m.users[0] : `${m.users.length} users`} · {m.reason}
+                </MenuItem>
+              ))}
+            </TextField>
             <Stack direction="row" spacing={2}>
               <TextField size="small" type="number" label="Every (minutes)" value={form.intervalMin}
                          error={!intervalOk} helperText={intervalOk ? ' ' : `At least ${minInterval} minutes`}

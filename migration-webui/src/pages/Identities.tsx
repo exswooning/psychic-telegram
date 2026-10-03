@@ -133,7 +133,9 @@ const TenantStats: React.FC<{
           </Typography>
           {inv.licenseError ? (
             <Typography variant="body2" color="text.secondary">
-              Couldn&apos;t read licences — the licensing scope isn&apos;t granted.
+              {side === 'source'
+                ? 'Not read on a source: Google’s only licensing scope can also assign and remove licences, and the migration’s source key holds read-only scopes. Licences matter on the target, where accounts are created.'
+                : 'Couldn’t read licences — the licensing scope isn’t granted.'}
             </Typography>
           ) : licences.length ? (
             <Stack direction="row" sx={{ flexWrap: 'wrap', gap: 0.75, mt: 0.5 }}>

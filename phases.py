@@ -423,8 +423,8 @@ def main(argv: list[str] | None = None) -> int:
     results = []
     failed_phase = None
 
-    for phase in phases:
-        print(f"\n  [{phase.upper()}]")
+    for k, phase in enumerate(phases, 1):
+        print(f"\n  [{k}/{len(phases)}] {phase.upper()}")
         counter = tally_tenant if phase in TENANT_PHASES else tally
         args_for = ((auth, settings, phase, "source")
                     if phase in TENANT_PHASES

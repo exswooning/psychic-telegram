@@ -376,3 +376,16 @@ class TestOtherServices:
         assert [t["title"] for t in tt if t["id"] == db.get_target_id(SRC_USER, milk, "task")] == ["Buy oat milk"]
         assert out["by_service"]["tasks"]["deletion_unsupported"] == 1
         assert len(tt) == 2                                   # nothing deleted: no bin
+
+
+class TestAMirrorThatFollowsOneMigration:
+    def test_a_user_outside_it_is_not_mirrored(self, world, auth, db, settings):
+        world["src"].add_binary("late.pdf", parent=world["projects"], data=b"x")
+        out = cycle(auth, db, settings, only=["someone-else@tenanta.com"])
+        assert out["by_service"].get("drive", {}).get("new", 0) == 0
+
+    def test_a_user_inside_it_is(self, world, auth, db, settings):
+        from tests.conftest import SRC_USER
+        world["src"].add_binary("late.pdf", parent=world["projects"], data=b"x")
+        out = cycle(auth, db, settings, only=[SRC_USER.upper()])
+        assert out["by_service"]["drive"]["new"] == 1

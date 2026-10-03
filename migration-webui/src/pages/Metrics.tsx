@@ -7,6 +7,7 @@ import {
 import { Refresh as RefreshIcon } from '@mui/icons-material'
 import MigrateMetricsCharts from '@/components/MigrateMetricsCharts'
 import LearnedLimits from '@/components/LearnedLimits'
+import RunMetricCards from '@/components/RunMetricCards'
 import {
   fetchMetrics, fetchMyMetrics, MetricsSnapshot, LimiterState,
 } from '@/api/controlPlane'
@@ -169,6 +170,7 @@ export const Metrics: React.FC = () => {
         </Alert>
       )}
 
+      {(scoped ? id : m?.accountId) ? <RunMetricCards accountId={scoped ? id : m!.accountId} /> : null}
       {(scoped ? id : m?.accountId) ? <LearnedLimits accountId={scoped ? id : m!.accountId} /> : null}
 
       {l && (

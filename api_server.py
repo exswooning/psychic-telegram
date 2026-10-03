@@ -1769,7 +1769,78 @@ def _discover_when_mapped(proc, account_id: int | None) -> None:
 _REPAIR_THREADS: dict = {}
 
 
-def _start_tally_after_repair(account_id: int | None) -> tuple[bool, str]:
+# The engine service that fills a tally service's gap.
+TALLY_FIXES_WITH = {"drive_files": "drive", "drive_folders": "drive", "mail": "gmail",
+                    "calendar": "calendar", "contacts": "contacts", "tasks": "tasks"}
+AUTOFIX_EVERY_HOURS = 6
+
+
+def _tally_follow(kind: str, users: list[str] | None) -> str:
+    """A follow-on kind that carries its users: "tally@a,b" -- one string, so it
+    travels in `then` and through the job queue unchanged."""
+    return f"{kind}@{','.join(users)}" if users else kind
+
+
+def _fix_after_tally(account_id: int | None, users: list[str] | None = None) -> tuple[bool, str]:
+    """A tally that is not an exact copy sets its fix going, without anyone asking:
+    SHORT -- the short services reopened for those users and migrated again (only
+    what is missing is copied; everything mapped is skipped); DIFFERS -- repair
+    (failed items, Drive stragglers, modified times, owed shares). OWED_TO_DMS waits
+    on Google; more on the target is reported, never deleted. At most once per user
+    per AUTOFIX_EVERY_HOURS, so a gap a fix cannot close is not retried in a loop."""
+    from db import MigrationDB
+    view = _tally_view(account_id)
+    wanted = {u.lower() for u in users} if users else None
+    path = _ledger_path(account_id)
+    if not os.path.isfile(path):
+        return False, "no ledger"
+    db = MigrationDB(path)
+    short: dict[str, set] = {}
+    differs: list[str] = []
+    try:
+        for u in view.get("users") or []:
+            who = u["user"]
+            if wanted is not None and who.lower() not in wanted:
+                continue
+            if u["verdict"] not in ("SHORT", "DIFFERS") or db.autofixed_since(who, AUTOFIX_EVERY_HOURS):
+                continue
+            if u["verdict"] == "SHORT":
+                gaps = {TALLY_FIXES_WITH[s] for s, v in (u.get("services") or {}).items()
+                        if s in TALLY_FIXES_WITH and isinstance(v, dict)
+                        and v.get("expected") is not None and v.get("target") is not None
+                        and v["target"] < v["expected"]}
+                if gaps:
+                    db.set_services_done(who, db.services_done(who) - gaps)
+                    short[who] = gaps
+                    db.note_autofix(who, "SHORT", "migrate " + ",".join(sorted(gaps)))
+                    continue
+            differs.append(who)
+            db.note_autofix(who, u["verdict"], "repair")
+    finally:
+        db.close()
+    did = []
+    if short:
+        services = sorted(set().union(*short.values()))
+        svc, env, ordered = _mail_plan(services, "engine")
+        argv = [PY, "main.py"] + _account_argv(account_id) + ["migrate", "--services", ",".join(svc)]
+        if ordered:
+            argv.append("--ordered")
+        for who in sorted(short):
+            argv += ["--user", who]
+        ok, detail = _run_admitted(argv, account_id, "migrate", **({"env": env} if env else {}),
+                                   then=["repair", _tally_follow("tally", sorted(short))])
+        did.append(f"{len(short)} short user(s) migrated again for {', '.join(services)}: {detail}")
+    if differs:
+        _start_repair(account_id, why=f"started automatically: the tally found {len(differs)} "
+                                      "user(s) whose items differ from the source")
+        _start_tally_after_repair(account_id, differs)
+        did.append(f"repair for {len(differs)} user(s) whose items differ")
+    msg = "; ".join(did) or "nothing to fix: every tallied user is an exact copy, owed, or fixed within the window"
+    log.info("tally fix for account %s: %s", account_id, msg)
+    return True, msg
+
+
+def _start_tally_after_repair(account_id: int | None, users: list[str] | None = None) -> tuple[bool, str]:
     """Count every user on both tenants once the run -- and the repair behind it --
     is over: the exhaustive per-user tally used to run inside the migration, after
     every pass, re-listing both tenants for each user up to three times on the same
@@ -1778,8 +1849,11 @@ def _start_tally_after_repair(account_id: int | None) -> tuple[bool, str]:
         prior = _REPAIR_THREADS.get(account_id)
         if prior is not None:
             prior.join()
-        ok, detail = _run_admitted([PY, "tally.py"] + _account_argv(account_id),
-                                   account_id, "user-tally")
+        argv = [PY, "tally.py"] + _account_argv(account_id)
+        for u in users or []:
+            argv += ["--user", u]
+        ok, detail = _run_admitted(argv, account_id, "user-tally",
+                                   then=_tally_follow("tally_fix", users))
         log.info("tally after the run for account %s: %s (%s)", account_id, ok, detail)
 
     threading.Thread(target=_go, name=f"tally-after-{account_id}", daemon=True).start()
@@ -1829,6 +1903,10 @@ def _start_repair(account_id: int | None, why: str, *,
     return True, "repair started; it checks each grant against the target and takes a few minutes"
 
 
+def _follow_users(kind: str) -> list[str] | None:
+    return [u for u in kind.split("@", 1)[1].split(",") if u] if "@" in kind else None
+
+
 def _follow_on(kind: str, account_id: int | None) -> None:
     """What a job that just exited cleanly asked to have done next."""
     if kind == "repair":
@@ -1839,8 +1917,10 @@ def _follow_on(kind: str, account_id: int | None) -> None:
     elif kind == "dms":
         _start_dms(account_id, require_clean=True, why="started automatically: the split migration finished cleanly, "
                                                        "so the mail it left for the DMS is now owed")
-    elif kind == "tally":
-        _start_tally_after_repair(account_id)
+    elif kind.split("@")[0] == "tally":
+        _start_tally_after_repair(account_id, _follow_users(kind))
+    elif kind.split("@")[0] == "tally_fix":
+        _fix_after_tally(account_id, _follow_users(kind))
 
 
 @app.post("/api/v2/migrate/start")
@@ -1913,8 +1993,8 @@ async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
     # once Google's import has finished (a tally before it would read mail as short).
     dms_follows = dms and body.mail_mode == "split"
     then = ([] if body.dry_run else ["repair"]) + (["dms"] if dms_follows else [])
-    if not body.dry_run and not dms_follows and body.sample is None and not body.users:
-        then.append("tally")
+    if not body.dry_run and not dms_follows and body.sample is None:
+        then.append(_tally_follow("tally", body.users or None))
     beside = dms and body.mail_mode == "dms"
 
     def launch() -> tuple[bool, str]:
@@ -2084,7 +2164,8 @@ async def tally_run(body: RunVerification, op: Operator = Depends(operator)):
         argv += ["--user", u]
     target = ",".join(body.users) if body.users else "ALL"
     return await _gated(op, "tally.run", body, target,
-                        lambda: _run_admitted(argv, account_id, "user-tally"))
+                        lambda: _run_admitted(argv, account_id, "user-tally",
+                                              then=_tally_follow("tally_fix", body.users or None)))
 
 
 # -- Mirror ---------------------------------------------------------------------------
@@ -2147,7 +2228,8 @@ def _mirror_view(account_id: int) -> dict:
         "settings": {"enabled": cfg["enabled"], "intervalMin": cfg["interval_min"],
                      "deletionMode": cfg["deletion_mode"], "capPct": cfg["cap_pct"],
                      "deletionsPaused": cfg["deletions_paused"], "enabledAt": cfg["enabled_at"],
-                     "updatedBy": cfg["updated_by"], "updatedAt": cfg["updated_at"]},
+                     "updatedBy": cfg["updated_by"], "updatedAt": cfg["updated_at"],
+                     "users": cfg.get("users")},
         "minIntervalMin": ms.MIN_INTERVAL_MIN, "lagIntervals": ms.LAG_INTERVALS,
         "running": _mirror_busy(account_id), "cycles": [], "lastCycle": None,
         "lastGoodAt": None, "lagSeconds": None, "behind": None,
@@ -2211,6 +2293,8 @@ class MirrorSettingsBody(WriteAction):
     interval_min: int = Field(ge=5, le=1440)
     deletion_mode: Literal["mirror", "keep"]
     cap_pct: float = Field(gt=0, le=100)
+    # One migration's users, or None for every user a migration finished.
+    users: list[str] | None = None
 
 
 class MirrorAccount(WriteAction):
@@ -2233,6 +2317,34 @@ async def mirror_status(account_id: int | None = None, op: Operator = Depends(op
     return await _off_loop(_mirror_view, aid)
 
 
+@app.get("/api/v2/mirror/migrations")
+async def mirror_migrations(account_id: int | None = None, op: Operator = Depends(operator)):
+    """The migrations a mirror can follow: this account's launches that started,
+    newest first, each with the users it chose (none = the whole tenant)."""
+    require_login(op)
+    aid = account_id if account_id is not None else op.account_id
+    _require_account_access(aid, op)
+
+    def _read() -> list[dict]:
+        with cpdb.ro() as conn:
+            rows = conn.execute(
+                "SELECT id, started_at, reason, params_json FROM operator_actions_log "
+                "WHERE action='migrate.start' AND outcome='OK' AND account_id IS ? "
+                "ORDER BY started_at DESC LIMIT 30", (aid,)).fetchall()
+        out = []
+        for r in rows:
+            try:
+                p = json.loads(r["params_json"] or "{}")
+            except ValueError:
+                p = {}
+            if p.get("dry_run"):
+                continue
+            out.append({"id": r["id"], "startedAt": r["started_at"], "reason": r["reason"],
+                        "users": p.get("users") or []})
+        return out
+    return {"accountId": aid, "migrations": await _off_loop(_read)}
+
+
 @app.put("/api/v2/mirror/settings")
 async def mirror_settings(body: MirrorSettingsBody, op: Operator = Depends(operator)):
     """On/off, interval (at least 5 minutes), deletion mode and cap."""
@@ -2242,7 +2354,8 @@ async def mirror_settings(body: MirrorSettingsBody, op: Operator = Depends(opera
     def go() -> tuple[bool, str]:
         try:
             saved = ms.save_settings(account_id, enabled=body.enabled, interval_min=body.interval_min,
-                                     deletion_mode=body.deletion_mode, cap_pct=body.cap_pct, by=op.name)
+                                     deletion_mode=body.deletion_mode, cap_pct=body.cap_pct, by=op.name,
+                                     users=body.users)
         except ValueError as exc:
             return False, str(exc)
         return True, ("mirror on, every %d min" % saved["interval_min"]) if saved["enabled"] else "mirror off"
@@ -3725,6 +3838,30 @@ async def full_setup_status(side: str, account: int | None = None,
 # regular SaaS client should ever be able to fire against another
 # tenant's project by guessing an id.
 # ======================================================================
+def _key_in_use(project: str, client_id: str) -> str:
+    """Which configured tenant still uses this project or client, or "". Every
+    account's keys on file, and every seed key (seed-sa.json) beside them."""
+    import glob
+    project, client_id = (project or "").strip(), (client_id or "").strip()
+    with cpdb.ro() as conn:
+        rows = conn.execute("SELECT account_id, side, domain, sa_key_path FROM tenant_configs "
+                            "WHERE sa_key_path IS NOT NULL AND sa_key_path != ''").fetchall()
+    keys = [(r["sa_key_path"], f"{r['domain']} ({r['side']}, account {r['account_id']})")
+            for r in rows]
+    keys += [(p, f"the seed key {p}") for p in glob.glob(os.path.join(HERE, "keys", "*", "seed-sa.json"))]
+    for path, who in keys:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                k = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if project and k.get("project_id") == project:
+            return f"project {project} holds the key of {who}"
+        if client_id and k.get("client_id") == client_id:
+            return f"client {client_id} is the key of {who}"
+    return ""
+
+
 class StartTeardown(WriteAction):
     """Mirrors StartFullSetup's password handling exactly -- passed to the
     subprocess environment only, excluded from the audit log."""
@@ -3796,6 +3933,13 @@ async def teardown_start(body: StartTeardown, op: Operator = Depends(operator)):
     Xvfb), same caveat as full-setup."""
     if not body.project and not body.client_id:
         raise HTTPException(400, "need project, client_id, or both")
+    in_use = await _off_loop(_key_in_use, body.project, body.client_id)
+    if in_use:
+        # The project delete is soft, but the delegation revoke is not -- and the
+        # On file table fills this form with LIVE tenants' keys at one click.
+        raise HTTPException(409, f"refusing: {in_use}. Remove that setup first "
+                                 "(Identities -> Delete this setup); this page is for "
+                                 "throwaway projects only")
 
     def _launch() -> tuple[bool, str]:
         admitted, admit_msg = job_admission.try_admit(op.account_id, "teardown")
@@ -5105,6 +5249,26 @@ async def metrics_for_me(history: int = 60, op: Operator = Depends(operator)):
                 "limiters": {}, "history": [],
                 "error": "no account in context and no migration running"}
     return await migration_metrics(account_id, history=history, op=op)
+
+
+@app.get("/api/v2/metrics/{account_id}/runs")
+async def metrics_runs(account_id: int, op: Operator = Depends(operator)):
+    """Each run's kept numbers (run_metric_summary), newest first, labelled with
+    the domains it ran between -- the Metrics page's run cards."""
+    require_login(op)
+    _require_account_access(account_id, op)
+
+    def _read() -> list[dict]:
+        path = _account_db_path(account_id)
+        if not path or not os.path.isfile(path):
+            return []
+        from db import MigrationDB
+        db = MigrationDB(path)
+        try:
+            return db.run_summaries()
+        finally:
+            db.close()
+    return {"accountId": account_id, "runs": await _off_loop(_read)}
 
 
 @app.get("/api/v2/metrics/{account_id}")

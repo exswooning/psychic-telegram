@@ -73,3 +73,22 @@ def test_no_cycle_while_the_pair_is_migrating(api, monkeypatch):
     r = api.post("/api/v2/mirror/run", json={"reason": "one now"}).json()
     assert r["ok"] is False and "already running" in r["detail"]
     assert api.started == []
+
+
+def test_a_mirror_follows_one_migrations_users(api):
+    """The Mirror page picks a migration; the mirror then follows only its users."""
+    import control_plane_db as cpdb
+    me = api.get("/api/v2/auth/me").json()["id"]
+    with cpdb.rw() as conn:
+        conn.execute("INSERT INTO operator_actions_log(actor, actor_role, action, params_json, reason, "
+                     "outcome, account_id) VALUES ('m', 'admin', 'migrate.start', ?, 'rehearsal', 'OK', ?)",
+                     ('{"users": ["seeduser200@src.example"]}', me))
+    migs = api.get("/api/v2/mirror/migrations").json()["migrations"]
+    assert migs[0]["users"] == ["seeduser200@src.example"]
+    body = {"reason": "follow that run", "enabled": True, "interval_min": 15,
+            "deletion_mode": "keep", "cap_pct": 2, "users": migs[0]["users"]}
+    assert api.put("/api/v2/mirror/settings", json=body).json()["ok"] is True
+    assert api.get("/api/v2/mirror").json()["settings"]["users"] == ["seeduser200@src.example"]
+    body["users"] = None
+    api.put("/api/v2/mirror/settings", json=body)
+    assert api.get("/api/v2/mirror").json()["settings"]["users"] is None

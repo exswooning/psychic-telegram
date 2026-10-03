@@ -40,7 +40,7 @@ def test_the_tally_waits_for_the_repair_then_runs_as_one_job(monkeypatch):
 
 def test_the_follow_on_is_wired(monkeypatch):
     seen = []
-    monkeypatch.setattr(A, "_start_tally_after_repair", lambda aid: seen.append(aid))
+    monkeypatch.setattr(A, "_start_tally_after_repair", lambda aid, users=None: seen.append(aid))
     A._follow_on("tally", 7)
     assert seen == [7]
 

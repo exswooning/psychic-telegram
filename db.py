@@ -204,6 +204,28 @@ CREATE TABLE IF NOT EXISTS run_metrics (
 );
 CREATE INDEX IF NOT EXISTS ix_run_metrics_at ON run_metrics(recorded_at DESC);
 
+-- One row per run, kept: run_metrics above is the last hour of samples, rolled
+-- over, so a run's numbers were gone an hour after it. Updated by every sample
+-- the run records; labelled with the domains it ran between.
+-- When a tally that did not match last set a fix going, per user -- so a gap a fix
+-- cannot close is retried once per window, not in a loop (api_server._fix_after_tally).
+CREATE TABLE IF NOT EXISTS tally_autofix (
+    source_user TEXT PRIMARY KEY,
+    at          TEXT NOT NULL,
+    verdict     TEXT,
+    action      TEXT
+);
+
+CREATE TABLE IF NOT EXISTS run_metric_summary (
+    run_key       TEXT PRIMARY KEY,
+    kind          TEXT NOT NULL,
+    source_domain TEXT,
+    target_domain TEXT,
+    started_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL,
+    payload       TEXT NOT NULL
+);
+
 -- Tenant tallies (tally.py): what BOTH tenants hold, counted directly rather
 -- than read from this ledger. One row per tally, newest wins; a run report
 -- reads the latest one taken after the run began.
@@ -902,6 +924,62 @@ class MigrationDB:
         self._mapping_cached_users.discard(source_user)
         return n
 
+    def record_run_summary(self, run: dict, sample: dict) -> None:
+        """Fold one sample into its run's kept summary: the running totals as of
+        now, and the peaks (request rate, memory, workers) seen across the run.
+        `run` = {kind, pid, started_at, source_domain, target_domain}."""
+        import json as _json
+        key = f"{run['kind']}:{run.get('pid')}:{run['started_at']}"
+        with self.write() as conn:
+            row = conn.execute("SELECT payload FROM run_metric_summary WHERE run_key=?",
+                               (key,)).fetchone()
+            prev = _json.loads(row[0]) if row else {}
+            out = {k: sample.get(k) for k in ("calls", "retries", "failures", "p50", "p95",
+                                              "elapsed_sec", "workers", "rss_mb")}
+            out["requests_per_sec"] = sample.get("requests_per_sec")
+            for k, src in (("peak_requests_per_sec", "requests_per_sec"),
+                           ("peak_rss_mb", "rss_mb"), ("peak_workers", "workers")):
+                vals = [v for v in (prev.get(k), sample.get(src)) if isinstance(v, (int, float))]
+                out[k] = max(vals) if vals else None
+            conn.execute(
+                "INSERT INTO run_metric_summary(run_key, kind, source_domain, target_domain, "
+                "started_at, updated_at, payload) VALUES(?,?,?,?,?,?,?) "
+                "ON CONFLICT(run_key) DO UPDATE SET updated_at=excluded.updated_at, "
+                "payload=excluded.payload",
+                (key, run["kind"], run.get("source_domain"), run.get("target_domain"),
+                 run["started_at"], utc_now(), _json.dumps(out)))
+
+    def autofixed_since(self, source_user: str, hours: float) -> bool:
+        row = self.conn.execute("SELECT at FROM tally_autofix WHERE source_user=?",
+                                (source_user,)).fetchone()
+        if not row:
+            return False
+        from datetime import datetime, timedelta, timezone
+        try:
+            at = datetime.fromisoformat(row[0].replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        return datetime.now(timezone.utc) - at < timedelta(hours=hours)
+
+    def note_autofix(self, source_user: str, verdict: str, action: str) -> None:
+        with self.write() as conn:
+            conn.execute("INSERT INTO tally_autofix(source_user, at, verdict, action) VALUES(?,?,?,?) "
+                         "ON CONFLICT(source_user) DO UPDATE SET at=excluded.at, "
+                         "verdict=excluded.verdict, action=excluded.action",
+                         (source_user, utc_now(), verdict, action))
+
+    def run_summaries(self, limit: int = 50) -> list[dict]:
+        """Kept per-run summaries, newest first."""
+        import json as _json
+        try:
+            rows = self.conn.execute(
+                "SELECT run_key, kind, source_domain, target_domain, started_at, updated_at, payload "
+                "FROM run_metric_summary ORDER BY started_at DESC LIMIT ?", (limit,)).fetchall()
+        except sqlite3.Error:
+            return []
+        return [{"runKey": r[0], "kind": r[1], "sourceDomain": r[2], "targetDomain": r[3],
+                 "startedAt": r[4], "updatedAt": r[5], **_json.loads(r[6] or "{}")} for r in rows]
+
     def record_metrics(self, payload: dict, keep: int = 240) -> None:
         """Persist one metrics sample.
 
@@ -1512,12 +1590,23 @@ def deferred_mail_by_user(conn) -> dict[str, int]:
         "GROUP BY source_user", (DEFERRED_TO_DMS,))}
 
 
+def _counted(services: dict, short: bool) -> list[str]:
+    """Services whose target count is below (short=True) or above (short=False)
+    the source's -- exact, not within a parity bar."""
+    out = []
+    for s, v in services.items():
+        if not isinstance(v, dict) or v.get("expected") is None or v.get("target") is None:
+            continue
+        if (v["target"] < v["expected"]) if short else (v["target"] > v["expected"]):
+            out.append(s)
+    return out
+
+
 def _short_only_by_owed_mail(t: dict, owed: int) -> bool:
     """Mail is the only service under the bar, and every missing message is one
     the DMS still owes -- waiting on Google, not a gap in this tool's work."""
     services = t.get("services") or {}
-    below = [s for s, v in services.items()
-             if isinstance(v, dict) and v.get("parity") is not None and v["parity"] < TALLY_PARITY_OK]
+    below = _counted(services, short=True)
     if below != ["mail"] or owed <= 0:
         return False
     m = services["mail"]
@@ -1525,8 +1614,10 @@ def _short_only_by_owed_mail(t: dict, owed: int) -> bool:
 
 
 def tally_rollup(users, tallies: list[dict], deferred: dict[str, int] | None = None) -> dict:
-    """Every user rolled up to one tally verdict: COMPLETE (every service at or above the
-    count_parity bar), SHORT (a service came up short), UNKNOWN (a tally ran but nothing
+    """Every user rolled up to one tally verdict: COMPLETE (an EXACT copy: every service's
+    count equal on both tenants and every Drive item matching -- not "within 99.9%", which
+    read one missing message as complete), SHORT (a service has fewer on the target),
+    DIFFERS (more on the target, or items that differ), UNKNOWN (a tally ran but nothing
     could be counted -- e.g. every service errored), or NOT_TALLIED -- never a blank, the
     same rule verification_rollup follows. Shared by the Tally page (api_server._tally_view),
     MigrationDB.tally_summary, and (should a report ever want it) the run report."""
@@ -1545,14 +1636,17 @@ def tally_rollup(users, tallies: list[dict], deferred: dict[str, int] | None = N
             verdict = "NOT_TALLIED"
         elif t.get("countParity") is None:
             verdict = "UNKNOWN"
-        elif t["countParity"] >= TALLY_PARITY_OK:
-            # Counts at parity is not the same as every item matching: DIFFERS
-            # is a copy that is there but not the same (name, size, checksum,
-            # modifiedTime), or a mapped item that is no longer there.
-            verdict = "DIFFERS" if items.get("differ") or items.get("missingOnTarget") else "COMPLETE"
-        else:
+        elif _counted(t.get("services") or {}, short=True) or t["countParity"] < 1.0:
             verdict = ("OWED_TO_DMS" if _short_only_by_owed_mail(t, deferred.get(u["source_email"], 0))
                        else "SHORT")
+        elif (_counted(t.get("services") or {}, short=False)
+              or items.get("differ") or items.get("missingOnTarget")):
+            # Counts equal is not the same as every item matching: DIFFERS is a
+            # copy that is there but not the same (name, size, checksum,
+            # modifiedTime), a mapped item no longer there, or MORE on the target.
+            verdict = "DIFFERS"
+        else:
+            verdict = "COMPLETE"
         totals[verdict] += 1
         out_users.append({"user": u["source_email"], "target": u["target_email"], "status": u["status"],
                           "verdict": verdict, "countParity": (t or {}).get("countParity"),

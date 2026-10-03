@@ -168,8 +168,8 @@ const Tally: React.FC = () => {
       </Stack>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2, maxWidth: 780 }}>
         {view?.onComplete
-          ? 'Each user is counted on both tenants the moment their migration finishes: every item of every service, not a sample. Nothing is written to either tenant.'
-          : 'Every user is counted on both tenants once a migration and its repair are over (after a split run, once the DMS import has finished): every item of every service, not a sample. Nothing is written to either tenant. Tally now counts sooner.'}
+          ? 'Each user is counted on both tenants the moment their migration finishes: every item of every service, not a sample. Complete means an exact copy — every count equal. Nothing is written to either tenant.'
+          : 'Every user is counted on both tenants once a migration and its repair are over (after a split run, once the DMS import has finished): every item of every service, not a sample. Complete means an exact copy — every count equal. Nothing is written to either tenant. Tally now counts sooner.'}
       </Typography>
 
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}

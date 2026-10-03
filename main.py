@@ -1082,8 +1082,10 @@ def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
     watchdog = threading.Thread(target=_memory_watchdog, args=(stop,),
                                 name="watchdog", daemon=True)
     watchdog.start()
-    flusher = threading.Thread(target=_metrics_flusher, args=(stop, db),
-                               name="metrics", daemon=True)
+    flusher = threading.Thread(
+        target=_metrics_flusher, args=(stop, db),
+        kwargs={"run": _run_label(settings, "delta" if delta else "migrate")},
+        name="metrics", daemon=True)
     flusher.start()
     try:
         with _registered("delta" if delta else "migrate",
@@ -1255,8 +1257,22 @@ def cmd_init_db(args, settings: Settings, db: MigrationDB, auth: AuthManager):
 METRICS_FLUSH_SEC = 15.0
 
 
+_RUN_STARTED: "str | None" = None
+
+
+def _run_label(settings, kind: str) -> dict:
+    """Which run a metrics sample belongs to, and the domains it runs between."""
+    global _RUN_STARTED
+    if _RUN_STARTED is None:
+        from datetime import datetime, timezone
+        _RUN_STARTED = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {"kind": kind, "pid": os.getpid(), "started_at": _RUN_STARTED,
+            "source_domain": getattr(settings, "source_domain", None),
+            "target_domain": getattr(settings, "target_domain", None)}
+
+
 def _metrics_flusher(stop_event: threading.Event, db,
-                     interval: float = METRICS_FLUSH_SEC) -> None:
+                     interval: float = METRICS_FLUSH_SEC, run: dict | None = None) -> None:
     """Copy this process's metrics into the ledger, so other processes can
     read them.
 
@@ -1297,6 +1313,8 @@ def _metrics_flusher(stop_event: threading.Event, db,
             payload["rss_mb"] = _rss_mb()
             payload["mappingCache"] = dict(getattr(db, "mapping_cache_stats", {}) or {})
             db.record_metrics(payload)
+            if run:
+                db.record_run_summary(run, payload)
         except Exception as exc:      # noqa: BLE001
             log.debug("metrics flush skipped: %s", exc)
 
@@ -2173,7 +2191,8 @@ def cmd_mirror(args, settings: Settings, db: MigrationDB, auth: AuthManager) -> 
         cfg = ms.get_settings(aid)
         out = mirror.Cycle(auth, db, settings, deletion_mode=cfg["deletion_mode"],
                            cap_pct=cfg["cap_pct"], deletions_paused=cfg["deletions_paused"],
-                           on_hold=lambda n, cap: ms.hold_deletions(aid, n, cap)).run()
+                           on_hold=lambda n, cap: ms.hold_deletions(aid, n, cap),
+                           only=cfg.get("users")).run()
     print("MIRROR " + json.dumps({k: out.get(k) for k in (
         "status", "cycle", "seconds", "calls", "counts", "deletions", "conflicts")}), flush=True)
     for line in out.get("errors") or []:

@@ -156,6 +156,10 @@ def _apply_column_upgrades(conn: sqlite3.Connection) -> None:
         # an unattended migration cannot rely on. NULL argv means "started
         # some way this cannot reproduce" (a terminal run), and is left
         # alone rather than guessed at.
+        # Which users a mirror follows: a JSON list, NULL for every migrated user.
+        "mirror_settings": [
+            ("users", "TEXT"),
+        ],
         "active_jobs": [
             ("argv", "TEXT"),
             ("cwd", "TEXT"),

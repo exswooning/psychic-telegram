@@ -105,3 +105,29 @@ class TestReopenOneUser:
             "reason": "rerun everything", "source_email": "a@src.example"})
         row = ledger.conn.execute("SELECT status, services_done FROM identity_map").fetchone()
         assert r.status_code == 200 and tuple(row) == ("PENDING", "")
+
+
+class TestTeardownRefusesALiveKey:
+    def test_a_project_or_client_a_tenant_still_uses_is_refused(self, cp, tmp_path, monkeypatch):
+        import json as _json
+
+        import api_server
+        import control_plane_db as cpdb
+        key = tmp_path / "source-sa.json"
+        key.write_text(_json.dumps({"project_id": "wsmig-src-1", "client_id": "111"}))
+        with cpdb.rw() as conn:
+            conn.execute("INSERT INTO tenant_configs(account_id, side, domain, sa_key_path) "
+                         "VALUES (99, 'source', 'live.example', ?)", (str(key),))
+        assert "live.example" in api_server._key_in_use("wsmig-src-1", "")
+        assert "live.example" in api_server._key_in_use("", "111")
+        assert api_server._key_in_use("wsmig-throwaway-9", "222") == ""
+
+
+class TestRunCards:
+    def test_each_runs_kept_numbers_are_served_labelled(self, cp, ledger):
+        me = _signed_in(cp, "metrics@example.com")
+        ledger.record_run_summary({"kind": "migrate", "pid": 1, "started_at": "2026-10-03T10:00:00Z",
+                                   "source_domain": "src.example", "target_domain": "tgt.example"},
+                                  {"calls": 5, "requests_per_sec": 2.0})
+        runs = cp.get(f"/api/v2/metrics/{me}/runs").json()["runs"]
+        assert runs[0]["sourceDomain"] == "src.example" and runs[0]["calls"] == 5

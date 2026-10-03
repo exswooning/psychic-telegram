@@ -154,6 +154,17 @@ export const deleteAccount = (accountId: number, confirmEmail: string, reason: s
     body: JSON.stringify({ reason, confirm_email: confirmEmail }),
   })
 
+/** One run's kept numbers, labelled with the domains it ran between. */
+export interface RunMetrics {
+  runKey: string; kind: string; sourceDomain: string | null; targetDomain: string | null
+  startedAt: string; updatedAt: string
+  calls?: number; retries?: number; failures?: number; p50?: number; p95?: number
+  elapsed_sec?: number; requests_per_sec?: number; peak_requests_per_sec?: number | null
+  peak_rss_mb?: number | null; peak_workers?: number | null
+}
+export const fetchMetricRuns = (accountId: number) =>
+  cpFetch<{ accountId: number; runs: RunMetrics[] }>(`/api/v2/metrics/${accountId}/runs`)
+
 export interface RateCeiling { tenant: string; ceiling: number; updated_at: string }
 /** The per-project Drive rate each tenant side has proven; a fresh run starts there. */
 export const fetchRateCeilings = (accountId: number) =>
@@ -1668,6 +1679,8 @@ export interface MirrorSettings {
   enabledAt: string | null
   updatedBy: string | null
   updatedAt: string | null
+  /** The users this mirror follows -- one migration's -- or null for every migrated user. */
+  users?: string[] | null
 }
 /** One cycle. `counts` is changes by kind (new, edited, renamed, moved, sharing, deleted,
  *  ...) summed over services; `byService` keeps them apart. `unknown` lists the checks the
@@ -1732,13 +1745,21 @@ export const fetchMirror = (accountId?: number) =>
 
 export const saveMirrorSettings = (
   reason: string,
-  s: { enabled: boolean; intervalMin: number; deletionMode: MirrorDeletionMode; capPct: number },
+  s: { enabled: boolean; intervalMin: number; deletionMode: MirrorDeletionMode; capPct: number;
+       users?: string[] | null },
   accountId?: number,
 ) => cpFetch<ActionResult>('/api/v2/mirror/settings', {
   method: 'PUT',
   body: JSON.stringify({ reason, account_id: accountId ?? null, enabled: s.enabled,
-    interval_min: s.intervalMin, deletion_mode: s.deletionMode, cap_pct: s.capPct }),
+    interval_min: s.intervalMin, deletion_mode: s.deletionMode, cap_pct: s.capPct,
+    users: s.users ?? null }),
 })
+
+/** A migration a mirror can follow: a launch that started, with the users it chose. */
+export interface MirrorMigration { id: number; startedAt: string; reason: string; users: string[] }
+export const fetchMirrorMigrations = (accountId?: number) =>
+  cpFetch<{ accountId: number; migrations: MirrorMigration[] }>(
+    `/api/v2/mirror/migrations${accountId ? `?account_id=${accountId}` : ''}`)
 
 export const runMirrorCycle = (reason: string, accountId?: number) =>
   cpFetch<ActionResult>('/api/v2/mirror/run', {

@@ -278,8 +278,11 @@ class Cycle:
     def __init__(self, auth, db, settings, *, deletion_mode: str = "mirror",
                  cap_pct: float = 2.0, deletions_paused: bool = False,
                  on_hold: Optional[Callable[[int, int], None]] = None,
-                 workers: Optional[int] = None, check_users: bool = True):
+                 workers: Optional[int] = None, check_users: bool = True,
+                 only: Optional[list] = None):
         self.auth, self.db, self.settings = auth, db, settings
+        # One migration's users (the Mirror page's choice), or None for every user.
+        self.only = {u.lower() for u in only} if only else None
         self.deletion_mode = deletion_mode
         self.cap_pct = cap_pct
         self.deletions_paused = deletions_paused
@@ -338,7 +341,8 @@ class Cycle:
         self.settings.rewrite_drive_links = True
         try:
             rows = [r for r in self.db.all_identities()
-                    if r["entity_type"] == "user" and r["status"] == "DONE"]
+                    if r["entity_type"] == "user" and r["status"] == "DONE"
+                    and (self.only is None or r["source_email"].lower() in self.only)]
             pairs = [(r["source_email"], r["target_email"]) for r in rows]
             # A service is mirrored only for a user the ledger shows it done for. DONE
             # alone is not enough: a ledger reset of Drive leaves a user DONE on the
