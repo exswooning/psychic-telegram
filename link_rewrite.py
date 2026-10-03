@@ -445,27 +445,40 @@ def sheet_requests(value_ranges: list[dict], lookup: Callable[[str], str | None]
             for s in sorted(ids) if (t := lookup(s))]
 
 
-def rewrite_native(kind: str, svc, file_id: str, lookup: Callable[[str], str | None]) -> int:
+def rewrite_native(kind: str, svc, file_id: str, lookup: Callable[[str], str | None],
+                   pace: Callable[[str], None] | None = None) -> int:
     """Repoint the links in one native TARGET copy. kind: docs | sheets | slides; svc is
-    that API's client as the target user. Returns how many requests were applied."""
+    that API's client as the target user. `pace("read")` / `pace("write")` is called
+    before each request -- these APIs meter per minute, and an unpaced run hits 429.
+    Returns how many requests were applied."""
+    go = pace or (lambda op: None)
     if kind == "docs":
+        go("read")
         reqs = doc_requests(svc.documents().get(documentId=file_id).execute(), lookup)
         if reqs:
+            go("write")
             svc.documents().batchUpdate(documentId=file_id, body={"requests": reqs}).execute()
     elif kind == "slides":
+        go("read")
         reqs = slides_requests(svc.presentations().get(presentationId=file_id).execute(), lookup)
         if reqs:
+            go("write")
             svc.presentations().batchUpdate(presentationId=file_id,
                                             body={"requests": reqs}).execute()
     elif kind == "sheets":
+        go("read")
         meta = svc.spreadsheets().get(spreadsheetId=file_id,
                                       fields="sheets.properties.title").execute()
         ranges = ["'" + s["properties"]["title"].replace("'", "''") + "'"
                   for s in meta.get("sheets") or []]
-        got = svc.spreadsheets().values().batchGet(
-            spreadsheetId=file_id, ranges=ranges, valueRenderOption="FORMULA").execute() if ranges else {}
+        got = {}
+        if ranges:
+            go("read")
+            got = svc.spreadsheets().values().batchGet(
+                spreadsheetId=file_id, ranges=ranges, valueRenderOption="FORMULA").execute()
         reqs = sheet_requests(got.get("valueRanges") or [], lookup)
         if reqs:
+            go("write")
             svc.spreadsheets().batchUpdate(spreadsheetId=file_id, body={"requests": reqs}).execute()
     else:
         return 0

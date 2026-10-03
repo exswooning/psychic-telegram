@@ -136,7 +136,7 @@ class TestTheEngine:
         m = self._engine(settings, db, calls)
         m._pending_native = [({"id": "S1", "mimeType": "application/vnd.google-apps.spreadsheet"}, "T1")]
         monkeypatch.setattr(link_rewrite, "rewrite_native",
-                            lambda kind, svc, fid, lk: calls.append((kind, svc, fid)) or 2)
+                            lambda kind, svc, fid, lk, pace=None: calls.append((kind, svc, fid)) or 2)
         m._rewrite_native_links()
         assert calls[0] == ("sheets", ("target", "sheets", "u@b"), "T1")
         assert ("mtime", "T1", 2) in calls
@@ -147,7 +147,7 @@ class TestTheEngine:
         m = self._engine(settings, db, [])
         m._pending_native = [({"id": "S1", "mimeType": "application/vnd.google-apps.document"}, "T1")]
         monkeypatch.setattr(link_rewrite, "rewrite_native",
-                            lambda *a: (_ for _ in ()).throw(RuntimeError("boom")))
+                            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
         m._rewrite_native_links()
         assert db.get_audit("u@a", "S1", "link_rewrite")["status"] == "FAILED"
 
@@ -186,3 +186,55 @@ def test_the_setup_check_requires_the_three_native_apis():
     import ensure_apis
     assert {"docs.googleapis.com", "sheets.googleapis.com", "slides.googleapis.com"} <= set(
         ensure_apis.REQUIRED_APIS)
+
+
+class TestItIsPacedToGooglesQuotas:
+    """Live: an unpaced rewrite of 270 spreadsheets drew 429 RESOURCE_EXHAUSTED on the
+    first one -- Sheets allows 60 reads a minute per user."""
+
+    def test_every_request_is_paced_by_kind_of_call(self):
+        seen = []
+        svc = _Docs({"body": {"content": [{"paragraph": {"elements": [_run(URL, 1, 3)]}}]}})
+        L.rewrite_native("docs", svc, "T1", lookup, pace=seen.append)
+        assert seen == ["read", "write"]
+
+    def test_sheets_read_twice_then_write(self):
+        seen = []
+
+        class Sheets:
+            def spreadsheets(self): return self
+            def values(self): return self
+            def get(self, spreadsheetId, fields):
+                return _Exec({"sheets": [{"properties": {"title": "A"}}]}, [], "get")
+            def batchGet(self, spreadsheetId, ranges, valueRenderOption):
+                return _Exec({"valueRanges": [{"values": [[f'=IMPORTRANGE("{SRC}","A1")']]}]}, [], "bg")
+            def batchUpdate(self, spreadsheetId, body): return _Exec({}, [], "u")
+
+        L.rewrite_native("sheets", Sheets(), "T1", lookup, pace=seen.append)
+        assert seen == ["read", "read", "write"]
+
+    def test_the_rates_are_ninety_percent_of_googles_published_quotas(self):
+        import drive_engine as D
+        assert abs(D._native_rate("sheets", "read", 0) - 0.9) < 1e-9     # 60/min per user
+        assert abs(D._native_rate("sheets", "read", 1) - 4.5) < 1e-9     # 300/min per project
+        assert abs(D._native_rate("docs", "write", 0) - 0.9) < 1e-9
+
+    def test_one_project_limiter_per_api_and_call_kind_for_the_whole_process(self):
+        import drive_engine as D
+        assert D._native_project_limiter("sheets", "read") is D._native_project_limiter("sheets", "read")
+        assert D._native_project_limiter("sheets", "read") is not D._native_project_limiter("sheets", "write")
+
+    def test_the_engine_passes_a_pacer(self, settings, db, monkeypatch):
+        import threading, drive_engine, link_rewrite
+        m = object.__new__(drive_engine.DriveMigrator)
+        m.settings, m.db, m.source_user, m.target_user = settings, db, "u@a", "u@b"
+        m.stats, m._stats_lock = {}, threading.Lock()
+        m._retry = lambda fn, **k: fn()
+        m.auth = type("A", (), {"api": lambda s, *a: None})()
+        m._pending_native = [({"id": "S1", "mimeType": "application/vnd.google-apps.document"}, "T1")]
+        got = {}
+        monkeypatch.setattr(link_rewrite, "rewrite_native",
+                            lambda kind, svc, fid, lk, pace=None: got.setdefault("pace", pace) and 0)
+        m._rewrite_native_links()
+        assert callable(got["pace"])
+        got["pace"]("read")          # paces without raising

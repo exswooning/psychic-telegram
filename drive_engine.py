@@ -104,6 +104,28 @@ _NATIVE_KIND = {"application/vnd.google-apps.document": "docs",
                 "application/vnd.google-apps.spreadsheet": "sheets",
                 "application/vnd.google-apps.presentation": "slides"}
 
+# Google's published per-minute quotas for each native app's API: (per user, per
+# project) for reads and for writes. Paced at 90% of each. Live, an unpaced rewrite of
+# 270 spreadsheets drew 429 RESOURCE_EXHAUSTED on the first one and burned a minute of
+# retries per file after.
+NATIVE_QUOTA_PER_MIN = {"sheets": {"read": (60, 300), "write": (60, 300)},
+                        "docs": {"read": (300, 3000), "write": (60, 600)},
+                        "slides": {"read": (600, 3000), "write": (60, 600)}}
+_NATIVE_PROJECT: dict = {}
+_NATIVE_PROJECT_LOCK = threading.Lock()
+
+
+def _native_rate(kind: str, op: str, scope: int) -> float:
+    return 0.9 * NATIVE_QUOTA_PER_MIN[kind][op][scope] / 60
+
+
+def _native_project_limiter(kind: str, op: str) -> RateLimiter:
+    """One per (API, read|write) for the whole process: a project's quota is shared by
+    every user running in it."""
+    with _NATIVE_PROJECT_LOCK:
+        return _NATIVE_PROJECT.setdefault((kind, op), RateLimiter(_native_rate(kind, op, 1)))
+
+
 _PROJECT_LIMITERS: dict = {}
 _PROJECT_LIMITER_LOCK = threading.Lock()
 
@@ -1900,12 +1922,19 @@ class DriveMigrator:
             return
         import link_rewrite
         fixed = 0
+        mine: dict = {}       # this user's own per-minute quota, per (API, read|write)
+
+        def pace(kind: str, op: str) -> None:
+            mine.setdefault((kind, op), RateLimiter(_native_rate(kind, op, 0))).acquire()
+            _native_project_limiter(kind, op).acquire()
+
         for item, tgt_id in self._pending_native:
             kind = _NATIVE_KIND[item["mimeType"]]
             try:
                 n = self._retry(lambda k=kind, t=tgt_id: link_rewrite.rewrite_native(
                     k, self.auth.api("target", k, self.target_user), t,
-                    self.db.target_for_source_id), label=f"{kind}.links")
+                    self.db.target_for_source_id, pace=lambda op, k=k: pace(k, op)),
+                    label=f"{kind}.links")
             except Exception as exc:      # noqa: BLE001 - the file migrated; record, never raise
                 self.db.log_audit(self.source_user, item["id"], "link_rewrite",
                                   "FAILED", str(exc)[:200])
