@@ -2040,6 +2040,33 @@ def reset_calendar(cal, settings: Settings) -> int:
 # ======================================================================
 # Service construction
 # ======================================================================
+def _use_own_key(settings: Settings) -> None:
+    """Seed with the seed key, never the migration's. Domain-wide delegation is one
+    scope list per client ID: seeding with the migration's key needs write scopes on
+    the key a migration reads the source with. A tenant with no seed key yet gets
+    one first (separate_credentials: created, delegated exactly the seed set, and
+    the migration's entry narrowed to exactly its own)."""
+    cur = os.getenv("SEED_SA_KEY", "")
+    src = settings.source_sa_key or ""
+    if cur and os.path.abspath(cur) != os.path.abspath(src):
+        return                                   # a key of its own, named explicitly
+    if not os.path.isfile(src):
+        return                                   # no real key on file: nothing to separate
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+    import separate_credentials as sc
+    key = sc.seed_key_path(settings)
+    if not key:
+        print("This tenant has no seed key of its own yet: creating one, so seeding "
+              "never needs write scopes on the key a migration uses ...", flush=True)
+        rc = sc.separate(None, settings=settings)
+        key = sc.seed_key_path(settings)
+        if rc or not key:
+            sys.exit(f"could not set up the seed key (separate_credentials exit {rc}); "
+                     "nothing was seeded")
+    os.environ["SEED_SA_KEY"] = key
+    print(f"  seed key: {key}", flush=True)
+
+
 def _resolve_key_path(settings: Settings) -> str:
     key = os.getenv("SEED_SA_KEY", settings.source_sa_key)
     if key and not os.path.isabs(key):
@@ -2989,6 +3016,7 @@ def main(argv: list[str] | None = None) -> int:
 
     settings = Settings()
     assert_sandbox(settings, args.confirm_domain)
+    _use_own_key(settings)
     settings.seed_solo = args.solo
     if args.solo:
         args.groups, args.shared_drives = False, 0

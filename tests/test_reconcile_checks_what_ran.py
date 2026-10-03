@@ -69,7 +69,10 @@ class TestTheVerifierWidensItself:
         assert env["MIGRATE_CONTACTS"] == "true"
         assert env["MIGRATE_TASKS"] == "true"
 
-    def test_it_does_not_invent_a_service(self, ledger):
+    def test_it_does_not_invent_a_service(self, ledger, monkeypatch):
+        # Unticked here on purpose: Chat is on by default now, and the point is
+        # that the LEDGER never adds a service that did not run.
+        monkeypatch.setitem(webui._RUN_STATE["services"], "chat", False)
         env = webui._service_env(66, from_ledger=True)
         assert env["MIGRATE_CHAT"] == "false", (
             "claiming to verify Chat that never ran is its own lie")

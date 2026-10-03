@@ -456,7 +456,9 @@ def print_inventory(mig: SSOMigrator, users: list[str]) -> None:
                              key=lambda kv: -kv[1]["users"])[:20]:
         print(f"  {info['users']:>4} user(s)  {name}")
     if not grants:
-        print("  none found (needs admin.directory.user.security)")
+        print("  none listed: needs admin.directory.user.security, which a "
+              "migration's source key does not hold (it can also revoke "
+              "those grants) -- grant it by hand to list them")
 
     print(f"\n=== Saved passwords ===")
     print("  Not migratable and not inventoriable: they are encrypted to the")

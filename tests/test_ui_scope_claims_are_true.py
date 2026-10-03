@@ -53,10 +53,12 @@ class TestTheSourceIsReadOnlyWhereTheUiSaysItIs:
         st.transfer_mode, st.migrate_sso = "download_upload", False
         assert writes(source_scopes(st)) == set()
 
-    def test_sso_is_the_one_pass_that_widens_it(self, st):
+    def test_sso_no_longer_widens_it(self, st):
+        """The SSO step reads SAML profiles (inboundsso.readonly). Its old extra,
+        admin.directory.user.security, served only the inventory's list of apps
+        users signed into -- no migration step -- and can revoke them."""
         st.transfer_mode, st.migrate_sso = "download_upload", True
-        assert {s.split("/auth/")[-1] for s in writes(source_scopes(st))} == {
-            "admin.directory.user.security"}
+        assert writes(source_scopes(st)) == set()
 
     @pytest.mark.parametrize("mode", WRITE_MODES)
     def test_and_these_modes_really_do_grant_one(self, st, mode):
@@ -82,9 +84,7 @@ class TestTheSourceIsReadOnlyWhereTheUiSaysItIs:
         # Gmail settings, Chat and calendar ACLs used to be here: each has a
         # read-only scope after all (gmail.readonly, chat.*.readonly,
         # calendar.acls.readonly -- Google's reference, per call the source makes).
-        expected = {
-            "migrate_sso": {"admin.directory.user.security"},
-        }
+        expected: dict = {}
         found = {}
         flags = [f for f, v in vars(Settings()).items()
                  if f.startswith("migrate_") and isinstance(v, bool)]

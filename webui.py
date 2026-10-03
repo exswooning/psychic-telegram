@@ -540,6 +540,13 @@ ACTIONS: dict[str, dict] = {
     },
     # Each of these was run by hand over SSH during a live migration, because
     # nothing in the product could start it.
+    "separate_credentials": {
+        "label": "Separate seed and migrate keys",
+        "blurb": "Gives the seeder its own service account on the source, delegated "
+                 "exactly what seeding needs, and narrows the migration's key to "
+                 "exactly what a migration reads with. Unattended; up to 15 min.",
+        "argv": [PY, "separate_credentials.py"],
+    },
     "acl_reconcile_dry": {
         "label": "Sharing failures: which are still real (preview)",
         "blurb": "Reads each FAILED share on the target. One the target already "
@@ -3189,7 +3196,9 @@ def seed_scopes_payload() -> dict:
     from provision import DIRECTORY_WRITE_SCOPE
 
     st = Settings()
-    granted = set(verify_scopes.grant_scopes(st, "source"))
+    # The seed key's own line: the source line is the migration's alone now.
+    import separate_credentials
+    granted = set(separate_credentials.seed_scopes())
     caps = [
         ("Drive, Gmail, Calendar, Chat", "always", list(SEED_SCOPES)),
         ("Contacts and Tasks", "always",
@@ -3808,8 +3817,11 @@ def _status_uncached(account_id: int | None = None) -> dict:
 # enabling one must be a deliberate click, never a default.
 _RUN_STATE: dict = {
     "dry_run": False,
+    # Every per-user service on, Chat included: full scope by default
+    # (fidelity.py). A pass the tenant cannot grant is switched off at run
+    # time, by name -- never by a default nobody changed.
     "services": {"drive": True, "gmail": True, "calendar": True,
-                "chat": False, "contacts": False, "tasks": False},
+                "chat": True, "contacts": True, "tasks": True},
     # Who carries the mail: this engine, or Google's Data Migration Service.
     #
     # One setting rather than two toggles, because the two independent ones
@@ -5664,8 +5676,18 @@ class Handler(BaseHTTPRequestHandler):
                                 "purpose must be 'seed' or 'migrate'"})
                     return
                 argv += ["--purpose", purpose]
-            label = f"narrow scopes for {purpose}" if purpose \
-                else "repair console setup"
+            if purpose and side == "source":
+                # Seed and migrate each have their own key now, each delegated
+                # exactly its own set: "narrow for seed/migrate" on one shared key
+                # (an overwrite undone by the next switch) is that, done once.
+                st_ = __import__("config").Settings(account_id=account_id) if account_id \
+                    else __import__("config").Settings()
+                env["DWD_EMAIL_SOURCE"] = st_.source_admin or ""
+                env["DWD_PASSWORD_SOURCE"] = env["DWD_PASSWORD"]
+                argv = [PY, "separate_credentials.py"]
+            label = ("separate seed and migrate keys" if purpose and side == "source"
+                     else f"narrow scopes for {purpose}" if purpose
+                     else "repair console setup")
             ok, msg = get_job(account_id).start(label, argv, env=env)
             self._json({"ok": ok, "error": "" if ok else msg})
             return

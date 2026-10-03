@@ -94,6 +94,25 @@ propagation after a grant is accepted can take up to ~15 minutes, and
 a delegation entry — it's confirmed by successfully minting a token per
 scope).
 
+**Seed and migrate each have their own key on the source, each delegated exactly
+its own scope set** (`separate_credentials.py`). Delegation is one list per
+service-account client ID, so one shared key meant the migration's source
+credential could write, and "narrow for migrate" was an overwrite the next seed
+undid. Now: the account's `source-sa.json` is delegated exactly
+`verify_scopes.migrate_source_scopes()` -- what a migration requests, every pass on
+and both offered transfer modes (`drive`, for a server-side copy, is its only write
+scope; SSO reads SAML profiles with `inboundsso.readonly`, and the app-grant list
+behind `admin.directory.user.security` is a report, not a migration step) -- and that is
+also what `required_scopes(source)` (the run's gate) and `grant_scopes(source)` (every
+grant path) return. `seed-sa.json` (same Cloud project, found by project id, so
+accounts sharing a source tenant share it) holds `separate_credentials.seed_scopes()`.
+The seeder always uses it (`seed_sandbox._use_own_key`) and on a tenant without one
+creates it first (gcloud signed in as the source admin through `gcloud_browser_auth`,
+then both entries written by `dwd_helper --no-merge`, then probed until propagated).
+A migrate launch narrows the source entry back to exact if a seed write scope ever
+mints on it again (`main._gate_on_delegation` -> `narrow_if_wide`). The target is
+unchanged: it is written to in every mode.
+
 **`domain_guard.py` protects every domain a setup wizard has ever configured,
 automatically, from the seeder and reset/wipe tooling** — protection starts
 the moment a `tenant_configs` row is written, not from an opt-in list. A

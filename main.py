@@ -994,6 +994,16 @@ def _gate_on_delegation(settings: Settings) -> None:
     for gap in repaired:
         log.warning("scope preflight repaired %s: granted %s",
                     gap.tenant, ", ".join(gap.missing))
+    # The source key must hold exactly the migration's scopes. Only acted on once
+    # the seeder has its own key -- narrowing first would cut off a seed.
+    try:
+        import separate_credentials
+        did = separate_credentials.narrow_if_wide(settings)
+        if did:
+            log.warning("scope preflight: %s", did)
+            print(f"NOTE {did}", flush=True)
+    except Exception as exc:      # noqa: BLE001 - advisory, never blocking
+        log.warning("source scope narrowing check could not run: %s", exc)
 
 
 def _say_source_access(settings) -> None:

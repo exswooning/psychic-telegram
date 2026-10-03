@@ -835,7 +835,12 @@ class TestSetupGrantsTheOptionalScopes:
         from config import Settings
 
         st = Settings()
-        for side in ("source", "target"):
+        # The source line is EXACTLY the migration's, every pass and offered
+        # transfer mode included -- the seeder has its own key and line.
+        src = set(verify_scopes.grant_scopes(st, "source"))
+        assert set(verify_scopes.required_scopes(st, "source")) <= src
+        assert src == set(verify_scopes.migrate_source_scopes(st))
+        for side in ("target",):
             grant = set(verify_scopes.grant_scopes(st, side))
             need = set(verify_scopes.required_scopes(st, side))
             assert need < grant, f"{side}: grant line should be strictly wider"

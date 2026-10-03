@@ -46,9 +46,9 @@ const SEEDABLE_SERVICES = ['drive', 'gmail', 'calendar', 'chat', 'contacts',
 const SERVICE_LABELS: Record<string, string> = { gmail_settings: 'gmail settings' }
 // main.py migrate --services help text is the source of truth: "drive,
 // gmail,calendar,chat,contacts,tasks -- or 'all' for every per-user
-// service." CLI default is drive,gmail,calendar.
+// service." Its default is 'all', and so is this one: Chat included.
 const MIGRATE_SERVICES = ['drive', 'gmail', 'calendar', 'chat', 'contacts', 'tasks']
-const DEFAULT_MIGRATE_SERVICES = ['drive', 'gmail', 'calendar']
+const DEFAULT_MIGRATE_SERVICES = MIGRATE_SERVICES
 
 type Health = 'running' | 'healthy' | 'propagating' | 'attention' | 'not_set_up' | 'unknown'
 

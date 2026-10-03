@@ -73,18 +73,26 @@ class TestRequiredScopesIsAUnion:
     and account provisioning -- because a token request fails whole if any
     one requested scope is unauthorised."""
 
-    def test_source_includes_directory_write_for_provisioning(self, settings):
+    def test_directory_write_is_the_targets_and_the_seed_keys_not_the_migrations_source(
+            self, settings):
+        """Accounts are created on the target; test users on the source are the
+        seeder's, with its own key -- not a write the migration's source key holds."""
+        import separate_credentials
         from provision import DIRECTORY_WRITE_SCOPE
-        req = vs.required_scopes(settings, "source")
-        assert DIRECTORY_WRITE_SCOPE in req
+        assert DIRECTORY_WRITE_SCOPE not in vs.required_scopes(settings, "source")
+        assert DIRECTORY_WRITE_SCOPE in vs.required_scopes(settings, "target")
+        assert DIRECTORY_WRITE_SCOPE in separate_credentials.seed_scopes()
 
-    def test_source_includes_seed_scopes_by_default(self, settings):
+    def test_source_includes_seed_scopes_only_when_asked(self, settings):
+        """The seeder writes with its own key now, so a migration's source
+        requirement -- what its gate checks -- never asks for its writes."""
         sys.path.insert(0, os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "data-generator"))
         from seed_sandbox import SEED_SCOPES
-        req = set(vs.required_scopes(settings, "source"))
-        assert set(SEED_SCOPES) <= req
+        assert not set(SEED_SCOPES) & set(vs.required_scopes(settings, "source")) - {
+            "https://www.googleapis.com/auth/drive"}
+        assert set(SEED_SCOPES) <= set(vs.required_scopes(settings, "source", include_seed=True))
 
     def test_no_seed_excludes_seed_only_scopes(self, settings):
         sys.path.insert(0, os.path.join(
@@ -142,5 +150,10 @@ class TestFitToLicensesRidesTheGrantLine:
         # Any tenant, any toggle combination -- OPTIONAL_SCOPES is unioned
         # in unconditionally, which is the whole point: it rides the line
         # without depending on what this run happens to be configured for.
+        # On the source it is the seeder's (fit to licences), so it rides the SEED
+        # key's line; the migration's source line carries only what a migration reads.
+        import separate_credentials
         assert ("https://www.googleapis.com/auth/admin.reports.usage.readonly"
-                in vs.grant_scopes(st, "source"))
+                in separate_credentials.seed_scopes())
+        assert ("https://www.googleapis.com/auth/admin.reports.usage.readonly"
+                not in vs.grant_scopes(st, "source"))

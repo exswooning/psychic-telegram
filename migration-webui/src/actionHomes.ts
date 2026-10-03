@@ -55,7 +55,7 @@ export const CLAIMED_ELSEWHERE = [
   // rewriting. webui's own `migrate` action is the one that reads those
   // toggles, and claiming the key here left it with no control at all: the
   // product could run a split DELTA and not a split MIGRATION.
-  'scope', 'export_scope',
+  'scope', 'export_scope', 'separate_credentials',
   'init_db', 'init_db_auto', 'phased_migrate', 'phased_count_only',
   'ab_transfer',
 ]

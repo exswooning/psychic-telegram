@@ -91,14 +91,14 @@ class TestNewActionsAreWellFormed:
 
 
 class TestServiceToggleDefaults:
-    def test_contacts_and_tasks_are_off_like_chat(self):
-        """Each widens the OAuth grant, and an unauthorised scope fails every
-        call outright -- so enabling one must be a deliberate click, the same
-        reasoning that already keeps chat off by default."""
+    def test_chat_contacts_and_tasks_are_on_like_everything_else(self):
+        """Full scope by default. An ungranted scope no longer fails every call:
+        the run's gate re-grants it, or switches off that one pass by name
+        (fidelity.drop_ungranted) -- so off-by-default only ever lost data."""
         svcs = webui._RUN_STATE["services"]
-        assert svcs["chat"] is False
-        assert svcs["contacts"] is False
-        assert svcs["tasks"] is False
+        assert svcs["chat"] is True
+        assert svcs["contacts"] is True
+        assert svcs["tasks"] is True
 
     def test_the_original_three_are_still_on(self):
         svcs = webui._RUN_STATE["services"]

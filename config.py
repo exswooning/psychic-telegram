@@ -244,7 +244,11 @@ def source_scopes(settings: "Settings") -> list[str]:
     if settings.migrate_tasks:
         scopes.append(TASKS_READONLY_SCOPE)
     if settings.migrate_sso:
-        scopes.extend([SSO_READONLY_SCOPE, TOKENS_READONLY_SCOPE])
+        # The SAML profiles only. TOKENS_READONLY_SCOPE (admin.directory.user.
+        # security) is not requested: no migration step uses it -- only the SSO
+        # inventory's and the reconnect sheet's list of apps each user signed into
+        # -- and the same scope can revoke those grants and app passwords.
+        scopes.append(SSO_READONLY_SCOPE)
     if settings.migrate_calendar_acls:
         # acl.list is rejected under calendar.readonly (verified: 403), but
         # accepted under calendar.acls.readonly -- no write scope needed.

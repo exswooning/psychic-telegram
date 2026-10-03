@@ -40,17 +40,29 @@ def settings(monkeypatch):
     return st
 
 
+def _line(settings, side):
+    """The line that covers a reset on this side: the target's own, and on the
+    source the SEED key's -- the source line is the migration's, which never deletes."""
+    if side == "source":
+        import separate_credentials
+        return set(separate_credentials.seed_scopes())
+    return set(verify_scopes.grant_scopes(settings, side))
+
+
 class TestItIsWrittenIntoTheGrant:
     @pytest.mark.parametrize("side", ["source", "target"])
     def test_grant_scopes_carries_it(self, settings, side):
-        assert CHAT_DELETE_SCOPE in verify_scopes.grant_scopes(settings, side)
+        assert CHAT_DELETE_SCOPE in _line(settings, side)
 
     @pytest.mark.parametrize("side", ["source", "target"])
     def test_even_when_the_flag_is_off(self, settings, side):
         """The point of a grant covering every toggle: turning the flag on
         later must not need a second visit to the Admin Console."""
         settings.chat_allow_delete = False
-        assert CHAT_DELETE_SCOPE in verify_scopes.grant_scopes(settings, side)
+        assert CHAT_DELETE_SCOPE in _line(settings, side)
+
+    def test_the_migrations_source_line_never_carries_it(self, settings):
+        assert CHAT_DELETE_SCOPE not in verify_scopes.grant_scopes(settings, "source")
 
     def test_every_toggle_scopes_varies_the_flag(self, settings):
         assert CHAT_DELETE_SCOPE in \
@@ -81,7 +93,7 @@ class TestItIsNeverRequired:
         req = set(verify_scopes.required_scopes(settings, side))
         assert CHAT_DELETE_SCOPE in req
         settings.chat_allow_delete = False
-        assert req <= set(verify_scopes.grant_scopes(settings, side)), (
+        assert CHAT_DELETE_SCOPE in _line(settings, side), (
             "the flag can request a scope the console line never carries")
 
     def test_the_grant_is_a_superset_of_the_requirement(self, settings):

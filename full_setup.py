@@ -932,8 +932,9 @@ def run_full_setup(
         # own scope and its own opt-in flag, so a tenant that has it stays
         # unexercised unless asked -- and groups are what every group-typed
         # Drive ACL needs to exist first.
-        if GROUP_WRITE_SCOPE in set(granted):
-            argv.append("--groups")
+        # The seed key's line carries group writes (separate_credentials), so
+        # groups are always seedable now -- the source line is the migration's.
+        argv.append("--groups")
         env = dict(os.environ, SANDBOX_MODE="true")
         # Point the child at the key THIS run just created.
         #
@@ -949,8 +950,14 @@ def run_full_setup(
         #
         # Two credentials, one of them stale, and the only symptom was an
         # error naming no file.
+        # NOT as SEED_SA_KEY: that is the migration's key, and seeding with it
+        # needs write scopes on it. The seeder makes and uses its own
+        # (seed_sandbox._use_own_key), signing in as this admin to do it.
+        env.pop("SEED_SA_KEY", None)
+        if side == "source" and env.get("DWD_PASSWORD"):
+            env.setdefault("DWD_EMAIL_SOURCE", admin_email)
+            env.setdefault("DWD_PASSWORD_SOURCE", env["DWD_PASSWORD"])
         env.update({
-            "SEED_SA_KEY": key_path,
             f"{side.upper()}_SA_KEY": key_path,
             f"{side.upper()}_DOMAIN": domain,
             f"{side.upper()}_ADMIN": admin_email,

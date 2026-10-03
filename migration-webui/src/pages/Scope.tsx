@@ -55,6 +55,9 @@ const Scope: React.FC = () => {
                   configuration needs -- the list to paste into the Admin
                   console. It had an ACTIONS entry and no button anywhere. */}
               {actions.scope && <JobRunner name="scope" spec={actions.scope} />}
+              {/* Seed and migrate each with its own key, each delegated exactly its own set. */}
+              {actions.separate_credentials && (
+                <JobRunner name="separate_credentials" spec={actions.separate_credentials} />)}
               {actions.export_scope &&
                 <JobRunner name="export_scope" spec={actions.export_scope} />}
             </Stack>

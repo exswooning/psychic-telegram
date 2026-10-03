@@ -218,8 +218,44 @@ def every_toggle_scopes(settings: Settings, tenant: str) -> set[str]:
     return out
 
 
+# The transfer modes a launch can choose. link_flip is never offered (it makes a
+# source file public for a moment), so its write scopes are never granted.
+OFFERED_TRANSFER_MODES = ("download_upload", "server_side")
+
+
+def migrate_source_scopes(settings: Settings) -> list[str]:
+    """Exactly what a migration requests from the source, in every transfer mode a
+    launch can choose. The seeder has a key of its own (separate_credentials), so
+    nothing here is there for it: the migration's source key holds no write scope
+    it does not itself use -- `drive` for a server-side copy and
+    admin.directory.user.security for the SSO pass, and nothing else.
+
+    Every migration pass on, whatever THIS process has switched off: a line written
+    from a process that had dropped Chat would leave Chat ungrantable for good.
+    """
+    import dataclasses
+
+    import fidelity
+    out: set = set()
+    for mode in OFFERED_TRANSFER_MODES:
+        for on in (True, False):
+            for chat_mode in ("direct", "import"):
+                try:
+                    variant = dataclasses.replace(
+                        settings, transfer_mode=mode, chat_space_mode=chat_mode,
+                        chat_allow_delete=False, **{f: on for f in fidelity.OPTIONAL})
+                except TypeError:      # a stand-in settings object, not the dataclass
+                    variant = settings
+                out |= set(required_scopes(variant, "source"))
+    return sorted(out)
+
+
 def grant_scopes(settings: Settings, tenant: str) -> list[str]:
     """Everything to put on the Admin Console line for this tenant.
+
+    The SOURCE line is the migration's own set, exactly (migrate_source_scopes):
+    the seeder writes with its own key and its own line. Before that one key held
+    both, so a migration's source credential could write.
 
     Wider than required_scopes() in two directions, both deliberate:
     OPTIONAL_SCOPES (features that degrade rather than fail), and every
@@ -227,6 +263,8 @@ def grant_scopes(settings: Settings, tenant: str) -> list[str]:
     being *written*; use required_scopes() wherever the question is "may
     this run start".
     """
+    if tenant == "source":
+        return migrate_source_scopes(settings)
     want = set(required_scopes(settings, tenant)) | OPTIONAL_SCOPES
     try:
         want |= every_toggle_scopes(settings, tenant)
@@ -236,7 +274,7 @@ def grant_scopes(settings: Settings, tenant: str) -> list[str]:
 
 
 def required_scopes(settings: Settings, tenant: str,
-                    include_seed: bool = True) -> list[str]:
+                    include_seed: bool = False) -> list[str]:
     """Everything the code will request against this tenant.
 
     Union rather than the migration set alone: the source is also written
@@ -262,9 +300,12 @@ def required_scopes(settings: Settings, tenant: str,
         want |= set(scope_mod.oauth_scopes(base)[tenant])
     except TypeError:      # a stand-in settings object, not the dataclass
         pass
-    want.add(DIRECTORY_WRITE_SCOPE)
+    if tenant == "target":
+        # Accounts are created on the target only; creating test users on the
+        # source is the seeder's, with its own key.
+        want.add(DIRECTORY_WRITE_SCOPE)
     want.add("https://www.googleapis.com/auth/admin.directory.user.readonly")
-    if include_seed:
+    if include_seed and tenant == "source":
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                         "data-generator"))
         try:

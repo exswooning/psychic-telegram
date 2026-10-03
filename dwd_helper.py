@@ -891,6 +891,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--account-id", type=int,
                     help="whose tenant: its key, its domain and its live scopes "
                          "(default: the legacy single-tenant settings)")
+    ap.add_argument("--key", help="service-account key to verify with, instead of the "
+                                  "tenant's own (the seed key's entry is checked with the seed key)")
     ap.add_argument("--revoke", action="store_true",
                     help="remove this client ID's delegation entry entirely, "
                          "instead of adding/editing one. Needs only "
@@ -900,6 +902,9 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     from config import Settings
     st = Settings(account_id=args.account_id) if args.account_id else Settings()
+    if args.key and args.tenant:
+        import dataclasses
+        st = dataclasses.replace(st, **{f"{args.tenant}_sa_key": args.key})
     if args.tenant == "source":
         _sign_in_as_source_admin(st)
 
