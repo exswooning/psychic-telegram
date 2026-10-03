@@ -128,6 +128,18 @@ def _sign_in_as_source_admin(st) -> None:
         os.environ.pop("DWD_PASSWORD", None)
 
 
+def _dump_dialog(page, dialog, tag: str) -> None:
+    """The dialog as it is -- screenshot and HTML under /tmp -- so a failed
+    console step leaves evidence instead of a guess. Never raises."""
+    try:
+        page.screenshot(path=f"/tmp/dwd-{tag}.png")
+        with open(f"/tmp/dwd-{tag}.html", "w", encoding="utf-8") as fh:
+            fh.write(dialog.first.evaluate("e => e.outerHTML"))
+        log(f"  saved /tmp/dwd-{tag}.png and .html")
+    except Exception:      # noqa: BLE001 - diagnostics only
+        pass
+
+
 def _tick_overwrite(dialog, label) -> bool:
     """Tick "Overwrite existing client ID" and PROVE it is ticked. A click on the
     label text did not toggle it live, and Authorize then reads as an inline
@@ -805,13 +817,17 @@ def run(client_id: str, scopes: str, timeout: int, headful: bool,
                     browser.close()
                     return 7
                 page.wait_for_timeout(500)
-                # Re-fill: some console builds clear the scope box when the
-                # duplicate error renders.
+                # Re-fill, ALWAYS, into the field as it is now: the duplicate
+                # error re-renders the dialog, and a locator taken before it can
+                # point at a field that is no longer the one Authorize submits.
                 try:
-                    if not (sc.input_value() or "").strip():
-                        sc.fill(scopes)
-                except Exception:      # noqa: BLE001
-                    pass
+                    sc2 = _field("OAuth scopes (comma-delimited)", "OAuth Scopes",
+                                 "OAuth scopes") or sc
+                    sc2.fill("")
+                    sc2.fill(scopes)
+                except Exception as exc:      # noqa: BLE001
+                    log(f"  could not re-fill the scopes: {str(exc)[:120]}")
+                _dump_dialog(page, dialog, "overwrite-before")
                 # Confirmed live: this re-click can time out -- the dialog
                 # this Authorize button lives in can close, re-render, or
                 # cover itself the moment the Overwrite checkbox is ticked,
@@ -840,8 +856,14 @@ def run(client_id: str, scopes: str, timeout: int, headful: bool,
 
         # Authorize either returns to the list (success) or the dialog stays
         # open with an inline error (bad/duplicate client id, unsupported
-        # scope). Report which.
+        # scope). Report which -- after giving a save time to finish: an
+        # overwrite can take longer than the 2.5 s waited above.
+        for _ in range(8):
+            if not _dialog_open(dialog):
+                break
+            page.wait_for_timeout(2500)
         if _dialog_open(dialog):
+            _dump_dialog(page, dialog, "overwrite-after")
             log("Authorize dialog still open -- likely an inline error "
                 "(check the client ID / scopes, or multi-party approval). "
                 "Fix in the open dialog, or do it by hand.")
