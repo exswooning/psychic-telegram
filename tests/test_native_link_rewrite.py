@@ -238,3 +238,29 @@ class TestItIsPacedToGooglesQuotas:
         m._rewrite_native_links()
         assert callable(got["pace"])
         got["pace"]("read")          # paces without raising
+
+
+class TestACleanResultClearsAnEarlierFailure:
+    def _engine(self, settings, db):
+        import threading, drive_engine
+        m = object.__new__(drive_engine.DriveMigrator)
+        m.settings, m.db, m.source_user, m.target_user = settings, db, "u@a", "u@b"
+        m.stats, m._stats_lock = {}, threading.Lock()
+        m._retry = lambda fn, **k: fn()
+        m.auth = type("A", (), {"api": lambda s, *a: None})()
+        m._pending_native = [({"id": "S1", "mimeType": "application/vnd.google-apps.document"}, "T1")]
+        return m
+
+    def test_an_earlier_failure_is_replaced(self, settings, db, monkeypatch):
+        import link_rewrite
+        db.log_audit("u@a", "S1", "link_rewrite", "FAILED", "HTTP 403 SERVICE_DISABLED")
+        monkeypatch.setattr(link_rewrite, "rewrite_native", lambda *a, **k: 0)
+        self._engine(settings, db)._rewrite_native_links()
+        row = db.get_audit("u@a", "S1", "link_rewrite")
+        assert row["status"] == "SUCCESS" and "no Drive links" in row["error_message"]
+
+    def test_a_file_that_never_failed_writes_nothing(self, settings, db, monkeypatch):
+        import link_rewrite
+        monkeypatch.setattr(link_rewrite, "rewrite_native", lambda *a, **k: 0)
+        self._engine(settings, db)._rewrite_native_links()
+        assert db.get_audit("u@a", "S1", "link_rewrite") is None

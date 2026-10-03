@@ -1945,6 +1945,14 @@ class DriveMigrator:
                 self._restore_modified_time(tgt_id, item, n, late_bump=True)
                 fixed += n
                 self._bump("links_rewritten", n)
+            else:
+                # Nothing to repoint writes nothing -- except over an earlier failure,
+                # which would otherwise stand forever. Live: 808 FAILED rows from a run
+                # whose APIs were off, every file since checked and found clean.
+                prior = self.db.get_audit(self.source_user, item["id"], "link_rewrite")
+                if prior is not None and str(prior["status"]).startswith("FAILED"):
+                    self.db.log_audit(self.source_user, item["id"], "link_rewrite", "SUCCESS",
+                                      "no Drive links to repoint")
         if fixed:
             log.info("[%s] repointed links inside %d native cop(ies) through their own API",
                      self.source_user, fixed)
