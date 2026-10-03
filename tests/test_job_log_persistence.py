@@ -301,6 +301,18 @@ class TestARunForChosenUsersIsMeasuredAgainstThem:
         # (60 + min(150, 100)) / (100 + 100), the other user's 10,000 left out
         assert webui._users_progress_fraction(snap, ["f@s.example"]) == 160 / 200
 
+    def test_past_every_expectation_is_no_fraction_not_100(self):
+        """Live: a user filled after discovery read "100%, ETA 0s" mid-Drive."""
+        import types
+
+        def row(src, **k):
+            base = dict(source=src, drive_done=0, drive_failed=0, drive_skipped=0, exp_drive=0,
+                        mail_done=0, mail_failed=0, mail_skipped=0, exp_mail=0)
+            return types.SimpleNamespace(**{**base, **k})
+        snap = types.SimpleNamespace(users=[row("g@s.example", drive_done=434, exp_drive=300,
+                                                mail_done=10, exp_mail=10)])
+        assert webui._users_progress_fraction(snap, ["g@s.example"]) is None
+
     def test_nothing_discovered_is_no_fraction_not_zero(self):
         import types
         snap = types.SimpleNamespace(users=[])
