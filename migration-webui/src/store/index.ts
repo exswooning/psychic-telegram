@@ -1,5 +1,21 @@
 import { create } from 'zustand'
 import { devtools } from 'zustand/middleware'
+
+// Dark mode is remembered in this browser (a per-viewer convenience), and until it
+// is chosen follows the system's own setting. Held only in memory, every reload
+// put the page back to light. Storage can be blocked or empty: never fatal.
+const DARK_KEY = 'bitport.darkMode'
+export function initialDarkMode(): boolean {
+  try {
+    const saved = localStorage.getItem(DARK_KEY)
+    if (saved === 'true' || saved === 'false') return saved === 'true'
+  } catch { /* storage blocked: fall through to the system's setting */ }
+  try {
+    return window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false
+  } catch {
+    return false
+  }
+}
 import {
   User,
   MigrationStatus,
@@ -88,7 +104,7 @@ export const useMigrationStore = create<MigrationStore>()(
       helpContext: defaultHelpContext,
       selectedUser: null,
       sidebarOpen: true,
-      darkMode: false,
+      darkMode: initialDarkMode(),
       lastUpdate: new Date().toISOString(),
       isLoading: true,
       error: null,
@@ -123,7 +139,11 @@ export const useMigrationStore = create<MigrationStore>()(
       setHelpContext: (helpContext) => set({ helpContext }, false, 'setHelpContext'),
       setSelectedUser: (email) => set({ selectedUser: email }, false, 'setSelectedUser'),
       toggleSidebar: () => set((state) => ({ sidebarOpen: !state.sidebarOpen }), false, 'toggleSidebar'),
-      toggleDarkMode: () => set((state) => ({ darkMode: !state.darkMode }), false, 'toggleDarkMode'),
+      toggleDarkMode: () => set((state) => {
+        const darkMode = !state.darkMode
+        try { localStorage.setItem(DARK_KEY, String(darkMode)) } catch { /* not remembered, still switched */ }
+        return { darkMode }
+      }, false, 'toggleDarkMode'),
       setLoading: (isLoading) => set({ isLoading }, false, 'setLoading'),
       setError: (error) => set({ error }, false, 'setError'),
       setLastUpdate: (lastUpdate) => set({ lastUpdate }, false, 'setLastUpdate'),
