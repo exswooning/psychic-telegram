@@ -747,11 +747,13 @@ def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
         """
         return _services_already_done(db, r, services)
 
-    # A redo run (REDO_UNREWRITTEN_LINKS) exists to revisit mail and events already
-    # copied, so its mail/calendar pass cannot skip the users who have them.
+    # A redo run (REDO_UNREWRITTEN_LINKS) exists to revisit what was already copied --
+    # mail, events, and native Drive files (repointed in place) -- so none of those
+    # passes may skip the users who have them. Live, the Drive pass of a redo said "no
+    # users to process" and repointed nothing.
     redo = (getattr(settings, "redo_unrewritten_links", False)
             and getattr(settings, "rewrite_drive_links", False)
-            and bool(set(services) & {"gmail", "calendar"}))
+            and bool(set(services) & {"gmail", "calendar", "drive"}))
     pairs = [
         (r["source_email"], r["target_email"])
         for r in rows

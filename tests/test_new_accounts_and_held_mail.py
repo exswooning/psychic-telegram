@@ -106,7 +106,7 @@ class TestRedoRevisitsUsersAlreadyDone:
                 return [{"entity_type": "user", "source_email": "f@s.example",
                          "target_email": "f@t.example", "status": "DONE"}]
             def services_done(self, u):
-                return {"gmail", "calendar"}
+                return {"drive", "gmail", "calendar"}
 
         class S:
             user_workers = 2
@@ -125,6 +125,11 @@ class TestRedoRevisitsUsersAlreadyDone:
 
     def test_a_redo_mail_pass_includes_them(self, monkeypatch):
         assert self._run(monkeypatch, {"gmail", "calendar"}, redo=True) == ["f@s.example"]
+
+    def test_a_redo_drive_pass_includes_them_too(self, monkeypatch):
+        """Natives copied before the in-place rewrite are repointed by a redo's Drive
+        pass -- live, it said "no users to process" and repointed nothing."""
+        assert self._run(monkeypatch, {"drive"}, redo=True) == ["f@s.example"]
 
     def test_an_ordinary_pass_still_skips_them(self, monkeypatch):
         assert self._run(monkeypatch, {"gmail", "calendar"}, redo=False) == []
