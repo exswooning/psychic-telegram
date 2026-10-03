@@ -131,3 +131,50 @@ class TestRunCards:
                                   {"calls": 5, "requests_per_sec": 2.0})
         runs = cp.get(f"/api/v2/metrics/{me}/runs").json()["runs"]
         assert runs[0]["sourceDomain"] == "src.example" and runs[0]["calls"] == 5
+
+
+class TestARunsDetailIsThatRun:
+    """Live: a one-user run's detail showed the whole account -- 1.6M items
+    "expected", every user's shares and mail, and a 'drive' bar of old notes."""
+
+    def test_its_figures_are_its_users_since_it_began(self, cp, tmp_path, monkeypatch):
+        import config
+        path = str(tmp_path / "l.db")
+        db = MigrationDB(path)
+        real = config.Settings
+
+        def fake(account_id=None, **k):
+            st = real(account_id=account_id, **k) if account_id is None else real()
+            if account_id is not None:          # the account's ledger; the control plane's stays its own
+                st.db_path = path
+            return st
+        monkeypatch.setattr(config, "Settings", fake)
+        db.record_metrics({"calls": 1, "elapsed_sec": 1})
+        with db.write() as conn:
+            for user, item, status, ts in [
+                    ("g@src", "file", "SUCCESS", "2026-10-03T15:01:00Z"),
+                    ("g@src", "file", "SUCCESS", "2026-10-03T15:02:00Z"),
+                    ("g@src", "file", "SUCCESS", "2026-10-01T09:00:00Z"),      # an earlier run
+                    ("other@src", "file", "SUCCESS", "2026-10-03T15:03:00Z"),  # another user
+                    ("f@src", "drive", "SKIPPED_USER_LATER_MIGRATED", "2026-10-01T11:49:12Z")]:
+                conn.execute("INSERT INTO audit_log(source_user, item_id, item_type, status, timestamp) "
+                             "VALUES (?,?,?,?,?)", (user, f"{user}{ts}", item, status, ts))
+                conn.execute("INSERT OR IGNORE INTO identity_map(source_email, target_email, entity_type, status) "
+                             "VALUES (?, ?, 'user', 'RUNNING')", (user, user + ".t"))
+            conn.execute("UPDATE audit_log SET bytes_moved=100")
+            conn.execute("INSERT INTO discovery(source_user, scanned_at, file_count, folder_count, messages_total, total_bytes) "
+                         "VALUES ('g@src', 'x', 10, 2, 8, 1000), ('g@src', 'w', 99, 99, 99, 9999)")  # 'w' an older scan
+        me = _signed_in(cp, "runscope@example.com")
+        body = cp.get(f"/api/v2/metrics/{me}",
+                      params={"users": "g@src", "since": "2026-10-03T15:00:00Z"}).json()
+        files = sum(v["count"] for v in body["volume"] if v["itemType"] == "file")
+        assert files == 2, body["volume"]
+        assert not [v for v in body["volume"] if v["itemType"] == "drive"]
+        assert body["throughput"]["expectedItems"] == 20
+        assert body["throughput"]["remainingItems"] == 17        # 3 of g's files ever reached
+        assert (body["throughput"]["bytesMovedTotal"], body["throughput"]["expectedBytes"],
+                body["throughput"]["remainingBytes"]) == (300, 1000, 700)
+        assert body["volumeScope"]["counts"].startswith("this run: 1 user(s)")
+        whole = cp.get(f"/api/v2/metrics/{me}").json()
+        assert sum(v["count"] for v in whole["volume"] if v["itemType"] == "file") == 4
+        assert not [v for v in whole["volume"] if v["itemType"] == "drive"]

@@ -1769,6 +1769,11 @@ def _external_job_snapshot(since: int = 0) -> dict | None:
         "detached": True,
         "pid": job["pid"],
         "pids": [j["pid"] for j in jobs],
+        # Which users this run is for, and since when -- so the run's detail can
+        # show THIS run, not the whole account's ledger (live: 1.6M "expected"
+        # items for a one-user run).
+        "users": job.get("users") or [],
+        "startedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - job["elapsed"])),
     }
 
 

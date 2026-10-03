@@ -141,6 +141,10 @@ export interface JobStatus {
   // _job_progress(). null everywhere else, including when nothing is
   // running at all.
   progressPct: number | null
+  /** A detached run's users (from its command line) and when it started -- what
+   *  its detail scopes its figures to. */
+  users?: string[]
+  startedAt?: string
   // Linear extrapolation from elapsed time and progressPct -- only set
   // while the job is actually running (see webui.py's Job.snapshot()); a
   // stopped job's "time left" is meaningless.

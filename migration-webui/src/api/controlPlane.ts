@@ -1478,8 +1478,10 @@ export const fetchMetrics = (accountId: number, history = 60) =>
   cpFetch<MetricsSnapshot>(`/api/v2/metrics/${accountId}?history=${history}`)
 
 /** Metrics without an account in context -- what the sidebar entry uses. */
-export const fetchMyMetrics = (history = 60) =>
-  cpFetch<MetricsSnapshot>(`/api/v2/metrics?history=${history}`)
+export const fetchMyMetrics = (history = 60, users?: string[], since?: string) =>
+  cpFetch<MetricsSnapshot>(`/api/v2/metrics?history=${history}${
+    users?.length ? `&users=${encodeURIComponent(users.join(','))}` : ''}${
+    since ? `&since=${encodeURIComponent(since)}` : ''}`)
 
 /* Run reports: one saved, judged document per run (run_report.py). */
 export type Verdict = 'PASS' | 'FAIL' | 'UNVERIFIED'

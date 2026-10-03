@@ -27,6 +27,9 @@ export interface RunningJob {
   stopAsked?: boolean
   /** Its process, when a source knows it -- the Jobs card reads its live stats. */
   pid?: number
+  /** The users this run is for and when it started: its detail shows THIS run. */
+  users?: string[]
+  startedAt?: string
   key: string; label: string; detail: string; pct: number | null
   /** seed | migrate | ... -- what the rectangle announces. */
   kind: JobKind
@@ -206,7 +209,7 @@ export function useRunningJobs() {
           : undefined
         found.push({
           key: `webui-${job.name}`,
-          kind, pid: job.pid ?? undefined,
+          kind, pid: job.pid ?? undefined, users: job.users, startedAt: job.startedAt,
           // Every other job acts on one tenant, so naming it is the whole answer; a
           // migration or delta reads one and writes the other, so jobDomain above
           // already carries both.

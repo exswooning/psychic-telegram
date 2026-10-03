@@ -5230,7 +5230,8 @@ async def set_run_incident_status(incident_id: int, body: IncidentStatusRequest,
 
 
 @app.get("/api/v2/metrics")
-async def metrics_for_me(history: int = 60, op: Operator = Depends(operator)):
+async def metrics_for_me(history: int = 60, users: str = "", since: str = "",
+                         op: Operator = Depends(operator)):
     """Metrics without having to name an account.
 
     The page is reached from the sidebar, where there is no migration in
@@ -5248,7 +5249,7 @@ async def metrics_for_me(history: int = 60, op: Operator = Depends(operator)):
         return {"accountId": 0, "latest": None, "operations": [],
                 "limiters": {}, "history": [],
                 "error": "no account in context and no migration running"}
-    return await migration_metrics(account_id, history=history, op=op)
+    return await migration_metrics(account_id, history=history, users=users, since=since, op=op)
 
 
 @app.get("/api/v2/metrics/{account_id}/runs")
@@ -5272,8 +5273,8 @@ async def metrics_runs(account_id: int, op: Operator = Depends(operator)):
 
 
 @app.get("/api/v2/metrics/{account_id}")
-async def migration_metrics(account_id: int, history: int = 60,
-                            op: Operator = Depends(operator)):
+async def migration_metrics(account_id: int, history: int = 60, users: str = "",
+                            since: str = "", op: Operator = Depends(operator)):
     """Per-operation latency, throughput and limiter state for one tenant.
 
     Read from the ledger, not from this process. Metrics are recorded by the
@@ -5283,6 +5284,11 @@ async def migration_metrics(account_id: int, history: int = 60,
     """
     require_login(op)
     _require_account_access(account_id, op)
+    # A run's own scope: its users, since it started. Without them every figure is
+    # the whole ledger -- every run, every user -- which a one-user run's detail
+    # showed as its own (1.6M items "expected", other users' shares and mail).
+    run_users = [u.strip().lower() for u in users.split(",") if u.strip()]
+    run_since = since.strip() or "0000"
 
     def _read() -> dict:
         # Settings(account_id=...).db_path, matching every other endpoint
@@ -5387,16 +5393,28 @@ async def migration_metrics(account_id: int, history: int = 60,
                 # audit_rollup is still unioned in: pruned users' counts live
                 # only there, and dropping it would report a finished user as
                 # having migrated nothing.
+                qs = ",".join("?" * len(run_users))
+                scoped = (f" AND source_user IN ({qs}) AND timestamp >= ?" if run_users else "")
+                scope_args = (*run_users, run_since) if run_users else ()
+                # Service-level notes (item_type drive/gmail/...: "this user failed
+                # to start, later migrated") are not items; as an item type they drew
+                # a whole bar of "skipped" labelled drive.
+                not_items = "('drive','gmail','chat','contacts','tasks')"
                 out["volume"] = [
                     {"itemType": r["item_type"], "status": r["status"],
                      "count": r["n"]}
-                    for r in conn.execute(
+                    for r in (conn.execute(
+                        "SELECT item_type, status, COUNT(*) n FROM audit_log "
+                        f"WHERE item_type NOT IN {not_items}{scoped} "
+                        "GROUP BY item_type, status ORDER BY n DESC", scope_args)
+                        if run_users else conn.execute(
                         "SELECT item_type, status, SUM(n) n FROM ("
                         "  SELECT item_type, status, COUNT(*) n FROM audit_log"
                         "   GROUP BY item_type, status"
                         "  UNION ALL"
                         "  SELECT item_type, status, n FROM audit_rollup"
-                        ") GROUP BY item_type, status ORDER BY n DESC")]
+                        f") WHERE item_type NOT IN {not_items} "
+                        "GROUP BY item_type, status ORDER BY n DESC"))]
                 # audit_log OUTLIVES id_mapping: wipe_target clears the
                 # mappings and deliberately keeps the history, so this table
                 # accumulates every generation this ledger has ever seen
@@ -5415,7 +5433,8 @@ async def migration_metrics(account_id: int, history: int = 60,
                     "  SELECT 1 FROM identity_map m"
                     "   WHERE m.source_email = a.source_user)").fetchone()
                 out["volumeScope"] = {
-                    "counts": "every generation recorded in this ledger",
+                    "counts": (f"this run: {len(run_users)} user(s) since {run_since}" if run_users
+                               else "every generation recorded in this ledger"),
                     "unmappedRows": orphan["n"] if orphan else 0,
                     "note": ("rows whose source user is no longer in "
                              "identity_map -- earlier tenant generations kept "
@@ -5438,7 +5457,32 @@ async def migration_metrics(account_id: int, history: int = 60,
                     {"type": r["type"], "count": r["n"]}
                     for r in conn.execute(
                         "SELECT type, COUNT(*) n FROM id_mapping "
-                        "GROUP BY type ORDER BY n DESC")]
+                        + (f"WHERE source_user IN ({qs}) " if run_users else "")
+                        + "GROUP BY type ORDER BY n DESC", tuple(run_users))]
+                if run_users:
+                    # The expected total is these users' discovery, done is what
+                    # they have reached -- not the account's.
+                    # Each user's latest scan only, as _throughput does: a rescan is a
+                    # second row, and summing both doubled the expected total.
+                    exp = conn.execute(
+                        "SELECT COALESCE(SUM(COALESCE(d.file_count,0) + COALESCE(d.folder_count,0) "
+                        "+ COALESCE(d.messages_total,0)),0) n, COALESCE(SUM(d.total_bytes),0) b "
+                        "FROM discovery d JOIN (SELECT source_user, MAX(scanned_at) ts FROM discovery "
+                        f"WHERE source_user IN ({qs}) GROUP BY source_user) x "
+                        "ON d.source_user=x.source_user AND d.scanned_at=x.ts",
+                        tuple(run_users)).fetchone()
+                    reached = conn.execute(
+                        "SELECT COUNT(*) n FROM audit_log WHERE item_type IN ('file','folder','message') "
+                        f"AND (status='SUCCESS' OR status LIKE 'SKIPPED%') AND source_user IN ({qs})",
+                        tuple(run_users)).fetchone()["n"]
+                    moved = conn.execute(
+                        "SELECT COALESCE(SUM(bytes_moved),0) b FROM audit_log "
+                        f"WHERE source_user IN ({qs})", tuple(run_users)).fetchone()["b"]
+                    out["throughput"] = {**(out.get("throughput") or {}),
+                                         "expectedItems": exp["n"],
+                                         "remainingItems": max(0, exp["n"] - reached),
+                                         "bytesMovedTotal": moved, "expectedBytes": exp["b"],
+                                         "remainingBytes": max(0, exp["b"] - moved) if exp["b"] else 0}
                 # Same grouped-by-cause failures the Migrations detail page already shows
                 # as a table (see _migration_detail, same query) -- reused here for the
                 # Metrics page's pie chart, so both name the same causes the same way and
@@ -5451,8 +5495,9 @@ async def migration_metrics(account_id: int, history: int = 60,
                     "FROM audit_log a WHERE a.status LIKE 'FAILED%' "
                     "AND EXISTS (SELECT 1 FROM identity_map m "
                     "            WHERE m.source_email = a.source_user) "
-                    "GROUP BY item_type, error_message, source_user "
-                    "LIMIT 200000"))
+                    + (f"AND a.source_user IN ({qs}) AND a.timestamp >= ? " if run_users else "")
+                    + "GROUP BY item_type, error_message, source_user "
+                    "LIMIT 200000", scope_args))
                 row = conn.execute(
                     "SELECT COALESCE(SUM(bytes_sent),0) b FROM upload_ledger "
                     "WHERE day_utc = date('now')").fetchone()
@@ -5503,7 +5548,7 @@ async def migration_metrics(account_id: int, history: int = 60,
         return out
 
     return await _off_loop(
-        lambda: _DETAIL_CACHE.get(("metrics", account_id, history), _read))
+        lambda: _DETAIL_CACHE.get(("metrics", account_id, history, tuple(run_users), run_since), _read))
 
 
 @app.get("/api/v2/migrations/{account_id}")

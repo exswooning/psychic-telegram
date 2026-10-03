@@ -30,19 +30,21 @@ import ProcessPanel from './ProcessPanel'
 /** Fetched here, once, rather than inside the charts section below: the top
  *  "glance" row wants the same snapshot the charts render from, and fetching
  *  it twice would let the two disagree about what "now" means. */
-const useMigrateMetrics = (enabled: boolean, live: boolean) => {
+const useMigrateMetrics = (enabled: boolean, live: boolean, users?: string[], since?: string) => {
   const [m, setM] = useState<MetricsSnapshot | null>(null)
   const [err, setErr] = useState('')
   useEffect(() => {
     if (!enabled) return undefined
     let on = true
-    const load = () => fetchMyMetrics(120)
+    // Scoped to this run when it names its users: otherwise every figure is the
+    // whole account's ledger (live: 1.6M items "expected" for a one-user run).
+    const load = () => fetchMyMetrics(120, users, since)
       .then((r) => { if (on) { setM(r); setErr('') } })
       .catch((e) => { if (on) setErr(e instanceof Error ? e.message : String(e)) })
     load()
     const t = live ? window.setInterval(load, 5_000) : undefined
     return () => { on = false; if (t) window.clearInterval(t) }
-  }, [enabled, live])
+  }, [enabled, live, users?.join(','), since])  // eslint-disable-line react-hooks/exhaustive-deps
   return { m, err }
 }
 
@@ -65,7 +67,8 @@ export const RunningJobDetail: React.FC<{
   // Called unconditionally (hooks can't follow the early return below): a job
   // that isn't a running migrate just never enables the fetch.
   const isMigrate = job?.kind === 'migrate'
-  const { m, err: metricsErr } = useMigrateMetrics(isMigrate, isMigrate && !job?.done)
+  const { m, err: metricsErr } = useMigrateMetrics(isMigrate, isMigrate && !job?.done,
+                                                   job?.users, job?.startedAt)
   if (!job) return null
   // Every job that has no dashboard of its own is measured from what it prints.
   const facts = !isMigrate && job.kind !== 'seed' && job.lines?.length
@@ -136,7 +139,7 @@ export const RunningJobDetail: React.FC<{
           {isMigrate && t && t.expectedBytes > 0 && (
             <Stat label="Data"
                   value={bytes(t.bytesMovedTotal)}
-                  hint={`of ${bytes(t.expectedBytes)} discovered total`} />
+                  hint={`of ${bytes(t.expectedBytes)} discovered ${job.users?.length ? `for ${job.users.length === 1 ? 'this user' : 'these users'}` : 'total'}`} />
           )}
         </Stack>
 

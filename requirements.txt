@@ -27,3 +27,5 @@ qrcode
 # bundled Chromium -- this line is the Python package only.
 playwright
 reportlab
+# Stack dumps for a stuck job (System Health → "Where is it?"; host_ops.stack_dump).
+py-spy

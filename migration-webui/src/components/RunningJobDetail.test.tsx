@@ -166,6 +166,13 @@ describe('a running migrate job\'s own metrics', () => {
     expect(screen.queryByText('Data')).not.toBeInTheDocument()
   })
 
+  it('asks for THIS run -- its users since it started -- not the whole account', async () => {
+    fetchMyMetrics.mockResolvedValue(snapshot())
+    render(<RunningJobDetail job={job({ kind: 'migrate', users: ['george@src'],
+                                        startedAt: '2026-10-03T15:00:29Z' })} onClose={() => {}} />)
+    await waitFor(() => expect(fetchMyMetrics).toHaveBeenCalledWith(120, ['george@src'], '2026-10-03T15:00:29Z'))
+  })
+
   it('says when metrics could not be read, rather than showing nothing', async () => {
     fetchMyMetrics.mockRejectedValue(new Error('ledger locked'))
     render(<RunningJobDetail job={job({ kind: 'migrate' })} onClose={() => {}} />)

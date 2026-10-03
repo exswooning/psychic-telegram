@@ -270,3 +270,8 @@ export function sawtoothRows(hist: Record<string, LimiterPoint[]> | undefined) {
   rows.sort((a, b) => a.ts - b.ts)
   return { rows, stats }
 }
+
+
+/** Axis ticks: seconds once they reach a second -- "4000ms" did not fit the axis
+ *  and read as "000ms". Stat text keeps exact milliseconds. */
+export const msAxis = (v: number) => (Math.abs(v) >= 1000 ? `${+(v / 1000).toFixed(1)} s` : `${Math.round(v)}ms`)

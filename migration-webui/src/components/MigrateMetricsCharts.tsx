@@ -15,7 +15,7 @@ import { BarsChart, ChartFrame, PieChartFrame, SeriesChart } from '@/components/
 import { Stat } from '@/pages/Metrics'
 import {
   clockAt, dayRows, failureCauseRows, historyRows, historyStats, limiterRows, operationRows,
-  progressRow, sawtoothRows, transferRow, volumeRows, volumeShareRows,
+  progressRow, sawtoothRows, transferRow, volumeRows, volumeShareRows, msAxis,
 } from '@/utils/metricsSeries'
 
 const n = (v: number) => v.toLocaleString()
@@ -94,7 +94,7 @@ export const MigrateMetricsCharts: React.FC<{ m: MetricsSnapshot }> = ({ m }) =>
         </ChartFrame>
         <ChartFrame title="Latency percentiles" hint="p50 / p95 / p99 — Google queues before it rejects, so a climb in the tail is the early warning"
                     empty={needTwo}>
-          <SeriesChart data={hist} xKey="t" fmt={ms}
+          <SeriesChart data={hist} xKey="t" fmt={msAxis}
                        series={[{ key: 'p50Ms', name: 'p50', color: c.info, type: 'line' },
                                 { key: 'p95Ms', name: 'p95', color: c.warning, type: 'line' },
                                 { key: 'p99Ms', name: 'p99', color: c.error, type: 'line' }]} />
@@ -102,7 +102,7 @@ export const MigrateMetricsCharts: React.FC<{ m: MetricsSnapshot }> = ({ m }) =>
         <ChartFrame title="Tail latency spread (p99 − p50)"
                     hint="widening here means a growing share of calls are far slower than typical, even while p50 looks fine"
                     empty={needTwo}>
-          <SeriesChart data={hist} xKey="t" fmt={ms}
+          <SeriesChart data={hist} xKey="t" fmt={msAxis}
                        series={[{ key: 'spreadMs', name: 'p99 − p50', color: c.warning, type: 'area' }]} />
         </ChartFrame>
         <ChartFrame title="Failures per snapshot" empty={needTwo}>
@@ -118,7 +118,7 @@ export const MigrateMetricsCharts: React.FC<{ m: MetricsSnapshot }> = ({ m }) =>
 
         <ChartFrame title="Latency by operation" hint="slowest first" height={Math.max(150, ops.length * 30)}
                     empty={none(ops, 'No calls recorded yet.')}>
-          <BarsChart data={ops} xKey="label" horizontal fmt={ms} labelWidth={165}
+          <BarsChart data={ops} xKey="label" horizontal fmt={msAxis} labelWidth={165}
                      series={[{ key: 'p50Ms', name: 'p50', color: c.info },
                               { key: 'p95Ms', name: 'p95', color: c.warning }]} />
         </ChartFrame>
