@@ -1797,10 +1797,19 @@ def _fix_after_tally(account_id: int | None, users: list[str] | None = None) -> 
     db = MigrationDB(path)
     short: dict[str, set] = {}
     differs: list[str] = []
+    absent: list[str] = []
     try:
         for u in view.get("users") or []:
             who = u["user"]
             if wanted is not None and who.lower() not in wanted:
+                continue
+            # No target account at all is not a gap a fix closes. Live: a Run tally over
+            # 300 users after target2's accounts were wiped read 295 SHORT, and this
+            # migrated every one -- 294 accounts created, four hours, then OOM-killed.
+            # Migrating a user who is not on the target is the operator's decision.
+            if any(isinstance(v, dict) and v.get("usersAbsent")
+                   for v in (u.get("services") or {}).values()):
+                absent.append(who)
                 continue
             if u["verdict"] not in ("SHORT", "DIFFERS") or db.autofixed_since(who, AUTOFIX_EVERY_HOURS):
                 continue
@@ -1835,6 +1844,9 @@ def _fix_after_tally(account_id: int | None, users: list[str] | None = None) -> 
                                       "user(s) whose items differ from the source")
         _start_tally_after_repair(account_id, differs)
         did.append(f"repair for {len(differs)} user(s) whose items differ")
+    if absent:
+        did.append(f"{len(absent)} user(s) left alone: no account on the target, so not "
+                   "migrated -- start their migration if they should be")
     msg = "; ".join(did) or "nothing to fix: every tallied user is an exact copy, owed, or fixed within the window"
     log.info("tally fix for account %s: %s", account_id, msg)
     return True, msg

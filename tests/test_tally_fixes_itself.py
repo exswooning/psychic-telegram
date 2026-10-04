@@ -64,6 +64,19 @@ def test_only_the_named_users_are_looked_at(wired):
     assert seen["run"] == [] and len(seen["repair"]) == 1
 
 
+def test_a_user_with_no_target_account_is_never_migrated_by_a_fix(wired, monkeypatch):
+    """Live: Run tally over 300 users after target2's accounts were wiped read 295
+    SHORT, and the fix migrated all of them -- 294 accounts created, then OOM."""
+    db, seen = wired
+    view = {"users": [{"user": "gone@src", "verdict": "SHORT", "services": {
+        "mail": {"expected": 100, "target": 0, "usersAbsent": 1},
+        "drive_files": {"expected": 5, "target": 0, "usersAbsent": 1}}}]}
+    monkeypatch.setattr(api_server, "_tally_view", lambda a: view)
+    ok, msg = api_server._fix_after_tally(3)
+    assert seen == {"run": [], "repair": [], "tally": []}
+    assert "1 user(s) left alone: no account on the target" in msg
+
+
 def test_follow_ons_carry_their_users():
     assert api_server._tally_follow("tally", ["a@x", "b@x"]) == "tally@a@x,b@x"
     assert api_server._follow_users("tally_fix@a@x,b@x") == ["a@x", "b@x"]
