@@ -151,6 +151,29 @@ class TestTheEngine:
         m._rewrite_native_links()
         assert db.get_audit("u@a", "S1", "link_rewrite")["status"] == "FAILED"
 
+    def test_the_check_runs_as_many_at_once_as_the_user_copies_files(self, settings, db, monkeypatch):
+        """Live: george's ~800 natives were checked one at a time for 16 minutes after
+        the copy ended, 2 needing a change -- a third of his Drive pass."""
+        import threading, time, link_rewrite
+        m = self._engine(settings, db, [])
+        settings.drive_file_workers = 4
+        m._pending_native = [({"id": f"D{i}", "mimeType": "application/vnd.google-apps.document"}, f"T{i}")
+                             for i in range(8)]
+        live, peak, lock = [0], [0], threading.Lock()
+
+        def slow(kind, svc, fid, lk, pace=None):
+            with lock:
+                live[0] += 1; peak[0] = max(peak[0], live[0])
+            time.sleep(0.05)
+            with lock:
+                live[0] -= 1
+            return 1 if fid == "T3" else 0
+        monkeypatch.setattr(link_rewrite, "rewrite_native", slow)
+        m._rewrite_native_links()
+        assert peak[0] == 4                                  # four at once, never more
+        assert db.get_audit("u@a", "D3", "link_rewrite")["status"] == "SUCCESS"
+        assert m.stats.get("links_rewritten") == 1
+
     def test_the_server_side_path_queues_natives_and_the_walk_drains_them(self):
         import inspect, drive_engine
         src = inspect.getsource(drive_engine.DriveMigrator._sync_server_side)

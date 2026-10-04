@@ -1931,14 +1931,17 @@ class DriveMigrator:
         if not self._pending_native:
             return
         import link_rewrite
-        fixed = 0
         mine: dict = {}       # this user's own per-minute quota, per (API, read|write)
+        mine_lock = threading.Lock()
 
         def pace(kind: str, op: str) -> None:
-            mine.setdefault((kind, op), RateLimiter(_native_rate(kind, op, 0))).acquire()
+            with mine_lock:
+                lim = mine.setdefault((kind, op), RateLimiter(_native_rate(kind, op, 0)))
+            lim.acquire()
             _native_project_limiter(kind, op).acquire()
 
-        for item, tgt_id in self._pending_native:
+        def one(pending) -> int:
+            item, tgt_id = pending
             kind = _NATIVE_KIND[item["mimeType"]]
             try:
                 n = self._retry(lambda k=kind, t=tgt_id: link_rewrite.rewrite_native(
@@ -1948,24 +1951,38 @@ class DriveMigrator:
             except Exception as exc:      # noqa: BLE001 - the file migrated; record, never raise
                 self.db.log_audit(self.source_user, item["id"], "link_rewrite",
                                   "FAILED", str(exc)[:200])
-                continue
-            if n:
-                self.db.log_audit(self.source_user, item["id"], "link_rewrite", "SUCCESS",
-                                  f"{n} link update(s) in the native copy")
-                self._restore_modified_time(tgt_id, item, n, late_bump=True)
-                fixed += n
-                self._bump("links_rewritten", n)
-            else:
-                # Nothing to repoint writes nothing -- except over an earlier failure,
-                # which would otherwise stand forever. Live: 808 FAILED rows from a run
-                # whose APIs were off, every file since checked and found clean.
-                prior = self.db.get_audit(self.source_user, item["id"], "link_rewrite")
-                if prior is not None and str(prior["status"]).startswith("FAILED"):
-                    self.db.log_audit(self.source_user, item["id"], "link_rewrite", "SUCCESS",
-                                      "no Drive links to repoint")
+                return 0
+            self._after_native_check(item, tgt_id, n)
+            return n
+
+        # Concurrently, as many at once as the user copies files. Live, george's ~800
+        # natives were checked one at a time for 16 minutes after the copy ended (2
+        # needed a change) -- a third of his Drive pass. The per-API limiters above
+        # still hold each app to its own quota (Sheets: 60 reads/min/user), so Docs
+        # and Slides no longer queue behind Sheets.
+        workers = max(1, min(len(self._pending_native), self.settings.drive_file_workers))
+        with futures.ThreadPoolExecutor(max_workers=workers, thread_name_prefix=f"links-{self.source_user.split('@')[0]}") as pool:
+            fixed = sum(pool.map(one, self._pending_native))
         if fixed:
-            log.info("[%s] repointed links inside %d native cop(ies) through their own API",
+            log.info("[%s] repointed links inside native copies: %d update(s)",
                      self.source_user, fixed)
+
+    def _after_native_check(self, item: dict, tgt_id: str, n: int) -> None:
+        """Record one native's link check: what was repointed, or a clean result over
+        an earlier failure."""
+        if n:
+            self.db.log_audit(self.source_user, item["id"], "link_rewrite", "SUCCESS",
+                              f"{n} link update(s) in the native copy")
+            self._restore_modified_time(tgt_id, item, n, late_bump=True)
+            self._bump("links_rewritten", n)
+            return
+        # Nothing to repoint writes nothing -- except over an earlier failure, which
+        # would otherwise stand forever. Live: 808 FAILED rows from a run whose APIs
+        # were off, every file since checked and found clean.
+        prior = self.db.get_audit(self.source_user, item["id"], "link_rewrite")
+        if prior is not None and str(prior["status"]).startswith("FAILED"):
+            self.db.log_audit(self.source_user, item["id"], "link_rewrite", "SUCCESS",
+                              "no Drive links to repoint")
 
     @staticmethod
     def _cleanup(path: str) -> None:
