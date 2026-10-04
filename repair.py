@@ -245,8 +245,9 @@ def reapply_owed_grants(auth, db, settings, apply: bool = False) -> dict:
                 exists[email] = False
         return exists[email]
 
+    migrators: dict[str, DriveMigrator] = {}
+    attempted: list[tuple[str, str, str, set[str]]] = []
     for user, files in by_user.items():
-        dm = None
         for sid, keys in files.items():
             ready = {k for k in keys if has_account(k.partition(":")[2])}
             out["ready"] += len(ready)
@@ -254,13 +255,40 @@ def reapply_owed_grants(auth, db, settings, apply: bool = False) -> dict:
             if not apply or not target_id:
                 continue
             try:
-                if dm is None:
+                if user not in migrators:
                     target_user = db.resolve_identity(user) or user
-                    dm = DriveMigrator(auth, db, settings, user, target_user, DailyQuotaGuard(
-                        db, target_user, settings.effective_upload_cap()))
-                out["granted"] += dm._sync_acls(sid, target_id, only=ready)
+                    migrators[user] = DriveMigrator(auth, db, settings, user, target_user,
+                                                    DailyQuotaGuard(db, target_user,
+                                                                    settings.effective_upload_cap()))
+                out["granted"] += migrators[user]._sync_acls(sid, target_id, only=ready)
+                attempted.append((user, sid, target_id, ready))
             except Exception as exc:      # noqa: BLE001
                 out["errors"].append(f"{user} {sid}: {str(exc)[:160]}")
+    # Second pass, after every folder above has had its grants: a share the file
+    # inherits from its folder is never granted on the file itself (the engine leaves
+    # it to the folder), so its row stayed "owed" forever. Live: 27,633 such rows
+    # after a repair granted the folders -- 30 of 30 sampled already had access.
+    out["covered"] = 0
+    for user, sid, target_id, ready in attempted:
+        still = [k for k in ready
+                 if (lambda row: row is not None and row["status"] == OWED_GRANT)(
+                     db.get_audit(user, k, "acl"))]
+        if not still:
+            continue
+        try:
+            dm = migrators[user]
+            perms = dm._retry(lambda t=target_id: dm.tgt.permissions().list(
+                fileId=t, supportsAllDrives=True,
+                fields="permissions(emailAddress)").execute()).get("permissions", [])
+        except Exception as exc:      # noqa: BLE001
+            out["errors"].append(f"{user} {sid}: {str(exc)[:160]}")
+            continue
+        have = {(x.get("emailAddress") or "").lower() for x in perms}
+        for k in still:
+            if k.partition(":")[2].lower() in have:
+                db.log_audit(user, k, "acl", "SUCCESS",
+                             "has access on the target -- inherited from its folder")
+                out["covered"] += 1
     # A mail delegate owed the same way: item_id is the delegate's target address.
     for r in delegates:
         if not has_account(r["item_id"]):
@@ -848,7 +876,8 @@ def summarise(result: dict) -> str:
     og = result.get("owed_grants") or {}
     # Owed shares are not failure rows, so they are said even when nothing failed.
     owed = (f"{og.get('granted', 0):,} owed share(s) granted; "
-            f"{og['owed'] - og.get('ready', 0):,} still waiting for the colleague's account"
+            + (f"{og['covered']:,} already had access through their folder; " if og.get("covered") else "")
+            + f"{og['owed'] - og.get('ready', 0):,} still waiting for the colleague's account"
             if og.get("owed") else "")
     if not s.get("total"):
         return "; ".join(p for p in ("no failed items recorded", times, owed) if p)

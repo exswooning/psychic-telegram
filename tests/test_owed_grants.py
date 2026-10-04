@@ -112,15 +112,17 @@ class TestRepairGrantsWhatWasOwed:
 
         class DM:
             def __init__(self, auth, db, settings, user, target_user, quota):
-                self.user = user
+                self.user, self.db = user, db
             def _sync_acls(self, sid, tid, only=None):
                 calls.append((self.user, sid, tid, set(only)))
+                for k in only:                     # as the engine does for each grant made
+                    self.db.log_audit(self.user, k, "acl", "SUCCESS")
                 return len(only)
         monkeypatch.setattr(drive_engine, "DriveMigrator", DM)
         auth = type("A", (), {"directory": lambda self, t, **k: _Dir(have={"c@tenantb.com", "d@tenantb.com"})})()
         out = repair.reapply_owed_grants(auth, db, settings, apply=True)
         assert calls == [("u@tenanta.com", "f1", "T1", {"f1:c@tenantb.com", "f1:d@tenantb.com"})]
-        assert out == {"owed": 3, "ready": 2, "granted": 2, "errors": []}
+        assert out == {"owed": 3, "ready": 2, "granted": 2, "errors": [], "covered": 0}
 
     def test_a_dry_run_grants_nothing(self, db, settings, monkeypatch):
         self._setup(db)
@@ -144,6 +146,33 @@ class TestRepairGrantsWhatWasOwed:
         assert "reapply_owed_grants" in inspect.getsource(repair.run_all)
 
 
+class TestASharedFolderCoversItsFiles:
+    """Live: 27,633 rows still read 'owed' after a repair granted the folders -- a
+    share a file inherits is never granted on the file itself, so it could never
+    clear. 30 of 30 sampled already had access through the folder."""
+
+    def test_an_owed_share_the_target_already_honours_is_marked_done(self, db, settings, monkeypatch):
+        db.record_mapping("u@tenanta.com", "f1", "T1", "file")
+        db.log_audit("u@tenanta.com", "f1:c@tenantb.com", "acl", OWED_GRANT, "x")
+        db.log_audit("u@tenanta.com", "f1:d@tenantb.com", "acl", OWED_GRANT, "x")
+
+        class Perms:
+            def permissions(self): return self
+            def list(self, **k):
+                return type("C", (), {"execute": lambda s: {"permissions": [{"emailAddress": "c@tenantb.com"}]}})()
+
+        class DM:
+            def __init__(self, *a, **k): self.tgt = Perms()
+            def _sync_acls(self, sid, tid, only=None): return 0       # inherited: nothing per file
+            def _retry(self, fn, **k): return fn()
+        monkeypatch.setattr(drive_engine, "DriveMigrator", DM)
+        auth = type("A", (), {"directory": lambda self, t, **k: _Dir(have={"c@tenantb.com", "d@tenantb.com"})})()
+        out = repair.reapply_owed_grants(auth, db, settings, apply=True)
+        assert out["covered"] == 1 and out["granted"] == 0
+        assert db.get_audit("u@tenanta.com", "f1:c@tenantb.com", "acl")["status"] == "SUCCESS"
+        assert db.get_audit("u@tenanta.com", "f1:d@tenantb.com", "acl")["status"] == OWED_GRANT  # no access yet
+
+
 class TestAMailDelegateIsOwedToo:
     """Live: george's delegate hannah had no target account (a one-user run) and
     Gmail's 'Invalid delegate' 404 was only a warning -- the delegation was lost."""
@@ -165,7 +194,7 @@ class TestAMailDelegateIsOwedToo:
                               "target_gmail": lambda self, u: Gmail(u)})()
         out = repair.reapply_owed_grants(auth, db, settings, apply=True)
         assert made == [("u@tenanta.com", "h@tenantb.com")]
-        assert out == {"owed": 2, "ready": 1, "granted": 1, "errors": []}
+        assert out == {"owed": 2, "ready": 1, "granted": 1, "errors": [], "covered": 0}
         assert db.get_audit("u@tenanta.com", "h@tenantb.com", "delegate")["status"] == "SUCCESS"
         assert db.get_audit("u@tenanta.com", "z@tenantb.com", "delegate")["status"] == OWED_GRANT
 
