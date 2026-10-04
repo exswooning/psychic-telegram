@@ -76,8 +76,9 @@ SERVICE_TYPES: dict[str, tuple[str, ...]] = {
     # link_rewrite rows are gmail's: one per message whose Drive links were
     # repointed. They must clear with the messages they describe, or a reset
     # leaves evidence of a rewrite for mail that is no longer there.
+    # delegate: a mailbox delegation owed to a colleague with no target account yet.
     "gmail": ("message", "draft", "filter", "signature", "link_rewrite",
-              "link_repair", "thread"),
+              "link_repair", "thread", "delegate"),
     # subscription: a calendar the user follows, re-followed on the target;
     # calendar_subscription is the audit row of one that could not be.
     "calendar": ("event", "calendar", "calendar_acl", "subscription",
