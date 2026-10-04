@@ -146,17 +146,24 @@ export function limiterRows(l: MetricsSnapshot['limiters'] | undefined) {
 /** One row per item type, its outcomes side by side. Only FAILED/BLOCKED count
  *  as failures -- SKIPPED_* are decisions, and painting them red is how a clean
  *  run teaches people to ignore red. */
+/** Owed, not declined (config.OWED_GRANT, config.DEFERRED_TO_DMS): a share waiting for
+ *  its colleague's target account, mail waiting for the DMS. Drawn grey as "skipped",
+ *  george's 9,234 waiting shares read as a decision nobody had made. */
+const OWED = new Set(['OWED_GRANTEE_NO_ACCOUNT', 'SKIPPED_NO_DRIVE_LINK'])
+
 export function volumeRows(v: MetricsSnapshot['volume'] | undefined) {
-  const by = new Map<string, { itemType: string; done: number; skipped: number; failed: number }>()
+  const by = new Map<string, { itemType: string; done: number; owed: number; skipped: number; failed: number }>()
   for (const r of v ?? []) {
-    const row = by.get(r.itemType) ?? { itemType: r.itemType, done: 0, skipped: 0, failed: 0 }
-    if (r.status === 'SUCCESS') row.done += r.count
+    const row = by.get(r.itemType) ?? { itemType: r.itemType, done: 0, owed: 0, skipped: 0, failed: 0 }
+    if (r.status === 'SUCCESS' || r.status === 'DELIVERED_BY_DMS') row.done += r.count
     else if (r.status === 'FAILED' || r.status === 'BLOCKED') row.failed += r.count
+    else if (OWED.has(r.status)) row.owed += r.count
     else row.skipped += r.count
     by.set(r.itemType, row)
   }
-  return [...by.values()].sort((a, b) =>
-    (b.done + b.skipped + b.failed) - (a.done + a.skipped + a.failed))
+  const total = (r: { done: number; owed: number; skipped: number; failed: number }) =>
+    r.done + r.owed + r.skipped + r.failed
+  return [...by.values()].sort((a, b) => total(b) - total(a))
 }
 
 /** volumeRows, reshaped as each type's own share (0-100) instead of a raw count. A
@@ -164,9 +171,9 @@ export function volumeRows(v: MetricsSnapshot['volume'] | undefined) {
  *  chart -- the small one is invisible beside the large one even if it failed entirely. */
 export function volumeShareRows(v: MetricsSnapshot['volume'] | undefined) {
   return volumeRows(v).map((r) => {
-    const total = r.done + r.skipped + r.failed
+    const total = r.done + r.owed + r.skipped + r.failed
     const pct = (x: number) => (total > 0 ? round1((x / total) * 100) : 0)
-    return { itemType: r.itemType, done: pct(r.done), skipped: pct(r.skipped), failed: pct(r.failed) }
+    return { itemType: r.itemType, done: pct(r.done), owed: pct(r.owed), skipped: pct(r.skipped), failed: pct(r.failed) }
   })
 }
 
@@ -280,3 +287,8 @@ export const msAxis = (v: number) => (Math.abs(v) >= 1000 ? `${+(v / 1000).toFix
  *  as a clean run; any failure at all now shows, and says how many. */
 export const ratePct = (v: number, n: number) =>
   (n > 0 ? `${v < 0.1 ? '<0.1' : v}% (${n.toLocaleString()})` : `${v}%`)
+
+/** A snapshot's latency, which is in SECONDS. The run cards printed it as ms --
+ *  live, a 530ms / 2.27s run read "1 ms · 2 ms". */
+export const latency = (seconds: number) =>
+  seconds >= 1 ? `${seconds.toFixed(2)}s` : `${Math.round(seconds * 1000)}ms`

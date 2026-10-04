@@ -11,7 +11,7 @@ import RunMetricCards from '@/components/RunMetricCards'
 import {
   fetchMetrics, fetchMyMetrics, MetricsSnapshot, LimiterState,
 } from '@/api/controlPlane'
-import { bytes } from '@/utils/metricsSeries'
+import { bytes, latency } from '@/utils/metricsSeries'
 
 /** Past this, the page says so rather than presenting an old run as current.
  *  A migration can legitimately be quiet for a while; three days cannot. */
@@ -50,8 +50,7 @@ const describeAge = (sec: number): string => {
  * alphabetical order do not answer it.
  */
 
-const ms = (seconds: number) =>
-  seconds >= 1 ? `${seconds.toFixed(2)}s` : `${Math.round(seconds * 1000)}ms`
+const ms = latency
 
 /** Statuses that are not failures, so the volume table can colour honestly.
  *  SKIPPED_* covers a family (unexportable, too large, no permission) that

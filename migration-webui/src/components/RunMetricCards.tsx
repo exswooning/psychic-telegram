@@ -2,8 +2,9 @@ import React, { useEffect, useState } from 'react'
 import { Box, Card, CardContent, Chip, Grid, Stack, Typography } from '@mui/material'
 import { fetchMetricRuns, RunMetrics } from '@/api/controlPlane'
 import { describeElapsed } from '@/hooks/useRunningJobs'
+import { latency } from '@/utils/metricsSeries'
 
-const ms = (v?: number) => (typeof v === 'number' ? `${Math.round(v)} ms` : '—')
+const ms = (v?: number) => (typeof v === 'number' ? latency(v) : '—')
 const num = (v?: number | null, d = 0) => (typeof v === 'number' ? v.toLocaleString(undefined, { maximumFractionDigits: d }) : '—')
 
 /**

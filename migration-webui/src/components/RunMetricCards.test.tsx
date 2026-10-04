@@ -10,7 +10,7 @@ describe('a card per run, titled with its domains', () => {
     fetchMetricRuns.mockResolvedValue({ accountId: 3, runs: [
       { runKey: 'migrate:1:x', kind: 'migrate', sourceDomain: 'src.example', targetDomain: 'tgt.example',
         startedAt: '2026-10-03T10:23:16Z', updatedAt: '', calls: 12345, requests_per_sec: 9.5,
-        peak_requests_per_sec: 58.6, p50: 210, p95: 1800, retries: 3, failures: 0, peak_rss_mb: 640,
+        peak_requests_per_sec: 58.6, p50: 0.53, p95: 2.27, retries: 3, failures: 0, peak_rss_mb: 640,
         elapsed_sec: 1500 },
       { runKey: 'seed:2:y', kind: 'seed', sourceDomain: 'src.example', targetDomain: null,
         startedAt: '2026-10-03T09:41:54Z', updatedAt: '', calls: 1531 },
@@ -20,6 +20,7 @@ describe('a card per run, titled with its domains', () => {
     expect(card).toHaveTextContent('src.example → tgt.example')
     expect(card).toHaveTextContent('12,345')
     expect(card).toHaveTextContent('58.6')
+    expect(card).toHaveTextContent('530ms · 2.27s')      // seconds, not "1 ms · 2 ms"
     expect(screen.getByTestId('run-card-seed:2:y')).toHaveTextContent('src.example')
   })
 })

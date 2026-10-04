@@ -196,16 +196,18 @@ export const MigrateMetricsCharts: React.FC<{ m: MetricsSnapshot }> = ({ m }) =>
         </ChartFrame>
         <ChartFrame title="Outcome by item type" height={Math.max(150, vol.length * 30)}
                     empty={none(vol, 'Nothing recorded in the ledger yet.')}>
-          <BarsChart data={vol} xKey="itemType" horizontal fmt={n} labelWidth={100}
+          <BarsChart data={vol} xKey="itemType" horizontal fmt={n} labelWidth={150}
                      series={[{ key: 'done', name: 'done', color: c.success, stackId: 'o' },
+                              { key: 'owed', name: 'owed (still to do)', color: c.warning, stackId: 'o' },
                               { key: 'skipped', name: 'skipped', color: c.muted, stackId: 'o' },
                               { key: 'failed', name: 'failed', color: c.error, stackId: 'o' }]} />
         </ChartFrame>
         <ChartFrame title="Outcome share by item type" hint="each type's own 100% — a rare type that failed entirely is invisible on the raw-count chart beside a huge one"
                     height={Math.max(150, volShare.length * 30)}
                     empty={none(volShare, 'Nothing recorded in the ledger yet.')}>
-          <BarsChart data={volShare} xKey="itemType" horizontal fmt={pct} labelWidth={100}
+          <BarsChart data={volShare} xKey="itemType" horizontal fmt={pct} labelWidth={150}
                      series={[{ key: 'done', name: 'done', color: c.success, stackId: 'os' },
+                              { key: 'owed', name: 'owed (still to do)', color: c.warning, stackId: 'os' },
                               { key: 'skipped', name: 'skipped', color: c.muted, stackId: 'os' },
                               { key: 'failed', name: 'failed', color: c.error, stackId: 'os' }]} />
         </ChartFrame>
@@ -225,7 +227,7 @@ export const MigrateMetricsCharts: React.FC<{ m: MetricsSnapshot }> = ({ m }) =>
         <ChartFrame title="Live mappings on the target" height={Math.max(150, maps.length * 28)}
                     empty={none(maps, 'No mappings yet.')}>
           <BarsChart data={maps.map((x) => ({ type: x.type, count: x.count }))} xKey="type" horizontal
-                     fmt={n} labelWidth={100}
+                     fmt={n} labelWidth={150}
                      series={[{ key: 'count', name: 'mapped', color: c.info }]} />
         </ChartFrame>
         <ChartFrame title="Workers against cores" hint="what this host budgeted" height={130}

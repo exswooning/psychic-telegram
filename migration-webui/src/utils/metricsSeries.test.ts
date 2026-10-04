@@ -159,9 +159,9 @@ describe('volumeShareRows', () => {
       { itemType: 'event', status: 'SUCCESS', count: 2 },
       { itemType: 'event', status: 'FAILED', count: 2 },
     ])
-    expect(r.find((x) => x.itemType === 'file')).toEqual({ itemType: 'file', done: 90, skipped: 0, failed: 10 })
+    expect(r.find((x) => x.itemType === 'file')).toEqual({ itemType: 'file', done: 90, owed: 0, skipped: 0, failed: 10 })
     // Half the events failed -- the same SHAPE as a much larger corpus with the same split.
-    expect(r.find((x) => x.itemType === 'event')).toEqual({ itemType: 'event', done: 50, skipped: 0, failed: 50 })
+    expect(r.find((x) => x.itemType === 'event')).toEqual({ itemType: 'event', done: 50, owed: 0, skipped: 0, failed: 50 })
   })
 
   it('is 0/0/0 rather than NaN for a type with no items at all', () => {
@@ -229,8 +229,20 @@ describe('volume', () => {
       { itemType: 'file', status: 'BLOCKED', count: 1 },
       { itemType: 'event', status: 'SUCCESS', count: 5 },
     ])
-    expect(r[0]).toEqual({ itemType: 'file', done: 90, skipped: 7, failed: 3 })
+    expect(r[0]).toEqual({ itemType: 'file', done: 90, owed: 0, skipped: 7, failed: 3 })
     expect(r[1].itemType).toBe('event')
+  })
+
+  it('draws owed work apart from a decision, and DMS-delivered mail as done', () => {
+    const r = volumeRows([
+      { itemType: 'acl', status: 'SUCCESS', count: 215 },
+      { itemType: 'acl', status: 'OWED_GRANTEE_NO_ACCOUNT', count: 9234 },
+      { itemType: 'acl', status: 'SKIPPED_UNMAPPED_IDENTITY', count: 31 },
+      { itemType: 'message', status: 'SKIPPED_NO_DRIVE_LINK', count: 40 },
+      { itemType: 'message', status: 'DELIVERED_BY_DMS', count: 60 },
+    ])
+    expect(r[0]).toEqual({ itemType: 'acl', done: 215, owed: 9234, skipped: 31, failed: 0 })
+    expect(r[1]).toEqual({ itemType: 'message', done: 60, owed: 40, skipped: 0, failed: 0 })
   })
 })
 
