@@ -591,6 +591,20 @@ with no kept login is left and reported (incident), retried daily. Every sweep a
 per-setup gcloud configs older than 24 h (a setup that died left them: one sat signed in as
 an old tenant's admin from August to October).
 
+**The mirror (`mirror.py`, the Mirror page) keeps a target in step with its source
+after a migration**, from each service's own change feed, as a `mirror` job every N
+minutes. Rules a live test on a sandbox user established (every scope mutated, then
+checked on the target): a target version bump is **not** a conflict by itself -- Docs
+re-anchors a commented Doc's comments minutes after Bitport writes it, bumping its
+version and modifiedTime stamped with Bitport's own write time; a conflict needs a
+rename, a move, or a write stamped after the mirror's record (`_edited_on_mirror`), and
+Bitport's own late write only has the source's time put back next cycle (so the mirror
+skips the engine's 4-minute settle wait). Every native it copies or re-imports gets its
+links repointed (`_pending_native`) -- an edit is re-imported from an export that names
+the SOURCE's files. An edit also carries new comments (a comment beside an edit reads as
+the edit alone). The deletion cap is a percentage of the FOLLOWED users' mapped items, and
+a mirror following chosen users never provisions a new source user (`not_followed`).
+
 **What only a person can move is counted before a run and listed after it.** Sites, My
 Maps and Jamboards have no copy and no usable export (Drive's own `exportFormats`: a Site
 gives text only, the other two nothing), so they end `SKIPPED_UNEXPORTABLE` with the
