@@ -500,6 +500,15 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
             if (jobRunning) items.push({ text: `${job!.name} is running (${progressIndeterminate ? 'in progress' : `${progressPct}%`})` })
             if (memoryPct >= 85) items.push({ text: `Memory at ${memoryPct}% — approaching the limit` })
             for (const o of owed) {
+              if (o.uncopyable) {
+                const ex = o.uncopyableExamples ?? []
+                items.push({
+                  to: `/migrations/${o.accountId}`,
+                  text: `${o.targetDomain}: ${o.uncopyable.toLocaleString()} file${o.uncopyable === 1 ? '' : 's'} no Google API `
+                    + `can copy — recreate by hand (${ex.join(', ')}${o.uncopyable > ex.length ? ', …' : ''}).`,
+                })
+              }
+              if (!o.shares) continue
               items.push({
                 to: `/migrations/${o.accountId}`,
                 // The target domain, not the account's name: two migrations run by one

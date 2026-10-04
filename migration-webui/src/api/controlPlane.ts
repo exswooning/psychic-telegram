@@ -409,7 +409,9 @@ export const startMigration = (
 
 export interface OwedGrants {
   migrations: { accountId: number; accountName: string; targetDomain: string; shares: number;
-                colleagues: number; examples: string[] }[]
+                colleagues: number; examples: string[]
+                /** Files no Google API can copy -- to recreate by hand. */
+                uncopyable?: number; uncopyableExamples?: string[] }[]
 }
 
 /** Shares waiting for colleagues who have no target account yet, per migration. */
@@ -750,6 +752,10 @@ export interface MigrationDetail {
   /** Items the tool deliberately did not migrate, by reason. Distinct from
    *  failures: a skip is a decision, not an error. */
   skipped?: { status: string; count: number }[]
+  /** Files no Google API could copy (Sites, My Maps, Jamboards, a native past the export
+   *  ceiling whose files.copy also failed): recreated by hand, so they are named. */
+  uncopyable?: { user: string; sourceId: string; name: string; status: string; reason: string }[]
+  uncopyableCount?: number
   failedUsers: Array<{
     sourceUser: string; targetUser: string; status?: string; detail: string
     /** When the status was last set. Absent on ledgers written before the

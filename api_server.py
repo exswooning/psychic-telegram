@@ -4388,6 +4388,31 @@ def _migration_progress(account_id: int | None) -> dict:
         return empty
 
 
+UNCOPYABLE = ("SKIPPED_UNEXPORTABLE", "SKIPPED_EXPORT_TOO_LARGE")
+
+
+def _uncopyable(conn, limit: int = 200) -> tuple[int, list[dict]]:
+    """Files no Google API could copy (Sites, My Maps, Jamboards; a native over the
+    export ceiling whose files.copy also failed) -- they need recreating by hand, so
+    they are named, not only counted. Corpus-scoped like the skipped panel. The name
+    is the record's first line (drive_engine._named); older records have none."""
+    marks = ",".join("?" * len(UNCOPYABLE))
+    scope = ("AND EXISTS (SELECT 1 FROM identity_map m WHERE m.source_email = a.source_user)")
+    n = conn.execute(f"SELECT COUNT(*) c FROM audit_log a WHERE a.status IN ({marks}) "
+                     f"AND a.item_type='file' {scope}", UNCOPYABLE).fetchone()["c"]
+    rows = conn.execute(f"SELECT source_user, item_id, status, error_message FROM audit_log a "
+                        f"WHERE a.status IN ({marks}) AND a.item_type='file' {scope} "
+                        f"ORDER BY source_user, item_id LIMIT ?", (*UNCOPYABLE, limit)).fetchall()
+    out = []
+    for r in rows:
+        msg = r["error_message"] or ""
+        name, reason = (msg[len("file: "):].split("\n", 1) + [""])[:2] if msg.startswith("file: ") \
+            else ("", msg)
+        out.append({"user": r["source_user"], "sourceId": r["item_id"], "name": name,
+                    "status": r["status"], "reason": reason[:300]})
+    return n, out
+
+
 @app.get("/api/v2/owed-grants")
 async def owed_grants(op: Operator = Depends(operator)):
     """Shares waiting for a colleague's target account, per migration this caller may
@@ -4415,16 +4440,21 @@ async def owed_grants(op: Operator = Depends(operator)):
                     rows = conn.execute(
                         "SELECT item_id FROM audit_log WHERE status IN (?,?) AND item_type='acl'",
                         (OWED_GRANT, "SKIPPED_GRANTEE_NOT_ON_GOOGLE")).fetchall()
+                    stuck, named = _uncopyable(conn, limit=3)
             except Exception:      # noqa: BLE001 - a ledger without the table owes nothing
                 continue
             who = [r["item_id"].partition(":")[2].lower() for r in rows]
             who = [w for w in who if w.endswith("@" + domain)]
-            if who:
+            if who or stuck:
                 out.append({"accountId": aid,
                             "accountName": acct.get("name") or acct.get("email") or f"#{aid}",
                             "targetDomain": domain,
                             "shares": len(who), "colleagues": len(set(who)),
-                            "examples": sorted(set(who))[:3]})
+                            "examples": sorted(set(who))[:3],
+                            # Files no Google API can copy: recreated by hand, so the
+                            # header says so rather than leaving it to a skip count.
+                            "uncopyable": stuck,
+                            "uncopyableExamples": [x["name"] or x["sourceId"] for x in named]})
         return {"migrations": out}
 
     return await _off_loop(_read)
@@ -5722,7 +5752,7 @@ async def migration_detail(account_id: int, op: Operator = Depends(operator)):
             # early for an unconfigured account, and a client that has to
             # branch on which keys exist will eventually branch wrong.
             "items": [], "failures": [], "failedUsers": [], "users": [],
-            "skipped": [], "repair": None,
+            "skipped": [], "uncopyable": [], "uncopyableCount": 0, "repair": None,
             "running": bool(_jobs_here),
             # Which job, and since when. A bare boolean could not tell a
             # delta from a full migration, so pressing Run delta changed
@@ -5818,6 +5848,7 @@ async def migration_detail(account_id: int, op: Operator = Depends(operator)):
                         "AND EXISTS (SELECT 1 FROM identity_map m "
                         "            WHERE m.source_email = a.source_user) "
                         "GROUP BY status ORDER BY n DESC")]
+                out["uncopyableCount"], out["uncopyable"] = _uncopyable(conn)
                 out["failedUsers"] = [
                     {"sourceUser": r["source_email"],
                      "targetUser": r["target_email"],

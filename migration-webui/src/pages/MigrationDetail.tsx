@@ -583,6 +583,28 @@ export const MigrationDetail: React.FC = () => {
             </Paper>
           )}
 
+          {!!d.uncopyable?.length && (
+            <Paper variant="outlined" sx={{ p: 2, mb: 3, borderColor: 'warning.main' }}
+                   data-testid="uncopyable-panel">
+              <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
+                Can&apos;t be copied by any Google API — recreate by hand
+                ({(d.uncopyableCount ?? d.uncopyable.length).toLocaleString()})
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                Google Sites, My Maps and Jamboards have no copy or export, and a Doc past the
+                export ceiling whose server-side copy also failed lands here. Each opens on the
+                source so it can be rebuilt on the target.
+              </Typography>
+              {d.uncopyable.map((u) => (
+                <Typography key={`${u.user}-${u.sourceId}`} variant="body2" sx={{ ml: 1 }}>
+                  <a href={`https://drive.google.com/open?id=${u.sourceId}`} target="_blank" rel="noreferrer">
+                    {u.name || u.sourceId}</a>
+                  {' '}— {u.user}{u.reason ? ` — ${u.reason.split('.')[0]}` : ''}
+                </Typography>
+              ))}
+            </Paper>
+          )}
+
           <Paper variant="outlined" sx={{ p: 2, mb: 3 }}>
             <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>
               What moved

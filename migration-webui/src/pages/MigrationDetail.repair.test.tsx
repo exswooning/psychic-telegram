@@ -225,6 +225,23 @@ describe('MigrationDetail reports what was skipped', () => {
       .toContain('56,975')
   })
 
+  it('names each file no Google API can copy, to recreate by hand', async () => {
+    fetchMigrationDetail.mockResolvedValue(detail({
+      uncopyableCount: 2,
+      uncopyable: [
+        { user: 'f@tenanta.com', sourceId: 'site1', name: 'Team site', status: 'SKIPPED_UNEXPORTABLE',
+          reason: 'no export mapping for application/vnd.google-apps.site' },
+        { user: 'f@tenanta.com', sourceId: 'map1', name: '', status: 'SKIPPED_UNEXPORTABLE', reason: '' },
+      ],
+    }))
+    render(<MigrationDetail />)
+    const panel = await screen.findByTestId('uncopyable-panel')
+    expect(panel).toHaveTextContent('recreate by hand (2)')
+    expect(panel).toHaveTextContent('Team site — f@tenanta.com — no export mapping')
+    expect(screen.getByText('Team site').closest('a')?.getAttribute('href'))
+      .toBe('https://drive.google.com/open?id=site1')
+  })
+
   it('breaks the skips down by reason', async () => {
     fetchMigrationDetail.mockResolvedValue(detail({
       skipped: [

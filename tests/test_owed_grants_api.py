@@ -54,7 +54,31 @@ def test_counts_owed_shares_and_colleagues_on_the_target_domain(cp, monkeypatch,
     got = cp.get("/api/v2/owed-grants").json()["migrations"]
     assert got == [{"accountId": aid, "accountName": "Tester", "targetDomain": "tenantb.com",
                     "shares": 3, "colleagues": 2,
-                    "examples": ["c@tenantb.com", "d@tenantb.com"]}]
+                    "examples": ["c@tenantb.com", "d@tenantb.com"],
+                    "uncopyable": 0, "uncopyableExamples": []}]
+
+
+def test_files_no_api_can_copy_are_named_for_the_header(cp, monkeypatch, tmp_path):
+    """A Site, a My Map: recreated by hand, so the header names them -- the detail
+    page only counted 'unexportable · 2' and nothing said to do anything."""
+    aid = _signup(cp)
+    _ledger(monkeypatch, tmp_path, [])
+    db = MigrationDB(str(tmp_path / "ledger.db"))
+    with db.write() as conn:
+        conn.execute("INSERT INTO identity_map(source_email, target_email, entity_type, status) "
+                     "VALUES ('f@tenanta.com', 'f@tenantb.com', 'user', 'DONE')")
+    db.log_audit("f@tenanta.com", "site1", "file", "SKIPPED_UNEXPORTABLE",
+                 "file: Team site\nno export mapping for application/vnd.google-apps.site")
+    db.log_audit("f@tenanta.com", "map1", "file", "SKIPPED_UNEXPORTABLE", "an old record, unnamed")
+    db.log_audit("gone@tenanta.com", "x", "file", "SKIPPED_UNEXPORTABLE", "a deleted user's")
+    got = cp.get("/api/v2/owed-grants").json()["migrations"]
+    assert got[0]["accountId"] == aid and got[0]["shares"] == 0
+    assert got[0]["uncopyable"] == 2 and got[0]["uncopyableExamples"] == ["map1", "Team site"]
+    with cpdb.ro(str(tmp_path / "ledger.db")) as conn:
+        n, rows = A._uncopyable(conn)
+    assert n == 2 and rows[1] == {"user": "f@tenanta.com", "sourceId": "site1", "name": "Team site",
+                                  "status": "SKIPPED_UNEXPORTABLE",
+                                  "reason": "no export mapping for application/vnd.google-apps.site"}
 
 
 def test_nothing_owed_is_no_entry(cp, monkeypatch, tmp_path):

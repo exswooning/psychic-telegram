@@ -374,6 +374,13 @@ def _is_unreachable_grantee(exc: Exception) -> bool:
     return any(m in text for m in _NO_ACCOUNT_MARKERS)
 
 
+def _named(item: dict, reason: str) -> str:
+    """A skip no Google API can undo, with the file's NAME on its own first line: the
+    ledger keys it by id, and "recreate these by hand" needs to say which file
+    (Migration detail and the header bell read it back -- api_server._uncopyable)."""
+    return f"file: {item.get('name') or item.get('id')}\n{reason}"
+
+
 def _in_target_domain(email: str, settings) -> bool:
     return email.rsplit("@", 1)[-1].lower() == (settings.target_domain or "").lower()
 
@@ -1295,7 +1302,7 @@ class DriveMigrator:
         if not native_api.can_rebuild(mime):
             self.db.log_audit(
                 self.source_user, item["id"], "file", "SKIPPED_UNEXPORTABLE",
-                native_api.API_FIDELITY.get(mime, f"no API rebuild for {mime}"))
+                _named(item, native_api.API_FIDELITY.get(mime, f"no API rebuild for {mime}")))
             self._bump("skipped")
             return
 
@@ -1742,7 +1749,7 @@ class DriveMigrator:
         export_mime, _ext = EXPORT_MIME_MAP.get(item["mimeType"], (None, None))
         if not export_mime:
             self.db.log_audit(self.source_user, item["id"], "file",
-                              "SKIPPED_UNEXPORTABLE", f"no export mapping for {item['mimeType']}")
+                              "SKIPPED_UNEXPORTABLE", _named(item, f"no export mapping for {item['mimeType']}"))
             self._bump("skipped")
             return
 
@@ -1765,11 +1772,11 @@ class DriveMigrator:
             self.db.log_audit(
                 self.source_user, item["id"], "file",
                 "SKIPPED_EXPORT_TOO_LARGE",
-                f"every export format exceeded the ~10 MB ceiling (tried "
+                _named(item, f"every export format exceeded the ~10 MB ceiling (tried "
                 f"{tried}). Not retryable by export -- the cascade will try "
                 f"files.copy, which never exports. Failing that, "
                 f"download it by hand from the Drive web UI, which uses a "
-                f"different path and is not capped."[:400])
+                f"different path and is not capped."[:400]))
             self._bump("skipped")
             return
         path, size, export_mime, fidelity_note = got
