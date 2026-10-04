@@ -2580,16 +2580,9 @@ class DriveMigrator:
         if shareable:
             self.db.mark_acl_pending(self.source_user, item["id"])
         touched, failed, sharing_ran, commented = 0, False, False, 0
-        try:
-            touched += self._sync_acls(item["id"], target_id, item.get("shared"), resume=resume)
-            sharing_ran = True
-        except QuotaExhausted:
-            raise               # stays pending: the next run finishes it
-        except Exception as exc:      # noqa: BLE001
-            failed = True
-            log.warning("[%s] sharing of %s failed after it was copied (%s: %s); it stays "
-                        "marked unfinished and the next run retries it",
-                        self.source_user, item.get("name"), type(exc).__name__, exc)
+        # Comments BEFORE sharing: Drive emails the people who can see a file about a new
+        # comment on it, and once shared that includes a client's outside collaborators.
+        # Written first, the only one who can see it is the target owner.
         if comments and self.settings.migrate_comments:
             try:
                 commented = self._sync_comments(item["id"], target_id)
@@ -2600,6 +2593,16 @@ class DriveMigrator:
                 failed = True
                 log.warning("[%s] comments on %s failed after it was copied (%s: %s)",
                             self.source_user, item.get("name"), type(exc).__name__, exc)
+        try:
+            touched += self._sync_acls(item["id"], target_id, item.get("shared"), resume=resume)
+            sharing_ran = True
+        except QuotaExhausted:
+            raise               # stays pending: the next run finishes it
+        except Exception as exc:      # noqa: BLE001
+            failed = True
+            log.warning("[%s] sharing of %s failed after it was copied (%s: %s); it stays "
+                        "marked unfinished and the next run retries it",
+                        self.source_user, item.get("name"), type(exc).__name__, exc)
         # Always put the time back after ANY step that may have written -- including one
         # that raised half way through.
         writes_applied = touched or (1 if failed else 0) or (1 if force_mtime_restore else 0)

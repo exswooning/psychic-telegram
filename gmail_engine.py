@@ -820,12 +820,24 @@ class GmailMigrator:
             log.warning("[%s] could not read forwarding addresses, NOT "
                         "migrated: %s", self.source_user, exc)
             return
+        target_domain = (self.settings.target_domain or "").lower()
+        source_domain = (self.settings.source_domain or "").lower()
         for addr in addrs:
+            email = (addr.get("forwardingEmail") or "").lower()
+            if email.rsplit("@", 1)[-1] == source_domain:
+                email = (self.db.resolve_identity(email) or "").lower()
+            # Google emails an address outside the target's own domain to verify it.
+            # A migration must not mail anyone (a real client's run, 2026-10-04), so
+            # an outside forwarding address is withheld and recorded, never created.
+            if not email or email.rsplit("@", 1)[-1] != target_domain:
+                self.db.log_audit(self.source_user, addr.get("forwardingEmail") or "",
+                                  "forwarding", "SKIPPED_WOULD_EMAIL_OUTSIDER",
+                                  "creating it makes Google email the address to verify it")
+                continue
             try:
-                self._retry(lambda a=addr: self.tgt.users().settings()
+                self._retry(lambda a=email: self.tgt.users().settings()
                             .forwardingAddresses().create(
-                                userId="me",
-                                body={"forwardingEmail": a["forwardingEmail"]}
+                                userId="me", body={"forwardingEmail": a}
                             ).execute())
                 self.stats["forwarding_addresses"] = \
                     self.stats.get("forwarding_addresses", 0) + 1

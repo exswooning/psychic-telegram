@@ -169,10 +169,14 @@ class TestAForwardingRefusalStaysInItsOwnPass:
     handler logged `a.get(...)` -- the lambda's parameter, not the loop's -- so a
     NameError took fiona's whole mail service down after her messages had landed."""
 
-    def _mig(self, exc):
+    def _mig(self, exc, forward_to="in@t.example"):
         from resilience import PermanentAPIError
         m = object.__new__(gmail_engine.GmailMigrator)
         m.source_user, m.stats = "f@s.example", {}
+        m.settings = type("S", (), {"source_domain": "s.example", "target_domain": "t.example"})()
+        m.audit, m.created = [], []
+        m.db = type("D", (), {"resolve_identity": lambda self, e: e.replace("@s.example", "@t.example"),
+                              "log_audit": lambda self, *a, **k: m.audit.append(a)})()
         m._retry = lambda fn, **k: fn()
         m._settings_has = lambda svc, name: name == "forwardingAddresses"
 
@@ -185,8 +189,10 @@ class TestAForwardingRefusalStaysInItsOwnPass:
 
         class Fwd:
             def __init__(self, src): self.src = src
-            def list(self, userId): return Call({"forwardingAddresses": [{"forwardingEmail": "out@elsewhere.example"}]})
-            def create(self, userId, body): return Call(raises=PermanentAPIError(exc))
+            def list(self, userId): return Call({"forwardingAddresses": [{"forwardingEmail": forward_to}]})
+            def create(self, userId, body):
+                m.created.append(body["forwardingEmail"])
+                return Call(raises=PermanentAPIError(exc))
 
         class Svc:
             def __init__(self, src): self.src = src
@@ -202,4 +208,26 @@ class TestAForwardingRefusalStaysInItsOwnPass:
 
     def test_any_other_refusal_is_logged_with_the_address_and_does_not_raise(self, caplog):
         self._mig("HTTP 400 (invalidArgument): nope")._migrate_forwarding()
-        assert "out@elsewhere.example not migrated" in caplog.text
+        assert "in@t.example not migrated" in caplog.text
+
+    def test_an_outside_address_is_withheld_never_created(self):
+        """Creating it makes Google email that address to verify it -- and a
+        migration must not mail anyone (a real client's run, 2026-10-04)."""
+        m = self._mig("unused", forward_to="out@elsewhere.example")
+        m._migrate_forwarding()
+        assert m.created == []
+        assert m.audit and m.audit[0][3] == "SKIPPED_WOULD_EMAIL_OUTSIDER"
+
+    def test_a_colleague_on_the_source_domain_is_remapped_to_the_target(self):
+        m = self._mig("HTTP 409 (alreadyExists): exists", forward_to="col@s.example")
+        m._migrate_forwarding()
+        assert m.created == ["col@t.example"]
+
+
+class TestNothingInARunMailsAnyone:
+    def test_comments_are_written_before_the_file_is_shared(self):
+        """Drive emails whoever can see a file about a new comment; written after the
+        sharing, that included a client's outside collaborators."""
+        import drive_engine
+        src = _code(drive_engine.DriveMigrator._finish_item)
+        assert src.index("_sync_comments(") < src.index("_sync_acls(")
