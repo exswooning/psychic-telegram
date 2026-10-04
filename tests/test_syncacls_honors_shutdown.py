@@ -66,6 +66,7 @@ def _no_real_google(monkeypatch):
     exercising -- only whether the LOOP stops matters here."""
     monkeypatch.setattr(drive_engine.DriveMigrator, "__init__", lambda self, *a: None)
     monkeypatch.setattr(drive_engine.DriveMigrator, "_sync_acls", lambda self, s, t: 1)
+    monkeypatch.setattr(drive_engine.DriveMigrator, "reapply_acls", lambda self, s, t: self._sync_acls(s, t))
     monkeypatch.setattr(resilience, "DailyQuotaGuard", lambda *a, **k: None)
 
 

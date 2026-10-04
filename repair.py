@@ -260,7 +260,7 @@ def reapply_owed_grants(auth, db, settings, apply: bool = False) -> dict:
                     migrators[user] = DriveMigrator(auth, db, settings, user, target_user,
                                                     DailyQuotaGuard(db, target_user,
                                                                     settings.effective_upload_cap()))
-                out["granted"] += migrators[user]._sync_acls(sid, target_id, only=ready)
+                out["granted"] += migrators[user].reapply_acls(sid, target_id, only=ready)
                 attempted.append((user, sid, target_id, ready))
             except Exception as exc:      # noqa: BLE001
                 out["errors"].append(f"{user} {sid}: {str(exc)[:160]}")

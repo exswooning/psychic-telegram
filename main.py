@@ -2280,7 +2280,7 @@ def cmd_syncacls(args, settings: Settings, db: MigrationDB,
                       f"done for {src})")
                 break
             try:
-                per += migrator._sync_acls(row["source_id"], row["target_id"])
+                per += migrator.reapply_acls(row["source_id"], row["target_id"])
             except Exception as exc:  # noqa: BLE001
                 print(f"    ! {row['source_id']}: {exc}")
             if i % 100 == 0:

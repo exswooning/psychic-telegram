@@ -2066,6 +2066,10 @@ class DriveMigrator:
         self.db.log_audit(self.source_user, item["id"], "file", "SUCCESS",
                           modified_time=item.get("modifiedTime"), bytes_moved=size)
         self._bump("files")
+        if is_native and self.settings.rewrite_drive_links and item.get("mimeType") in _NATIVE_KIND:
+            # The export names the SOURCE's files: live, every mirrored edit of a Doc
+            # with links pointed it back at the source. Repointed in place at the end.
+            self._pending_native.append((item, target_id))
         return True
 
     # -- shortcuts (two-pass) ---------------------------------------------------
@@ -2733,6 +2737,18 @@ class DriveMigrator:
                  self.source_user, len(checks), fixed)
         if fixed:
             self._bump("mtime_repaired", fixed)
+
+    def reapply_acls(self, source_id: str, target_id: str, **kw) -> int:
+        """_sync_acls for an item copied earlier -- owed grants, ACL repair, a failure
+        resolved. A grant moves the file's modifiedTime to now and _finish_item's restore
+        ran long ago: live, 137 of george's files read 4 October after a repair granted
+        owed shares. The time put back is the one the copy was made from."""
+        n = self._sync_acls(source_id, target_id, **kw)
+        if n:
+            mtime = next(filter(None, (self.db.last_synced_modified_time(self.source_user, source_id, t)
+                                       for t in ("file", "folder", "shortcut"))), None)
+            self._restore_modified_time(target_id, {"id": source_id, "modifiedTime": mtime}, n)
+        return n
 
     def _restore_modified_time(self, target_id: str, item: dict,
                                writes_applied: int, late_bump: bool = False) -> None:

@@ -914,6 +914,8 @@ class GmailMigrator:
                             ).execute())
                 self.stats["delegates"] = self.stats.get("delegates", 0) + 1
             except OPTIONAL_PASS_ERRORS as exc:
+                if "alreadyExists" in str(exc):
+                    continue          # added by an earlier run (or mirror cycle) of this user
                 log.warning("[%s] delegate %s not migrated: %s",
                             self.source_user, tgt_addr, exc)
                 # Live: george's delegate had no target account yet (a run for one

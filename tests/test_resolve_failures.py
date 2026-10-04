@@ -26,7 +26,7 @@ class TestAclRetryCannotHideAFailure:
         src = inspect.getsource(resolve_failures.resolve_for_user)
         acl_part = src.split('elif item_type == "acl"')[1]
 
-        sync_at = acl_part.index("_sync_acls(")
+        sync_at = acl_part.index("reapply_acls(")
         delete_at = acl_part.index("DELETE FROM audit_log")
         assert sync_at < delete_at, (
             "the FAILED row is still deleted before the retry runs, so a "

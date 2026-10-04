@@ -127,7 +127,7 @@ def repair(auth, db, settings, dry_run: bool = True,
                 # shared=None, never False: the caller does not know whether
                 # Drive still reports this file as shared, and False is the
                 # value that skips the listing entirely.
-                stats["applied"] += migrator._sync_acls(src_file, tgt_file,
+                stats["applied"] += migrator.reapply_acls(src_file, tgt_file,
                                                         shared=None)
             except Exception as exc:      # noqa: BLE001
                 if len(stats["errors"]) < 10:

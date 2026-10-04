@@ -154,6 +154,26 @@ class TestDrive:
         assert not [c for c in tgt.calls_to("files.update") if c.get("media_body") is not None]
         assert [c["content"].endswith("looks good") for c in tgt.comment_store[doc_t]] == [True]
 
+    def test_a_comment_made_beside_an_edit_lands_too(self, world, auth, db, settings):
+        src, tgt = world["src"], world["tgt"]
+        src.add_comment(world["doc"], "said beside the edit")
+        src.edit_native(world["doc"], b"doc v2", LATER)
+        out = cycle(auth, db, settings)
+        assert out["by_service"]["drive"]["edited"] == 1
+        assert [c["content"].endswith("said beside the edit")
+                for c in tgt.comment_store[tid(db, world["doc"])]] == [True]
+
+    def test_an_edited_native_has_its_links_repointed(self, world, auth, db, settings, monkeypatch):
+        """A re-import comes from an export that names the SOURCE's files."""
+        import link_rewrite
+        seen = []
+        monkeypatch.setattr(link_rewrite, "rewrite_native",
+                            lambda kind, svc, fid, lookup, pace=None, apply=True: seen.append(fid) or 0)
+        monkeypatch.setattr(auth, "api", lambda *a: None, raising=False)
+        world["src"].edit_native(world["doc"], b"doc v2", LATER)
+        cycle(auth, db, settings)
+        assert seen == [tid(db, world["doc"])]
+
     def test_a_new_file_in_a_new_folder(self, world, auth, db, settings):
         src, tgt = world["src"], world["tgt"]
         folder = src.add_folder("Q3", parent=world["projects"])
@@ -207,6 +227,20 @@ class TestMirrorSideEdits:
         assert tgt.content[pdf_t] == b"v1"
         assert tid(db, world["pdf"]) == pdf_t
 
+    def test_our_own_write_landing_late_is_not_a_conflict(self, world, auth, db, settings):
+        """Docs bumps a commented Doc minutes after a re-import, stamped with the write's
+        own time: no conflict, no second re-import, and the source's time put back."""
+        src, tgt = world["src"], world["tgt"]
+        src.edit_native(world["doc"], b"doc v2", "2024-02-02T00:00:00Z")
+        cycle(auth, db, settings)
+        doc_t = tid(db, world["doc"])
+        tgt.store[doc_t]["modifiedTime"] = "2001-01-01T00:00:00Z"   # before the record
+        tgt._mark(doc_t)
+        out = cycle(auth, db, settings)
+        assert out["conflicts"] == 0 and "native_reimported" not in out["by_service"].get("drive", {})
+        assert tgt.store[doc_t]["modifiedTime"] == "2024-02-02T00:00:00Z"
+        assert cycle(auth, db, settings)["conflicts"] == 0       # and the version is recorded
+
     def test_our_own_writes_are_not_conflicts(self, world, auth, db, settings):
         world["src"].rename(world["pdf"], "a.pdf")
         cycle(auth, db, settings)
@@ -241,6 +275,18 @@ class TestDeletions:
         assert len(db.mirror_deletions("awaiting")) == 6
         assert mirror.decide_held(auth, db, "apply") == {"applied": 6, "failed": 0, "kept": 0}
         assert all(tgt.store[tid(db, f)]["trashed"] for f in made)
+
+    def test_the_cap_counts_only_the_users_it_follows(self, world, auth, db, settings):
+        src = world["src"]
+        made = self._trash(world, 3)
+        cycle(auth, db, settings, only=[SRC_USER])
+        # A big ledger of someone else's: the cap must not grow with it.
+        for i in range(10_000):
+            db.record_mapping("other@tenanta.com", f"o{i}", f"t{i}", "file")
+        for f in made:
+            src.trash(f)
+        out = cycle(auth, db, settings, cap_pct=10, only=[SRC_USER])
+        assert out["deletions"]["held"] == 3 and out["deletions"]["applied"] == 0
 
     def test_keep_them_leaves_the_target_alone(self, world, auth, db, settings):
         src, tgt = world["src"], world["tgt"]
@@ -308,6 +354,19 @@ class TestOtherServices:
         out = cycle(auth, db, settings, cap_pct=100)
         assert out["deletions"]["applied"] == 1
         assert "TRASH" in t.messages[t1]["labelIds"]
+
+    def test_mail_trashed_and_restored_in_one_cycle_stays_out_of_the_bin(
+            self, world, auth, db, settings, gmail_migrator):
+        g = auth.source_gmail(SRC_USER)
+        m1 = g.add_message(RAW_1, ["INBOX"])
+        gmail_migrator.run()
+        cycle(auth, db, settings)
+        t1 = db.get_target_id(SRC_USER, m1, "message")
+        g.relabel(m1, add=("TRASH",), remove=("INBOX",))
+        g.relabel(m1, remove=("TRASH",))
+        out = cycle(auth, db, settings, cap_pct=100)
+        assert out["deletions"]["proposed"] == 0
+        assert "TRASH" not in auth.target_gmail(TGT_USER).messages[t1]["labelIds"]
 
     def test_an_edited_draft_is_updated_in_place(self, world, auth, db, settings, gmail_migrator):
         g = auth.source_gmail(SRC_USER)
@@ -389,3 +448,24 @@ class TestAMirrorThatFollowsOneMigration:
         world["src"].add_binary("late.pdf", parent=world["projects"], data=b"x")
         out = cycle(auth, db, settings, only=[SRC_USER.upper()])
         assert out["by_service"]["drive"]["new"] == 1
+
+
+class TestNewSourceUsers:
+    def test_a_mirror_of_chosen_users_reports_a_new_one_and_never_provisions_it(
+            self, db, settings, monkeypatch):
+        from db import bulk_seed_identities
+        bulk_seed_identities(db, [(SRC_USER, TGT_USER)])
+
+        class Dir:
+            def users(self): return self
+            def list(self, **k):
+                return type("C", (), {"execute": lambda s: {"users": [
+                    {"primaryEmail": SRC_USER}, {"primaryEmail": "newbie@tenanta.com"}]}})()
+        auth = type("A", (), {"directory": lambda self, side, **k: Dir()})()
+        made = []
+        monkeypatch.setattr(mirror.Cycle, "_first_run", lambda self, src: made.append(src))
+        chosen = mirror.Cycle(auth, db, settings, only=[SRC_USER])
+        chosen._check_users([(SRC_USER, TGT_USER)])
+        assert made == [] and chosen.users["not_followed"] == ["newbie@tenanta.com"]
+        mirror.Cycle(auth, db, settings)._check_users([(SRC_USER, TGT_USER)])
+        assert made == ["newbie@tenanta.com"]          # the whole-tenant mirror still does

@@ -286,10 +286,11 @@ const Mirror: React.FC = () => {
                 ))}
               </Alert>
             )}
-            {(last.users?.new?.length || last.users?.suspended?.length || last.users?.gone?.length) ? (
+            {(last.users?.new?.length || last.users?.suspended?.length || last.users?.gone?.length || last.users?.not_followed?.length) ? (
               <Alert severity="info" sx={{ mt: 1.5 }} data-testid="users">
                 {last.users.new?.length ? <Typography variant="body2">New on the source, given an account and a full first run: {last.users.new.join(', ')}</Typography> : null}
                 {last.users.suspended?.length ? <Typography variant="body2">Suspended on the source (target account left as it is): {last.users.suspended.join(', ')}</Typography> : null}
+                {last.users.not_followed?.length ? <Typography variant="body2">New on the source, not followed by this mirror (no account made): {last.users.not_followed.join(', ')}</Typography> : null}
                 {last.users.gone?.length ? <Typography variant="body2">Gone from the source (target account never deleted automatically): {last.users.gone.join(', ')}</Typography> : null}
               </Alert>
             ) : null}

@@ -113,7 +113,7 @@ class TestRepairGrantsWhatWasOwed:
         class DM:
             def __init__(self, auth, db, settings, user, target_user, quota):
                 self.user, self.db = user, db
-            def _sync_acls(self, sid, tid, only=None):
+            def reapply_acls(self, sid, tid, only=None):
                 calls.append((self.user, sid, tid, set(only)))
                 for k in only:                     # as the engine does for each grant made
                     self.db.log_audit(self.user, k, "acl", "SUCCESS")
@@ -163,7 +163,7 @@ class TestASharedFolderCoversItsFiles:
 
         class DM:
             def __init__(self, *a, **k): self.tgt = Perms()
-            def _sync_acls(self, sid, tid, only=None): return 0       # inherited: nothing per file
+            def reapply_acls(self, sid, tid, only=None): return 0       # inherited: nothing per file
             def _retry(self, fn, **k): return fn()
         monkeypatch.setattr(drive_engine, "DriveMigrator", DM)
         auth = type("A", (), {"directory": lambda self, t, **k: _Dir(have={"c@tenantb.com", "d@tenantb.com"})})()
@@ -216,3 +216,16 @@ class TestTheRepairSummarySaysSo:
 
     def test_silent_when_nothing_is_owed(self):
         assert repair.summarise({"survey": {"total": 0}}) == "no failed items recorded"
+
+
+def test_a_grant_made_later_puts_the_copy_time_back(migrator, auth, db, monkeypatch):
+    """Live: 137 of george's files read 4 October after repair granted owed shares."""
+    from tests.conftest import SRC_USER, TGT_USER
+    f = auth.source_drive(SRC_USER).add_binary("a.pdf", mtime="2019-05-05T05:05:05Z")
+    migrator.run()
+    t = db.get_target_id(SRC_USER, f, "file")
+    tgt = auth.target_drive(TGT_USER)
+    tgt.store[t]["modifiedTime"] = "2026-10-04T16:36:43Z"          # what the grant did
+    monkeypatch.setattr(migrator, "_sync_acls", lambda *a, **k: 1)
+    assert migrator.reapply_acls(f, t, only={"x"}) == 1
+    assert tgt.store[t]["modifiedTime"] == "2019-05-05T05:05:05Z"

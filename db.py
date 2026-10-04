@@ -1413,8 +1413,14 @@ class MigrationDB:
             (source_user, target_id)).fetchone()
         return (row["source_id"], row["type"]) if row else None
 
-    def mapping_count(self) -> int:
-        return self.conn.execute("SELECT COUNT(*) FROM id_mapping").fetchone()[0]
+    def mapping_count(self, users=None) -> int:
+        """Every mapped item, or only those of `users` (a mirror following one migration)."""
+        if not users:
+            return self.conn.execute("SELECT COUNT(*) FROM id_mapping").fetchone()[0]
+        users = sorted({u.lower() for u in users})
+        return self.conn.execute(
+            f"SELECT COUNT(*) FROM id_mapping WHERE lower(source_user) IN ({','.join('?' * len(users))})",
+            users).fetchone()[0]
 
     def failed_items(self, source_user: str) -> list[sqlite3.Row]:
         return self.conn.execute(

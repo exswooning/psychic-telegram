@@ -1758,7 +1758,7 @@ export interface MirrorCycle {
   byService: Record<string, Record<string, number>>
   errors: string[]
   unknown: string[]
-  users: { new?: string[]; suspended?: string[]; gone?: string[]; provision_failed?: string[] }
+  users: { new?: string[]; suspended?: string[]; gone?: string[]; provision_failed?: string[]; not_followed?: string[] }
   deletionsProposed: number
   deletionsApplied: number
   deletionsHeld: number

@@ -147,7 +147,7 @@ def resolve_for_user(auth: AuthManager, db: MigrationDB, settings: Settings,
                 # was legitimately removed, which is the safe direction: a
                 # visible failure that turns out to be fine costs a look, an
                 # invisible one costs the grant.
-                applied = migrator._sync_acls(source_file, target_file)
+                applied = migrator.reapply_acls(source_file, target_file)
                 if applied > 0:
                     with db.write() as conn:
                         conn.execute(

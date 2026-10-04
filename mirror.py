@@ -61,7 +61,7 @@ SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
 NATIVE_PREFIX = "application/vnd.google-apps."
 PERM_FIELDS = ("permissions(id,type,role,emailAddress,domain,allowFileDiscovery,"
                "permissionDetails,expirationTime)")
-TARGET_FIELDS = "id,name,parents,mimeType,md5Checksum,trashed,version"
+TARGET_FIELDS = "id,name,parents,mimeType,md5Checksum,trashed,version,modifiedTime"
 
 # Told plainly on the Mirror page, and in every cycle's record.
 CANNOT_MIRROR = [
@@ -89,6 +89,15 @@ def _now_iso() -> str:
 def _status(exc) -> Optional[int]:
     resp = getattr(exc, "resp", None)
     return getattr(resp, "status", None) if resp is not None else getattr(exc, "status", None)
+
+
+def _after(stamp: Optional[str], than: Optional[str]) -> bool:
+    """Whether Google's `stamp` is later than the ledger's `than` (ISO, UTC). Either
+    missing: cannot tell, so yes -- the side that still reports a conflict."""
+    if not stamp or not than:
+        return True
+    p = lambda v: datetime.fromisoformat(v.replace("Z", "+00:00"))
+    return p(stamp) > p(than)
 
 
 def _call(fn, tries: int = 6):
@@ -296,7 +305,8 @@ class Cycle:
         self.conflicts = 0
         self.errors: list[str] = []
         self.unknown: list[str] = []
-        self.users: dict = {"new": [], "suspended": [], "gone": [], "provision_failed": []}
+        self.users: dict = {"new": [], "suspended": [], "gone": [], "provision_failed": [],
+                            "not_followed": []}
         self.done: dict[str, set[str]] = {}
         self.applied = self.held = 0
 
@@ -454,6 +464,11 @@ class Cycle:
         self.users["suspended"] = sorted(e for e, s in listed.items() if s and e in everyone)
         self.users["gone"] = sorted(e for e in everyone if e not in listed)
         new = sorted(e for e, s in listed.items() if not s and e not in everyone)
+        if self.only is not None:
+            # This mirror follows one migration's users: a new source user is reported,
+            # never given a licence and a whole first run nobody chose.
+            self.users["not_followed"] = new
+            return
         for src in new:
             if shutdown_requested():
                 return
@@ -602,6 +617,11 @@ class Cycle:
                              container=None, name=None)
             labels = [l for l in labels if l != "TRASH"]
             if not add:
+                # Trashed and restored within one cycle: the deletion queued for the end
+                # of the cycle would otherwise bin the copy AFTER this untrash.
+                with self._lock:
+                    self.proposed = [d for d in self.proposed if not (
+                        d["service"] == "gmail" and d["item_id"] == mid)]
                 _call(lambda: gm.tgt.users().messages().untrash(userId="me", id=tid).execute())
                 self.count("gmail", "restored")
         mapped = gm._map_label_ids(labels)
@@ -849,7 +869,9 @@ class Cycle:
                 self.db.mirror_record_deletion(self.cycle_id, d, "kept", "keep mode never deletes")
                 self.count(d["service"], "deletions_kept")
             return
-        cap = max(1, math.floor(self.db.mapping_count() * self.cap_pct / 100.0))
+        # Of what this mirror follows: the whole ledger would let a one-user mirror bin
+        # everything that user has before the cap ever held a cycle.
+        cap = max(1, math.floor(self.db.mapping_count(self.only) * self.cap_pct / 100.0))
         if self.deletions_paused or len(props) > cap:
             why = ("deletions are paused for this pair" if self.deletions_paused else
                    f"{len(props)} deletions is more than this pair's cap of {cap}")
@@ -893,7 +915,7 @@ class DriveSync:
     # -- the unit -----------------------------------------------------------------------
     def run(self) -> None:
         dm = self.dm
-        dm._pending_link_rewrites, dm._mtime_checks = [], []
+        dm._pending_link_rewrites, dm._pending_native, dm._mtime_checks = [], [], []
         dm._open_file_pool()
         finished = False
         try:
@@ -915,7 +937,12 @@ class DriveSync:
             try:
                 dm._fixup_shortcuts()
                 dm._rewrite_pending_links()
-                dm._verify_modified_times()
+                # A server-side copy and a re-imported edit are native: their links are
+                # repointed in place, as the migration does (it was missing here).
+                dm._rewrite_native_links()
+                # No _verify_modified_times here: its 4-minute settle held mail, calendar
+                # and the rest back (live, one cycle ran 6 minutes). A time that a late
+                # bump moves is put back next cycle, by _mirror_side_edits.
             finally:
                 if dm._staging_drive_id and not self.c.settings.dry_run:
                     dm._teardown_staging_drive()
@@ -991,6 +1018,17 @@ class DriveSync:
                 continue      # gone on the source too: its own feed deals with that
             if f.get("trashed"):
                 continue
+            if not gone and not self._edited_on_mirror(tv, fp):
+                want = self._target_parents(f)
+                if want is None or set(tv.get("parents") or []) == set(want):
+                    # Bitport's own write, landing late: no one's conflict. Its
+                    # modifiedTime is the write's, so put the source's back.
+                    if (tv.get("modifiedTime") or "")[:19] != (f.get("modifiedTime") or "")[:19]:
+                        self.dm._restore_modified_time(tid, f, 1)
+                        log.info("[mirror] %s: %r changed late after our own write; "
+                                 "its time put back", self.key, f.get("name"))
+                    self.touched[tid] = sid
+                    continue
             self.c.conflict(self.key, "drive", sid, tid, f.get("name"),
                             "changed on the mirror since Bitport last wrote it; the source's "
                             "state was put back")
@@ -1107,7 +1145,7 @@ class DriveSync:
                 self.c.conflict(self.key, "drive", item_id, tid, f.get("name"),
                                 "moved to the bin on the mirror; restored from the source")
             self._target_update(tid, item_id, {"trashed": False})
-        elif fp and fp.get("tgt_version") and str(tv.get("version")) != str(fp["tgt_version"]):
+        elif self._edited_on_mirror(tv, fp):
             self.c.conflict(self.key, "drive", item_id, tid, f.get("name"),
                             "edited on the mirror since Bitport last wrote it; the source wins")
         if "retyped" in kinds:
@@ -1137,8 +1175,10 @@ class DriveSync:
             shared = self._sharing_diff(f, tid)
             wrote += shared
         commented = 0
-        if "comment" in kinds and self.c.settings.migrate_comments:
-            # A comment alone: only the new comments go, never the content.
+        if kinds & {"comment", "edited"} and self.c.settings.migrate_comments:
+            # Only the new comments go, never the content. An edit is asked too: a
+            # comment made beside an edit reads as the edit alone, and a re-import
+            # carries no comments -- live, both test Docs lost their new comment.
             commented = dm._sync_comments(item_id, tid)
             wrote += commented
         if wrote or "comment" in kinds or "edited" in kinds:
@@ -1156,6 +1196,20 @@ class DriveSync:
             self.touched[tid] = item_id
 
     # -- helpers ------------------------------------------------------------------------
+    @staticmethod
+    def _edited_on_mirror(tv: dict, fp: Optional[dict]) -> bool:
+        """Someone else wrote the target copy since Bitport last recorded it. A newer
+        version alone is not that: Docs re-anchors a commented Doc's comments minutes
+        after Bitport re-imports it, bumping its version and modifiedTime -- stamped with
+        Bitport's own write time. Measured live, that made every cycle re-import two Docs
+        and record a conflict nobody caused. Someone else's write is stamped after the
+        record; a rename may not move modifiedTime, so the name is compared as well."""
+        if not fp or not fp.get("tgt_version") or str(tv.get("version")) == str(fp["tgt_version"]):
+            return False
+        if fp.get("name") is not None and tv.get("name") != fp["name"]:
+            return True
+        return _after(tv.get("modifiedTime"), fp.get("updated_at"))
+
     def _fields(self) -> str:
         from drive_engine import ITEM_FIELDS
         return f"{ITEM_FIELDS},trashed,version,headRevisionId,owners(emailAddress),driveId"
