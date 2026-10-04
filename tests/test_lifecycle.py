@@ -1,6 +1,6 @@
-"""A migration's end of life (lifecycle.py): approved -- by the operator, or on its own
-after a quiet spell -- then torn down later, never touching what another account uses.
-The operator's policy, 2026-10-04."""
+"""A migration's end of life (lifecycle.py): approved by the operator, then torn down
+later, never touching what another account uses.
+The operator's policy, 2026-10-04: only their click approves."""
 import json
 import os
 import tempfile
@@ -57,24 +57,16 @@ def _sides():
     return calls, run_side
 
 
-def test_auto_approval_waits_n_days_from_the_last_run_and_from_first_sight(world):
+def test_nothing_is_ever_approved_without_an_operator(world):
+    """The operator's word (2026-10-04): only their click approves a migration. A
+    migrated pair idle for over a year is still not approved, nor torn down."""
     key, config, ran = world
     config(5, "source", "client.example", key(5, "source", "p-src", "111"))
-    ran(5, "2026-10-01T00:00:00.000Z")
+    ran(5, "2025-01-01T00:00:00.000Z")
     calls, run_side = _sides()
-    # First sight is the clock's floor: an old run does not approve the day this ships.
-    lifecycle.sweep(lambda a: False, run_side, now=NOW)
-    assert not lifecycle.state(5).get("approved_at")
-    did = lifecycle.sweep(lambda a: False, run_side, now=NOW + timedelta(days=lifecycle.AUTO_APPROVE_DAYS))
-    assert lifecycle.state(5)["approved_by"] == "auto" and "approved automatically" in did[0]
-
-
-def test_a_never_migrated_account_is_never_called_complete(world):
-    key, config, ran = world
-    config(6, "source", "fresh.example", key(6, "source", "p6", "666"))
-    lifecycle.sweep(lambda a: False, _sides()[1], now=NOW)
-    lifecycle.sweep(lambda a: False, _sides()[1], now=NOW + timedelta(days=400))
-    assert not lifecycle.state(6).get("approved_at")
+    for days in (0, 31, 61, 400):
+        assert lifecycle.sweep(lambda a: False, run_side, now=NOW + timedelta(days=days)) == []
+    assert not lifecycle.state(5).get("approved_at") and calls == []
 
 
 def test_teardown_signs_in_with_the_kept_login_and_leaves_what_others_use(world):

@@ -11,9 +11,9 @@ const daysUntil = (iso?: string | null) =>
   iso ? Math.max(0, Math.ceil((new Date(iso).getTime() - Date.now()) / 86_400_000)) : null
 
 /**
- * A migration's end of life (lifecycle.py). Approving it -- or, if nobody does, its
- * own approval after a quiet spell -- signs gcloud out of this server and sets the
- * teardown due: each side's Cloud project deleted and delegation revoked (with the
+ * A migration's end of life (lifecycle.py). Approving it -- only this button does;
+ * nothing approves a migration on its own -- signs gcloud out of this server and sets
+ * the teardown due: each side's Cloud project deleted and delegation revoked (with the
  * admin login kept at setup), then its keys. What will go, and what is left because
  * another account still uses it, is listed before it happens.
  */
@@ -40,14 +40,14 @@ const ApproveComplete: React.FC = () => {
         <Alert severity="info" sx={{ my: 1 }}>Torn down {day(st.torn_down_at)}.</Alert>
       ) : st.approved_at ? (
         <Alert severity="warning" sx={{ my: 1 }} data-testid="teardown-due">
-          Approved {day(st.approved_at)} {st.approved_by === 'auto' ? '(automatically, after no run)' : `by ${st.approved_by}`}.
+          Approved {day(st.approved_at)} by {st.approved_by}.
           Teardown {due === 0 ? 'is due now' : `in ${due} day${due === 1 ? '' : 's'}`} ({day(st.teardown_due_at)}).
         </Alert>
       ) : (
         <Typography variant="body2" color="text.secondary" sx={{ my: 1 }}>
           Approving signs gcloud out of this server and tears the pair down
-          {life ? ` ${life.teardownDays} days later` : ' later'}. If no run happens
-          for {life ? life.autoApproveDays : '--'} days it is approved automatically.
+          {life ? ` ${life.teardownDays} days later` : ' later'}. Nothing is approved
+          until someone presses the button below.
         </Typography>
       )}
 

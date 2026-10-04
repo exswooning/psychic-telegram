@@ -1,20 +1,20 @@
 """
 lifecycle.py -- a migration's end of life, decided by policy rather than memory.
 
-The operator approves a migration as complete (Final Report) -- or, if nobody does, it
-is approved automatically AUTO_APPROVE_DAYS after its last migrate/delta run (the
-operator's call, 2026-10-04). TEARDOWN_DAYS after approval, everything that gave this
+The operator approves a migration as complete (Final Report) -- only a person clicking
+it does; nothing approves a migration on its own (the operator's call, 2026-10-04: an
+automatic approval was built and taken out the same day). TEARDOWN_DAYS after approval,
+everything that gave this
 server access to the pair goes: each side's Cloud project is deleted (soft, recoverable
 for 30 days) and its delegation entry revoked (NOT undoable), signed in with the admin
 login kept for exactly this at setup (admin_secrets.save_teardown_login); then the
 account's key files, the kept logins, and every gcloud sign-in on the box.
 
 What it never does:
+  * approve a migration -- only the operator's click does;
   * act while one of the account's jobs runs;
   * delete a project or revoke a client another account's key still uses -- accounts
-    share them (live: accounts 2 and 3 both hold keys from one source project);
-  * count time before it first saw an account toward auto-approval, so switching this
-    on does not approve every old pair at once.
+    share them (live: accounts 2 and 3 both hold keys from one source project).
 
 Orphaned gcloud sign-ins (a per-setup config older than ORPHAN_HOURS, from a setup that
 died) are revoked and deleted on every sweep, whatever the account state.
@@ -35,7 +35,6 @@ import gcloud_browser_auth
 import gcloud_signout
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-AUTO_APPROVE_DAYS = float(os.getenv("AUTO_APPROVE_DAYS", "30"))
 TEARDOWN_DAYS = float(os.getenv("TEARDOWN_DAYS", "30"))
 ORPHAN_HOURS = 24
 RETRY_HOURS = 24
@@ -85,14 +84,6 @@ def undo(account_id: int) -> bool:
                       "teardown_due_at=NULL WHERE account_id=? AND torn_down_at IS NULL",
                       (account_id,)).rowcount
     return bool(n)
-
-
-def _last_run_end(account_id: int) -> str | None:
-    with cpdb.ro() as c:
-        row = c.execute("SELECT MAX(at) m FROM run_events WHERE account_id=? AND "
-                        "event='finished' AND job_name IN ('migrate','delta')",
-                        (account_id,)).fetchone()
-    return row["m"] if row else None
 
 
 def _configs(account_id: int | None = None) -> list[dict]:
@@ -220,22 +211,13 @@ def sweep(busy: Callable[[int], bool], run_side: Callable[[str, str, str, str], 
     orphans = clean_orphans(now.timestamp())
     if orphans:
         did.append(f"signed out orphaned gcloud sign-ins: {', '.join(orphans)}")
-    for aid in sorted({r["account_id"] for r in _configs()}):
-        _seen(aid, now)
+    with cpdb.ro() as c:
+        approved = [r["account_id"] for r in c.execute(
+            "SELECT account_id FROM migration_lifecycle WHERE approved_at IS NOT NULL "
+            "AND torn_down_at IS NULL ORDER BY account_id")]
+    for aid in approved:                      # only what an operator approved
         s = state(aid)
-        if s.get("torn_down_at") or busy(aid):
-            continue
-        if not s.get("approved_at"):
-            last = _parse(_last_run_end(aid))
-            if last is None:
-                continue                      # never migrated: nothing to call complete
-            since = max(last, _parse(s["first_seen_at"]) or last)
-            if now - since >= timedelta(days=AUTO_APPROVE_DAYS):
-                approve(aid, "auto", now)
-                if not gcloud_signout.busy():       # as an operator's approval does
-                    gcloud_signout.sign_out_all()
-                did.append(f"account {aid}: approved automatically -- no run for "
-                           f"{AUTO_APPROVE_DAYS:g} days; teardown in {TEARDOWN_DAYS:g} days")
+        if busy(aid):
             continue
         due = _parse(s.get("teardown_due_at"))
         tried = _parse(s.get("last_attempt_at"))

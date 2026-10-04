@@ -1198,7 +1198,6 @@ async def lifecycle_view(account_id: int | None = None, op: Operator = Depends(o
     def _read() -> dict:
         return {"accountId": aid, "state": lifecycle.state(aid) if aid else {},
                 "plan": lifecycle.plan(aid) if aid else [],
-                "autoApproveDays": lifecycle.AUTO_APPROVE_DAYS,
                 "teardownDays": lifecycle.TEARDOWN_DAYS}
     return await _off_loop(_read)
 

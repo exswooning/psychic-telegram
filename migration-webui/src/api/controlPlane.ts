@@ -167,7 +167,7 @@ export interface LifecycleView {
   state: { approved_at?: string | null; approved_by?: string | null; teardown_due_at?: string | null
            torn_down_at?: string | null; last_result?: string | null; first_seen_at?: string }
   plan: TeardownSide[]
-  autoApproveDays: number; teardownDays: number
+  teardownDays: number
 }
 
 /** Where this pair is in its end of life, and what its teardown will do. */
