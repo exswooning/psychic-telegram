@@ -79,7 +79,7 @@ class TestOwedIsNotDeclined:
         for i in range(deferred):
             db.log_audit(SRC_USER, f"d{i}", "message", DEFERRED_TO_DMS, "left for the DMS pass")
         for i in range(declined):
-            db.log_audit(SRC_USER, f"s{i}", "message", "SKIPPED_IS_DRAFT", "drafts pass owns it")
+            db.log_audit(SRC_USER, f"s{i}", "message", "SKIPPED_TOO_LARGE", "a real decision (a draft would be delivered as a draft)")
         for i in range(moved):
             db.log_audit(SRC_USER, f"m{i}", "message", "SUCCESS")
 
@@ -136,7 +136,7 @@ class TestWhatThePageIsTold:
         for i in range(97):
             db.log_audit(SRC_USER, f"d{i}", "message", DEFERRED_TO_DMS, "left for the DMS pass")
         for i in range(3):
-            db.log_audit(SRC_USER, f"s{i}", "message", "SKIPPED_IS_DRAFT", "drafts pass owns it")
+            db.log_audit(SRC_USER, f"s{i}", "message", "SKIPPED_TOO_LARGE", "a real decision (a draft would be delivered as a draft)")
         monkeypatch.setattr(config, "Settings", lambda account_id=None: settings)
         out = api_server._migration_progress(1)
         assert out["itemsDeferred"] == 97 and out["itemsSkipped"] == 3

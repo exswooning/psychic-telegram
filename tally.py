@@ -321,9 +321,13 @@ def skipped_by_user(conn) -> dict[str, dict[str, int]]:
     out: dict[str, dict[str, int]] = {}
     # Not DEFERRED_TO_DMS: mail left for the DMS is owed, not declined. Subtracting
     # it would let a split run that never reached the DMS score mail parity 100%.
+    # Not SKIPPED_IS_DRAFT either: a draft is skipped as a MESSAGE because it is
+    # recreated as a draft, and both tenants count it among their messages. Live,
+    # george's 4 drafts were on the target and subtracted from what it expected, so
+    # an exact mailbox read "4 more on the target".
     for r in conn.execute("SELECT source_user, item_type, COUNT(*) n FROM audit_log "
-                          "WHERE status LIKE 'SKIPPED%' AND status <> ? GROUP BY 1, 2",
-                          (DEFERRED_TO_DMS,)):
+                          "WHERE status LIKE 'SKIPPED%' AND status NOT IN (?, 'SKIPPED_IS_DRAFT') "
+                          "GROUP BY 1, 2", (DEFERRED_TO_DMS,)):
         svc = SKIP_TYPE.get(r["item_type"])
         if svc:
             out.setdefault(r["source_user"], {})[svc] = r["n"]

@@ -140,6 +140,15 @@ class TestSkips:
         db.conn.commit()
         assert T.skipped_by_user(db.conn) == {"u": {"drive_files": 2, "mail": 1}}
 
+    def test_a_draft_is_delivered_as_a_draft_not_declined(self, settings, db):
+        """Live: george's 4 drafts were on the target and subtracted from what it
+        expected, so an exact mailbox read '4 more on the target'."""
+        for i in range(4):
+            db.conn.execute("INSERT INTO audit_log(source_user,item_id,item_type,status) "
+                            "VALUES('g',?, 'message', 'SKIPPED_IS_DRAFT')", (f"d{i}",))
+        db.conn.commit()
+        assert T.skipped_by_user(db.conn) == {}
+
 
 class TestRun:
     def _wire(self, db, n=4, done=True):
