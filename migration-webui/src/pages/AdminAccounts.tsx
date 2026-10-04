@@ -1,11 +1,11 @@
 import React, { useEffect, useState } from 'react'
 import {
-  Alert, Box, Chip, CircularProgress, IconButton, Paper, Stack, Switch, Table,
-  TableBody, TableCell, TableContainer, TableHead, TableRow, Typography,
+  Alert, Box, Button, Chip, CircularProgress, IconButton, Paper, Stack, Switch, Table,
+  TableBody, TableCell, TableContainer, TableHead, TableRow, TextField, Typography,
 } from '@mui/material'
 import { AdminPanelSettings as AdminIcon, DeleteOutline as DeleteIcon } from '@mui/icons-material'
 import {
-  Account, deleteAccount, fetchAdminAccounts, setAccountSubscription, setAccountSeedEnabled,
+  Account, createAccount, deleteAccount, fetchAdminAccounts, setAccountSubscription, setAccountSeedEnabled,
 } from '@/api/controlPlane'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
 
@@ -13,6 +13,7 @@ type Pending = { id: number; email: string } & (
   | { kind: 'subscription'; active: boolean }
   | { kind: 'seed'; enabled: boolean }
   | { kind: 'delete' }
+  | { kind: 'create'; name: string; password: string }
 )
 
 /**
@@ -29,6 +30,8 @@ const AdminAccounts: React.FC = () => {
   const [pending, setPending] = useState<Pending | null>(null)
   const [busy, setBusy] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
+  const [draft, setDraft] = useState({ email: '', name: '', password: '' })
+  const [created, setCreated] = useState<string | null>(null)
 
   const refresh = () => {
     fetchAdminAccounts().then(setAccounts).catch((e) => setError(e.message))
@@ -44,8 +47,14 @@ const AdminAccounts: React.FC = () => {
         ? await setAccountSubscription(pending.id, pending.active, reason)
         : pending.kind === 'seed'
           ? await setAccountSeedEnabled(pending.id, pending.enabled, reason)
-          : await deleteAccount(pending.id, pending.email, reason)
+          : pending.kind === 'create'
+            ? await createAccount(pending.email, pending.password, pending.name, reason)
+            : await deleteAccount(pending.id, pending.email, reason)
       if (!r.ok) throw new Error(r.detail || 'could not update')
+      if (pending.kind === 'create') {
+        setCreated(`${r.detail}. Sign in as it to set up its pair in the Setup Wizard.`)
+        setDraft({ email: '', name: '', password: '' })
+      }
       setPending(null)
       refresh()
     } catch (e: unknown) {
@@ -63,6 +72,30 @@ const AdminAccounts: React.FC = () => {
       </Stack>
 
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+
+      {/* A new pair needs its own account: the Setup Wizard configures whoever is
+          signed in, and sign-up is closed once this install has an account. */}
+      <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
+        <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>New account</Typography>
+        <Stack direction="row" sx={{ flexWrap: 'wrap', gap: 1.5 }} alignItems="center">
+          <TextField size="small" label="Sign-in email" value={draft.email}
+                     onChange={(e) => setDraft({ ...draft, email: e.target.value })}
+                     inputProps={{ 'data-testid': 'new-account-email' }} />
+          <TextField size="small" label="Name" value={draft.name}
+                     onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+                     inputProps={{ 'data-testid': 'new-account-name' }} />
+          <TextField size="small" label="Password (8+ characters)" type="password" value={draft.password}
+                     onChange={(e) => setDraft({ ...draft, password: e.target.value })}
+                     inputProps={{ 'data-testid': 'new-account-password' }} />
+          <Button variant="outlined" data-testid="new-account-go"
+                  disabled={!draft.email.trim() || draft.name.trim().length < 2 || draft.password.length < 8}
+                  onClick={() => setPending({ kind: 'create', id: 0, email: draft.email.trim(),
+                                              name: draft.name.trim(), password: draft.password })}>
+            Create account
+          </Button>
+        </Stack>
+        {created && <Alert severity="success" sx={{ mt: 1.5 }} onClose={() => setCreated(null)}>{created}</Alert>}
+      </Paper>
 
       {!accounts && !error && (
         <Box sx={{ display: 'flex', justifyContent: 'center', py: 6 }}>
@@ -143,7 +176,8 @@ const AdminAccounts: React.FC = () => {
             ? (pending.active ? `Reactivate ${pending.email}` : `Deactivate ${pending.email}`)
             : pending?.kind === 'seed'
               ? (pending.enabled ? `Enable seeding for ${pending.email}` : `Disable seeding for ${pending.email}`)
-              : pending?.kind === 'delete' ? `Delete ${pending.email}` : ''
+              : pending?.kind === 'delete' ? `Delete ${pending.email}`
+                : pending?.kind === 'create' ? `Create account ${pending.email}` : ''
         }
         description={
           pending?.kind === 'subscription' ? (
@@ -157,6 +191,9 @@ const AdminAccounts: React.FC = () => {
           ) : pending?.kind === 'delete' ? (
             <>Deletes the account and signs it out everywhere. Refused if it has a tenant set up
               or a job running — for throwaway and test accounts. Type its email to confirm.</>
+          ) : pending?.kind === 'create' ? (
+            <>Creates a sign-in with its own empty pair and its own ledger. Nothing is set up
+              yet: sign in as it and run the Setup Wizard for its source and target.</>
           ) : null
         }
         confirmPhrase={pending?.kind === 'delete' ? pending.email : undefined}

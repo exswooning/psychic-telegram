@@ -148,6 +148,14 @@ export const setAccountSeedEnabled = (accountId: number, enabled: boolean, reaso
 
 /** A throwaway account: refused for a superadmin, your own, one with a tenant set up
  *  or a job running. The email typed back is the confirmation. */
+/** A new account for a new tenant pair: the Setup Wizard configures the signed-in
+ *  account, and sign-up is closed once an install has one. Superadmin only. */
+export const createAccount = (email: string, password: string, name: string, reason: string) =>
+  cpFetch<ActionResult>('/api/v2/admin/accounts', {
+    method: 'POST',
+    body: JSON.stringify({ reason, email, password, name }),
+  })
+
 export const deleteAccount = (accountId: number, confirmEmail: string, reason: string) =>
   cpFetch<ActionResult>(`/api/v2/admin/accounts/${accountId}/delete`, {
     method: 'POST',

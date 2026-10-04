@@ -57,6 +57,31 @@ class TestDeleteAThrowawayAccount:
         assert accounts_auth.get_account(me)
 
 
+class TestCreateAnAccountForANewPair:
+    """The Setup Wizard configures the signed-in account, so a second client's pair
+    needs its own -- and with sign-up closed, the UI had no way to make one."""
+
+    def test_a_superadmin_creates_one_and_its_password_is_not_logged(self, cp):
+        import accounts_auth
+        import control_plane_db as cpdb
+        _signed_in(cp, "boss3@example.com", superadmin=True)
+        r = cp.post("/api/v2/admin/accounts", json={
+            "reason": "new client pair", "email": "client-pair@example.com",
+            "password": "s3cret-pass-123", "name": "Client pair"})
+        assert r.status_code == 200 and r.json()["ok"], r.text
+        assert accounts_auth.authenticate("client-pair@example.com", "s3cret-pass-123")
+        with cpdb.ro() as conn:
+            logged = " ".join(str(tuple(x)) for x in conn.execute("SELECT * FROM operator_actions_log"))
+        assert "s3cret-pass-123" not in logged and "admin.create_account" in logged
+
+    def test_nobody_else_can(self, cp):
+        _signed_in(cp, "plain@example.com")
+        r = cp.post("/api/v2/admin/accounts", json={
+            "reason": "trying", "email": "x-pair@example.com", "password": "s3cret-pass-123",
+            "name": "X pair"})
+        assert r.status_code == 403
+
+
 class TestLearnedRateCeilings:
     def test_listed_and_forgotten(self, cp, ledger):
         me = _signed_in(cp, "owner@example.com")

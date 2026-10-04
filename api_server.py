@@ -1128,6 +1128,28 @@ async def admin_list_accounts(op: Operator = Depends(operator)):
     return await _off_loop(accounts_auth.list_accounts)
 
 
+class CreateAccount(WriteAction):
+    email: str = Field(min_length=3)
+    password: str = Field(min_length=8, exclude=True)     # never in the audit log
+    name: str = Field(min_length=2)
+    plan: str = "trial"
+
+
+@app.post("/api/v2/admin/accounts")
+async def admin_create_account(body: CreateAccount, op: Operator = Depends(operator)):
+    """An account for a new tenant pair. The Setup Wizard always configures the
+    signed-in account, so a second client's pair needs an account of its own -- and
+    with sign-up closed once an install has one, nothing in the UI could make one."""
+    def _create() -> tuple[bool, str]:
+        try:
+            aid = accounts_auth.create_account(body.email, body.password, body.name, body.plan)
+        except accounts_auth.AccountError as exc:
+            return False, str(exc)
+        return True, f"created account {aid} ({body.email.strip().lower()})"
+    return await _gated(op, "admin.create_account", body, f"account:{body.email.strip().lower()}",
+                        _create, extra_check=require_superadmin)
+
+
 @app.post("/api/v2/admin/accounts/{account_id}/subscription")
 async def admin_set_subscription(account_id: int, body: SetSubscription,
                                  op: Operator = Depends(operator)):
