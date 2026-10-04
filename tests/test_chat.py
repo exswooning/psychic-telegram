@@ -543,3 +543,19 @@ def test_a_sample_copies_a_slice_of_chat_not_all_of_it(chat_migrator, auth, db, 
     made = auth.target_chat(TGT_USER).space_store
     assert len(made) == 1
     assert chat_migrator.stats["messages"] == 2
+
+
+def test_drive_links_in_a_message_point_at_the_copies(chat_migrator, auth, db, settings):
+    """Live: seeduser200's "Doc is here: <link>" crossed unchanged -- mail and
+    calendar rewrote theirs, Chat never did."""
+    settings.rewrite_drive_links = True
+    db.record_mapping("someone@tenanta.com", "SRCDOC123456789012345678901", "TGTDOC9876543210", "file")
+    src = auth.source_chat(SRC_USER)
+    space = src.add_space("Links")
+    src.add_chat_message(space, "Doc is here: https://docs.google.com/document/d/SRCDOC123456789012345678901/edit",
+                         SRC_USER)
+    chat_migrator.run()
+    posted = [m for msgs in auth.target_chat(TGT_USER).message_store.values() for m in msgs]
+    assert posted and "TGTDOC9876543210" in posted[0]["text"]
+    assert "SRCDOC123456789012345678901" not in posted[0]["text"]
+    assert chat_migrator.stats.get("links_rewritten") == 1

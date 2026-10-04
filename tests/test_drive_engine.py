@@ -204,6 +204,18 @@ def test_shortcut_resolved_after_target_migrates(migrator, auth):
     assert mapped == tgt.by_name("real.pdf")[0]["id"]
 
 
+def test_a_shortcut_keeps_its_own_time(migrator, auth):
+    """Live: seeduser200's shortcut was the one Drive item stamped with the copy's
+    time -- its create call carried no times at all."""
+    src = auth.source_drive(SRC_USER)
+    target_file = src.add_binary("real.pdf")
+    src.add_shortcut("link-to-real", target_id=target_file)
+    migrator.run()
+    made = [c["body"] for c in auth.target_drive(TGT_USER).calls_to("files.create")
+            if c["body"].get("name") == "link-to-real"]
+    assert made and made[0].get("modifiedTime") == "2024-01-01T00:00:00Z"
+
+
 # ======================================================================
 # Idempotency — the property the whole design rests on
 # ======================================================================

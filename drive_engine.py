@@ -2100,10 +2100,20 @@ class DriveMigrator:
 
             body = {"name": item["name"], "mimeType": SHORTCUT_MIME,
                    "parents": [tgt_parent], "shortcutDetails": {"targetId": mapped}}
+            # Its own times too: live, seeduser200's shortcut was the one Drive item
+            # whose created/modified time was the copy's. Dropped if Drive refuses them.
+            times = {k: item[k] for k in ("createdTime", "modifiedTime") if item.get(k)}
             try:
-                result = self._retry(lambda: self.tgt.files().create(
-                    body=body, fields="id", supportsAllDrives=True,
-                ).execute())
+                try:
+                    result = self._retry(lambda: self.tgt.files().create(
+                        body={**body, **times}, fields="id", supportsAllDrives=True,
+                    ).execute())
+                except (PermanentAPIError, RuntimeError):
+                    if not times:
+                        raise
+                    result = self._retry(lambda: self.tgt.files().create(
+                        body=body, fields="id", supportsAllDrives=True,
+                    ).execute())
             except (PermanentAPIError, RuntimeError) as exc:
                 self.db.log_audit(self.source_user, item["id"], "shortcut", "FAILED", str(exc))
                 self._bump("failed")

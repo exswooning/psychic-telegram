@@ -434,6 +434,14 @@ class ChatMigrator:
             else:
                 attributed = False   # app/bot message
 
+            # Drive links repointed at the copies, as mail and calendar do. Live:
+            # seeduser200's "Doc is here: <link>" crossed unchanged -- the only
+            # surface whose links still named the source after an ordered run.
+            if self.settings.rewrite_drive_links and text:
+                from link_rewrite import rewrite_text
+                text, hits = rewrite_text(text, self.db.target_for_source_id)
+                if hits:
+                    self.stats["links_rewritten"] = self.stats.get("links_rewritten", 0) + hits
             body = {"text": text if attributed
                     else f"[originally from {sender.get('name', 'unknown')}] {text}"}
             # When it was said, in an import-mode space -- the one place Chat
