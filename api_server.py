@@ -830,6 +830,7 @@ async def lifespan(_: FastAPI):
     watchdog = asyncio.create_task(_supervise_jobs())
     observer = asyncio.create_task(_watch_runs())
     mirrors = asyncio.create_task(_mirror_loop())
+    ends = asyncio.create_task(_lifecycle_loop())
     try:
         yield
     finally:
@@ -837,6 +838,7 @@ async def lifespan(_: FastAPI):
         watchdog.cancel()
         observer.cancel()
         mirrors.cancel()
+        ends.cancel()
 
 
 app = FastAPI(title="Migration Command Center", version="1.0", lifespan=lifespan)
@@ -1176,10 +1178,41 @@ async def approve_migration_complete(body: ApproveComplete, op: Operator = Depen
         using = gcloud_signout.busy()
         if using:
             return False, f"a setup is using a gcloud sign-in right now ({using}) -- approve once it ends"
+        import lifecycle
         gone = gcloud_signout.sign_out_all()
-        return True, (f"migration for account {aid} approved as complete; gcloud signed out of: "
+        st = lifecycle.approve(aid, op.name)
+        return True, (f"migration for account {aid} approved as complete; teardown due "
+                      f"{st.get('teardown_due_at') or '--'}; gcloud signed out of: "
                       + (", ".join(gone) if gone else "nothing -- no sign-in was held"))
     return await _gated(op, "migration.approve_complete", body, f"account:{aid}", _approve,
+                        extra_check=require_superadmin)
+
+
+@app.get("/api/v2/lifecycle")
+async def lifecycle_view(account_id: int | None = None, op: Operator = Depends(operator)):
+    """Where this pair is in its end of life, and exactly what its teardown will do."""
+    require_reader(op)
+    import lifecycle
+    aid = account_id if (account_id and op.is_superadmin) else op.account_id
+
+    def _read() -> dict:
+        return {"accountId": aid, "state": lifecycle.state(aid) if aid else {},
+                "plan": lifecycle.plan(aid) if aid else [],
+                "autoApproveDays": lifecycle.AUTO_APPROVE_DAYS,
+                "teardownDays": lifecycle.TEARDOWN_DAYS}
+    return await _off_loop(_read)
+
+
+@app.post("/api/v2/lifecycle/undo")
+async def lifecycle_undo(body: ApproveComplete, op: Operator = Depends(operator)):
+    """Take an approval back -- a re-run is wanted -- so no teardown is due."""
+    import lifecycle
+    aid = body.account_id or op.account_id
+
+    def _undo() -> tuple[bool, str]:
+        return (True, f"approval for account {aid} taken back; no teardown is due") \
+            if lifecycle.undo(aid) else (False, "nothing to undo: not approved, or already torn down")
+    return await _gated(op, "migration.undo_approval", body, f"account:{aid}", _undo,
                         extra_check=require_superadmin)
 
 
@@ -2240,6 +2273,7 @@ async def tally_run(body: RunVerification, op: Operator = Depends(operator)):
 # live in the control plane (mirror_scheduler.py); cycles, held deletions and
 # conflicts in the account's own ledger. A cycle is always the job "mirror".
 MIRROR_POLL_SEC = 60
+LIFECYCLE_POLL_SEC = 3600       # lifecycle.sweep: approvals, teardowns, orphaned sign-ins
 
 
 def _mirror_busy(account_id: int | None) -> bool:
@@ -3647,6 +3681,9 @@ class StartFullSetup(WriteAction):
     # WHOLE if any requested scope is ungranted, so deselecting a required
     # one would not narrow the migration, it would break it.
     scopes: list[str] = Field(default_factory=list)
+    # Keep this admin login on the server (root-only file) so the automatic teardown
+    # can sign in unattended -- the operator's policy, 2026-10-04. Deleted at teardown.
+    keep_login: bool = True
 
 
 def _identity_map_log_path(account_id: int | None) -> str:
@@ -3732,6 +3769,10 @@ async def full_setup_start(body: StartFullSetup, op: Operator = Depends(operator
 
         env = dict(os.environ)
         env["DWD_PASSWORD"] = body.admin_password
+        if body.keep_login and not body.dry_run and setup_account is not None:
+            import admin_secrets
+            admin_secrets.save_teardown_login(setup_account, body.side, body.admin_email,
+                                              body.admin_password)
         # Truncate any previous result first, same reasoning as gcp-provision:
         # a stale file would be served as this run's progress until gcloud
         # produces its first byte. A stale .progress is worse than a stale
@@ -3906,27 +3947,54 @@ async def full_setup_status(side: str, account: int | None = None,
 # tenant's project by guessing an id.
 # ======================================================================
 def _key_in_use(project: str, client_id: str) -> str:
-    """Which configured tenant still uses this project or client, or "". Every
-    account's keys on file, and every seed key (seed-sa.json) beside them."""
-    import glob
-    project, client_id = (project or "").strip(), (client_id or "").strip()
-    with cpdb.ro() as conn:
-        rows = conn.execute("SELECT account_id, side, domain, sa_key_path FROM tenant_configs "
-                            "WHERE sa_key_path IS NOT NULL AND sa_key_path != ''").fetchall()
-    keys = [(r["sa_key_path"], f"{r['domain']} ({r['side']}, account {r['account_id']})")
-            for r in rows]
-    keys += [(p, f"the seed key {p}") for p in glob.glob(os.path.join(HERE, "keys", "*", "seed-sa.json"))]
-    for path, who in keys:
+    """Which configured tenant still uses this project or client, or "". The same
+    question the automatic teardown asks (lifecycle.key_in_use), so they agree."""
+    import lifecycle
+    return lifecycle.key_in_use(project, client_id)
+
+
+def _teardown_side(project: str, client_id: str, admin_email: str, admin_password: str) -> dict:
+    """One side of an automatic teardown (lifecycle.sweep): teardown_tenant.py, the same
+    script GCP Teardown runs, waited for. The password goes in the child's environment
+    only, never argv."""
+    argv = [PY, "teardown_tenant.py", "--admin", admin_email, "--json"]
+    if project:
+        argv += ["--project", project]
+    if client_id:
+        argv += ["--client-id", client_id]
+    env = dict(os.environ, DWD_PASSWORD=admin_password)
+    try:
+        p = subprocess.run(argv, cwd=HERE, env=env, capture_output=True, text=True,
+                           timeout=1800, stdin=subprocess.DEVNULL)
+        res = json.loads(p.stdout or "{}")
+    except (subprocess.TimeoutExpired, ValueError) as exc:
+        return {"ok": False, "detail": f"teardown did not finish: {exc}"[:300]}
+    phases = "; ".join(f"{x.get('name')}: {x.get('status')}" for x in res.get("phases") or [])
+    return {"ok": bool(res.get("ok")), "detail": phases or (p.stderr or "")[-300:]}
+
+
+async def _lifecycle_loop() -> None:
+    """The end-of-life policy, once an hour (lifecycle.sweep)."""
+    import lifecycle
+    import run_watch
+
+    def busy(aid: int) -> bool:
+        return any(j.get("account_id") == aid for j in job_admission.list_active())
+    while True:
         try:
-            with open(path, encoding="utf-8") as fh:
-                k = json.load(fh)
-        except (OSError, ValueError):
-            continue
-        if project and k.get("project_id") == project:
-            return f"project {project} holds the key of {who}"
-        if client_id and k.get("client_id") == client_id:
-            return f"client {client_id} is the key of {who}"
-    return ""
+            await asyncio.sleep(LIFECYCLE_POLL_SEC)
+            for line in await _off_loop(lifecycle.sweep, busy, _teardown_side):
+                log.info("lifecycle: %s", line)
+                if "incomplete" in line:
+                    # The account id leads the line ("account 7: teardown incomplete ...").
+                    aid = int(line.split()[1].rstrip(":")) if line.startswith("account ") else None
+                    await _off_loop(lambda: run_watch.open_incident(
+                        kind="teardown", title="Automatic teardown incomplete", summary=line,
+                        account_id=aid, job_name="teardown", fingerprint=f"teardown-{aid}"))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:      # noqa: BLE001 - the loop must outlive a bad pass
+            log.warning("lifecycle sweep failed: %r", exc)
 
 
 class StartTeardown(WriteAction):

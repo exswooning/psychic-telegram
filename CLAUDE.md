@@ -575,3 +575,17 @@ run-shard` children, each a disjoint slice of the users (`MIGRATE_SHARD=k/n`), e
 sized to 1/n of the RAM and of the learned project rate (`PROCESS_SHARE`). The parent
 keeps the admission slot, the PASS markers, the memory watchdog and Stop (forwarded as
 SIGINT); a child whose parent dies kills itself.
+
+**A pair's end of life is policy, run hourly by the API** (`lifecycle.py`, `_lifecycle_loop`;
+the operator's choices, 2026-10-04). Final Report → *Approve as complete* (or, with no
+`migrate`/`delta` run for `AUTO_APPROVE_DAYS`=30 counted from when the sweep first saw the
+account, approval on its own) revokes every gcloud sign-in on the box (`gcloud_signout`) and
+sets a teardown `TEARDOWN_DAYS`=30 later: each side's Cloud project deleted and delegation
+revoked through `teardown_tenant.py`, signed in with the admin login the setup kept
+(`StartFullSetup.keep_login`, default on → `admin_secrets.save_teardown_login`, root-only JSON
+under `/etc/bitport/teardown/`), then the account's key files, the kept logins, and gcloud.
+It never acts while one of the account's jobs runs, and never tears down a project or client
+another account's key uses (`lifecycle.key_in_use`, which `_key_in_use` also answers) --
+accounts share projects. A side with no kept login is left and reported (incident), retried
+daily. Every sweep also revokes per-setup gcloud configs older than 24 h (a setup that died
+left them: one sat signed in as an old tenant's admin from August to October).

@@ -88,3 +88,45 @@ def missing(side: str, settings=None, path: str | None = None) -> str:
         return (f"no password on file for {who} "
                 f"(set DWD_PASSWORD_{side.upper()} in {ENV_FILE})")
     return ""
+
+
+# -- the admin logins a tenant's automatic teardown signs in with ------------------
+#
+# Kept per account and side, set at setup when the operator ticks "keep this login"
+# (the operator's policy, 2026-10-04: teardown runs unattended). JSON, not KEY=VALUE:
+# a password may end in a space or hold any character, and _load() strips values.
+# Deleted with the rest of the pair at teardown (lifecycle.py).
+LOGIN_DIR = os.getenv("BITPORT_TEARDOWN_LOGINS", "/etc/bitport/teardown")
+
+
+def _login_path(account_id: int, side: str) -> str:
+    if side not in ("source", "target"):
+        raise ValueError(f"side must be source or target, got {side!r}")
+    return os.path.join(LOGIN_DIR, f"{int(account_id)}-{side}.json")
+
+
+def save_teardown_login(account_id: int, side: str, email: str, password: str) -> None:
+    import json
+    os.makedirs(LOGIN_DIR, mode=0o700, exist_ok=True)
+    fd = os.open(_login_path(account_id, side), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump({"email": email, "password": password}, fh)
+
+
+def teardown_login(account_id: int, side: str) -> tuple[str, str]:
+    """(email, password), or ("", "") when none was kept."""
+    import json
+    try:
+        with open(_login_path(account_id, side), encoding="utf-8") as fh:
+            d = json.load(fh)
+        return d.get("email") or "", d.get("password") or ""
+    except (OSError, ValueError):
+        return "", ""
+
+
+def forget_teardown_logins(account_id: int) -> None:
+    for side in ("source", "target"):
+        try:
+            os.remove(_login_path(account_id, side))
+        except OSError:
+            pass

@@ -1,32 +1,76 @@
 import React, { useEffect, useState } from 'react'
-import { Alert, Button, Chip, Paper, Stack, Typography } from '@mui/material'
-import { approveMigrationComplete, fetchGcloudIdentities, GcloudIdentity } from '@/api/controlPlane'
+import { Alert, Box, Button, Chip, Paper, Stack, Typography } from '@mui/material'
+import {
+  approveMigrationComplete, fetchGcloudIdentities, fetchLifecycle, GcloudIdentity,
+  LifecycleView, undoApproval,
+} from '@/api/controlPlane'
 import ReasonCodeDialog from './ReasonCodeDialog'
 
+const day = (iso?: string | null) => (iso ? new Date(iso).toLocaleString() : '--')
+const daysUntil = (iso?: string | null) =>
+  iso ? Math.max(0, Math.ceil((new Date(iso).getTime() - Date.now()) / 86_400_000)) : null
+
 /**
- * The sign-off that a migration is finished, which also signs gcloud out of this
- * server: a tenant admin's sign-in must not outlive the migration it was for (live,
- * one had sat in /tmp since August). The next tenant's setup signs in fresh as that
- * tenant's own admin. Shows who is signed in now, so a stale one is seen, not found.
+ * A migration's end of life (lifecycle.py). Approving it -- or, if nobody does, its
+ * own approval after a quiet spell -- signs gcloud out of this server and sets the
+ * teardown due: each side's Cloud project deleted and delegation revoked (with the
+ * admin login kept at setup), then its keys. What will go, and what is left because
+ * another account still uses it, is listed before it happens.
  */
 const ApproveComplete: React.FC = () => {
   const [held, setHeld] = useState<GcloudIdentity[] | null>(null)
-  const [asking, setAsking] = useState(false)
+  const [life, setLife] = useState<LifecycleView | null>(null)
+  const [asking, setAsking] = useState<'approve' | 'undo' | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [done, setDone] = useState<string | null>(null)
   const load = () => {
     fetchGcloudIdentities().then((r) => setHeld(r.identities)).catch(() => setHeld(null))
+    fetchLifecycle().then(setLife).catch(() => setLife(null))
   }
   useEffect(() => { load() }, [])
   const accounts = (held ?? []).flatMap((h) => h.accounts)
+  const st = life?.state ?? {}
+  const due = daysUntil(st.teardown_due_at)
 
   return (
     <Paper variant="outlined" sx={{ p: 2, mb: 3 }} data-testid="approve-complete">
       <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>Approve this migration as complete</Typography>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-        Revokes every gcloud sign-in this server holds. The next tenant&apos;s setup signs in
-        again as that tenant&apos;s own admin.
-      </Typography>
+
+      {st.torn_down_at ? (
+        <Alert severity="info" sx={{ my: 1 }}>Torn down {day(st.torn_down_at)}.</Alert>
+      ) : st.approved_at ? (
+        <Alert severity="warning" sx={{ my: 1 }} data-testid="teardown-due">
+          Approved {day(st.approved_at)} {st.approved_by === 'auto' ? '(automatically, after no run)' : `by ${st.approved_by}`}.
+          Teardown {due === 0 ? 'is due now' : `in ${due} day${due === 1 ? '' : 's'}`} ({day(st.teardown_due_at)}).
+        </Alert>
+      ) : (
+        <Typography variant="body2" color="text.secondary" sx={{ my: 1 }}>
+          Approving signs gcloud out of this server and tears the pair down
+          {life ? ` ${life.teardownDays} days later` : ' later'}. If no run happens
+          for {life ? life.autoApproveDays : '--'} days it is approved automatically.
+        </Typography>
+      )}
+
+      {life && life.plan.length > 0 && !st.torn_down_at && (
+        <Box sx={{ mb: 1.5 }} data-testid="teardown-plan">
+          <Typography variant="caption" color="text.secondary">The teardown will:</Typography>
+          {life.plan.map((s) => (
+            <Typography key={s.side} variant="body2" sx={{ ml: 1 }}>
+              {s.side} ({s.domain}):{' '}
+              {s.leftBecause
+                ? <>leave project {s.project || '--'} — {s.leftBecause}</>
+                : !s.project && !s.clientId
+                  ? <>no key on file</>
+                  : <>delete project {s.project}, revoke delegation {s.clientId}{' '}
+                      {s.loginKept
+                        ? <Chip size="small" color="success" variant="outlined" label={`login kept (${s.adminEmail})`} />
+                        : <Chip size="small" color="warning" variant="outlined" label="no login kept — needs GCP Teardown by hand" />}</>}
+            </Typography>
+          ))}
+          <Typography variant="body2" sx={{ ml: 1 }}>then delete this account&apos;s key files and sign gcloud out.</Typography>
+        </Box>
+      )}
+
       {held && (
         <Stack direction="row" sx={{ flexWrap: 'wrap', gap: 0.75, mb: 1.5 }} alignItems="center"
                data-testid="gcloud-held">
@@ -36,23 +80,37 @@ const ApproveComplete: React.FC = () => {
             : <Typography variant="caption">nobody is signed in</Typography>}
         </Stack>
       )}
-      <Button variant="outlined" size="small" onClick={() => setAsking(true)}
-              data-testid="approve-complete-go">
-        Approve as complete
-      </Button>
+
+      {!st.torn_down_at && (
+        <Stack direction="row" spacing={1}>
+          <Button variant="outlined" size="small" onClick={() => setAsking('approve')}
+                  data-testid="approve-complete-go">
+            {st.approved_at ? 'Approve again (sign gcloud out)' : 'Approve as complete'}
+          </Button>
+          {st.approved_at && (
+            <Button size="small" onClick={() => setAsking('undo')} data-testid="undo-approval">
+              Undo approval
+            </Button>
+          )}
+        </Stack>
+      )}
       {done && <Alert severity="success" sx={{ mt: 1.5 }} onClose={() => setDone(null)}>{done}</Alert>}
+
       <ReasonCodeDialog
-        open={asking} error={err}
-        title="Approve this migration as complete"
-        description={<>Revokes every gcloud sign-in on this server
-          {accounts.length ? <> ({accounts.join(', ')})</> : null}. Refused while a setup, or a
-          job of this account, is still running.</>}
-        onCancel={() => { setAsking(false); setErr(null) }}
+        open={!!asking} error={err}
+        title={asking === 'undo' ? 'Take the approval back' : 'Approve this migration as complete'}
+        description={asking === 'undo'
+          ? <>No teardown will be due until it is approved again — for a re-run.</>
+          : <>Revokes every gcloud sign-in on this server{accounts.length ? <> ({accounts.join(', ')})</> : null}
+              {' '}and sets the teardown above due in {life ? life.teardownDays : '--'} days.
+              Refused while a setup, or a job of this account, is still running.</>}
+        destructive={asking === 'approve'}
+        onCancel={() => { setAsking(null); setErr(null) }}
         onConfirm={async (reason) => {
           try {
-            const r = await approveMigrationComplete(reason)
+            const r = asking === 'undo' ? await undoApproval(reason) : await approveMigrationComplete(reason)
             if (!r.ok) throw new Error(r.detail)
-            setDone(r.detail); setAsking(false); setErr(null); load()
+            setDone(r.detail); setAsking(null); setErr(null); load()
           } catch (e) {
             setErr(e instanceof Error ? e.message : String(e))
           }

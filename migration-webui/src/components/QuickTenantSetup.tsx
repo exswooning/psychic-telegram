@@ -305,6 +305,7 @@ const QuickTenantSetup: React.FC<{
   const [password, setPassword] = useState(initialPassword ?? '')
   const [orgId, setOrgId] = useState('')
   const [dryRun, setDryRun] = useState(true)
+  const [keepLogin, setKeepLogin] = useState(true)
   const [authDialogOpen, setAuthDialogOpen] = useState(false)
   const navigate = useNavigate()
   const [seed, setSeed] = useState(false)
@@ -450,7 +451,7 @@ const QuickTenantSetup: React.FC<{
       // not thrown by cpFetch -- only a non-2xx status is. Has to be
       // checked explicitly, same reason as JobController.tsx's askStart.
       const r = await startFullSetup(reason, side, domain.trim(), email.trim(), password, {
-        orgId: orgId.trim(), dryRun,
+        orgId: orgId.trim(), dryRun, keepLogin,
         seed: showSeedOptions ? seed : false, seedScale,
         createUsers: showSeedOptions ? createUsers : false,
         provisionUsers: showProvisionUsers ? provisionUsers : false,
@@ -938,6 +939,14 @@ const QuickTenantSetup: React.FC<{
             password={password} setPassword={setPassword}
             orgId={orgId} setOrgId={setOrgId}
             dryRun={dryRun} setDryRun={setDryRun}
+            extraOptions={
+              <FormControlLabel
+                sx={{ color: G_TEXT_DIM, '& .MuiTypography-root': { fontSize: 14 } }}
+                control={<Switch size="small" checked={keepLogin}
+                                 onChange={(e) => setKeepLogin(e.target.checked)}
+                                 inputProps={{ 'data-testid': 'keep-login' } as never} />}
+                label="Keep this admin login on the server for the automatic teardown (root-only; deleted at teardown)"
+              />}
             canSubmit={!!canLaunch}
             submitLabel={status?.running ? 'Running…' : dryRun ? 'Preview' : `Set up ${side}`}
             onSubmit={() => { setAuthDialogOpen(false); setAsk(true) }}

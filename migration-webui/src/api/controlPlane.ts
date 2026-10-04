@@ -158,6 +158,28 @@ export const createAccount = (email: string, password: string, name: string, rea
 
 export interface GcloudIdentity { config: string; accounts: string[] }
 
+export interface TeardownSide {
+  side: string; domain: string; project: string; clientId: string; keyFile: string
+  loginKept: boolean; adminEmail: string; leftBecause: string
+}
+export interface LifecycleView {
+  accountId: number | null
+  state: { approved_at?: string | null; approved_by?: string | null; teardown_due_at?: string | null
+           torn_down_at?: string | null; last_result?: string | null; first_seen_at?: string }
+  plan: TeardownSide[]
+  autoApproveDays: number; teardownDays: number
+}
+
+/** Where this pair is in its end of life, and what its teardown will do. */
+export const fetchLifecycle = () => cpFetch<LifecycleView>('/api/v2/lifecycle')
+
+/** Take an approval back (a re-run is wanted), so no teardown is due. Superadmin only. */
+export const undoApproval = (reason: string, accountId?: number) =>
+  cpFetch<ActionResult>('/api/v2/lifecycle/undo', {
+    method: 'POST',
+    body: JSON.stringify({ reason, account_id: accountId }),
+  })
+
 /** Which gcloud sign-ins this server holds. Superadmin only. */
 export const fetchGcloudIdentities = () =>
   cpFetch<{ identities: GcloudIdentity[] }>('/api/v2/gcloud/identities')
@@ -636,6 +658,9 @@ export const startFullSetup = (
      *  the server regardless -- omitting one does not narrow the migration,
      *  it breaks it. */
     scopes?: string[]
+    /** Keep this admin login on the server (root-only file) so the automatic
+     *  teardown can sign in unattended. Server default: true. */
+    keepLogin?: boolean
   } = {},
 ) =>
   cpFetch<ActionResult>('/api/v2/full-setup/start', {
@@ -650,6 +675,7 @@ export const startFullSetup = (
       reprovision: opts.reprovision ?? false,
       confirm_domain: opts.confirmDomain ?? '',
       scopes: opts.scopes ?? [],
+      keep_login: opts.keepLogin ?? true,
     }),
   })
 

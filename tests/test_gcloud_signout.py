@@ -41,3 +41,34 @@ class TestApprovingAMigrationSignsGcloudOut:
     def test_only_a_superadmin(self, cp):
         _signed_in(cp, "plain2@example.com")
         assert cp.post("/api/v2/migrations/approve", json={"reason": "x done"}).status_code == 403
+
+
+class TestTheLifecycleThroughThePage:
+    def test_approval_sets_a_teardown_date_and_undo_takes_it_back(self, cp, monkeypatch):
+        _signed_in(cp, "boss6@example.com", superadmin=True)
+        monkeypatch.setattr(gcloud_signout, "busy", lambda: "")
+        monkeypatch.setattr(gcloud_signout, "sign_out_all", lambda: [])
+        r = cp.post("/api/v2/migrations/approve", json={"reason": "client done"})
+        assert r.json()["ok"] and "teardown due" in r.json()["detail"], r.text
+        v = cp.get("/api/v2/lifecycle").json()
+        assert v["state"]["approved_by"] and v["state"]["teardown_due_at"]
+        assert cp.post("/api/v2/lifecycle/undo", json={"reason": "re-run wanted"}).json()["ok"]
+        assert not cp.get("/api/v2/lifecycle").json()["state"]["teardown_due_at"]
+
+    def test_setup_keeps_the_admin_login_for_the_unattended_teardown(self, cp, monkeypatch, tmp_path):
+        import admin_secrets
+        import api_server
+        me = _signed_in(cp, "boss7@example.com", superadmin=True)
+        monkeypatch.setattr(admin_secrets, "LOGIN_DIR", str(tmp_path))
+
+        class Proc:
+            pid = 1
+            def wait(self):
+                return 0
+        monkeypatch.setattr(api_server.subprocess, "Popen", lambda *a, **k: Proc())
+        r = cp.post("/api/v2/full-setup/start", json={
+            "reason": "client setup", "side": "source", "domain": "c.example.com",
+            "admin_email": "admin@c.example.com", "admin_password": "pw-123",
+            "dry_run": False, "account_id": me})
+        assert r.json()["ok"], r.text
+        assert admin_secrets.teardown_login(me, "source") == ("admin@c.example.com", "pw-123")
