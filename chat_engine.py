@@ -58,6 +58,19 @@ import uuid
 from google.auth.exceptions import RefreshError
 
 from config import Settings
+
+
+def _second_before(ts: str) -> str | None:
+    """RFC 3339 time one second earlier. Chat writes up to nanoseconds, which
+    fromisoformat (3.10) cannot read past microseconds, so the fraction is cut to six."""
+    from datetime import datetime, timedelta
+    import re
+    m = re.match(r"^(.*T\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})$", ts)
+    if not m:
+        return None
+    frac = (m.group(2) or ".0")[:7]
+    when = datetime.fromisoformat(m.group(1) + frac + ("+00:00" if m.group(3) == "Z" else m.group(3)))
+    return (when - timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 from sample_budget import Budget
 from resilience import (PermanentAPIError, RateLimiter, retry_on_google_error,
                         shutdown_requested)
@@ -141,11 +154,14 @@ class ChatMigrator:
                 return
 
     def _first_message_time(self, space_name: str) -> str | None:
-        """The oldest message's createTime, for a space that has none of its own."""
+        """A second before the oldest message, for a space that has none of its own:
+        a message must be strictly AFTER its space -- live, a space dated exactly at
+        its first message still had that message refused (400 INVALID_ARGUMENT)."""
         try:
-            return next(iter(self._iter_messages(space_name)), {}).get("createTime")
+            first = next(iter(self._iter_messages(space_name)), {}).get("createTime")
         except Exception:      # noqa: BLE001 - no date is the old behaviour, not a failure
             return None
+        return _second_before(first) if first else None
 
     def _iter_messages(self, space_name: str):
         """Oldest first: with no usable createTime, arrival order is the only

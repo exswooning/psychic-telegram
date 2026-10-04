@@ -199,7 +199,8 @@ def test_a_space_with_no_time_of_its_own_is_dated_at_its_first_message(chat_migr
     _seed_conversation(auth, db)
     chat_migrator.run()
     created = auth.target_chat(TGT_USER).calls_to("spaces.create")
-    assert created and created[0]["body"].get("createTime") == "2024-01-01T00:00:00Z"
+    # A second BEFORE it: a message dated exactly at its space was refused too.
+    assert created and created[0]["body"].get("createTime") == "2023-12-31T23:59:59.000000Z"
     assert chat_migrator.stats["failed"] == 0
 
 
@@ -559,3 +560,11 @@ def test_drive_links_in_a_message_point_at_the_copies(chat_migrator, auth, db, s
     assert posted and "TGTDOC9876543210" in posted[0]["text"]
     assert "SRCDOC123456789012345678901" not in posted[0]["text"]
     assert chat_migrator.stats.get("links_rewritten") == 1
+
+
+def test_second_before_reads_every_precision_chat_writes():
+    from chat_engine import _second_before
+    assert _second_before("2026-09-19T03:17:36.711295Z") == "2026-09-19T03:17:35.711295Z"
+    assert _second_before("2026-09-19T03:17:36.711295123Z") == "2026-09-19T03:17:35.711295Z"
+    assert _second_before("2026-09-19T03:17:36Z") == "2026-09-19T03:17:35.000000Z"
+    assert _second_before("not a time") is None

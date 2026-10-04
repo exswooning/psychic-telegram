@@ -326,3 +326,32 @@ def test_a_wipe_counts_users_for_the_jobs_page(monkeypatch, capsys):
     assert webui._counter_progress_pct(lines[:1]) == 0
     assert webui._counter_progress_pct(lines[:2]) == 33.33
     assert webui._counter_progress_pct(lines) == 100
+
+
+
+def test_chat_spaces_the_ledger_made_are_deleted_by_id(tmp_path):
+    """A migrated DM or group chat has no name, so the name-based reset never matched
+    it and every reset-and-rerun left another copy (three of seeduser200's, 2026-10-04)."""
+    from db import MigrationDB
+    path = str(tmp_path / "l.db")
+    db = MigrationDB(path)
+    with db.write() as conn:
+        conn.execute("INSERT INTO identity_map(source_email, target_email, entity_type, status) "
+                     "VALUES ('u@a.example.com', 'u@b.example.com', 'user', 'DONE')")
+    db.record_mapping("u@a.example.com", "spaces/SRC1", "spaces/TGT1", "chat_space")
+    db.record_mapping("u@a.example.com", "spaces/SRC2", "spaces/GONE", "chat_space")
+    deleted = []
+
+    class Chat:
+        def spaces(self): return self
+        def delete(self, name):
+            class C:
+                def execute(s):
+                    if name == "spaces/GONE":
+                        raise RuntimeError("HTTP 404 NOT_FOUND")
+                    deleted.append(name)
+            return C()
+    st = settings(); st.db_path = path
+    auth = type("A", (), {"target_chat": lambda self, u: Chat()})()
+    assert reset_target._delete_ledger_spaces(st, auth, "u@b.example.com") == 1
+    assert deleted == ["spaces/TGT1"]

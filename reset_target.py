@@ -211,8 +211,36 @@ def reset_one(settings: Settings, auth: AuthManager, user: str,
             out["chat"] = seed.reset_chat(auth.target_chat(user), settings, local)
         except Exception as exc:  # noqa: BLE001 - Chat is frequently switched off
             print(f"    ! {user} chat: {str(exc)[:90]}")
+        out["chat"] += _delete_ledger_spaces(settings, auth, user)
     out["unreachable"] = sorted(unreachable)
     return out
+
+
+def _delete_ledger_spaces(settings: Settings, auth: AuthManager, target_user: str) -> int:
+    """The Chat spaces the ledger says were made for this user, by id. A migrated
+    direct message or group chat has no name, so the seeder's name-based reset never
+    matched it, and every reset-and-rerun left another copy (three of seeduser200's
+    Drive-app DM, 2026-10-04). A space the name-based pass already removed answers 404."""
+    import sqlite3
+    try:
+        conn = sqlite3.connect(f"file:{settings.db_path}?mode=ro", uri=True)
+        ids = [r[0] for r in conn.execute(
+            "SELECT m.target_id FROM id_mapping m JOIN identity_map i ON i.source_email = m.source_user "
+            "WHERE lower(i.target_email) = lower(?) AND m.type = 'chat_space'", (target_user,))]
+        conn.close()
+    except Exception:  # noqa: BLE001 - no ledger to read is nothing to delete
+        return 0
+    if not ids:
+        return 0
+    chat, n = auth.target_chat(target_user), 0
+    for name in ids:
+        try:
+            chat.spaces().delete(name=name).execute()
+            n += 1
+        except Exception as exc:  # noqa: BLE001 - gone already, or not this user's to delete
+            if "404" not in str(exc) and "NOT_FOUND" not in str(exc):
+                print(f"    ! {target_user} chat space {name}: {str(exc)[:90]}")
+    return n
 
 
 def main(argv: list[str] | None = None) -> int:
