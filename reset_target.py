@@ -25,6 +25,8 @@ Exactly what `seed_sandbox.reset_*` removes, run with target credentials:
             copies the source's, so each cycle would otherwise stack another pair)
   Calendar  the seeded calendars and events
   Chat      the seeded spaces
+  Contacts  the seeded contacts and the seeder's two groups
+  Tasks     the seeded task lists
 
 The same three guards as the seeder, checked against TARGET_DOMAIN:
 SANDBOX_MODE=true, a typed --confirm-domain, and the PROTECTED_DOMAINS list.
@@ -115,7 +117,11 @@ def assert_sandbox(settings: Settings, confirm_domain: str,
     print(f"Sandbox guard passed for {domain} ({side}).")
 
 
-ALL_SERVICES = ("drive", "gmail", "calendar", "chat")
+# contacts and tasks too: without them a reset-and-rerun left a user's migrated
+# contacts and tasks on the target, and the next migration added a second set beside
+# them (seeduser200's 1:1 rerun, 2026-10-04). The seeder's own resets delete only
+# what carries its marker, as migrated copies do.
+ALL_SERVICES = ("drive", "gmail", "calendar", "chat", "contacts", "tasks")
 
 # What Google puts in every new mailbox ("Tips for using your new inbox", "Get the official Gmail
 # app"). The seeder's own reset only trashes @seed.test mail, so these survive it -- and the source
@@ -173,12 +179,15 @@ def reset_one(settings: Settings, auth: AuthManager, user: str,
     seed = _load_seeder()
 
     local = user.split("@")[0]
-    out = {"user": user, "drive": 0, "gmail": 0, "calendar": 0, "chat": 0}
+    out = {"user": user, "drive": 0, "gmail": 0, "calendar": 0, "chat": 0,
+           "contacts": 0, "tasks": 0}
     unreachable = set()
     for key, fn, svc in (
         ("drive", seed.reset_drive, auth.target_drive),
         ("gmail", seed.reset_gmail, auth.target_gmail),
         ("calendar", seed.reset_calendar, auth.target_calendar),
+        ("contacts", seed.reset_contacts, auth.target_people),
+        ("tasks", seed.reset_tasks, auth.target_tasks),
     ):
         if key not in services:
             continue

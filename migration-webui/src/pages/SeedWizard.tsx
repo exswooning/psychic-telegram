@@ -784,7 +784,7 @@ export const ResetTargetStep: React.FC<{ domain?: string }> = ({ domain }) => {
     <Box>
       {domain && <DomainSandboxToggle domain={domain} />}
       <Alert severity="error" sx={{ mb: 2 }}>
-        Empties the TARGET tenant's seeded Drive/Gmail/Calendar/Chat data --
+        Empties the TARGET tenant's seeded Drive/Gmail/Calendar/Chat/Contacts/Tasks data --
         not the ledger, and never the source. Do this before a clean re-test,
         not after a real migration you want to keep.
       </Alert>
@@ -830,8 +830,8 @@ export const ResetTargetStep: React.FC<{ domain?: string }> = ({ domain }) => {
         <DialogTitle>Empty {confirmDomain}?</DialogTitle>
         <DialogContent>
           <Typography variant="body2">
-            This deletes the seeded Drive files, mail, calendar events and chat
-            spaces reset_target.py can find for {users.trim()
+            This deletes the seeded Drive files, mail, calendar events, chat
+            spaces, contacts and task lists reset_target.py can find for {users.trim()
               ? <strong>{users.trim()}</strong> : 'every mapped user in this tenant'}
             {services.trim() ? <> ({services.trim()} only)</> : null}. It does
             not touch the source tenant or the migration ledger.

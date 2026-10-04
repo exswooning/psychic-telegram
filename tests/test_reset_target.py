@@ -98,8 +98,9 @@ class TestSelectiveServiceReset:
         calls = []
         monkeypatch.setattr(reset_target, "_load_seeder", lambda: _fake_seeder(calls))
         out = reset_target.reset_one(settings(), _FakeAuth(), "a@a.example.com")
-        assert calls == ["drive", "gmail", "calendar", "chat"]
+        assert calls == ["drive", "gmail", "calendar", "contacts", "tasks", "chat"]
         assert out["drive"] == out["gmail"] == out["calendar"] == out["chat"] == 1
+        assert out["contacts"] == out["tasks"] == 1      # a rerun must not double them
 
     def test_services_drive_only_touches_nothing_else(self, monkeypatch):
         calls = []
@@ -108,18 +109,18 @@ class TestSelectiveServiceReset:
                                      services=("drive",))
         assert calls == ["drive"]
         assert out["drive"] == 1
-        assert out["gmail"] == out["calendar"] == out["chat"] == 0
+        assert out["gmail"] == out["calendar"] == out["chat"] == out["contacts"] == out["tasks"] == 0
 
     def test_unknown_service_name_is_refused_at_the_cli(self):
         with pytest.raises(SystemExit, match="unknown service"):
             reset_target.main(["--confirm-domain", "a.example.com",
                               "--services", "drive,carrier-pigeon"])
 
-    def test_services_argument_defaults_to_all_four_in_help(self):
+    def test_services_argument_defaults_to_every_service(self):
         """The flag exists to narrow scope, not to require it on every call
         -- an operator who never heard of --services must get today's
         full-wipe behavior unchanged."""
-        assert reset_target.ALL_SERVICES == ("drive", "gmail", "calendar", "chat")
+        assert reset_target.ALL_SERVICES == ("drive", "gmail", "calendar", "chat", "contacts", "tasks")
 
 
 class _FakeGmail:
@@ -182,6 +183,8 @@ class TestGoogleWelcomeMail:
             def reset_gmail(self, svc, st): raise RuntimeError("invalid_grant")
             def reset_calendar(self, svc, st): return 0
             def reset_chat(self, svc, st, local): return 0
+            def reset_contacts(self, svc, st): return 0
+            def reset_tasks(self, svc, st): return 0
         swept = []
         monkeypatch.setattr(reset_target, "_load_seeder", lambda: Seed())
         monkeypatch.setattr(reset_target, "trash_google_welcome_mail", lambda g: swept.append(g) or 1)
@@ -193,7 +196,7 @@ class TestGoogleWelcomeMail:
         monkeypatch.setattr(reset_target, "_load_seeder", lambda: _fake_seeder(calls))
         monkeypatch.setattr(reset_target, "trash_google_welcome_mail", lambda g: 1 / 0)
         out = reset_target.reset_one(settings(), _FakeAuth(), "a@a.example.com")
-        assert calls == ["drive", "gmail", "calendar", "chat"] and out["chat"] == 1
+        assert calls == ["drive", "gmail", "calendar", "contacts", "tasks", "chat"] and out["chat"] == 1
 
 
 class _FakeAuth:
@@ -208,6 +211,12 @@ class _FakeAuth:
 
     def target_chat(self, user):
         return ("chat", user)
+
+    def target_people(self, user):
+        return ("people", user)
+
+    def target_tasks(self, user):
+        return ("tasks", user)
 
 
 def _fake_seeder(calls: list):
@@ -226,6 +235,14 @@ def _fake_seeder(calls: list):
 
         def reset_chat(self, svc, settings, local):
             calls.append("chat")
+            return 1
+
+        def reset_contacts(self, svc, settings):
+            calls.append("contacts")
+            return 1
+
+        def reset_tasks(self, svc, settings):
+            calls.append("tasks")
             return 1
     return _Seed()
 
