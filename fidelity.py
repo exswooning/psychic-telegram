@@ -33,6 +33,7 @@ OPTIONAL = {
     "migrate_contacts": "MIGRATE_CONTACTS",
     "migrate_tasks": "MIGRATE_TASKS",
     "migrate_sso": "MIGRATE_SSO",
+    "migrate_form_links": "MIGRATE_FORM_LINKS",
 }
 
 # The passes this process switched off for a missing grant, for the processes

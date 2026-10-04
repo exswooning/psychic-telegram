@@ -374,6 +374,9 @@ def _is_unreachable_grantee(exc: Exception) -> bool:
     return any(m in text for m in _NO_ACCOUNT_MARKERS)
 
 
+FORM_MIME = "application/vnd.google-apps.form"
+
+
 def _named(item: dict, reason: str) -> str:
     """A skip no Google API can undo, with the file's NAME on its own first line: the
     ledger keys it by id, and "recreate these by hand" needs to say which file
@@ -2583,6 +2586,8 @@ class DriveMigrator:
         actually interrupted keeps the mark, so a ledger from before this existed reads as
         finished everywhere, as it always did.
         """
+        if item.get("mimeType") == FORM_MIME and self.settings.migrate_form_links:
+            self._note_form_link(item)
         shareable = item.get("shared") is not False      # an explicit False has nothing to share
         if shareable:
             self.db.mark_acl_pending(self.source_user, item["id"])
@@ -2617,6 +2622,23 @@ class DriveMigrator:
         self._apply_lock(target_id, item)
         if shareable and sharing_ran:
             self.db.clear_acl_pending(self.source_user, item["id"])
+
+    def _note_form_link(self, item: dict) -> None:
+        """Which Sheet this Form writes its responses to. The copy is linked to nothing,
+        and no API can link it (linkedSheetId is read-only; Apps Script's setDestination
+        cannot run as a delegated account), so the pair is recorded for a person to
+        relink -- Migration detail lists it. Read-only; never fails the item."""
+        try:
+            got = self._retry(lambda: self.auth.api("source", "forms", self.source_user)
+                              .forms().get(formId=item["id"], fields="linkedSheetId").execute(),
+                              label="forms.get")
+        except Exception as exc:      # noqa: BLE001 - a missing link note is not a lost file
+            log.info("[%s] could not read the responses Sheet of %s: %s",
+                     self.source_user, item.get("name"), exc)
+            return
+        if got.get("linkedSheetId"):
+            self.db.log_audit(self.source_user, item["id"], "form_link", "RELINK_BY_HAND",
+                              f"sheet: {got['linkedSheetId']}")
 
     def _apply_lock(self, target_id: str, item: dict) -> None:
         """Lock the copy the way the source is locked, last: a locked file refuses

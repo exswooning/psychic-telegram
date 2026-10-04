@@ -38,7 +38,9 @@ _API_VERSIONS = {"drive": "v3", "gmail": "v1", "calendar": "v3",
                  # A document's own API, for rebuilding a native file that
                  # is too large to export. Read-only on the source -- see
                  # native_api.py.
-                 "sheets": "v4", "docs": "v1", "slides": "v1"}
+                 "sheets": "v4", "docs": "v1", "slides": "v1",
+                 # A Form's responses Sheet (drive_engine._note_form_link). Read-only.
+                 "forms": "v1"}
 
 
 # One parsed discovery document per API, shared by every client built from it.

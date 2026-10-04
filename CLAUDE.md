@@ -545,7 +545,7 @@ did it (`dms_*.py`, `*_probe.py`) -- the approval was rebuilt once from guesses.
 
 **Full scope, always** (`fidelity.py`): every optional pass -- external-owned shares,
 secondary calendars, groups, Gmail settings, calendar ACLs, rooms, comments, chat,
-contacts, tasks, SSO profiles -- defaults ON in config.py. A run mints ONE token for every
+contacts, tasks, SSO profiles, form links -- defaults ON in config.py. A run mints ONE token for every
 scope and one ungranted scope fails every call, so: the launch probes each pass's extra
 scopes and writes it on or off (`plan`, named in the launch detail); the run's own gate
 (`main._gate_on_delegation`) tries scope_guard's unattended re-grant first and otherwise
@@ -590,3 +590,15 @@ runs, and never tears down a project or client another account's key uses
 with no kept login is left and reported (incident), retried daily. Every sweep also revokes
 per-setup gcloud configs older than 24 h (a setup that died left them: one sat signed in as
 an old tenant's admin from August to October).
+
+**What only a person can move is counted before a run and listed after it.** Sites, My
+Maps and Jamboards have no copy and no usable export (Drive's own `exportFormats`: a Site
+gives text only, the other two nothing), so they end `SKIPPED_UNEXPORTABLE` with the
+file's name as the record's first line (`drive_engine._named`); Migration detail lists them
+with source links and the header bell counts them (`api_server._uncopyable`). The source
+scan's `mime_histogram` already counted them per user -- Migration detail's "Only a person
+can do these" now shows that before a run (`_hand_work`), with what to do per type. A
+Form copies, but no API can link the copy to its responses Sheet (`linkedSheetId` is
+read-only), so the form-links pass (`MIGRATE_FORM_LINKS`, `forms.body.readonly` on the
+source) records each pair as `form_link`/`RELINK_BY_HAND` and the same panel lists both
+target copies to relink by hand (`_relinks`).

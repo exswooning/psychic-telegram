@@ -242,6 +242,20 @@ describe('MigrationDetail reports what was skipped', () => {
       .toBe('https://drive.google.com/open?id=site1')
   })
 
+  it('says before a run what only a person can move, and after it which forms to relink', async () => {
+    fetchMigrationDetail.mockResolvedValue(detail({
+      handWork: { scanned: 2, totals: { site: 1, map: 2, jam: 0, form: 1, oversized: 0 },
+                  users: [{ user: 'u@a.com', site: 1, map: 2, jam: 0, form: 1, oversized: 0 }] },
+      relink: [{ user: 'u@a.com', formName: 'Signup', formTargetId: 'TF', sheetName: 'Signup (Responses)', sheetTargetId: 'TS' }],
+    }))
+    render(<MigrationDetail />)
+    expect(await screen.findByTestId('hand-map')).toHaveTextContent('My Maps: 2 — no API at all')
+    expect(screen.queryByTestId('hand-jam')).toBeNull()
+    expect(screen.getByText('Signup').closest('a')?.getAttribute('href')).toBe('https://docs.google.com/forms/d/TF/edit')
+    expect(screen.getByText('Signup (Responses)').closest('a')?.getAttribute('href'))
+      .toBe('https://docs.google.com/spreadsheets/d/TS/edit')
+  })
+
   it('breaks the skips down by reason', async () => {
     fetchMigrationDetail.mockResolvedValue(detail({
       skipped: [

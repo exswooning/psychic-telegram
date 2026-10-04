@@ -53,7 +53,7 @@ from db import MigrationDB    # noqa: E402
 # tenants live), so clearing them costs no resumability.
 # `acl_pass` is the marker for an item whose sharing was started and not finished; it goes
 # with the items it describes.
-DRIVE_TYPES = ("folder", "file", "shortcut", "acl", "comment", "acl_pass")
+DRIVE_TYPES = ("folder", "file", "shortcut", "acl", "comment", "acl_pass", "form_link")
 
 # The ledger row types each service owns. Everything the engine writes to
 # id_mapping/audit_log has to appear here, or a reset leaves rows behind

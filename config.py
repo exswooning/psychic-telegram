@@ -193,6 +193,11 @@ SSO_WRITE_SCOPE = "https://www.googleapis.com/auth/cloud-identity.inboundsso"
 # consenting and an API that could forge one would be a vulnerability.
 TOKENS_READONLY_SCOPE = (
     "https://www.googleapis.com/auth/admin.directory.user.security")
+# Which Sheet a Form writes its responses to (forms.get -> linkedSheetId). Read-only.
+# The copy of a Form is not linked to the copy of its Sheet and no API can link it --
+# linkedSheetId is output-only, and Apps Script's setDestination cannot run as a
+# delegated account -- so the pairs are recorded for a person to relink.
+FORMS_READONLY_SCOPE = "https://www.googleapis.com/auth/forms.body.readonly"
 
 # Adding the original participants to a recreated space. Needed by both space
 # modes, for different reasons: under `direct` a user cannot post into a space
@@ -255,6 +260,8 @@ def source_scopes(settings: "Settings") -> list[str]:
         scopes.append(CALENDAR_ACLS_READONLY_SCOPE)
     if settings.migrate_resources:
         scopes.append(RESOURCE_READONLY_SCOPE)
+    if settings.migrate_form_links:
+        scopes.append(FORMS_READONLY_SCOPE)
     return scopes
 
 
@@ -834,6 +841,11 @@ class Settings:
     # admin running the migration, and a mistake locks the tenant out.
     migrate_sso: bool = field(
         default_factory=lambda: _env_bool("MIGRATE_SSO", True)
+    )
+    # Record each Form's responses Sheet, so the pair can be relinked by hand on the
+    # target (Migration detail lists them). Read-only on the source.
+    migrate_form_links: bool = field(
+        default_factory=lambda: _env_bool("MIGRATE_FORM_LINKS", True)
     )
     # Creating groups on the target. Reading them needs nothing extra --
     # admin.directory.group.readonly is already in the base scopes, which is

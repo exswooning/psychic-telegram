@@ -4413,6 +4413,63 @@ def _uncopyable(conn, limit: int = 200) -> tuple[int, list[dict]]:
     return n, out
 
 
+# What only a person can move, by Google type, with what to do -- the scan counts them
+# before a run (discovery's mime_histogram), so nobody meets them for the first time
+# after one.
+HAND_TYPES = {
+    "application/vnd.google-apps.site": "site",
+    "application/vnd.google-apps.map": "map",
+    "application/vnd.google-apps.jam": "jam",
+    "application/vnd.google-apps.form": "form",
+}
+
+
+def _hand_work(conn) -> dict:
+    """From each mapped user's latest source scan: Sites, My Maps and Jamboards (no
+    API can copy them), Forms (copied, but their responses Sheet has to be relinked by
+    hand) and Docs past the export ceiling (copied server-side; only download/upload
+    cannot). Totals plus the users who have any."""
+    rows = conn.execute(
+        "SELECT d.source_user, d.mime_histogram, d.oversized_native FROM discovery d "
+        "JOIN (SELECT source_user, MAX(scanned_at) ts FROM discovery GROUP BY source_user) x "
+        "ON d.source_user = x.source_user AND d.scanned_at = x.ts "
+        "WHERE EXISTS (SELECT 1 FROM identity_map m WHERE m.source_email = d.source_user)").fetchall()
+    totals = {k: 0 for k in (*HAND_TYPES.values(), "oversized")}
+    users = []
+    for r in rows:
+        try:
+            hist = json.loads(r["mime_histogram"] or "{}")
+        except ValueError:
+            hist = {}
+        mine = {kind: int(hist.get(mime, 0)) for mime, kind in HAND_TYPES.items()}
+        mine["oversized"] = int(r["oversized_native"] or 0)
+        for k, v in mine.items():
+            totals[k] += v
+        if any(mine.values()):
+            users.append({"user": r["source_user"], **mine})
+    return {"scanned": len(rows), "totals": totals, "users": users[:200]}
+
+
+def _relinks(conn) -> list[dict]:
+    """Each copied Form whose source wrote to a responses Sheet: both copies, by name
+    and target id, for a person to relink (no API can -- drive_engine._note_form_link)."""
+    def target(src: str) -> tuple[str, str]:
+        r = conn.execute("SELECT target_id, source_name FROM id_mapping WHERE source_id=? "
+                         "LIMIT 1", (src,)).fetchone()
+        return (r["target_id"], r["source_name"] or "") if r else ("", "")
+    out = []
+    for r in conn.execute(
+            "SELECT source_user, item_id, error_message FROM audit_log a WHERE item_type='form_link' "
+            "AND status='RELINK_BY_HAND' AND EXISTS (SELECT 1 FROM identity_map m "
+            "WHERE m.source_email = a.source_user) ORDER BY source_user LIMIT 200").fetchall():
+        sheet_src = (r["error_message"] or "").removeprefix("sheet: ").strip()
+        form_tgt, form_name = target(r["item_id"])
+        sheet_tgt, sheet_name = target(sheet_src)
+        out.append({"user": r["source_user"], "formName": form_name, "formTargetId": form_tgt,
+                    "sheetName": sheet_name, "sheetTargetId": sheet_tgt})
+    return out
+
+
 @app.get("/api/v2/owed-grants")
 async def owed_grants(op: Operator = Depends(operator)):
     """Shares waiting for a colleague's target account, per migration this caller may
@@ -5752,7 +5809,8 @@ async def migration_detail(account_id: int, op: Operator = Depends(operator)):
             # early for an unconfigured account, and a client that has to
             # branch on which keys exist will eventually branch wrong.
             "items": [], "failures": [], "failedUsers": [], "users": [],
-            "skipped": [], "uncopyable": [], "uncopyableCount": 0, "repair": None,
+            "skipped": [], "uncopyable": [], "uncopyableCount": 0, "handWork": None,
+            "relink": [], "repair": None,
             "running": bool(_jobs_here),
             # Which job, and since when. A bare boolean could not tell a
             # delta from a full migration, so pressing Run delta changed
@@ -5849,6 +5907,8 @@ async def migration_detail(account_id: int, op: Operator = Depends(operator)):
                         "            WHERE m.source_email = a.source_user) "
                         "GROUP BY status ORDER BY n DESC")]
                 out["uncopyableCount"], out["uncopyable"] = _uncopyable(conn)
+                out["handWork"] = _hand_work(conn)
+                out["relink"] = _relinks(conn)
                 out["failedUsers"] = [
                     {"sourceUser": r["source_email"],
                      "targetUser": r["target_email"],

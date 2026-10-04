@@ -756,6 +756,12 @@ export interface MigrationDetail {
    *  ceiling whose files.copy also failed): recreated by hand, so they are named. */
   uncopyable?: { user: string; sourceId: string; name: string; status: string; reason: string }[]
   uncopyableCount?: number
+  /** From each user's latest source scan: what only a person can move, by type. */
+  handWork?: { scanned: number
+               totals: { site: number; map: number; jam: number; form: number; oversized: number }
+               users: { user: string; site: number; map: number; jam: number; form: number; oversized: number }[] } | null
+  /** Each copied Form and the copy of its responses Sheet, to relink by hand. */
+  relink?: { user: string; formName: string; formTargetId: string; sheetName: string; sheetTargetId: string }[]
   failedUsers: Array<{
     sourceUser: string; targetUser: string; status?: string; detail: string
     /** When the status was last set. Absent on ledgers written before the

@@ -583,6 +583,55 @@ export const MigrationDetail: React.FC = () => {
             </Paper>
           )}
 
+          {(() => {
+            const t = d.handWork?.totals
+            const found = !!t && (t.site + t.map + t.jam + t.form + t.oversized) > 0
+            if (!found && !d.relink?.length) return null
+            const how: [keyof NonNullable<typeof t>, string, string][] = [
+              ['site', 'Google Sites', 'no API can copy or export a Site (Drive gives its text only). Rebuild it on the target, or have the source admin share it with the target user so they can use Duplicate site.'],
+              ['map', 'My Maps', 'no API at all. On the source: ⋮ → Export to KML/KMZ; on the target: My Maps → Create map → Import.'],
+              ['jam', 'Jamboards', 'Jamboard is discontinued: export each to PDF while it still opens.'],
+              ['form', 'Forms', 'copied with their questions; their responses live in the linked Sheet, and the copy has to be relinked to it by hand (listed below once migrated).'],
+              ['oversized', 'Docs past the 10 MB export limit', 'copied as they are by the server-side copy — nothing to do unless that copy failed.'],
+            ]
+            return (
+              <Paper variant="outlined" sx={{ p: 2, mb: 3 }} data-testid="hand-work">
+                <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>Only a person can do these</Typography>
+                {found && t && (
+                  <>
+                    <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                      Found by the source scan of {d.handWork!.scanned.toLocaleString()} user(s), before migrating:
+                    </Typography>
+                    {how.filter(([k]) => t[k] > 0).map(([k, label, what]) => (
+                      <Typography key={k} variant="body2" sx={{ ml: 1, mb: 0.5 }} data-testid={`hand-${k}`}>
+                        <strong>{label}: {t[k].toLocaleString()}</strong> — {what}
+                      </Typography>
+                    ))}
+                  </>
+                )}
+                {!!d.relink?.length && (
+                  <Box sx={{ mt: 1.5 }} data-testid="relink">
+                    <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                      Relink each form to its responses Sheet: open the form → Responses → Link to Sheets → Select existing spreadsheet.
+                    </Typography>
+                    {d.relink.map((r) => (
+                      <Typography key={r.formTargetId || r.formName} variant="body2" sx={{ ml: 1 }}>
+                        <a href={`https://docs.google.com/forms/d/${r.formTargetId}/edit`} target="_blank" rel="noreferrer">
+                          {r.formName || r.formTargetId}</a>
+                        {' → '}
+                        {r.sheetTargetId
+                          ? <a href={`https://docs.google.com/spreadsheets/d/${r.sheetTargetId}/edit`} target="_blank" rel="noreferrer">
+                              {r.sheetName || r.sheetTargetId}</a>
+                          : <>its Sheet was not migrated (owned by someone else?)</>}
+                        {' '}— {r.user}
+                      </Typography>
+                    ))}
+                  </Box>
+                )}
+              </Paper>
+            )
+          })()}
+
           {!!d.uncopyable?.length && (
             <Paper variant="outlined" sx={{ p: 2, mb: 3, borderColor: 'warning.main' }}
                    data-testid="uncopyable-panel">
