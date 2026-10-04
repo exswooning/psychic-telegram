@@ -945,7 +945,7 @@ const QuickTenantSetup: React.FC<{
                 control={<Switch size="small" checked={keepLogin}
                                  onChange={(e) => setKeepLogin(e.target.checked)}
                                  inputProps={{ 'data-testid': 'keep-login' } as never} />}
-                label="Keep this admin login on the server for the automatic teardown (root-only; deleted at teardown)"
+                label="Keep this admin login on the server, so the teardown can sign in on its own 30 days after you approve the migration (root-only; deleted at teardown)"
               />}
             canSubmit={!!canLaunch}
             submitLabel={status?.running ? 'Running…' : dryRun ? 'Preview' : `Set up ${side}`}

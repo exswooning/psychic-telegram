@@ -171,7 +171,8 @@ export interface LifecycleView {
 }
 
 /** Where this pair is in its end of life, and what its teardown will do. */
-export const fetchLifecycle = () => cpFetch<LifecycleView>('/api/v2/lifecycle')
+export const fetchLifecycle = (accountId?: number) =>
+  cpFetch<LifecycleView>(accountId ? `/api/v2/lifecycle?account_id=${accountId}` : '/api/v2/lifecycle')
 
 /** Take an approval back (a re-run is wanted), so no teardown is due. Superadmin only. */
 export const undoApproval = (reason: string, accountId?: number) =>

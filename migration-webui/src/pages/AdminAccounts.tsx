@@ -8,6 +8,7 @@ import {
   Account, createAccount, deleteAccount, fetchAdminAccounts, setAccountSubscription, setAccountSeedEnabled,
 } from '@/api/controlPlane'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
+import LifecycleChip from '@/components/LifecycleChip'
 
 type Pending = { id: number; email: string } & (
   | { kind: 'subscription'; active: boolean }
@@ -115,6 +116,9 @@ const AdminAccounts: React.FC = () => {
                 <TableCell align="center">Superadmin</TableCell>
                 <TableCell align="center">Subscription active</TableCell>
                 <TableCell align="center">Seed enabled</TableCell>
+                <TableCell title="Only someone's click on Final Report approves a migration; its teardown follows 30 days later">
+                  Lifecycle
+                </TableCell>
                 <TableCell />
               </TableRow>
             </TableHead>
@@ -148,6 +152,7 @@ const AdminAccounts: React.FC = () => {
                       })}
                     />
                   </TableCell>
+                  <TableCell><LifecycleChip accountId={a.id} /></TableCell>
                   <TableCell align="center">
                     {!a.is_superadmin && (
                       <IconButton size="small" color="error" aria-label={`delete ${a.email}`}
@@ -160,7 +165,7 @@ const AdminAccounts: React.FC = () => {
                 </TableRow>
               ))}
               {accounts.length === 0 && (
-                <TableRow><TableCell colSpan={8}>No accounts yet.</TableCell></TableRow>
+                <TableRow><TableCell colSpan={9}>No accounts yet.</TableCell></TableRow>
               )}
             </TableBody>
           </Table>

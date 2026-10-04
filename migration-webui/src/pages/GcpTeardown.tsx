@@ -6,6 +6,8 @@ import {
 import { DeleteForever as TeardownIcon } from '@mui/icons-material'
 import { startTeardown, fetchTeardownStatus, fetchTeardownKnown, TeardownStatus, KnownTenant } from '@/api/controlPlane'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
+import LifecycleChip from '@/components/LifecycleChip'
+import GcloudHeld from '@/components/GcloudHeld'
 
 /**
  * Superadmin-only: delete a GCP project and/or revoke a domain-wide
@@ -85,11 +87,14 @@ const GcpTeardown: React.FC = () => {
         <TeardownIcon color="action" />
         <Typography variant="h4" sx={{ fontWeight: 700 }}>GCP Teardown</Typography>
       </Stack>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
         Delete a throwaway GCP project and/or revoke its domain-wide
-        delegation entry. The project delete is soft (30-day recovery); the
-        delegation revoke is not.
+        delegation entry by hand. The project delete is soft (30-day recovery); the
+        delegation revoke is not. A migrated pair is torn down on its own only 30 days
+        after someone clicks <strong>Approve as complete</strong> on its Final Report —
+        never without that click. Its state is in the Lifecycle column below.
       </Typography>
+      <GcloudHeld />
 
       {known.length > 0 && (
         <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 3 }}>
@@ -106,6 +111,7 @@ const GcpTeardown: React.FC = () => {
                 <TableHead>
                   <TableRow>
                     <TableCell>Account</TableCell>
+                    <TableCell>Lifecycle</TableCell>
                     <TableCell>Side</TableCell>
                     <TableCell>Domain</TableCell>
                     <TableCell>Admin</TableCell>
@@ -118,6 +124,7 @@ const GcpTeardown: React.FC = () => {
                   {known.map((t) => (
                     <TableRow key={`${t.accountId}-${t.side}`} hover>
                       <TableCell>{t.accountEmail || t.accountId}</TableCell>
+                      <TableCell><LifecycleChip accountId={t.accountId} /></TableCell>
                       <TableCell><Chip size="small" label={t.side} /></TableCell>
                       <TableCell>{t.domain || '--'}</TableCell>
                       <TableCell>{t.adminEmail || '--'}</TableCell>

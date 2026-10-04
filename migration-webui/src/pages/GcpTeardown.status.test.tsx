@@ -11,6 +11,8 @@ vi.mock('@/api/controlPlane', () => ({
   startTeardown: vi.fn(),
   fetchTeardownStatus: (...a: unknown[]) => fetchTeardownStatus(...a),
   fetchTeardownKnown: vi.fn().mockResolvedValue({ tenants: [] }),
+  fetchLifecycle: vi.fn().mockResolvedValue({ accountId: 1, state: {}, plan: [], teardownDays: 30 }),
+  fetchGcloudIdentities: vi.fn().mockResolvedValue({ identities: [] }),
 }))
 
 import GcpTeardown from './GcpTeardown'

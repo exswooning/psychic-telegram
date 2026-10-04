@@ -11,6 +11,8 @@ vi.mock('@/api/controlPlane', () => ({
   deleteAccount: (...a: unknown[]) => deleteAccount(...a),
   setAccountSubscription: vi.fn(),
   setAccountSeedEnabled: vi.fn(),
+  fetchLifecycle: vi.fn().mockResolvedValue({ accountId: 1, state: {}, plan: [], teardownDays: 30 }),
+  fetchGcloudIdentities: vi.fn().mockResolvedValue({ identities: [] }),
 }))
 
 const acct = (id: number, email: string, is_superadmin = false) => ({
@@ -57,5 +59,13 @@ describe('creating an account for a new pair', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
     await waitFor(() => expect(createAccount).toHaveBeenCalledWith('client@x.com', 'long-enough-1', 'Client pair', 'new client'))
     expect(await screen.findByText(/Sign in as it to set up its pair/)).toBeTruthy()
+  })
+})
+
+describe('each account\'s end of life', () => {
+  it('shows "not approved" -- nothing is approved without a click', async () => {
+    fetchAdminAccounts.mockResolvedValue([acct(1, 'boss@x.com', true), acct(7, 'client@x.com')])
+    render(<AdminAccounts />)
+    expect(await screen.findByTestId('lifecycle-7')).toHaveTextContent('not approved')
   })
 })
