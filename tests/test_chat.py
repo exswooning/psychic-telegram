@@ -188,7 +188,30 @@ def test_a_refused_timestamp_costs_the_time_never_the_message(chat_migrator, aut
 
     assert m._with_time_fallback(send, {"text": "hi", "createTime": "2020"}) == {"name": "x"}
     assert [("createTime" in s) for s in sent] == [True, False]
-    assert m._keep_time is False                     # not paid again for this user
+    assert m._keep_time is False                     # not paid again within this space
+
+
+def test_a_space_with_no_time_of_its_own_is_dated_at_its_first_message(chat_migrator, auth, db,
+                                                                        settings):
+    """Live: seeduser200's DM with the Drive app has no createTime, so its copy was
+    dated NOW and its 19-September message was refused its time (400 INVALID_ARGUMENT)."""
+    settings.chat_space_mode = "import"
+    _seed_conversation(auth, db)
+    chat_migrator.run()
+    created = auth.target_chat(TGT_USER).calls_to("spaces.create")
+    assert created and created[0]["body"].get("createTime") == "2024-01-01T00:00:00Z"
+    assert chat_migrator.stats["failed"] == 0
+
+
+def test_a_refusal_in_one_space_does_not_cost_the_next_its_times(chat_migrator, auth, db,
+                                                                 settings):
+    """Live, one refusal stamped every later space of the user at migration time."""
+    settings.chat_space_mode = "import"
+    _seed_conversation(auth, db)
+    chat_migrator._keep_time = False                # as if an earlier space refused it
+    chat_migrator.run()
+    posted = [m for msgs in auth.target_chat(TGT_USER).message_store.values() for m in msgs]
+    assert posted and all(m.get("createTime") == "2024-01-01T00:00:00Z" for m in posted)
 
 
 def test_replies_go_back_into_their_thread(chat_migrator, auth, db, settings):

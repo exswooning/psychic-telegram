@@ -87,7 +87,9 @@ class ChatMigrator:
                       "failed": 0, "unmapped_senders": 0}
         self.budget = Budget(getattr(settings, "sample_limit", None))
         self._email_cache: dict[str, str] = {}
-        # Historical createTime is sent until the tenant refuses it once.
+        # Historical createTime is sent until a space refuses it; reset for each space
+        # (_migrate_space), because a refusal says something about that space -- live,
+        # one DM with the Drive app cost every later space of the user its times.
         self._keep_time = True
 
     def _retry(self, fn, label=None):
@@ -137,6 +139,13 @@ class ChatMigrator:
             token = resp.get("nextPageToken")
             if not token:
                 return
+
+    def _first_message_time(self, space_name: str) -> str | None:
+        """The oldest message's createTime, for a space that has none of its own."""
+        try:
+            return next(iter(self._iter_messages(space_name)), {}).get("createTime")
+        except Exception:      # noqa: BLE001 - no date is the old behaviour, not a failure
+            return None
 
     def _iter_messages(self, space_name: str):
         """Oldest first: with no usable createTime, arrival order is the only
@@ -271,10 +280,16 @@ class ChatMigrator:
         # A DM / group chat has no name of its own: it is its members.
         body = ({"spaceType": "SPACE", "displayName": f"{display}"} if stype == "SPACE"
                 else {"spaceType": stype})
+        self._keep_time = True
         if import_mode:
             body["importMode"] = True
-            if space.get("createTime") and self._keep_time:
-                body["createTime"] = space["createTime"]
+            # A message may not be older than its import-mode space. A DM has no
+            # createTime of its own, so its copy was dated NOW and the first message
+            # (seeduser200's DM with the Drive app, 19 Sept) was refused its time --
+            # 400 INVALID_ARGUMENT. Date such a space at its earliest message.
+            when = space.get("createTime") or self._first_message_time(name)
+            if when:
+                body["createTime"] = when
         try:
             created = self._with_time_fallback(lambda b: self._retry(
                 lambda: tgt.spaces().create(body=b).execute()), body)
@@ -460,8 +475,8 @@ class ChatMigrator:
     def _with_time_fallback(self, send, body: dict):
         """send(body); if it fails while carrying a historical createTime, once
         more without it -- and if THAT works, stop sending createTime for the rest
-        of this user (the tenant does not accept it; an honest "now" beats a
-        message that never arrives)."""
+        of this space (it does not accept it; an honest "now" beats a message
+        that never arrives). The next space tries again."""
         try:
             return send(body)
         except OPTIONAL_PASS_ERRORS as refused:
@@ -472,7 +487,7 @@ class ChatMigrator:
                 # With Google's own reason: live, george's refusal said only that it
                 # happened, so whether a fix exists could not be told.
                 log.warning("[%s] Chat refused historical createTime on %s (%s); the rest "
-                            "of this user's Chat is stamped at migration time",
+                            "of this space's Chat is stamped at migration time",
                             self.source_user, "a space" if "spaceType" in body else "a message",
                             str(refused)[:300])
             self._keep_time = False
