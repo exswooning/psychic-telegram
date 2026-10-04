@@ -24,6 +24,7 @@ import {
 } from '@mui/icons-material'
 import { useMigrationStore } from '@/store'
 import RunReports from '@/components/RunReports'
+import ApproveComplete from '@/components/ApproveComplete'
 import Incidents from '@/components/Incidents'
 import { tint } from '@/theme'
 
@@ -46,6 +47,7 @@ const FinalReport: React.FC = () => {
             even when the live summary below has nothing to say. */}
         <Incidents />
         <RunReports />
+        <ApproveComplete />
         <Alert severity="info" sx={{ mt: 2 }}>No live summary yet. Run a migration, then generate a report above.</Alert>
       </Box>
     )
@@ -75,6 +77,7 @@ const FinalReport: React.FC = () => {
 
       <Incidents />
       <RunReports />
+      <ApproveComplete />
 
       <Alert severity={clean ? 'success' : 'warning'} sx={{ mb: 3 }}>
         <AlertTitle>{clean ? 'Migration Complete' : 'Migration finished with failures'}</AlertTitle>

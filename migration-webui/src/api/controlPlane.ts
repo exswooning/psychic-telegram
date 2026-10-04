@@ -156,6 +156,20 @@ export const createAccount = (email: string, password: string, name: string, rea
     body: JSON.stringify({ reason, email, password, name }),
   })
 
+export interface GcloudIdentity { config: string; accounts: string[] }
+
+/** Which gcloud sign-ins this server holds. Superadmin only. */
+export const fetchGcloudIdentities = () =>
+  cpFetch<{ identities: GcloudIdentity[] }>('/api/v2/gcloud/identities')
+
+/** Approve a migration as complete -- which also revokes every gcloud sign-in on this
+ *  server (a tenant admin's must not outlive its migration). Superadmin only. */
+export const approveMigrationComplete = (reason: string, accountId?: number) =>
+  cpFetch<ActionResult>('/api/v2/migrations/approve', {
+    method: 'POST',
+    body: JSON.stringify({ reason, account_id: accountId }),
+  })
+
 export const deleteAccount = (accountId: number, confirmEmail: string, reason: string) =>
   cpFetch<ActionResult>(`/api/v2/admin/accounts/${accountId}/delete`, {
     method: 'POST',

@@ -13,6 +13,7 @@ import { useMigrationStore } from '@/store'
 
 vi.mock('@/components/RunReports', () => ({ default: () => <div data-testid="run-reports" /> }))
 vi.mock('@/components/Incidents', () => ({ default: () => <div data-testid="incidents" /> }))
+vi.mock('@/components/ApproveComplete', () => ({ default: () => <div data-testid="approve-complete" /> }))
 
 const report = (over = {}) => ({
   totalUsers: 10, successfulUsers: 8, failedUsers: 2, dataMigrated: '1.2 GB', emailsMigrated: 1,

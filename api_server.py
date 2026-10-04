@@ -1150,6 +1150,39 @@ async def admin_create_account(body: CreateAccount, op: Operator = Depends(opera
                         _create, extra_check=require_superadmin)
 
 
+class ApproveComplete(WriteAction):
+    account_id: int | None = None
+
+
+@app.get("/api/v2/gcloud/identities")
+async def gcloud_identities(op: Operator = Depends(operator)):
+    """Which gcloud sign-ins this box holds -- so a stale one is visible, not found."""
+    require_superadmin(op)
+    import gcloud_signout
+    return {"identities": await _off_loop(gcloud_signout.held)}
+
+
+@app.post("/api/v2/migrations/approve")
+async def approve_migration_complete(body: ApproveComplete, op: Operator = Depends(operator)):
+    """The operator's sign-off that a migration is finished -- and with it every gcloud
+    sign-in on this box revoked (gcloud_signout): a tenant admin's must not outlive
+    the migration it was for. The audit log is the record of the approval."""
+    import gcloud_signout
+    aid = body.account_id or op.account_id
+
+    def _approve() -> tuple[bool, str]:
+        if [j for j in job_admission.list_active() if j.get("account_id") == aid]:
+            return False, "a job of this account is still running -- approve once it ends"
+        using = gcloud_signout.busy()
+        if using:
+            return False, f"a setup is using a gcloud sign-in right now ({using}) -- approve once it ends"
+        gone = gcloud_signout.sign_out_all()
+        return True, (f"migration for account {aid} approved as complete; gcloud signed out of: "
+                      + (", ".join(gone) if gone else "nothing -- no sign-in was held"))
+    return await _gated(op, "migration.approve_complete", body, f"account:{aid}", _approve,
+                        extra_check=require_superadmin)
+
+
 @app.post("/api/v2/admin/accounts/{account_id}/subscription")
 async def admin_set_subscription(account_id: int, body: SetSubscription,
                                  op: Operator = Depends(operator)):
