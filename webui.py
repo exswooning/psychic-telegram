@@ -4717,6 +4717,32 @@ def host_busy() -> list[str]:
     return busy + host_ops.unfinished_repairs()
 
 
+def deploy_status() -> dict:
+    """What this server runs, every deploy sync_vps.sh recorded on it (logs/deploys.jsonl,
+    newest first), and what a restarting deploy would stop right now (host_busy). The
+    Deploy page knew only its own laptop-era form, and said "No deploys recorded" after
+    five deploys in a day."""
+    from datetime import datetime, timezone
+    stamp = os.path.join(HERE, "DEPLOYED_COMMIT")
+    try:
+        with open(stamp, encoding="utf-8") as fh:
+            commit = fh.read().strip()
+        at = datetime.fromtimestamp(os.path.getmtime(stamp), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except OSError:
+        commit, at = "", None
+    history = []
+    try:
+        with open(os.path.join(HERE, "logs", "deploys.jsonl"), encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    history.append(json.loads(line))
+                except ValueError:
+                    continue
+    except OSError:
+        pass
+    return {"commit": commit, "deployedAt": at, "history": history[::-1][:50], "busy": host_busy()}
+
+
 LOG_MATCH_CAP = 300
 
 
@@ -5537,6 +5563,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"jobs": completed_jobs(self._account_id())})
         elif path == "/api/deploy_history":
             self._json({"history": load_deploy_history()})
+        elif path == "/api/deploy_status":
+            self._json(deploy_status())
         elif path == "/console" or path == "/console/":
             self._serve_console()
         elif path.startswith("/app/assets/"):

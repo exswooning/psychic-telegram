@@ -97,6 +97,23 @@ try_rsync() {
 #  * node_modules/ is a build dependency of the frontend, which is built HERE
 #    and shipped as dist/. It was 432 MB of dead weight on a small disk.
 SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# One line per deploy on the box (logs/deploys.jsonl), read by the Deploy page's
+# "This server" card -- before this, the box knew only its current commit, and the
+# page said "No deploys recorded" after five deploys in a day. Best-effort: a failed
+# record never fails a deploy that otherwise worked.
+record_deploy() {   # $1 commit, $2 restarted (0/1)
+  ( cd "$SRC_DIR" && COMMIT="$1" RESTARTED="$2" FILES="${RUNTIME_CHANGES:-}" python3 -c '
+import json, os, socket, subprocess, datetime
+subject = subprocess.run(["git", "log", "-1", "--format=%s"], capture_output=True, text=True).stdout.strip()
+files = [f for f in os.environ.get("FILES", "").split() if f]
+print(json.dumps({"at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                  "commit": os.environ["COMMIT"], "subject": subject,
+                  "restarted": os.environ["RESTARTED"] == "1", "files": files[:20],
+                  "from": socket.gethostname()}))' ) \
+    | "${SSH[@]}" "$TARGET" "mkdir -p $DEST/logs && cat >> $DEST/logs/deploys.jsonl" \
+    || echo "  (could not record this deploy on the box -- the deploy itself is unaffected)"
+}
 SYNC_EXCLUDES=(
   --exclude '.git/' --exclude '__pycache__/' --exclude '.pytest_cache/'
   --exclude '.venv' --exclude 'scratch/' --exclude 'migration.db*'
@@ -176,6 +193,7 @@ if [[ -z "$RUNTIME_CHANGES" && "${FORCE_RESTART:-0}" != "1" ]]; then
   [[ -n "$(cd "$SRC_DIR" && git status --porcelain 2>/dev/null)" ]] && COMMIT="$COMMIT-dirty"
   "${SSH[@]}" "$TARGET" "printf '%s\n' '$COMMIT' > $DEST/DEPLOYED_COMMIT"
   echo "  stamped DEPLOYED_COMMIT=$COMMIT"
+  record_deploy "$COMMIT" 0
   echo "  FRONTEND-ONLY: nothing that runs on the box changed, so no service was"
   echo "  restarted and no job was touched. Reload the page to see it."
   exit 0
@@ -241,6 +259,7 @@ if [[ -n "$DIRTY" ]]; then
 fi
 "${SSH[@]}" "$TARGET" "printf '%s\n' '$COMMIT' > $DEST/DEPLOYED_COMMIT"
 echo "  stamped DEPLOYED_COMMIT=$COMMIT"
+record_deploy "$COMMIT" 1
 
 # Say it out loud. Both of these shipped silently once and cost real time to
 # untangle: a deploy stamped 204168a-dirty -- code matching no commit, so

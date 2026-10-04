@@ -1061,6 +1061,17 @@ export interface DeployHistoryEntry {
  * answer to "did the last deploy actually work, and what commit is
  * running on that VPS right now" was SSHing in and checking by hand.
  */
+/** One deploy of THIS server, as sync_vps.sh recorded it on the box (logs/deploys.jsonl). */
+export interface ServerDeploy {
+  at: string; commit: string; subject: string; restarted: boolean; files: string[]; from: string
+}
+/** What this server runs, every recorded deploy (newest first), and the jobs a deploy
+ *  that restarts services would stop right now. */
+export interface DeployStatus {
+  commit: string; deployedAt: string | null; history: ServerDeploy[]; busy: string[]
+}
+export const fetchDeployStatus = () => getJSON<DeployStatus>('/api/deploy_status')
+
 export async function fetchDeployHistory(): Promise<DeployHistoryEntry[]> {
   const data = await getJSON<{ history: DeployHistoryEntry[] }>('/api/deploy_history')
   return data.history

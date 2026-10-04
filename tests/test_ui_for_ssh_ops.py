@@ -203,3 +203,29 @@ class TestARunsDetailIsThatRun:
         whole = cp.get(f"/api/v2/metrics/{me}").json()
         assert sum(v["count"] for v in whole["volume"] if v["itemType"] == "file") == 4
         assert not [v for v in whole["volume"] if v["itemType"] == "drive"]
+
+
+class TestTheDeployPageKnowsThisServer:
+    """Live: "No deploys recorded yet" after five deploys in a day -- they all went
+    through sync_vps.sh, which records on the box now (logs/deploys.jsonl)."""
+
+    def test_the_running_commit_and_every_recorded_deploy_newest_first(self, tmp_path, monkeypatch):
+        import json
+        import webui
+        (tmp_path / "DEPLOYED_COMMIT").write_text("9d7ae1c\n")
+        (tmp_path / "logs").mkdir()
+        (tmp_path / "logs" / "deploys.jsonl").write_text(
+            json.dumps({"commit": "0ff37fa", "restarted": True}) + "\nnot json\n"
+            + json.dumps({"commit": "9d7ae1c", "restarted": False}) + "\n")
+        monkeypatch.setattr(webui, "HERE", str(tmp_path))
+        monkeypatch.setattr(webui, "host_busy", lambda: ["migrate (account 3, pid 1)"])
+        st = webui.deploy_status()
+        assert st["commit"] == "9d7ae1c" and st["deployedAt"]
+        assert [h["commit"] for h in st["history"]] == ["9d7ae1c", "0ff37fa"]
+        assert st["busy"] == ["migrate (account 3, pid 1)"]
+
+    def test_a_box_with_no_record_says_so_rather_than_failing(self, tmp_path, monkeypatch):
+        import webui
+        monkeypatch.setattr(webui, "HERE", str(tmp_path))
+        monkeypatch.setattr(webui, "host_busy", lambda: [])
+        assert webui.deploy_status() == {"commit": "", "deployedAt": None, "history": [], "busy": []}

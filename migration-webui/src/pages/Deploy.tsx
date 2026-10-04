@@ -26,29 +26,111 @@ import {
 } from '@mui/icons-material'
 import {
   fetchConfig, saveDeployConfig, runDeploy, DeployFields,
-  fetchDeployHistory, DeployHistoryEntry,
+  fetchDeployHistory, DeployHistoryEntry, fetchDeployStatus, DeployStatus,
 } from '@/api/client'
 import { getCpBase, setCpBase, checkConnection } from '@/api/controlPlane'
 import JobProgress from '@/components/JobProgress'
 
+/** Opened on the operator's own machine, not on the server at its domain. */
+const isLocal = () => ['localhost', '127.0.0.1', '::1'].includes(window.location.hostname)
+
 /**
- * Operator-only: pushing this tool to a VPS that stays up through a
- * multi-hour migration, and reaching the control plane's second port
- * through the SSH tunnel. Promoted out of Settings into its own page --
- * this is real, wired capability (webui.py's /api/deploy_config,
- * /api/deploy, /api/deploy_history), not settings in the usual sense.
+ * What this server runs and how it got there. The page was built when Bitport ran on
+ * a laptop and this form pushed it to a VPS (deploy_remote.py, then an SSH tunnel);
+ * now the server IS the VPS, served at its own domain, and is updated from the code
+ * checkout by sync_vps.sh -- which the page never saw, so it said "No deploys
+ * recorded" after five in a day. The tunnel card only applies on a laptop.
  */
 const Deploy: React.FC = () => (
   <Box>
     <Typography variant="h4" sx={{ fontWeight: 700, mb: 0.5 }}>Deploy</Typography>
     <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-      Push this tool to a VPS, and reach its control plane through the SSH tunnel.
+      What this server is running and every update it has had — and copying it to
+      another host.
     </Typography>
 
-    <VpsConnectionCard />
+    <ThisServerCard />
+    {isLocal() && <VpsConnectionCard />}
     <DeployCard />
   </Box>
 )
+
+/**
+ * The running commit, each deploy sync_vps.sh recorded on the box, and whether a
+ * deploy right now would stop a job -- the same check the script refuses on.
+ */
+const ThisServerCard: React.FC = () => {
+  const [st, setSt] = useState<DeployStatus | null>(null)
+  const [err, setErr] = useState('')
+  useEffect(() => {
+    fetchDeployStatus().then(setSt).catch((e) => setErr(e instanceof Error ? e.message : String(e)))
+  }, [])
+  return (
+    <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 3 }}
+          data-testid="this-server">
+      <CardHeader title="This server" avatar={<DeployIcon />}
+                  subheader="Updated from the code checkout with sync_vps.sh, which records every deploy here" />
+      <CardContent>
+        {err && <Alert severity="error">{err}</Alert>}
+        {st && (
+          <>
+            <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1.5, flexWrap: 'wrap', gap: 1 }}>
+              <Typography variant="body2" color="text.secondary">Running</Typography>
+              <Chip size="small" label={st.commit || 'unknown'} sx={{ fontFamily: 'ui-monospace, monospace' }} />
+              {st.history[0]?.commit === st.commit && (
+                <Typography variant="body2">{st.history[0].subject}</Typography>
+              )}
+              {st.deployedAt && (
+                <Typography variant="body2" color="text.secondary">
+                  · deployed {new Date(st.deployedAt).toLocaleString()}
+                </Typography>
+              )}
+            </Stack>
+            {st.busy.length
+              ? <Alert severity="warning" sx={{ mb: 2 }} data-testid="deploy-busy">
+                  A deploy that restarts the services now would stop: {st.busy.join(', ')}.
+                  sync_vps.sh refuses until they end; a frontend-only change still goes out.
+                </Alert>
+              : <Alert severity="success" sx={{ mb: 2 }}>Nothing is running — a deploy now interrupts nothing.</Alert>}
+            {st.history.length ? (
+              <TableContainer sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 1 }}>
+                <Table size="small">
+                  <TableHead>
+                    <TableRow>
+                      <TableCell>When</TableCell>
+                      <TableCell>Commit</TableCell>
+                      <TableCell>What</TableCell>
+                      <TableCell>Services</TableCell>
+                      <TableCell>From</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {st.history.map((h, i) => (
+                      <TableRow key={`${h.at}-${i}`}>
+                        <TableCell>{new Date(h.at).toLocaleString()}</TableCell>
+                        <TableCell sx={{ fontFamily: 'ui-monospace, monospace' }}>{h.commit}</TableCell>
+                        <TableCell>{h.subject}</TableCell>
+                        <TableCell title={h.files.join('\n')}>
+                          <Chip size="small" variant="outlined" color={h.restarted ? 'warning' : 'default'}
+                                label={h.restarted ? `restarted (${h.files.length} file${h.files.length === 1 ? '' : 's'})` : 'frontend only'} />
+                        </TableCell>
+                        <TableCell>{h.from}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+            ) : (
+              <Typography variant="body2" color="text.secondary">
+                No deploy recorded yet — the next sync_vps.sh run records the first.
+              </Typography>
+            )}
+          </>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
 
 /**
  * Reaching the control plane (api_server.py, port 8090) is different from
@@ -213,7 +295,9 @@ const DeployCard: React.FC = () => {
 
   return (
     <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>
-      <CardHeader title="Deploy to a VPS" subheader="Run the migration from a host that stays up" avatar={<DeployIcon />} />
+      <CardHeader title="Copy this server to another host"
+                  subheader="For moving Bitport to a new VPS -- updating this one is done with sync_vps.sh (above)"
+                  avatar={<DeployIcon />} />
       <CardContent>
         <Grid container spacing={2}>
           <Grid item xs={12} sm={6}>
@@ -283,13 +367,13 @@ const DeployHistoryTable: React.FC<{ history: DeployHistoryEntry[] }> = ({ histo
   if (!history.length) {
     return (
       <Typography variant="body2" color="text.secondary" sx={{ mt: 3 }}>
-        No deploys recorded yet in this checkout.
+        No copies to another host made from this page yet.
       </Typography>
     )
   }
   return (
     <Box sx={{ mt: 3 }}>
-      <Typography variant="subtitle2" fontWeight={600} sx={{ mb: 1 }}>Deploy history</Typography>
+      <Typography variant="subtitle2" fontWeight={600} sx={{ mb: 1 }}>Copies made from this page</Typography>
       <TableContainer sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 1 }}>
         <Table size="small">
           <TableHead>
