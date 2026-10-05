@@ -265,6 +265,35 @@ def _inherited_acls_affordable(settings) -> bool:
         return not _INHERIT_STATS["disabled"]
 
 
+# A native link check reads the whole document -- every cell of a Sheet -- and each user's
+# pass runs its own pool, so users finishing Drive together read users x 7 documents at
+# once. Live: 5 users (35 reads) took a 600 MB process to 3.5 GB in five minutes and the
+# kernel killed it, bitport-api with it: about 70 MB a read. One cap for the process, from
+# the memory there is -- a quarter of what is available, at that measured cost.
+NATIVE_READ_MB = 70
+_NATIVE_SLOTS: threading.Semaphore | None = None
+_NATIVE_SLOTS_LOCK = threading.Lock()
+
+
+def _native_slots() -> threading.Semaphore:
+    global _NATIVE_SLOTS
+    with _NATIVE_SLOTS_LOCK:
+        if _NATIVE_SLOTS is None:
+            n = int(os.getenv("NATIVE_LINK_CONCURRENCY", "0") or 0)
+            if not n:
+                from resources import cached_probe
+                n = int(cached_probe().ram_usable_gb * 1024 * 0.25 / NATIVE_READ_MB)
+            _NATIVE_SLOTS = threading.BoundedSemaphore(max(2, n))
+        return _NATIVE_SLOTS
+
+
+def _inherited_grants(perms: list[dict]) -> int:
+    """How many of a file's grants come (at least partly) from its folder."""
+    return sum(1 for x in perms
+               if x.get("role") != "owner"
+               and any(d.get("inherited") for d in (x.get("permissionDetails") or [])))
+
+
 def _note_inherited_density(inherited: int, settings, log_fn=None) -> None:
     """Record one file's inherited-grant count; disable per-file recreation
     once the sample says it is pathological. Decided once, process-wide,
@@ -1944,10 +1973,11 @@ class DriveMigrator:
             item, tgt_id = pending
             kind = _NATIVE_KIND[item["mimeType"]]
             try:
-                n = self._retry(lambda k=kind, t=tgt_id: link_rewrite.rewrite_native(
-                    k, self.auth.api("target", k, self.target_user), t,
-                    self.db.target_for_source_id, pace=lambda op, k=k: pace(k, op)),
-                    label=f"{kind}.links")
+                with _native_slots():
+                    n = self._retry(lambda k=kind, t=tgt_id: link_rewrite.rewrite_native(
+                        k, self.auth.api("target", k, self.target_user), t,
+                        self.db.target_for_source_id, pace=lambda op, k=k: pace(k, op)),
+                        label=f"{kind}.links")
             except Exception as exc:      # noqa: BLE001 - the file migrated; record, never raise
                 self.db.log_audit(self.source_user, item["id"], "link_rewrite",
                                   "FAILED", str(exc)[:200])
@@ -2269,12 +2299,7 @@ class DriveMigrator:
         # Counted before the loop decides anything, so the measurement is of
         # what this corpus actually contains rather than of what the current
         # setting happens to let through.
-        _note_inherited_density(
-            sum(1 for x in perms
-                if x.get("role") != "owner"
-                and any(d.get("inherited")
-                        for d in (x.get("permissionDetails") or []))),
-            self.settings)
+        _note_inherited_density(_inherited_grants(perms), self.settings)
         grants = self._translate_grants(source_id, perms, resume=resume)
         if only is not None:          # repair: just the grants it was asked to put back
             grants = [g for g in grants if g[1] in only]
@@ -2287,6 +2312,13 @@ class DriveMigrator:
         mirrored one can never translate the same source sharing differently."""
         batch: list[tuple[dict, str | None]] = []
         keep_inherited = _inherited_acls_affordable(self.settings)
+        # Per file too. A file inheriting more grantees than the limit is the very case
+        # the run-wide switch exists for, and that switch trips on a running average:
+        # every lightly shared file before it bought ~25 grants of headroom first. Live,
+        # 280,000 grants and an hour of a 16-user run (12-15k for one user) went on
+        # copying folder grants onto files before the average crossed.
+        if keep_inherited and _inherited_grants(perms) > INHERIT_DENSITY_LIMIT:
+            keep_inherited = False
 
         for p in perms:
             if p.get("role") == "owner":

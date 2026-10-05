@@ -174,6 +174,36 @@ class TestTheEngine:
         assert db.get_audit("u@a", "D3", "link_rewrite")["status"] == "SUCCESS"
         assert m.stats.get("links_rewritten") == 1
 
+    def test_users_finishing_together_share_one_cap(self, settings, db, monkeypatch):
+        """Live: 5 users reached the link check together, 35 whole-document reads at
+        once, and the process went from 600 MB to 3.5 GB and was OOM-killed. Each
+        user's own pool is still 4 here; the process never reads more than its cap."""
+        import threading, time, link_rewrite, drive_engine
+        monkeypatch.setattr(drive_engine, "_NATIVE_SLOTS", threading.BoundedSemaphore(3))
+        settings.drive_file_workers = 4
+        live, peak, lock = [0], [0], threading.Lock()
+
+        def slow(kind, svc, fid, lk, pace=None):
+            with lock:
+                live[0] += 1; peak[0] = max(peak[0], live[0])
+            time.sleep(0.05)
+            with lock:
+                live[0] -= 1
+            return 0
+        monkeypatch.setattr(link_rewrite, "rewrite_native", slow)
+        engines = []
+        for u in range(2):
+            m = self._engine(settings, db, [])
+            m._pending_native = [({"id": f"U{u}D{i}", "mimeType": "application/vnd.google-apps.document"},
+                                  f"U{u}T{i}") for i in range(8)]
+            engines.append(m)
+        threads = [threading.Thread(target=m._rewrite_native_links) for m in engines]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert peak[0] == 3                     # two users, eight workers, three reads at once
+
     def test_the_server_side_path_queues_natives_and_the_walk_drains_them(self):
         import inspect, drive_engine
         src = inspect.getsource(drive_engine.DriveMigrator._sync_server_side)

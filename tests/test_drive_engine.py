@@ -457,6 +457,30 @@ def test_inherited_permissions_are_recreated_per_file(migrator, auth, db):
                and p["role"] == "reader" for p in perms)
 
 
+def test_a_heavily_shared_folder_is_not_copied_onto_each_file(migrator, auth, db):
+    """Live: the run-wide switch trips on a running average, so a corpus whose first
+    files were lightly shared copied 280,000 folder grants onto files -- an hour of a
+    16-user run -- before it tripped. A file inheriting more grantees than the limit
+    keeps its folder's sharing and its own direct grant; a lightly shared file still
+    gets its inherited grant made explicit."""
+    import drive_engine
+    from db import bulk_seed_identities
+
+    n = int(drive_engine.INHERIT_DENSITY_LIMIT) + 5
+    bulk_seed_identities(db, [(f"u{i}@tenanta.com", f"u{i}@tenantb.com") for i in range(n)]
+                         + [("bob@tenanta.com", "bob@tenantb.com")])
+    src = auth.source_drive(SRC_USER)
+    heavy = src.add_binary("heavy.pdf")
+    for i in range(n):
+        src.add_permission(heavy, "user", "reader", email=f"u{i}@tenanta.com", inherited=True)
+    src.add_permission(heavy, "user", "writer", email="bob@tenanta.com")
+    light = src.add_binary("light.pdf")
+    src.add_permission(light, "user", "reader", email="u0@tenanta.com", inherited=True)
+    migrator.run()
+    assert [p["emailAddress"] for p in _target_perms(auth, "heavy.pdf")] == ["bob@tenantb.com"]
+    assert [p["emailAddress"] for p in _target_perms(auth, "light.pdf")] == ["u0@tenantb.com"]
+
+
 def test_inherited_permission_default_is_on():
     from config import Settings
 
