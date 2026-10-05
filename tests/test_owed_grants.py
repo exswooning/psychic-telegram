@@ -229,3 +229,29 @@ def test_a_grant_made_later_puts_the_copy_time_back(migrator, auth, db, monkeypa
     monkeypatch.setattr(migrator, "_sync_acls", lambda *a, **k: 1)
     assert migrator.reapply_acls(f, t, only={"x"}) == 1
     assert tgt.store[t]["modifiedTime"] == "2019-05-05T05:05:05Z"
+
+
+def test_the_hourly_sweep_grants_owed_shares_on_idle_accounts_only(tmp_path, monkeypatch):
+    """Owed shares are granted without a run: an account added by an admin, or by a
+    mirror cycle, no longer waits for some unrelated Bitport run's repair."""
+    import accounts_auth
+    import api_server
+    import auth
+    import config
+    import job_admission
+    from db import MigrationDB
+    paths = {}
+    for aid in (3, 4, 5):
+        paths[aid] = str(tmp_path / f"{aid}.db")
+        MigrationDB(paths[aid]).close()
+    monkeypatch.setattr(accounts_auth, "list_accounts", lambda: [{"id": a} for a in (3, 4, 5, 6)])
+    monkeypatch.setattr(api_server, "_account_db_path", lambda aid: paths.get(aid))      # 6: no ledger
+    monkeypatch.setattr(job_admission, "list_active", lambda: [{"account_id": 4, "job_name": "migrate"}])
+    monkeypatch.setitem(api_server._REPAIR_THREADS, 5, type("T", (), {"is_alive": lambda s: True})())
+    monkeypatch.setattr(auth, "AuthManager", lambda st: "auth")
+    monkeypatch.setattr(config, "Settings", lambda **k: k)
+    seen = []
+    monkeypatch.setattr(repair, "reapply_owed_grants", lambda a, d, st, apply=False: seen.append(
+        (st["account_id"], apply)) or {"granted": 2, "covered": 1, "errors": []})
+    assert api_server._grant_owed_everywhere() == ["account 3: 2 granted, 1 already had access, 0 error(s)"]
+    assert seen == [(3, True)]

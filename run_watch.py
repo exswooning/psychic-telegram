@@ -62,6 +62,8 @@ DEDUPE_HOURS = 6
 BURST_MIN_FAILURES = 25
 BURST_ERROR_FAILURES = 200
 SEED_WARN_BURST = 15
+# How long a run that vanished with no exit code waits for its launcher to record one.
+RC_GRACE_SEC = 120
 
 # A tally is deliberately absent: it measures the tenants for a report, it is not
 # a run to be judged (it moves nothing, so it would score as "migrated nothing").
@@ -275,6 +277,102 @@ def set_status(incident_id: int, status: str, note: str = "") -> bool:
         return cur.rowcount > 0
 
 
+# ---------------------------------------------------------------------------
+# Closing what has cleared
+# ---------------------------------------------------------------------------
+SWEEP_SEC = 60
+# A later run of the same job exiting 0 says the process no longer crashes, stalls or
+# throws. (A seed's warning burst is the same: its log is all there is to go on.)
+_CLEARED_BY_A_CLEAN_RUN = {"crashed", "stalled", "traceback"}
+
+
+def resolve(incident_id: int, reason: str) -> None:
+    """Close an incident whose condition has cleared, and say what cleared it."""
+    with cpdb.rw() as c:
+        c.execute("UPDATE incidents SET status='resolved', resolved_at=?, note=? WHERE id=? "
+                  "AND status IN ('open','acknowledged')",
+                  (_now_iso(), f"closed on its own: {reason}", incident_id))
+    _feed(f"RESOLVED #{incident_id} automatically :: {reason}")
+
+
+def _later_run(inc: dict, event: str, clean: bool) -> str | None:
+    with cpdb.ro() as c:
+        r = c.execute(
+            "SELECT at FROM run_events WHERE event=? AND job_name=? AND "
+            "COALESCE(account_id,-1)=COALESCE(?,-1) AND at > ?" + (" AND rc=0" if clean else "")
+            + " ORDER BY id LIMIT 1",
+            (event, inc["job_name"], inc["account_id"], inc["last_seen_at"])).fetchone()
+    return r["at"] if r else None
+
+
+def _cleared(inc: dict, ledger_path_for) -> str | None:
+    """Why this incident's condition no longer holds, or None while it still does.
+    Only evidence closes one: a later run, the ledger, the mirror's or lifecycle's own
+    state -- never the passage of time."""
+    kind, job, aid = inc["kind"], inc["job_name"] or "", inc["account_id"]
+    seed_burst = kind == "failing" and job.startswith("seed")
+    if kind in _CLEARED_BY_A_CLEAN_RUN or seed_burst:
+        at = _later_run(inc, "finished", clean=True)
+        return f"a later `{job}` run exited 0 at {at}" if at else None
+    if kind == "verdict_fail":
+        import run_report
+        since = _epoch(inc["last_seen_at"]) or 0
+        for rep in run_report.list_reports(aid):
+            if (rep.get("verdict") == "PASS" and rep.get("kind") == report_kind(job)
+                    and (_epoch(rep.get("generatedAt")) or 0) > since):
+                return f"a later report ({rep['id']}) passed its benchmarks"
+        return None
+    if kind == "dms_not_started":
+        at = _later_run(inc, "started", clean=False)
+        return f"the DMS was started at {at}" if at else None
+    if kind == "teardown":
+        import lifecycle
+        st = lifecycle.state(aid) if aid is not None else {}
+        if st.get("torn_down_at"):
+            return f"teardown completed at {st['torn_down_at']}"
+        return None if st.get("approved_at") else "the approval was undone"
+    path = ledger_path_for(aid)
+    if not path or not os.path.isfile(path):
+        return None
+    if kind == "failing":
+        # failing:{account}:{job}:{normalised message}, from _watch_migration
+        family = inc["fingerprint"].split(":", 3)[-1]
+        with cpdb.ro(path) as c:
+            for r in c.execute("SELECT DISTINCT substr(COALESCE(error_message,'(no message)'),1,160) m "
+                               "FROM audit_log WHERE status IN ('FAILED','BLOCKED')"):
+                if normalise(r["m"]) == family:
+                    return None
+        return "none of these failures is left in the ledger"
+    if kind == "mirror_deletions_held":
+        with cpdb.ro(path) as c:
+            n = c.execute("SELECT COUNT(*) n FROM mirror_deletions WHERE status='awaiting'").fetchone()["n"]
+        return None if n else "no deletion is waiting for a decision"
+    if kind == "mirror_lag":
+        import mirror_scheduler as ms
+        s = ms.get_settings(aid)
+        if not s["enabled"]:
+            return "the mirror was switched off"
+        since = ms.lag_since(s, ms.last_cycles(path))
+        if since is not None and time.time() - since <= ms.LAG_INTERVALS * s["interval_min"] * 60:
+            return "a good mirror cycle finished within the lag window"
+    return None
+
+
+def sweep_cleared(ledger_path_for) -> list[tuple[int, str]]:
+    """Close every open or acknowledged incident whose condition has cleared."""
+    closed = []
+    for inc in list_incidents("open", limit=500) + list_incidents("acknowledged", limit=500):
+        try:
+            why = _cleared(inc, ledger_path_for)
+        except Exception as exc:      # noqa: BLE001 - one unreadable condition must not stop the rest
+            log.warning("could not check whether incident %s cleared: %s", inc["id"], exc)
+            continue
+        if why:
+            resolve(inc["id"], why)
+            closed.append((inc["id"], why))
+    return closed
+
+
 def read_brief(incident_id: int) -> str | None:
     inc = get_incident(incident_id)
     if not inc or not inc.get("brief_path"):
@@ -376,6 +474,8 @@ class Watcher:
         self._live: dict = {}
         self._cursor: dict = {}          # account -> last audit_log id looked at
         self._offset: dict = {}          # (account, job) -> bytes of log already scanned
+        self._swept_at = 0.0             # when sweep_cleared last ran
+        self._gone: dict = {}            # run key -> when it was first seen gone with no exit code
 
     # -- who is running -------------------------------------------------
     def _observe(self) -> None:
@@ -389,11 +489,21 @@ class Watcher:
                 record_started(key[0], key[1], key[2], j.get("started_at"))
         for key, r in opened.items():
             if key in live:
+                self._gone.pop(key, None)
                 continue
             started = _epoch(r.get("started_at") or r.get("at"))
             rc = self.rc_for(key[0], key[1], started)
+            if rc is None and self.now() - self._gone.setdefault(key, self.now()) < RC_GRACE_SEC:
+                # main.py frees its slot a moment BEFORE it exits, so writing "not
+                # observed" now beat the launcher's real exit code to the row, and the
+                # first write wins: 24 of 35 live migrate runs read unobserved, and a
+                # crash at the end of one was never called a crash. Give the launcher
+                # its moment; only a launcher that is gone (a restart) leaves it unknown.
+                continue
+            self._gone.pop(key, None)
             record_finished(key[0], key[1], rc, key[2], r.get("started_at") or r.get("at"),
                             "" if rc is not None else "the process ended and no exit code was observed")
+        self._gone = {k: v for k, v in self._gone.items() if k in opened}
         self._live = live
 
     # -- during a run -----------------------------------------------------
@@ -539,4 +649,9 @@ class Watcher:
                 self._handle_finished(ev)
             except Exception as exc:      # noqa: BLE001
                 log.warning("handling finished run %s failed: %s", ev.get("id"), exc)
-        return {"live": len(self._live), "watched": watched, "finished": len(finished)}
+        closed = []
+        if self.now() - self._swept_at >= SWEEP_SEC:
+            self._swept_at = self.now()
+            closed = sweep_cleared(self.ledger_path_for)
+        return {"live": len(self._live), "watched": watched, "finished": len(finished),
+                "closed": len(closed)}

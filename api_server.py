@@ -831,6 +831,7 @@ async def lifespan(_: FastAPI):
     observer = asyncio.create_task(_watch_runs())
     mirrors = asyncio.create_task(_mirror_loop())
     ends = asyncio.create_task(_lifecycle_loop())
+    owed = asyncio.create_task(_owed_grants_loop())
     try:
         yield
     finally:
@@ -839,6 +840,7 @@ async def lifespan(_: FastAPI):
         observer.cancel()
         mirrors.cancel()
         ends.cancel()
+        owed.cancel()
 
 
 app = FastAPI(title="Migration Command Center", version="1.0", lifespan=lifespan)
@@ -2302,17 +2304,7 @@ def _start_mirror(account_id: int | None, decide: str | None = None) -> tuple[bo
 def _mirror_last_cycles(account_id: int | None) -> dict:
     import mirror_scheduler as ms
     path = _ledger_path(account_id)
-    if not os.path.isfile(path):
-        return {}
-    try:
-        with cpdb.ro(path) as conn:
-            last = conn.execute("SELECT started_at FROM mirror_cycles ORDER BY id DESC LIMIT 1").fetchone()
-            good = conn.execute("SELECT finished_at FROM mirror_cycles WHERE status IN ('ok','partial') "
-                                "AND finished_at IS NOT NULL ORDER BY id DESC LIMIT 1").fetchone()
-    except sqlite3.OperationalError:      # a ledger from before the mirror
-        return {}
-    return {"started": ms._epoch(last["started_at"]) if last else None,
-            "good": ms._epoch(good["finished_at"]) if good else None}
+    return ms.last_cycles(path) if os.path.isfile(path) else {}
 
 
 def _mirror_view(account_id: int) -> dict:
@@ -2373,9 +2365,9 @@ def _mirror_view(account_id: int) -> dict:
     good = next((c for c in out["cycles"] if c["status"] in ("ok", "partial") and c["finishedAt"]), None)
     if good:
         out["lastGoodAt"] = good["finishedAt"]
-        lag = time.time() - (ms._epoch(good["finishedAt"]) or time.time())
+        lag = time.time() - (ms.lag_since(cfg, {"good": ms._epoch(good["finishedAt"])}) or time.time())
         out["lagSeconds"] = max(0, int(lag))
-        out["behind"] = lag > ms.LAG_INTERVALS * cfg["interval_min"] * 60
+        out["behind"] = bool(cfg["enabled"]) and lag > ms.LAG_INTERVALS * cfg["interval_min"] * 60
     out["waiting"] = {"retry": retry_n, "held": held_n}
     out["held"] = [{"id": h["id"], "sourceUser": h["source_user"], "service": h["service"],
                     "itemType": h["item_type"], "name": h["name"], "targetId": h["target_id"],
@@ -3994,6 +3986,53 @@ async def _lifecycle_loop() -> None:
             raise
         except Exception as exc:      # noqa: BLE001 - the loop must outlive a bad pass
             log.warning("lifecycle sweep failed: %r", exc)
+
+
+OWED_POLL_SEC = int(os.getenv("OWED_GRANTS_POLL_SEC", "3600"))
+
+
+def _grant_owed_everywhere() -> list[str]:
+    """One pass of _owed_grants_loop: every account's owed shares whose colleague now
+    has a target account, through the same repair.reapply_owed_grants every run's repair
+    uses. An account with nothing owed costs one ledger query."""
+    from auth import AuthManager
+    from config import Settings
+    from db import MigrationDB
+    import repair
+    busy = {j.get("account_id") for j in job_admission.list_active()}
+    out = []
+    for acct in accounts_auth.list_accounts():
+        aid = acct.get("id") if isinstance(acct, dict) else acct
+        t = _REPAIR_THREADS.get(aid)
+        path = _account_db_path(aid)
+        if aid in busy or (t is not None and t.is_alive()) or not path or not os.path.isfile(path):
+            continue            # a run or its repair grants these itself; next pass otherwise
+        st = Settings(account_id=aid)
+        d = MigrationDB(path)
+        try:
+            got = repair.reapply_owed_grants(AuthManager(st), d, st, apply=True)
+        finally:
+            d.close()
+        if got.get("granted") or got.get("covered") or got.get("errors"):
+            out.append(f"account {aid}: {got.get('granted', 0)} granted, "
+                       f"{got.get('covered', 0)} already had access, {len(got.get('errors') or [])} error(s)")
+    return out
+
+
+async def _owed_grants_loop() -> None:
+    """Grant an owed share as soon as its colleague has a target account, however the
+    account came to exist. Every run's repair already does this, but only after a
+    Bitport run: an account an admin added by hand, or one a mirror cycle created, left
+    its shares owed until some unrelated run came along."""
+    while True:
+        try:
+            await asyncio.sleep(OWED_POLL_SEC)
+            for line in await _off_loop(_grant_owed_everywhere):
+                log.info("owed grants: %s", line)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:      # noqa: BLE001 - the loop must outlive a bad pass
+            log.warning("owed-grant sweep failed: %r", exc)
 
 
 class StartTeardown(WriteAction):

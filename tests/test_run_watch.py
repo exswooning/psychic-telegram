@@ -77,8 +77,12 @@ class TestRunsAreObserved:
         assert f["rc"] == 0 and f["handled_at"] is not None
 
     def test_an_exit_nobody_saw_is_recorded_as_unknown_never_as_zero(self, cp):
-        b = Box(); w = b.watcher(); b.jobs = [job()]
+        clock = [1000.0]
+        b = Box(); w = b.watcher(now=lambda: clock[0]); b.jobs = [job()]
         w.tick(); b.jobs = []
+        w.tick()
+        assert len(W.open_runs()) == 1          # its launcher may still record the real code
+        clock[0] += W.RC_GRACE_SEC
         w.tick()
         with cpdb.ro() as c:
             f = c.execute("SELECT rc, detail FROM run_events WHERE event='finished'").fetchone()
@@ -86,10 +90,12 @@ class TestRunsAreObserved:
 
     def test_a_run_that_ended_while_the_watcher_was_not_running_is_still_noticed(self, cp):
         """State is in the database, so a restart loses nothing."""
+        clock = [1000.0]
         b = Box(); b.jobs = [job()]
-        b.watcher().tick()                 # first watcher sees it start, then "dies"
+        b.watcher(now=lambda: clock[0]).tick()     # first watcher sees it start, then "dies"
         b.jobs = []
-        b.watcher().tick()                 # a new watcher, no memory of the first
+        w = b.watcher(now=lambda: clock[0])        # a new watcher, no memory of the first
+        w.tick(); clock[0] += W.RC_GRACE_SEC; w.tick()
         assert W.open_runs() == []
 
     def test_the_launchers_own_exit_wins_over_the_observers_guess(self, cp):
@@ -100,6 +106,19 @@ class TestRunsAreObserved:
         with cpdb.ro() as c:
             rows = c.execute("SELECT rc FROM run_events WHERE event='finished'").fetchall()
         assert [r["rc"] for r in rows] == [-6]
+
+    def test_a_slot_freed_before_the_exit_waits_for_the_launchers_code(self, cp):
+        """Live: main.py releases its slot just before it exits; the observer's
+        "unobserved" used to win the row, so a crash at the very end opened nothing."""
+        b = Box(); w = b.watcher(); b.jobs = [job()]
+        w.tick(); b.jobs = []
+        w.tick()                                           # gone, no code yet: wait
+        W.record_finished(2, "migrate", -9, 100)          # the launcher's waiter
+        w.tick()
+        with cpdb.ro() as c:
+            rows = c.execute("SELECT rc FROM run_events WHERE event='finished'").fetchall()
+        assert [r["rc"] for r in rows] == [-9]
+        assert [i["kind"] for i in W.list_incidents()] == ["crashed"]
 
     def test_a_recycled_pid_is_a_new_run(self, cp):
         b = Box(); w = b.watcher(); b.jobs = [job(pid=100)]
@@ -412,3 +431,77 @@ class TestTheRealSeedThatPassedWhileUsersWereRefused:
         assert inc["kind"] == "verdict_fail" and "fill_users_failed" in inc["title"]
         brief = W.read_brief(inc["id"])
         assert "storageQuotaExceeded" in brief and "POOL ran out" in brief
+
+
+class TestIncidentsCloseThemselves:
+    """An incident closes when its own condition clears -- a later run, the ledger, the
+    mirror's state -- and says why. Live: #16 (held deletions) and #17 (mirror lag)
+    stayed open long after both had cleared."""
+
+    def _open(self, kind, job="migrate", fp=None, aid=2):
+        return W.open_incident(kind=kind, title="t", summary="s", account_id=aid, job_name=job,
+                               fingerprint=fp or f"{kind}:{aid}:{job}")[0]
+
+    def _ledger(self, tmp_path):
+        path = str(tmp_path / "ledger.db")
+        MigrationDB(path).close()
+        return lambda aid: path
+
+    def test_a_crash_closes_when_a_later_run_of_that_job_exits_0(self, cp, tmp_path):
+        i = self._open("crashed")
+        W.record_finished(2, "migrate", 1, pid=5)            # failed again: still open
+        assert W.sweep_cleared(self._ledger(tmp_path)) == []
+        W.record_finished(2, "delta", 0, pid=6)              # another job: still open
+        W.record_finished(2, "migrate", 0, pid=7)
+        assert [x[0] for x in W.sweep_cleared(self._ledger(tmp_path))] == [i]
+        inc = W.get_incident(i)
+        assert inc["status"] == "resolved" and "exited 0" in inc["note"]
+        assert f"RESOLVED #{i} automatically" in open(W.feed_path()).read()
+
+    def test_a_failed_benchmark_closes_on_a_later_passing_report(self, cp, tmp_path, monkeypatch):
+        import run_report
+        i = self._open("verdict_fail")
+        reports = [{"id": "r1", "kind": "migration", "verdict": "FAIL", "generatedAt": "2099-01-01T00:00:00Z"}]
+        monkeypatch.setattr(run_report, "list_reports", lambda aid: reports)
+        assert W.sweep_cleared(self._ledger(tmp_path)) == []
+        reports.append({"id": "r2", "kind": "migration", "verdict": "PASS", "generatedAt": "2099-01-02T00:00:00Z"})
+        assert W.sweep_cleared(self._ledger(tmp_path))[0][0] == i
+
+    def test_a_failure_burst_closes_once_none_of_it_is_left(self, cp, tmp_path):
+        ledger = self._ledger(tmp_path)
+        msg = "HttpError 500 when copying 1abcdefghijklmnopqrstuvwxyz0123"
+        db = MigrationDB(ledger(2))
+        db.log_audit("u@a.com", "f1", "file", "FAILED", msg)
+        i = self._open("failing", fp=f"failing:2:migrate:{W.normalise(msg)}")
+        assert W.sweep_cleared(ledger) == []
+        db.log_audit("u@a.com", "f1", "file", "SUCCESS", "")
+        assert W.sweep_cleared(ledger)[0] == (i, "none of these failures is left in the ledger")
+
+    def test_held_deletions_close_once_nothing_waits(self, cp, tmp_path):
+        ledger = self._ledger(tmp_path)
+        db = MigrationDB(ledger(2))
+        cyc = db.mirror_cycle_start(1)
+        did = db.mirror_record_deletion(cyc, {"service": "drive", "source_user": "u", "target_user": "t",
+                                              "item_type": "file", "item_id": "f", "target_id": "t1",
+                                              "container": None, "name": "n"}, "awaiting", "over the cap")
+        i = self._open("mirror_deletions_held", job="mirror")
+        assert W.sweep_cleared(ledger) == []
+        db.set_mirror_deletion(did, "applied", "binned")
+        assert W.sweep_cleared(ledger)[0][0] == i
+
+    def test_mirror_lag_closes_when_the_mirror_is_off(self, cp, tmp_path):
+        i = self._open("mirror_lag", job="mirror")
+        assert W.sweep_cleared(self._ledger(tmp_path)) == [(i, "the mirror was switched off")]
+
+    def test_dms_not_started_closes_when_a_dms_run_starts(self, cp, tmp_path):
+        i = self._open("dms_not_started", job="dms")
+        assert W.sweep_cleared(self._ledger(tmp_path)) == []
+        W.record_started(2, "dms", 9)
+        assert W.sweep_cleared(self._ledger(tmp_path))[0][0] == i
+
+    def test_the_watcher_sweeps_on_its_own(self, cp, tmp_path):
+        box = Box()
+        w = box.watcher(ledger_path_for=self._ledger(tmp_path))
+        i = self._open("crashed")
+        W.record_finished(2, "migrate", 0, pid=7)
+        assert w.tick()["closed"] == 1 and W.get_incident(i)["status"] == "resolved"

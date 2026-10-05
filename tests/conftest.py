@@ -126,6 +126,39 @@ def _signup_open_for_tests(monkeypatch):
     monkeypatch.setenv("BITPORT_SIGNUP_OPEN", "1")
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _sweep_a_killed_runs_keys():
+    """A run killed mid-test skips _cleanup_account_dirs below, and its fake key under
+    keys/{id}/ then reads as an uploaded key to the next run (live: twice in one
+    session, each time a false failure). Only a file holding a test's stub key goes --
+    "FAKE", "abc": under 200 characters, where a real private key is ~1,700 -- and a
+    numbered directory only when that emptied it."""
+    import json
+
+    import accounts_auth
+
+    keys_dir = os.path.join(accounts_auth.HERE, "keys")
+    for name in (os.listdir(keys_dir) if os.path.isdir(keys_dir) else []):
+        d = os.path.join(keys_dir, name)
+        if not (name.isdigit() and os.path.isdir(d)):
+            continue
+        removed = False
+        for f in os.listdir(d):
+            p = os.path.join(d, f)
+            try:
+                with open(p, encoding="utf-8") as fh:
+                    pk = json.load(fh).get("private_key")
+                fake = isinstance(pk, str) and 0 < len(pk) < 200
+            except (OSError, ValueError, AttributeError):
+                continue
+            if fake:
+                os.remove(p)
+                removed = True
+        if removed and not os.listdir(d):
+            os.rmdir(d)
+    yield
+
+
 @pytest.fixture(autouse=True)
 def _cleanup_account_dirs():
     """accounts_auth.create_account() writes real directories under

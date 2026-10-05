@@ -71,8 +71,15 @@ def test_a_disabled_pair_never_starts(cp):
     assert box.cycles == []
 
 
+def enabled_on(aid: int, when: float) -> None:
+    with cpdb.rw() as c:
+        c.execute("UPDATE mirror_settings SET enabled_at=? WHERE account_id=?",
+                  (datetime.fromtimestamp(when, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), aid))
+
+
 def test_lag_past_three_intervals_opens_an_incident(cp):
     ms.save_settings(3, enabled=True, interval_min=15, deletion_mode="mirror", cap_pct=2, by="t")
+    enabled_on(3, at(9))
     box = Box(at(12), busy=True, last={"good": at(11, 20)})     # 40 min: fine
     box.sched().tick()
     assert box.incidents == []
@@ -80,6 +87,18 @@ def test_lag_past_three_intervals_opens_an_incident(cp):
     box.sched().tick()
     assert [i["kind"] for i in box.incidents] == ["mirror_lag"]
     assert box.incidents[0]["fingerprint"] == "mirror-lag-3"
+
+
+def test_hours_switched_off_are_not_hours_behind(cp):
+    """Live: re-enabling a pair opened "317 minutes behind" before its first cycle ran."""
+    ms.save_settings(3, enabled=True, interval_min=5, deletion_mode="mirror", cap_pct=2, by="t")
+    enabled_on(3, at(12))
+    box = Box(at(12, 5), busy=True, last={"good": at(7)})       # last good cycle: 5 h ago
+    box.sched().tick()
+    assert box.incidents == []
+    box.clock = at(12, 16)                                       # 16 min after switching on
+    box.sched().tick()
+    assert [i["kind"] for i in box.incidents] == ["mirror_lag"]
 
 
 def test_each_pair_is_tallied_once_a_night(cp):

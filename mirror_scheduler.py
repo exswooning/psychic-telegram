@@ -130,6 +130,27 @@ def hold_deletions(account_id: Optional[int], held: int, cap: int) -> None:
         log.warning("could not open the held-deletions incident: %s", exc)
 
 
+def last_cycles(ledger_path: str) -> dict:
+    """When this pair's newest cycle started and its newest good one finished (epochs)."""
+    import sqlite3
+    try:
+        with cpdb.ro(ledger_path) as conn:
+            last = conn.execute("SELECT started_at FROM mirror_cycles ORDER BY id DESC LIMIT 1").fetchone()
+            good = conn.execute("SELECT finished_at FROM mirror_cycles WHERE status IN ('ok','partial') "
+                                "AND finished_at IS NOT NULL ORDER BY id DESC LIMIT 1").fetchone()
+    except sqlite3.OperationalError:      # a ledger from before the mirror
+        return {}
+    return {"started": _epoch(last["started_at"]) if last else None,
+            "good": _epoch(good["finished_at"]) if good else None}
+
+
+def lag_since(s: dict, last: dict) -> Optional[float]:
+    """Where lag is measured from: the last good cycle, or switching the mirror on if
+    that is later -- hours spent switched off are not hours behind (live, re-enabling
+    a pair opened "317 minutes behind" before its first cycle had a chance to run)."""
+    return max([t for t in (last.get("good"), _epoch(s["enabled_at"])) if t], default=None)
+
+
 def enabled_pairs() -> list[dict]:
     try:
         with cpdb.ro() as c:
@@ -177,7 +198,7 @@ class Scheduler:
                     out["started"].append(aid)
                 else:
                     log.info("mirror cycle for account %s not started: %s", aid, detail)
-            good = last.get("good") or _epoch(s["enabled_at"])
+            good = lag_since(s, last)
             if good and now - good > LAG_INTERVALS * interval:
                 out["lagging"].append(aid)
                 if self.open_incident:

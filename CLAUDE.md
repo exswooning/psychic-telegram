@@ -63,7 +63,8 @@ It then rsyncs the tree (excluding `.venv`, `keys/`, `migration.db`, `logs/`,
 `requirements.txt`/`requirements-control-plane.txt` idempotently, syntax-checks
 under the target's Python, warns (but does not block) on a dirty tree or an
 in-progress `full_setup.py`/`seed_sandbox.py` run that the restart is about to
-kill, then restarts the systemd units. `install.sh` is the from-scratch
+kill, then restarts the systemd units -- refusing outright over a running job, except a
+lone mirror cycle, which it waits out (`MIRROR_WAIT_SEC`, 240). `install.sh` is the from-scratch
 installer for a box that has never run this before (creates the venv, the
 first superadmin account, systemd units, Caddy config).
 
@@ -182,7 +183,13 @@ unattended**: `sync_vps.sh` restarts services and a webui-launched seed or a
 migration dies with it. Say what you changed and let the operator pick the
 moment (an API-only change needs only `systemctl restart bitport-api`, which
 does not touch a webui-launched job). Then `incidents.py resolve <id> -m
-"<what fixed it>"`. Notifications are opt-in via `INCIDENT_NTFY_TOPIC`,
+"<what fixed it>"` -- or let it close itself: the watcher's `sweep_cleared` (once a
+minute) closes an incident when its own condition clears, with the reason in its note
+and a `RESOLVED` feed line -- a crash, stall or traceback by a later run of the same job
+exiting 0, a failed benchmark by a later passing report, a failure burst once none of it
+is left in the ledger, held deletions once none waits, mirror lag once caught up or
+switched off, the DMS once started, a teardown once done or un-approved. Only evidence
+closes one, never time. Notifications are opt-in via `INCIDENT_NTFY_TOPIC`,
 `INCIDENT_WEBHOOK_URL`, or `INCIDENT_GITHUB_REPO` + `INCIDENT_GITHUB_TOKEN`
 (the last opens an issue a Claude Code routine can be pointed at); none is set
 by default and a failed send never fails a run.
@@ -328,8 +335,10 @@ migrated yet. The engine asks the target directory once per colleague
 `OWED_GRANTEE_NO_ACCOUNT` at once, never through the retry ladder. Drive's own "no
 Google account" 400 gets two tries (`resilience.NO_ACCOUNT_RETRY_BUDGET`), then is
 owed too. `repair.reapply_owed_grants` (start of `run_all`, so every run's automatic
-repair) grants each owed share whose colleague now has an account, through the
-engine's `_sync_acls(only=...)`. The status does not start with `SKIPPED`, so the
+repair, and hourly on every idle account -- `api_server._owed_grants_loop`, for an
+account an admin or a mirror cycle created) grants each owed share whose colleague now
+has an account, through the engine's `reapply_acls` (which also puts back the
+modifiedTime a grant moves). The status does not start with `SKIPPED`, so the
 one-to-one check counts it missing until then; `GET /api/v2/owed-grants` feeds the
 header's notifications. An outsider with no Google account stays
 `SKIPPED_GRANTEE_NOT_ON_GOOGLE`.

@@ -103,3 +103,29 @@ def test_a_frontend_only_deploy_is_never_refused(box):
     box.repair(_now())
     r, log = box(would="migration-webui/src/pages/Jobs.tsx")
     assert r.returncode == 0 and "FRONTEND-ONLY" in r.stdout
+
+
+def _mirror_cycle(box, seconds):
+    """A stand-in `main.py ... mirror` process, as the busy check sees one."""
+    fake = box.tmp / "main.py"
+    fake.write_text(f"import time\ntime.sleep({seconds})\n")
+    return subprocess.Popen([sys.executable, str(fake), "--account-id", "9", "mirror"])
+
+
+def test_a_mirror_cycle_alone_is_waited_out_not_refused(box):
+    p = _mirror_cycle(box, 4)
+    try:
+        r, log = box(MIRROR_WAIT_SEC=60)
+    finally:
+        p.kill()
+    assert r.returncode == 0, r.stderr
+    assert "waiting for it to finish" in r.stdout and "systemctl restart" in log
+
+
+def test_a_mirror_cycle_that_outlasts_the_wait_still_refuses(box):
+    p = _mirror_cycle(box, 60)
+    try:
+        r, log = box(MIRROR_WAIT_SEC=0)
+    finally:
+        p.kill()
+    assert r.returncode == 3 and "mirror" in r.stderr and "rsync:" not in log
