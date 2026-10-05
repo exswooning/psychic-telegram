@@ -189,6 +189,51 @@ def _extract_reason(exc: HttpError) -> str:
         return ""
 
 
+# -- which Google limit refused a call -------------------------------------------
+# The reason alone does not say whose limit it was: Drive answers "rateLimitExceeded"
+# for more than one of its limits, and only the message names the one that bound
+# ("... limit 'Write requests per minute per user' ..."). That decides whether a second
+# Cloud project could help, so every pacing refusal is counted by reason AND by what
+# Google said, the first of each kind logged in full and a running tally once a minute.
+PACING_REASONS = {"rateLimitExceeded", "userRateLimitExceeded", "quotaExceeded",
+                  "sharingRateLimitExceeded"}
+REJECTIONS: dict = {}
+_REJ_LOCK = threading.Lock()
+_rej_tally_at = [0.0]
+REJECTION_TALLY_SEC = 60
+
+
+def _google_said(exc: HttpError) -> str:
+    """The limit Google named, else its message and error domain."""
+    try:
+        content = exc.content.decode("utf-8", "replace") if isinstance(exc.content, bytes) else exc.content
+        err = json.loads(content).get("error") or {}
+        msg = err.get("message") or ""
+        domain = ((err.get("errors") or [{}])[0] or {}).get("domain") or ""
+    except Exception:  # noqa: BLE001 - malformed error bodies happen
+        msg, domain = str(exc), ""
+    named = re.search(r"limit '([^']+)'", msg)
+    said = named.group(1) if named else msg.strip()[:120]
+    return f"{said} [{domain}]" if domain else said
+
+
+def note_pacing_refusal(label: str | None, status: int, reason: str, exc: HttpError) -> None:
+    key = (label or "api", status, reason or "?", _google_said(exc))
+    now = time.monotonic()
+    with _REJ_LOCK:
+        first = key not in REJECTIONS
+        REJECTIONS[key] = REJECTIONS.get(key, 0) + 1
+        tally = now - _rej_tally_at[0] >= REJECTION_TALLY_SEC
+        if tally:
+            _rej_tally_at[0] = now
+            snapshot = sorted(REJECTIONS.items(), key=lambda kv: -kv[1])
+    if first:
+        log.warning("Google refused %s: HTTP %s %s -- %s", *key)
+    if tally:
+        log.info("Google pacing refusals so far: %s", "; ".join(
+            f"{n} x {lbl} HTTP {st} {rsn} ({said})" for (lbl, st, rsn, said), n in snapshot))
+
+
 def _status_of(exc: HttpError) -> int:
     try:
         return int(exc.resp.status)
@@ -392,6 +437,8 @@ def retry_on_google_error(
                                    ok=False)
                     status = _status_of(exc)
                     reason = _extract_reason(exc)
+                    if status == 429 or reason in PACING_REASONS:
+                        note_pacing_refusal(label, status, reason, exc)
                     if _is_permanent(status, reason, exc):
                         raise PermanentAPIError(
                             f"HTTP {status} ({reason or 'unknown reason'}): {exc}"

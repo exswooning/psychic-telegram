@@ -130,3 +130,33 @@ class TestTheLimiterLearnsFromTheFirstRejectionNotOnlyTheLast:
         with pytest.raises(RuntimeError, match="exhausted"):
             boom()
         assert calls["n"] == R.RATE_LIMIT_RETRY_BUDGET + 1
+
+
+class TestWhichLimitRefusedIsRecorded:
+    """The reason alone ("rateLimitExceeded") does not say whose limit bound --
+    one user's or the whole project's -- and that decides whether a second Cloud
+    project helps. Google's message names the limit; it is now kept."""
+
+    def test_each_refusal_is_counted_by_reason_and_by_the_limit_google_named(self, monkeypatch, caplog):
+        from tests.fakes import http_error
+        monkeypatch.setattr(R, "REJECTIONS", {})
+        monkeypatch.setattr(R, "_rej_tally_at", [0.0])
+        refusals = iter([
+            http_error(429, "rateLimitExceeded", "Quota exceeded for quota metric 'Write requests' and "
+                                                 "limit 'Write requests per minute per user' of service drive"),
+            http_error(403, "userRateLimitExceeded", "User Rate Limit Exceeded"),
+        ])
+
+        @R.retry_on_google_error(max_retries=6, base_delay=0, max_delay=0, label="drive.files.copy")
+        def call():
+            nxt = next(refusals, None)
+            if nxt is not None:
+                raise nxt
+            return "ok"
+
+        with caplog.at_level("INFO", logger="resilience"):
+            assert call() == "ok"
+        assert R.REJECTIONS == {
+            ("drive.files.copy", 429, "rateLimitExceeded", "Write requests per minute per user"): 1,
+            ("drive.files.copy", 403, "userRateLimitExceeded", "User Rate Limit Exceeded"): 1}
+        assert "Write requests per minute per user" in caplog.text      # the first of a kind, in full
