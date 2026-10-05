@@ -199,7 +199,10 @@ class Scheduler:
                 else:
                     log.info("mirror cycle for account %s not started: %s", aid, detail)
             good = lag_since(s, last)
-            if good and now - good > LAG_INTERVALS * interval:
+            # Not while another job holds this account's slot: the mirror waits for it
+            # by design (live: every migration over 15 minutes on a mirrored pair opened
+            # "Mirror is 15 minutes behind"). The job itself is watched by the supervisor.
+            if good and now - good > LAG_INTERVALS * interval and not self.is_busy(aid):
                 out["lagging"].append(aid)
                 if self.open_incident:
                     mins = int((now - good) // 60)

@@ -80,7 +80,7 @@ def enabled_on(aid: int, when: float) -> None:
 def test_lag_past_three_intervals_opens_an_incident(cp):
     ms.save_settings(3, enabled=True, interval_min=15, deletion_mode="mirror", cap_pct=2, by="t")
     enabled_on(3, at(9))
-    box = Box(at(12), busy=True, last={"good": at(11, 20)})     # 40 min: fine
+    box = Box(at(12), last={"good": at(11, 20), "started": at(12)})     # 40 min: fine
     box.sched().tick()
     assert box.incidents == []
     box.clock = at(12, 6)                                        # 46 min: behind
@@ -89,11 +89,24 @@ def test_lag_past_three_intervals_opens_an_incident(cp):
     assert box.incidents[0]["fingerprint"] == "mirror-lag-3"
 
 
+def test_waiting_for_another_job_on_the_account_is_not_lag(cp):
+    """Live: a 47-minute migration on the mirrored account opened "Mirror is 15 minutes
+    behind" -- the mirror was waiting for the account's slot, as designed."""
+    ms.save_settings(3, enabled=True, interval_min=5, deletion_mode="mirror", cap_pct=2, by="t")
+    enabled_on(3, at(9))
+    box = Box(at(12), busy=True, last={"good": at(11)})
+    box.sched().tick()
+    assert box.incidents == []
+    box.busy = False
+    box.sched().tick()
+    assert [i["kind"] for i in box.incidents] == ["mirror_lag"]
+
+
 def test_hours_switched_off_are_not_hours_behind(cp):
     """Live: re-enabling a pair opened "317 minutes behind" before its first cycle ran."""
     ms.save_settings(3, enabled=True, interval_min=5, deletion_mode="mirror", cap_pct=2, by="t")
     enabled_on(3, at(12))
-    box = Box(at(12, 5), busy=True, last={"good": at(7)})       # last good cycle: 5 h ago
+    box = Box(at(12, 5), last={"good": at(7), "started": at(12, 5)})       # last good cycle: 5 h ago
     box.sched().tick()
     assert box.incidents == []
     box.clock = at(12, 16)                                       # 16 min after switching on

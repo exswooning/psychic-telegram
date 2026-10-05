@@ -45,6 +45,14 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
+# Run as a script this module is __main__, and `import main` anywhere else
+# (resilience.shutdown_requested, repair, mirror) loaded a SECOND copy whose
+# SHUTDOWN nothing ever set -- so every engine's per-item Stop check read that
+# copy and never fired. Live, a stopped Drive pass copied 1,115 more files in
+# 11 minutes and ran on until its user's whole Drive was done. One module, one flag.
+if __name__ == "__main__":
+    sys.modules["main"] = sys.modules["__main__"]
+
 from auth import AuthManager, list_domain_users
 from calendar_engine import CalendarMigrator
 from chat_engine import ChatMigrator
