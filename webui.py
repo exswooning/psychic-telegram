@@ -6269,12 +6269,18 @@ class Handler(BaseHTTPRequestHandler):
             #
             # Best-effort: an audit table that is unwritable must not stop
             # someone halting a runaway job.
+            # Never empty: begin_action refuses an empty reason, and a Stop pressed
+            # without one went unrecorded -- every kill behind incidents #7, #8, #10
+            # and #12 then read as a crash (run_watch.stopped_by looks for this row).
+            stop_reason = (str(body.get("reason") or "").strip()[:300]
+                           or ("Stop pressed again (forced), no reason given" if force
+                               else "Stop pressed, no reason given"))
             _stop_action = None
             try:
                 _stop_action = cpdb.begin_action(
                     actor=_account_email(account_id), actor_role="operator",
                     action="stop job (force)" if force else "stop job",
-                    reason=str(body.get("reason") or "")[:300],
+                    reason=stop_reason,
                     target=(job.name if job.running else "external process"),
                     params={"force": force, "pid": getattr(job.proc, "pid", None)},
                     account_id=account_id)
@@ -6292,7 +6298,7 @@ class Handler(BaseHTTPRequestHandler):
                 msg = job.stop(force)
                 if pid:
                     job_admission.note_stop(pid)
-                _note("done", msg)
+                _note("done", f"{msg} (pid {pid})")
                 self._json({"ok": True, "msg": msg})
             else:
                 jobs = _external_processes()

@@ -66,7 +66,9 @@ in-progress `full_setup.py`/`seed_sandbox.py` run that the restart is about to
 kill, then restarts the systemd units -- refusing outright over a running job, except a
 lone mirror cycle, which it waits out (`MIRROR_WAIT_SEC`, 240). `install.sh` is the from-scratch
 installer for a box that has never run this before (creates the venv, the
-first superadmin account, systemd units, Caddy config).
+first superadmin account, systemd units, Caddy config, and -- asked, default yes --
+key-only SSH plus fail2ban through `harden_ssh.sh`, which leaves passwords on while
+root has no key).
 
 ## Architecture notes that span multiple files
 
@@ -175,7 +177,9 @@ Benchmarks (`benchmarks.py`) have four outcomes; **a check nobody could make is
 benchmarks read from `run_fidelity`, written only by `main.py tally`
 (`tally.py`: counts both tenants, spot-checks a sample of DONE users for
 checksums/timestamps/sharing). A tally older than the run it is used for is
-ignored. Throughput is items written *during the run*, never the ledger total.
+ignored. Throughput is items written *during the run*, never the ledger total, and per worker
+it divides by the user workers the run could keep busy (`busyWorkers`: the pool, or
+the users it wrote, whichever is smaller) -- never the whole pool.
 
 **Handling an incident.** Read the brief; reproduce from its evidence; fix on
 a **test sandbox tenant**, never a real one; add a test. **Do not deploy
@@ -188,8 +192,11 @@ minute) closes an incident when its own condition clears, with the reason in its
 and a `RESOLVED` feed line -- a crash, stall or traceback by a later run of the same job
 exiting 0, a failed benchmark by a later passing report, a failure burst once none of it
 is left in the ledger, held deletions once none waits, mirror lag once caught up or
-switched off, the DMS once started, a teardown once done or un-approved. Only evidence
-closes one, never time. Notifications are opt-in via `INCIDENT_NTFY_TOPIC`,
+switched off, the DMS once started, a teardown once done or un-approved, a failed
+benchmark once a later report passes that same check. Only evidence closes one, never
+time. A run killed after a Stop that names its pid in `operator_actions_log` is
+recorded STOPPED, not crashed (`run_watch.stopped_by`) -- both Stop endpoints always
+audit, with a default reason when none is given. Notifications are opt-in via `INCIDENT_NTFY_TOPIC`,
 `INCIDENT_WEBHOOK_URL`, or `INCIDENT_GITHUB_REPO` + `INCIDENT_GITHUB_TOKEN`
 (the last opens an issue a Claude Code routine can be pointed at); none is set
 by default and a failed send never fails a run.

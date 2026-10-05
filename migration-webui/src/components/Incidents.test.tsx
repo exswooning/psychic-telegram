@@ -59,10 +59,22 @@ describe('Incidents', () => {
     api.fetchIncidents.mockResolvedValue({ incidents: [inc()] })
     render(<Incidents />)
     fireEvent.click(await screen.findByRole('button', { name: 'Acknowledge' }))
-    await waitFor(() => expect(api.setIncidentStatus).toHaveBeenCalledWith(7, 'acknowledged'))
-    fireEvent.click(screen.getByRole('button', { name: 'Resolve' }))
-    await waitFor(() => expect(api.setIncidentStatus).toHaveBeenCalledWith(7, 'resolved'))
+    await waitFor(() => expect(api.setIncidentStatus).toHaveBeenCalledWith(7, 'acknowledged', ''))
+    fireEvent.click(screen.getByTestId('resolve-7'))
+    // What fixed it is asked for, and required.
+    expect(screen.getByTestId('resolve-confirm-7')).toBeDisabled()
+    fireEvent.change(screen.getByTestId('resolve-why-7'), { target: { value: 'fixed in fb61cdb' } })
+    fireEvent.click(screen.getByTestId('resolve-confirm-7'))
+    await waitFor(() => expect(api.setIncidentStatus).toHaveBeenCalledWith(7, 'resolved', 'fixed in fb61cdb'))
     expect(api.fetchIncidents.mock.calls.length).toBeGreaterThan(2)
+  })
+
+  it('shows why a resolved incident was closed', async () => {
+    api.fetchIncidents.mockResolvedValue({ incidents: [
+      inc({ id: 9, status: 'resolved', note: 'closed on its own: a later `migrate` run exited 0' })] })
+    render(<Incidents />)
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Show resolved' }))
+    expect(await screen.findByTestId('incident-note-9')).toHaveTextContent('a later `migrate` run exited 0')
   })
 
   it('copies the brief to the clipboard', async () => {

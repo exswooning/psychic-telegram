@@ -342,3 +342,15 @@ def test_the_production_default_is_server_side_transfer():
     CPU/network was the bottleneck, not Google's quota."""
     unit = open(os.path.join(ROOT, "systemd", "bitport-api.service"), encoding="utf-8").read()
     assert "Environment=TRANSFER_MODE=server_side" in unit
+
+
+def test_ssh_is_made_key_only_only_when_asked_and_never_without_a_key():
+    """Live: 12,924 password guesses at root in one day. The installer asks (a shared
+    box may have password users), and harden_ssh.sh never turns passwords off while
+    root has no key -- on a fresh box that is the only way in -- nor reloads sshd on a
+    config it has not validated."""
+    assert "ask BITPORT_KEY_ONLY_SSH" in SH and "harden_ssh.sh" in SH
+    hs = open(os.path.join(ROOT, "harden_ssh.sh"), encoding="utf-8").read()
+    assert hs.index("authorized_keys") < hs.index("PasswordAuthentication no")
+    assert hs.index("\nsshd -t") < hs.index("\nsystemctl reload ssh")
+    assert "permitrootlogin without-password" in hs        # verified, not assumed

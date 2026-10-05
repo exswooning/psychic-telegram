@@ -125,6 +125,7 @@ ask BITPORT_DOMAIN      "Public domain for HTTPS"  ""
 ask BITPORT_ADMIN_EMAIL "First superadmin email"   "admin@bitport.local"
 ask_secret BITPORT_ADMIN_PASSWORD "Superadmin password"
 ask ENABLE_BROWSER      "Enable browser automation for DWD/DMS (yes/no)" "yes"
+ask BITPORT_KEY_ONLY_SSH "Make SSH key-only and ban password guessers (yes/no)" "yes"
 
 # The install dir gets an rsync'd tree; a system path here would be
 # catastrophic. Require an absolute, non-system, reasonably specific path.
@@ -573,6 +574,21 @@ elif [ -f "$INSTALL_DIR/harden.sh" ]; then
   ok "secrets restricted to the service account"
 else
   warn "harden.sh missing -- check permissions on keys/ and the ledgers"
+fi
+
+step "SSH"
+# Key-only SSH and fail2ban (harden_ssh.sh). The live box took 12,924 password
+# guesses at root in one day. Asked, not assumed: on a shared box other people may
+# still log in with a password. The script itself leaves passwords on while root
+# has no key on file -- on a fresh box that is the only way in.
+if [ "${BITPORT_KEY_ONLY_SSH:-yes}" != yes ]; then
+  warn "left as it is -- run 'sudo bash $INSTALL_DIR/harden_ssh.sh' to make SSH key-only"
+elif [ "$DRY_RUN" = 1 ]; then
+  ok "dry-run: would make SSH key-only and start fail2ban"
+elif run "bash '$INSTALL_DIR/harden_ssh.sh'"; then
+  ok "SSH is key-only; fail2ban bans repeated failures"
+else
+  warn "SSH hardening did not complete -- see above"
 fi
 
 step "Health check"

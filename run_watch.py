@@ -277,6 +277,36 @@ def set_status(incident_id: int, status: str, note: str = "") -> bool:
         return cur.rowcount > 0
 
 
+STOP_ACTIONS = ("job.stop", "job.force-stop", "stop job", "stop job (force)")
+
+
+def stopped_by(pid, since: str | None) -> str | None:
+    """Who asked this run to stop, if a person did: an audited Stop from either server
+    that names its pid, since it started. A run killed after one is stopped, not crashed."""
+    if not pid:
+        return None
+    with cpdb.ro() as c:
+        rows = c.execute("SELECT actor, target, detail, params_json FROM operator_actions_log "
+                         f"WHERE action IN ({','.join('?' * len(STOP_ACTIONS))}) AND started_at >= ? "
+                         "ORDER BY id DESC", (*STOP_ACTIONS, since or "")).fetchall()
+    named = re.compile(rf"(?<!\d){int(pid)}(?!\d)")
+    for r in rows:
+        if any(named.search(str(r[k] or "")) for k in ("target", "detail", "params_json")):
+            return r["actor"] or "a person"
+    return None
+
+
+def _run_started(ev: dict) -> str | None:
+    if ev.get("started_at"):
+        return ev["started_at"]
+    with cpdb.ro() as c:
+        r = c.execute("SELECT at FROM run_events WHERE event='started' AND job_name=? AND "
+                      "COALESCE(account_id,-1)=COALESCE(?,-1) AND COALESCE(pid,-1)=COALESCE(?,-1) "
+                      "AND id < ? ORDER BY id DESC LIMIT 1",
+                      (ev["job_name"], ev["account_id"], ev.get("pid"), ev["id"])).fetchone()
+    return r["at"] if r else None
+
+
 # ---------------------------------------------------------------------------
 # Closing what has cleared
 # ---------------------------------------------------------------------------
@@ -315,12 +345,21 @@ def _cleared(inc: dict, ledger_path_for) -> str | None:
         at = _later_run(inc, "finished", clean=True)
         return f"a later `{job}` run exited 0 at {at}" if at else None
     if kind == "verdict_fail":
+        # Cleared when a later report passes the very checks this one failed. Not
+        # "a PASS": a run without a fresh tally is UNVERIFIED, never PASS, so that
+        # rule would have held every benchmark incident open for good.
         import run_report
+        failed = set(filter(None, inc["fingerprint"].rsplit(":", 1)[-1].split(",")))
         since = _epoch(inc["last_seen_at"]) or 0
         for rep in run_report.list_reports(aid):
-            if (rep.get("verdict") == "PASS" and rep.get("kind") == report_kind(job)
-                    and (_epoch(rep.get("generatedAt")) or 0) > since):
+            if rep.get("kind") != report_kind(job) or (_epoch(rep.get("generatedAt")) or 0) <= since:
+                continue
+            if rep.get("verdict") == "PASS":
                 return f"a later report ({rep['id']}) passed its benchmarks"
+            results = ((run_report.load_report(aid, rep["id"]) or {}).get("benchmarks") or {}).get("results", [])
+            status = {r["id"]: r["status"] for r in results}
+            if failed and all(status.get(f) == "pass" for f in failed):
+                return f"a later report ({rep['id']}) passes {', '.join(sorted(failed))}"
         return None
     if kind == "dms_not_started":
         at = _later_run(inc, "started", clean=False)
@@ -595,7 +634,12 @@ class Watcher:
         transcript = self.transcript_for(aid, name)
         verdict = (report or {}).get("verdict")
         run_id = (report or {}).get("id")
-        if rc not in (None, 0):
+        who = stopped_by(ev.get("pid"), _run_started(ev)) if rc not in (None, 0) else None
+        if who:
+            # A person pressed Stop (twice, for a SIGKILL): the run ended as asked.
+            _feed(f"STOPPED account={aid} job={name} rc={rc} by {who}"
+                  + (f" report={run_id}" if run_id else ""))
+        elif rc not in (None, 0):
             how = f"signal {-rc}" if rc < 0 else f"code {rc}"
             title = f"{name} exited with {how}"
             summary = (f"`{name}` for account {aid} ended with exit {how}. "

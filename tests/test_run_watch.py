@@ -458,8 +458,23 @@ class TestIncidentsCloseThemselves:
         assert inc["status"] == "resolved" and "exited 0" in inc["note"]
         assert f"RESOLVED #{i} automatically" in open(W.feed_path()).read()
 
+    def test_a_failed_benchmark_closes_when_a_later_report_passes_that_check(self, cp, tmp_path, monkeypatch):
+        import run_report
+        i = self._open("verdict_fail", fp="verdict:2:migrate:items_per_min_per_worker")
+        reports = [{"id": "r0", "kind": "migration", "verdict": "UNVERIFIED", "generatedAt": "2099-01-01T00:00:00Z"}]
+        full = {"r0": {"benchmarks": {"results": [{"id": "items_per_min_per_worker", "status": "fail"}]}}}
+        monkeypatch.setattr(run_report, "list_reports", lambda aid: reports)
+        monkeypatch.setattr(run_report, "load_report", lambda aid, rid: full.get(rid))
+        assert W.sweep_cleared(self._ledger(tmp_path)) == []
+        reports.insert(0, {"id": "r1", "kind": "migration", "verdict": "UNVERIFIED", "generatedAt": "2099-01-02T00:00:00Z"})
+        full["r1"] = {"benchmarks": {"results": [{"id": "items_per_min_per_worker", "status": "pass"},
+                                                  {"id": "count_parity", "status": "unknown"}]}}
+        assert W.sweep_cleared(self._ledger(tmp_path)) == [
+            (i, "a later report (r1) passes items_per_min_per_worker")]
+
     def test_a_failed_benchmark_closes_on_a_later_passing_report(self, cp, tmp_path, monkeypatch):
         import run_report
+        monkeypatch.setattr(run_report, "load_report", lambda aid, rid: None)
         i = self._open("verdict_fail")
         reports = [{"id": "r1", "kind": "migration", "verdict": "FAIL", "generatedAt": "2099-01-01T00:00:00Z"}]
         monkeypatch.setattr(run_report, "list_reports", lambda aid: reports)
@@ -505,3 +520,37 @@ class TestIncidentsCloseThemselves:
         i = self._open("crashed")
         W.record_finished(2, "migrate", 0, pid=7)
         assert w.tick()["closed"] == 1 and W.get_incident(i)["status"] == "resolved"
+
+
+class TestAStopIsNotACrash:
+    """Live: incidents #7, #8, #10 and #12 were all Stop pressed twice (SIGINT, then
+    SIGKILL a few seconds later) and each read as "exited with signal 9"."""
+
+    def _stop(self, pid, action="stop job (force)", **kw):
+        a = cpdb.begin_action(actor="Ops <ops@x>", actor_role="operator", action=action,
+                              reason="stuck on retries", target="external process",
+                              params={"force": True, "pid": None}, account_id=2)
+        cpdb.finish_action(a, "done", kw.get("detail", f"kill sent to 1 external process(es): {pid}"))
+
+    def _killed(self, b, w, pid=100):
+        b.jobs = [job(pid=pid)]; w.tick()
+        b.jobs = []; b.rc = {"migrate": -9}; w.tick()
+
+    def test_a_kill_after_a_stop_naming_its_pid_opens_nothing(self, cp):
+        b = Box(); w = b.watcher()
+        self._stop(100)
+        self._killed(b, w)
+        assert W.list_incidents() == []
+        assert "STOPPED account=2 job=migrate rc=-9 by Ops <ops@x>" in open(W.feed_path()).read()
+
+    def test_the_api_s_force_stop_counts_too(self, cp):
+        b = Box(); w = b.watcher()
+        self._stop(100, action="job.force-stop", detail="SIGKILL -> 100")
+        self._killed(b, w)
+        assert W.list_incidents() == []
+
+    def test_a_kill_nobody_asked_for_is_still_a_crash(self, cp):
+        b = Box(); w = b.watcher()
+        self._stop(1000)                         # another pid: 100 must not match 1000
+        self._killed(b, w)
+        assert [i["kind"] for i in W.list_incidents()] == ["crashed"]

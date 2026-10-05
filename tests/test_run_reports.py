@@ -159,6 +159,25 @@ class TestFacts:
         perf = RR.collect_facts(db, settings, run=run)["perf"]
         assert perf["itemsInRun"] == 600 and perf["itemsPerMin"] == pytest.approx(1.0)
 
+    def test_throughput_per_worker_counts_only_the_workers_the_run_could_use(self, settings, db):
+        """Live: 142 items a minute for ONE user, divided by a pool of 48, scored 3 and
+        failed a bar of 30. One user keeps one user worker busy."""
+        _users(db)
+        settings.user_workers = 48
+        _seed(db, [("u0@a.com", "file", "SUCCESS", None)] * 600)
+        run = {"returnCode": 0, "startedAt": "2026-09-25T00:00:00Z", "finishedAt": "2026-09-25T00:10:00Z"}
+        perf = RR.collect_facts(db, settings, run=run)["perf"]
+        assert perf["usersInRun"] == 1 and perf["busyWorkers"] == 1
+        assert perf["itemsPerMinPerWorker"] == pytest.approx(60.0)
+
+    def test_a_run_that_wrote_nothing_has_no_speed_to_judge(self, settings, db):
+        _users(db)
+        run = {"returnCode": 0, "startedAt": "2026-09-25T00:00:00Z", "finishedAt": "2026-09-25T00:10:00Z"}
+        f = RR.collect_facts(db, settings, run=run)
+        assert f["perf"]["itemsPerMinPerWorker"] is None
+        r = B.evaluate(f)
+        assert next(x for x in r["results"] if x["id"] == "items_per_min_per_worker")["status"] != "fail"
+
     def test_a_tally_taken_before_the_run_is_not_used_to_judge_it(self, settings, db):
         db.record_fidelity({"countParity": 1.0, "checksumFailures": 0, "aclFidelity": 1.0, "extraGrants": 0})
         db.conn.execute("UPDATE run_fidelity SET recorded_at='2026-09-01T00:00:00Z'")

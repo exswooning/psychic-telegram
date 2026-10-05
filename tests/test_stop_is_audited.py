@@ -79,3 +79,19 @@ class TestItCannotBreakTheStop:
         assert hasattr(webui, "cpdb")
         assert callable(webui.cpdb.begin_action)
         assert callable(webui.cpdb.finish_action)
+
+
+class TestAStopWithoutAReasonIsStillRecorded:
+    def test_an_empty_reason_falls_back_to_one_the_audit_accepts(self, tmp_path, monkeypatch):
+        """Live: the Stop arrived with no reason, begin_action refused the empty one,
+        and four Stop-then-kill presses were recorded nowhere -- each then read as a
+        crash, because run_watch.stopped_by had no row to find."""
+        b = _stop_block()
+        assert "reason=stop_reason" in b and "no reason given" in b
+        import control_plane_db as cpdb
+        path = str(tmp_path / "cp.db")
+        cpdb.apply_migrations(path)
+        monkeypatch.setattr(cpdb, "_db_path", lambda: path)
+        assert cpdb.begin_action(actor="x", actor_role="operator", action="stop job",
+                                 reason="Stop pressed, no reason given", target="t",
+                                 params={}, account_id=None)

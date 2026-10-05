@@ -6,13 +6,14 @@
  * brief -- the failing checks, the error families and the log tail -- written
  * to be pasted straight into Claude Code. Nothing here fixes anything by
  * itself: a fix is a deploy, and a deploy can kill a running seed or
- * migration, so the person decides when.
+ * migration, so the person decides when. The watcher closes one itself once
+ * its condition clears; a person resolving one says what fixed it.
  *
  * Reachable with nothing running: incidents are stored, not live.
  */
 import React, { useCallback, useEffect, useState } from 'react'
 import {
-  Alert, Box, Button, Chip, CircularProgress, FormControlLabel, Paper, Stack, Switch, Typography,
+  Alert, Box, Button, Chip, CircularProgress, FormControlLabel, Paper, Stack, Switch, TextField, Typography,
 } from '@mui/material'
 import { fetchIncidentBrief, fetchIncidents, setIncidentStatus } from '@/api/controlPlane'
 import type { Incident, IncidentStatus } from '@/api/controlPlane'
@@ -46,9 +47,12 @@ export const Incidents: React.FC = () => {
     return () => clearInterval(t)
   }, [load])
 
-  const move = async (id: number, status: IncidentStatus) => {
+  // Resolving asks what fixed it: a bare "resolved" tells the next reader nothing.
+  const [resolving, setResolving] = useState<{ id: number; why: string } | null>(null)
+
+  const move = async (id: number, status: IncidentStatus, why = '') => {
     setError('')
-    try { await setIncidentStatus(id, status); load() }
+    try { await setIncidentStatus(id, status, why); setResolving(null); load() }
     catch (e) { setError(e instanceof Error ? e.message : String(e)) }
   }
 
@@ -120,13 +124,30 @@ export const Incidents: React.FC = () => {
               {i.summary && (
                 <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>{i.summary}</Typography>
               )}
+              {i.status === 'resolved' && i.note && (
+                <Typography variant="caption" sx={{ display: 'block' }} data-testid={`incident-note-${i.id}`}>
+                  Closed{i.resolved_at ? ` ${when(i.resolved_at)}` : ''}: {i.note}
+                </Typography>
+              )}
+              {resolving?.id === i.id && (
+                <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
+                  <TextField size="small" fullWidth autoFocus label="What fixed it" value={resolving.why}
+                             inputProps={{ 'data-testid': `resolve-why-${i.id}` }}
+                             onChange={(e) => setResolving({ id: i.id, why: e.target.value })} />
+                  <Button size="small" variant="contained" disabled={!resolving.why.trim()}
+                          data-testid={`resolve-confirm-${i.id}`}
+                          onClick={() => move(i.id, 'resolved', resolving.why.trim())}>Resolve</Button>
+                  <Button size="small" onClick={() => setResolving(null)}>Cancel</Button>
+                </Stack>
+              )}
             </Box>
             <Stack direction="row" spacing={0.75}>
               <Button size="small" variant="outlined" onClick={() => copy(i.id)}>Copy brief</Button>
               {i.status === 'open' && (
                 <Button size="small" onClick={() => move(i.id, 'acknowledged')}>Acknowledge</Button>)}
-              {i.status !== 'resolved' && (
-                <Button size="small" onClick={() => move(i.id, 'resolved')}>Resolve</Button>)}
+              {i.status !== 'resolved' && resolving?.id !== i.id && (
+                <Button size="small" data-testid={`resolve-${i.id}`}
+                        onClick={() => setResolving({ id: i.id, why: '' })}>Resolve</Button>)}
               {i.status === 'resolved' && (
                 <Button size="small" onClick={() => move(i.id, 'open')}>Reopen</Button>)}
             </Stack>

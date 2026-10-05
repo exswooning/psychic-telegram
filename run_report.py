@@ -173,6 +173,17 @@ def _items_since(conn, started: str | None) -> int | None:
                         (stamp,)).fetchone()["c"]
 
 
+def _users_since(conn, started: str | None) -> int | None:
+    """Distinct users with a row written since `started`: how many user workers this
+    run could have kept busy, whatever the pool's size."""
+    when = _parse_iso(started)
+    if not when:
+        return None
+    stamp = when.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return conn.execute("SELECT COUNT(DISTINCT source_user) c FROM audit_log WHERE timestamp>=?",
+                        (stamp,)).fetchone()["c"]
+
+
 def _fidelity(conn) -> dict:
     """What the tenants themselves said (written by the tally / verify pass).
 
@@ -325,11 +336,20 @@ def collect_facts(db, settings, *, kind: str = "migration", run: dict | None = N
     in_run = (_guard(errors, "itemsInRun", lambda: _items_since(conn, run.get("startedAt")), None)
               if duration and source == "job" else None)
     per_min = (in_run / (duration / 60)) if in_run is not None else None
+    # Per worker the run could keep busy: one user's run uses one user worker however
+    # large the pool. Dividing by the pool (48 on the live box) failed every few-user
+    # run -- 142 items a minute for one user scored 3 against a bar of 30. A run that
+    # wrote nothing has no speed to judge: unknown, not slow.
+    users = (_guard(errors, "usersInRun", lambda: _users_since(conn, run.get("startedAt")), None)
+             if in_run else None)
+    busy = min(workers, users) if workers and users else None
     facts["perf"] = {
         "itemsInRun": in_run,
         "itemsPerMin": per_min,
         "workers": workers,
-        "itemsPerMinPerWorker": (per_min / workers) if per_min is not None and workers else None,
+        "usersInRun": users,
+        "busyWorkers": busy,
+        "itemsPerMinPerWorker": (per_min / busy) if per_min and busy else None,
     }
 
     facts["paths"] = {"ledger": getattr(settings, "db_path", None)}
