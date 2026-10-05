@@ -2876,7 +2876,13 @@ def main(argv: list[str] | None = None) -> int:
         args.func(args, settings, db, auth)
     finally:
         db.close()
-    return 0
+    # A run that Stop ended did not finish. Exiting 0 told the API to start its
+    # follow-ons -- repair, then a tally whose auto-fix re-launched the very user just
+    # stopped (live: 10 minutes after Stop). 130 is the shell's code for an interrupt.
+    return STOPPED_RC if SHUTDOWN.is_set() else 0
+
+
+STOPPED_RC = 130
 
 
 if __name__ == "__main__":
