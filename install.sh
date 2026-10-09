@@ -341,7 +341,10 @@ else
 fi
 
 step "Python environment"
-[ -x "$INSTALL_DIR/.venv/bin/python" ] || run "python3 -m venv '$INSTALL_DIR/.venv'"
+# The newest Python on the box: Ubuntu 22.04's own python3 is 3.10, so a python3.12
+# installed beside it (deadsnakes) is preferred when present.
+PY=$(command -v python3.14 python3.13 python3.12 2>/dev/null | head -1); PY=${PY:-python3}
+[ -x "$INSTALL_DIR/.venv/bin/python" ] || run "$PY -m venv '$INSTALL_DIR/.venv'"
 run "'$INSTALL_DIR/.venv/bin/pip' install -q --upgrade pip"
 run "'$INSTALL_DIR/.venv/bin/pip' install -q -r '$INSTALL_DIR/requirements.txt'"
 [ -f "$INSTALL_DIR/requirements-control-plane.txt" ] && \
