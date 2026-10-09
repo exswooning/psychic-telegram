@@ -216,6 +216,25 @@ class SharedDriveMigrator:
             return None
         return users[0]["emailAddress"]
 
+    def copiers_for(self, drive_id: str) -> list[str]:
+        """Who can copy this drive's files out: its managers first, then content
+        managers and contributors -- every role that can copy any file in it -- who
+        are this tenant's own users, so delegation can act as them.
+
+        Google allows each account 750 GB of uploads and copies a day, charged to
+        whoever makes the copy, so one account moves a 5 TB drive in a week; the
+        engine copies as each of these in turn, and only those it needs are used."""
+        try:
+            members = self._members(drive_id)
+        except Exception:      # noqa: BLE001 - the reader alone still copies
+            return []
+        can_copy = ROLE_ORDER[:3]          # organizer, fileOrganizer, writer
+        found = [p for p in members if p.get("type") == "user"
+                 and p.get("role") in can_copy and p.get("emailAddress")
+                 and self.db.resolve_identity(p["emailAddress"])]
+        found.sort(key=lambda p: can_copy.index(p["role"]))
+        return [p["emailAddress"] for p in found]
+
     def _members(self, drive_id: str, svc=None) -> list[dict]:
         out, token = [], None
         while True:
@@ -488,9 +507,10 @@ class SharedDriveMigrator:
         # Read as the member, but keep source_user=admin_user so the ledger
         # keys stay stable: which member happens to be readable can change
         # between runs, and a moving key would re-copy the whole drive
-        # instead of resuming it.
-        if reader and reader != self.admin_user:
-            engine.src = self.auth.source_drive(reader)
+        # instead of resuming it. A name, not a client: a client built here
+        # belongs to this thread, and the engine's file pool would share it.
+        engine.reader = reader or self.admin_user
+        engine.copiers = self.copiers_for(src_id) or [engine.reader]
         try:
             result = engine.run()
         except Exception as exc:  # noqa: BLE001 - one drive must not lose the rest

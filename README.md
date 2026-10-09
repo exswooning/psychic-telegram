@@ -674,9 +674,15 @@ per-user. Ten threads on one mailbox mostly sleep in backoff; ten threads on ten
 mailboxes run at nearly ten times the throughput.
 
 **The 750 GB/day cap is persisted.** `upload_ledger` survives process restarts.
-Blowing the cap locks the account out of uploads for 24 hours — far more
-expensive than pausing. On exhaustion the user is marked `PAUSED_QUOTA` and the
-batch continues; the next day's delta pass skips everything already copied.
+Google charges the account that uploads or copies — for a server-side copy, the
+source user; a move is never charged (measured on a sandbox pair, 2026-10-09).
+Past the cap Google refuses every copy that would not fit, with a 403
+`userRateLimitExceeded` that reads exactly like a rate limit, so pausing first
+is cheaper than finding out. On exhaustion the user is marked `PAUSED_QUOTA` and
+the batch continues; the next day's delta pass skips everything already copied.
+A shared drive is copied by its own members in turn, each with its own 750 GB
+(`SharedDriveMigrator.copiers_for`), so a 5 TB drive with seven members who can
+copy moves in a day.
 
 ---
 

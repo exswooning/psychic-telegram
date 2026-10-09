@@ -532,8 +532,8 @@ class Cycle:
             quota = DailyQuotaGuard(self.db, tadmin, self.settings.effective_upload_cap())
             dm = DriveMigrator(self.auth, self.db, self.settings, admin, tadmin, quota)
             dm.shared_drive, dm.target_drive_id = src_id, tgt_id
-            if reader != admin:
-                dm.src = self.auth.source_drive(reader)
+            # The member reads and copies (the admin may not be one), resolved per thread.
+            dm.reader, dm.copiers = reader, [reader]
             try:
                 DriveSync(self, dm, key_user=admin, target_user=tadmin,
                           service=f"drive:{src_id}", owner=None, drive_id=src_id).run()

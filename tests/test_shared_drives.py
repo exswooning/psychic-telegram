@@ -246,27 +246,23 @@ class TestReadingADriveTheAdminIsNotIn:
         class _Engine:
             def __init__(self, auth, db, settings, source_user, target_user, quota):
                 seen["ledger_user"] = source_user
+                seen["engine"] = self
                 self.shared_drive = self.target_drive_id = None
-
-            @property
-            def src(self):
-                return None
-
-            @src.setter
-            def src(self, v):
-                seen["impersonated"] = v
 
             def run(self):
                 return {"files": 0, "folders": 0, "failed": 0}
 
         import shared_drives
         monkeypatch.setattr(shared_drives, "DriveMigrator", _Engine)
-        sd.auth.source_drive = lambda u: f"client:{u}"
+        sd.copiers_for = lambda drive_id: []
 
         sd._copy_contents("drv-1", "drv-2", "Finance", "o@tenanta.com")
 
         assert seen["ledger_user"] == SRC_USER
-        assert seen["impersonated"] == "client:o@tenanta.com"
+        # A name the engine resolves per thread, never a client built on this one: the
+        # engine's file pool would all drive this thread's one socket.
+        assert seen["engine"].reader == "o@tenanta.com"
+        assert seen["engine"].copiers == ["o@tenanta.com"]
 
 
 def _source_domain() -> str:
@@ -806,3 +802,100 @@ class TestAMappedDriveIsNotReGrantedMemberByMember:
         granted = {c["body"]["emailAddress"] for c in sd.tgt.calls_to("permissions.create")}
         assert granted == {"new@othercorp.com", "promoted@othercorp.com"}
         assert sd.stats["members_present"] == 1
+
+
+class TestManagersShareTheDailyCap:
+    """Google charges a copy to the account that MAKES it -- not the drive it lands in,
+    not whoever moves it after (sandbox pair, 2026-10-09: a manager refused at ~740 GB of
+    copies while a second copied 25 GB into the same drive; accounts already refused moved
+    5-25 GB in every direction). One account moves a 5 TB drive in a week; its managers in
+    turn, in a day."""
+
+    MANAGERS = ["m1@tenanta.com", "m2@tenanta.com", "m3@tenanta.com"]
+
+    @pytest.fixture
+    def engine(self, auth, db, settings, identity, quota):
+        import drive_engine
+
+        settings.transfer_mode = "server_side"
+        settings.effective_upload_cap = lambda: 200      # two 100-byte files a day each
+        main = auth._get("source", "drive", SRC_USER)
+        main.shared_drives["src-drive"] = {"id": "src-drive", "name": "Finance"}
+        for i in range(4):
+            main.add_binary(f"f{i}.pdf", parent="src-drive", data=bytes([i]) * 100)
+        for m in self.MANAGERS:            # every member sees the same drive
+            auth._get("source", "drive", m)
+            auth._svcs[("source", "drive", m)] = main
+        auth.target_drive(TGT_USER).shared_drives["tgt-drive"] = {"id": "tgt-drive",
+                                                                   "name": "Finance"}
+        e = drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota)
+        e.shared_drive, e.target_drive_id = "src-drive", "tgt-drive"
+        e.reader, e.copiers = SRC_USER, list(self.MANAGERS)
+        return e
+
+    def test_each_copies_until_its_own_allowance_is_spent(self, engine, auth, db):
+        result = engine.run()
+        assert (result["files"], result["failed"]) == (4, 0)
+        spent = [db.bytes_sent_today(m) for m in self.MANAGERS]
+        assert spent == [200, 200, 0]                  # m3 never needed
+        assert db.bytes_sent_today(TGT_USER) == 0      # a copy is not the target's
+        staged = {c["body"]["emailAddress"]
+                  for c in auth.target_drive(TGT_USER).calls_to("permissions.create")}
+        assert staged == {"m1@tenanta.com", "m2@tenanta.com"}   # only who copied
+
+    def test_google_refusing_one_first_hands_the_file_to_the_next(self, engine, auth, db):
+        """The cap reads like a rate limit and outlasts the retry ladder: what the
+        manager uploaded itself today counts too, so Google can say no first."""
+        main = auth._svcs[("source", "drive", SRC_USER)]
+        m1 = type(main)("m1@tenanta.com", "source")
+        m1.store, m1.content, m1.shared_drives, m1.peer = (
+            main.store, main.content, main.shared_drives, main.peer)
+        m1.fail_next("files.copy", status=403, reason="userRateLimitExceeded", times=50)
+        auth._svcs[("source", "drive", "m1@tenanta.com")] = m1
+
+        result = engine.run()
+
+        assert (result["files"], result["failed"]) == (4, 0)
+        assert db.bytes_sent_today("m1@tenanta.com") == 200     # spent until tomorrow
+        assert [db.bytes_sent_today(m) for m in self.MANAGERS[1:]] == [200, 200]
+
+    def test_with_every_one_spent_the_drive_stops_without_failing_files(self, engine, db):
+        from resilience import QuotaExhausted
+
+        engine.copiers = self.MANAGERS[:1]
+        with pytest.raises(QuotaExhausted):
+            engine.run()
+        assert db.conn.execute("SELECT COUNT(*) FROM audit_log WHERE item_type='file' "
+                               "AND status LIKE 'FAILED%'").fetchone()[0] == 0
+        assert db.conn.execute("SELECT COUNT(*) FROM id_mapping WHERE type='file'"
+                               ).fetchone()[0] == 2
+
+    def test_copiers_are_the_drives_own_users_who_can_copy(self, sd, db):
+        from db import bulk_seed_identities
+
+        bulk_seed_identities(db, [(m, m.replace("tenanta", "tenantb"))
+                                  for m in ("w@tenanta.com", "o@tenanta.com",
+                                            "r@tenanta.com", "c@tenanta.com")])
+        sd._members = lambda drive_id, svc=None: [
+            {"type": "user", "role": "writer", "emailAddress": "w@tenanta.com"},
+            {"type": "user", "role": "reader", "emailAddress": "r@tenanta.com"},
+            {"type": "user", "role": "organizer", "emailAddress": "partner@other.com"},
+            {"type": "user", "role": "organizer", "emailAddress": "gone@tenanta.com"},
+            {"type": "group", "role": "organizer", "emailAddress": "team@tenanta.com"},
+            {"type": "user", "role": "commenter", "emailAddress": "c@tenanta.com"},
+            {"type": "user", "role": "organizer", "emailAddress": "o@tenanta.com"},
+        ]
+        assert sd.copiers_for("drv-1") == ["o@tenanta.com", "w@tenanta.com"]
+
+    def test_each_shared_drive_gets_its_own_staging_drive(self, engine, auth, db,
+                                                          settings, quota):
+        """Two drives migrate at once under the one admin; a shared staging drive was
+        deleted by whichever finished first while the other still copied into it."""
+        import drive_engine
+
+        other = drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota)
+        other.shared_drive = "src-drive-2"
+        mine = drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota)
+        assert len({engine._staging_drive_name(), other._staging_drive_name(),
+                    mine._staging_drive_name()}) == 3
+        assert mine._staging_drive_name() == f"{settings.staging_drive_prefix}-alice"

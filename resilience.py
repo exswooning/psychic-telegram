@@ -861,3 +861,9 @@ class DailyQuotaGuard:
             return
         with self._lock:
             self.db.add_bytes_sent(self.target_user, -n)
+
+    def exhaust(self) -> None:
+        """Google refused before this guard did -- what the account sent outside this
+        count is charged too -- so it is spent until the ledger's next day."""
+        with self._lock:
+            self.db.add_bytes_sent(self.target_user, self.remaining())

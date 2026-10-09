@@ -35,8 +35,9 @@ from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload  # noqa: F
 
 from config import EXPORT_MIME_MAP, FOLDER_MIME, OWED_GRANT, SHORTCUT_MIME, Settings
 from sample_budget import Budget
-from resilience import (AdaptiveRateLimiter, PermanentAPIError, QuotaExhausted,
-                        RateLimiter, retry_on_google_error, shutdown_requested)
+from resilience import (AdaptiveRateLimiter, DailyQuotaGuard, PermanentAPIError,
+                        QuotaExhausted, RateLimiter, retry_on_google_error,
+                        shutdown_requested)
 
 log = logging.getLogger(__name__)
 
@@ -488,6 +489,16 @@ class DriveMigrator:
     # safe for every instance -- including ones built without __init__ (tests do).
     # __init__ replaces it with the run's own when a sample is asked for.
     budget = Budget(None)
+    # Set by shared_drives.py (and the mirror): who reads the drive -- a member; the admin
+    # may not be one -- and who may copy out of it. Google charges a copy's bytes to the
+    # account that makes it, not to the drive it lands in and not to whoever moves it
+    # afterwards (measured on the sandbox pair, 2026-10-09: a manager was refused at ~740 GB
+    # of copies while accounts already refused moved 5-25 GB in every direction), so each
+    # copies its own 750 GB a day, in turn. Unset: the source user reads and copies,
+    # charged to `quota`, as a user's own files must be. Class-level for the same reason
+    # as `budget`, and never mutated in place.
+    reader: str | None = None
+    copiers: tuple[str, ...] | list[str] = ()
 
     def __init__(self, auth, db, settings: Settings, source_user: str,
                  target_user: str, quota):
@@ -572,6 +583,8 @@ class DriveMigrator:
         # getting a parallel one that would need every fix applied twice.
         self.shared_drive: str | None = None
         self.target_drive_id: str | None = None
+        self._copier_quota: dict[str, DailyQuotaGuard] = {}
+        self._can_stage: set[str] = set()
 
     # -- API clients ------------------------------------------------------
     #
@@ -592,9 +605,9 @@ class DriveMigrator:
     def src(self):
         # Read-only (auth.ReadOnlyDrive), plus files.copy into this run's own staging
         # drive once there is one. link_flip alone rewrites source sharing.
-        svc = self._src_override or (self.auth.source_drive(self.source_user, writable=True)
-                                     if self.link_flip
-                                     else self.auth.source_drive(self.source_user))
+        who = self.reader or self.source_user
+        svc = self._src_override or (self.auth.source_drive(who, writable=True)
+                                     if self.link_flip else self.auth.source_drive(who))
         from auth import allow_copy_into
         return allow_copy_into(svc, self._staging_drive_id)
 
@@ -822,6 +835,12 @@ class DriveMigrator:
         # Deterministic per user pair so an interrupted run reuses the same
         # staging drive rather than leaving a trail of orphaned ones.
         local = self.source_user.split("@")[0]
+        if self.shared_drive:
+            # Shared drives migrate two at a time under ONE source user, the admin. One
+            # name let the first drive to finish delete the staging drive the other was
+            # still copying into (empty between a move and the next copy), and every file
+            # after that failed its copy and went the slow way.
+            local += "-" + self.shared_drive
         return f"{self.settings.staging_drive_prefix}-{local}"
 
     def _ensure_consolidation_folder(self, parent_id: str, name: str) -> str:
@@ -887,17 +906,52 @@ class DriveMigrator:
             log.info("[%s] created staging drive %s", self.source_user,
                     self._staging_drive_id)
 
-        # Idempotent: re-granting an existing membership is harmless.
+        if not self.copiers:
+            self._grant_staging_locked(self.source_user)
+
+    def _grant_staging_locked(self, who: str) -> None:
+        """Let `who` copy into the staging drive: whoever copies, never just the source
+        user -- a shared drive's copy runs as one of its members, and granting the admin
+        sent every one of those copies the slow way. Idempotent; once per account."""
+        if who in self._can_stage:
+            return
         try:
             self._retry(lambda: self.tgt.permissions().create(
                 fileId=self._staging_drive_id,
-                body={"type": "user", "role": "organizer",
-                     "emailAddress": self.source_user},
+                body={"type": "user", "role": "organizer", "emailAddress": who},
                 supportsAllDrives=True, sendNotificationEmail=False, fields="id",
             ).execute())
+            self._can_stage.add(who)
         except (PermanentAPIError, RuntimeError) as exc:
-            log.warning("[%s] could not add source user to staging drive: %s",
-                       self.source_user, exc)
+            log.warning("[%s] could not add %s to staging drive: %s",
+                        self.source_user, who, exc)
+
+    def _copier(self, size: int):
+        """Who makes this server-side copy, and the daily allowance it is charged to.
+
+        The first of `copiers` with room for `size` -- each its own 750 GB, Google's own
+        unit -- granted onto the staging drive the first time it is picked. With none
+        set, the source user, charged to `quota`. Nobody with room left raises
+        QuotaExhausted, which stops the run where it can resume tomorrow."""
+        if not self.copiers:
+            if size:
+                self.quota.reserve(size)
+            return self.src, self.quota
+        from auth import allow_copy_into
+        for who in self.copiers:
+            guard = self._copier_quota.setdefault(
+                who, DailyQuotaGuard(self.db, who, self.settings.effective_upload_cap()))
+            try:
+                if size:
+                    guard.reserve(size)
+            except QuotaExhausted:
+                continue
+            with self._staging_lock:
+                self._grant_staging_locked(who)
+            return allow_copy_into(self.auth.source_drive(who), self._staging_drive_id), guard
+        raise QuotaExhausted(f"all {len(self.copiers)} account(s) that can copy "
+                             f"{self.shared_drive or self.source_user} have spent today's "
+                             f"{self.settings.daily_upload_cap_gb:g} GB")
 
     def _teardown_staging_drive(self) -> None:
         """Delete the staging drive, but only once it is verifiably empty --
@@ -1339,7 +1393,7 @@ class DriveMigrator:
             return
 
         kind = "sheets" if mime == native_api.SHEET else "docs"
-        src_api = self.auth.api("source", kind, self.source_user)
+        src_api = self.auth.api("source", kind, self.reader or self.source_user)
         tgt_api = self.auth.api("target", kind, self.target_user)
         tgt_id, note = native_api.REBUILDERS[mime](
             src_api, tgt_api, item["id"], item["name"])
@@ -1543,8 +1597,7 @@ class DriveMigrator:
         size = int(item.get("size") or 0)
         # Native files report no size; they still consume target storage, but
         # there is nothing to reserve against up front.
-        if size:
-            self.quota.reserve(size)
+        src, quota = self._copier(size)
 
         body = {"name": item["name"], "parents": [self._staging_drive_id]}
         # copy() does not carry modifiedTime across on its own.
@@ -1579,19 +1632,36 @@ class DriveMigrator:
                                   f"link_flip could not record the ACL: {exc}")
                 self._bump("failed")
                 if size:
-                    self.quota.refund(size)
+                    quota.refund(size)
                 return
 
         adopted = self._take_staged(item)
         try:
-            copied = adopted or with_carried_fallback(lambda b: self._retry(
-                lambda: self.src.files().copy(
-                    fileId=item["id"], body=b, supportsAllDrives=True,
-                    fields="id,md5Checksum",
-                ).execute(), label="drive.files.copy", tenant="source"), body)
+            while True:
+                try:
+                    copied = adopted or with_carried_fallback(lambda b: self._retry(
+                        lambda: src.files().copy(
+                            fileId=item["id"], body=b, supportsAllDrives=True,
+                            fields="id,md5Checksum",
+                        ).execute(), label="drive.files.copy", tenant="source"), body)
+                    break
+                except (PermanentAPIError, RuntimeError) as exc:
+                    # Google's own daily cap reads exactly like a rate limit (403
+                    # userRateLimitExceeded, "User rate limit exceeded.", no Retry-After;
+                    # live, 2026-10-09) and differs only in not clearing through the
+                    # whole retry ladder. The account also spends it outside this count,
+                    # so it is spent for today and the next one with room copies the
+                    # file -- or nobody has room and the run stops (QuotaExhausted).
+                    if not (self.copiers and size and "userRateLimitExceeded" in str(exc)):
+                        raise
+                    quota.refund(size)
+                    quota.exhaust()
+                    log.warning("[%s] Google refused %s's copies for today; the next "
+                                "account takes over", self.source_user, quota.target_user)
+                    src, quota = self._copier(size)
         except (PermanentAPIError, RuntimeError) as exc:
             if size:
-                self.quota.refund(size)
+                quota.refund(size)
             self.db.log_audit(self.source_user, item["id"], "file", "FAILED",
                               f"server-side copy failed: {exc}")
             self._bump("failed")
@@ -1625,7 +1695,7 @@ class DriveMigrator:
                 and copied["md5Checksum"] != item["md5Checksum"]:
             if self.settings.verify_server_side_md5:
                 if size:
-                    self.quota.refund(size)
+                    quota.refund(size)
                 self.db.log_audit(self.source_user, item["id"], "file", "FAILED",
                                   "checksum mismatch after server-side copy")
                 self._bump("failed")
@@ -1648,7 +1718,7 @@ class DriveMigrator:
             ).execute(), label="drive.files.move"), move_body)
         except (PermanentAPIError, RuntimeError) as exc:
             if size:
-                self.quota.refund(size)
+                quota.refund(size)
             # Deliberately not deleting the stranded copy: the next run finds
             # it in the staging drive, and losing bytes is worse than a retry.
             if adopted:
@@ -2692,7 +2762,8 @@ class DriveMigrator:
         cannot run as a delegated account), so the pair is recorded for a person to
         relink -- Migration detail lists it. Read-only; never fails the item."""
         try:
-            got = self._retry(lambda: self.auth.api("source", "forms", self.source_user)
+            reader = self.reader or self.source_user
+            got = self._retry(lambda: self.auth.api("source", "forms", reader)
                               .forms().get(formId=item["id"], fields="linkedSheetId").execute(),
                               label="forms.get")
         except Exception as exc:      # noqa: BLE001 - a missing link note is not a lost file

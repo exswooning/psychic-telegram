@@ -632,3 +632,25 @@ Form copies, but no API can link the copy to its responses Sheet (`linkedSheetId
 read-only), so the form-links pass (`MIGRATE_FORM_LINKS`, `forms.body.readonly` on the
 source) records each pair as `form_link`/`RELINK_BY_HAND` and the same panel lists both
 target copies to relink by hand (`_relinks`).
+
+**Google's 750 GB a day is charged to whoever copies, so a shared drive is copied by its
+own members in turn** (`DriveMigrator.copiers`, `SharedDriveMigrator.copiers_for`).
+Measured on the sandbox pair (2026-10-09): a cross-org server-side `files.copy` is charged
+to the source account that makes it -- not the target org, the drive it lands in, or
+whoever moves it afterwards; uploads count too; the check is per copy and size-aware (a
+copy that would not fit is refused, a 1 KB one still passes at the brim) and lands a little
+under 750 GiB; moves are never charged (5-25 GB moves in every direction by accounts
+already refused); a second account copied into the same drive while the first was capped.
+A 25 GB server-side copy takes ~1 s, so for large files the cap is the only limit. The
+refusal is `403 userRateLimitExceeded "User rate limit exceeded."` -- the same bytes as an
+ordinary rate limit, no Retry-After -- so a copier whose copy still fails that way after the
+whole retry ladder is spent for the day (`DailyQuotaGuard.exhaust`: it also spends its
+allowance outside our count) and the next takes the file. Copiers are the drive's members
+who can copy any file (Manager, Content manager, Contributor) and are this tenant's users,
+in that order; each has its own guard keyed by its address and is granted onto the staging
+drive only when first picked; none left raises `QuotaExhausted` (the drive stops, no file
+FAILED, the next run resumes). A user's own files still have one copier, the user, charged
+to `quota`. Each shared drive has its own staging drive (two migrate at once under the one
+admin, and a shared one was deleted by whichever finished first), and the engine is handed
+the member's *name* (`reader`), resolved per thread -- a client built on the caller's thread
+was driven by the whole file pool.
