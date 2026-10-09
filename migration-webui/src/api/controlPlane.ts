@@ -365,8 +365,11 @@ export type MailMode = 'engine' | 'dms' | 'split'
  *  works between any two tenants, but is bounded by that host's own CPU/network.
  *  `server_side` asks Drive to copy the file itself, never touching this host, but
  *  needs a per-user staging shared drive that depends on the target tenant's
- *  external-sharing settings actually allowing it. */
-export type TransferMode = 'download_upload' | 'server_side'
+ *  external-sharing settings actually allowing it. `move` moves the file itself through
+ *  that drive: it LEAVES the source (no copy, no 750 GB a day, same id, history and
+ *  comments), needs the source admin to let content leave, and is sent only with
+ *  `confirmMove` = "MOVE". */
+export type TransferMode = 'download_upload' | 'server_side' | 'move'
 
 /** Per-launch overrides for measured runs; each omitted = the job sizes itself. */
 export interface MigrationTuning {
@@ -383,7 +386,8 @@ export interface MigrationTuning {
 export const startMigration = (
   reason: string, services: string[], users: string[], dryRun = false,
   accountId?: number, mailMode?: MailMode, sample?: number, dmsAfter?: boolean,
-  transferMode?: TransferMode, tuning?: MigrationTuning, redoLinks = false) =>
+  transferMode?: TransferMode, tuning?: MigrationTuning, redoLinks = false,
+  confirmMove?: string) =>
   cpFetch<ActionResult>('/api/v2/migrate/start', {
     method: 'POST',
     // accountId is the migration on screen. Without it the server falls back
@@ -398,6 +402,7 @@ export const startMigration = (
                            // off only when asked; the server starts the DMS on its own otherwise
                            ...(dmsAfter === false ? { dms_after: false } : {}),
                            ...(transferMode ? { transfer_mode: transferMode } : {}),
+                           ...(confirmMove ? { confirm_move: confirmMove } : {}),
                            ...(redoLinks ? { redo_links: true } : {}),
                            ...(tuning?.userWorkers !== undefined ? { user_workers: tuning.userWorkers } : {}),
                            ...(tuning?.driveFileWorkers !== undefined ? { drive_file_workers: tuning.driveFileWorkers } : {}),

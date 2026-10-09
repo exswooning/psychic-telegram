@@ -48,7 +48,18 @@ def undo_user(auth: AuthManager, db: MigrationDB, settings: Settings,
     gmail = auth.target_gmail(target_user)
     cal = auth.target_calendar(target_user)
 
+    # A file MOVED, not copied, left the source: the target holds the only copy, and
+    # its folders hold it -- deleting either loses it. Such a user's Drive is left as
+    # it is; moving it back is the only undo.
+    moved = db.conn.execute(
+        "SELECT COUNT(*) FROM id_mapping WHERE source_user=? AND type='file' "
+        "AND source_id = target_id", (source_user,)).fetchone()[0]
+    if moved:
+        print(f"    Drive left as it is: {moved} file(s) were moved, not copied -- "
+              "the target holds the only copy")
     for kind in DELETE_ORDER:
+        if moved and kind in ("file", "shortcut", "folder"):
+            continue
         rows = db.conn.execute(
             "SELECT source_id, target_id FROM id_mapping "
             "WHERE source_user=? AND type=?", (source_user, kind),
@@ -176,8 +187,16 @@ def main(argv: list[str] | None = None) -> int:
         ph_s = ",".join("?" * len(src))
         ph_t = ",".join("?" * len(tgt))
         with db.write() as conn:
-            conn.execute(f"DELETE FROM id_mapping WHERE source_user IN ({ph_s})", src)
-            conn.execute(f"DELETE FROM audit_log WHERE source_user IN ({ph_s})", src)
+            # Not a moved file's row, nor its folders': the target holds its only copy,
+            # left in place above, and this record is all that says where it came from.
+            conn.execute(f"DELETE FROM id_mapping WHERE source_user IN ({ph_s}) AND NOT ("
+                         "type IN ('file', 'folder', 'shortcut') AND source_user IN ("
+                         "SELECT source_user FROM id_mapping WHERE type='file' "
+                         "AND source_id = target_id))", src)
+            conn.execute(f"DELETE FROM audit_log WHERE source_user IN ({ph_s}) AND NOT ("
+                         "item_type IN ('file', 'folder', 'shortcut', 'acl') AND source_user IN ("
+                         "SELECT source_user FROM id_mapping WHERE type='file' "
+                         "AND source_id = target_id))", src)
             conn.execute(f"DELETE FROM label_map WHERE source_user IN ({ph_s})", src)
             conn.execute(f"DELETE FROM upload_ledger WHERE target_user IN ({ph_t})", tgt)
             conn.execute(

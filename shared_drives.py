@@ -216,19 +216,21 @@ class SharedDriveMigrator:
             return None
         return users[0]["emailAddress"]
 
-    def copiers_for(self, drive_id: str) -> list[str]:
+    def copiers_for(self, drive_id: str, managers_only: bool = False) -> list[str]:
         """Who can copy this drive's files out: its managers first, then content
         managers and contributors -- every role that can copy any file in it -- who
         are this tenant's own users, so delegation can act as them.
 
         Google allows each account 750 GB of uploads and copies a day, charged to
         whoever makes the copy, so one account moves a 5 TB drive in a week; the
-        engine copies as each of these in turn, and only those it needs are used."""
+        engine copies as each of these in turn, and only those it needs are used.
+        A move run takes Managers only: only a Manager may move a shared drive's files
+        to another organisation."""
         try:
             members = self._members(drive_id)
         except Exception:      # noqa: BLE001 - the reader alone still copies
             return []
-        can_copy = ROLE_ORDER[:3]          # organizer, fileOrganizer, writer
+        can_copy = ROLE_ORDER[:1 if managers_only else 3]   # organizer[, fileOrganizer, writer]
         found = [p for p in members if p.get("type") == "user"
                  and p.get("role") in can_copy and p.get("emailAddress")
                  and self.db.resolve_identity(p["emailAddress"])]
@@ -510,7 +512,8 @@ class SharedDriveMigrator:
         # instead of resuming it. A name, not a client: a client built here
         # belongs to this thread, and the engine's file pool would share it.
         engine.reader = reader or self.admin_user
-        engine.copiers = self.copiers_for(src_id) or [engine.reader]
+        engine.copiers = self.copiers_for(
+            src_id, managers_only=self.settings.transfer_mode == "move") or [engine.reader]
         try:
             result = engine.run()
         except Exception as exc:  # noqa: BLE001 - one drive must not lose the rest

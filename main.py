@@ -1014,6 +1014,19 @@ def _gate_on_delegation(settings: Settings) -> None:
         log.warning("source scope narrowing check could not run: %s", exc)
 
 
+def _gate_on_move(auth, settings) -> None:
+    """A move run first proves the source lets files leave (drive_engine.move_preflight):
+    refused, nothing has moved and the run stops saying what to change."""
+    if getattr(settings, "transfer_mode", None) != "move" or getattr(settings, "dry_run", False):
+        return
+    import drive_engine
+    why = drive_engine.move_preflight(auth, settings)
+    if why:
+        print(f"MOVE REFUSED: {why}", flush=True)
+        raise SystemExit(2)
+    print("MOVE CHECK: the source lets files move to the target", flush=True)
+
+
 def _say_source_access(settings) -> None:
     """One line in every run's log: can this run write to the source? After the gate,
     so a pass it switched off is not counted -- the record a real client's run needs."""
@@ -1026,6 +1039,9 @@ def _say_source_access(settings) -> None:
         return
     print("SOURCE ACCESS: read-only" if not writes
           else f"SOURCE ACCESS: can write ({', '.join(writes)})", flush=True)
+    if settings.transfer_mode == "move":
+        print("SOURCE ACCESS: this run MOVES Drive files out of the source; they leave it",
+              flush=True)
 
 
 def demote_stale_running(db) -> int:
@@ -1067,6 +1083,7 @@ def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
     so no future command can forget.
     """
     _gate_on_delegation(settings)
+    _gate_on_move(auth, settings)
     _say_source_access(settings)
     try:
         stale = demote_stale_running(db)
@@ -2527,8 +2544,8 @@ def cmd_scope(args, settings: Settings, db: MigrationDB, auth: AuthManager):
     if any(widened.values()):
         print("\n  NOTE: your current settings widen the default grant. The "
               "options responsible:")
-        if settings.transfer_mode == "server_side":
-            print("    TRANSFER_MODE=server_side      -> source needs write "
+        if settings.transfer_mode in ("server_side", "move"):
+            print(f"    TRANSFER_MODE={settings.transfer_mode:<15} -> source needs write "
                   "'drive' instead of 'drive.readonly'")
         if settings.migrate_calendar_acls:
             print("    MIGRATE_CALENDAR_ACLS=true     -> source needs write "

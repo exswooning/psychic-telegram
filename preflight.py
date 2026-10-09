@@ -174,7 +174,7 @@ def main(argv: list[str] | None = None) -> int:
     from config import EXPORT_MIME_MAP, Settings
     settings = Settings(account_id=args.account_id)
     ceiling = settings.export_size_limit
-    can_copy = settings.transfer_mode == "server_side" or _has_write_scope(settings)
+    can_copy = settings.transfer_mode in ("server_side", "move") or _has_write_scope(settings)
 
     if args.users:
         users = [u.strip() for u in args.users.split(",") if u.strip()]

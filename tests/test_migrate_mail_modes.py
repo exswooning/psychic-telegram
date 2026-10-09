@@ -227,6 +227,19 @@ class TestTransferMode:
         r, seen = _start(cp, monkeypatch, services=["drive"], transfer_mode="teleport")
         assert r.status_code == 422 and not seen
 
+    @pytest.mark.parametrize("confirm", [None, "", "yes"])
+    def test_a_move_is_not_started_without_typing_move(self, cp, monkeypatch, confirm):
+        """A move takes every Drive file out of the source: never from a stray click."""
+        r, seen = _start(cp, monkeypatch, services=["drive"], transfer_mode="move",
+                         **({"confirm_move": confirm} if confirm is not None else {}))
+        assert r.status_code == 400 and "type MOVE" in r.json()["detail"] and not seen
+
+    def test_a_confirmed_move_is_passed_through(self, cp, monkeypatch):
+        r, seen = _start(cp, monkeypatch, services=["drive"], transfer_mode="move",
+                         confirm_move="move")
+        assert r.status_code == 200, r.text
+        assert seen["env"]["TRANSFER_MODE"] == "move"
+
     def test_it_is_in_the_audit_record(self, cp, monkeypatch):
         _start(cp, monkeypatch, services=["drive"], transfer_mode="server_side")
         with cpdb.ro() as c:

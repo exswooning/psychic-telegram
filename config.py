@@ -19,7 +19,16 @@ from dataclasses import dataclass, field
 # ======================================================================
 # MIME constants
 # ======================================================================
-TRANSFER_MODES = ("download_upload", "server_side", "link_flip")
+TRANSFER_MODES = ("download_upload", "server_side", "link_flip", "move")
+# The modes that go through a staging shared drive on the target. `move` moves the
+# file itself there (it leaves the source: no copy, no 750 GB a day, the same id,
+# revisions and comments), which needs the source admin's "Distributing content
+# outside" setting to let it -- drive_engine.move_preflight checks before a run.
+STAGING_MODES = ("server_side", "link_flip", "move")
+# A file whose move has begun: written before it leaves the source, so a run that
+# stops between the two hops is finished by the next one (DriveMigrator.
+# _resume_moves) -- the walk can no longer find a file that left the source.
+MOVE_PENDING = "MOVE_PENDING"
 
 # How a Chat space gets built on the target.
 #
@@ -230,11 +239,11 @@ CHAT_IMPORT_SCOPE = "https://www.googleapis.com/auth/chat.import"
 def source_scopes(settings: "Settings") -> list[str]:
     """Scopes the source service account actually needs for this run."""
     scopes = list(SOURCE_SCOPES)
-    if settings.transfer_mode in ("server_side", "link_flip"):
+    if settings.transfer_mode in STAGING_MODES:
         # files.copy is a create call, so read-only will not do. This is the
         # trade the mode asks for, and it is why it is not the default.
-        # link_flip additionally rewrites permissions on the source, which the
-        # same write scope covers.
+        # link_flip additionally rewrites permissions on the source, and move
+        # moves the file out of it, which the same write scope covers.
         scopes = [DRIVE_WRITE_SCOPE if s == DRIVE_READONLY_SCOPE else s
                  for s in scopes]
     # Gmail settings need nothing more here: every settings READ (filters,

@@ -157,6 +157,9 @@ class FakeDrive(FakeService):
         # "already at target" or "licence cap below the requested target".
         self.storage_usage = 0
         self.storage_limit = 1099511627776   # 1 TiB, the previous constant
+        # The tenant admin's "Distributing content outside of <org>" set to No one:
+        # a move into another tenant's shared drive is refused (_move_across).
+        self.distribution_blocked = False
         # The mirror reads Drive's changes feed: every write records the file
         # with a rising sequence (a delete leaves a tombstone), bumps its
         # `version`, and content gets a new revision -- a comment or a grant
@@ -539,7 +542,8 @@ class _DriveFiles:
 
         result = {"id": fid}
         if media_body is not None:
-            data = media_body.read_all()
+            data = (media_body.read_all() if hasattr(media_body, "read_all")
+                    else media_body.getbytes(0, media_body.size()))    # MediaInMemoryUpload
             self.s.content[fid] = data
             meta["size"] = str(len(data))
             if not meta["mimeType"]:
@@ -628,9 +632,33 @@ class _DriveFiles:
     def update(self, **kw):
         return _Call(self.s, "files.update", self._update, kw)
 
+    def _move_across(self, fileId: str, drive: str) -> dict:
+        """A move into a shared drive of the OTHER tenant: the same file, same id, its
+        content, revisions, comments and direct grants, leaves this tenant for that
+        drive, owned by the drive now. Refused when this tenant's admin blocks it."""
+        src, dst = self.s, self.s.peer
+        if src.distribution_blocked:
+            raise http_error(403, "insufficientFilePermissions",
+                             "The user does not have sufficient permissions for this file.")
+        meta = src.store.pop(fileId)
+        meta.update(parents=[drive], driveId=drive, owners=[])
+        dst.store[fileId] = meta
+        for attr in ("content", "exports", "perms", "comment_store", "_revisions"):
+            here = getattr(src, attr)
+            if fileId in here:
+                getattr(dst, attr)[fileId] = here.pop(fileId)
+        dst.perms[fileId] = [p for p in dst.perms.get(fileId, []) if p.get("role") != "owner"]
+        src._seq += 1
+        src._changed[fileId] = src._seq          # gone, as the source's change feed says
+        dst._mark(fileId)
+        return {"id": fileId}
+
     def _update(self, fileId: str, body: Optional[dict] = None,
                 media_body=None, addParents: str = "",
                 removeParents: str = "", **_):
+        if (addParents and fileId in self.s.store and self.s.peer is not None
+                and addParents in self.s.peer.shared_drives):
+            return self._move_across(fileId, addParents)
         if fileId not in self.s.store:
             raise http_error(404, "notFound", fileId)
         meta = self.s.store[fileId]

@@ -660,3 +660,31 @@ spent on it: the next would be refused too), or with nobody fresh, it is left
 admin, and a shared one was deleted by whichever finished first), and the engine is handed
 the member's *name* (`reader`), resolved per thread -- a client built on the caller's thread
 was driven by the whole file pool.
+
+**`TRANSFER_MODE=move` moves the file itself, not a copy** (`DriveMigrator._sync_move`):
+hop 1 as its owner (a shared drive's Manager: `copiers_for(managers_only=True)`) out of the
+source into the staging drive, hop 2 as the target (`_out_of_staging`, shared with the copy
+path). One id on both sides -- `id_mapping` source_id == target_id is how every guard
+recognises a moved file -- its own revisions and comments (`_finish_item(comments=False)`),
+no bytes, so no 750 GB reservation. The source read-only guard grants exactly one more
+write, in this mode only (`allow_copy_into(..., moves=True)`: a files.update into its own
+staging drive changing nothing else). Needs the source admin's "Distributing content outside
+of <org>" set to Anyone or its own users (Google's own admin docs; No one refuses with 403
+insufficientFilePermissions -- the sandbox's state, so the cross-org hop has not run live
+yet): `main._gate_on_move` runs `move_preflight` (a 1-byte probe moved and deleted) before
+anything moves and exits 2, "MOVE REFUSED: ...", otherwise. `MOVE_PENDING` is written before
+a file leaves the source, so `_resume_moves` (run start) finishes one a stopped run left
+between the hops: the walk cannot find it on the source any more. Sharing comes with the
+file: `_sync_acls` reads it on the target, skips grants already there, and
+`_drop_replaced_source_grants` removes a source account's grant only once its mapped target
+account holds one (`SOURCE_GRANT_REPLACED`), so nobody loses a file before they arrive.
+Because the target then holds the only copy: the mirror never proposes or applies a moved
+file's deletion (`mirror._moved`), undo leaves a moved user's Drive and its ledger rows
+alone, verify checks a moved file on the target only, and the tally adds moved files back
+into what it expects (`tally.moved_by_user`) -- they leave the source's count. Never a
+fallback in either direction, and what runs after keeps the choice: repair re-runs a moved
+user's Drive as a move (`repair.retry_drive_stragglers` -- the end-of-run repair otherwise
+runs in the API's own mode, a copy), and a mirror always copies (`mirror.Cycle` turns
+`move` into `server_side`: a move would take each new file away from the person still
+working on the source). The API refuses `transfer_mode: "move"` without
+`confirm_move: "MOVE"`; only the full-run dialog offers it.

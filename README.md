@@ -265,6 +265,7 @@ budget roughly `USER_WORKERS × largest_file_size`.
 ```bash
 export TRANSFER_MODE=download_upload   # default
 export TRANSFER_MODE=server_side       # faster, higher fidelity, wider grant
+export TRANSFER_MODE=move              # the files themselves leave the source
 ```
 
 **`download_upload`** streams every file through this host. It works with a
@@ -297,11 +298,40 @@ the staging drive is **not** deleted; the next run finishes the move. A
 staging drive that still contains files is never cleaned up, because losing
 bytes is worse than leaving a drive behind.
 
-> What `server_side` does **not** do is move the original file object. Drive
-> refuses to move a file across an organisation boundary in either direction
-> (verified: `403 insufficientFilePermissions`), so target files are new
-> objects with new IDs, and any saved link to an old file ID still points at
-> the source tenant. There is no API that changes this.
+> What `server_side` does **not** do is move the original file object: target
+> files are new objects with new IDs, and a saved link to an old file ID still
+> points at the source tenant (Bitport rewrites the links it can reach, in mail,
+> events and Docs). Moving the object itself is possible where the source admin
+> allows it -- that is `move`, below. (The `403 insufficientFilePermissions` once
+> recorded here as "Drive refuses" was the source's setting, not a limit.)
+
+**`move`** moves the file object itself through the same staging drive: its
+owner (for a shared drive, a Manager) moves it out of the source into the
+staging drive, then the target user moves it into place. It keeps its ID,
+version history and comments, no byte is copied -- so Google's 750 GB per
+account per day does not apply (measured: a move is never charged) -- and
+**the source no longer has the file**. It needs the source admin to set
+*Admin console > Apps > Google Workspace > Drive and Docs > Sharing settings >
+Distributing content outside of <org>* to *Anyone* or *Only users in <org>*;
+with *No one*, Google refuses (`403 insufficientFilePermissions`). Every move
+run first moves a probe file and stops, saying so, if the source refuses. The
+setting can differ per organisational unit, so a user can still be refused
+later; their files are recorded FAILED with the same instruction, and never
+copied instead. Decide it deliberately:
+
+- Undo cannot delete it: `undo_migration.py` leaves a moved user's Drive alone,
+  because the target holds the only copy. Undoing means moving it back, which
+  needs the *target* admin's equivalent setting.
+- Sharing travels with the file. Each source account's grant is replaced by its
+  target account's; someone with no target account yet keeps their source grant
+  until they have one; outsiders keep theirs.
+- A run that stops between the two moves leaves the file in the staging drive,
+  and the next run finishes it.
+- The mirror never treats a moved file leaving the source as a deletion, and
+  never moves anything itself: it always copies. Repair moves whatever a moved
+  user still has on the source; it never copies it instead.
+- Only the full migration dialog offers it, behind "type MOVE to confirm"; the
+  API refuses it without `confirm_move: "MOVE"`.
 
 ### 2.2 Optional passes
 

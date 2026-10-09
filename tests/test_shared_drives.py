@@ -254,7 +254,7 @@ class TestReadingADriveTheAdminIsNotIn:
 
         import shared_drives
         monkeypatch.setattr(shared_drives, "DriveMigrator", _Engine)
-        sd.copiers_for = lambda drive_id: []
+        sd.copiers_for = lambda drive_id, managers_only=False: []
 
         sd._copy_contents("drv-1", "drv-2", "Finance", "o@tenanta.com")
 

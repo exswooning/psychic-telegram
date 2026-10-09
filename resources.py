@@ -76,7 +76,7 @@ def mb_per_worker(chunk_bytes: int | None = None, transfer_mode: str | None = No
         # not via Settings(), to avoid re-entering this module before
         # recommend() exists.
         transfer_mode = os.getenv("TRANSFER_MODE", "download_upload")
-    if transfer_mode == "server_side":
+    if transfer_mode in ("server_side", "move"):     # no bytes through this host
         return WORKER_BASE_MB
     if chunk_bytes is None:
         # Read from the environment, NOT via Settings().

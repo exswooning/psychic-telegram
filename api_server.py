@@ -348,8 +348,12 @@ class StartMigration(WriteAction):
     # user organizer access to a drive on the TARGET tenant, which depends on that
     # tenant's external-sharing settings actually allowing it. `link_flip` (deprecated,
     # benchmark-only -- briefly makes the source file public) is deliberately not
-    # offered here at all.
-    transfer_mode: Literal["download_upload", "server_side"] | None = None
+    # offered here at all. `move` moves the file itself through that staging drive: it
+    # LEAVES the source (no copy, no 750 GB a day, the same id, revisions and comments),
+    # so it is launched only with `confirm_move` set to "MOVE", and refused before
+    # anything moves unless the source admin lets content leave (main._gate_on_move).
+    transfer_mode: Literal["download_upload", "server_side", "move"] | None = None
+    confirm_move: str | None = None
     # Repoint Drive links in mail and events this tool already copied before their
     # Drive files had migrated (REDO_UNREWRITTEN_LINKS): a message is trashed and
     # inserted again, an event is edited in place, and anything with nothing to
@@ -2047,6 +2051,9 @@ async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
     if body.sample is not None:
         env = {**(env or os.environ), "SAMPLE_LIMIT": str(body.sample)}
         ordered = True      # Drive first, so links in the sampled mail can resolve
+    if body.transfer_mode == "move" and (body.confirm_move or "").strip().upper() != "MOVE":
+        raise HTTPException(400, "a move takes every Drive file out of the source -- "
+                                 "type MOVE to confirm")
     if body.transfer_mode:
         env = {**(env or os.environ), "TRANSFER_MODE": body.transfer_mode}
     if body.redo_links:

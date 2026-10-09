@@ -24,6 +24,7 @@ which keeps the record of what happened and why it stopped mattering.
 """
 from __future__ import annotations
 
+import copy
 import logging
 
 log = logging.getLogger("repair")
@@ -358,8 +359,16 @@ def retry_drive_stragglers(auth, db, settings, apply: bool = False,
         stats["attempted"] += 1
         if not apply:
             continue
+        st = settings
+        if settings is not None and settings.transfer_mode != "move" and db.conn.execute(
+                "SELECT 1 FROM id_mapping WHERE source_user=? AND type='file' "
+                "AND source_id = target_id LIMIT 1", (src,)).fetchone():
+            # Its files were MOVED: what is left goes the same way, never copied instead
+            # (the end-of-run repair runs in the API's own mode, a copy).
+            st = copy.copy(settings)
+            st.transfer_mode = "move"
         try:
-            result = migrate_user(auth, db, settings, src, tgt, {"drive"},
+            result = migrate_user(auth, db, st, src, tgt, {"drive"},
                                   delta=False, delta_days=0)
             if result.get("status") not in ("FAILED", "BLOCKED"):
                 stats["retried"] += 1

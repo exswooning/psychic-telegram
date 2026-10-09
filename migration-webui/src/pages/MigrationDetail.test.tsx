@@ -406,6 +406,23 @@ describe('MigrationDetail: how Drive content moves', () => {
     expect(startMigration.mock.calls[0][5]).toBe('dms')
     expect(startMigration.mock.calls[0][8]).toBe('server_side')
   })
+
+  it('will not move the files out of the source until MOVE is typed', async () => {
+    await openDialog()
+    expect(screen.queryByTestId('move-confirm')).toBeNull()
+    fireEvent.click(screen.getByTestId('transfer-mode-move').querySelector('input')!)
+    expect(screen.getByTestId('move-confirm')).toHaveTextContent('leaves')
+    fireEvent.change(screen.getByLabelText('Reason Code'), { target: { value: 'full migration' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+    expect(await screen.findByText(/the files leave the source/)).toBeInTheDocument()
+    expect(startMigration).not.toHaveBeenCalled()
+
+    fireEvent.change(screen.getByTestId('move-confirm-input'), { target: { value: 'MOVE' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+    await waitFor(() => expect(startMigration).toHaveBeenCalled())
+    expect(startMigration.mock.calls[0][8]).toBe('move')
+    expect(startMigration.mock.calls[0][11]).toBe('MOVE')
+  })
 })
 
 describe('MigrationDetail: settings for measured runs', () => {

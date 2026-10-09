@@ -21,6 +21,7 @@ fixup pass that runs after the rest of the tree has been mirrored.
 from __future__ import annotations
 
 import concurrent.futures as futures
+import json
 import logging
 import os
 import threading
@@ -33,8 +34,8 @@ import metrics
 
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload  # noqa: F401
 
-from config import (EXPORT_MIME_MAP, FOLDER_MIME, OVER_DAILY_CAP, OWED_GRANT, SHORTCUT_MIME,
-                    Settings)
+from config import (EXPORT_MIME_MAP, FOLDER_MIME, MOVE_PENDING, OVER_DAILY_CAP, OWED_GRANT,
+                    SHORTCUT_MIME, STAGING_MODES, Settings)
 from sample_budget import Budget
 from resilience import (AdaptiveRateLimiter, DailyQuotaGuard, PermanentAPIError,
                         QuotaExhausted, RateLimiter, retry_on_google_error,
@@ -406,6 +407,17 @@ def _is_unreachable_grantee(exc: Exception) -> bool:
 
 
 FORM_MIME = "application/vnd.google-apps.form"
+
+
+# A moved file's grant to a SOURCE account, removed once that person's target account
+# holds one (DriveMigrator._drop_replaced_source_grants).
+SOURCE_GRANT_REPLACED = "SOURCE_GRANT_REPLACED"
+
+
+def _grant_key(p: dict) -> tuple:
+    """One grant, for telling a grant a file already carries from one it needs."""
+    return (p.get("type"), (p.get("emailAddress") or p.get("domain") or "").lower(),
+            p.get("role"))
 
 
 def _named(item: dict, reason: str) -> str:
@@ -785,6 +797,8 @@ class DriveMigrator:
 
         if self.server_side and not self.settings.dry_run:
             self._ensure_staging_drive()
+            if self.move:
+                self._resume_moves()
         try:
             self._open_file_pool()
             try:
@@ -819,8 +833,13 @@ class DriveMigrator:
 
     @property
     def server_side(self) -> bool:
-        """Both staging-drive modes take the server-side path."""
-        return self.settings.transfer_mode in ("server_side", "link_flip")
+        """Every staging-drive mode takes the server-side path."""
+        return self.settings.transfer_mode in STAGING_MODES
+
+    @property
+    def move(self) -> bool:
+        """Move the file itself, not a copy: it leaves the source (see _sync_move)."""
+        return self.settings.transfer_mode == "move"
 
     @property
     def link_flip(self) -> bool:
@@ -1363,6 +1382,11 @@ class DriveMigrator:
         -- publishing a file the operator did not agree to expose is not a
         recovery, it is a different decision made on their behalf.
         """
+        if self.move:
+            # Never a fallback either way: a copy leaves the source holding the file,
+            # which is not what a move run was asked for -- and it is never fallen
+            # back INTO, since it empties the source.
+            return [("move", self._sync_move)]
         native_or_binary = (self._sync_native if is_native else self._sync_binary)
         order = [("server_side", self._sync_server_side),
                  ("download_upload", native_or_binary)]
@@ -1484,7 +1508,7 @@ class DriveMigrator:
             strategies = [s for s in strategies if s[0] == "server_side"]
         for name, fn in strategies:
             try:
-                if name == "server_side":
+                if name in ("server_side", "move"):
                     # Idempotent, and lazy: a download_upload run only pays
                     # for a staging drive if it actually needs to fall back.
                     self._ensure_staging_drive()
@@ -1737,17 +1761,8 @@ class DriveMigrator:
                         self.source_user, item["name"],
                         copied["md5Checksum"], item["md5Checksum"])
 
-        move_body = {}
-        if item.get("modifiedTime"):
-            move_body["modifiedTime"] = item["modifiedTime"]
-        # Set here, as the target user, in the move it already makes: no extra call.
-        move_body.update(carried_metadata(item))
         try:
-            moved = with_carried_fallback(lambda b: self._retry(lambda: self.tgt.files().update(
-                fileId=copy_id, addParents=tgt_parent,
-                removeParents=self._staging_drive_id,
-                body=b or None, supportsAllDrives=True, fields="id,modifiedTime",
-            ).execute(), label="drive.files.move"), move_body)
+            moved = self._out_of_staging(item, copy_id, tgt_parent)
         except (PermanentAPIError, RuntimeError) as exc:
             if size:
                 quota.refund(size)
@@ -1769,13 +1784,32 @@ class DriveMigrator:
             self._bump("failed")
             return
 
-        self.db.record_mapping(self.source_user, item["id"], copy_id, "file",
+        self._landed(item, copy_id, tgt_parent, moved, bytes_moved=size)
+
+    def _out_of_staging(self, item: dict, file_id: str, tgt_parent: str) -> dict:
+        """The second hop, as the TARGET account: out of the staging drive into its
+        place -- in a My Drive that makes the target user the owner -- carrying the
+        source's modifiedTime and metadata in the same call. Raises if it would not."""
+        body = {}
+        if item.get("modifiedTime"):
+            body["modifiedTime"] = item["modifiedTime"]
+        # Set here, as the target user, in the move it already makes: no extra call.
+        body.update(carried_metadata(item))
+        return with_carried_fallback(lambda b: self._retry(lambda: self.tgt.files().update(
+            fileId=file_id, addParents=tgt_parent, removeParents=self._staging_drive_id,
+            body=b or None, supportsAllDrives=True, fields="id,modifiedTime",
+        ).execute(), label="drive.files.move"), body)
+
+    def _landed(self, item: dict, target_id: str, tgt_parent: str, moved: dict | None,
+                bytes_moved: int = 0, note: str = "", comments: bool = True) -> None:
+        """Record a file that reached its place on the target, then finish it."""
+        self.db.record_mapping(self.source_user, item["id"], target_id, "file",
                                parent_target_id=tgt_parent, source_name=item["name"])
-        self.db.log_audit(self.source_user, item["id"], "file", "SUCCESS",
-                          modified_time=item.get("modifiedTime"), bytes_moved=size)
+        self.db.log_audit(self.source_user, item["id"], "file", "SUCCESS", note,
+                          modified_time=item.get("modifiedTime"), bytes_moved=bytes_moved)
         self._bump("files")
         if self.settings.rewrite_drive_links and item.get("mimeType") in _NATIVE_KIND:
-            self._pending_native.append((item, copy_id))
+            self._pending_native.append((item, target_id))
         # Found by the item-by-item tally: a native Doc/Sheet copied server-side
         # keeps the COPY's time whatever the copy and the move ask for (live: a
         # quarter of files on a 300-user run, every one unshared and uncommented,
@@ -1783,8 +1817,103 @@ class DriveMigrator:
         # kept -- free, already asked for -- so a mismatch forces the restore.
         kept = (moved or {}).get("modifiedTime") or ""
         want = item.get("modifiedTime") or ""
-        self._finish_item(item, copy_id,
+        self._finish_item(item, target_id, comments=comments,
                           force_mtime_restore=bool(want and kept and kept[:19] != want[:19]))
+
+    # -- move: the file itself, not a copy ------------------------------------------------
+    def _mover(self):
+        """Who moves a file out of the source: its owner -- for a shared drive, a Manager
+        (only a Manager may move a shared drive's files to another organisation) --
+        allowed exactly one write, a move into this run's staging drive."""
+        from auth import allow_copy_into
+        who = (self.copiers or [self.reader or self.source_user])[0]
+        if self.copiers:
+            with self._staging_lock:
+                self._grant_staging_locked(who)
+        return allow_copy_into(self.auth.source_drive(who), self._staging_drive_id, moves=True)
+
+    def _sync_move(self, item: dict, tgt_parent: str) -> None:
+        """Move the file itself to the target, keeping its id, revisions and comments.
+
+        Hop 1, its owner moves it out of the source into the target's staging drive;
+        hop 2, the target account moves it into place (_out_of_staging), as a copy is.
+        No byte is copied, so the 750 GB a day does not apply (measured on the sandbox
+        pair: a move is never charged). The source no longer holds it afterwards --
+        and the walk can no longer find it, which is why its MOVE_PENDING row is written
+        before it leaves: a run that stops between the hops is finished by the next
+        (_resume_moves). Needs the source admin to let content leave the organisation
+        ("Distributing content outside of ..."); move_preflight checks before a run."""
+        fid = item["id"]
+        pending = json.dumps({"parent": tgt_parent, "item": item}, default=str)
+        self.db.log_audit(self.source_user, fid, "file", MOVE_PENDING, pending)
+        try:
+            self._retry(lambda: self._mover().files().update(
+                fileId=fid, addParents=self._staging_drive_id,
+                removeParents=",".join(item.get("parents") or []),
+                supportsAllDrives=True, fields="id").execute(),
+                label="drive.files.move_out", tenant="source")
+        except (PermanentAPIError, RuntimeError) as exc:
+            # A lost response can hide a move that happened: ask where it is first.
+            if not self._in_staging(fid):
+                hint = (" -- the source admin must set Drive and Docs > Sharing settings > "
+                        "Distributing content outside of the organisation to Anyone or to its "
+                        "own users" if "insufficientFilePermissions" in str(exc) else "")
+                self.db.log_audit(self.source_user, fid, "file", "FAILED",
+                                  f"move refused: {exc}{hint}")
+                self._bump("failed")
+                return
+        self._place_moved(item, tgt_parent)
+
+    def _place_moved(self, item: dict, tgt_parent: str) -> None:
+        """Hop 2 for a file already moved out of the source, then record and finish it.
+        Failing, its MOVE_PENDING row stays: the next run finishes it."""
+        fid = item["id"]
+        try:
+            moved = self._out_of_staging(item, fid, tgt_parent)
+        except (PermanentAPIError, RuntimeError) as exc:
+            log.warning("[%s] %s left the source but is not in place yet (%s); the next "
+                        "run finishes it", self.source_user, item.get("name"), exc)
+            self._bump("failed")
+            return
+        # Its own comments came with it: copying them again would double every one.
+        self._landed(item, fid, tgt_parent, moved, bytes_moved=int(item.get("size") or 0),
+                     note="moved", comments=False)
+
+    def _target_parents(self, fid: str) -> list[str]:
+        """Where the target account sees this file -- nothing while it is still on the source."""
+        try:
+            f = self._retry(lambda: self.tgt.files().get(
+                fileId=fid, fields="parents", supportsAllDrives=True).execute(), write=False)
+        except (PermanentAPIError, RuntimeError):
+            return []
+        return f.get("parents") or []
+
+    def _in_staging(self, fid: str) -> bool:
+        return self._staging_drive_id in self._target_parents(fid)
+
+    def _resume_moves(self) -> None:
+        """Finish every move a stopped run left between its hops."""
+        rows = self.db.conn.execute(
+            "SELECT item_id, error_message FROM audit_log WHERE source_user=? "
+            "AND item_type='file' AND status=?", (self.source_user, MOVE_PENDING)).fetchall()
+        for r in rows:
+            try:
+                want = json.loads(r["error_message"] or "{}")
+            except ValueError:
+                continue
+            item, parent = want.get("item") or {}, want.get("parent")
+            if item.get("id") != r["item_id"] or not parent:
+                continue
+            where = self._target_parents(item["id"])
+            if self._staging_drive_id in where:
+                log.info("[%s] finishing the move of %s", self.source_user, item.get("name"))
+                self._place_moved(item, parent)
+            elif parent in where:
+                # In place already; only the record was lost.
+                self._landed(item, item["id"], parent, None, note="moved", comments=False,
+                             bytes_moved=int(item.get("size") or 0))
+            # Neither: still on the source (the walk moves it again), or in another
+            # shared drive's staging drive (that drive's run finishes it).
 
     def _over_daily_cap(self, item: dict, why: str) -> None:
         """Leave a file bigger than one account's daily allowance for a person (or the
@@ -2368,10 +2497,13 @@ class DriveMigrator:
         skip would drop it silently. One round trip per file is a cheap price
         for not guessing; lift this once contract_probe covers a shared drive.
         """
-        if shared is False and self.shared_drive is None:
+        # A MOVED file (same id on both sides) carries its own sharing across, and only
+        # the target can still read it -- the source no longer holds it.
+        moved = source_id == target_id
+        if shared is False and self.shared_drive is None and not moved:
             return 0
         try:
-            perms = self._retry(lambda: self.src.permissions().list(
+            perms = self._retry(lambda: (self.tgt if moved else self.src).permissions().list(
                 fileId=source_id,
                 fields="permissions(id,type,role,emailAddress,domain,"
                        "allowFileDiscovery,permissionDetails)",
@@ -2416,7 +2548,53 @@ class DriveMigrator:
         grants = self._translate_grants(source_id, perms, resume=resume)
         if only is not None:          # repair: just the grants it was asked to put back
             grants = [g for g in grants if g[1] in only]
-        return self._create_permissions_batched(target_id, grants)
+        if not moved:
+            return self._create_permissions_batched(target_id, grants)
+        # What it already carries came with it -- an outsider, a link share -- and only
+        # the source accounts' grants become their target accounts'.
+        have = {_grant_key(p) for p in perms}
+        applied = self._create_permissions_batched(
+            target_id, [g for g in grants if _grant_key(g[0]) not in have])
+        self._drop_replaced_source_grants(target_id)
+        return applied
+
+    def _drop_replaced_source_grants(self, fid: str) -> None:
+        """A moved file keeps its direct grants, the source accounts' among them -- now
+        accounts outside the file's organisation. Each one whose person holds a grant
+        through their target account is removed; one whose person has no target account
+        yet keeps it (an owed grant), so nobody loses a file before they arrive."""
+        src_dom = (self.settings.source_domain or "").lower()
+        tgt_dom = (self.settings.target_domain or "").lower()
+        try:
+            perms = self._retry(lambda: self.tgt.permissions().list(
+                fileId=fid, supportsAllDrives=True,
+                fields="permissions(id,type,role,emailAddress,domain)").execute(),
+                write=False).get("permissions", [])
+        except (PermanentAPIError, RuntimeError) as exc:
+            log.warning("[%s] could not re-read %s's sharing to drop source access: %s",
+                        self.source_user, fid, exc)
+            return
+        holders = {p["emailAddress"].lower() for p in perms if p.get("emailAddress")}
+        domains = {(p.get("domain") or "").lower() for p in perms if p.get("type") == "domain"}
+        for p in perms:
+            who = (p.get("emailAddress") or p.get("domain") or "").lower()
+            if p.get("role") == "owner" or not src_dom:
+                continue
+            if p.get("type") in ("user", "group") and who.endswith("@" + src_dom):
+                mapped = (self.db.resolve_identity(who) or "").lower()
+                if not mapped or mapped not in holders:
+                    continue
+            elif not (p.get("type") == "domain" and who == src_dom and tgt_dom in domains):
+                continue
+            try:
+                self._retry(lambda: self.tgt.permissions().delete(
+                    fileId=fid, permissionId=p["id"], supportsAllDrives=True).execute())
+            except (PermanentAPIError, RuntimeError) as exc:
+                log.warning("[%s] could not drop %s's source access to %s: %s",
+                            self.source_user, who, fid, exc)
+                continue
+            self.db.log_audit(self.source_user, f"{fid}:{who}", "acl", SOURCE_GRANT_REPLACED,
+                              f"{p.get('role')} for {who} dropped: the target account holds it")
 
     def _translate_grants(self, source_id: str, perms: list[dict],
                           resume: bool = False) -> list[tuple[dict, str | None]]:
@@ -2937,3 +3115,62 @@ class DriveMigrator:
         except Exception as exc:      # noqa: BLE001 - was (PermanentAPIError, RuntimeError) only
             log.warning("[%s] could not restore modifiedTime on %s: %s",
                        self.source_user, target_id, exc)
+
+
+def move_preflight(auth, settings) -> str | None:
+    """None when the source lets files leave for the target; otherwise what to change.
+
+    Google has no read for the source admin's "Distributing content outside" setting,
+    so this moves a probe: a 1-byte file it creates in the source admin's My Drive,
+    moved into a drive it creates on the target, both deleted after. The setting can
+    differ per organisational unit, so a user's own files can still be refused later;
+    each such file is FAILED with the same instruction."""
+    from googleapiclient.errors import HttpError
+    from googleapiclient.http import MediaInMemoryUpload
+
+    admin, tadmin = settings.source_admin, settings.target_admin
+    if not (admin and tadmin):
+        return "SOURCE_ADMIN and TARGET_ADMIN must both be set to check that files can move"
+    src, tgt = auth.source_drive(admin, writable=True), auth.target_drive(tadmin)
+    drive_id = file_id = None
+    holder = src                    # which side holds the probe, for deleting it
+    try:
+        drive_id = tgt.drives().create(
+            requestId=uuid.uuid4().hex, fields="id",
+            body={"name": f"{settings.staging_drive_prefix}-MOVE-CHECK"}).execute()["id"]
+        tgt.permissions().create(
+            fileId=drive_id, supportsAllDrives=True, sendNotificationEmail=False, fields="id",
+            body={"type": "user", "role": "organizer", "emailAddress": admin}).execute()
+        made = src.files().create(body={"name": "Bitport move check (deletes itself)"},
+                                  media_body=MediaInMemoryUpload(b".", "text/plain"),
+                                  fields="id,parents").execute()
+        file_id = made["id"]
+        try:
+            src.files().update(fileId=file_id, addParents=drive_id,
+                               removeParents=",".join(made.get("parents") or []),
+                               supportsAllDrives=True, fields="id").execute()
+            holder = tgt
+        except HttpError as exc:
+            return (f"{settings.source_domain} refused to move a file to {settings.target_domain} "
+                    f"(HTTP {getattr(exc.resp, 'status', '?')}). In {settings.source_domain}'s "
+                    "Admin console, set Apps > Google Workspace > Drive and Docs > Sharing "
+                    "settings > Distributing content outside of the organisation to Anyone, or "
+                    "to its own users, then run again")
+        return None
+    except Exception as exc:      # noqa: BLE001 - the run must not move anything unproven
+        return f"could not check that files can move: {type(exc).__name__}: {exc}"
+    finally:
+        if file_id:
+            try:
+                holder.files().delete(fileId=file_id, supportsAllDrives=True).execute()
+            except Exception as exc:      # noqa: BLE001
+                log.warning("move check: could not delete its probe file %s: %s", file_id, exc)
+        for attempt in range(3) if drive_id else ():
+            try:
+                tgt.drives().delete(driveId=drive_id).execute()
+                break
+            except Exception as exc:      # noqa: BLE001 - just emptied: Drive lags a little
+                if attempt == 2:
+                    log.warning("move check: could not delete its probe drive %s: %s", drive_id, exc)
+                else:
+                    time.sleep(3)

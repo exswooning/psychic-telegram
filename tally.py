@@ -240,7 +240,9 @@ def aggregate(rows: list[dict]) -> dict:
                 if tgt is None:
                     continue
             skipped = min(src, (r.get("skipped") or {}).get(svc, 0))
-            expected = src - skipped
+            # A MOVED file left the source for the target: the source no longer counts
+            # it, the target does, and it is owed all the same.
+            expected = src - skipped + (r.get("moved") or {}).get(svc, 0)
             s["source"] += src
             s["target"] += tgt
             s["skipped"] += skipped
@@ -334,6 +336,14 @@ def skipped_by_user(conn) -> dict[str, dict[str, int]]:
     return out
 
 
+def moved_by_user(conn, user: str | None = None) -> dict[str, dict[str, int]]:
+    """Files moved, not copied, per user (drive_engine._sync_move): one id on both sides."""
+    one = " AND source_user = ?" if user else ""
+    return {r["source_user"]: {"drive_files": r["n"]} for r in conn.execute(
+        "SELECT source_user, COUNT(*) n FROM id_mapping WHERE type='file' "
+        f"AND source_id = target_id{one} GROUP BY 1", (user,) if user else ())}
+
+
 def run(settings, db, auth, *, users: list[str] | None = None, sample_users: int = 5, samples: int = 25,
         workers: int = 4, deep: bool = True, progress=print, count_fn=count_side,
         verify_fn=None, audit_fn=None, retry=lambda f: f, rng=random) -> dict:
@@ -344,11 +354,13 @@ def run(settings, db, auth, *, users: list[str] | None = None, sample_users: int
         want = {u.lower() for u in users}
         pairs = [p for p in pairs if p[0].lower() in want]
     skipped = skipped_by_user(db.conn)
+    moved = moved_by_user(db.conn)
     rows, lock, done = [], threading.Lock(), [0]
 
     def one(pair):
         src_user, tgt_user = pair
         row = {"user": src_user, "target_user": tgt_user, "skipped": skipped.get(src_user, {}),
+               "moved": moved.get(src_user, {}),
                "source": count_fn(auth, settings, "source", src_user, retry),
                "target": count_fn(auth, settings, "target", tgt_user, retry)}
         with lock:
@@ -424,6 +436,7 @@ def tally_user(auth, settings, db, source_user: str, target_user: str,
     src_items: dict = {}
     tgt_items: dict = {}
     row = {"user": source_user, "target_user": target_user, "skipped": skipped,
+           "moved": moved_by_user(db.conn, source_user).get(source_user, {}),
            "source": count_side(auth, settings, "source", source_user, retry, keep=src_items),
            "target": count_side(auth, settings, "target", target_user, retry, keep=tgt_items)}
     payload = aggregate([row])

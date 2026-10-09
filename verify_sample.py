@@ -370,8 +370,14 @@ class Verifier:
         seen_targets = {tid for kind in ("folder", "file", "shortcut") for _, tid, _ in self._pairs(kind)}
         target_keys = {}
         for kind in ("folder", "file"):
-            for sid, tid, _ in self._pairs(kind, sample=True):
+            for sid, tid, recorded_name in self._pairs(kind, sample=True):
                 res["checked"] += 1
+                if sid == tid:
+                    # MOVED, not copied (drive_engine._sync_move): the source no longer
+                    # holds it, and what is on the target IS the file -- one id, its own
+                    # history. So it is checked there: present, not binned, its name.
+                    self._check_moved(tgt, sid, recorded_name, res)
+                    continue
                 try:
                     sm = self._drive_meta(src, sid)
                 except Exception as exc:      # noqa: BLE001
@@ -427,6 +433,24 @@ class Verifier:
             res["notes"].append(f"sharing: all {sh['matched']} grants matched")
         res["notCopied"] = self._failed(("file", "folder", "drive"))
         return res
+
+    def _check_moved(self, tgt, fid: str, name: str | None, res: dict) -> None:
+        try:
+            tm = self._drive_meta(tgt, fid)
+        except Exception as exc:      # noqa: BLE001
+            res["missing"].append({"source": fid, "target": fid, "name": name,
+                                   "why": f"moved, but not on the target ({str(exc)[:80]})"})
+            return
+        if tm.get("trashed"):
+            res["missing"].append({"source": fid, "target": fid, "name": name,
+                                   "why": "moved, and in the target's trash"})
+        elif name and tm.get("name") != name:
+            res["differences"].append({"item": name, "path": "", "source": fid, "target": fid,
+                                       "diffs": [f"moved, now named {tm.get('name')!r}"]})
+        else:
+            res["identical"] += 1
+        self.evidence.append({"service": "drive", "kind": "file", "name": name,
+                              "path": "", "opened": False, "moved": True})
 
     def _perms(self, svc, fid) -> list[dict]:
         r = self._x(lambda: svc.permissions().list(

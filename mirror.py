@@ -37,6 +37,7 @@ fingerprint before anything is written.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
@@ -237,8 +238,17 @@ def classify(file: dict, fp: dict, *, latest_rev: Optional[dict] = None,
 
 
 # -- deletions -----------------------------------------------------------------------
+def _moved(d: dict) -> bool:
+    """A Drive item moved, not copied (drive_engine._sync_move): one id on both sides."""
+    return d.get("service") == "drive" and bool(d.get("target_id")) \
+        and d.get("item_id") == d.get("target_id")
+
+
 def apply_deletion(auth, db, d: dict) -> tuple[bool, str]:
-    """Move one target item to its bin. Never a permanent delete."""
+    """Move one target item to its bin. Never a permanent delete -- and never a MOVED
+    file's, whatever an older proposal says: it is the only one there is."""
+    if _moved(d):
+        return False, "moved, not copied: the target holds the only copy"
     svc, tid, tu = d["service"], d["target_id"], d["target_user"]
     try:
         if svc == "drive":
@@ -289,6 +299,11 @@ class Cycle:
                  on_hold: Optional[Callable[[int, int], None]] = None,
                  workers: Optional[int] = None, check_users: bool = True,
                  only: Optional[list] = None):
+        if getattr(settings, "transfer_mode", "") == "move":
+            # A mirror follows a source still in use: it copies, never moves -- a
+            # move would take each new file away from the person who just made it.
+            settings = copy.copy(settings)
+            settings.transfer_mode = "server_side"
         self.auth, self.db, self.settings = auth, db, settings
         # One migration's users (the Mirror page's choice), or None for every user.
         self.only = {u.lower() for u in only} if only else None
@@ -326,6 +341,10 @@ class Cycle:
             self.unknown.append(what)
 
     def propose(self, **d) -> None:
+        if _moved(d):
+            # A MOVED file is gone from the source because it is on the target now --
+            # the same file, the only one. Its source vanishing is the move, not a delete.
+            return
         with self._lock:
             self.proposed.append(d)
 

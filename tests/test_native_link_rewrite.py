@@ -206,9 +206,12 @@ class TestTheEngine:
 
     def test_the_server_side_path_queues_natives_and_the_walk_drains_them(self):
         import inspect, drive_engine
-        src = inspect.getsource(drive_engine.DriveMigrator._sync_server_side)
-        assert "_pending_native.append" in src
-        assert "_rewrite_native_links()" in inspect.getsource(drive_engine.DriveMigrator.run)
+        D = drive_engine.DriveMigrator
+        # A copy and a move both land through _landed, which queues the natives.
+        assert "self._landed(" in inspect.getsource(D._sync_server_side)
+        assert "self._landed(" in inspect.getsource(D._place_moved)
+        assert "_pending_native.append" in inspect.getsource(D._landed)
+        assert "_rewrite_native_links()" in inspect.getsource(D.run)
 
 
 class TestARedoRepointsNativesCopiedBefore:

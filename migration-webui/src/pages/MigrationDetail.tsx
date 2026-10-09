@@ -74,6 +74,7 @@ export const MigrationDetail: React.FC = () => {
   // '' = the server's own default (config.TRANSFER_MODES via TRANSFER_MODE) --
   // most runs never need to touch this.
   const [transferMode, setTransferMode] = useState<TransferMode | ''>('')
+  const [confirmMove, setConfirmMove] = useState('')
   // Who to migrate: every user, or the ones chosen here. Chosen users move their mail
   // through this tool -- the DMS only starts after a whole-tenant run, so Split or DMS
   // for a few users would leave their mail undelivered (the server refuses it too).
@@ -989,7 +990,31 @@ export const MigrationDetail: React.FC = () => {
                       external-sharing settings allowing it.
                     </Typography>
                   } />
+                <FormControlLabel
+                  value="move" control={<Radio size="small" />}
+                  data-testid="transfer-mode-move"
+                  label={
+                    <Typography variant="body2">
+                      <strong>Move the files themselves</strong> — Google moves each file
+                      out of the source into the target: no copy, no 750 GB a day limit, and
+                      each file keeps its id, version history and comments. The files{' '}
+                      <strong>leave the source</strong>. Needs the source admin to let content
+                      move to other organisations; the run checks first and stops if not.
+                    </Typography>
+                  } />
               </RadioGroup>
+              {transferMode === 'move' && (
+                <Box sx={{ mt: 1 }} data-testid="move-confirm">
+                  <Alert severity="warning" sx={{ mb: 1 }}>
+                    Every Drive file of the users in this run leaves {d?.sourceDomain || 'the source'}.
+                    Undo will not delete them on the target, because the target then holds the
+                    only copy; moving them back is the only way back.
+                  </Alert>
+                  <TextField size="small" label="Type MOVE to confirm" value={confirmMove}
+                             onChange={(e) => setConfirmMove(e.target.value)}
+                             inputProps={{ 'data-testid': 'move-confirm-input' }} />
+                </Box>
+              )}
             </Box>
             <Box sx={{ mt: 2 }} data-testid="run-full-tuning">
               <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 0.5 }}>
@@ -1030,6 +1055,9 @@ export const MigrationDetail: React.FC = () => {
               throw new Error('Choose at least one user, or pick All users.')
             }
             const users = who === 'some' ? picked : []
+            if (transferMode === 'move' && confirmMove.trim().toUpperCase() !== 'MOVE') {
+              throw new Error('Type MOVE to confirm: the files leave the source.')
+            }
             const r = await startMigration(reason, ['all'], users, false,
                                            Number(accountId), mailBy, undefined,
                                            dmsAuto ? undefined : false,
@@ -1038,7 +1066,8 @@ export const MigrationDetail: React.FC = () => {
                                              driveFileWorkers: num(tuneFileWorkers),
                                              mappingCacheUserCap: num(tuneCacheCap),
                                              processes: num(tuneProcesses) },
-                                           who === 'some' && redoLinks)
+                                           who === 'some' && redoLinks,
+                                           transferMode === 'move' ? confirmMove : undefined)
             if (!r.ok) throw new Error(r.detail || 'could not start')
             setAskFull(false)
             setStarted(r.detail || 'migration started')

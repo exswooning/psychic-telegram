@@ -115,11 +115,14 @@ _DRIVE_READS = {
 class ReadOnlyDrive:
     """The SOURCE Drive, reads only -- plus, when `copy_into` is set, files.copy into
     that one folder: a server-side run's own staging drive on the target, the single
-    write a migration makes on the source. Anything else raises SourceWriteRefused."""
+    write a migration makes on the source. With `moves` too (a move run, and only
+    one), files.update that moves a file INTO that drive and changes nothing else.
+    Anything else raises SourceWriteRefused."""
 
-    def __init__(self, svc, copy_into: str | None = None):
+    def __init__(self, svc, copy_into: str | None = None, moves: bool = False):
         object.__setattr__(self, "_svc", svc)
         object.__setattr__(self, "_copy_into", copy_into)
+        object.__setattr__(self, "_moves", moves)
 
     def __setattr__(self, name, value):      # transparent: a test fake's flags land on it
         setattr(self._svc, name, value)
@@ -128,12 +131,13 @@ class ReadOnlyDrive:
         attr = getattr(self._svc, name)
         if name not in _DRIVE_READS:
             return attr
-        return lambda *a, **k: _ReadOnlyCollection(attr(*a, **k), name, self._copy_into)
+        return lambda *a, **k: _ReadOnlyCollection(attr(*a, **k), name, self._copy_into,
+                                                   self._moves)
 
 
 class _ReadOnlyCollection:
-    def __init__(self, res, name: str, copy_into: str | None):
-        self._res, self._name, self._copy_into = res, name, copy_into
+    def __init__(self, res, name: str, copy_into: str | None, moves: bool = False):
+        self._res, self._name, self._copy_into, self._moves = res, name, copy_into, moves
 
     def __getattr__(self, method):
         fn = getattr(self._res, method)
@@ -148,6 +152,15 @@ class _ReadOnlyCollection:
                         f"copies only into its own staging drive ({self._copy_into})")
                 return fn(*a, **kw)
             return copy
+        if self._name == "files" and method == "update" and self._moves and self._copy_into:
+            def move(*a, **kw):
+                if (kw.get("addParents") != self._copy_into or kw.get("body")
+                        or kw.get("media_body")):
+                    raise SourceWriteRefused(
+                        "source Drive files.update refused: a move run only moves a file "
+                        f"into its own staging drive ({self._copy_into}), changing nothing else")
+                return fn(*a, **kw)
+            return move
 
         def refused(*a, **k):
             raise SourceWriteRefused(f"source Drive {self._name}.{method} refused: a "
@@ -155,10 +168,11 @@ class _ReadOnlyCollection:
         return refused
 
 
-def allow_copy_into(svc, staging: str | None):
-    """The same source Drive, also allowed to copy into `staging`."""
+def allow_copy_into(svc, staging: str | None, moves: bool = False):
+    """The same source Drive, also allowed to copy into `staging` -- and with `moves`,
+    to move a file into it."""
     if isinstance(svc, ReadOnlyDrive) and staging:
-        return ReadOnlyDrive(svc._svc, staging)
+        return ReadOnlyDrive(svc._svc, staging, moves)
     return svc
 
 
