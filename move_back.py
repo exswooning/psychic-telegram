@@ -28,14 +28,13 @@ import uuid
 from collections import Counter
 
 from auth import AuthManager
-from config import Settings
+from config import MOVED_BACK, Settings
 from db import MigrationDB
 from drive_engine import _grant_key, move_preflight
 from resilience import PermanentAPIError, retry_on_google_error
 
 log = logging.getLogger("move_back")
 
-MOVED_BACK = "MOVED_BACK"
 # A moved-back file's grant to a TARGET account, removed once that person's source
 # account holds one again.
 TARGET_GRANT_REPLACED = "TARGET_GRANT_REPLACED"

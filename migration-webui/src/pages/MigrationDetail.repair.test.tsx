@@ -225,6 +225,25 @@ describe('MigrationDetail reports what was skipped', () => {
       .toContain('56,975')
   })
 
+  it('says how many files moved, how many wait between the moves, and how many came back', async () => {
+    fetchMigrationDetail.mockResolvedValue(detail({
+      items: [{ type: 'file', count: 12 }],
+      moves: { moved: 10, waiting: 2, movedBack: 1 },
+    }))
+    render(<MigrationDetail />)
+    const line = await screen.findByTestId('moves')
+    expect(line).toHaveTextContent('Moved, not copied: 10 files left')
+    expect(line).toHaveTextContent('2 out of the source, not yet in place — the next run finishes them')
+    expect(line).toHaveTextContent('1 moved back')
+  })
+
+  it('says nothing about moves when nothing ever moved', async () => {
+    fetchMigrationDetail.mockResolvedValue(detail({ items: [{ type: 'file', count: 12 }] }))
+    render(<MigrationDetail />)
+    await screen.findByTestId('item-file')
+    expect(screen.queryByTestId('moves')).toBeNull()
+  })
+
   it('names each file Bitport could not move, for a person', async () => {
     fetchMigrationDetail.mockResolvedValue(detail({
       uncopyableCount: 3,

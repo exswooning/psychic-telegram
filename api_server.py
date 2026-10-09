@@ -4498,6 +4498,26 @@ def _hand_work(conn) -> dict:
     return {"scanned": len(rows), "totals": totals, "users": users[:200]}
 
 
+def _moves(conn) -> dict | None:
+    """What move runs did (TRANSFER_MODE=move): files that left the source for the target
+    (one id on both sides), files out of the source and not yet in place -- the next run
+    finishes them -- and files move_back.py put back. None when no file ever moved."""
+    from config import MOVE_PENDING, MOVED_BACK
+
+    def scoped(alias):
+        return (f"AND EXISTS (SELECT 1 FROM identity_map m "
+                f"WHERE m.source_email = {alias}.source_user)")
+    moved = conn.execute("SELECT COUNT(*) c FROM id_mapping i WHERE type='file' "
+                         "AND source_id = target_id " + scoped("i")).fetchone()["c"]
+    states = {r["status"]: r["n"] for r in conn.execute(
+        "SELECT status, COUNT(*) n FROM audit_log a WHERE item_type='file' "
+        "AND status IN (?, ?) " + scoped("a") + " GROUP BY status", (MOVE_PENDING, MOVED_BACK))}
+    if not (moved or states):
+        return None
+    return {"moved": moved, "waiting": states.get(MOVE_PENDING, 0),
+            "movedBack": states.get(MOVED_BACK, 0)}
+
+
 def _relinks(conn) -> list[dict]:
     """Each copied Form whose source wrote to a responses Sheet: both copies, by name
     and target id, for a person to relink (no API can -- drive_engine._note_form_link)."""
@@ -5858,7 +5878,7 @@ async def migration_detail(account_id: int, op: Operator = Depends(operator)):
             # branch on which keys exist will eventually branch wrong.
             "items": [], "failures": [], "failedUsers": [], "users": [],
             "skipped": [], "uncopyable": [], "uncopyableCount": 0, "handWork": None,
-            "relink": [], "repair": None,
+            "relink": [], "repair": None, "moves": None,
             "running": bool(_jobs_here),
             # Which job, and since when. A bare boolean could not tell a
             # delta from a full migration, so pressing Run delta changed
@@ -5957,6 +5977,7 @@ async def migration_detail(account_id: int, op: Operator = Depends(operator)):
                 out["uncopyableCount"], out["uncopyable"] = _uncopyable(conn)
                 out["handWork"] = _hand_work(conn)
                 out["relink"] = _relinks(conn)
+                out["moves"] = _moves(conn)
                 out["failedUsers"] = [
                     {"sourceUser": r["source_email"],
                      "targetUser": r["target_email"],

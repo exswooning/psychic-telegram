@@ -29,6 +29,8 @@ STAGING_MODES = ("server_side", "link_flip", "move")
 # stops between the two hops is finished by the next one (DriveMigrator.
 # _resume_moves) -- the walk can no longer find a file that left the source.
 MOVE_PENDING = "MOVE_PENDING"
+# A moved file move_back.py put back where it was on the source: no longer migrated.
+MOVED_BACK = "MOVED_BACK"
 
 # How a Chat space gets built on the target.
 #

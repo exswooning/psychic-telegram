@@ -674,6 +674,20 @@ export const MigrationDetail: React.FC = () => {
                 ))}
               </Stack>
             )}
+            {d.moves && (
+              <Typography variant="body2" sx={{ mt: 1 }} data-testid="moves">
+                Moved, not copied: <strong>{d.moves.moved.toLocaleString()}</strong>{' '}
+                file{d.moves.moved === 1 ? '' : 's'} left {d.sourceDomain || 'the source'} for{' '}
+                {d.targetDomain || 'the target'}
+                {d.moves.waiting > 0 && (
+                  <Box component="span" sx={{ color: 'warning.main' }}>
+                    {' '}· {d.moves.waiting.toLocaleString()} out of the source, not yet in place —
+                    the next run finishes {d.moves.waiting === 1 ? 'it' : 'them'}
+                  </Box>
+                )}
+                {d.moves.movedBack > 0 && <> · {d.moves.movedBack.toLocaleString()} moved back</>}
+              </Typography>
+            )}
           </Paper>
 
           {d.failedUsers.length > 0 && (

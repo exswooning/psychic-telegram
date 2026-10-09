@@ -143,3 +143,15 @@ def test_undo_points_at_it(auth, db, settings, capsys):
     db.record_mapping(SRC_USER, "F1", "F1", "file")
     undo_migration.undo_user(auth, db, settings, SRC_USER, TGT_USER, dry_run=False)
     assert "Move back" in capsys.readouterr().out
+
+
+def test_migration_detail_says_what_moved_and_what_waits(db, identity):
+    import api_server
+    from config import MOVE_PENDING, MOVED_BACK
+
+    assert api_server._moves(db.conn) is None                    # never moved: no line at all
+    db.record_mapping(SRC_USER, "F1", "F1", "file")              # moved
+    db.record_mapping(SRC_USER, "F2", "T2", "file")              # copied
+    db.log_audit(SRC_USER, "F3", "file", MOVE_PENDING, "{}")     # between the two moves
+    db.log_audit(SRC_USER, "F4", "file", MOVED_BACK, "back")
+    assert api_server._moves(db.conn) == {"moved": 1, "waiting": 1, "movedBack": 1}

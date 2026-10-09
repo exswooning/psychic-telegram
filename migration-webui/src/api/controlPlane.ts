@@ -762,6 +762,9 @@ export interface MigrationDetail {
    *  account's 750 GB a day and could not go today (OVER_DAILY_CAP). Named, for a person. */
   uncopyable?: { user: string; sourceId: string; name: string; status: string; reason: string }[]
   uncopyableCount?: number
+  /** What move runs did: files that left the source, files out of it and not yet in place
+   *  (the next run finishes them), files moved back. Absent when no file ever moved. */
+  moves?: { moved: number; waiting: number; movedBack: number } | null
   /** From each user's latest source scan: what only a person can move, by type. */
   handWork?: { scanned: number
                totals: { site: number; map: number; jam: number; form: number; oversized: number }
