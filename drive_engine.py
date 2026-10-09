@@ -3117,21 +3117,26 @@ class DriveMigrator:
                        self.source_user, target_id, exc)
 
 
-def move_preflight(auth, settings) -> str | None:
-    """None when the source lets files leave for the target; otherwise what to change.
+def move_preflight(auth, settings, back: bool = False) -> str | None:
+    """None when files can move from one tenant to the other; otherwise what to change.
 
-    Google has no read for the source admin's "Distributing content outside" setting,
-    so this moves a probe: a 1-byte file it creates in the source admin's My Drive,
-    moved into a drive it creates on the target, both deleted after. The setting can
-    differ per organisational unit, so a user's own files can still be refused later;
-    each such file is FAILED with the same instruction."""
+    Google has no read for the "Distributing content outside" setting, so this moves
+    a probe: a 1-byte file it creates in the moving side's admin's My Drive, moved
+    into a drive it creates on the other side, both deleted after. `back` checks
+    target -> source, for move_back.py. The setting can differ per organisational
+    unit, so a user's own files can still be refused later; each such file is FAILED
+    with the same instruction."""
     from googleapiclient.errors import HttpError
     from googleapiclient.http import MediaInMemoryUpload
 
-    admin, tadmin = settings.source_admin, settings.target_admin
-    if not (admin and tadmin):
+    if not (settings.source_admin and settings.target_admin):
         return "SOURCE_ADMIN and TARGET_ADMIN must both be set to check that files can move"
-    src, tgt = auth.source_drive(admin, writable=True), auth.target_drive(tadmin)
+    if back:
+        mover, from_dom, to_dom = settings.target_admin, settings.target_domain, settings.source_domain
+        src, tgt = auth.target_drive(mover), auth.source_drive(settings.source_admin, writable=True)
+    else:
+        mover, from_dom, to_dom = settings.source_admin, settings.source_domain, settings.target_domain
+        src, tgt = auth.source_drive(mover, writable=True), auth.target_drive(settings.target_admin)
     drive_id = file_id = None
     holder = src                    # which side holds the probe, for deleting it
     try:
@@ -3140,7 +3145,7 @@ def move_preflight(auth, settings) -> str | None:
             body={"name": f"{settings.staging_drive_prefix}-MOVE-CHECK"}).execute()["id"]
         tgt.permissions().create(
             fileId=drive_id, supportsAllDrives=True, sendNotificationEmail=False, fields="id",
-            body={"type": "user", "role": "organizer", "emailAddress": admin}).execute()
+            body={"type": "user", "role": "organizer", "emailAddress": mover}).execute()
         made = src.files().create(body={"name": "Bitport move check (deletes itself)"},
                                   media_body=MediaInMemoryUpload(b".", "text/plain"),
                                   fields="id,parents").execute()
@@ -3151,13 +3156,13 @@ def move_preflight(auth, settings) -> str | None:
                                supportsAllDrives=True, fields="id").execute()
             holder = tgt
         except HttpError as exc:
-            return (f"{settings.source_domain} refused to move a file to {settings.target_domain} "
-                    f"(HTTP {getattr(exc.resp, 'status', '?')}). In {settings.source_domain}'s "
+            return (f"{from_dom} refused to move a file to {to_dom} "
+                    f"(HTTP {getattr(exc.resp, 'status', '?')}). In {from_dom}'s "
                     "Admin console, set Apps > Google Workspace > Drive and Docs > Sharing "
                     "settings > Distributing content outside of the organisation to Anyone, or "
                     "to its own users, then run again")
         return None
-    except Exception as exc:      # noqa: BLE001 - the run must not move anything unproven
+    except Exception as exc:      # noqa: BLE001 - nothing may move unproven
         return f"could not check that files can move: {type(exc).__name__}: {exc}"
     finally:
         if file_id:

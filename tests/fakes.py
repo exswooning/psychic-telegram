@@ -905,6 +905,14 @@ class _DriveDrives:
         self.s.shared_drives[did] = {"id": did, "name": body.get("name")}
         return {"id": did, "name": body.get("name")}
 
+    def get(self, **kw):
+        return _Call(self.s, "drives.get", self._get_drive, kw)
+
+    def _get_drive(self, driveId: str, **_):
+        if driveId not in self.s.shared_drives:
+            raise http_error(404, "notFound", driveId)
+        return dict(self.s.shared_drives[driveId])
+
     def delete(self, **kw):
         return _Call(self.s, "drives.delete", self._delete, kw)
 

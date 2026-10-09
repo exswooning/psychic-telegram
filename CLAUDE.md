@@ -688,3 +688,17 @@ runs in the API's own mode, a copy), and a mirror always copies (`mirror.Cycle` 
 `move` into `server_side`: a move would take each new file away from the person still
 working on the source). The API refuses `transfer_mode: "move"` without
 `confirm_move: "MOVE"`; only the full-run dialog offers it.
+
+**`move_back.py` undoes a move** (Maintenance > Move back, confirm "MOVE BACK"; `--dry-run`
+first). The same two hops reversed, through a staging drive the SOURCE admin makes on the
+source (`<prefix>-BACK-USER-<who>` or `-BACK-DRIVE-<source drive>`, both movers organizers):
+hop 1 as the file's holder on the target (its owner, or the target admin for a shared drive),
+hop 2 as its owner on the source (a Manager for a shared drive) into the folder it came from --
+folders were never moved, so `id_mapping` maps the target folder back to the source one; a
+folder since deleted puts it at its owner's root (only on 404: any other refusal leaves it in
+staging). No pending record: every file is looked up first (the target holder can see a
+back-staging drive; the drive's name says whose), so a stopped run is simply run again.
+Sharing reverses `_drop_replaced_source_grants` (TARGET_GRANT_REPLACED). On success the
+mapping is forgotten and the file reads MOVED_BACK, so undo can then clear the empty target
+folders and the rest. Needs the TARGET admin's distributing setting (`move_preflight(back=True)`);
+refuses while the mirror follows those users -- it would copy every file straight back.

@@ -37,7 +37,7 @@ export const MAINTENANCE_KEYS = [
   'restore_direct_grants',
   'calendar_links_dry', 'calendar_links',
   'link_dupes_dry', 'link_dupes',
-  'undo_dry', 'undo',
+  'undo_dry', 'undo', 'move_back_dry', 'move_back',
   'acl_reconcile_dry', 'acl_reconcile', 'acl_repair_dry', 'acl_repair', 'syncacls',
 ]
 

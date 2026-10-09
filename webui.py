@@ -251,6 +251,21 @@ ACTIONS: dict[str, dict] = {
         "destructive": True,
         "confirm": "UNDO",
     },
+    # A MOVED file is the only copy, so undo leaves it: this is its undo.
+    "move_back_dry": {
+        "label": "Move back (dry run)",
+        "blurb": "Count, per user, the files a move run took to the target that would go back.",
+        "argv": [PY, "move_back.py", "--dry-run"],
+    },
+    "move_back": {
+        "label": "Move back",
+        "blurb": "Put every file a move run took to the target back where it was on the "
+                 "source -- the same file, its history, comments and sharing. Needs the "
+                 "TARGET admin to let content leave its organisation; checked first.",
+        "argv": [PY, "move_back.py", "--yes"],
+        "destructive": True,
+        "confirm": "MOVE BACK",
+    },
     "resolve": {
         "label": "Resolve failures",
         "blurb": "Retry every FAILED item with the current code.",

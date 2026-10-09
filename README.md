@@ -320,8 +320,14 @@ later; their files are recorded FAILED with the same instruction, and never
 copied instead. Decide it deliberately:
 
 - Undo cannot delete it: `undo_migration.py` leaves a moved user's Drive alone,
-  because the target holds the only copy. Undoing means moving it back, which
-  needs the *target* admin's equivalent setting.
+  because the target holds the only copy. **Move back** undoes it instead
+  (`python move_back.py --dry-run`, then `--yes [--user X]`; Maintenance >
+  Move back, typed confirmation "MOVE BACK"): each file goes back to the folder
+  it came from on the source -- same file, history and comments -- and each
+  target account's grant becomes its source account's again. It needs the
+  *target* admin's equivalent setting (a probe checks first), refuses while the
+  mirror follows those users (it would copy them straight back), and a run that
+  stops half-way is simply run again. Then undo clears the rest.
 - Sharing travels with the file. Each source account's grant is replaced by its
   target account's; someone with no target account yet keeps their source grant
   until they have one; outsiders keep theirs.

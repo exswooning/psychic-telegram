@@ -56,7 +56,8 @@ def undo_user(auth: AuthManager, db: MigrationDB, settings: Settings,
         "AND source_id = target_id", (source_user,)).fetchone()[0]
     if moved:
         print(f"    Drive left as it is: {moved} file(s) were moved, not copied -- "
-              "the target holds the only copy")
+              "the target holds the only copy. Move back puts them back "
+              "(move_back.py; Maintenance > Move back), then undo clears the rest")
     for kind in DELETE_ORDER:
         if moved and kind in ("file", "shortcut", "folder"):
             continue
