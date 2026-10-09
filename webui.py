@@ -5264,6 +5264,32 @@ class Handler(BaseHTTPRequestHandler):
         return bool(name and expected
                     and hmac.compare_digest(token, expected))
 
+    # What acts on the box itself -- its own tenant (env.sh, keys/, oauth/), its settings,
+    # its deploy target -- or reads every account's logs. Signing in was all these asked,
+    # so a client account could deploy this box, every tenant's keys with it, to a host of
+    # its choosing.
+    _SUPERADMIN_ONLY = frozenset({
+        "POST /api/deploy", "POST /api/deploy_config", "GET /api/deploy_history",
+        "GET /api/deploy_status", "POST /api/upload", "POST /api/groq", "GET /api/groq",
+        "POST /api/groq_log", "GET /api/logs", "POST /api/oauth/begin",
+        "POST /api/oauth/disconnect", "GET /api/oauth/status", "POST /api/runmode",
+        "POST /api/authmode", "POST /api/toggles", "POST /api/identities/save",
+        "POST /api/check", "POST /api/checkstep", "POST /api/check_dwd",
+        "POST /api/scope_diagnosis", "POST /api/dwd/automate", "GET /api/dms_metrics",
+        "POST /api/host/restart", "GET /api/host/services", "GET /api/host/proc",
+        "GET /api/host/stack",
+    })
+
+    def _may(self, verb: str, path: str) -> bool:
+        """False, having answered 403, when the route is the box's and the caller is not
+        a superadmin."""
+        if f"{verb} {path}" not in self._SUPERADMIN_ONLY or self._caller()[1]:
+            return True
+        self._json({"ok": False, "msg": "superadmin only",
+                    "error": "superadmin only: this acts on the server itself, not on "
+                             "your migration"}, 403)
+        return False
+
     def _deny(self) -> None:
         self._json({"ok": False, "error": "sign in required"}, 401)
 
@@ -5375,6 +5401,8 @@ class Handler(BaseHTTPRequestHandler):
         query = urllib.parse.parse_qs(self.path.partition("?")[2])
         if not self._is_public(path) and not self._authorised():
             self._deny()
+            return
+        if not self._may("GET", path):
             return
         if path == "/":
             # Bitport (the SPA at /app) is the only UI now. This used to
@@ -5609,6 +5637,8 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length) or b"{}")
         except json.JSONDecodeError:
             self._json({"ok": False, "error": "bad json"}, 400)
+            return
+        if not self._may("POST", self.path):
             return
         route = self._POST_ROUTES.get(self.path)
         if route is None:
@@ -6121,7 +6151,9 @@ class Handler(BaseHTTPRequestHandler):
         if err:
             self._json({"ok": False, "error": err}, 400)
             return
-        write_config(clean)
+        box = self._caller()[1]          # env.sh is the box's own tenant
+        if box:
+            write_config(clean)
         # A signed-in account's tenant pair lives in tenant_configs, not
         # env.sh -- that is what every action button and the header read.
         # Writing only env.sh meant an account could correct its domain
@@ -6139,12 +6171,15 @@ class Handler(BaseHTTPRequestHandler):
                 accounts_auth.update_tenant_config(
                     acct, "target", domain=clean.get("TARGET_DOMAIN"),
                     admin_email=clean.get("TARGET_ADMIN"))
-                saved_to = f"this account's tenant config (and {ENV_PATH})"
+                saved_to = "this account's tenant config" + (f" (and {ENV_PATH})" if box else "")
             except Exception as exc:      # noqa: BLE001
                 self._json({"ok": False,
-                            "error": f"saved to {ENV_PATH} but not to this "
-                                     f"account's tenant config: {exc}"}, 500)
+                            "error": "not saved to this account's tenant config"
+                                     + (f" (saved to {ENV_PATH})" if box else "") + f": {exc}"}, 500)
                 return
+        elif not box:
+            self._json({"ok": False, "error": "superadmin only: this server's own tenant"}, 403)
+            return
         self._json({"ok": True, "msg": f"saved to {saved_to}",
                     "config": read_config(acct)})
         return

@@ -448,6 +448,15 @@ model**: `api/client.ts` (polling, talks to webui.py's `/api/*`) and
 `hooks/useRunningJobs.ts`) and reconcile them itself — there is no unified
 job-status endpoint yet.
 
+**webui.py's only role check is `Handler._SUPERADMIN_ONLY`.** `_authorised()` asks only
+that the caller is signed in, and scoping is per route (`_on_screen()`,
+`resolve_target_account`). Every route that acts on the box itself -- its own tenant in
+env.sh, keys/ and oauth/, its settings, its deploy target, every account's logs -- is listed
+there and refused before it runs. Until 2026-10-09 none was, and any client account could
+POST /api/deploy with include_credentials: every tenant's delegated keys, rsynced to a host
+the caller named. `tests/test_box_routes_are_superadmin_only.py` fails on a new route that
+names no account and is neither gated nor on its short HARMLESS list.
+
 **Worker count is re-probed once per pass, not just once per process.**
 `Settings.user_workers` used to be decided exactly once, at `Settings()`
 construction (`resources.recommend()` against RAM measured at that instant),
