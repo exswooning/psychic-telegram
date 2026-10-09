@@ -52,6 +52,12 @@ DELIVERED_BY_DMS = "DELIVERED_BY_DMS"
 # it once the account exists, and it deliberately does not start with SKIPPED, so
 # the one-to-one check counts it missing until then.
 OWED_GRANT = "OWED_GRANTEE_NO_ACCOUNT"
+# A file bigger than one account's whole 750 GB a day. Each run copies it server-side
+# (never streamed: that needs its size in disk here) as an account that has copied
+# nothing yet that day, which it then spends. Refused, or with nobody fresh, it is
+# left as this and listed for a person (api_server.UNCOPYABLE). Owed, not declined:
+# not SKIPPED, so the one-to-one check counts it missing until it moves.
+OVER_DAILY_CAP = "OVER_DAILY_CAP"
 SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
 
 # Native Google types this engine knows how to round-trip through an OOXML

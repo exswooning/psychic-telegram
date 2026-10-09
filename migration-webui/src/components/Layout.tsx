@@ -504,8 +504,8 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
                 const ex = o.uncopyableExamples ?? []
                 items.push({
                   to: `/migrations/${o.accountId}`,
-                  text: `${o.targetDomain}: ${o.uncopyable.toLocaleString()} file${o.uncopyable === 1 ? '' : 's'} no Google API `
-                    + `can copy — recreate by hand (${ex.join(', ')}${o.uncopyable > ex.length ? ', …' : ''}).`,
+                  text: `${o.targetDomain}: ${o.uncopyable.toLocaleString()} file${o.uncopyable === 1 ? '' : 's'} Bitport `
+                    + `can't move — do ${o.uncopyable === 1 ? 'it' : 'them'} by hand (${ex.join(', ')}${o.uncopyable > ex.length ? ', …' : ''}).`,
                 })
               }
               if (!o.shares) continue

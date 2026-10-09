@@ -636,13 +636,14 @@ export const MigrationDetail: React.FC = () => {
             <Paper variant="outlined" sx={{ p: 2, mb: 3, borderColor: 'warning.main' }}
                    data-testid="uncopyable-panel">
               <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
-                Can&apos;t be copied by any Google API — recreate by hand
+                Bitport can&apos;t move these — do them by hand
                 ({(d.uncopyableCount ?? d.uncopyable.length).toLocaleString()})
               </Typography>
               <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                Google Sites, My Maps and Jamboards have no copy or export, and a Doc past the
-                export ceiling whose server-side copy also failed lands here. Each opens on the
-                source so it can be rebuilt on the target.
+                Google Sites, My Maps and Jamboards have no copy or export, so they are rebuilt on
+                the target. A Doc past the export ceiling whose server-side copy also failed lands
+                here, and so does a file bigger than one account&apos;s 750 GB a day that could not
+                go today — the next run tries it again. Each opens on the source.
               </Typography>
               {d.uncopyable.map((u) => (
                 <Typography key={`${u.user}-${u.sourceId}`} variant="body2" sx={{ ml: 1 }}>

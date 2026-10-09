@@ -33,7 +33,8 @@ import metrics
 
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload  # noqa: F401
 
-from config import EXPORT_MIME_MAP, FOLDER_MIME, OWED_GRANT, SHORTCUT_MIME, Settings
+from config import (EXPORT_MIME_MAP, FOLDER_MIME, OVER_DAILY_CAP, OWED_GRANT, SHORTCUT_MIME,
+                    Settings)
 from sample_budget import Budget
 from resilience import (AdaptiveRateLimiter, DailyQuotaGuard, PermanentAPIError,
                         QuotaExhausted, RateLimiter, retry_on_google_error,
@@ -932,18 +933,23 @@ class DriveMigrator:
         The first of `copiers` with room for `size` -- each its own 750 GB, Google's own
         unit -- granted onto the staging drive the first time it is picked. With none
         set, the source user, charged to `quota`. Nobody with room left raises
-        QuotaExhausted, which stops the run where it can resume tomorrow."""
+        QuotaExhausted, which stops the run where it can resume tomorrow.
+
+        A file bigger than a whole day reserves the whole day, so only an account that
+        has copied nothing yet today can take it, and it copies nothing after: Google
+        lets an upload past the limit finish, then refuses the account the rest of the
+        day."""
+        cap = self.settings.effective_upload_cap()
         if not self.copiers:
             if size:
-                self.quota.reserve(size)
+                self.quota.reserve(min(size, cap))
             return self.src, self.quota
         from auth import allow_copy_into
         for who in self.copiers:
-            guard = self._copier_quota.setdefault(
-                who, DailyQuotaGuard(self.db, who, self.settings.effective_upload_cap()))
+            guard = self._copier_quota.setdefault(who, DailyQuotaGuard(self.db, who, cap))
             try:
                 if size:
-                    guard.reserve(size)
+                    guard.reserve(min(size, cap))
             except QuotaExhausted:
                 continue
             with self._staging_lock:
@@ -1471,7 +1477,12 @@ class DriveMigrator:
         # thread-safe.
         local_failures = 0
         last_error = ""
-        for name, fn in self._file_strategies(is_native):
+        strategies = self._file_strategies(is_native)
+        if int(item.get("size") or 0) > self.settings.effective_upload_cap():
+            # More than a whole day: only a server-side copy can carry it. Streamed, it
+            # would need its size in disk on this host first.
+            strategies = [s for s in strategies if s[0] == "server_side"]
+        for name, fn in strategies:
             try:
                 if name == "server_side":
                     # Idempotent, and lazy: a download_upload run only pays
@@ -1597,7 +1608,16 @@ class DriveMigrator:
         size = int(item.get("size") or 0)
         # Native files report no size; they still consume target storage, but
         # there is nothing to reserve against up front.
-        src, quota = self._copier(size)
+        try:
+            src, quota = self._copier(size)
+        except QuotaExhausted:
+            if size <= self.settings.effective_upload_cap():
+                raise
+            # Bigger than a day, and every account that could take it has copied
+            # something today: listed, and the rest of the drive goes on.
+            self._over_daily_cap(item, "and every account that could copy it has copied "
+                                       "something today. The next run tries again")
+            return
 
         body = {"name": item["name"], "parents": [self._staging_drive_id]}
         # copy() does not carry modifiedTime across on its own.
@@ -1652,7 +1672,19 @@ class DriveMigrator:
                     # whole retry ladder. The account also spends it outside this count,
                     # so it is spent for today and the next one with room copies the
                     # file -- or nobody has room and the run stops (QuotaExhausted).
-                    if not (self.copiers and size and "userRateLimitExceeded" in str(exc)):
+                    capped = bool(size) and "userRateLimitExceeded" in str(exc)
+                    if capped and size > self.settings.effective_upload_cap():
+                        # Refused even to an account that had copied nothing today: the
+                        # next one would be too, so none is spent on it.
+                        quota.refund(size)
+                        tried = quota.target_user if self.copiers else self.source_user
+                        # "Charged", not "copied": a manager's own My Drive copies
+                        # count under its user pair, not here.
+                        self._over_daily_cap(item, "and Google refused it even from an "
+                                                   "account with nothing charged to it today. "
+                                                   f"Tried as {tried}")
+                        return
+                    if not (capped and self.copiers):
                         raise
                     quota.refund(size)
                     quota.exhaust()
@@ -1753,6 +1785,17 @@ class DriveMigrator:
         want = item.get("modifiedTime") or ""
         self._finish_item(item, copy_id,
                           force_mtime_restore=bool(want and kept and kept[:19] != want[:19]))
+
+    def _over_daily_cap(self, item: dict, why: str) -> None:
+        """Leave a file bigger than one account's daily allowance for a person (or the
+        next run), named, with the rest of the run going on. The first sentence is
+        what the list shows, so nothing in it may contain a full stop."""
+        gb = int(item.get("size") or 0) // 1024 ** 3
+        self.db.log_audit(self.source_user, item["id"], "file", OVER_DAILY_CAP, _named(
+            item, f"{gb:,} GB, more than one account may copy in a day, {why}. To move it by "
+                  "hand, download it and upload it to the target (an upload past the limit "
+                  "is allowed to finish), or use Google's Domain Transfer"))
+        self._bump("skipped")
 
     def _sync_binary(self, item: dict, tgt_parent: str) -> None:
         size = int(item.get("size") or 0)

@@ -650,7 +650,13 @@ who can copy any file (Manager, Content manager, Contributor) and are this tenan
 in that order; each has its own guard keyed by its address and is granted onto the staging
 drive only when first picked; none left raises `QuotaExhausted` (the drive stops, no file
 FAILED, the next run resumes). A user's own files still have one copier, the user, charged
-to `quota`. Each shared drive has its own staging drive (two migrate at once under the one
+to `quota`. A file bigger than a whole day's allowance reserves the whole day
+(`_copier`: `min(size, cap)`), so only an account that has copied nothing yet today takes
+it -- Google lets an upload past the limit finish -- and it is only ever copied
+server-side (streamed, it would need its size in disk here). Refused even then (none is
+spent on it: the next would be refused too), or with nobody fresh, it is left
+`OVER_DAILY_CAP`, owed not SKIPPED, listed with what no API can copy
+(`api_server.UNCOPYABLE`), and the rest of the drive goes on; the next run tries again. Each shared drive has its own staging drive (two migrate at once under the one
 admin, and a shared one was deleted by whichever finished first), and the engine is handed
 the member's *name* (`reader`), resolved per thread -- a client built on the caller's thread
 was driven by the whole file pool.

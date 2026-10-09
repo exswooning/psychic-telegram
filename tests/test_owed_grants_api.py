@@ -89,3 +89,9 @@ def test_nothing_owed_is_no_entry(cp, monkeypatch, tmp_path):
 
 def test_it_needs_a_login(cp):
     assert cp.get("/api/v2/owed-grants").status_code in (401, 403)
+
+
+def test_a_file_bigger_than_a_day_is_listed_for_a_person():
+    """The engine writes config.OVER_DAILY_CAP; the list matches it by that exact string."""
+    import config
+    assert config.OVER_DAILY_CAP in A.UNCOPYABLE

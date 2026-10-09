@@ -410,7 +410,7 @@ export const startMigration = (
 export interface OwedGrants {
   migrations: { accountId: number; accountName: string; targetDomain: string; shares: number;
                 colleagues: number; examples: string[]
-                /** Files no Google API can copy -- to recreate by hand. */
+                /** Files Bitport can't move (no API copies them, or bigger than a day's 750 GB) -- for a person. */
                 uncopyable?: number; uncopyableExamples?: string[] }[]
 }
 
@@ -752,8 +752,9 @@ export interface MigrationDetail {
   /** Items the tool deliberately did not migrate, by reason. Distinct from
    *  failures: a skip is a decision, not an error. */
   skipped?: { status: string; count: number }[]
-  /** Files no Google API could copy (Sites, My Maps, Jamboards, a native past the export
-   *  ceiling whose files.copy also failed): recreated by hand, so they are named. */
+  /** Files Bitport could not move: no Google API copies them (Sites, My Maps, Jamboards, a
+   *  native past the export ceiling whose files.copy also failed), or one is bigger than an
+   *  account's 750 GB a day and could not go today (OVER_DAILY_CAP). Named, for a person. */
   uncopyable?: { user: string; sourceId: string; name: string; status: string; reason: string }[]
   uncopyableCount?: number
   /** From each user's latest source scan: what only a person can move, by type. */

@@ -225,19 +225,26 @@ describe('MigrationDetail reports what was skipped', () => {
       .toContain('56,975')
   })
 
-  it('names each file no Google API can copy, to recreate by hand', async () => {
+  it('names each file Bitport could not move, for a person', async () => {
     fetchMigrationDetail.mockResolvedValue(detail({
-      uncopyableCount: 2,
+      uncopyableCount: 3,
       uncopyable: [
         { user: 'f@tenanta.com', sourceId: 'site1', name: 'Team site', status: 'SKIPPED_UNEXPORTABLE',
           reason: 'no export mapping for application/vnd.google-apps.site' },
         { user: 'f@tenanta.com', sourceId: 'map1', name: '', status: 'SKIPPED_UNEXPORTABLE', reason: '' },
+        { user: 'f@tenanta.com', sourceId: 'vm1', name: 'disk.vmdk', status: 'OVER_DAILY_CAP',
+          reason: '800 GB, more than one account may copy in a day, and Google refused it even from '
+            + 'an account with nothing charged to it today. Tried as f@tenanta.com. To move it by hand…' },
       ],
     }))
     render(<MigrationDetail />)
     const panel = await screen.findByTestId('uncopyable-panel')
-    expect(panel).toHaveTextContent('recreate by hand (2)')
+    expect(panel).toHaveTextContent("Bitport can't move these — do them by hand (3)")
     expect(panel).toHaveTextContent('Team site — f@tenanta.com — no export mapping')
+    // Only the first sentence: the account's address has full stops in it.
+    expect(panel).toHaveTextContent('disk.vmdk — f@tenanta.com — 800 GB, more than one account may '
+      + 'copy in a day, and Google refused it even from an account with nothing charged to it today')
+    expect(panel).not.toHaveTextContent('Tried as')
     expect(screen.getByText('Team site').closest('a')?.getAttribute('href'))
       .toBe('https://drive.google.com/open?id=site1')
   })

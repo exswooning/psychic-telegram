@@ -682,7 +682,10 @@ is cheaper than finding out. On exhaustion the user is marked `PAUSED_QUOTA` and
 the batch continues; the next day's delta pass skips everything already copied.
 A shared drive is copied by its own members in turn, each with its own 750 GB
 (`SharedDriveMigrator.copiers_for`), so a 5 TB drive with seven members who can
-copy moves in a day.
+copy moves in a day. A single file bigger than 750 GB goes to an account that
+has copied nothing yet that day; if Google refuses it, or nobody is fresh, it is
+recorded `OVER_DAILY_CAP` and listed on Migration detail for a person, and the
+run carries on.
 
 ---
 

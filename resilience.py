@@ -857,6 +857,9 @@ class DailyQuotaGuard:
             self.db.add_bytes_sent(self.target_user, n)
 
     def refund(self, n: int) -> None:
+        # Never more than one reservation can charge: a file bigger than a whole day
+        # reserves the day, not its size (drive_engine._copier).
+        n = min(n, self.cap_bytes)
         if n <= 0:
             return
         with self._lock:

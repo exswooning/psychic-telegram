@@ -804,6 +804,28 @@ class TestAMappedDriveIsNotReGrantedMemberByMember:
         assert sd.stats["members_present"] == 1
 
 
+def _managed_drive(auth, db, settings, quota, managers):
+    """A shared drive of four 100-byte files that every manager can see, each manager
+    allowed 200 bytes a day, and the engine set to copy it as them in turn."""
+    import drive_engine
+
+    settings.transfer_mode = "server_side"
+    settings.effective_upload_cap = lambda: 200      # two 100-byte files a day each
+    main = auth._get("source", "drive", SRC_USER)
+    main.shared_drives["src-drive"] = {"id": "src-drive", "name": "Finance"}
+    for i in range(4):
+        main.add_binary(f"f{i}.pdf", parent="src-drive", data=bytes([i]) * 100)
+    for m in managers:                 # every member sees the same drive
+        auth._get("source", "drive", m)
+        auth._svcs[("source", "drive", m)] = main
+    auth.target_drive(TGT_USER).shared_drives["tgt-drive"] = {"id": "tgt-drive",
+                                                               "name": "Finance"}
+    e = drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota)
+    e.shared_drive, e.target_drive_id = "src-drive", "tgt-drive"
+    e.reader, e.copiers = SRC_USER, list(managers)
+    return e
+
+
 class TestManagersShareTheDailyCap:
     """Google charges a copy to the account that MAKES it -- not the drive it lands in,
     not whoever moves it after (sandbox pair, 2026-10-09: a manager refused at ~740 GB of
@@ -815,23 +837,7 @@ class TestManagersShareTheDailyCap:
 
     @pytest.fixture
     def engine(self, auth, db, settings, identity, quota):
-        import drive_engine
-
-        settings.transfer_mode = "server_side"
-        settings.effective_upload_cap = lambda: 200      # two 100-byte files a day each
-        main = auth._get("source", "drive", SRC_USER)
-        main.shared_drives["src-drive"] = {"id": "src-drive", "name": "Finance"}
-        for i in range(4):
-            main.add_binary(f"f{i}.pdf", parent="src-drive", data=bytes([i]) * 100)
-        for m in self.MANAGERS:            # every member sees the same drive
-            auth._get("source", "drive", m)
-            auth._svcs[("source", "drive", m)] = main
-        auth.target_drive(TGT_USER).shared_drives["tgt-drive"] = {"id": "tgt-drive",
-                                                                   "name": "Finance"}
-        e = drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota)
-        e.shared_drive, e.target_drive_id = "src-drive", "tgt-drive"
-        e.reader, e.copiers = SRC_USER, list(self.MANAGERS)
-        return e
+        return _managed_drive(auth, db, settings, quota, self.MANAGERS)
 
     def test_each_copies_until_its_own_allowance_is_spent(self, engine, auth, db):
         result = engine.run()
@@ -899,3 +905,112 @@ class TestManagersShareTheDailyCap:
         assert len({engine._staging_drive_name(), other._staging_drive_name(),
                     mine._staging_drive_name()}) == 3
         assert mine._staging_drive_name() == f"{settings.staging_drive_prefix}-alice"
+
+
+class TestAFileBiggerThanADay:
+    """A file bigger than one account's whole daily allowance used to stop its drive (or
+    pause its user) on every run: no reservation could ever fit it. It now goes, server-side,
+    to an account that has copied nothing yet today -- Google lets an upload past the limit
+    finish -- and refused, or with nobody fresh, it is listed for a person while the rest
+    of the drive goes on."""
+
+    MANAGERS = TestManagersShareTheDailyCap.MANAGERS
+
+    @pytest.fixture
+    def engine(self, auth, db, settings, identity, quota):
+        return _managed_drive(auth, db, settings, quota, self.MANAGERS)
+
+    @staticmethod
+    def _huge(auth, size=300):
+        main = auth._svcs[("source", "drive", SRC_USER)]
+        return main, main.add_binary("huge.vmdk", parent="src-drive", data=b"x" * size)
+
+    def _row(self, db, fid):
+        return db.get_audit(SRC_USER, fid, "file")
+
+    def test_it_goes_to_an_account_that_has_copied_nothing_today(self, engine, auth, db):
+        _, huge = self._huge(auth)
+        result = engine.run()
+        assert (result["files"], result["failed"]) == (5, 0)
+        assert self._row(db, huge)["status"] == "SUCCESS"
+        # Four 100-byte files fill two days; the 300-byte one takes a third whole day.
+        assert [db.bytes_sent_today(m) for m in self.MANAGERS] == [200, 200, 200]
+
+    def test_google_refusing_it_lists_it_spends_nobody_and_the_drive_goes_on(
+            self, engine, auth, db, settings, quota):
+        import drive_engine
+        import resilience
+        from config import OVER_DAILY_CAP
+        from tests.fakes import http_error
+
+        main, huge = self._huge(auth)
+        tries = []
+        files = type(main).files
+
+        def refusing(svc):
+            f = files(svc)
+            real = f.copy
+
+            def copy(**kw):
+                if kw.get("fileId") == huge:
+                    tries.append(1)
+                    raise http_error(403, "userRateLimitExceeded", "User rate limit exceeded.")
+                return real(**kw)
+            f.copy = copy
+            return f
+        main.files = lambda: refusing(main)
+
+        result = engine.run()
+
+        assert (result["files"], result["failed"]) == (4, 0)
+        row = self._row(db, huge)
+        assert row["status"] == OVER_DAILY_CAP
+        assert row["error_message"].startswith("file: huge.vmdk\n0 GB, more than one account")
+        assert "Google refused it even from an account with nothing charged to it today" in \
+            row["error_message"]
+        assert len(tries) == resilience.RATE_LIMIT_RETRY_BUDGET + 1    # one account's ladder
+        assert sum(db.bytes_sent_today(m) for m in self.MANAGERS) == 400  # refunded, none spent
+
+        # Nothing is decided for good: the next run tries it again.
+        del main.files
+        again = drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota)
+        again.shared_drive, again.target_drive_id = "src-drive", "tgt-drive"
+        again.reader, again.copiers = SRC_USER, list(self.MANAGERS)
+        assert again.run()["files"] == 1           # the one fresh manager left takes it
+        assert self._row(db, huge)["status"] == "SUCCESS"
+
+    def test_with_nobody_fresh_today_it_is_listed_and_the_drive_goes_on(
+            self, engine, auth, db, settings):
+        from config import OVER_DAILY_CAP
+
+        settings.effective_upload_cap = lambda: 300
+        _, huge = self._huge(auth, size=400)
+        for m in self.MANAGERS:
+            db.add_bytes_sent(m, 1)
+
+        result = engine.run()
+
+        assert result["files"] == 4                 # the drive did not stop
+        row = self._row(db, huge)
+        assert row["status"] == OVER_DAILY_CAP and "has copied something today" in \
+            row["error_message"]
+        assert [db.bytes_sent_today(m) for m in self.MANAGERS] == [201, 201, 1]
+
+    def test_a_users_own_one_is_never_streamed_through_this_host(self, auth, db, settings,
+                                                                 identity):
+        import drive_engine
+        from config import OVER_DAILY_CAP
+        from resilience import DailyQuotaGuard
+
+        settings.transfer_mode = "download_upload"     # streaming would be tried first
+        settings.effective_upload_cap = lambda: 200
+        src = auth._get("source", "drive", SRC_USER)
+        huge = src.add_binary("huge.vmdk", data=b"x" * 300)
+        db.add_bytes_sent(TGT_USER, 1)
+        m = drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER,
+                                       DailyQuotaGuard(db, TGT_USER, 200))
+
+        m.run()
+
+        assert db.get_audit(SRC_USER, huge, "file")["status"] == OVER_DAILY_CAP
+        assert src.call_count("files.get_media") == 0

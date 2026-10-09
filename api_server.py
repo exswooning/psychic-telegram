@@ -4427,14 +4427,16 @@ def _migration_progress(account_id: int | None) -> dict:
         return empty
 
 
-UNCOPYABLE = ("SKIPPED_UNEXPORTABLE", "SKIPPED_EXPORT_TOO_LARGE")
+UNCOPYABLE = ("SKIPPED_UNEXPORTABLE", "SKIPPED_EXPORT_TOO_LARGE", "OVER_DAILY_CAP")
 
 
 def _uncopyable(conn, limit: int = 200) -> tuple[int, list[dict]]:
-    """Files no Google API could copy (Sites, My Maps, Jamboards; a native over the
-    export ceiling whose files.copy also failed) -- they need recreating by hand, so
-    they are named, not only counted. Corpus-scoped like the skipped panel. The name
-    is the record's first line (drive_engine._named); older records have none."""
+    """Files Bitport could not move: no Google API could copy them (Sites, My Maps,
+    Jamboards; a native over the export ceiling whose files.copy also failed), or one
+    is bigger than an account's whole daily allowance and Google refused it, or nobody
+    fresh was left today (OVER_DAILY_CAP). They need a person, so they are named, not
+    only counted. Corpus-scoped like the skipped panel. The name is the record's first
+    line (drive_engine._named); older records have none."""
     marks = ",".join("?" * len(UNCOPYABLE))
     scope = ("AND EXISTS (SELECT 1 FROM identity_map m WHERE m.source_email = a.source_user)")
     n = conn.execute(f"SELECT COUNT(*) c FROM audit_log a WHERE a.status IN ({marks}) "
