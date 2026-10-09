@@ -29,7 +29,6 @@ Usage
 from __future__ import annotations
 
 import argparse
-import sys
 
 from auth import AuthManager
 from config import Settings

@@ -51,6 +51,8 @@ Usage
 """
 from __future__ import annotations
 
+import logging
+
 import argparse
 import json
 import os
@@ -121,6 +123,7 @@ def _find_first(page, selectors: list[str], timeout_ms: int = 8000):
             loc.wait_for(state="visible", timeout=timeout_ms // len(selectors))
             return loc
         except Exception:      # noqa: BLE001 - a miss is expected, not an error
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             continue
     return None
 
@@ -164,7 +167,7 @@ def open_console(headful: bool, timeout: int, attempts: int = 3):
             try:
                 p.stop()
             except Exception:         # noqa: BLE001
-                pass
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             if "ERR_CERT" in str(exc) or "ERR_NETWORK" in str(exc):
                 log(f"transient sign-in error, retrying ({attempt + 1}/{attempts}): "
                     f"{str(exc)[:80]}")
@@ -257,6 +260,7 @@ def _set_earliest_date(page) -> bool:
             page.wait_for_timeout(1200)
             return page.locator('[role="gridcell"]').count() > 0
         except Exception:               # noqa: BLE001
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             return False
 
     def shown_year():
@@ -266,6 +270,7 @@ def _set_earliest_date(page) -> bool:
             try:
                 return int(yb.first.inner_text().strip())
             except Exception:           # noqa: BLE001
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
                 return None
         m = re.search(r"\b(19|20)\d\d\b", page.inner_text("body"))
         return int(m.group()) if m else None
@@ -301,6 +306,7 @@ def _set_earliest_date(page) -> bool:
                 target = bd
                 break
         except Exception:               # noqa: BLE001
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             continue
     if target is None:
         return False
@@ -308,6 +314,7 @@ def _set_earliest_date(page) -> bool:
         target.click(timeout=3000)
         page.wait_for_timeout(600)
     except Exception:                   # noqa: BLE001
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return False
     ok = page.get_by_role("button", name=re.compile("^Ok$", re.I))
     if ok.count() and ok.first.is_enabled():
@@ -315,7 +322,7 @@ def _set_earliest_date(page) -> bool:
             ok.first.click(timeout=3000)
             page.wait_for_timeout(1200)
         except Exception:               # noqa: BLE001
-            pass
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
     return True
 
 
@@ -392,7 +399,7 @@ def status(timeout: int, headful: bool) -> dict:
             with open(METRICS_FILE, "w", encoding="utf-8") as fh:
                 json.dump(got, fh)
         except Exception:             # noqa: BLE001
-            pass
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return out
     except Exception as exc:          # noqa: BLE001
         out["detail"] = str(exc)[:300]
@@ -402,7 +409,7 @@ def status(timeout: int, headful: bool) -> dict:
             try:
                 browser.close(); p.stop()
             except Exception:         # noqa: BLE001
-                pass
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
 
 
 def ledger_identities(out_dir: str = os.path.join("logs", "dms")) -> str | None:
@@ -528,7 +535,7 @@ def start(source_domain: str, source_admin: str, timeout: int,
             box = _find_first(page, [
                 f'input[placeholder="{STEP1_FIELD}"]',
                 f'input[aria-label="{STEP1_FIELD}"]',
-                f'//input[contains(@placeholder,"super admin")]',
+                '//input[contains(@placeholder,"super admin")]',
             ])
             if box is None:
                 result["detail"] = (f"no {STEP1_FIELD!r} field on {page.url}")
@@ -570,7 +577,7 @@ def start(source_domain: str, source_admin: str, timeout: int,
                     head.click(timeout=8000)
                     page.wait_for_timeout(3000)
                 except Exception:      # noqa: BLE001 - already-open is fine
-                    pass
+                    logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             # If a processed map is already present (server-side, survives
             # sessions), don't re-upload -- that restarts the slow job.
             s2 = page.inner_text("body")
@@ -598,7 +605,7 @@ def start(source_domain: str, source_admin: str, timeout: int,
                         page.wait_for_timeout(4000)
                         uploaded = True
                     except Exception:      # noqa: BLE001
-                        pass
+                        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
                 if not uploaded:           # fall back to the button's chooser
                     btn = _find_first(page,
                                       ['button:has-text("Upload data import map")'])
@@ -610,7 +617,7 @@ def start(source_domain: str, source_admin: str, timeout: int,
                             page.wait_for_timeout(4000)
                             uploaded = True
                         except Exception:  # noqa: BLE001
-                            pass
+                            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             if uploaded:
                 # Uploading kicks off a SERVER-SIDE 'Processing migration maps'
                 # job (visible in the Tasks panel) that can take minutes for
@@ -660,7 +667,7 @@ def start(source_domain: str, source_admin: str, timeout: int,
                     box.first.check(timeout=4000)
                     result["did"].append(f"enabled {label!r}")
             except Exception:          # noqa: BLE001
-                pass
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         if _set_earliest_date(page):
             result["did"].append("set the start date to the earliest offered")
         else:
@@ -680,7 +687,7 @@ def start(source_domain: str, source_admin: str, timeout: int,
                     sv.first.click(timeout=3000)
                     page.wait_for_timeout(3500)
                 except Exception:      # noqa: BLE001
-                    pass
+                    logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             if start_btn.count() and start_btn.first.is_enabled():
                 result["did"].append("saved Step 3 settings")
                 break
@@ -736,7 +743,7 @@ def start(source_domain: str, source_admin: str, timeout: int,
             try:
                 browser.close(); p.stop()
             except Exception:      # noqa: BLE001
-                pass
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
 
 
 def _start_blocked(page) -> tuple[str, str]:
@@ -881,7 +888,7 @@ def approve_as_source(timeout: int, headful: bool) -> list[str]:
         try:
             p.stop()
         except Exception:         # noqa: BLE001
-            pass
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
 
 
 # How often to read a running import. Each read is a fresh sign-in, and an

@@ -14,7 +14,6 @@ that are supposed to be true.
 
 from __future__ import annotations
 
-import pytest
 
 from corpus import SCALES
 
@@ -69,7 +68,6 @@ class TestItStaysInTheRightBallpark:
         """This test's copy of the formula must not drift from the real one
         -- drift is exactly how the wide bug survived."""
         import ast
-        import os
 
         import seed_sandbox
 

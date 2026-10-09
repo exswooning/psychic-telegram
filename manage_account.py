@@ -19,7 +19,6 @@ that check is an account-takeover button.
 from __future__ import annotations
 
 import argparse
-import sqlite3
 import sys
 
 import accounts_auth as auth

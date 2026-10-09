@@ -17,6 +17,8 @@ plane's FastAPI dependencies and should not need them.
 
 from __future__ import annotations
 
+import logging
+
 import argparse
 import json
 import os
@@ -58,13 +60,13 @@ def _specs() -> dict:
             out["ram_gb"] = round(r.ram_total_gb, 1) or None
         out["platform"] = r.platform or None
     except Exception:  # noqa: BLE001
-        pass
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
     try:
         import shutil
 
         out["disk_gb"] = round(shutil.disk_usage(HERE).total / 1e9, 1)
     except Exception:  # noqa: BLE001
-        pass
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
     return out
 
 
@@ -79,18 +81,18 @@ def _pct_cpu_ram_disk() -> tuple[float | None, float | None, float | None]:
         if r.ram_total_gb and not getattr(r, "ram_estimated", False):
             ram = round((1 - r.ram_usable_gb / r.ram_total_gb) * 100, 1)
     except Exception:  # noqa: BLE001
-        pass
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
     try:
         with open("/proc/loadavg", encoding="utf-8") as fh:
             load1 = float(fh.read().split()[0])
         cpu = round(min(100.0, load1 / max(os.cpu_count() or 1, 1) * 100), 1)
     except Exception:  # noqa: BLE001
-        pass
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
     try:
         st = os.statvfs(HERE)
         disk = round((1 - st.f_bavail / st.f_blocks) * 100, 1)
     except Exception:  # noqa: BLE001
-        pass
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
     return cpu, ram, disk
 
 
@@ -149,6 +151,7 @@ def _commit() -> str:
                            capture_output=True, text=True, timeout=5)
         return r.stdout.strip() if r.returncode == 0 else ""
     except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return ""
 
 
@@ -226,7 +229,7 @@ def build_payload(node_id: str, seed_log: str | None = None,
 
         mode = Settings().transfer_mode
     except Exception:  # noqa: BLE001
-        pass
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
     seed = _seed_progress(seed_log)
     if seed:
         # seed_sandbox.py runs outside main.py entirely, so _active_job()

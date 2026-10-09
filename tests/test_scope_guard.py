@@ -878,7 +878,9 @@ class TestSetupGrantsTheOptionalScopes:
         import verify_scopes
         from config import Settings
 
-        need = set(verify_scopes.required_scopes(Settings(), "source"))
+        run = Settings()
+        run.migrate_chat = False        # a run that moves no chat asks for no chat scope
+        need = set(verify_scopes.required_scopes(run, "source"))
         assert "https://www.googleapis.com/auth/chat.memberships.readonly" not in need
 
     def test_setup_grants_the_wide_line_not_the_required_one(self):

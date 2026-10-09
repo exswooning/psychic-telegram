@@ -117,6 +117,8 @@ export interface FinalReport {
   driveFilesMigrated: number
   calendarEvents: number
   contacts: number
+  tasks?: number
+  chatMessages?: number
   groups: number
   sharedDrives: number
   totalDuration: string

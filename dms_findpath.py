@@ -14,10 +14,11 @@ the console rather than from documentation.
 """
 from __future__ import annotations
 
+import logging
+
 import json
 import sys
 
-import dms_migrate
 import dwd_helper
 
 log = dwd_helper.log
@@ -74,6 +75,7 @@ def main() -> int:
                     if t:
                         results.append(t[:90])
                 except Exception:      # noqa: BLE001
+                    logging.getLogger(__name__).debug("ignored an error", exc_info=True)
                     continue
             log(f"search suggestions: {len(results)}")
             # Take the first suggestion that names it, and record where it goes.
@@ -82,6 +84,7 @@ def main() -> int:
                 try:
                     t = (el.inner_text() or "").lower()
                 except Exception:      # noqa: BLE001
+                    logging.getLogger(__name__).debug("ignored an error", exc_info=True)
                     continue
                 if "data migration" in t or "migrat" in t:
                     el.click()
@@ -89,6 +92,12 @@ def main() -> int:
                     log(f"followed a suggestion -> {page.url}")
                     break
 
+        # What the page offers now, and the part of it about migration.
+        items = page.eval_on_selector_all(
+            "a[href]", "els => els.map(e => ({text: (e.innerText || '').trim().slice(0, 60), "
+                       "href: e.href}))")
+        interesting = [x for x in items if "migrat" in x["text"].lower()
+                       or "data" in x["text"].lower()]
         out = {"url": page.url, "nav": items, "interesting": interesting,
                "search_results": results,
                "page_text": page.locator("body").inner_text()[:2500]}
@@ -111,7 +120,7 @@ def main() -> int:
         try:
             browser.close(); p.stop()
         except Exception:      # noqa: BLE001
-            pass
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
 
 
 if __name__ == "__main__":

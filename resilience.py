@@ -186,6 +186,7 @@ def _extract_reason(exc: HttpError) -> str:
             return errors[0]["reason"]
         return (body.get("error") or {}).get("status", "") or ""
     except Exception:  # noqa: BLE001 - malformed error bodies happen
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return ""
 
 
@@ -238,6 +239,7 @@ def _status_of(exc: HttpError) -> int:
     try:
         return int(exc.resp.status)
     except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return 0
 
 

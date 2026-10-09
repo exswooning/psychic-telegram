@@ -113,6 +113,7 @@ def current_sku(svc, email: str) -> str:
                 productId="Google-Apps", skuId=sku, userId=email).execute()
             return sku
         except Exception:                              # noqa: BLE001
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             continue
     return ""
 
@@ -467,7 +468,7 @@ def snapshot(settings: Settings, side: str, limit: int | None = None,
                     try:
                         on_progress(done, len(sample))
                     except Exception:      # noqa: BLE001 - never kill the scan
-                        pass
+                        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         out["deep"] = True
         # Summed over the SAMPLE, never the tenant -- these are not tenant
         # totals and must not be presented as if they were. The UI reads

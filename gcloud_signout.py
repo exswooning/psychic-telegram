@@ -15,6 +15,8 @@ gcloud_browser_auth already does when nothing is signed in.
 
 from __future__ import annotations
 
+import logging
+
 import glob
 import os
 import subprocess
@@ -59,6 +61,7 @@ def busy() -> str:
         out = subprocess.run(["ps", "-eo", "args"], capture_output=True, text=True,
                              timeout=10).stdout
     except Exception:      # noqa: BLE001
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return ""
     for line in out.splitlines():
         for marker in USERS_OF_A_SIGN_IN:

@@ -18,8 +18,9 @@ other mail.
 """
 from __future__ import annotations
 
+import logging
+
 import re
-import sys
 
 import dms_migrate as D
 
@@ -49,6 +50,7 @@ def _dismiss_interstitials(page):
         try:
             return "smart features" in page.inner_text("body").lower()
         except Exception:          # noqa: BLE001
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             return False
 
     for _ in range(10):
@@ -66,6 +68,7 @@ def _dismiss_interstitials(page):
                         page.wait_for_timeout(400)
                         break
                 except Exception:  # noqa: BLE001
+                    logging.getLogger(__name__).debug("ignored an error", exc_info=True)
                     continue
         advanced = False
         for label in ("Done", "Confirm", "Got it", "Finish", "Next", "Save"):
@@ -76,7 +79,7 @@ def _dismiss_interstitials(page):
                     advanced = True
                     break
                 except Exception:  # noqa: BLE001
-                    pass
+                    logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         if not advanced and not present():
             break
 
@@ -91,7 +94,7 @@ def _wait_gmail_ready(page, timeout=60000):
         page.wait_for_selector("input[aria-label*='Search'], form[role='search']",
                                timeout=timeout)
     except Exception:              # noqa: BLE001
-        pass
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
     page.wait_for_timeout(2500)
     _dismiss_interstitials(page)
     # results pane: a row, or Gmail's "No messages matched" empty state
@@ -102,7 +105,7 @@ def _wait_gmail_ready(page, timeout=60000):
                        document.body.innerText)""",
             timeout=25000)
     except Exception:              # noqa: BLE001
-        pass
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
 
 
 def _find_request_thread(page):
@@ -152,6 +155,7 @@ def approve(headful: bool, timeout: int) -> dict:
                     opened_mail = True
                     break
                 except Exception:  # noqa: BLE001
+                    logging.getLogger(__name__).debug("ignored an error", exc_info=True)
                     continue
         if not opened_mail:
             try:
@@ -159,7 +163,7 @@ def approve(headful: bool, timeout: int) -> dict:
                 page.keyboard.press("o")
                 opened_mail = True
             except Exception:      # noqa: BLE001
-                pass
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         if not opened_mail:
             out["detail"] = "found the mail but could not open it"
             return out
@@ -174,14 +178,14 @@ def approve(headful: bool, timeout: int) -> dict:
                 if a3s.count() and len((a3s.first.inner_text() or "").strip()) > 40:
                     return True
             except Exception:      # noqa: BLE001
-                pass
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             return False
 
         for attempt in range(2):
             try:
                 page.wait_for_selector("div.a3s", timeout=20000)
             except Exception:      # noqa: BLE001
-                pass
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             page.wait_for_timeout(3000)
             if "reloading the page" in page.inner_text("body").lower():
                 page.reload(wait_until="domcontentloaded")
@@ -193,7 +197,7 @@ def approve(headful: bool, timeout: int) -> dict:
                 try:
                     thread.locator("span.bog").first.click(force=True, timeout=6000)
                 except Exception:      # noqa: BLE001
-                    pass
+                    logging.getLogger(__name__).debug("ignored an error", exc_info=True)
                 page.wait_for_timeout(4000)
         if not _body_ready():
             page.screenshot(path="/root/migration/dms_approve_stuck.png",
@@ -232,6 +236,7 @@ def approve(headful: bool, timeout: int) -> dict:
                         if href.startswith("http"):
                             anchors.append((a, href, (a.inner_text() or "").strip()))
             except Exception:      # noqa: BLE001
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
                 continue
         GOOGLE_ADMIN = ("admin.google.com", "notifications.google.com",
                         "accounts.google.com")
@@ -290,7 +295,7 @@ def approve(headful: bool, timeout: int) -> dict:
             try:
                 browser.close(); p.stop()
             except Exception:      # noqa: BLE001
-                pass
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
 
 
 def main(argv=None) -> int:

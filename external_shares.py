@@ -211,7 +211,7 @@ def compose(collab: dict, settings: Settings) -> tuple[str, str]:
     n = collab["file_count"]
     subject = (f"Your shared files have moved to {settings.target_domain}")
     lines = [
-        f"Hello,",
+        "Hello,",
         "",
         f"{settings.source_domain} has migrated to {settings.target_domain}.",
         "",

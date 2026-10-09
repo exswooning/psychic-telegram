@@ -23,10 +23,10 @@ import sys
 
 import pytest
 
-from config import FOLDER_MIME, Settings
-from tests.fakes import (FakeAuth, FakeCalendar, FakeChat, FakeDrive,
+from config import FOLDER_MIME
+from tests.fakes import (FakeCalendar, FakeChat, FakeDrive,
                         FakeGmail, FakePeople, FakeTasks)
-from corpus import ORG, SCALES, CorpusBuilder
+from corpus import ORG, CorpusBuilder
 
 SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
 DOC_MIME = "application/vnd.google-apps.document"

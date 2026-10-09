@@ -484,3 +484,10 @@ class TestSupersededConfigs:
             aa.snapshot_superseded(acct, "source", "new.com")
         assert len(aa.list_superseded()) == 2          # None = all accounts
         assert len(aa.list_superseded(a)) == 1
+
+
+def test_a_worker_numbers_its_accounts_from_its_own_range(db):
+    """Under pytest -n, keys/{id}/ is a real folder two workers would otherwise share."""
+    from tests.conftest import _OWN_IDS
+
+    assert aa.create_account("worker@example.com", "longenough", "Worker") in _OWN_IDS

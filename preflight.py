@@ -24,6 +24,8 @@ for certain is to export, which is the run itself.
 """
 from __future__ import annotations
 
+import logging
+
 import argparse
 import sys
 from collections import Counter
@@ -222,6 +224,7 @@ def _has_write_scope(settings) -> bool:
         scopes = verify_scopes.required_scopes(settings, "source")
         return "https://www.googleapis.com/auth/drive" in scopes
     except Exception:      # noqa: BLE001
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return False
 
 

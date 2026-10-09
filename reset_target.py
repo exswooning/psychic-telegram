@@ -36,6 +36,8 @@ SANDBOX_MODE=true, a typed --confirm-domain, and the PROTECTED_DOMAINS list.
 
 from __future__ import annotations
 
+import logging
+
 import argparse
 import concurrent.futures as futures
 import os
@@ -229,6 +231,7 @@ def _delete_ledger_spaces(settings: Settings, auth: AuthManager, target_user: st
             "WHERE lower(i.target_email) = lower(?) AND m.type = 'chat_space'", (target_user,))]
         conn.close()
     except Exception:  # noqa: BLE001 - no ledger to read is nothing to delete
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return 0
     if not ids:
         return 0

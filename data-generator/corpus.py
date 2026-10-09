@@ -406,7 +406,6 @@ class CorpusBuilder:
 
     # ==================================================================
     def build(self, dept: str, project: str, edge_cases: bool) -> dict:
-        cfg = self.cfg
         try:
             root = self.folder("MIGRATION-TEST", days_ago=500)
             self.m["items"]["root"] = root

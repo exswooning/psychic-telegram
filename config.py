@@ -373,6 +373,7 @@ def _concurrent_jobs() -> int:
         _CONCURRENT_JOBS_CACHE["v"] = (time.monotonic() + 5.0, value)
         return value
     except Exception:      # noqa: BLE001 - never break startup over this
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return 1
 
 

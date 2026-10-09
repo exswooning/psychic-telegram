@@ -940,7 +940,7 @@ class Job:
         try:
             self._log_fh.close()
         except Exception:  # noqa: BLE001
-            pass
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         self.finished = time.time()
         self.rc = rc
         self._save_result()
@@ -952,7 +952,7 @@ class Job:
                 # thread -- the job itself already finished successfully or
                 # not; losing its history entry is a lesser failure than
                 # losing the ability to see that the job ran at all.
-                pass
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
 
     def stop(self, force: bool = False) -> str:
         with self.lock:
@@ -1093,7 +1093,7 @@ class Job:
                 json.dump(payload, fh)
             prune_job_archives(os.path.dirname(path))
         except Exception:  # noqa: BLE001
-            pass
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
 
 
 def job_result_path(account_id: int | None, name: str) -> str:
@@ -1400,6 +1400,7 @@ def _account_email(account_id: int | None) -> str:
     try:
         return (accounts_auth.get_account(account_id) or {}).get("email", "")
     except Exception:  # noqa: BLE001 - a name is never worth failing a launch
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return ""
 
 
@@ -1527,7 +1528,6 @@ _PENDING: dict[str, str] = {}
 # One definition, shared with fleet_agent.py: both scan the process table
 # for the same jobs, and when they disagreed on the name Running Now showed
 # a live migration as "--account-id".
-from fleet_agent import MAIN_COMMANDS as _EXT_MAIN_CMDS
 _EXT_SCRIPTS = {"seed_sandbox.py": "seed", "reset_target.py": "reset target",
                 "deploy_remote.py": "deploy", "verify.py": "verify",
                 "resolve_failures.py": "resolve-failures",
@@ -1703,6 +1703,7 @@ def _reconcile_active_jobs() -> None:
     try:
         active = job_admission.list_active()
     except Exception:  # noqa: BLE001 - best-effort, must not block startup
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return
     running = {p["name"]: p for p in _external_processes()}
     for row in active:
@@ -1933,7 +1934,7 @@ def oauth_finish(tenant: str, full_url: str) -> dict:
         account = (me.get("user") or {}).get("emailAddress", "")
         domain = account.split("@")[-1] if account else ""
     except Exception:  # noqa: BLE001 - identity is a nicety, not required
-        pass
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
 
     st = Settings()
     oauth_store.TokenStore(st.oauth_token_dir).save(
@@ -2122,7 +2123,7 @@ def host_info() -> dict:
         if r.returncode == 0:
             commit = r.stdout.strip()
     except Exception:  # noqa: BLE001 - not a git checkout is a normal state
-        pass
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
 
     ip = _primary_ip()
     try:
@@ -2175,7 +2176,7 @@ def read_config(account_id: int | None = None) -> dict:
             if val:
                 out[field] = val
     except Exception:      # noqa: BLE001 - the header must never 500 a page
-        pass
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
     return out
 
 
@@ -3198,7 +3199,7 @@ def gcloud_env() -> dict:
             env["PATH"] = os.path.dirname(path) + os.pathsep + env.get("PATH", "")
             env["GCLOUD_BIN"] = path
     except Exception:  # noqa: BLE001 - never let discovery break a run
-        pass
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
     return env
 
 
@@ -3214,7 +3215,6 @@ def seed_scopes_payload() -> dict:
     never said which capability was refused. This lists them, with the
     scopes each needs and whether the line this tool writes carries them.
     """
-    import verify_scopes
     from config import Settings
 
     sys.path.insert(0, os.path.join(HERE, "data-generator"))
@@ -3320,7 +3320,7 @@ def dwd_payload(account_id: int | None = None) -> dict:
             with open(key_path, encoding="utf-8") as fh:
                 client_id = json.load(fh).get("client_id", "")
         except Exception:  # noqa: BLE001 - absent key is a normal early state
-            pass
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         out["tenants"].append({
             "side": side, "domain": domain, "admin": admin,
             "client_id": client_id,
@@ -3394,7 +3394,7 @@ def dwd_payload(account_id: int | None = None) -> dict:
             with open(_resolve_key_path(st), encoding="utf-8") as fh:
                 seed_client_id = json.load(fh).get("client_id", "")
         except Exception:  # noqa: BLE001 - absent key is a normal early state
-            pass
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         # True only when no dedicated seed-sa.json exists yet and this
         # would-be seed key is actually the read-only source key -- pasting
         # the line below onto it grants it write access, which is exactly
@@ -3466,6 +3466,7 @@ def _widen_to_required(out: dict, st) -> dict:
         try:
             need = set(verify_scopes.required_scopes(st, side)) | optional
         except Exception:      # noqa: BLE001 - never break /api/dwd
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             return
         have = set(entry.get("scope_list") or [])
         if not have:
@@ -4873,7 +4874,7 @@ def _groq_analyze_log(tail: str, prompt: str, key: str) -> tuple[str, str]:
         try:
             detail = exc.read().decode("utf-8", "replace")[:300]
         except Exception:  # noqa: BLE001
-            pass
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return "", f"Groq API error {exc.code}: {detail or exc.reason}"
     except Exception as exc:  # noqa: BLE001 - network/urllib failures
         return "", f"could not reach Groq: {exc}"
@@ -4895,7 +4896,7 @@ def _groq_run_summary() -> str:
             f"{t.get('items_failed', 0)} failed, {t.get('bytes_moved', 0)} bytes moved"
         )
     except Exception:  # noqa: BLE001 - a metrics hiccup must not kill the panel
-        pass
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
     try:
         import metrics
 
@@ -4908,7 +4909,7 @@ def _groq_run_summary() -> str:
                 f"{s['retries']:,} retries, {s['failures']:,} failures"
             )
     except Exception:  # noqa: BLE001
-        pass
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
     return "\n".join(parts)
 
 
@@ -5360,7 +5361,7 @@ class Handler(BaseHTTPRequestHandler):
                             "error": f"{type(exc).__name__}: {exc}"[:300],
                             "where": label}, 500)
             except Exception:                          # noqa: BLE001
-                pass                                   # response already begun
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)  # response already begun
 
     def do_GET(self) -> None:
         self._guard(self._do_GET, "GET " + self.path.split("?")[0])
@@ -6077,13 +6078,13 @@ class Handler(BaseHTTPRequestHandler):
                 with open(key, encoding="utf-8") as fh:
                     client_id = json.load(fh).get("client_id", "")
             except Exception:  # noqa: BLE001 - absent key is an early state
-                pass
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             scopes = ""
             try:
                 data = dwd_helper._load_payload(tenant)
                 scopes = data.get("scopes", "")
             except Exception:  # noqa: BLE001 - never break the panel
-                pass
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             if not client_id:
                 self._json({"ok": False,
                             "error": f"upload the {tenant} service-account "
@@ -6171,8 +6172,10 @@ class Handler(BaseHTTPRequestHandler):
                           "benchmarking and error reporting.")
             tail = "\n".join(logs_payload()["lines"][-500:])
             summary = _groq_run_summary()
+            # The log itself, headed by the run's metrics: the summary used to go in its
+            # place, so the diagnosis was asked to quote log lines it was never shown.
             text, err = _groq_analyze_log(
-                f"{summary}\n\n{prompt}" if summary else prompt, prompt, key)
+                f"{summary}\n\n{tail}" if summary else tail, prompt, key)
             if err:
                 self._json({"ok": False, "error": err}, 502)
                 return

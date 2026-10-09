@@ -480,8 +480,10 @@ class Cycle:
             self.cannot_check(f"source users could not be listed ({type(exc).__name__}), "
                               f"so new, suspended and deleted users were not checked")
             return
-        self.users["suspended"] = sorted(e for e, s in listed.items() if s and e in everyone)
-        self.users["gone"] = sorted(e for e in everyone if e not in listed)
+        # Only the users this mirror follows: one following a single migration reports its
+        # own users suspended or gone, never every user in the ledger.
+        self.users["suspended"] = sorted(e for e, s in listed.items() if s and e in mapped)
+        self.users["gone"] = sorted(e for e in mapped if e not in listed)
         new = sorted(e for e, s in listed.items() if not s and e not in everyone)
         if self.only is not None:
             # This mirror follows one migration's users: a new source user is reported,
@@ -723,7 +725,7 @@ class Cycle:
     def _calendar_pass(self, cm, src, tgt, src_cal, tgt_cal, marker) -> Optional[str]:
         """With a marker: what changed since it. Without one: every event (the first
         cycle, or Google asking for a full sync), which is also how the token is got."""
-        page, token = None, None
+        page = None
         while True:
             kw = {"calendarId": src_cal, "showDeleted": True, "maxResults": 2500,
                   "pageToken": page}

@@ -155,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
     print("Anything else in those accounts is left untouched.\n")
 
     if not args.dry_run and not args.yes:
-        if input(f"Type the target domain to confirm: ").strip() != settings.target_domain:
+        if input("Type the target domain to confirm: ").strip() != settings.target_domain:
             print("Aborted.")
             return 1
 

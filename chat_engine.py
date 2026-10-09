@@ -53,7 +53,6 @@ migrated once, by whichever member's run claims it first (db.claim).
 from __future__ import annotations
 
 import logging
-import uuid
 
 from google.auth.exceptions import RefreshError
 
@@ -160,6 +159,7 @@ class ChatMigrator:
         try:
             first = next(iter(self._iter_messages(space_name)), {}).get("createTime")
         except Exception:      # noqa: BLE001 - no date is the old behaviour, not a failure
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             return None
         return _second_before(first) if first else None
 

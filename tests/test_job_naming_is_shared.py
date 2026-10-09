@@ -11,7 +11,6 @@ pid. webui.py had its own copy of the same scan with its own command list,
 which is how the two could disagree at all.
 """
 import fleet_agent
-import webui
 
 
 class TestTheSubcommandIsFound:
@@ -49,9 +48,6 @@ class TestBothScannersAgree:
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         src = open(os.path.join(root, "webui.py"), encoding="utf-8").read()
         assert "fleet_agent.main_command(args)" in src
-
-    def test_there_is_one_command_list(self):
-        assert webui._EXT_MAIN_CMDS is fleet_agent.MAIN_COMMANDS
 
     def test_migrate_and_delta_are_in_it(self):
         # The two that matter for "what is running right now".

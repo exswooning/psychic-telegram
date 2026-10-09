@@ -14,14 +14,14 @@ password.
 """
 from __future__ import annotations
 
+import logging
+
 import argparse
 import http.server
 import json
 import os
 import shutil
 import subprocess
-import threading
-import urllib.parse
 
 STATE_DIR = os.path.expanduser("~/.workspace_migrator")
 PIDFILE = os.path.join(STATE_DIR, "tunnel.pid")
@@ -111,6 +111,7 @@ def _tunnel_running() -> bool:
         os.kill(pid, 0)
         return True
     except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return False
 
 

@@ -25,6 +25,8 @@ from each account's own per-customer migration.db under data/accounts/.
 
 from __future__ import annotations
 
+import logging
+
 import datetime as _dt
 import hashlib
 import os
@@ -288,7 +290,7 @@ def update_tenant_config(account_id: int, side: str, *, domain: str | None = Non
         try:
             snapshot_superseded(account_id, side, domain)
         except Exception:      # noqa: BLE001 - never block the write itself
-            pass
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
 
     cols = {"domain": domain, "admin_email": admin_email, "sa_key_path": sa_key_path}
     sets = [f"{col}=?" for col, val in cols.items() if val is not None]

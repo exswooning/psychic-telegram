@@ -347,7 +347,6 @@ def verification_payload(conn: sqlite3.Connection, settings) -> list[dict]:
     import tui
 
     snap = tui.collect_snapshot(conn, settings.effective_upload_cap())
-    t = snap.totals
 
     def row(label: str, done: int, expected: int) -> dict:
         if expected <= 0:
@@ -586,6 +585,8 @@ def report_payload(conn: sqlite3.Connection, settings, job_started: float,
         "driveFilesMigrated": sum(u.drive_done for u in snap.users),
         "calendarEvents": sum(u.cal_done for u in snap.users),
         "contacts": contacts,
+        "tasks": tasks_n,
+        "chatMessages": chat_n,
         "groups": groups_n,
         "sharedDrives": shared_drives_n,
         "totalDuration": duration_str,

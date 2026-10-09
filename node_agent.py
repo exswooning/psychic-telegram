@@ -19,6 +19,8 @@ recover from.
 """
 from __future__ import annotations
 
+import logging
+
 import argparse
 import json
 import os
@@ -112,7 +114,7 @@ class Agent:
                              else round(r.ram_total_gb, 1) or None)
             out["platform"] = r.platform or None
         except Exception:      # noqa: BLE001 - specs are not worth a failure
-            pass
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         try:
             st = os.statvfs(self.workdir)
             out["disk_gb"] = round(st.f_blocks * st.f_frsize / 1e9, 1)
@@ -121,7 +123,7 @@ class Agent:
                 import shutil
                 out["disk_gb"] = round(shutil.disk_usage(self.workdir).total / 1e9, 1)
             except Exception:      # noqa: BLE001
-                pass
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         self._specs = out
         return out
 
@@ -137,18 +139,18 @@ class Agent:
             if r.ram_total_gb and not r.ram_estimated:
                 out["ram_pct"] = round((1 - r.ram_usable_gb / r.ram_total_gb) * 100, 1)
         except Exception:      # noqa: BLE001
-            pass
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         try:
             load1 = os.getloadavg()[0]
             out["cpu_pct"] = round(min(100.0, load1 / max(os.cpu_count() or 1, 1) * 100), 1)
         except Exception:      # noqa: BLE001 - no getloadavg on Windows
-            pass
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         try:
             import shutil
             u = shutil.disk_usage(self.workdir)
             out["disk_pct"] = round(u.used / u.total * 100, 1)
         except Exception:      # noqa: BLE001
-            pass
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return out
 
     def heartbeat(self) -> None:
@@ -169,7 +171,7 @@ class Agent:
             body.update(self.load())
             _post(f"{self.coordinator}/api/v2/fleet/heartbeat", self.token, body)
         except Exception:      # noqa: BLE001 - reported by absence instead
-            pass
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
 
     # -- the child -------------------------------------------------------
     def start(self, services: str) -> None:
@@ -239,7 +241,7 @@ class Agent:
             # leave items the local ledger never recorded.
             self.proc.send_signal(getattr(signal, "SIGINT", signal.SIGTERM))
         except Exception:      # noqa: BLE001 - already gone is fine
-            pass
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
 
     # A child that ran this long before exiting was doing real work, so its
     # exit is an ending rather than a failure to launch.
@@ -291,7 +293,7 @@ class Agent:
             for line in tail:
                 print(f"    | {line.rstrip()}", flush=True)
         except Exception:      # noqa: BLE001 - the backoff still holds
-            pass
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
 
     def tick(self) -> str:
         self._reap()

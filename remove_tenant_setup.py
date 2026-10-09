@@ -144,7 +144,7 @@ def remove(side: str, domain: str, admin_email: str, admin_password: str,
                 path = key if os.path.isabs(key) else os.path.join(HERE, key)
                 try:
                     os.remove(path)
-                    removed = f", key file deleted"
+                    removed = ", key file deleted"
                 except OSError:
                     removed = f", key file left at {key}"
             add(f"forget {side} configuration", True,

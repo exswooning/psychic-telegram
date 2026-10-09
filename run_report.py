@@ -20,6 +20,8 @@ still worth having, and saying so is better than not producing one.
 """
 from __future__ import annotations
 
+import logging
+
 import json
 import os
 import platform
@@ -219,6 +221,7 @@ def _git_commit() -> str | None:
                              capture_output=True, text=True, timeout=5)
         return out.stdout.strip() or None
     except Exception:      # noqa: BLE001 - a deployed tree has no .git
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return None
 
 
@@ -231,7 +234,7 @@ def _environment() -> dict:
         env.update({"cores": r.cpu_logical, "ramTotalGb": round(r.ram_total_gb, 1),
                     "ramUsableGb": round(r.ram_usable_gb, 1)})
     except Exception:      # noqa: BLE001
-        pass
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
     return env
 
 

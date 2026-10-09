@@ -84,6 +84,7 @@ def _client_id(key_path: str) -> str:
         with open(key_path, encoding="utf-8") as fh:
             return json.load(fh).get("client_id", "")
     except Exception:      # noqa: BLE001 - absent key is reported separately
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return ""
 
 

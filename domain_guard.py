@@ -32,6 +32,8 @@ WHAT THIS DOES NOT DO
 
 from __future__ import annotations
 
+import logging
+
 import json
 import os
 import tempfile
@@ -79,7 +81,7 @@ def configured_domains() -> set[str]:
                 if row["domain"]:
                     out.add(_norm(row["domain"]))
     except Exception:      # noqa: BLE001 - absence is not permission
-        pass
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
     return {d for d in out if d}
 
 

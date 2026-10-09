@@ -34,6 +34,8 @@ share it with api_server.py rather than keeping a second copy.
 
 from __future__ import annotations
 
+import logging
+
 import json
 import os
 import sqlite3
@@ -238,7 +240,7 @@ def analyze(context: str, key: str, prompt: str = "",
         try:
             detail = exc.read().decode("utf-8", "replace")[:300]
         except Exception:      # noqa: BLE001
-            pass
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return "", f"Groq API error {exc.code}: {detail or exc.reason}"
     except Exception as exc:   # noqa: BLE001 - network failures are normal
         return "", f"could not reach Groq: {exc}"

@@ -32,6 +32,8 @@ Run it with nothing else touching the tenants.
 
 from __future__ import annotations
 
+import logging
+
 import argparse
 import json
 import os
@@ -170,19 +172,19 @@ def one_mode(mode: str, settings: Settings, auth: AuthManager,
             try:
                 c.execute(f"DELETE FROM {t} WHERE {col} IN ({ph})", users_src)
             except Exception:  # noqa: BLE001
-                pass
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         try:
             c.execute(f"DELETE FROM upload_ledger WHERE target_user IN ({ph})",
                       users_tgt)
         except Exception:  # noqa: BLE001
-            pass
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         c.execute(f"UPDATE identity_map SET status='PENDING', notes=NULL "
                   f"WHERE source_email IN ({ph})", users_src)
     db._mapping_cache.clear()
     db._mapping_cached_users.clear()
 
     print(f"=== {mode}: migrating drive ===", flush=True)
-    net0, scratch0 = net_bytes(), scratch_peak(settings)
+    net0 = net_bytes()
     rc, secs = run([PY, "main.py", "migrate", "--services", "drive", *scoped], env)
     net1 = net_bytes()
 

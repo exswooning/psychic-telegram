@@ -20,6 +20,8 @@ would read off the screen anyway.
 
 from __future__ import annotations
 
+import logging
+
 import re
 from typing import Callable
 
@@ -119,6 +121,7 @@ def from_page(page) -> str:
     try:
         return describe(page.inner_text("body"))
     except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return ""
 
 
@@ -140,7 +143,7 @@ def _report(text: str) -> None:
     try:
         REPORTER(text)
     except Exception:  # noqa: BLE001 - a reporter must never break a sign-in
-        pass
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
 
 
 class Watcher:

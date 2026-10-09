@@ -25,6 +25,16 @@ from tests.fakes import FakeAuth, FakeDownloader, FakeMediaUpload  # noqa: E402
 SRC_USER = "alice@tenanta.com"
 TGT_USER = "alice@tenantb.com"
 
+# keys/{id}/ and data/accounts/{id}/ are real folders in the checkout. Under xdist two
+# workers each made "account 2", shared one folder, and each one's cleanup deleted the
+# other's key -- so each worker numbers its accounts from its own million.
+_OWN_IDS = range(int(os.getenv("PYTEST_XDIST_WORKER", "gw0")[2:]) * 10**6,
+                 (int(os.getenv("PYTEST_XDIST_WORKER", "gw0")[2:]) + 1) * 10**6)
+
+
+def _own(name: str) -> bool:
+    return name.isdigit() and int(name) in _OWN_IDS
+
 
 @pytest.fixture
 def settings(tmp_path) -> Settings:
@@ -140,7 +150,7 @@ def _sweep_a_killed_runs_keys():
     keys_dir = os.path.join(accounts_auth.HERE, "keys")
     for name in (os.listdir(keys_dir) if os.path.isdir(keys_dir) else []):
         d = os.path.join(keys_dir, name)
-        if not (name.isdigit() and os.path.isdir(d)):
+        if not (_own(name) and os.path.isdir(d)):
             continue
         removed = False
         for f in os.listdir(d):
@@ -157,6 +167,30 @@ def _sweep_a_killed_runs_keys():
         if removed and not os.listdir(d):
             os.rmdir(d)
     yield
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _accounts_numbered_per_worker():
+    import contextlib
+    import sqlite3
+
+    import control_plane_db as cpdb
+
+    real = cpdb.apply_migrations
+
+    def apply(db_path=None):
+        out = real(db_path)
+        with contextlib.closing(sqlite3.connect(db_path or cpdb._db_path())) as c, c:
+            if not c.execute("UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = "
+                             "'accounts'", (_OWN_IDS.start,)).rowcount:
+                c.execute("INSERT INTO sqlite_sequence VALUES ('accounts', ?)",
+                          (_OWN_IDS.start,))
+        return out
+
+    with pytest.MonkeyPatch.context() as mp:
+        if _OWN_IDS.start:
+            mp.setattr(cpdb, "apply_migrations", apply)
+        yield
 
 
 @pytest.fixture(autouse=True)
@@ -177,7 +211,7 @@ def _cleanup_account_dirs():
     def _numeric_dirs(base: str) -> set[str]:
         if not os.path.isdir(base):
             return set()
-        return {name for name in os.listdir(base) if name.isdigit()}
+        return {name for name in os.listdir(base) if _own(name)}
 
     data_accounts = os.path.join(accounts_auth.HERE, "data", "accounts")
     keys_dir = os.path.join(accounts_auth.HERE, "keys")

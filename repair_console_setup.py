@@ -64,7 +64,6 @@ def _run(argv: list[str], env: dict) -> tuple[bool, str]:
 def repair(side: str, do_grant: bool, do_chat: bool,
            account_id: int | None = None, purpose: str = "") -> dict:
     from config import Settings
-    import dwd_helper
     import verify_scopes
 
     st = Settings(account_id=account_id) if account_id else Settings()
@@ -113,7 +112,6 @@ def repair(side: str, do_grant: bool, do_chat: bool,
         # from the narrow line still issued afterwards. It simply never adds
         # them, which on a tenant that lacked one is a feature silently
         # staying off.
-        from config import Settings as _S
 
         # A purpose narrows the grant; without one it stays the union.
         #

@@ -12,6 +12,8 @@ starting a second pytest inside the first one.
 """
 from __future__ import annotations
 
+import logging
+
 import json
 import os
 import subprocess
@@ -103,6 +105,7 @@ def _git_commit() -> str:
                              timeout=10)
         return out.stdout.strip() if out.returncode == 0 else ""
     except Exception:      # noqa: BLE001
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return ""
 
 

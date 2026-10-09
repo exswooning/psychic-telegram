@@ -25,6 +25,8 @@ disarmable from anywhere that can reach the box.
 """
 from __future__ import annotations
 
+import logging
+
 import argparse
 import calendar
 import glob
@@ -134,6 +136,7 @@ def _last_interactive_login() -> float:
         out = subprocess.run(["last", "-F", "-n", "1"], capture_output=True,
                              text=True, timeout=20).stdout.splitlines()
     except Exception:      # noqa: BLE001
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return 0.0
     # Located by finding the weekday, not by column index. `last` pads its
     # columns by content width -- a long hostname or a wtmp entry with no
@@ -170,6 +173,7 @@ def _last_sshd_auth() -> float:
              "-o", "short-unix", "--no-pager"],
             capture_output=True, text=True, timeout=20).stdout
     except Exception:      # noqa: BLE001
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return 0.0
     for line in out.splitlines():
         if "Accepted" not in line:
@@ -202,6 +206,7 @@ def _last_webui_login() -> float:
                                            "%Y-%m-%dT%H:%M:%S"))
         return expiry - accounts_auth.SESSION_LIFETIME_S
     except Exception:      # noqa: BLE001 - one signal failing is not death
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return 0.0
 
 

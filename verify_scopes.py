@@ -36,6 +36,8 @@ migration loses `gmail.readonly` at 2am.
 
 from __future__ import annotations
 
+import logging
+
 import argparse
 import json
 import os
@@ -210,10 +212,12 @@ def every_toggle_scopes(settings: Settings, tenant: str) -> set[str]:
         try:
             variant = dataclasses.replace(settings, **combo)
         except Exception:      # noqa: BLE001 - a field this build lacks
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             continue
         try:
             out |= set(scope_mod.oauth_scopes(variant)[tenant])
         except Exception:      # noqa: BLE001 - skip an invalid combination
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             continue
     return out
 
@@ -269,7 +273,7 @@ def grant_scopes(settings: Settings, tenant: str) -> list[str]:
     try:
         want |= every_toggle_scopes(settings, tenant)
     except Exception:      # noqa: BLE001 - never make a grant impossible
-        pass
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
     return sorted(want)
 
 
@@ -312,7 +316,7 @@ def required_scopes(settings: Settings, tenant: str,
             from seed_sandbox import SEED_SCOPES
             want |= set(SEED_SCOPES)
         except Exception:      # noqa: BLE001 - seeding is optional
-            pass
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
     return sorted(want)
 
 
@@ -347,7 +351,7 @@ def scopes_for_purpose(settings: Settings, tenant: str,
     try:
         want |= every_toggle_scopes(settings, tenant)
     except Exception:      # noqa: BLE001 - never make a grant impossible
-        pass
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
     if not include_seed:
         # An ALLOWLIST, not a subtraction.
         #

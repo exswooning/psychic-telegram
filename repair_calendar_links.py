@@ -23,6 +23,8 @@ Attachments carry a real fileId and are mapped by calendar_engine itself.
 """
 from __future__ import annotations
 
+import logging
+
 import argparse
 import sys
 
@@ -71,6 +73,7 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 ev = cal.events().get(calendarId="primary", eventId=tid).execute()
             except Exception:                        # noqa: BLE001 -- deleted, declined, moved
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
                 continue
             patch = {}
             for f in _FIELDS:

@@ -34,6 +34,8 @@ path is guarded by SANDBOX_MODE like every other tool here that writes.
 
 from __future__ import annotations
 
+import logging
+
 import argparse
 import base64
 import os
@@ -494,7 +496,7 @@ def probe_staging_acl_order(p: Probe, auth, settings, source_user: str,
                     svc.files().delete(fileId=ident,
                                        supportsAllDrives=True).execute()
                 except Exception:     # noqa: BLE001
-                    pass
+                    logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         if drive_id:
             try:
                 tgt.drives().delete(driveId=drive_id).execute()

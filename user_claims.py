@@ -36,6 +36,8 @@ outage at 2am.
 
 from __future__ import annotations
 
+import logging
+
 import datetime as _dt
 import os
 import socket
@@ -112,7 +114,7 @@ def _audit_takeover(account_id: int | None, source_user: str, owner: str,
             account_id=account_id)
         cpdb.finish_action(action, "ok", "")
     except Exception:      # noqa: BLE001 - never block the claim on audit
-        pass
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
 
 
 def _local_acquire(account_id: int | None, source_user: str, *, node: str | None = None,

@@ -30,10 +30,10 @@ without notifying anyone.
 """
 from __future__ import annotations
 
+import logging
+
 import argparse
 import concurrent.futures as futures
-import os
-import sys
 from typing import Callable, Optional
 
 from googleapiclient.errors import HttpError
@@ -84,7 +84,7 @@ def wipe_drive(drive) -> int:
     try:
         drive.files().emptyTrash().execute()
     except Exception:      # noqa: BLE001 - the bin empties itself after 30 days anyway
-        pass
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
     return n
 
 
@@ -283,6 +283,7 @@ def granted(key_path: str, admin: str, service: str) -> bool:
         creds.refresh(Request())
         return True
     except Exception:      # noqa: BLE001 - not granted, or not reachable: either way, no
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return False
 
 

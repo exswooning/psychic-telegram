@@ -26,6 +26,8 @@ one it means refusing to make things worse.
 
 from __future__ import annotations
 
+import logging
+
 import os
 import subprocess
 import sys
@@ -747,6 +749,7 @@ def _run(cmd: list[str]) -> str:
         return subprocess.run(cmd, capture_output=True, text=True,
                               timeout=10).stdout
     except Exception:  # noqa: BLE001 - probing must never raise
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return ""
 
 

@@ -3743,7 +3743,7 @@ def main(argv: list[str] | None = None) -> int:
     print("  2. Create one Google Form, to confirm it is skipped not crashed.")
     print("\nNext:")
     print(f"  python main.py init-db --identities {args.identities_out}")
-    print(f"  python tools/rehearsal.py")
+    print("  python tools/rehearsal.py")
 
     # A run that seeded nobody is a failure, and it has to say so in the exit
     # code. It previously returned 0 whatever happened: five users timing out

@@ -29,6 +29,8 @@ Usage
 """
 from __future__ import annotations
 
+import logging
+
 import argparse
 import atexit
 import json
@@ -77,7 +79,7 @@ def _load_payload(tenant: str) -> dict:
         with open(key, encoding="utf-8") as fh:
             client_id = json.load(fh).get("client_id", "")
     except Exception:  # noqa: BLE001 - absent key is an early, normal state
-        pass
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
     scopes = (source_scopes(st) if tenant == "source"
               else target_scopes(st))
     return {"client_id": client_id, "scopes": ",".join(scopes)}
@@ -137,7 +139,7 @@ def _dump_dialog(page, dialog, tag: str) -> None:
             fh.write(dialog.first.evaluate("e => e.outerHTML"))
         log(f"  saved /tmp/dwd-{tag}.png and .html")
     except Exception:      # noqa: BLE001 - diagnostics only
-        pass
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
 
 
 def _tick_overwrite(dialog, label) -> bool:
@@ -160,19 +162,21 @@ def _tick_overwrite(dialog, label) -> bool:
                 try:
                     act()
                 except Exception:      # noqa: BLE001 - try the next way
-                    pass
+                    logging.getLogger(__name__).debug("ignored an error", exc_info=True)
                 try:
                     if box.is_checked():
                         return True
                 except Exception:      # noqa: BLE001 - not a checkable element
                     break
         except Exception:      # noqa: BLE001
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             continue
     try:
         label.click(timeout=5000)
         return "check the 'overwrite existing client id' box" not in (
             dialog.inner_text() or "").lower()
     except Exception:      # noqa: BLE001
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return False
 
 
@@ -200,6 +204,7 @@ def _dialog_open(dialog) -> bool:
         return (dialog.count() > 0
                 and dialog.get_by_role("button", name="Authorize").count() > 0)
     except Exception:      # noqa: BLE001 - a detached node counts as closed
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return False
 
 
@@ -222,6 +227,7 @@ def _display_live(num: int) -> bool:
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             timeout=5).returncode == 0
     except Exception:      # noqa: BLE001
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return False
 
 
@@ -271,6 +277,7 @@ def _ensure_display() -> str:
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True)
         except Exception:      # noqa: BLE001 - fall through to the message
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             return ""
         # Wait for the display to actually ACCEPT CONNECTIONS, not merely
         # for its socket file to appear.
@@ -294,7 +301,7 @@ def _ensure_display() -> str:
             try:
                 proc.terminate()
             except Exception:      # noqa: BLE001
-                pass
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             continue
         _XVFB = proc
         os.environ["DISPLAY"] = f":{num}"
@@ -310,7 +317,7 @@ def _stop_display() -> None:
         try:
             _XVFB.terminate()
         except Exception:      # noqa: BLE001 - best effort at exit
-            pass
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
     _XVFB = None
 
 
@@ -489,6 +496,7 @@ def _open_dwd_console(p, headful: bool, timeout: int, url: str = DWD_URL,
                 pg.keyboard.press("Enter")
                 return True
             except Exception:      # noqa: BLE001 - try the next match
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
                 continue
         return False
 
@@ -510,7 +518,7 @@ def _open_dwd_console(p, headful: bool, timeout: int, url: str = DWD_URL,
                         typed_pw = True
                         continue
                 except Exception:      # noqa: BLE001 - fall back to human
-                    pass
+                    logging.getLogger(__name__).debug("ignored an error", exc_info=True)
 
         # Scan every open tab, not just the first: Google's sign-in often
         # opens the Admin console in a NEW tab and leaves the original
@@ -575,7 +583,7 @@ def _open_dwd_console(p, headful: bool, timeout: int, url: str = DWD_URL,
                     fh.write(f"URL: {pg.url}\n\n{text}")
                 log(f"  saved text of tab {i}: /tmp/dwd-timeout-{i}.txt")
         except Exception:  # noqa: BLE001 - screenshots are diagnostic
-            pass
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         browser.close()
         return None
 
@@ -798,7 +806,7 @@ def run(client_id: str, scopes: str, timeout: int, headful: bool,
                 first_err = dialog.inner_text()[:400]
                 log(f"  dialog after first Authorize click: {first_err!r}")
             except Exception:      # noqa: BLE001 - diagnostics only
-                pass
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             box = dialog.locator(
                 "text=Overwrite existing client ID").first
             if box.count() > 0:
@@ -813,7 +821,7 @@ def run(client_id: str, scopes: str, timeout: int, headful: bool,
                     try:
                         page.screenshot(path="/tmp/dwd-overwrite-unticked.png")
                     except Exception:      # noqa: BLE001 - diagnostics only
-                        pass
+                        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
                     browser.close()
                     return 7
                 page.wait_for_timeout(500)
@@ -852,7 +860,7 @@ def run(client_id: str, scopes: str, timeout: int, headful: bool,
                         page.screenshot(path="/tmp/dwd-reauth-failed.png")
                         log("  saved screenshot: /tmp/dwd-reauth-failed.png")
                     except Exception:      # noqa: BLE001 - diagnostics only
-                        pass
+                        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
 
         # Authorize either returns to the list (success) or the dialog stays
         # open with an inline error (bad/duplicate client id, unsupported
@@ -871,7 +879,7 @@ def run(client_id: str, scopes: str, timeout: int, headful: bool,
                 msg = dialog.inner_text()[:400]
                 log(f"  dialog says: {msg!r}")
             except Exception:  # noqa: BLE001 - diagnostics
-                pass
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             browser.close()
             return 3
 

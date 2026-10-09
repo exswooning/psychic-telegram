@@ -38,6 +38,8 @@ logged, or passed on a command line.
 """
 from __future__ import annotations
 
+import logging
+
 import argparse
 import base64
 import email
@@ -254,6 +256,7 @@ def check_actions(pg, session, host: str) -> dict:
                 if key in offered:
                     seen.setdefault(key, route)
         except Exception:                              # noqa: BLE001
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             continue
     missing = sorted(set(offered) - set(seen))
     return {

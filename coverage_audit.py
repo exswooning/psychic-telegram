@@ -39,6 +39,8 @@ web UI and CI both see a failure rather than a wall of green.
 
 from __future__ import annotations
 
+import logging
+
 import argparse
 import json
 import os
@@ -222,6 +224,7 @@ def _count_external_shared_with_me(auth: AuthManager, settings: Settings,
             if not token:
                 break
     except Exception:      # noqa: BLE001
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return 0
     return n
 
@@ -241,6 +244,7 @@ def _count_contacts(auth: AuthManager, user: str) -> int | None:
             personFields="names").execute()
         return int(resp.get("totalItems", 0))
     except Exception:      # noqa: BLE001
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return None
 
 
@@ -255,6 +259,7 @@ def _count_tasks(auth: AuthManager, user: str) -> int | None:
             total += len(items)
         return total
     except Exception:      # noqa: BLE001
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return None
 
 
@@ -268,6 +273,7 @@ def _count_vacation_enabled(auth: AuthManager, user: str) -> int | None:
             userId="me").execute()
         return 1 if v.get("enableAutoReply") else 0
     except Exception:      # noqa: BLE001
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return None
 
 
@@ -277,6 +283,7 @@ def _count_pop_enabled(auth: AuthManager, user: str) -> int | None:
             userId="me").execute()
         return 0 if p.get("accessWindow", "disabled") == "disabled" else 1
     except Exception:      # noqa: BLE001
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return None
 
 
@@ -286,6 +293,7 @@ def _count_imap_enabled(auth: AuthManager, user: str) -> int | None:
             userId="me").execute()
         return 1 if i.get("enabled") else 0
     except Exception:      # noqa: BLE001
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return None
 
 
@@ -295,6 +303,7 @@ def _count_delegates(auth: AuthManager, user: str) -> int | None:
             userId="me").execute()
         return len(d.get("delegates", []))
     except Exception:      # noqa: BLE001
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return None
 
 
@@ -304,6 +313,7 @@ def _count_forwarding_addresses(auth: AuthManager, user: str) -> int | None:
             .forwardingAddresses().list(userId="me").execute()
         return len(f.get("forwardingAddresses", []))
     except Exception:      # noqa: BLE001
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return None
 
 
@@ -316,6 +326,7 @@ def _count_groups(auth: AuthManager) -> int | None:
         ).execute().get("groups", [])
         return len(groups)
     except Exception:      # noqa: BLE001
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return None
 
 

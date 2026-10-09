@@ -21,6 +21,8 @@ import {
   Event as CalendarIcon,
   Group as GroupIcon,
   Storage as StorageIcon,
+  TaskAlt as TaskIcon,
+  Forum as ChatIcon,
 } from '@mui/icons-material'
 import { useMigrationStore } from '@/store'
 import RunReports from '@/components/RunReports'
@@ -66,6 +68,8 @@ const FinalReport: React.FC = () => {
     { label: 'Drive Files', value: report.driveFilesMigrated, icon: <DriveIcon />, color: 'primary' },
     { label: 'Calendar Events', value: report.calendarEvents, icon: <CalendarIcon />, color: 'success' },
     { label: 'Contacts', value: report.contacts, icon: <PeopleIcon />, color: 'secondary' },
+    { label: 'Tasks', value: report.tasks ?? 0, icon: <TaskIcon />, color: 'success' },
+    { label: 'Chat Messages', value: report.chatMessages ?? 0, icon: <ChatIcon />, color: 'info' },
     { label: 'Groups', value: report.groups, icon: <GroupIcon />, color: 'info' },
     { label: 'Shared Drives', value: report.sharedDrives, icon: <DriveIcon />, color: 'warning' },
   ]

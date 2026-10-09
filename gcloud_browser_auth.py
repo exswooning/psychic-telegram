@@ -44,6 +44,8 @@ to finish it by hand, then re-run.
 """
 from __future__ import annotations
 
+import logging
+
 import os
 import re
 import shutil
@@ -153,7 +155,7 @@ def cleanup(cloudsdk_config_dir: str) -> None:
                        capture_output=True, timeout=30,
                        stdin=subprocess.DEVNULL, env=env)
     except Exception:      # noqa: BLE001
-        pass
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
     finally:
         shutil.rmtree(cloudsdk_config_dir, ignore_errors=True)
 
@@ -195,13 +197,14 @@ def _extract_auth_code(pg) -> str:
                 if m:
                     return m.group(0)
         except Exception:      # noqa: BLE001 - try the next shape
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             continue
     try:
         m = _CODE_RE.search(pg.inner_text("body"))
         if m:
             return m.group(0)
     except Exception:      # noqa: BLE001
-        pass
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
     return ""
 
 
@@ -220,6 +223,7 @@ def _fill_visible(pg, selector: str, value: str) -> bool:
             pg.keyboard.press("Enter")
             return True
         except Exception:      # noqa: BLE001 - try the next match
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             continue
     return False
 
@@ -275,8 +279,9 @@ def _drive_browser(proc, url: str, email: str, password: str, timeout: int) -> N
                                     log("  handed the verification code to gcloud")
                                     sent_code = True
                                 except Exception:      # noqa: BLE001
-                                    pass
+                                    logging.getLogger(__name__).debug("ignored an error", exc_info=True)
                 except Exception:      # noqa: BLE001 - keep polling
+                    logging.getLogger(__name__).debug("ignored an error", exc_info=True)
                     continue
             challenge.check(browser.contexts[0].pages)
             time.sleep(1)
@@ -292,7 +297,7 @@ def _drive_browser(proc, url: str, email: str, password: str, timeout: int) -> N
                 for i, pg in enumerate(browser.contexts[0].pages):
                     pg.screenshot(path=f"/tmp/gcloud-auth-timeout-{i}.png")
             except Exception:      # noqa: BLE001 - diagnostics only
-                pass
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         else:
             # gcloud caught the OAuth redirect -- sign-in genuinely
             # succeeded. Same authenticated session, one more thing to
@@ -386,7 +391,7 @@ def _try_accept_tos_at(page, url: str, timeout: int) -> str:
             with open(f"/tmp/gcloud-tos-{tag_base}-{tag}.txt", "w", encoding="utf-8") as fh:
                 fh.write(f"URL: {page.url}\n\n{page.inner_text('body')[:3000]}")
         except Exception:      # noqa: BLE001 - diagnostics only
-            pass
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
 
     try:
         page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
@@ -414,6 +419,7 @@ def _try_accept_tos_at(page, url: str, timeout: int) -> str:
                 try:
                     btn.first.click()
                 except Exception:      # noqa: BLE001 - try the next label
+                    logging.getLogger(__name__).debug("ignored an error", exc_info=True)
                     continue
                 page.wait_for_timeout(2000)
                 _save_diagnostics("after-click")
@@ -435,6 +441,7 @@ def _try_accept_tos_at(page, url: str, timeout: int) -> str:
                     "xpath=ancestor::*[self::label or self::div][1]")
                 text = container.inner_text(timeout=500).lower()
             except Exception:      # noqa: BLE001 - try the next checkbox
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
                 continue
             if any(hint in text for hint in _TOS_CHECKBOX_HINTS):
                 try:
@@ -442,7 +449,7 @@ def _try_accept_tos_at(page, url: str, timeout: int) -> str:
                         box.check(timeout=2000)
                     checked = True
                 except Exception:      # noqa: BLE001
-                    pass
+                    logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         if checked:
             break
         # Some of Google's own consent pages are a single button with no
@@ -540,6 +547,7 @@ def _confirm_open_dialog(page, wait_ms: int = 8000) -> bool:
         if backdrop.count() == 0:
             return False
     except Exception:      # noqa: BLE001
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return False
 
     # 1. Let it finish. Most of these are spinners.
@@ -551,6 +559,7 @@ def _confirm_open_dialog(page, wait_ms: int = 8000) -> bool:
             if page.locator(".cdk-overlay-backdrop-showing").count() == 0:
                 return True
         except Exception:      # noqa: BLE001
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             return True
 
     # 2. Still there. Say what it is, then try to answer it.
@@ -570,6 +579,7 @@ def _confirm_open_dialog(page, wait_ms: int = 8000) -> bool:
                 page.wait_for_timeout(1500)
                 return True
         except Exception:      # noqa: BLE001
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             continue
 
     # 3. Escape closes a menu or a dismissible dialog.
@@ -577,7 +587,7 @@ def _confirm_open_dialog(page, wait_ms: int = 8000) -> bool:
         page.keyboard.press("Escape")
         page.wait_for_timeout(1000)
     except Exception:      # noqa: BLE001
-        pass
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
     return True
 
 
@@ -614,6 +624,7 @@ def _dismiss_console_banners(page) -> int:
                 gone += 1
                 log(f"  dismissed the console's {label!r} banner")
         except Exception:      # noqa: BLE001 - a banner is never fatal
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             continue
     return gone
 
@@ -635,7 +646,7 @@ def _chat_field(page, label: str):
         if loc.count() > 0 and loc.first.is_visible():
             return loc.first
     except Exception:      # noqa: BLE001 - older console shapes
-        pass
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
     for sel in (f'mat-form-field:has-text("{label}") input',
                 f'mat-form-field:has-text("{label}") textarea',
                 f'input[aria-label*="{label}" i]',
@@ -645,6 +656,7 @@ def _chat_field(page, label: str):
             if loc.count() > 0 and loc.first.is_visible():
                 return loc.first
         except Exception:      # noqa: BLE001
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             continue
     return None
 
@@ -700,6 +712,7 @@ def _set_checkbox(page, label_fragment: str, want: bool) -> bool:
                         f"{label_fragment!r} ({attempt})")
                     return True
             except Exception:      # noqa: BLE001 - try the next route
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
                 continue
         log(f"  could not change {label_fragment!r}")
         return False
@@ -897,7 +910,7 @@ def _save_chat_diagnostics(page, project: str, tag: str) -> None:
                  "w", encoding="utf-8") as fh:
             fh.write(f"URL: {page.url}\n\n{page.inner_text('body')[:3000]}")
     except Exception:      # noqa: BLE001 - diagnostics only
-        pass
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
 
 
 def _open_chat_configuration_tab(page, attempts: int = 3) -> bool:
@@ -944,6 +957,7 @@ def _open_chat_configuration_tab(page, attempts: int = 3) -> bool:
                     loc.first.click()
                     page.wait_for_timeout(4000)   # the form renders client-side
                 except Exception:      # noqa: BLE001 - try the next shape
+                    logging.getLogger(__name__).debug("ignored an error", exc_info=True)
                     continue
                 break
         else:
@@ -1050,7 +1064,7 @@ def _fill_chat_app_form(page, project: str, timeout: int) -> tuple[bool, str]:
             try:
                 control.first.click()
             except Exception:      # noqa: BLE001 - status may already be set
-                pass
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             break
 
     # What the form actually holds, before trying to submit it. Typing into
@@ -1070,7 +1084,7 @@ def _fill_chat_app_form(page, project: str, timeout: int) -> tuple[bool, str]:
         if errs:
             log(f"  the form is rejecting: {errs[:6]}")
     except Exception:      # noqa: BLE001
-        pass
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
 
     # Again -- the console re-renders its banners on navigation, and the
     # tab click counts.
@@ -1103,7 +1117,7 @@ def _fill_chat_app_form(page, project: str, timeout: int) -> tuple[bool, str]:
                 if errs:
                     log(f"  the form is rejecting: {errs[:6]}")
             except Exception:      # noqa: BLE001
-                pass
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             continue
         try:
             # Into view first. The form is long and the console's viewport
@@ -1111,7 +1125,7 @@ def _fill_chat_app_form(page, project: str, timeout: int) -> tuple[bool, str]:
             btn.first.scroll_into_view_if_needed(timeout=4000)
             page.wait_for_timeout(400)
         except Exception:      # noqa: BLE001 - not fatal
-            pass
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         try:
             btn.first.click(timeout=8000)
             page.wait_for_timeout(2500)
@@ -1167,6 +1181,7 @@ def _fill_chat_app_form(page, project: str, timeout: int) -> tuple[bool, str]:
                     log(f"  console response ({sel}): {text!r}")
                     break
             except Exception:      # noqa: BLE001
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
                 continue
 
         # Reload and read it back. Every previous version of this step

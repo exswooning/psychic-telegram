@@ -403,6 +403,7 @@ class SSOMigrator:
                 customerId="my_customer", orgUnitPath=key).execute()
             return ou.get("orgUnitPath")
         except Exception:  # noqa: BLE001
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             return None
 
     def _org_unit_by_path(self, tenant: str, path: str) -> str | None:
@@ -413,6 +414,7 @@ class SSOMigrator:
                 customerId="my_customer", orgUnitPath=path.lstrip("/")).execute()
             return f"orgUnits/{ou.get('orgUnitId', '').replace('id:', '')}"
         except Exception:  # noqa: BLE001
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             return None
 
     def _group_email(self, tenant: str, resource: str) -> str | None:
@@ -422,6 +424,7 @@ class SSOMigrator:
             g = directory.groups().get(groupKey=resource.split("/")[-1]).execute()
             return (g.get("email") or "").lower()
         except Exception:  # noqa: BLE001
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             return None
 
     def _group_exists(self, tenant: str, email: str) -> bool:
@@ -431,6 +434,7 @@ class SSOMigrator:
             directory.groups().get(groupKey=email).execute()
             return True
         except Exception:  # noqa: BLE001
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             return False
 
 
@@ -438,7 +442,7 @@ def print_inventory(mig: SSOMigrator, users: list[str]) -> None:
     profiles = mig.read_profiles("source")
     assignments = mig.read_assignments("source")
 
-    print(f"\n=== SSO into Google (migratable) ===")
+    print("\n=== SSO into Google (migratable) ===")
     if not profiles:
         print("  no inbound SAML profiles configured")
     for p in profiles:
@@ -450,7 +454,7 @@ def print_inventory(mig: SSOMigrator, users: list[str]) -> None:
                or "EVERY ACCOUNT IN THE TENANT")
         print(f"      -> {who}")
 
-    print(f"\n=== 'Sign in with Google' grants (NOT migratable) ===")
+    print("\n=== 'Sign in with Google' grants (NOT migratable) ===")
     print("  Each is a user's consent. No API creates one, by design --")
     print("  people must reconnect these apps after cutover.")
     grants = mig.read_oauth_grants(users)
@@ -462,7 +466,7 @@ def print_inventory(mig: SSOMigrator, users: list[str]) -> None:
               "migration's source key does not hold (it can also revoke "
               "those grants) -- grant it by hand to list them")
 
-    print(f"\n=== Saved passwords ===")
+    print("\n=== Saved passwords ===")
     print("  Not migratable and not inventoriable: they are encrypted to the")
     print("  user, so no admin can read them. Users keep them by signing into")
     print("  Chrome, or they are lost.")

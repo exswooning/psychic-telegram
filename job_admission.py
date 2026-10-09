@@ -261,7 +261,7 @@ def note_stop(pid: int) -> None:
                 "UPDATE active_jobs SET stop_asked_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') "
                 "WHERE pid=? AND stop_asked_at IS NULL", (pid,))
     except Exception:      # noqa: BLE001 - the stop itself already went out
-        pass
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
 
 
 def stop_asked(pid: int | None) -> bool:
@@ -273,6 +273,7 @@ def stop_asked(pid: int | None) -> bool:
             return conn.execute("SELECT 1 FROM active_jobs WHERE pid=? AND stop_asked_at "
                                 "IS NOT NULL", (pid,)).fetchone() is not None
     except Exception:      # noqa: BLE001 - not knowing is a polite stop, as before
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return False
 
 

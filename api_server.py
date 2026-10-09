@@ -60,7 +60,6 @@ import logging
 import os
 import re
 import socket
-import urllib.error
 import sqlite3
 import subprocess
 import threading
@@ -554,6 +553,7 @@ def _reconcile_active_jobs() -> None:
     try:
         active = job_admission.list_active()
     except Exception:  # noqa: BLE001 - best-effort, must not block startup
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return
     owned = [row for row in active if row.get("job_name") in _OWNED_JOB_NAMES]
     if not owned:
@@ -562,6 +562,7 @@ def _reconcile_active_jobs() -> None:
         ps_out = subprocess.run(["ps", "-eo", "args="], capture_output=True,
                                 text=True, timeout=5).stdout
     except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return
     for row in owned:
         name = row["job_name"]
@@ -609,6 +610,7 @@ def _reconcile_inventory_scans() -> None:
                     json.dump(data, fh)
                 os.replace(tmp, path)
             except Exception:      # noqa: BLE001 - never block startup
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
                 continue
 
 
@@ -1086,7 +1088,7 @@ async def auth_login(body: LoginRequest, response: Response):
                 log.warning("login refused: %s is locked for another %ss",
                             body.email, held)
         except Exception:      # noqa: BLE001 - never fail a login on logging
-            pass
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         raise HTTPException(401, "wrong email or password")
     token = await _off_loop(accounts_auth.create_session, account_id)
     _set_session_cookie(response, token)
@@ -2152,7 +2154,7 @@ def _history_view(account_id: int | None, limit: int = 200) -> dict:
                         "running": r["finished_at"] is None,
                     })
         except Exception:      # noqa: BLE001 - a ledger from before repair_runs existed
-            pass
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
     runs.sort(key=lambda r: r["startedAt"] or "", reverse=True)
     return {"accountId": account_id, "runs": runs[:limit]}
 
@@ -2295,6 +2297,7 @@ def _mirror_busy(account_id: int | None) -> bool:
             return True
         return any(r["job_name"] == "mirror" for r in job_queue.waiting(account_id))
     except Exception:      # noqa: BLE001 - unknown is not busy; the cycle's own lock decides
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return False
 
 
@@ -3106,7 +3109,7 @@ async def benchmark_results(op: Operator = Depends(operator)):
                     stale = bool(r.get("passed")) != bool(verdict)
                 except Exception:  # noqa: BLE001 - an unjudgeable old record
                     # keeps its stored verdict rather than vanishing.
-                    pass
+                    logging.getLogger(__name__).debug("ignored an error", exc_info=True)
                 out.append({
                     "file": name, "label": r.get("label"),
                     "startedAt": r.get("startedAt"), "passed": verdict,
@@ -3323,7 +3326,7 @@ async def ai_analyze(body: AnalyzeRequest, op: Operator = Depends(operator)):
             f"sent {len(result['context'])} chars of live state to Groq",
             "groq")
     except Exception:  # noqa: BLE001 - the audit row must not break the panel
-        pass
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
     return result
 
 
@@ -3493,7 +3496,7 @@ async def dwd_status(tenant: str = "source", account_id: int | None = None,
                         note = why if usable is False else note
                     caveats.append({"api": api, "note": note})
             except Exception:      # noqa: BLE001 - advisory only
-                pass
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
 
             return {"tenant": tenant, "checked": True, "clientId": client_id,
                     "live": len(rows) - len(missing), "total": len(rows),
@@ -4567,6 +4570,7 @@ async def owed_grants(op: Operator = Depends(operator)):
                         (OWED_GRANT, "SKIPPED_GRANTEE_NOT_ON_GOOGLE")).fetchall()
                     stuck, named = _uncopyable(conn, limit=3)
             except Exception:      # noqa: BLE001 - a ledger without the table owes nothing
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
                 continue
             who = [r["item_id"].partition(":")[2].lower() for r in rows]
             who = [w for w in who if w.endswith("@" + domain)]
@@ -5041,7 +5045,6 @@ async def repair_survey(account_id: int, op: Operator = Depends(operator)):
 
     def _read() -> dict:
         from config import Settings
-        import repair
         out = {"accountId": account_id, "total": 0, "families": [],
                "unclassified": 0, "error": ""}
         try:
@@ -5289,7 +5292,7 @@ def _watch_rc_for(account_id, job_name, started_epoch) -> int | None:
                 and abs(float(res["started"]) - started_epoch) <= 180):
             return int(res["rc"])
     except Exception:      # noqa: BLE001
-        pass
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
     return None
 
 
@@ -6711,6 +6714,7 @@ def _license_headroom_warning(account_id: int) -> str:
         tgt_n = len(tenant_inventory.list_accounts(
             auth, "target", settings.target_domain))
     except Exception:      # noqa: BLE001 - advisory only, never blocks linking
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return ""
     if tgt_n < src_n:
         return (f"  ⚠ {settings.source_domain} has {src_n} user(s); "
@@ -6992,7 +6996,7 @@ def _start_node_agent() -> dict:
         if existing.returncode == 0 and existing.stdout.strip():
             return {"started": True, "detail": "already running"}
     except Exception:      # noqa: BLE001 - no pgrep is not a reason to stop
-        pass
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
 
     detail = "started"
     try:
@@ -7028,7 +7032,7 @@ def _start_node_agent() -> dict:
             if r.returncode == 0:
                 detail = "started, and enabled at boot"
         except Exception:      # noqa: BLE001 - the running agent is the point
-            pass
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
     return {"started": True, "detail": detail}
 
 
@@ -7304,6 +7308,7 @@ def _checkin_enrolled() -> bool:
         import totp
         return bool(totp.load_secrets().get(CHECKIN_ACCOUNT))
     except Exception:      # noqa: BLE001 - an unreadable store is not proof
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return False       # of enrolment, and must not seal the page shut
 
 
@@ -7591,7 +7596,7 @@ async def deadman_wipe_now(req: WipeNowRequest,
         try:
             cpdb.finish_action(action, "ok", "; ".join(removed)[:500])
         except Exception:      # noqa: BLE001 - the ledger may be gone now
-            pass
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return {"ok": True, "removed": removed}
     return await _off_loop(_fire)
 

@@ -584,7 +584,7 @@ def cleanup_staging_drives(auth: AuthManager, settings: Settings,
                     body={"type": "user", "role": "organizer",
                           "emailAddress": target_admin}).execute()
             except Exception:          # noqa: BLE001
-                pass
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
 
             left = tgt.files().list(
                 corpora="drive", driveId=d["id"], includeItemsFromAllDrives=True,

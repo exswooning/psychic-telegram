@@ -207,6 +207,7 @@ def has_drive_link(raw_b64: str) -> bool:
     try:
         msg = email.message_from_bytes(base64.urlsafe_b64decode(raw_b64 + "==="))
     except Exception:                                  # noqa: BLE001
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return False
     for part in msg.walk():
         if part.get_content_maintype() != "text" or part.is_multipart():
@@ -214,6 +215,7 @@ def has_drive_link(raw_b64: str) -> bool:
         try:
             payload = part.get_payload(decode=True)
         except Exception:                              # noqa: BLE001
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             continue
         if payload and DRIVE_ID.search(payload):
             return True
@@ -247,6 +249,7 @@ def rewrite_raw(raw_b64: str, lookup: Callable[[str], str | None]) -> tuple[str,
         try:
             payload = part.get_payload(decode=True)
         except Exception:                          # noqa: BLE001
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             continue
         if not payload:
             continue

@@ -56,12 +56,15 @@ gcloud_browser_auth.log() calls never receive it either.
 
 from __future__ import annotations
 
+import logging
+
 import argparse
 import getpass
 import json
 import os
-import re
 import random
+import re
+import subprocess
 import sys
 
 import signin_challenge
@@ -162,13 +165,14 @@ def _admin_can_reach_project(project: str, admin_email: str,
             capture_output=True, text=True, timeout=180, env=env)
         return proc.returncode == 0
     except Exception:      # noqa: BLE001 - never block setup on the probe
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return False
     finally:
         if cfg:
             try:
                 gcloud_browser_auth.cleanup(cfg)
             except Exception:      # noqa: BLE001
-                pass
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
 
 
 def _delegation_already_live(settings, side: str, client_id: str) -> bool:
@@ -185,6 +189,7 @@ def _delegation_already_live(settings, side: str, client_id: str) -> bool:
         return scope_guard.is_complete(
             settings, side, verify_scopes.required_scopes(settings, side))
     except Exception:      # noqa: BLE001
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return False
 
 
@@ -580,7 +585,7 @@ def run_full_setup(
                     chat_phase.status = "skipped"
                     chat_phase.detail = why
             except Exception as exc:      # noqa: BLE001 - advisory
-                pass
+                logging.getLogger(__name__).debug("ignored an error: %s", exc, exc_info=True)
         except Exception as exc:      # noqa: BLE001 - never fail setup over this
             chat_phase.status, chat_phase.detail = "skipped", str(exc)[:150]
 
@@ -604,7 +609,7 @@ def run_full_setup(
                     account_id, side, domain=domain, admin_email=admin_email,
                     sa_key_path=key_path)
             except Exception:      # noqa: BLE001 - advisory only
-                pass
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
 
     if dry_run:
         phases.append(Phase("domain-wide delegation (skipped: dry run)"))

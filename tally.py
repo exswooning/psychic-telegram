@@ -33,7 +33,6 @@ Rules learned the hard way, which the code below keeps:
 """
 from __future__ import annotations
 
-import json
 import random
 import re
 import threading

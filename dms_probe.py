@@ -18,9 +18,10 @@ It changes nothing. No clicks beyond what is needed to reach the page.
 """
 from __future__ import annotations
 
+import logging
+
 import argparse
 import json
-import os
 import sys
 
 import dms_migrate
@@ -39,7 +40,7 @@ def describe(page) -> dict:
     try:
         out["text"] = page.locator("body").inner_text()[:6000]
     except Exception:      # noqa: BLE001
-        pass
+        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
 
     seen = set()
     for role in ROLES:
@@ -47,6 +48,7 @@ def describe(page) -> dict:
             loc = page.get_by_role(role)
             n = min(loc.count(), 60)
         except Exception:      # noqa: BLE001
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             continue
         for i in range(n):
             el = loc.nth(i)
@@ -63,6 +65,7 @@ def describe(page) -> dict:
                     "type": el.get_attribute("type"),
                 }
             except Exception:      # noqa: BLE001
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
                 continue
             key = (item["role"], item["name"], item["id"])
             if key in seen:
@@ -114,7 +117,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             browser.close(); p.stop()
         except Exception:      # noqa: BLE001
-            pass
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
 
 
 if __name__ == "__main__":

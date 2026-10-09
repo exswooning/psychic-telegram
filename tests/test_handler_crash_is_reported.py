@@ -49,9 +49,14 @@ class TestEveryHandlerIsGuarded:
 
     def test_a_failure_to_report_does_not_become_a_second_crash(self):
         """The response may already have begun."""
-        src = inspect.getsource(webui.Handler._guard)
-        i = src.index("except Exception:")
-        assert "pass" in src[i:i + 120]
+        class HalfAnswered:
+            def _json(self, *a):
+                raise OSError("headers already sent")
+
+        def boom():
+            raise ValueError("x")
+
+        webui.Handler._guard(HalfAnswered(), boom, "GET /x")     # must not raise
 
 
 class TestTheBugThatFoundIt:

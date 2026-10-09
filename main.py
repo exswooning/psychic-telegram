@@ -292,6 +292,7 @@ def reconcile_service_markers(db) -> list[tuple]:
                         "WHERE source_email=?",
                         (",".join(sorted(keep)), user))
         except Exception:      # noqa: BLE001 - one bad row must not stop the run
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             continue
     return reopened
 
@@ -1273,9 +1274,9 @@ def cmd_init_db(args, settings: Settings, db: MigrationDB, auth: AuthManager):
             print(f"  {len(missing)} of them have no target account yet. "
                   f"They are mapped so `provision-users` can create them; "
                   f"until it does, migrating those users will fail.")
-            print(f"  Creating them consumes a licence each -- run "
-                  f"`provision-users --tenant target --dry-run` first to see "
-                  f"the exact list.")
+            print("  Creating them consumes a licence each -- run "
+                  "`provision-users --tenant target --dry-run` first to see "
+                  "the exact list.")
     print(f"Schema initialised at {settings.db_path}")
 
 
@@ -1328,7 +1329,7 @@ def _metrics_flusher(stop_event: threading.Event, db,
                 # only in one log line at the moment it was decided.
                 payload["inheritedAcls"] = drive_engine.inherited_acl_stats()
             except Exception:      # noqa: BLE001
-                pass
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             payload["workers_configured"] = getattr(
                 db, "_workers_configured", None) or 0
             # What a perf test needs and nothing recorded: this process's resident
@@ -1930,7 +1931,7 @@ def cmd_provision_users(args, settings: Settings, db: MigrationDB,
         print("DRY RUN — nothing will be created\n")
     else:
         print("\nThis creates real accounts, which consume licences.")
-        if not args.yes and input(f"Type the domain to confirm: ").strip() != domain:
+        if not args.yes and input("Type the domain to confirm: ").strip() != domain:
             print("Aborted.")
             return
 

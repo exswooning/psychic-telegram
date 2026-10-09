@@ -1034,7 +1034,7 @@ def main(argv=None) -> int:
     db = MigrationDB(settings.db_path)
     # flush: a job's output is a file, and a buffered "verify: <user>" line made a
     # working run look frozen for half an hour.
-    report = run_and_save(AuthManager(settings), db, settings, a.user, services,
+    run_and_save(AuthManager(settings), db, settings, a.user, services,
                           retry=retry_on_google_error(max_retries=settings.max_retries),
                           progress=lambda m: print(m, flush=True),
                           limit=a.limit, base=verify_dir(a.account_id))

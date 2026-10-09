@@ -20,8 +20,9 @@ wizard then polls until it sees the result and continues on its own.
 
 from __future__ import annotations
 
+import logging
+
 import argparse
-import json
 import os
 import re
 import shutil
@@ -336,7 +337,7 @@ class State:
                     self._preflight = True
                     return True
             except Exception:
-                pass
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             hint = "an account in identity_map does not exist"
         else:
             first = next((l for l in out.splitlines() if "FAIL" in l), "")
@@ -360,6 +361,7 @@ class State:
                 "SELECT source_email, target_email FROM identity_map").fetchall()
             con.close()
         except Exception:
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
             return 0
 
         # A migration.db outlives the run that created it. Reusing a directory

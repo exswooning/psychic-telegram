@@ -372,7 +372,7 @@ class AuthManager:
             try:
                 evicted.close()          # releases the pooled TLS connection
             except Exception:            # noqa: BLE001 - eviction must not fail a call
-                pass
+                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         cache[key] = svc
         return svc
 

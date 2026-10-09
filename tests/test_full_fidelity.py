@@ -117,7 +117,7 @@ class TestEverythingOnByDefault:
             setattr(settings, flag, True)
         missing = {config.RESOURCE_WRITE_SCOPE}
         monkeypatch.delenv("MIGRATE_RESOURCES", raising=False)
-        monkeypatch.delenv(fidelity.DROPPED_ENV, raising=False)
+        monkeypatch.setenv(fidelity.DROPPED_ENV, "")   # delenv on an absent var restores nothing
         notes = fidelity.drop_ungranted(
             settings, lambda t, s: (not (set(s) & missing), "not delegated"))
         assert settings.migrate_resources is False and settings.migrate_groups is True
@@ -131,7 +131,7 @@ class TestEverythingOnByDefault:
 
         import config
         import main
-        monkeypatch.delenv(fidelity.DROPPED_ENV, raising=False)
+        monkeypatch.setenv(fidelity.DROPPED_ENV, "")   # delenv on an absent var restores nothing
         monkeypatch.setenv("MIGRATE_CHAT", "true")
         settings.migrate_chat = True
         chat = set(config.CHAT_SCOPES)
