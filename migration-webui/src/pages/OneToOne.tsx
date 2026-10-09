@@ -113,6 +113,21 @@ const UserRow: React.FC<{ u: OneToOneUser; selected: boolean; onSelect: (on: boo
   )
 }
 
+// What "every item" means for these users, from each one's last check: every service's whole
+// item count against the slice a sample opens. A user nobody has checked has no count yet.
+const sizeOf = (us: OneToOneUser[], per: number) => {
+  let all = 0, sample = 0, unknown = 0
+  for (const u of us) {
+    if (!u.services.length) { unknown += 1; continue }
+    for (const s of u.services) {
+      const n = s.sampledOf ?? s.checked
+      all += n
+      sample += Math.min(n, per)
+    }
+  }
+  return { all, sample, unknown }
+}
+
 const OneToOne: React.FC = () => {
   const [params] = useSearchParams()
   const asked = Number(params.get('account')) || undefined
@@ -144,6 +159,7 @@ const OneToOne: React.FC = () => {
   }, [view, filter])
 
   const totals = view?.totals ?? {}
+  const size = sizeOf((view?.users ?? []).filter((u) => !picked.size || picked.has(u.user)), view?.perService ?? 25)
   const go = async (reason: string) => {
     setBusy(true)
     try {
@@ -218,6 +234,14 @@ const OneToOne: React.FC = () => {
           <FormControlLabel sx={{ display: 'block', mt: 1 }} control={
             <Checkbox size="small" checked={everything} onChange={(e) => setEverything(e.target.checked)} inputProps={{ 'aria-label': 'check every item' }} />}
             label="Check every item, not a sample (slow on a large user)" />
+          {everything && (
+            <Typography variant="body2" color="text.secondary" data-testid="every-item-size">
+              {size.sample
+                ? `About ${size.all.toLocaleString()} items, ${Math.max(1, Math.round(size.all / size.sample))}× the ${size.sample.toLocaleString()} a sample opens: expect it to take about that many times as long.`
+                : 'Nobody chosen has been checked yet, so how many items they hold is not known.'}
+              {size.sample > 0 && size.unknown > 0 && ` ${size.unknown} never checked ${size.unknown === 1 ? 'is' : 'are'} not counted.`}
+            </Typography>
+          )}
         </>}
         onCancel={() => setAsking(false)} onConfirm={go} />
     </Box>

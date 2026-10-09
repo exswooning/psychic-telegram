@@ -50,8 +50,9 @@ and a type error in a test file only surfaces here.
 
 **Building for deploy**: `VITE_CP_BASE="" npm run build` — the empty base is
 required, or the bundle bakes in `http://localhost:8090` and every API call
-breaks in production. `grep -c localhost:8090 dist/assets/*.js` should show
-exactly 1 (an inert placeholder string in Settings.tsx), never more.
+breaks in production. `cat dist/assets/*.js | grep -c localhost:8090` should print
+exactly 1 (an inert placeholder string in Settings.tsx), never more. Each page is its own
+chunk (`React.lazy` in `App.tsx`), so a per-file `grep -c` prints one count per file.
 
 **Deploying**: `./sync_vps.sh user@host /remote/dir [keyfile]` — first dry-runs
 by *content* to see what would change on the box. **If nothing that runs changed

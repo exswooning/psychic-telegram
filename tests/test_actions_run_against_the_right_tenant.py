@@ -80,7 +80,8 @@ class TestTheRouteUsesIt:
         return open(os.path.join(root, "webui.py"), encoding="utf-8").read()
 
     def _block(self):
-        return self._src().split('if self.path != "/api/run":')[1]
+        import inspect
+        return inspect.getsource(webui.Handler._POST_ROUTES["/api/run"])
 
     def _launcher(self):
         """launch_or_queue's own body.
@@ -154,11 +155,8 @@ class TestStopReachesTheJobThatWasStarted:
     """
 
     def _block(self):
-        import os
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        src = open(os.path.join(root, "webui.py"), encoding="utf-8").read()
-        return src.split('if self.path == "/api/stop":')[1].split(
-            'if self.path != "/api/run":')[0]
+        import inspect
+        return inspect.getsource(webui.Handler._POST_ROUTES["/api/stop"])
 
     def test_stop_resolves_the_same_account_run_does(self):
         assert "resolve_target_account" in self._block()

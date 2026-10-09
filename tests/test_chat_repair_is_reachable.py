@@ -15,9 +15,7 @@ even what the phase had reported was gone.
 from __future__ import annotations
 
 import inspect
-import re
 
-import pytest
 
 import gcloud_browser_auth
 import webui
@@ -26,10 +24,7 @@ import webui
 def _block() -> str:
     # _do_POST, not do_POST: the latter is the crash-guard wrapper, whose
     # source contains none of this.
-    src = inspect.getsource(webui.Handler._do_POST)
-    i = src.index('if self.path == "/api/configure_chat_app":')
-    j = src.index('if self.path == "/api/remove_tenant_setup":', i)
-    return src[i:j]
+    return inspect.getsource(webui.Handler._POST_ROUTES["/api/configure_chat_app"])
 
 
 class TestItCanBeRunOnItsOwn:

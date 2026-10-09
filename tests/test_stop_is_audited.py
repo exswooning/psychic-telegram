@@ -18,7 +18,6 @@ import inspect
 import webui
 
 
-STOP = webui.__file__
 
 
 def _stop_block() -> str:
@@ -27,9 +26,7 @@ def _stop_block() -> str:
     A fixed character slice was clipping the last branch and reporting two
     of three -- a test that measures its own window rather than the code.
     """
-    src = open(STOP, encoding="utf-8").read()
-    body = src.split('if self.path == "/api/stop":')[1]
-    return body[:body.index("\n            return")]
+    return inspect.getsource(webui.Handler._POST_ROUTES["/api/stop"])
 
 
 class TestTheIntentIsRecorded:

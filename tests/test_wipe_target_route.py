@@ -88,10 +88,7 @@ class TestTheCommand:
 
 class TestTheRouteIsWired:
     def test_the_endpoint_exists_and_admits_a_job(self):
-        import os
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        src = open(os.path.join(root, "webui.py"), encoding="utf-8").read()
-        block = src.split('if self.path == "/api/wipe_target":')[1][:900]
+        block = inspect.getsource(webui.Handler._POST_ROUTES["/api/wipe_target"])
         assert "wipe_target_argv" in block
         # launch_or_queue is what admits now -- and, when the box is full,
         # queues instead of refusing. Two at once still cannot run.
@@ -109,10 +106,7 @@ class TestItCanTargetAnotherAccount:
     """
 
     def _block(self, path):
-        import os
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        src = open(os.path.join(root, "webui.py"), encoding="utf-8").read()
-        return src.split(f'if self.path == "{path}":')[1][:700]
+        return inspect.getsource(webui.Handler._POST_ROUTES[path])
 
     def test_wipe_resolves_the_requested_account(self):
         b = self._block("/api/wipe_target")

@@ -18,7 +18,6 @@ import ast
 import inspect
 import os
 
-import pytest
 
 import repair_console_setup as R
 import webui
@@ -89,10 +88,7 @@ class TestItRefusesRatherThanHanging:
 
 class TestTheEndpointGuardsIt:
     def _block(self) -> str:
-        src = inspect.getsource(webui.Handler._do_POST)
-        i = src.index('if self.path == "/api/repair_console_setup":')
-        j = src.index('if self.path == "/api/configure_chat_app":', i)
-        return src[i:j]
+        return inspect.getsource(webui.Handler._POST_ROUTES["/api/repair_console_setup"])
 
     def test_the_password_goes_through_the_environment(self):
         blk = self._block()

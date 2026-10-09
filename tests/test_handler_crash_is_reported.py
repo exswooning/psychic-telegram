@@ -64,7 +64,5 @@ class TestTheBugThatFoundIt:
         """Another branch of do_POST imports Settings inside its own `if`,
         which makes it a LOCAL of the whole method -- so reaching it from a
         branch that did not run raises UnboundLocalError."""
-        src = inspect.getsource(webui.Handler._do_POST)
-        i = src.index('if self.path == "/api/remove_tenant_setup":')
-        j = src.index('if self.path == "/api/reset_target":', i)
-        assert "from config import Settings as _Settings" in src[i:j]
+        src = inspect.getsource(webui.Handler._POST_ROUTES["/api/remove_tenant_setup"])
+        assert "from config import Settings as _Settings" in src

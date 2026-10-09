@@ -165,3 +165,17 @@ class TestTheGateOnTheRealServer:
 
     def test_a_garbage_cookie_is_refused(self, live_server):
         assert _get(live_server, "/api/actions", "bp_session=not-a-real-token") == 401
+
+
+def test_hashed_assets_are_cached_and_nothing_else_is(tmp_path, monkeypatch):
+    """A content-hashed file can never go stale, so the 1.6 MB bundle need not be fetched
+    on every page load; a missing one (a 404) and every other response stay no-store."""
+    (tmp_path / "assets").mkdir()
+    (tmp_path / "assets" / "index-abc123.js").write_text("x")
+    monkeypatch.setattr(webui, "SPA_DIST_DIR", str(tmp_path))
+    sent = []
+    h = type("H", (), {"_ASSET_CTYPES": webui.Handler._ASSET_CTYPES,
+                       "_send": lambda self, *a, **k: sent.append(k.get("cache", "no-store"))})()
+    webui.Handler._serve_spa_asset(h, "/app/assets/index-abc123.js")
+    webui.Handler._serve_spa_asset(h, "/app/assets/gone-123.js")
+    assert sent == ["public, max-age=31536000, immutable", "no-store"]

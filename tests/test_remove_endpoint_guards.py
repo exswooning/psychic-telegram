@@ -11,10 +11,7 @@ import webui
 def _block() -> str:
     # _do_POST, not do_POST: the latter is now the crash guard
     # wrapper, whose source contains none of this.
-    src = inspect.getsource(webui.Handler._do_POST)
-    i = src.index('if self.path == "/api/remove_tenant_setup":')
-    j = src.index('if self.path == "/api/reset_target":', i)
-    return src[i:j]
+    return inspect.getsource(webui.Handler._POST_ROUTES["/api/remove_tenant_setup"])
 
 
 class TestItRefuses:

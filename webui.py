@@ -5184,12 +5184,13 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):  # quiet
         pass
 
-    def _send(self, code: int, body: bytes, ctype: str) -> None:
+    def _send(self, code: int, body: bytes, ctype: str, cache: str = "no-store") -> None:
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        # This UI drives a migration; nothing about it should be cached.
-        self.send_header("Cache-Control", "no-store")
+        # This UI drives a migration; nothing about it should be cached -- except the
+        # SPA's hashed asset files, whose names change whenever their contents do.
+        self.send_header("Cache-Control", cache)
         self.end_headers()
         self.wfile.write(body)
 
@@ -5334,7 +5335,7 @@ class Handler(BaseHTTPRequestHandler):
         ext = os.path.splitext(target)[1]
         ctype = self._ASSET_CTYPES.get(ext, "application/octet-stream")
         with open(target, "rb") as f:
-            self._send(200, f.read(), ctype)
+            self._send(200, f.read(), ctype, cache="public, max-age=31536000, immutable")
 
     # -- crash containment ---------------------------------------------------
     #
@@ -5609,754 +5610,758 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self._json({"ok": False, "error": "bad json"}, 400)
             return
-
-        if self.path == "/api/oauth/begin":
-            tenant = body.get("tenant", "")
-            if tenant not in ("source", "target"):
-                self._json({"ok": False, "error": "tenant must be source or target"}, 400)
-                return
-            _PENDING["tenant"] = tenant
-            self._json(oauth_begin(tenant, self.server.server_address[1]))
-            return
-
-        if self.path == "/api/oauth/disconnect":
-            from config import Settings
-            import oauth_store
-
-            tenant = body.get("tenant", "")
-            if tenant not in ("source", "target"):
-                self._json({"ok": False, "error": "tenant must be source or target"}, 400)
-                return
-            oauth_store.TokenStore(Settings().oauth_token_dir).clear(tenant)
-            # Deliberately worded: the local token is gone, but the grant still
-            # exists at Google until an admin revokes it in their own console.
-            self._json({"ok": True,
-                        "msg": f"{tenant} token removed locally; access is still "
-                               f"granted at Google until revoked in the admin console"})
-            return
-
-        if self.path == "/api/queue/cancel":
-            # Scoped to the caller's own account unless they are the
-            # operator: a shared queue where anyone can drop anyone's work
-            # is worse than no queue.
-            caller = self._account_id()
-            scope = None if caller in (None, 1) else caller
-            dropped = job_queue.cancel(int(body.get("id") or 0),
-                                       account_id=scope)
-            self._json({"ok": dropped,
-                        "error": "" if dropped else
-                                 "not queued (already started, cancelled, "
-                                 "or belongs to another account)"})
-            return
-
-        if self.path == "/api/seed":
-            # Same bug resolve_target_account's docstring names: a
-            # superadmin picking another account's domain (SeedDomainPicker
-            # lists every account's) got "set the source domain in step 2
-            # first" back -- silently resolved to the OPERATOR's account.
-            account_id, scope_err = resolve_target_account(
-                self._account_id(), body.get("account_id"))
-            if scope_err:
-                self._json({"ok": False, "error": scope_err}, 403)
-                return
-            if not _subscription_ok(account_id):
-                self._json({"ok": False, "error": "subscription inactive"}, 402)
-                return
-            if not _seed_ok(account_id):
-                self._json({"ok": False, "error": "seeding is not enabled on this account"}, 403)
-                return
-            argv, env, err = seed_argv(body, account_id)
-            if err:
-                self._json({"ok": False, "error": err}, 400)
-                return
-            state, msg = launch_or_queue(
-                account_id, "seed", argv, env=env,
-                cwd=os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                 "data-generator"),
-                requested_by=_account_email(account_id),
-                retry={"path": "/api/seed", "body": body})
-            self._json({"ok": state != "error", "queued": state == "queued",
-                        "msg": msg, "error": msg if state == "error" else ""})
-            return
-
-        if self.path == "/api/repair_console_setup":
-            # The two steps with no API and no gcloud command -- the DWD
-            # grant and the Chat app -- redone for a tenant already set up.
-            # full_setup does both once; neither was reachable afterwards,
-            # so a tenant whose setup died before those phases, or one set
-            # up before a scope was added, had no route back except
-            # re-running the whole setup against a project that exists.
-            #
-            # It runs HERE, on the box. /api/dwd/automate hands back a
-            # command to run elsewhere because "this server is headless",
-            # which stopped being true when dwd_helper._ensure_display()
-            # learned to start Xvfb -- full_setup's own Chat phase has
-            # relied on that for a while. Confirmed on this VPS:
-            # _ensure_display() returns :100 and Chromium is installed.
-            account_id, scope_err = resolve_target_account(
-                self._account_id(), body.get("account_id"))
-            if scope_err:
-                self._json({"ok": False, "error": scope_err}, 403)
-                return
-            side = (body.get("side") or "source").strip()
-            if side not in ("source", "target"):
-                self._json({"ok": False, "error": "side must be source or target"})
-                return
-            env = _account_env(account_id, dict(os.environ))
-            # Environment, never argv -- a command line is readable by every
-            # process on the box through ps.
-            env["DWD_PASSWORD"] = body.get("admin_password") or ""
-            if not env["DWD_PASSWORD"]:
-                self._json({"ok": False, "error":
-                            "the admin password is needed: both steps sign "
-                            "in to a Google console and neither can prompt"})
-                return
-            # No --account-id here, deliberately: _account_env above sets
-            # MIGRATION_DB, and a child given both follows it into the
-            # per-account ledger hunting for tenant_configs that live in the
-            # control plane. The environment already names the tenant, which
-            # is why the flag is redundant as well as harmful.
-            argv = [PY, "repair_console_setup.py", "--side", side]
-            if not body.get("grant", True):
-                argv.append("--skip-grant")
-            if not body.get("chat", True):
-                argv.append("--skip-chat")
-            # Narrow the delegation to what this tenant is now for.
-            #
-            # Setup grants the union so a tenant works either way
-            # immediately; once an operator says "migrate", the source's
-            # write scopes have to GO, because the read-only source is the
-            # guarantee the whole tool rests on and a wide grant makes it
-            # untrue with nothing on screen to say so.
-            purpose = (body.get("purpose") or "").strip()
-            if purpose:
-                if purpose not in ("seed", "migrate"):
-                    self._json({"ok": False, "error":
-                                "purpose must be 'seed' or 'migrate'"})
-                    return
-                argv += ["--purpose", purpose]
-            if purpose and side == "source":
-                # Seed and migrate each have their own key now, each delegated
-                # exactly its own set: "narrow for seed/migrate" on one shared key
-                # (an overwrite undone by the next switch) is that, done once.
-                st_ = __import__("config").Settings(account_id=account_id) if account_id \
-                    else __import__("config").Settings()
-                env["DWD_EMAIL_SOURCE"] = st_.source_admin or ""
-                env["DWD_PASSWORD_SOURCE"] = env["DWD_PASSWORD"]
-                argv = [PY, "separate_credentials.py"]
-            label = ("separate seed and migrate keys" if purpose and side == "source"
-                     else f"narrow scopes for {purpose}" if purpose
-                     else "repair console setup")
-            ok, msg = get_job(account_id).start(label, argv, env=env)
-            self._json({"ok": ok, "error": "" if ok else msg})
-            return
-
-        if self.path == "/api/configure_chat_app":
-            # Chat needs an app configured in the Cloud console before a
-            # single chat.spaces() call stops returning 404 "Google Chat app
-            # not found", and there is no API and no gcloud command for it.
-            # full_setup does this once per tenant -- but a tenant whose
-            # setup died before that phase's result was written had no route
-            # back to it except re-running the whole setup against a project
-            # that already exists. Live, that left 46 finished users with 46
-            # chat 404s and no chat data at all.
-            account_id, scope_err = resolve_target_account(
-                self._account_id(), body.get("account_id"))
-            if scope_err:
-                self._json({"ok": False, "error": scope_err}, 403)
-                return
-            side = (body.get("side") or "source").strip()
-            if side not in ("source", "target"):
-                self._json({"ok": False, "error": "side must be source or target"})
-                return
-            from config import Settings as _Settings
-
-            st = (_Settings(account_id=account_id) if account_id
-                  else _Settings())
-            key = st.source_sa_key if side == "source" else st.target_sa_key
-            admin = st.source_admin if side == "source" else st.target_admin
-            try:
-                import ensure_apis
-
-                project = ensure_apis.project_of(key)
-            except Exception as exc:      # noqa: BLE001
-                self._json({"ok": False, "error":
-                            f"could not read the project from {key}: "
-                            f"{str(exc)[:120]}"})
-                return
-            if not project or not admin:
-                self._json({"ok": False, "error":
-                            "this tenant has no project or no admin on file"})
-                return
-            env = _account_env(account_id, dict(os.environ))
-            # Environment, never argv: a command line is readable by every
-            # process on the box through ps.
-            env["DWD_PASSWORD"] = body.get("admin_password") or ""
-            if not env["DWD_PASSWORD"]:
-                self._json({"ok": False, "error":
-                            "the admin password is needed to sign in to the "
-                            "Cloud console"})
-                return
-            argv = [PY, "gcloud_browser_auth.py", "--configure-chat",
-                    "--project", project, "--admin", admin]
-            ok, msg = get_job(account_id).start("configure chat app", argv,
-                                                env=env)
-            self._json({"ok": ok, "error": "" if ok else msg})
-            return
-
-        if self.path == "/api/remove_tenant_setup":
-            # The most destructive endpoint here: it ends a tenant setup
-            # rather than pausing or resetting it -- the data, the Cloud
-            # project, the delegation grant and the saved configuration.
-            #
-            # The domain must be typed back, and is compared against
-            # Settings(), never against anything in the body. A generic
-            # confirm word proves someone read a dialog; the domain proves
-            # they know which of two configured tenants they are pointed at,
-            # which is the mistake worth catching when both are one click
-            # apart on the same page.
-            account_id, scope_err = resolve_target_account(
-                self._account_id(), body.get("account_id"))
-            if scope_err:
-                self._json({"ok": False, "error": scope_err}, 403)
-                return
-            side = (body.get("side") or "").strip()
-            if side not in ("source", "target"):
-                self._json({"ok": False, "error": "side must be source or target"})
-                return
-            # Imported here, not relied on from the enclosing scope. Another
-            # branch of this same method does `from config import Settings`
-            # inside its own `if`, which makes Settings a LOCAL of do_POST
-            # for every path through it -- so reaching it from a branch that
-            # did not run raises UnboundLocalError, not NameError, and the
-            # server returns a bare 502 with no body at all. The dialog
-            # showed "Unexpected end of JSON input", which names the
-            # symptom and nothing else.
-            #
-            # webui.py's own module docstring warns about exactly this
-            # shape at line 70. It is easier to hit than it reads.
-            from config import Settings as _Settings
-
-            st = (_Settings(account_id=account_id) if account_id
-                  else _Settings())
-            configured = (st.source_domain if side == "source"
-                          else st.target_domain) or ""
-            typed = (body.get("confirm_domain") or "").strip()
-            if not configured or typed.lower() != configured.lower():
-                self._json({"ok": False, "error":
-                            f"{typed!r} is not the configured {side} domain "
-                            f"({configured!r})"})
-                return
-            env = _account_env(account_id, dict(os.environ))
-            # Never logged and never stored: it reaches the child as
-            # environment and nothing writes it anywhere.
-            env["DWD_PASSWORD"] = body.get("admin_password") or ""
-            argv = [PY, "remove_tenant_setup.py", "--side", side,
-                    "--confirm-domain", configured]
-            # "wipe" empties the tenant and leaves it usable; "remove" also
-            # takes the project, the grant and the configuration. Two very
-            # different intentions behind one confirmation dialog, so the
-            # caller has to say which -- an unrecognised value is refused
-            # rather than defaulting to the destructive one.
-            mode = (body.get("mode") or "remove").strip()
-            if mode not in ("wipe", "remove", "remove_setup", "delete_users"):
-                self._json({"ok": False, "error":
-                            f"mode must be 'wipe', 'remove', 'remove_setup' "
-                            f"or 'delete_users', got {mode!r}"})
-                return
-            if mode == "delete_users":
-                # A different script entirely: wipe and remove empty a
-                # tenant's DATA and leave the accounts, this deletes the
-                # accounts themselves. wipe_target.py already owns that --
-                # same typed-domain gate, its own assert_sandbox, and it
-                # invalidates the ledger afterwards, without which the next
-                # run skips every user it believes is migrated and reports
-                # success against an empty tenant.
-                #
-                # Still no --account-id, for the reason the comment above
-                # gives: _account_env has already pointed MIGRATION_DB at
-                # this account's ledger, and a child told to resolve an
-                # account follows it there looking for tenant_configs, a
-                # control-plane-only table.
-                argv = [PY, "wipe_target.py", "--side", side,
-                        "--confirm-domain", configured, "--apply"]
-            elif mode == "wipe":
-                argv.append("--keep-setup")
-            elif mode == "remove_setup":
-                # Undo the Setup Wizard and NOTHING else: revoke the DWD
-                # grant, delete the Cloud project, forget the config and the
-                # key -- but leave the tenant's data alone. The wizard never
-                # created data, so removing "what the wizard did" must not
-                # wipe a tenant. --keep-data skips step 1 (the data wipe) and
-                # runs only the teardown + config-forget.
-                argv.append("--keep-data")
-            # Deliberately NOT --account-id, exactly as wipe_target_argv
-            # explains: _account_env has already set MIGRATION_DB to this
-            # account's ledger, and a child told to resolve an account
-            # follows MIGRATION_DB there looking for tenant_configs, a table
-            # that only lives in the control-plane database.
-            #
-            #     sqlite3.OperationalError: no such table: tenant_configs
-            #
-            # Reproduced here on the first real call, in a file that already
-            # carried the warning. The env above carries this account's
-            # domain, admin and key, which is everything the child needs.
-            # The side is in the name because the Jobs page takes a running
-            # job's domain from its name: "wipe tenant data" against target2
-            # was shown as the SOURCE domain for its whole run.
-            label = {"wipe": f"wipe {side} data",
-                     "delete_users": f"delete all {side} users",
-                     "remove_setup": f"remove {side} setup (keep data)",
-                     "remove": f"remove {side} setup"}[mode]
-            ok, msg = get_job(account_id).start(label, argv, env=env)
-            self._json({"ok": ok, "error": "" if ok else msg})
-            return
-
-        if self.path == "/api/reset_target":
-            # Same targeting as reset_drive_ledger: an operator cleaning up
-            # somebody else's tenant is the normal case here, and resolving
-            # from the session alone silently aims at their own empty one.
-            account_id, scope_err = resolve_target_account(
-                self._account_id(), body.get("account_id"))
-            if scope_err:
-                self._json({"ok": False, "error": scope_err}, 403)
-                return
-            if not _subscription_ok(account_id):
-                self._json({"ok": False, "error": "subscription inactive"}, 402)
-                return
-            argv, env, err = reset_target_argv(body, account_id)
-            if err:
-                self._json({"ok": False, "error": err}, 400)
-                return
-
-            # reset_target.py lives at the repo root, unlike the seeder.
-            state, msg = launch_or_queue(
-                account_id, "reset target", argv, env=env,
-                requested_by=_account_email(account_id))
-            self._json({"ok": state != "error", "queued": state == "queued",
-                        "msg": msg, "error": msg if state == "error" else ""})
-            return
-
-        if self.path == "/api/wipe_source":
-            account_id, scope_err = resolve_target_account(
-                self._account_id(), body.get("account_id"))
-            if scope_err:
-                self._json({"ok": False, "error": scope_err}, 403)
-                return
-            if not _subscription_ok(account_id):
-                self._json({"ok": False, "error": "subscription inactive"}, 402)
-                return
-            argv, env, err = wipe_source_argv(body, account_id)
-            if err:
-                self._json({"ok": False, "error": err}, 400)
-                return
-
-            state, msg = launch_or_queue(
-                account_id, "wipe source", argv, env=env,
-                requested_by=_account_email(account_id))
-            self._json({"ok": state != "error", "queued": state == "queued",
-                        "msg": msg, "error": msg if state == "error" else ""})
-            return
-
-        if self.path == "/api/wipe_target":
-            # Same targeting as reset_drive_ledger: an operator cleaning up
-            # somebody else's tenant is the normal case here, and resolving
-            # from the session alone silently aims at their own empty one.
-            account_id, scope_err = resolve_target_account(
-                self._account_id(), body.get("account_id"))
-            if scope_err:
-                self._json({"ok": False, "error": scope_err}, 403)
-                return
-            if not _subscription_ok(account_id):
-                self._json({"ok": False, "error": "subscription inactive"}, 402)
-                return
-            argv, env, err = wipe_target_argv(body, account_id)
-            if err:
-                self._json({"ok": False, "error": err}, 400)
-                return
-
-            state, msg = launch_or_queue(
-                account_id, "wipe target", argv, env=env,
-                requested_by=_account_email(account_id))
-            self._json({"ok": state != "error", "queued": state == "queued",
-                        "msg": msg, "error": msg if state == "error" else ""})
-            return
-
-        if self.path == "/api/licences/assign":
-            from config import Settings as _S
-            import tenant_inventory
-
-            side = body.get("side", "target")
-            if side not in ("source", "target"):
-                self._json({"ok": False, "error": "side must be source or target"}, 400)
-                return
-            aid = self._on_screen()
-            ok, msg = tenant_inventory.assign_license(
-                _S(account_id=aid) if aid else _S(), side,
-                body.get("email", ""), body.get("sku_id", ""))
-            self._json({"ok": ok, "error": "" if ok else msg, "msg": msg})
-            return
-
-        if self.path == "/api/identities/save":
-            self._json(save_identity_pair(
-                body.get("source_email", ""), body.get("target_email", "")))
-            return
-
-        if self.path == "/api/reset_drive_ledger":
-            account_id, scope_err = resolve_target_account(
-                self._account_id(), body.get("account_id"))
-            if scope_err:
-                self._json({"ok": False, "error": scope_err}, 403)
-                return
-            if not _subscription_ok(account_id):
-                self._json({"ok": False, "error": "subscription inactive"}, 402)
-                return
-            argv, env, err = reset_drive_ledger_argv(body, account_id)
-            if err:
-                self._json({"ok": False, "error": err}, 400)
-                return
-
-            state, msg = launch_or_queue(
-                account_id, "reset drive ledger", argv, env=env,
-                requested_by=_account_email(account_id))
-            self._json({"ok": state != "error", "queued": state == "queued",
-                        "msg": msg, "error": msg if state == "error" else ""})
-            return
-
-        if self.path == "/api/check":
-            self._json(live_check(body.get("kind", "")))
-            return
-
-        if self.path == "/api/check_dwd":
-            invalidate_status()
-            _refresh_snapshot()
-            with _snap_lock:
-                entry = _snaps.get(None)
-                data = (entry or {}).get("data") or {}
-            self._json({"ok": True, "status": data})
-            return
-
-        if self.path == "/api/scope_diagnosis":
-            tenant = (body.get("tenant") or "").strip().lower()
-            if tenant not in ("source", "target"):
-                self._json({"ok": False, "error": "tenant must be 'source' or 'target'"}, 400)
-                return
-            self._json({"ok": True, "diagnosis": scope_diagnosis(tenant)})
-            return
-
-        if self.path == "/api/checkstep":
-            try:
-                n = int(body.get("step", 0))
-            except (TypeError, ValueError):
-                self._json({"ok": False, "error": "step must be a number"}, 400)
-                return
-            self._json(check_step(n))
-            return
-
-        if self.path == "/api/runmode":
-            self._json(set_run_mode(body.get("mode", "")))
-            return
-
-        if self.path == "/api/toggles":
-            self._json(set_toggles(body))
-            return
-
-        if self.path == "/api/dwd/automate":
-            tenant = body.get("tenant", "")
-            if tenant not in ("source", "target"):
-                self._json({"ok": False,
-                            "error": "tenant must be source or target"}, 400)
-                return
-            from config import Settings
-            import dwd_helper
-
-            st = Settings()
-            base = os.path.dirname(os.path.abspath(__file__))
-            key = st.source_sa_key if tenant == "source" else st.target_sa_key
-            client_id = ""
-            try:
-                with open(key, encoding="utf-8") as fh:
-                    client_id = json.load(fh).get("client_id", "")
-            except Exception:  # noqa: BLE001 - absent key is an early state
-                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
-            scopes = ""
-            try:
-                data = dwd_helper._load_payload(tenant)
-                scopes = data.get("scopes", "")
-            except Exception:  # noqa: BLE001 - never break the panel
-                logging.getLogger(__name__).debug("ignored an error", exc_info=True)
-            if not client_id:
-                self._json({"ok": False,
-                            "error": f"upload the {tenant} service-account "
-                                     f"key first (no client ID yet)"}, 400)
-                return
-            cmd = (f"cd {base} && "
-                   f"{sys.executable} dwd_helper.py --client-id {client_id} "
-                   f"--scopes {scopes!r}")
-            # This server is headless (VPS), so it cannot open the browser
-            # itself: hand the operator the exact command to run on a machine
-            # with a display. --headful is the default inside the helper.
-            self._json({"ok": True, "command": cmd, "client_id": client_id,
-                        "scopes": scopes, "tenant": tenant,
-                        "note": "run this on a machine with a browser"})
-            return
-
-        if self.path == "/api/authmode":
-            self._json(set_auth_mode(body.get("mode", "")))
-            return
-
-        if self.path == "/api/upload":
-            res = upload_credential(body.get("kind", ""), body.get("content", ""))
-            self._json(res, 200 if res.get("ok") else 400)
-            return
-
-        if self.path == "/api/config":
-            clean, err = validate_config(body)
-            if err:
-                self._json({"ok": False, "error": err}, 400)
-                return
-            write_config(clean)
-            # A signed-in account's tenant pair lives in tenant_configs, not
-            # env.sh -- that is what every action button and the header read.
-            # Writing only env.sh meant an account could correct its domain
-            # here, be told "saved", and see nothing change anywhere, because
-            # every reader was looking at the other place. env.sh is still
-            # written for the single-tenant box that has no account row.
-            acct = self._on_screen()
-            saved_to = ENV_PATH
-            if acct is not None:
-                try:
-                    import accounts_auth
-                    accounts_auth.update_tenant_config(
-                        acct, "source", domain=clean.get("SOURCE_DOMAIN"),
-                        admin_email=clean.get("SOURCE_ADMIN"))
-                    accounts_auth.update_tenant_config(
-                        acct, "target", domain=clean.get("TARGET_DOMAIN"),
-                        admin_email=clean.get("TARGET_ADMIN"))
-                    saved_to = f"this account's tenant config (and {ENV_PATH})"
-                except Exception as exc:      # noqa: BLE001
-                    self._json({"ok": False,
-                                "error": f"saved to {ENV_PATH} but not to this "
-                                         f"account's tenant config: {exc}"}, 500)
-                    return
-            self._json({"ok": True, "msg": f"saved to {saved_to}",
-                        "config": read_config(acct)})
-            return
-
-        if self.path == "/api/groq":
-            # Save the Groq API key (case-preserved -- it is not a domain) or
-            # clear it with an empty string.
-            if "key" in body:
-                err = save_groq_key(body.get("key", ""))
-                if err:
-                    self._json({"ok": False, "error": err}, 400)
-                    return
-                self._json({"ok": True,
-                            "msg": "saved to " + ENV_PATH,
-                            "configured": bool(groq_api_key())})
-                return
-            self._json({"ok": False, "error": "no key field"}, 400)
-            return
-
-        if self.path == "/api/groq_log":
-            # Ask Groq to summarise the current log tail + headline metrics.
-            key = groq_api_key()
-            if not key:
-                self._json({"ok": False,
-                            "error": "no Groq API key — add one in the Logs panel"},
-                           400)
-                return
-            prompt = (body.get("prompt") or "").strip()[:2000]
-            if not prompt:
-                prompt = ("Summarise this migration's current state for "
-                          "benchmarking and error reporting.")
-            tail = "\n".join(logs_payload()["lines"][-500:])
-            summary = _groq_run_summary()
-            # The log itself, headed by the run's metrics: the summary used to go in its
-            # place, so the diagnosis was asked to quote log lines it was never shown.
-            text, err = _groq_analyze_log(
-                f"{summary}\n\n{tail}" if summary else tail, prompt, key)
-            if err:
-                self._json({"ok": False, "error": err}, 502)
-                return
-            self._json({"ok": True, "text": text})
-            return
-
-        if self.path == "/api/setup":
-            # This account's tenants, not the box's. Worse than the header
-            # bug it shares a cause with: this one builds a setup.sh command
-            # line out of the domains, so an unscoped read does not merely
-            # display the wrong tenant -- it runs against it.
-            cfg = read_config(self._on_screen())
-            missing = [k for k, v in cfg.items() if not v]
-            if missing:
-                self._json({"ok": False,
-                            "error": "save the domains and admins first (missing: "
-                                     + ", ".join(missing) + ")"}, 400)
-                return
-            argv = ["bash", "setup.sh",
-                    "--source-domain", cfg["source_domain"],
-                    "--target-domain", cfg["target_domain"],
-                    "--source-admin", cfg["source_admin"],
-                    "--target-admin", cfg["target_admin"]]
-            if body.get("keyless"):
-                argv.append("--keyless")
-            ok, msg = JOB.start("setup", argv, env=gcloud_env())
-            self._json({"ok": ok, "error": "" if ok else msg})
-            return
-
-        if self.path == "/api/deploy_config":
-            # Save-only: lets the VPS connection be entered once, from either
-            # UI, before a Deploy is ever run -- see read_deploy_config().
-            clean, err = validate_deploy_config(body)
-            if err:
-                self._json({"ok": False, "error": err}, 400)
-                return
-            write_config_raw(clean)
-            self._json({"ok": True, "msg": f"saved to {ENV_PATH}"})
-            return
-
-        if self.path == "/api/deploy":
-            clean, err = validate_deploy_config(body)
-            if err:
-                self._json({"ok": False, "error": err}, 400)
-                return
-            host, user = clean["DEPLOY_HOST"], clean["DEPLOY_USER"]
-            port, ui_port = clean["DEPLOY_PORT"], clean["DEPLOY_UI_PORT"]
-            key = clean["DEPLOY_KEY"]
-            # Copying credentials to another machine is outward-facing and not
-            # undoable, so it takes the same typed confirmation as a migration.
-            creds = bool(body.get("include_credentials"))
-            if creds and body.get("confirm") != "DEPLOY":
-                self._json({"ok": False,
-                            "error": "sending credentials to a host needs the "
-                                     "confirmation phrase DEPLOY"}, 400)
-                return
-            # Remembered for next time regardless of how this run turns out --
-            # a failed deploy (bad password prompt, network blip) still means
-            # the operator typed a real host worth keeping.
-            write_config_raw(clean)
-            argv = [PY, "deploy_remote.py", "--host", host, "--user", user,
-                    "--port", port, "--ui-port", ui_port]
-            if key:
-                argv += ["--key", key]
-            if creds:
-                argv.append("--include-credentials")
-            rec_id = record_deploy_start(host, user, port, ui_port, creds,
-                                         host_info().get("commit", ""))
-            ok, msg = JOB.start("deploy", argv,
-                                on_finish=lambda rc: record_deploy_finish(rec_id, rc))
-            if not ok:
-                # Never started -- e.g. another job already running -- so
-                # there is no process to ever call on_finish. Recording it
-                # as its own immediate failure keeps the history honest
-                # instead of leaving a permanently "in progress" ghost.
-                record_deploy_finish(rec_id, None)
-            self._json({"ok": ok, "error": "" if ok else msg})
-            return
-
-        if self.path == "/api/host/restart":
-            if not self._caller()[1]:
-                self._json({"ok": False, "msg": "superadmin only"}, 403)
-                return
-            import host_ops
-            ok, msg = host_ops.restart(str(body.get("unit") or ""), host_busy())
-            log.warning("host restart %s by account %s: %s", body.get("unit"), self._account_id(), msg)
-            self._json({"ok": ok, "msg": msg}, 200 if ok else 409)
-            return
-        if self.path == "/api/stop":
-            # The account whose job this is. /api/run starts jobs under
-            # get_job(account_id); stopping the global JOB instead meant a
-            # tenant could start work it could not then stop -- pressed
-            # live, Stop reported success and the run carried on.
-            account_id, scope_err = resolve_target_account(
-                self._account_id(), body.get("account_id"))
-            if scope_err:
-                self._json({"ok": False, "msg": scope_err}, 403)
-                return
-            force = bool(body.get("force"))
-            job = get_job(account_id)
-
-            # Recorded BEFORE the signal, like every other destructive
-            # action here. Stop kills work: a SIGINT ended a thirteen-hour,
-            # 200-user seed a few minutes short of writing its manifest, and
-            # afterwards there was nothing anywhere saying who had asked for
-            # that or why -- operator_actions_log had no row, the job log had
-            # only a KeyboardInterrupt traceback. An operator reconstructing
-            # it could not get past "something sent a signal".
-            #
-            # Best-effort: an audit table that is unwritable must not stop
-            # someone halting a runaway job.
-            # Never empty: begin_action refuses an empty reason, and a Stop pressed
-            # without one went unrecorded -- every kill behind incidents #7, #8, #10
-            # and #12 then read as a crash (run_watch.stopped_by looks for this row).
-            stop_reason = (str(body.get("reason") or "").strip()[:300]
-                           or ("Stop pressed again (forced), no reason given" if force
-                               else "Stop pressed, no reason given"))
-            _stop_action = None
-            try:
-                _stop_action = cpdb.begin_action(
-                    actor=_account_email(account_id), actor_role="operator",
-                    action="stop job (force)" if force else "stop job",
-                    reason=stop_reason,
-                    target=(job.name if job.running else "external process"),
-                    params={"force": force, "pid": getattr(job.proc, "pid", None)},
-                    account_id=account_id)
-            except Exception as exc:  # noqa: BLE001
-                print(f"could not record the stop: {exc}", flush=True)
-
-            def _note(outcome: str, detail: str) -> None:
-                if _stop_action is not None:
-                    cpdb.finish_action(_stop_action, outcome, detail[:300])
-
-            if job.running:
-                # A second Stop forces, from any page (job_admission.stop_asked).
-                pid = getattr(job.proc, "pid", None)
-                force = force or job_admission.stop_asked(pid)
-                msg = job.stop(force)
-                if pid:
-                    job_admission.note_stop(pid)
-                _note("done", f"{msg} (pid {pid})")
-                self._json({"ok": True, "msg": msg})
-            else:
-                jobs = _external_processes()
-                # Only the job the caller is looking at -- its own pid, or the
-                # one /api/job describes (jobs[0]) for an older client. This
-                # signalled EVERY listed process: with tally.py listed, one
-                # account's tally Stop would have stopped another account's
-                # migration too. A pid the scan does not list is never touched.
-                jobs = _external_stop_targets(jobs, body.get("pid"))
-                if not jobs:
-                    _note("done", "nothing running")
-                    self._json({"ok": True, "msg": "nothing running"})
-                else:
-                    sent = []
-                    hard = False
-                    for j in jobs:
-                        # A second Stop forces, from any page (job_admission).
-                        this_hard = force or job_admission.stop_asked(j["pid"])
-                        hard = hard or this_hard
-                        try:
-                            # Same cooperative SIGINT the webui's own Stop uses:
-                            # the engine finishes in-flight items, then resumes.
-                            os.kill(j["pid"], signal.SIGKILL if this_hard
-                                    else signal.SIGINT)
-                            sent.append(str(j["pid"]))
-                            if not this_hard:
-                                job_admission.note_stop(j["pid"])
-                        except (ProcessLookupError, PermissionError):
-                            pass
-                    verb = "kill" if hard else "interrupt"
-                    msg = (f"{verb} sent to {len(sent)} external "
-                           f"process(es): {', '.join(sent)}") if sent \
-                        else "external process(es) already gone"
-                    _note("done", msg)
-                    self._json({"ok": True, "msg": msg})
-            return
-
-        if self.path != "/api/run":
+        route = self._POST_ROUTES.get(self.path)
+        if route is None:
             self._json({"ok": False, "error": "not found"}, 404)
             return
+        route(self, body)
+
+    def _post_oauth_begin(self, body: dict) -> None:
+        tenant = body.get("tenant", "")
+        if tenant not in ("source", "target"):
+            self._json({"ok": False, "error": "tenant must be source or target"}, 400)
+            return
+        _PENDING["tenant"] = tenant
+        self._json(oauth_begin(tenant, self.server.server_address[1]))
+        return
+
+    def _post_oauth_disconnect(self, body: dict) -> None:
+        from config import Settings
+        import oauth_store
+
+        tenant = body.get("tenant", "")
+        if tenant not in ("source", "target"):
+            self._json({"ok": False, "error": "tenant must be source or target"}, 400)
+            return
+        oauth_store.TokenStore(Settings().oauth_token_dir).clear(tenant)
+        # Deliberately worded: the local token is gone, but the grant still
+        # exists at Google until an admin revokes it in their own console.
+        self._json({"ok": True,
+                    "msg": f"{tenant} token removed locally; access is still "
+                           f"granted at Google until revoked in the admin console"})
+        return
+
+    def _post_queue_cancel(self, body: dict) -> None:
+        # Scoped to the caller's own account unless they are the
+        # operator: a shared queue where anyone can drop anyone's work
+        # is worse than no queue.
+        caller = self._account_id()
+        scope = None if caller in (None, 1) else caller
+        dropped = job_queue.cancel(int(body.get("id") or 0),
+                                   account_id=scope)
+        self._json({"ok": dropped,
+                    "error": "" if dropped else
+                             "not queued (already started, cancelled, "
+                             "or belongs to another account)"})
+        return
+
+    def _post_seed(self, body: dict) -> None:
+        # Same bug resolve_target_account's docstring names: a
+        # superadmin picking another account's domain (SeedDomainPicker
+        # lists every account's) got "set the source domain in step 2
+        # first" back -- silently resolved to the OPERATOR's account.
+        account_id, scope_err = resolve_target_account(
+            self._account_id(), body.get("account_id"))
+        if scope_err:
+            self._json({"ok": False, "error": scope_err}, 403)
+            return
+        if not _subscription_ok(account_id):
+            self._json({"ok": False, "error": "subscription inactive"}, 402)
+            return
+        if not _seed_ok(account_id):
+            self._json({"ok": False, "error": "seeding is not enabled on this account"}, 403)
+            return
+        argv, env, err = seed_argv(body, account_id)
+        if err:
+            self._json({"ok": False, "error": err}, 400)
+            return
+        state, msg = launch_or_queue(
+            account_id, "seed", argv, env=env,
+            cwd=os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "data-generator"),
+            requested_by=_account_email(account_id),
+            retry={"path": "/api/seed", "body": body})
+        self._json({"ok": state != "error", "queued": state == "queued",
+                    "msg": msg, "error": msg if state == "error" else ""})
+        return
+
+    def _post_repair_console_setup(self, body: dict) -> None:
+        # The two steps with no API and no gcloud command -- the DWD
+        # grant and the Chat app -- redone for a tenant already set up.
+        # full_setup does both once; neither was reachable afterwards,
+        # so a tenant whose setup died before those phases, or one set
+        # up before a scope was added, had no route back except
+        # re-running the whole setup against a project that exists.
+        #
+        # It runs HERE, on the box. /api/dwd/automate hands back a
+        # command to run elsewhere because "this server is headless",
+        # which stopped being true when dwd_helper._ensure_display()
+        # learned to start Xvfb -- full_setup's own Chat phase has
+        # relied on that for a while. Confirmed on this VPS:
+        # _ensure_display() returns :100 and Chromium is installed.
+        account_id, scope_err = resolve_target_account(
+            self._account_id(), body.get("account_id"))
+        if scope_err:
+            self._json({"ok": False, "error": scope_err}, 403)
+            return
+        side = (body.get("side") or "source").strip()
+        if side not in ("source", "target"):
+            self._json({"ok": False, "error": "side must be source or target"})
+            return
+        env = _account_env(account_id, dict(os.environ))
+        # Environment, never argv -- a command line is readable by every
+        # process on the box through ps.
+        env["DWD_PASSWORD"] = body.get("admin_password") or ""
+        if not env["DWD_PASSWORD"]:
+            self._json({"ok": False, "error":
+                        "the admin password is needed: both steps sign "
+                        "in to a Google console and neither can prompt"})
+            return
+        # No --account-id here, deliberately: _account_env above sets
+        # MIGRATION_DB, and a child given both follows it into the
+        # per-account ledger hunting for tenant_configs that live in the
+        # control plane. The environment already names the tenant, which
+        # is why the flag is redundant as well as harmful.
+        argv = [PY, "repair_console_setup.py", "--side", side]
+        if not body.get("grant", True):
+            argv.append("--skip-grant")
+        if not body.get("chat", True):
+            argv.append("--skip-chat")
+        # Narrow the delegation to what this tenant is now for.
+        #
+        # Setup grants the union so a tenant works either way
+        # immediately; once an operator says "migrate", the source's
+        # write scopes have to GO, because the read-only source is the
+        # guarantee the whole tool rests on and a wide grant makes it
+        # untrue with nothing on screen to say so.
+        purpose = (body.get("purpose") or "").strip()
+        if purpose:
+            if purpose not in ("seed", "migrate"):
+                self._json({"ok": False, "error":
+                            "purpose must be 'seed' or 'migrate'"})
+                return
+            argv += ["--purpose", purpose]
+        if purpose and side == "source":
+            # Seed and migrate each have their own key now, each delegated
+            # exactly its own set: "narrow for seed/migrate" on one shared key
+            # (an overwrite undone by the next switch) is that, done once.
+            st_ = __import__("config").Settings(account_id=account_id) if account_id \
+                else __import__("config").Settings()
+            env["DWD_EMAIL_SOURCE"] = st_.source_admin or ""
+            env["DWD_PASSWORD_SOURCE"] = env["DWD_PASSWORD"]
+            argv = [PY, "separate_credentials.py"]
+        label = ("separate seed and migrate keys" if purpose and side == "source"
+                 else f"narrow scopes for {purpose}" if purpose
+                 else "repair console setup")
+        ok, msg = get_job(account_id).start(label, argv, env=env)
+        self._json({"ok": ok, "error": "" if ok else msg})
+        return
+
+    def _post_configure_chat_app(self, body: dict) -> None:
+        # Chat needs an app configured in the Cloud console before a
+        # single chat.spaces() call stops returning 404 "Google Chat app
+        # not found", and there is no API and no gcloud command for it.
+        # full_setup does this once per tenant -- but a tenant whose
+        # setup died before that phase's result was written had no route
+        # back to it except re-running the whole setup against a project
+        # that already exists. Live, that left 46 finished users with 46
+        # chat 404s and no chat data at all.
+        account_id, scope_err = resolve_target_account(
+            self._account_id(), body.get("account_id"))
+        if scope_err:
+            self._json({"ok": False, "error": scope_err}, 403)
+            return
+        side = (body.get("side") or "source").strip()
+        if side not in ("source", "target"):
+            self._json({"ok": False, "error": "side must be source or target"})
+            return
+        from config import Settings as _Settings
+
+        st = (_Settings(account_id=account_id) if account_id
+              else _Settings())
+        key = st.source_sa_key if side == "source" else st.target_sa_key
+        admin = st.source_admin if side == "source" else st.target_admin
+        try:
+            import ensure_apis
+
+            project = ensure_apis.project_of(key)
+        except Exception as exc:      # noqa: BLE001
+            self._json({"ok": False, "error":
+                        f"could not read the project from {key}: "
+                        f"{str(exc)[:120]}"})
+            return
+        if not project or not admin:
+            self._json({"ok": False, "error":
+                        "this tenant has no project or no admin on file"})
+            return
+        env = _account_env(account_id, dict(os.environ))
+        # Environment, never argv: a command line is readable by every
+        # process on the box through ps.
+        env["DWD_PASSWORD"] = body.get("admin_password") or ""
+        if not env["DWD_PASSWORD"]:
+            self._json({"ok": False, "error":
+                        "the admin password is needed to sign in to the "
+                        "Cloud console"})
+            return
+        argv = [PY, "gcloud_browser_auth.py", "--configure-chat",
+                "--project", project, "--admin", admin]
+        ok, msg = get_job(account_id).start("configure chat app", argv,
+                                            env=env)
+        self._json({"ok": ok, "error": "" if ok else msg})
+        return
+
+    def _post_remove_tenant_setup(self, body: dict) -> None:
+        # The most destructive endpoint here: it ends a tenant setup
+        # rather than pausing or resetting it -- the data, the Cloud
+        # project, the delegation grant and the saved configuration.
+        #
+        # The domain must be typed back, and is compared against
+        # Settings(), never against anything in the body. A generic
+        # confirm word proves someone read a dialog; the domain proves
+        # they know which of two configured tenants they are pointed at,
+        # which is the mistake worth catching when both are one click
+        # apart on the same page.
+        account_id, scope_err = resolve_target_account(
+            self._account_id(), body.get("account_id"))
+        if scope_err:
+            self._json({"ok": False, "error": scope_err}, 403)
+            return
+        side = (body.get("side") or "").strip()
+        if side not in ("source", "target"):
+            self._json({"ok": False, "error": "side must be source or target"})
+            return
+        # Imported here, not relied on from the enclosing scope. Another
+        # branch of this same method does `from config import Settings`
+        # inside its own `if`, which makes Settings a LOCAL of do_POST
+        # for every path through it -- so reaching it from a branch that
+        # did not run raises UnboundLocalError, not NameError, and the
+        # server returns a bare 502 with no body at all. The dialog
+        # showed "Unexpected end of JSON input", which names the
+        # symptom and nothing else.
+        #
+        # webui.py's own module docstring warns about exactly this
+        # shape at line 70. It is easier to hit than it reads.
+        from config import Settings as _Settings
+
+        st = (_Settings(account_id=account_id) if account_id
+              else _Settings())
+        configured = (st.source_domain if side == "source"
+                      else st.target_domain) or ""
+        typed = (body.get("confirm_domain") or "").strip()
+        if not configured or typed.lower() != configured.lower():
+            self._json({"ok": False, "error":
+                        f"{typed!r} is not the configured {side} domain "
+                        f"({configured!r})"})
+            return
+        env = _account_env(account_id, dict(os.environ))
+        # Never logged and never stored: it reaches the child as
+        # environment and nothing writes it anywhere.
+        env["DWD_PASSWORD"] = body.get("admin_password") or ""
+        argv = [PY, "remove_tenant_setup.py", "--side", side,
+                "--confirm-domain", configured]
+        # "wipe" empties the tenant and leaves it usable; "remove" also
+        # takes the project, the grant and the configuration. Two very
+        # different intentions behind one confirmation dialog, so the
+        # caller has to say which -- an unrecognised value is refused
+        # rather than defaulting to the destructive one.
+        mode = (body.get("mode") or "remove").strip()
+        if mode not in ("wipe", "remove", "remove_setup", "delete_users"):
+            self._json({"ok": False, "error":
+                        f"mode must be 'wipe', 'remove', 'remove_setup' "
+                        f"or 'delete_users', got {mode!r}"})
+            return
+        if mode == "delete_users":
+            # A different script entirely: wipe and remove empty a
+            # tenant's DATA and leave the accounts, this deletes the
+            # accounts themselves. wipe_target.py already owns that --
+            # same typed-domain gate, its own assert_sandbox, and it
+            # invalidates the ledger afterwards, without which the next
+            # run skips every user it believes is migrated and reports
+            # success against an empty tenant.
+            #
+            # Still no --account-id, for the reason the comment above
+            # gives: _account_env has already pointed MIGRATION_DB at
+            # this account's ledger, and a child told to resolve an
+            # account follows it there looking for tenant_configs, a
+            # control-plane-only table.
+            argv = [PY, "wipe_target.py", "--side", side,
+                    "--confirm-domain", configured, "--apply"]
+        elif mode == "wipe":
+            argv.append("--keep-setup")
+        elif mode == "remove_setup":
+            # Undo the Setup Wizard and NOTHING else: revoke the DWD
+            # grant, delete the Cloud project, forget the config and the
+            # key -- but leave the tenant's data alone. The wizard never
+            # created data, so removing "what the wizard did" must not
+            # wipe a tenant. --keep-data skips step 1 (the data wipe) and
+            # runs only the teardown + config-forget.
+            argv.append("--keep-data")
+        # Deliberately NOT --account-id, exactly as wipe_target_argv
+        # explains: _account_env has already set MIGRATION_DB to this
+        # account's ledger, and a child told to resolve an account
+        # follows MIGRATION_DB there looking for tenant_configs, a table
+        # that only lives in the control-plane database.
+        #
+        #     sqlite3.OperationalError: no such table: tenant_configs
+        #
+        # Reproduced here on the first real call, in a file that already
+        # carried the warning. The env above carries this account's
+        # domain, admin and key, which is everything the child needs.
+        # The side is in the name because the Jobs page takes a running
+        # job's domain from its name: "wipe tenant data" against target2
+        # was shown as the SOURCE domain for its whole run.
+        label = {"wipe": f"wipe {side} data",
+                 "delete_users": f"delete all {side} users",
+                 "remove_setup": f"remove {side} setup (keep data)",
+                 "remove": f"remove {side} setup"}[mode]
+        ok, msg = get_job(account_id).start(label, argv, env=env)
+        self._json({"ok": ok, "error": "" if ok else msg})
+        return
+
+    def _post_reset_target(self, body: dict) -> None:
+        # Same targeting as reset_drive_ledger: an operator cleaning up
+        # somebody else's tenant is the normal case here, and resolving
+        # from the session alone silently aims at their own empty one.
+        account_id, scope_err = resolve_target_account(
+            self._account_id(), body.get("account_id"))
+        if scope_err:
+            self._json({"ok": False, "error": scope_err}, 403)
+            return
+        if not _subscription_ok(account_id):
+            self._json({"ok": False, "error": "subscription inactive"}, 402)
+            return
+        argv, env, err = reset_target_argv(body, account_id)
+        if err:
+            self._json({"ok": False, "error": err}, 400)
+            return
+
+        # reset_target.py lives at the repo root, unlike the seeder.
+        state, msg = launch_or_queue(
+            account_id, "reset target", argv, env=env,
+            requested_by=_account_email(account_id))
+        self._json({"ok": state != "error", "queued": state == "queued",
+                    "msg": msg, "error": msg if state == "error" else ""})
+        return
+
+    def _post_wipe_source(self, body: dict) -> None:
+        account_id, scope_err = resolve_target_account(
+            self._account_id(), body.get("account_id"))
+        if scope_err:
+            self._json({"ok": False, "error": scope_err}, 403)
+            return
+        if not _subscription_ok(account_id):
+            self._json({"ok": False, "error": "subscription inactive"}, 402)
+            return
+        argv, env, err = wipe_source_argv(body, account_id)
+        if err:
+            self._json({"ok": False, "error": err}, 400)
+            return
+
+        state, msg = launch_or_queue(
+            account_id, "wipe source", argv, env=env,
+            requested_by=_account_email(account_id))
+        self._json({"ok": state != "error", "queued": state == "queued",
+                    "msg": msg, "error": msg if state == "error" else ""})
+        return
+
+    def _post_wipe_target(self, body: dict) -> None:
+        # Same targeting as reset_drive_ledger: an operator cleaning up
+        # somebody else's tenant is the normal case here, and resolving
+        # from the session alone silently aims at their own empty one.
+        account_id, scope_err = resolve_target_account(
+            self._account_id(), body.get("account_id"))
+        if scope_err:
+            self._json({"ok": False, "error": scope_err}, 403)
+            return
+        if not _subscription_ok(account_id):
+            self._json({"ok": False, "error": "subscription inactive"}, 402)
+            return
+        argv, env, err = wipe_target_argv(body, account_id)
+        if err:
+            self._json({"ok": False, "error": err}, 400)
+            return
+
+        state, msg = launch_or_queue(
+            account_id, "wipe target", argv, env=env,
+            requested_by=_account_email(account_id))
+        self._json({"ok": state != "error", "queued": state == "queued",
+                    "msg": msg, "error": msg if state == "error" else ""})
+        return
+
+    def _post_licences_assign(self, body: dict) -> None:
+        from config import Settings as _S
+        import tenant_inventory
+
+        side = body.get("side", "target")
+        if side not in ("source", "target"):
+            self._json({"ok": False, "error": "side must be source or target"}, 400)
+            return
+        aid = self._on_screen()
+        ok, msg = tenant_inventory.assign_license(
+            _S(account_id=aid) if aid else _S(), side,
+            body.get("email", ""), body.get("sku_id", ""))
+        self._json({"ok": ok, "error": "" if ok else msg, "msg": msg})
+        return
+
+    def _post_identities_save(self, body: dict) -> None:
+        self._json(save_identity_pair(
+            body.get("source_email", ""), body.get("target_email", "")))
+        return
+
+    def _post_reset_drive_ledger(self, body: dict) -> None:
+        account_id, scope_err = resolve_target_account(
+            self._account_id(), body.get("account_id"))
+        if scope_err:
+            self._json({"ok": False, "error": scope_err}, 403)
+            return
+        if not _subscription_ok(account_id):
+            self._json({"ok": False, "error": "subscription inactive"}, 402)
+            return
+        argv, env, err = reset_drive_ledger_argv(body, account_id)
+        if err:
+            self._json({"ok": False, "error": err}, 400)
+            return
+
+        state, msg = launch_or_queue(
+            account_id, "reset drive ledger", argv, env=env,
+            requested_by=_account_email(account_id))
+        self._json({"ok": state != "error", "queued": state == "queued",
+                    "msg": msg, "error": msg if state == "error" else ""})
+        return
+
+    def _post_check(self, body: dict) -> None:
+        self._json(live_check(body.get("kind", "")))
+        return
+
+    def _post_check_dwd(self, body: dict) -> None:
+        invalidate_status()
+        _refresh_snapshot()
+        with _snap_lock:
+            entry = _snaps.get(None)
+            data = (entry or {}).get("data") or {}
+        self._json({"ok": True, "status": data})
+        return
+
+    def _post_scope_diagnosis(self, body: dict) -> None:
+        tenant = (body.get("tenant") or "").strip().lower()
+        if tenant not in ("source", "target"):
+            self._json({"ok": False, "error": "tenant must be 'source' or 'target'"}, 400)
+            return
+        self._json({"ok": True, "diagnosis": scope_diagnosis(tenant)})
+        return
+
+    def _post_checkstep(self, body: dict) -> None:
+        try:
+            n = int(body.get("step", 0))
+        except (TypeError, ValueError):
+            self._json({"ok": False, "error": "step must be a number"}, 400)
+            return
+        self._json(check_step(n))
+        return
+
+    def _post_runmode(self, body: dict) -> None:
+        self._json(set_run_mode(body.get("mode", "")))
+        return
+
+    def _post_toggles(self, body: dict) -> None:
+        self._json(set_toggles(body))
+        return
+
+    def _post_dwd_automate(self, body: dict) -> None:
+        tenant = body.get("tenant", "")
+        if tenant not in ("source", "target"):
+            self._json({"ok": False,
+                        "error": "tenant must be source or target"}, 400)
+            return
+        from config import Settings
+        import dwd_helper
+
+        st = Settings()
+        base = os.path.dirname(os.path.abspath(__file__))
+        key = st.source_sa_key if tenant == "source" else st.target_sa_key
+        client_id = ""
+        try:
+            with open(key, encoding="utf-8") as fh:
+                client_id = json.load(fh).get("client_id", "")
+        except Exception:  # noqa: BLE001 - absent key is an early state
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
+        scopes = ""
+        try:
+            data = dwd_helper._load_payload(tenant)
+            scopes = data.get("scopes", "")
+        except Exception:  # noqa: BLE001 - never break the panel
+            logging.getLogger(__name__).debug("ignored an error", exc_info=True)
+        if not client_id:
+            self._json({"ok": False,
+                        "error": f"upload the {tenant} service-account "
+                                 f"key first (no client ID yet)"}, 400)
+            return
+        cmd = (f"cd {base} && "
+               f"{sys.executable} dwd_helper.py --client-id {client_id} "
+               f"--scopes {scopes!r}")
+        # This server is headless (VPS), so it cannot open the browser
+        # itself: hand the operator the exact command to run on a machine
+        # with a display. --headful is the default inside the helper.
+        self._json({"ok": True, "command": cmd, "client_id": client_id,
+                    "scopes": scopes, "tenant": tenant,
+                    "note": "run this on a machine with a browser"})
+        return
+
+    def _post_authmode(self, body: dict) -> None:
+        self._json(set_auth_mode(body.get("mode", "")))
+        return
+
+    def _post_upload(self, body: dict) -> None:
+        res = upload_credential(body.get("kind", ""), body.get("content", ""))
+        self._json(res, 200 if res.get("ok") else 400)
+        return
+
+    def _post_config(self, body: dict) -> None:
+        clean, err = validate_config(body)
+        if err:
+            self._json({"ok": False, "error": err}, 400)
+            return
+        write_config(clean)
+        # A signed-in account's tenant pair lives in tenant_configs, not
+        # env.sh -- that is what every action button and the header read.
+        # Writing only env.sh meant an account could correct its domain
+        # here, be told "saved", and see nothing change anywhere, because
+        # every reader was looking at the other place. env.sh is still
+        # written for the single-tenant box that has no account row.
+        acct = self._on_screen()
+        saved_to = ENV_PATH
+        if acct is not None:
+            try:
+                import accounts_auth
+                accounts_auth.update_tenant_config(
+                    acct, "source", domain=clean.get("SOURCE_DOMAIN"),
+                    admin_email=clean.get("SOURCE_ADMIN"))
+                accounts_auth.update_tenant_config(
+                    acct, "target", domain=clean.get("TARGET_DOMAIN"),
+                    admin_email=clean.get("TARGET_ADMIN"))
+                saved_to = f"this account's tenant config (and {ENV_PATH})"
+            except Exception as exc:      # noqa: BLE001
+                self._json({"ok": False,
+                            "error": f"saved to {ENV_PATH} but not to this "
+                                     f"account's tenant config: {exc}"}, 500)
+                return
+        self._json({"ok": True, "msg": f"saved to {saved_to}",
+                    "config": read_config(acct)})
+        return
+
+    def _post_groq(self, body: dict) -> None:
+        # Save the Groq API key (case-preserved -- it is not a domain) or
+        # clear it with an empty string.
+        if "key" in body:
+            err = save_groq_key(body.get("key", ""))
+            if err:
+                self._json({"ok": False, "error": err}, 400)
+                return
+            self._json({"ok": True,
+                        "msg": "saved to " + ENV_PATH,
+                        "configured": bool(groq_api_key())})
+            return
+        self._json({"ok": False, "error": "no key field"}, 400)
+        return
+
+    def _post_groq_log(self, body: dict) -> None:
+        # Ask Groq to summarise the current log tail + headline metrics.
+        key = groq_api_key()
+        if not key:
+            self._json({"ok": False,
+                        "error": "no Groq API key — add one in the Logs panel"},
+                       400)
+            return
+        prompt = (body.get("prompt") or "").strip()[:2000]
+        if not prompt:
+            prompt = ("Summarise this migration's current state for "
+                      "benchmarking and error reporting.")
+        tail = "\n".join(logs_payload()["lines"][-500:])
+        summary = _groq_run_summary()
+        # The log itself, headed by the run's metrics: the summary used to go in its
+        # place, so the diagnosis was asked to quote log lines it was never shown.
+        text, err = _groq_analyze_log(
+            f"{summary}\n\n{tail}" if summary else tail, prompt, key)
+        if err:
+            self._json({"ok": False, "error": err}, 502)
+            return
+        self._json({"ok": True, "text": text})
+        return
+
+    def _post_setup(self, body: dict) -> None:
+        # This account's tenants, not the box's. Worse than the header
+        # bug it shares a cause with: this one builds a setup.sh command
+        # line out of the domains, so an unscoped read does not merely
+        # display the wrong tenant -- it runs against it.
+        cfg = read_config(self._on_screen())
+        missing = [k for k, v in cfg.items() if not v]
+        if missing:
+            self._json({"ok": False,
+                        "error": "save the domains and admins first (missing: "
+                                 + ", ".join(missing) + ")"}, 400)
+            return
+        argv = ["bash", "setup.sh",
+                "--source-domain", cfg["source_domain"],
+                "--target-domain", cfg["target_domain"],
+                "--source-admin", cfg["source_admin"],
+                "--target-admin", cfg["target_admin"]]
+        if body.get("keyless"):
+            argv.append("--keyless")
+        ok, msg = JOB.start("setup", argv, env=gcloud_env())
+        self._json({"ok": ok, "error": "" if ok else msg})
+        return
+
+    def _post_deploy_config(self, body: dict) -> None:
+        # Save-only: lets the VPS connection be entered once, from either
+        # UI, before a Deploy is ever run -- see read_deploy_config().
+        clean, err = validate_deploy_config(body)
+        if err:
+            self._json({"ok": False, "error": err}, 400)
+            return
+        write_config_raw(clean)
+        self._json({"ok": True, "msg": f"saved to {ENV_PATH}"})
+        return
+
+    def _post_deploy(self, body: dict) -> None:
+        clean, err = validate_deploy_config(body)
+        if err:
+            self._json({"ok": False, "error": err}, 400)
+            return
+        host, user = clean["DEPLOY_HOST"], clean["DEPLOY_USER"]
+        port, ui_port = clean["DEPLOY_PORT"], clean["DEPLOY_UI_PORT"]
+        key = clean["DEPLOY_KEY"]
+        # Copying credentials to another machine is outward-facing and not
+        # undoable, so it takes the same typed confirmation as a migration.
+        creds = bool(body.get("include_credentials"))
+        if creds and body.get("confirm") != "DEPLOY":
+            self._json({"ok": False,
+                        "error": "sending credentials to a host needs the "
+                                 "confirmation phrase DEPLOY"}, 400)
+            return
+        # Remembered for next time regardless of how this run turns out --
+        # a failed deploy (bad password prompt, network blip) still means
+        # the operator typed a real host worth keeping.
+        write_config_raw(clean)
+        argv = [PY, "deploy_remote.py", "--host", host, "--user", user,
+                "--port", port, "--ui-port", ui_port]
+        if key:
+            argv += ["--key", key]
+        if creds:
+            argv.append("--include-credentials")
+        rec_id = record_deploy_start(host, user, port, ui_port, creds,
+                                     host_info().get("commit", ""))
+        ok, msg = JOB.start("deploy", argv,
+                            on_finish=lambda rc: record_deploy_finish(rec_id, rc))
+        if not ok:
+            # Never started -- e.g. another job already running -- so
+            # there is no process to ever call on_finish. Recording it
+            # as its own immediate failure keeps the history honest
+            # instead of leaving a permanently "in progress" ghost.
+            record_deploy_finish(rec_id, None)
+        self._json({"ok": ok, "error": "" if ok else msg})
+        return
+
+    def _post_host_restart(self, body: dict) -> None:
+        if not self._caller()[1]:
+            self._json({"ok": False, "msg": "superadmin only"}, 403)
+            return
+        import host_ops
+        ok, msg = host_ops.restart(str(body.get("unit") or ""), host_busy())
+        log.warning("host restart %s by account %s: %s", body.get("unit"), self._account_id(), msg)
+        self._json({"ok": ok, "msg": msg}, 200 if ok else 409)
+        return
+
+    def _post_stop(self, body: dict) -> None:
+        # The account whose job this is. /api/run starts jobs under
+        # get_job(account_id); stopping the global JOB instead meant a
+        # tenant could start work it could not then stop -- pressed
+        # live, Stop reported success and the run carried on.
+        account_id, scope_err = resolve_target_account(
+            self._account_id(), body.get("account_id"))
+        if scope_err:
+            self._json({"ok": False, "msg": scope_err}, 403)
+            return
+        force = bool(body.get("force"))
+        job = get_job(account_id)
+
+        # Recorded BEFORE the signal, like every other destructive
+        # action here. Stop kills work: a SIGINT ended a thirteen-hour,
+        # 200-user seed a few minutes short of writing its manifest, and
+        # afterwards there was nothing anywhere saying who had asked for
+        # that or why -- operator_actions_log had no row, the job log had
+        # only a KeyboardInterrupt traceback. An operator reconstructing
+        # it could not get past "something sent a signal".
+        #
+        # Best-effort: an audit table that is unwritable must not stop
+        # someone halting a runaway job.
+        # Never empty: begin_action refuses an empty reason, and a Stop pressed
+        # without one went unrecorded -- every kill behind incidents #7, #8, #10
+        # and #12 then read as a crash (run_watch.stopped_by looks for this row).
+        stop_reason = (str(body.get("reason") or "").strip()[:300]
+                       or ("Stop pressed again (forced), no reason given" if force
+                           else "Stop pressed, no reason given"))
+        _stop_action = None
+        try:
+            _stop_action = cpdb.begin_action(
+                actor=_account_email(account_id), actor_role="operator",
+                action="stop job (force)" if force else "stop job",
+                reason=stop_reason,
+                target=(job.name if job.running else "external process"),
+                params={"force": force, "pid": getattr(job.proc, "pid", None)},
+                account_id=account_id)
+        except Exception as exc:  # noqa: BLE001
+            print(f"could not record the stop: {exc}", flush=True)
+
+        def _note(outcome: str, detail: str) -> None:
+            if _stop_action is not None:
+                cpdb.finish_action(_stop_action, outcome, detail[:300])
+
+        if job.running:
+            # A second Stop forces, from any page (job_admission.stop_asked).
+            pid = getattr(job.proc, "pid", None)
+            force = force or job_admission.stop_asked(pid)
+            msg = job.stop(force)
+            if pid:
+                job_admission.note_stop(pid)
+            _note("done", f"{msg} (pid {pid})")
+            self._json({"ok": True, "msg": msg})
+        else:
+            jobs = _external_processes()
+            # Only the job the caller is looking at -- its own pid, or the
+            # one /api/job describes (jobs[0]) for an older client. This
+            # signalled EVERY listed process: with tally.py listed, one
+            # account's tally Stop would have stopped another account's
+            # migration too. A pid the scan does not list is never touched.
+            jobs = _external_stop_targets(jobs, body.get("pid"))
+            if not jobs:
+                _note("done", "nothing running")
+                self._json({"ok": True, "msg": "nothing running"})
+            else:
+                sent = []
+                hard = False
+                for j in jobs:
+                    # A second Stop forces, from any page (job_admission).
+                    this_hard = force or job_admission.stop_asked(j["pid"])
+                    hard = hard or this_hard
+                    try:
+                        # Same cooperative SIGINT the webui's own Stop uses:
+                        # the engine finishes in-flight items, then resumes.
+                        os.kill(j["pid"], signal.SIGKILL if this_hard
+                                else signal.SIGINT)
+                        sent.append(str(j["pid"]))
+                        if not this_hard:
+                            job_admission.note_stop(j["pid"])
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                verb = "kill" if hard else "interrupt"
+                msg = (f"{verb} sent to {len(sent)} external "
+                       f"process(es): {', '.join(sent)}") if sent \
+                    else "external process(es) already gone"
+                _note("done", msg)
+                self._json({"ok": True, "msg": msg})
+        return
+
+    def _post_run(self, body: dict) -> None:
 
         name = body.get("action", "")
         spec = ACTIONS.get(name)
@@ -6425,6 +6430,44 @@ class Handler(BaseHTTPRequestHandler):
             requested_by=_account_email(account_id))
         self._json({"ok": state != "error", "queued": state == "queued",
                     "msg": msg, "error": None if state != "error" else msg})
+
+    # Every POST route, one method each: a name one route binds is no longer a local of
+    # every other (an import inside one branch of a single _do_POST once made Settings
+    # unbound in another -- UnboundLocalError, live, on the wipe endpoint).
+    _POST_ROUTES = {
+        "/api/oauth/begin": _post_oauth_begin,
+        "/api/oauth/disconnect": _post_oauth_disconnect,
+        "/api/queue/cancel": _post_queue_cancel,
+        "/api/seed": _post_seed,
+        "/api/repair_console_setup": _post_repair_console_setup,
+        "/api/configure_chat_app": _post_configure_chat_app,
+        "/api/remove_tenant_setup": _post_remove_tenant_setup,
+        "/api/reset_target": _post_reset_target,
+        "/api/wipe_source": _post_wipe_source,
+        "/api/wipe_target": _post_wipe_target,
+        "/api/licences/assign": _post_licences_assign,
+        "/api/identities/save": _post_identities_save,
+        "/api/reset_drive_ledger": _post_reset_drive_ledger,
+        "/api/check": _post_check,
+        "/api/check_dwd": _post_check_dwd,
+        "/api/scope_diagnosis": _post_scope_diagnosis,
+        "/api/checkstep": _post_checkstep,
+        "/api/runmode": _post_runmode,
+        "/api/toggles": _post_toggles,
+        "/api/dwd/automate": _post_dwd_automate,
+        "/api/authmode": _post_authmode,
+        "/api/upload": _post_upload,
+        "/api/config": _post_config,
+        "/api/groq": _post_groq,
+        "/api/groq_log": _post_groq_log,
+        "/api/setup": _post_setup,
+        "/api/deploy_config": _post_deploy_config,
+        "/api/deploy": _post_deploy,
+        "/api/host/restart": _post_host_restart,
+        "/api/stop": _post_stop,
+        "/api/run": _post_run,
+    }
+
 
 
 def main(argv: list[str] | None = None) -> int:

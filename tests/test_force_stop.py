@@ -14,6 +14,7 @@ reporting success. The job slot stayed held and nothing else could start.
 SIGKILL is deliberately not the default: the engine's cooperative SIGINT
 commits state so a re-run resumes cleanly, and killing throws that away.
 """
+import inspect
 import os
 import signal
 
@@ -69,9 +70,7 @@ class TestForceKills:
 
 class TestTheRouteAndButton:
     def _block(self):
-        src = open(os.path.join(ROOT, "webui.py"), encoding="utf-8").read()
-        return src.split('if self.path == "/api/stop":')[1].split(
-            'if self.path != "/api/run":')[0]
+        return inspect.getsource(webui.Handler._POST_ROUTES["/api/stop"])
 
     def test_the_route_passes_force_through(self):
         b = self._block()

@@ -12,12 +12,12 @@ webui-launched job the row was reaped and three things broke at once:
   * job_supervisor never saw it at all, because it iterates that table --
     so the stall detection could not have protected any of these jobs
 """
+import inspect
 import os
 
 import job_admission
 import webui
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 class _Proc:
@@ -72,12 +72,11 @@ class TestTheLaunchRecordsThePid:
         makes them impossible to disagree -- so the endpoints only have to
         pass one name, and this checks they do.
         """
-        src = open(os.path.join(ROOT, "webui.py"), encoding="utf-8").read()
-        for path, job in (('"/api/seed"', '"seed"'),
-                          ('"/api/reset_target"', '"reset target"'),
-                          ('"/api/wipe_target"', '"wipe target"')):
-            block = src.split(f"if self.path == {path}:")[1][:1200]
-            assert f"launch_or_queue(\n                account_id, {job}," in block, path
+        for path, job in (("/api/seed", '"seed"'),
+                          ("/api/reset_target", '"reset target"'),
+                          ("/api/wipe_target", '"wipe target"')):
+            block = " ".join(inspect.getsource(webui.Handler._POST_ROUTES[path]).split())
+            assert f"launch_or_queue( account_id, {job}," in block, path
 
     def test_the_admitted_name_and_the_recorded_name_are_one_variable(self):
         """The reason the above is now enough: nothing can pass a different

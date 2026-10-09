@@ -20,10 +20,7 @@ import webui
 
 
 def _block() -> str:
-    src = inspect.getsource(webui.Handler._do_POST)
-    i = src.index('if self.path == "/api/seed":')
-    j = src.index('if self.path == "/api/repair_console_setup":', i)
-    return src[i:j]
+    return inspect.getsource(webui.Handler._POST_ROUTES["/api/seed"])
 
 
 class TestSeedResolvesTheRequestedAccountNotJustTheSession:

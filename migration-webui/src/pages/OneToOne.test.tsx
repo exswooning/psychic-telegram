@@ -154,6 +154,15 @@ describe('Verify now', () => {
     await waitFor(() => expect(cp.run.mock.calls[0][1].limit).toBe(0))
   })
 
+  it('says what every item comes to before it is asked for', async () => {
+    show()
+    fireEvent.click(await screen.findByTestId('verify-now'))
+    fireEvent.click(await screen.findByLabelText('check every item'))
+    const size = screen.getByTestId('every-item-size')
+    expect(size).toHaveTextContent('About 12,540 items, 167× the 75 a sample opens')
+    expect(size).toHaveTextContent('1 never checked is not counted')
+  })
+
   it('shows a refusal instead of pretending it started', async () => {
     cp.run.mockResolvedValue({ ok: false, detail: 'that migration belongs to another account' })
     show()

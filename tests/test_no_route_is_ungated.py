@@ -71,8 +71,7 @@ def _fastapi_routes() -> list[tuple[str, str, bool]]:
 def _webui_api_paths() -> set[str]:
     """Every /api/ path literal webui.py routes on."""
     src = open(os.path.join(ROOT, "webui.py"), encoding="utf-8").read()
-    return set(re.findall(r'path == "(/api/[^"]*)"', src)) | \
-           set(re.findall(r'self\.path == "(/api/[^"]*)"', src))
+    return set(re.findall(r'path == "(/api/[^"]*)"', src)) | set(webui.Handler._POST_ROUTES)
 
 
 class TestTheFastApiServer:

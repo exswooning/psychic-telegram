@@ -13,6 +13,7 @@ domain entirely.
 
 from __future__ import annotations
 
+import inspect
 import webui
 
 
@@ -76,8 +77,7 @@ class TestTheEndpointPassesTheAccount:
         """Reading from tenant_configs while writing only env.sh would let an
         account correct its domain, be told "saved", and see nothing change
         anywhere -- worse than the bug it replaced."""
-        src = open(webui.__file__, encoding="utf-8").read()
-        block = src.split('if self.path == "/api/config":')[1][:1600]
+        block = inspect.getsource(webui.Handler._POST_ROUTES["/api/config"])
         assert "update_tenant_config" in block
         assert '"source"' in block and '"target"' in block
 
@@ -87,8 +87,7 @@ class TestActionsUseTheAccountTenantToo:
         """Worse than the header: /api/setup puts these domains on a
         setup.sh command line, so an unscoped read does not merely show the
         wrong tenant -- it runs against it."""
-        src = open(webui.__file__, encoding="utf-8").read()
-        block = src.split('if self.path == "/api/setup":')[1][:400]
+        block = inspect.getsource(webui.Handler._POST_ROUTES["/api/setup"])
         assert "read_config(self._on_screen())" in block
 
     def test_no_unscoped_read_config_calls_remain(self):
