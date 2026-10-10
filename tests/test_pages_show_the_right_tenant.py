@@ -61,23 +61,29 @@ class TestTheEndpointsPassOne:
         Either is fine -- falling through to the shared control-plane
         database is not.
         """
+        import ast
         import os
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         src = open(os.path.join(root, "api_server.py"), encoding="utf-8").read()
+        # Judged on the function that makes the read, not a fixed window of
+        # characters around it: a refactor that moved the ledger's name a few
+        # lines up read as the scoping having gone.
+        funcs = [n for n in ast.walk(ast.parse(src))
+                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        seen = 0
         for reader in ("cpdb.user_progress", "cpdb.failure_feed",
                        "cpdb.forensic_detail"):
-            start = 0
-            while True:
-                idx = src.find(reader, start)
-                if idx == -1:
-                    break
-                start = idx + len(reader)
-                window = src[max(0, idx - 260):idx + 340]
-                assert ("_ledger_for" in window
-                        or "_account_db_path" in window
-                        or "_ws_ledger" in window), (
-                    f"{reader} at offset {idx} falls through to the shared "
-                    f"ledger: {window[-160:]!r}")
+            for node in ast.walk(ast.parse(src)):
+                if not (isinstance(node, ast.Attribute) and ast.unparse(node) == reader):
+                    continue
+                seen += 1
+                home = min((f for f in funcs if f.lineno <= node.lineno <= f.end_lineno),
+                           key=lambda f: f.end_lineno - f.lineno)
+                body = ast.get_source_segment(src, home)
+                assert ("_ledger_for" in body or "_account_db_path" in body
+                        or "_ws_ledger" in body), (
+                    f"{reader} in {home.name}() falls through to the shared ledger")
+        assert seen >= 3          # a parsing slip would make this vacuous
 
     def test_the_websocket_snapshot_is_scoped_too(self):
         # It pushes user progress on connect, so an unscoped snapshot shows
@@ -169,7 +175,11 @@ class TestTheWebsocketDoesNotFanOutOneTenantToEveryone:
         src = open(os.path.join(root, "api_server.py"), encoding="utf-8").read()
         tail = src.split("async def _tailer")[1].split("\n@app")[0]
         assert "HUB.accounts()" in tail
-        assert "_account_db_path(account_id)" in tail
+        assert "_tail_progress(account_id)" in tail
+        import inspect
+
+        import api_server
+        assert "_account_db_path(account_id)" in inspect.getsource(api_server._tail_progress)
         # and the diff is per tenant, or one busy account starves the others
         assert "_last_snapshot.get(account_id)" in tail
 

@@ -904,6 +904,32 @@ async def _off_loop(fn, *a, **kw):
 # ======================================================================
 _last_snapshot: dict = {}
 
+# The ticker's share of a core while someone watches a migration that is moving.
+# user_progress groups the whole audit_log -- 251 ms at 1.46M rows, measured on the box
+# (2026-10-10) -- so one read a second held a quarter of a core for as long as a tab was
+# open, and went on reading every second after the migration had finished. Now a read
+# waits for the ledger to change, and for its own cost over this share to pass.
+TAIL_CPU_SHARE = float(os.getenv("TAIL_CPU_SHARE", "0.10"))
+_tail_seen: dict = {}          # account -> {"stamp", "at", "cost", "users"}
+
+
+async def _tail_progress(account_id: int) -> list | None:
+    """That account's per-user progress: the last read while its ledger is unchanged,
+    or while the last read is too recent for what it cost; otherwise a fresh one. None
+    when it has no ledger yet."""
+    path = _account_db_path(account_id)
+    if not path or not os.path.isfile(path):
+        return None
+    stamp = cpdb.ledger_stamp(path)          # before the read: a write during it shows next tick
+    seen = _tail_seen.get(account_id)
+    if seen is None or (seen["stamp"] != stamp
+                        and time.monotonic() - seen["at"] >= seen["cost"] / TAIL_CPU_SHARE):
+        t0 = time.monotonic()
+        users = await _off_loop(cpdb.user_progress, path)
+        seen = _tail_seen[account_id] = {"stamp": stamp, "at": t0,
+                                          "cost": time.monotonic() - t0, "users": users}
+    return seen["users"]
+
 
 async def _tailer() -> None:
     global _last_snapshot
@@ -931,10 +957,9 @@ async def _tailer() -> None:
             # single frame carried one account's per-user progress to every
             # browser connected to this control plane.
             for account_id in await HUB.accounts():
-                path = _account_db_path(account_id)
-                if not path or not os.path.isfile(path):
+                progress = await _tail_progress(account_id)
+                if progress is None:
                     continue          # nothing migrated yet for this tenant
-                progress = await _off_loop(cpdb.user_progress, path)
                 snap = {"users": progress, "nodes": nodes,
                         "publicShares": len(public)}
                 # Diff per tenant. An idle migration otherwise pushes an

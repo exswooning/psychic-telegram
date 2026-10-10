@@ -200,6 +200,21 @@ def _apply_column_upgrades(conn: sqlite3.Connection) -> None:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
 
+def ledger_stamp(path: str | None) -> tuple:
+    """What a reader compares to know a ledger is unchanged since it last read it: the
+    database and its WAL, each (mtime_ns, size) -- every commit writes one of the two.
+    Two stat() calls, against 0.25-2 s to rebuild a dashboard payload on a 1.5M-row
+    ledger (measured on the box, 2026-10-10)."""
+    out = []
+    for p in (path, f"{path}-wal") if path else ():
+        try:
+            st = os.stat(p)
+            out.append((st.st_mtime_ns, st.st_size))
+        except OSError:
+            out.append(None)
+    return tuple(out)
+
+
 @contextmanager
 def ro(path: str | None = None) -> Iterator[sqlite3.Connection]:
     """A read-only connection. See rule 1 in the module docstring.

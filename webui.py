@@ -3738,14 +3738,29 @@ _spa_cache: dict = {}
 _spa_lock = threading.Lock()
 _spa_busy: set = set()
 
+# A payload built only from the ledger and the job's start and end still stands while
+# those are unchanged, so a due refresh re-dates it instead of rebuilding it: an open tab
+# on a finished migration rebuilt the same answers at ~17% of a core (measured on the box,
+# 2026-10-10, 1.46M audit_log rows). SPA_MAX_STALE bounds what the stamp cannot see -- a
+# settings change, the age of the share audit the verification panel shows.
+SPA_MAX_STALE = float(os.getenv("SPA_MAX_STALE", "300"))
 
-def _cached_payload(name: str, fn, account_id: int | None):
+
+def _stamp(account_id: int | None) -> tuple:
+    """Everything a stable payload reads, without reading it: the ledger's files, the job's
+    start and end, and the day (gb_today starts again at midnight UTC)."""
+    return (cpdb.ledger_stamp(account_context.db_path(account_id)), JOB.started, JOB.finished,
+            time.strftime("%Y-%m-%d", time.gmtime()))
+
+
+def _cached_payload(name: str, fn, account_id: int | None, stable: bool = False):
     """fn(account_id), memoised per (reader, account) for SPA_TTL seconds.
 
     The first call for a key pays for itself -- there is nothing to show yet
     and a wrong answer is worse than a slow one. Every later call is served
     from the entry while a single background thread refreshes it, so N
-    pollers cost the same as one.
+    pollers cost the same as one. stable: fn reads nothing _stamp does not
+    cover, so while the stamp is unchanged the entry stands (SPA_MAX_STALE).
     """
     key = (name, account_id)
     now = time.time()
@@ -3753,14 +3768,20 @@ def _cached_payload(name: str, fn, account_id: int | None):
         entry = _spa_cache.get(key)
 
     if entry is None:
+        stamp = _stamp(account_id) if stable else None   # before the read: a write during it shows next time
         t0 = time.monotonic()
         data = fn(account_id)
         with _spa_lock:
-            _spa_cache[key] = {"data": data, "at": time.time(),
-                               "cost": time.monotonic() - t0}
+            _spa_cache[key] = {"data": data, "at": time.time(), "built": time.time(),
+                               "cost": time.monotonic() - t0, "stamp": stamp}
         return data
 
     if now - entry["at"] > max(SPA_TTL, entry.get("cost", 0.0) * SPA_COST_MULTIPLE):
+        if (stable and now - entry.get("built", 0.0) < SPA_MAX_STALE
+                and entry.get("stamp") == _stamp(account_id)):
+            with _spa_lock:
+                entry["at"] = now          # nothing it reads has changed: it still stands
+            return entry["data"]
         with _spa_lock:
             start = key not in _spa_busy
             if start:
@@ -3768,11 +3789,12 @@ def _cached_payload(name: str, fn, account_id: int | None):
 
         def _refresh() -> None:
             try:
+                stamp = _stamp(account_id) if stable else None
                 t0 = time.monotonic()
                 data = fn(account_id)
                 with _spa_lock:
-                    _spa_cache[key] = {"data": data, "at": time.time(),
-                                       "cost": time.monotonic() - t0}
+                    _spa_cache[key] = {"data": data, "at": time.time(), "built": time.time(),
+                                       "cost": time.monotonic() - t0, "stamp": stamp}
             except Exception as exc:      # noqa: BLE001
                 # Keep serving the stale entry: a failed refresh is not a
                 # reason to blank a dashboard that was working a moment ago.
@@ -4361,9 +4383,9 @@ def _ledger_progress_fraction(account_id: int | None = None,
     if users:
         return _cached_payload("ledger_progress_fraction:" + ",".join(sorted(users)),
                                lambda a: _ledger_progress_fraction_uncached(a, users),
-                               account_id)
+                               account_id, stable=True)
     return _cached_payload("ledger_progress_fraction",
-                           _ledger_progress_fraction_uncached, account_id)
+                           _ledger_progress_fraction_uncached, account_id, stable=True)
 
 
 def _users_progress_fraction(snap, users: list[str]) -> float | None:
@@ -4553,15 +4575,21 @@ def spa_metrics_payload(account_id: int | None = None) -> dict:
     from config import Settings
 
     settings = Settings(account_id=account_id)
-    conn = _db_conn(account_id)
-    totals: dict = {}
-    if conn is not None:
+
+    def ledger_totals(account_id):
+        conn = _db_conn(account_id)
+        if conn is None:
+            return {}
         try:
-            totals = tui.collect_snapshot(conn, settings.effective_upload_cap()).totals
+            return tui.collect_snapshot(conn, settings.effective_upload_cap()).totals
         except sqlite3.Error:
-            totals = {}
+            return {}
         finally:
             conn.close()
+
+    # The host figures (load, RAM, disk) stay live; only the ledger scan behind them is
+    # kept while the ledger stands.
+    totals = _cached_payload("spa_metrics_totals", ledger_totals, account_id, stable=True)
     return webui_spa.metrics_payload(settings, settings.effective_upload_cap(), totals)
 
 
@@ -5428,20 +5456,21 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/snapshot":
             self._json(_cached_payload("snapshot_payload", snapshot_payload, self._on_screen()))
         elif path == "/api/spa/users":
-            self._json(_cached_payload("spa_users_payload", spa_users_payload, self._on_screen()))
+            self._json(_cached_payload("spa_users_payload", spa_users_payload, self._on_screen(), stable=True))
         elif path == "/api/spa/activity":
             self._json(spa_activity_payload(self._on_screen()))
         elif path == "/api/spa/metrics":
             self._json(_cached_payload("spa_metrics_payload", spa_metrics_payload, self._on_screen()))
         elif path == "/api/spa/stages":
-            self._json(_cached_payload("spa_stages_payload", spa_stages_payload, self._on_screen()))
+            self._json(_cached_payload("spa_stages_payload", spa_stages_payload, self._on_screen(), stable=True))
         elif path == "/api/spa/verification":
-            self._json(_cached_payload("spa_verification_payload", spa_verification_payload, self._on_screen()))
+            self._json(_cached_payload("spa_verification_payload", spa_verification_payload, self._on_screen(),
+                                       stable=True))
         elif path == "/api/spa/shared_drives":
             self._json(_cached_payload("spa_shared_drives_payload",
-                                       spa_shared_drives_payload, self._on_screen()))
+                                       spa_shared_drives_payload, self._on_screen(), stable=True))
         elif path == "/api/spa/report":
-            self._json(_cached_payload("spa_report_payload", spa_report_payload, self._on_screen()))
+            self._json(_cached_payload("spa_report_payload", spa_report_payload, self._on_screen(), stable=True))
         elif path == "/api/toggles":
             # Readable, not only settable. set_toggles returns the state,
             # but a UI that can only POST has to mutate something to find
