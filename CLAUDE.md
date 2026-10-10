@@ -696,8 +696,10 @@ another organisation's shared drive (`drive_engine.MOVE_OUT_NEEDS`). Measured 20
 sandbox pair -- two separate Business Starter customers, the setting already at Anyone on both:
 refused with 403 insufficientFilePermissions for an admin and a plain user alike, while the
 same move inside one organisation went through; Google lists the cross-organisation control
-for Enterprise and Education editions. So the cross-org hop has never run live, and cannot on
-that pair: `main._gate_on_move` runs `move_preflight` (a 1-byte probe moved and deleted) before
+for Enterprise and Education editions. Every other route was refused too -- a source shared
+drive in the middle, moved out by either admin, an ownership transfer, a pending owner -- so on
+such an edition only a copy crosses. The cross-org hop has never run live, and cannot on that
+pair: `main._gate_on_move` runs `move_preflight` (a 1-byte probe moved and deleted) before
 anything moves and exits 2, "MOVE REFUSED: ...", otherwise. `MOVE_PENDING` is written before
 a file leaves the source, so `_resume_moves` (run start) finishes one a stopped run left
 between the hops: the walk cannot find it on the source any more. Sharing comes with the

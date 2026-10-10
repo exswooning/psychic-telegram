@@ -3127,7 +3127,11 @@ class DriveMigrator:
 # sandbox pair -- two separate Business Starter customers, the setting at Anyone on both, both
 # admins at the root unit: refused (insufficientFilePermissions) for an admin and a plain user
 # alike, while the same move inside one organisation went through and the target drive had no
-# restriction set. Google lists the control for Enterprise and Education editions.
+# restriction set. Google lists the control for Enterprise and Education editions. No other
+# route kept an id across either: a source shared drive in the middle (moved out by either
+# admin, into the target's drive or the target admin's My Drive) was refused the same way, an
+# ownership transfer with ownershipChangeAcrossDomainNotPermitted, a pending owner with
+# targetUserCannotBePendingOwnerOnFile. On such an edition only a copy crosses.
 MOVE_OUT_NEEDS = ("Drive and Docs > Sharing settings > Distributing content outside of the "
                   "organisation set to Anyone or to its own users, AND an edition that lets content "
                   "move to another organisation's shared drive (Google lists it for Enterprise and "
