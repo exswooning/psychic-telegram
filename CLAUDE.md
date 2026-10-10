@@ -403,10 +403,19 @@ sharing, comments, then the modifiedTime those writes moved. Each stands alone (
 exception used to be logged at DEBUG by `_sync_with_fallback` and dropped, so the
 time was never restored). **A comment written to a Doc or Sheet moves its
 modifiedTime ~3 minutes later, to the comment's own write time** (measured on a
-scratch tenant; grants, a bare restore and a bare create never do), overwriting any
+scratch tenant; a bare restore and a bare create never do), overwriting any
 restore made in between — so `_verify_modified_times` checks only files that had
 comments, and only after `MTIME_SETTLE_SEC` (240) since the last one, then puts back
-what moved. The ledger calls an item done the
+what moved. **A sharing grant moves it at once, not later** (measured on the sandbox
+target, 2026-10-10: a file's time jumps to the grant's, and a restore straight after holds
+for at least six minutes), which is why every path that grants restores after
+(`_finish_item`, `reapply_acls`). Both the native link rewrite and the late-bump check run
+at the END of a user's Drive pass, so a stopped run skips them: a native copy is marked
+`links_pass` PENDING when it lands and a resume re-queues it, and `repair.fix_modified_times`
+checks any user -- not only DONE ones -- whose Drive moved since their OWN last check
+(`mtime_checks`). Before those, the one-to-one check found 7,850 files with drifted times
+and 62 Docs still linking to the source on the sandbox, 62 of the 65 users INTERRUPTED.
+The ledger calls an item done the
 moment it lands — before its sharing runs — so an item is marked `acl_pass` PENDING
 first and cleared when the sharing has run; a resume finishes what is still pending
 and does not re-attempt grants already decided. Only an interrupted item keeps the

@@ -298,3 +298,15 @@ class TestMainIsolatesPerUserFailures:
         # exception ate the whole run.
         assert all(v == 0 for v in data["totals"].values())
         assert len(data["users"]) == 2  # bob, carol -- not SRC_USER
+
+
+def test_an_organisation_audience_reads_as_the_domain_grant_it_is():
+    """Drive lists everyone-at-the-organisation as group "/hd/domain/<domain>" on the
+    source and a domain grant on the target; the one-to-one check called that one grant a
+    loss and a disclosure."""
+    from acl_audit import _grant_key
+
+    src = {"type": "group", "role": "reader", "emailAddress": "/hd/domain/source.example"}
+    tgt = {"type": "domain", "role": "reader", "domain": "target.example"}
+    assert (_grant_key(src, lambda e: None, "source.example", "target.example")
+            == _grant_key(tgt, lambda e: e) == ("domain", "target.example", "reader"))

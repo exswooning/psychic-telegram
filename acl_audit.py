@@ -70,8 +70,14 @@ def _grant_key(perm: dict, translate, source_domain: str = "",
     if role == "owner":
         return None
     ptype = perm.get("type")
+    email = (perm.get("emailAddress") or "").lower()
+    if ptype == "group" and email.startswith("/hd/domain/"):
+        # Drive names an organisation's audience as a group "/hd/domain/<domain>" on
+        # one side and a domain grant on the other -- both are everyone at <domain>.
+        # Read as anything else, one correctly-migrated grant was reported as a loss
+        # plus a disclosure (the one-to-one check, 2026-10-10).
+        ptype, perm = "domain", {"domain": email[len("/hd/domain/"):]}
     if ptype == "user" or ptype == "group":
-        email = (perm.get("emailAddress") or "").lower()
         if not email:
             return None
         return (ptype, translate(email) or email, role)

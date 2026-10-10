@@ -228,6 +228,15 @@ class TestEveryKindOfDamageIsFound:
         f["trashed"] = True
         assert verify(migrated)["users"][SRC_USER]["drive"]["missing"][0]["why"] == "in the target's trash"
 
+    def test_a_file_binned_on_both_sides_is_where_its_original_is(self, migrated):
+        """The mirror carries a source deletion across; the copy in the target's trash is
+        right, not missing (11 of seeduser200's files, 2026-10-10)."""
+        tgt, f = self._drive_target(migrated, "notes.txt")
+        f["trashed"] = True
+        src = migrated.auth.source_drive(SRC_USER)
+        next(m for m in src.store.values() if m.get("name") == "notes.txt")["trashed"] = True
+        assert verify(migrated)["users"][SRC_USER]["drive"]["missing"] == []
+
     def test_a_file_copied_twice(self, migrated):
         tgt, f = self._drive_target(migrated, "notes.txt")
         dup = dict(f, id="dup1")
@@ -288,6 +297,13 @@ class TestEveryKindOfDamageIsFound:
         migrated.auth.target_people(TGT_USER).contacts.clear()
         r = verify(migrated)
         assert r["users"][SRC_USER]["contacts"]["missing"] and r["verdict"] == "DIFFERENCES"
+
+    def test_a_contact_deleted_from_the_source_since_is_said_not_failed(self, migrated):
+        """Nothing is left to compare, so it is not a check that could not be made."""
+        migrated.auth.source_people(SRC_USER).contacts.clear()
+        c = verify(migrated)["users"][SRC_USER]["contacts"]
+        assert c["errors"] == [] and c["goneFromSource"] == 1 and c["checked"] == 0
+        assert any("deleted from the source" in n for n in c["notes"])
 
     def test_a_task_whose_status_changed(self, migrated):
         for tasks in migrated.auth.target_tasks(TGT_USER).task_store.values():

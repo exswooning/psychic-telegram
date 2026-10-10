@@ -1330,10 +1330,13 @@ class DriveMigrator:
         is_native = str(item.get("mimeType", "")).startswith("application/vnd.google-apps.")
         existing = self.db.get_target_id(self.source_user, item["id"], "file")
         if existing:
-            if (self.settings.redo_unrewritten_links and self.settings.rewrite_drive_links
-                    and item.get("mimeType") in _NATIVE_KIND and not self.settings.dry_run):
+            if (self.settings.rewrite_drive_links and item.get("mimeType") in _NATIVE_KIND
+                    and not self.settings.dry_run
+                    and (self.settings.redo_unrewritten_links
+                         or self.db.links_pending(self.source_user, item["id"]))):
                 # A redo also repoints natives copied before the in-place rewrite
-                # existed; one already clean produces no request at all.
+                # existed; one already clean produces no request at all. Without a redo,
+                # a copy a stopped run left due its rewrite gets it now.
                 self._pending_native.append((item, existing))
             if self.db.acl_pending(self.source_user, item["id"]) and not self.settings.dry_run:
                 self._finish_item(item, existing, resume=True)
@@ -1810,6 +1813,7 @@ class DriveMigrator:
         self._bump("files")
         if self.settings.rewrite_drive_links and item.get("mimeType") in _NATIVE_KIND:
             self._pending_native.append((item, target_id))
+            self.db.mark_links_pending(self.source_user, item["id"])
         # Found by the item-by-item tally: a native Doc/Sheet copied server-side
         # keeps the COPY's time whatever the copy and the move ask for (live: a
         # quarter of files on a 300-user run, every one unshared and uncommented,
@@ -2223,8 +2227,10 @@ class DriveMigrator:
             except Exception as exc:      # noqa: BLE001 - the file migrated; record, never raise
                 self.db.log_audit(self.source_user, item["id"], "link_rewrite",
                                   "FAILED", str(exc)[:200])
+                self.db.clear_links_pending(self.source_user, item["id"])
                 return 0
             self._after_native_check(item, tgt_id, n)
+            self.db.clear_links_pending(self.source_user, item["id"])
             return n
 
         # Concurrently, as many at once as the user copies files. Live, george's ~800
@@ -2342,6 +2348,7 @@ class DriveMigrator:
             # The export names the SOURCE's files: live, every mirrored edit of a Doc
             # with links pointed it back at the source. Repointed in place at the end.
             self._pending_native.append((item, target_id))
+            self.db.mark_links_pending(self.source_user, item["id"])
         return True
 
     # -- shortcuts (two-pass) ---------------------------------------------------

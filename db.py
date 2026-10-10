@@ -173,6 +173,15 @@ CREATE TABLE IF NOT EXISTS repair_runs (
     error       TEXT
 );
 
+-- When repair.fix_modified_times last checked each user's copied Drive items. Per user, not
+-- per repair: "moved since the last repair" counted a user that repair skipped -- every user
+-- a stopped run left part-way -- as checked, so their drifted times were never looked at
+-- again (7,850 files on account 3's sandbox, 62 of 65 users INTERRUPTED).
+CREATE TABLE IF NOT EXISTS mtime_checks (
+    source_user TEXT PRIMARY KEY,
+    checked_at  TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS audit_rollup (
     source_user TEXT NOT NULL,
     item_type   TEXT NOT NULL,
@@ -807,6 +816,24 @@ class MigrationDB:
             "SELECT 1 FROM id_mapping WHERE type IN ('file','folder') LIMIT 1"
         ).fetchone() is not None
 
+    def users_due_mtime_check(self) -> set[str]:
+        """Users whose copied Drive items need their modifiedTimes checked: never checked, or
+        written to since their own last check -- a landing, a grant, a comment or a link
+        rewrite each can move a target file's time."""
+        return {r[0] for r in self.conn.execute(
+            "SELECT DISTINCT m.source_user FROM id_mapping m "
+            "LEFT JOIN mtime_checks c ON c.source_user = m.source_user "
+            "WHERE m.type IN ('file', 'folder') AND (c.checked_at IS NULL OR EXISTS ("
+            "  SELECT 1 FROM audit_log a WHERE a.source_user = m.source_user AND a.item_type IN "
+            "  ('file', 'folder', 'shortcut', 'acl', 'comment', 'link_rewrite') "
+            "  AND a.timestamp >= c.checked_at))")}
+
+    def record_mtime_check(self, source_user: str, checked_at: str) -> None:
+        with self.write() as conn:
+            conn.execute("INSERT INTO mtime_checks (source_user, checked_at) VALUES (?, ?) "
+                         "ON CONFLICT(source_user) DO UPDATE SET checked_at = excluded.checked_at",
+                         (source_user, checked_at))
+
     def mapped_ids(self, source_user: str, types: tuple[str, ...]) -> dict[str, str]:
         """source id -> target id for every item of these types this user has."""
         marks = ",".join("?" * len(types))
@@ -1281,6 +1308,22 @@ class MigrationDB:
     def acl_pending(self, source_user: str, item_id: str) -> bool:
         return self.conn.execute(
             "SELECT 1 FROM audit_log WHERE source_user=? AND item_id=? AND item_type='acl_pass' "
+            "AND status='PENDING'", (source_user, item_id)).fetchone() is not None
+
+    # Same shape for a native copy whose links are due a rewrite: the rewrite runs at the
+    # end of the user's Drive pass, so a stopped run left its copies pointing at the source
+    # and a resume never went back (62 Docs on the sandbox, found by the one-to-one check).
+    def mark_links_pending(self, source_user: str, item_id: str) -> None:
+        self.log_audit(source_user, item_id, "links_pass", "PENDING")
+
+    def clear_links_pending(self, source_user: str, item_id: str) -> None:
+        with self.write() as conn:
+            conn.execute("DELETE FROM audit_log WHERE source_user=? AND item_id=? AND item_type='links_pass'",
+                         (source_user, item_id))
+
+    def links_pending(self, source_user: str, item_id: str) -> bool:
+        return self.conn.execute(
+            "SELECT 1 FROM audit_log WHERE source_user=? AND item_id=? AND item_type='links_pass' "
             "AND status='PENDING'", (source_user, item_id)).fetchone() is not None
 
     def get_audit(self, source_user: str, item_id: str,

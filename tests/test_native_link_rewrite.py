@@ -320,3 +320,33 @@ class TestACleanResultClearsAnEarlierFailure:
         monkeypatch.setattr(link_rewrite, "rewrite_native", lambda *a, **k: 0)
         self._engine(settings, db)._rewrite_native_links()
         assert db.get_audit("u@a", "S1", "link_rewrite") is None
+
+
+def test_a_copy_a_stopped_run_left_due_its_rewrite_gets_it_next_run(
+        migrator, auth, db, settings, quota, monkeypatch):
+    """The rewrite runs at the end of the user's Drive pass, so a stopped run left its native
+    copies pointing at the source, and a resume skipped them as already copied: 62 Docs on
+    the sandbox, found by the one-to-one check. The copy is marked due when it lands."""
+    import drive_engine
+    import link_rewrite
+    from tests.conftest import SRC_USER, TGT_USER
+
+    settings.rewrite_drive_links = True
+    settings.transfer_mode = "server_side"          # a native copy: rewritten in place, at the end
+    settings.source_admin, settings.target_admin = SRC_USER, TGT_USER
+    fid = auth._get("source", "drive", SRC_USER).add_native("Q3 summary (links out)")
+    rewritten = []
+    monkeypatch.setattr(auth, "api", lambda *a, **k: object(), raising=False)   # no Docs API here
+    monkeypatch.setattr(link_rewrite, "rewrite_native",
+                        lambda kind, svc, target_id, lookup, pace=None: rewritten.append(target_id) or 1)
+    real, stopped = drive_engine.DriveMigrator._rewrite_native_links, [True]
+    monkeypatch.setattr(drive_engine.DriveMigrator, "_rewrite_native_links",
+                        lambda self: None if stopped[0] else real(self))
+
+    migrator.run()                                               # stopped before its rewrite
+    assert db.links_pending(SRC_USER, fid) and rewritten == []
+    stopped[0] = False
+    drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota).run()   # the next run
+    assert rewritten == [db.get_target_id(SRC_USER, fid, "file")]
+    assert not db.links_pending(SRC_USER, fid)
+    assert db.get_audit(SRC_USER, fid, "link_rewrite")["status"] == "SUCCESS"

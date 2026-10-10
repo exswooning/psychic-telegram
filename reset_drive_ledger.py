@@ -53,7 +53,8 @@ from db import MigrationDB    # noqa: E402
 # tenants live), so clearing them costs no resumability.
 # `acl_pass` is the marker for an item whose sharing was started and not finished; it goes
 # with the items it describes.
-DRIVE_TYPES = ("folder", "file", "shortcut", "acl", "comment", "acl_pass", "form_link")
+DRIVE_TYPES = ("folder", "file", "shortcut", "acl", "comment", "acl_pass", "links_pass",
+               "form_link")
 
 # The ledger row types each service owns. Everything the engine writes to
 # id_mapping/audit_log has to appear here, or a reset leaves rows behind
@@ -103,6 +104,9 @@ SERVICE_TYPES: dict[str, tuple[str, ...]] = {
 SERVICE_SIDE_TABLES: dict[str, tuple[tuple[str, str], ...]] = {
     # service -> ((table, user_column), ...)
     "gmail": (("label_map", "source_user"),),
+    # When the repair last checked this user's copied times: a reset Drive is copied
+    # afresh, so its times are due a check again.
+    "drive": (("mtime_checks", "source_user"),),
     # A chat space this user's run claimed (db.claim): kept, the space it
     # names is gone from the ledger and no member's re-run would migrate it.
     "chat": (("tenant_claims", "owner"),),

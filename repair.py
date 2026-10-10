@@ -585,23 +585,20 @@ def fix_modified_times(auth, db, settings, apply: bool = False,
 
     from resilience import retry_on_google_error
 
+    from db import utc_now
     out = {"checked": 0, "drifted": 0, "fixed": 0, "failed": 0}
+    # Only users due a check: never checked, or written to since their own last one.
+    # Every run ends with a repair, and re-listing all 300 users (~20 minutes) after a
+    # run that touched five is work that finds nothing. Any status, not DONE only: a
+    # stopped run's users are exactly the ones whose end-of-pass time check never ran.
+    due = db.users_due_mtime_check()
     pairs = [(r["source_email"], r["target_email"]) for r in db.all_identities()
-             if r["entity_type"] == "user" and r["status"] == "DONE"]
-    # Only users whose Drive moved since the last finished repair: every run ends
-    # with a repair, and re-listing all 300 users (~20 minutes) after a run that
-    # touched five is work that finds nothing. The first repair checks everyone.
-    last = db.conn.execute("SELECT started_at FROM repair_runs WHERE finished_at IS NOT NULL "
-                           "ORDER BY id DESC LIMIT 1").fetchone()
-    if last and last[0]:
-        moved = {r[0] for r in db.conn.execute(
-            "SELECT DISTINCT source_user FROM audit_log WHERE item_type IN ('file','folder') "
-            "AND timestamp >= ?", (last[0],))}
-        pairs = [p for p in pairs if p[0] in moved]
+             if r["entity_type"] == "user" and r["source_email"] in due]
     out["users"] = len(pairs)
 
     def one(pair) -> dict:
         got = {"checked": 0, "drifted": 0, "fixed": 0, "failed": 0}
+        started = utc_now()       # before the listing: a write during it is due next time
         try:
             src_items, tgt_items = {}, {}
             tally.count_drive(auth.source_drive(pair[0]), settings, keep=src_items)
@@ -626,6 +623,8 @@ def fix_modified_times(auth, db, settings, apply: bool = False,
                     got["fixed"] += 1
                 except Exception:      # noqa: BLE001 - a locked file, a deleted one
                     got["failed"] += 1
+            if apply and not got["failed"]:
+                db.record_mtime_check(pair[0], started)
         except Exception as exc:      # noqa: BLE001
             log.warning("[%s] modifiedTime check failed: %s", pair[0], exc)
         return got

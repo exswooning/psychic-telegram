@@ -84,19 +84,30 @@ class TestRepairPutsDriftedTimesBack:
         assert "1 of 1 drifted modified time(s) put back" in repair.summarise(out)
 
 
-def test_after_a_repair_only_users_whose_drive_moved_are_rechecked(auth, db, settings, identity):
-    """Every run ends with a repair; re-listing every user after a run that touched
-    five was ~20 minutes that found nothing."""
+def test_a_user_is_rechecked_only_after_their_own_drive_moved(auth, db, settings, identity):
+    """Every run ends with a repair; re-listing every user after a run that touched five
+    was ~20 minutes that found nothing. Per user, so a repair that skipped someone never
+    counts as having checked them."""
     import repair
     from db import bulk_seed_identities
 
     bulk_seed_identities(db, [("bob@tenanta.com", "bob@tenantb.com")])
-    db.set_identity_status(SRC_USER, "DONE")
-    db.set_identity_status("bob@tenanta.com", "DONE")
-    assert repair.fix_modified_times(auth, db, settings)["users"] == 2   # first repair: everyone
-    rid = db.repair_started()
-    db.repair_finished(rid, "done")
-    db.conn.execute("UPDATE repair_runs SET started_at='2020-01-01T00:00:00Z' WHERE id=?", (rid,))
-    db.conn.commit()
-    db.log_audit(SRC_USER, "f-new", "file", "SUCCESS")                  # alice's Drive moved since
-    assert repair.fix_modified_times(auth, db, settings)["users"] == 1
+    db.record_mapping(SRC_USER, "a1", "t1", "file")
+    db.record_mapping("bob@tenanta.com", "b1", "t2", "file")
+    assert repair.fix_modified_times(auth, db, settings, apply=True)["users"] == 2   # all with copies
+    assert repair.fix_modified_times(auth, db, settings, apply=True)["users"] == 0   # nothing moved
+    db.log_audit(SRC_USER, "f-new", "acl", "SUCCESS")                                # a grant moves a time
+    assert repair.fix_modified_times(auth, db, settings, apply=True)["users"] == 1
+
+
+def test_a_user_a_stopped_run_left_part_way_is_checked_too(auth, db, settings, identity):
+    """Only DONE users were checked, so the users a stopped run left part-way -- exactly
+    the ones whose end-of-pass time check never ran -- kept their drifted times: 7,850
+    files on the sandbox, 62 of the 65 users INTERRUPTED."""
+    import repair
+
+    tgt, ta, _ = TestRepairPutsDriftedTimesBack()._world(auth, db)
+    db.set_identity_status(SRC_USER, "INTERRUPTED")
+    out = repair.fix_modified_times(auth, db, settings, apply=True)
+    assert (out["users"], out["fixed"]) == (1, 1)
+    assert tgt.store[ta]["modifiedTime"] == "2023-01-01T00:00:00Z"

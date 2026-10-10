@@ -122,6 +122,17 @@ def compare_message(src_raw: bytes, tgt_raw: bytes, expected_after_rewrite: byte
     return "different", notes
 
 
+def _gone_from_source(exc, res: dict) -> bool:
+    """A 404 reading the SOURCE: deleted there after it was copied. Nothing is left to
+    compare, so it is neither a check made nor one that could not be -- it is counted and
+    said (two contacts turned a user INCOMPLETE, 2026-10-10)."""
+    if getattr(getattr(exc, "resp", None), "status", None) != 404:
+        return False
+    res["checked"] -= 1
+    res["goneFromSource"] = res.get("goneFromSource", 0) + 1
+    return True
+
+
 def compare_grants(src_perms: list[dict], tgt_perms: list[dict], translate, src_domain: str, tgt_domain: str,
                    skipped_ids: set[str], source_id: str) -> dict:
     """Who can see one file, source against target.
@@ -381,6 +392,8 @@ class Verifier:
                 try:
                     sm = self._drive_meta(src, sid)
                 except Exception as exc:      # noqa: BLE001
+                    if _gone_from_source(exc, res):
+                        continue
                     res["errors"].append(f"{kind} {sid}: could not read the SOURCE: {str(exc)[:120]}")
                     continue
                 try:
@@ -388,6 +401,11 @@ class Verifier:
                 except Exception as exc:      # noqa: BLE001
                     res["missing"].append({"source": sid, "target": tid, "name": sm.get("name"),
                                            "why": f"not on the target ({str(exc)[:80]})"})
+                    continue
+                if tm.get("trashed") and sm.get("trashed"):
+                    # Binned on the source too, and the mirror carried it across: the
+                    # copy is where its original is (11 of seeduser200's, 2026-10-10).
+                    res["identical"] += 1
                     continue
                 if tm.get("trashed"):
                     res["missing"].append({"source": sid, "target": tid, "name": sm.get("name"), "why": "in the target's trash"})
@@ -563,6 +581,8 @@ class Verifier:
             try:
                 sraw, sm = self._raw(src, sid)
             except Exception as exc:      # noqa: BLE001
+                if _gone_from_source(exc, res):
+                    continue
                 res["errors"].append(f"message {sid}: could not read the SOURCE: {str(exc)[:100]}")
                 continue
             try:
@@ -664,6 +684,8 @@ class Verifier:
             try:
                 sraw, _m = self._draft_raw(src, sid)
             except Exception as exc:      # noqa: BLE001
+                if _gone_from_source(exc, res):
+                    continue
                 res["errors"].append(f"draft {sid}: could not read the SOURCE: {str(exc)[:100]}")
                 continue
             try:
@@ -707,6 +729,8 @@ class Verifier:
             try:
                 sev = self._x(lambda: src.events().get(calendarId=src_cal or "primary", eventId=eid).execute())
             except Exception as exc:      # noqa: BLE001
+                if _gone_from_source(exc, res):
+                    continue
                 res["errors"].append(f"event {eid}: could not read the SOURCE: {str(exc)[:100]}")
                 continue
             try:
@@ -736,6 +760,8 @@ class Verifier:
             try:
                 sp = self._x(lambda: src.people().get(resourceName=sid, personFields=PERSON_FIELDS).execute())
             except Exception as exc:      # noqa: BLE001
+                if _gone_from_source(exc, res):
+                    continue
                 res["errors"].append(f"contact {sid}: could not read the SOURCE: {str(exc)[:100]}")
                 continue
             try:
@@ -854,6 +880,9 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
         for svc in services:
             try:
                 per[svc] = getattr(v, svc)()
+                if per[svc].get("goneFromSource"):
+                    per[svc]["notes"].append(f"{per[svc]['goneFromSource']} item(s) deleted from the source "
+                                             f"since they were copied: nothing left to compare")
             except Exception as exc:      # noqa: BLE001 - one service failing must not lose the rest
                 r = Verifier._blank()
                 r["errors"].append(f"{svc} could not be verified: {type(exc).__name__}: {str(exc)[:160]}")
