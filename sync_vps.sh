@@ -115,7 +115,7 @@ print(json.dumps({"at": datetime.datetime.now(datetime.timezone.utc).strftime("%
     || echo "  (could not record this deploy on the box -- the deploy itself is unaffected)"
 }
 SYNC_EXCLUDES=(
-  --exclude '.git/' --exclude '__pycache__/' --exclude '.pytest_cache/'
+  --exclude '.git/' --exclude '__pycache__/' --exclude '.pytest_cache/' --exclude '.ruff_cache/'
   --exclude '.venv' --exclude 'scratch/' --exclude 'migration.db*'
   --exclude 'unprotected_domains.json'
   --exclude '*.log' --exclude 'sandbox_manifest*.json' --exclude 'identities*.csv'
