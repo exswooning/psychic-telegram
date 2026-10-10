@@ -51,7 +51,7 @@ class FakeDB:
     def mark_services_done(self, u, svcs): self.marked_done = list(svcs)
     def log_audit(self, *a, **k): self.audits.append(a)
     def sources_for_target(self, t): return 1
-    def bytes_sent_today(self, u): return 0
+    def bytes_sent_24h(self, u): return 0
     def add_bytes_sent(self, u, n): pass
 
 

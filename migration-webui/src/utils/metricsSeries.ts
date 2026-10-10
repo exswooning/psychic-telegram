@@ -222,7 +222,7 @@ export function progressRow(t: MetricsSnapshot['throughput'] | undefined) {
 export function transferRow(t: MetricsSnapshot['transfer'] | undefined) {
   if (!t || !(t.dailyCapBytes > 0)) return null
   const used = t.bytesToday / GB, cap = t.dailyCapBytes / GB
-  return [{ name: 'today', used: Math.round(used * 100) / 100,
+  return [{ name: 'last 24 h', used: Math.round(used * 100) / 100,
             left: Math.round(Math.max(0, cap - used) * 100) / 100 }]
 }
 

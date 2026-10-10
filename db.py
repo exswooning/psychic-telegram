@@ -26,7 +26,7 @@ import sqlite3
 import threading
 from collections import OrderedDict
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Iterable, Iterator, Optional
 
 log = logging.getLogger(__name__)
@@ -297,7 +297,7 @@ CREATE TABLE IF NOT EXISTS discovery (
 -- does not forget how much of the 750 GB/day cap we have already consumed.
 CREATE TABLE IF NOT EXISTS upload_ledger (
     target_user TEXT NOT NULL,
-    day_utc     TEXT NOT NULL,   -- YYYY-MM-DD
+    day_utc     TEXT NOT NULL,   -- the UTC hour, YYYY-MM-DDTHH (YYYY-MM-DD before 2026-10-10)
     bytes_sent  INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (target_user, day_utc)
 );
@@ -1508,25 +1508,31 @@ class MigrationDB:
         ).fetchone()
 
     # -- upload ledger (750 GB/day guard) ------------------------------------
-    def bytes_sent_today(self, target_user: str) -> int:
-        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        row = self.conn.execute(
-            "SELECT bytes_sent FROM upload_ledger WHERE target_user=? AND day_utc=?",
-            (target_user, day),
-        ).fetchone()
-        return row["bytes_sent"] if row else 0
+    # Google gives the 750 GB back 24 hours after each copy, not at a midnight (measured
+    # 2026-10-10: capped at 06:25Z, still refused at 06:19Z the next day, allowed at 06:34Z),
+    # so bytes are kept per UTC hour and the last 24 hours summed. The hour the window
+    # starts in counts whole: a byte frees up to an hour late, never early.
+    @staticmethod
+    def _hour(at: datetime) -> str:
+        return at.strftime("%Y-%m-%dT%H")
+
+    def bytes_sent_24h(self, target_user: str) -> int:
+        since = self._hour(datetime.now(timezone.utc) - timedelta(hours=24))
+        return self.conn.execute(
+            "SELECT COALESCE(SUM(bytes_sent), 0) FROM upload_ledger "
+            "WHERE target_user=? AND day_utc >= ?", (target_user, since)).fetchone()[0]
 
     def add_bytes_sent(self, target_user: str, n: int) -> int:
-        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        hour = self._hour(datetime.now(timezone.utc))
         with self.write() as conn:
             conn.execute(
                 """INSERT INTO upload_ledger (target_user, day_utc, bytes_sent)
                    VALUES (?,?,?)
                    ON CONFLICT(target_user, day_utc) DO UPDATE SET
                        bytes_sent = upload_ledger.bytes_sent + excluded.bytes_sent""",
-                (target_user, day, n),
+                (target_user, hour, n),
             )
-        return self.bytes_sent_today(target_user)
+        return self.bytes_sent_24h(target_user)
 
     # -- gmail labels --------------------------------------------------------
     def get_label_map(self, source_user: str) -> dict[str, str]:

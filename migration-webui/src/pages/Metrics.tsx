@@ -433,12 +433,12 @@ export const Metrics: React.FC = () => {
           {m.transfer && (
             <Paper variant="outlined" sx={{ p: 2, mb: 3 }} data-testid="transfer">
               <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1.5 }}>
-                Transfer today
+                Transfer, last 24 hours
               </Typography>
               {/* Google's 750 GB/day cap is per target account and is the
                   reason a run can stop mid-way with nothing having failed. */}
               <Stack direction="row" spacing={4} sx={{ flexWrap: 'wrap', gap: 2 }}>
-                <Stat id="bytes" label="uploaded today"
+                <Stat id="bytes" label="uploaded in 24 h"
                       value={bytes(m.transfer.bytesToday)} />
                 <Stat id="cap" label="daily cap"
                       value={bytes(m.transfer.dailyCapBytes)}

@@ -286,7 +286,7 @@ def metrics_payload(settings, cap_bytes: int, snap_totals: dict) -> dict:
         disk_total_gb = disk_used_gb = disk_pct = 0
 
     # Not tracked: no persistent byte-rate counter exists across a run (only
-    # a per-day total in upload_ledger). Real motion is not fabricated here;
+    # an hourly total in upload_ledger). Real motion is not fabricated here;
     # 0 is the honest answer until this engine measures throughput directly.
     network = {"up": 0.0, "down": 0.0}
 

@@ -79,7 +79,7 @@ describe('live readings', () => {
     }) })
     expect(l.audit_log.text).toBe('1.3M rows · 87K failed')
     expect(l.id_mapping.text).toBe('604K mapped')
-    expect(l.quota.text).toBe('310/750 GB today')
+    expect(l.quota.text).toBe('310/750 GB in 24 h')
     expect(l.sizing.text).toBe('45 workers · 2 cores')
   })
 

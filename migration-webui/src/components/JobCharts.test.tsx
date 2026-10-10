@@ -50,7 +50,7 @@ describe('migrate charts', () => {
     expect(within(frame('Rate limiter sawtooth')).getByText(/Needs limiter snapshots/)).toBeInTheDocument()
     expect(within(frame('Latency by operation')).getByText('No calls recorded yet.')).toBeInTheDocument()
     expect(within(frame('Items done and remaining')).getByText(/No expected total/)).toBeInTheDocument()
-    expect(within(frame('Uploaded today against the daily cap')).getByText('No daily cap configured.'))
+    expect(within(frame('Uploaded in the last 24 hours against the daily cap')).getByText('No daily cap configured.'))
       .toBeInTheDocument()
     expect(within(frame('Failure causes')).getByText(/No failures recorded/)).toBeInTheDocument()
   })

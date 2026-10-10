@@ -842,9 +842,9 @@ class TestManagersShareTheDailyCap:
     def test_each_copies_until_its_own_allowance_is_spent(self, engine, auth, db):
         result = engine.run()
         assert (result["files"], result["failed"]) == (4, 0)
-        spent = [db.bytes_sent_today(m) for m in self.MANAGERS]
+        spent = [db.bytes_sent_24h(m) for m in self.MANAGERS]
         assert spent == [200, 200, 0]                  # m3 never needed
-        assert db.bytes_sent_today(TGT_USER) == 0      # a copy is not the target's
+        assert db.bytes_sent_24h(TGT_USER) == 0      # a copy is not the target's
         staged = {c["body"]["emailAddress"]
                   for c in auth.target_drive(TGT_USER).calls_to("permissions.create")}
         assert staged == {"m1@tenanta.com", "m2@tenanta.com"}   # only who copied
@@ -862,8 +862,8 @@ class TestManagersShareTheDailyCap:
         result = engine.run()
 
         assert (result["files"], result["failed"]) == (4, 0)
-        assert db.bytes_sent_today("m1@tenanta.com") == 200     # spent until tomorrow
-        assert [db.bytes_sent_today(m) for m in self.MANAGERS[1:]] == [200, 200]
+        assert db.bytes_sent_24h("m1@tenanta.com") == 200     # spent for the next 24 hours
+        assert [db.bytes_sent_24h(m) for m in self.MANAGERS[1:]] == [200, 200]
 
     def test_with_every_one_spent_the_drive_stops_without_failing_files(self, engine, db):
         from resilience import QuotaExhausted
@@ -934,7 +934,7 @@ class TestAFileBiggerThanADay:
         assert (result["files"], result["failed"]) == (5, 0)
         assert self._row(db, huge)["status"] == "SUCCESS"
         # Four 100-byte files fill two days; the 300-byte one takes a third whole day.
-        assert [db.bytes_sent_today(m) for m in self.MANAGERS] == [200, 200, 200]
+        assert [db.bytes_sent_24h(m) for m in self.MANAGERS] == [200, 200, 200]
 
     def test_google_refusing_it_lists_it_spends_nobody_and_the_drive_goes_on(
             self, engine, auth, db, settings, quota):
@@ -969,7 +969,7 @@ class TestAFileBiggerThanADay:
         assert "Google refused it even from an account with nothing charged to it today" in \
             row["error_message"]
         assert len(tries) == resilience.RATE_LIMIT_RETRY_BUDGET + 1    # one account's ladder
-        assert sum(db.bytes_sent_today(m) for m in self.MANAGERS) == 400  # refunded, none spent
+        assert sum(db.bytes_sent_24h(m) for m in self.MANAGERS) == 400  # refunded, none spent
 
         # Nothing is decided for good: the next run tries it again.
         del main.files
@@ -994,7 +994,7 @@ class TestAFileBiggerThanADay:
         row = self._row(db, huge)
         assert row["status"] == OVER_DAILY_CAP and "has copied something today" in \
             row["error_message"]
-        assert [db.bytes_sent_today(m) for m in self.MANAGERS] == [201, 201, 1]
+        assert [db.bytes_sent_24h(m) for m in self.MANAGERS] == [201, 201, 1]
 
     def test_a_users_own_one_is_never_streamed_through_this_host(self, auth, db, settings,
                                                                  identity):

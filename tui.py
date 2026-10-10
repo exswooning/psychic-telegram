@@ -223,11 +223,11 @@ def collect_snapshot(conn: sqlite3.Connection, cap_bytes: int,
         except (IndexError, KeyError):
             u.exp_mail = 0
 
-    # Today's upload consumption, keyed by target address.
+    # Upload consumption over the last 24 hours (Google's window), keyed by target address.
     ledger = {}
     for r in conn.execute(
-        "SELECT target_user, bytes_sent FROM upload_ledger "
-        "WHERE day_utc = strftime('%Y-%m-%d','now')"
+        "SELECT target_user, SUM(bytes_sent) AS bytes_sent FROM upload_ledger "
+        "WHERE day_utc >= strftime('%Y-%m-%dT%H','now','-24 hours') GROUP BY target_user"
     ):
         ledger[(r["target_user"] or "").lower()] = r["bytes_sent"]
     for u in users.values():

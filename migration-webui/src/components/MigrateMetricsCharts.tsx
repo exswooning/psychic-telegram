@@ -217,7 +217,7 @@ export const MigrateMetricsCharts: React.FC<{ m: MetricsSnapshot }> = ({ m }) =>
                      series={[{ key: 'done', name: 'done', color: c.success, stackId: 'p' },
                               { key: 'remaining', name: 'remaining', color: c.muted, stackId: 'p' }]} />
         </ChartFrame>
-        <ChartFrame title="Uploaded today against the daily cap" hint="gigabytes" height={90}
+        <ChartFrame title="Uploaded in the last 24 hours against the daily cap" hint="gigabytes" height={90}
                     empty={xfer ? null : 'No daily cap configured.'}>
           <BarsChart data={xfer ?? []} xKey="name" horizontal fmt={gb} labelWidth={40}
                      series={[{ key: 'used', name: 'uploaded', color: c.primary, stackId: 't' },

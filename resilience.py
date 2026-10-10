@@ -846,7 +846,7 @@ class DailyQuotaGuard:
         self._lock = threading.Lock()
 
     def remaining(self) -> int:
-        return max(0, self.cap_bytes - self.db.bytes_sent_today(self.target_user))
+        return max(0, self.cap_bytes - self.db.bytes_sent_24h(self.target_user))
 
     def reserve(self, n: int) -> None:
         with self._lock:
@@ -869,6 +869,7 @@ class DailyQuotaGuard:
 
     def exhaust(self) -> None:
         """Google refused before this guard did -- what the account sent outside this
-        count is charged too -- so it is spent until the ledger's next day."""
+        count is charged too, as of now, the latest it can have been sent -- so the account
+        is spent until its bytes are a day old (Google's window rolls; see db._hour)."""
         with self._lock:
             self.db.add_bytes_sent(self.target_user, self.remaining())

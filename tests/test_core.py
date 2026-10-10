@@ -428,6 +428,19 @@ def test_scope_filters():
 # ======================================================================
 # TUI snapshot
 # ======================================================================
+def test_upload_ledger_counts_the_last_24_hours(db):
+    """Google frees each copy's bytes 24 hours after it, not at a midnight (measured
+    2026-10-10); the hour the window starts in counts whole, so bytes free late, never early."""
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    with db.write() as conn:
+        for hours_ago, n in ((25, 1000), (24, 100), (23, 10), (0, 1)):
+            conn.execute("INSERT INTO upload_ledger (target_user, day_utc, bytes_sent) VALUES (?,?,?)",
+                         (TGT_USER, (now - timedelta(hours=hours_ago)).strftime("%Y-%m-%dT%H"), n))
+    assert db.bytes_sent_24h(TGT_USER) == 111
+    assert db.add_bytes_sent(TGT_USER, 5) == 116        # lands in the current hour's bucket
+
+
 def test_snapshot_aggregates_progress(db, settings):
     bulk_seed_identities(db, [(SRC_USER, TGT_USER)])
     db.record_discovery(SRC_USER, file_count=10, folder_count=2,

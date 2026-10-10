@@ -663,10 +663,10 @@ whoever moves it afterwards; uploads count too; the check is per copy and size-a
 copy that would not fit is refused, a 1 KB one still passes at the brim) and lands a little
 under 750 GiB; moves are never charged (5-25 GB moves in every direction by accounts
 already refused); a second account copied into the same drive while the first was capped.
-A 25 GB server-side copy takes ~1 s, so for large files the cap is the only limit. The
+It comes back 24 hours after each copy, not at a midnight (2026-10-10: refused at 05:55Z and 06:19Z, allowed at 06:34Z, a day after the 06:25Z copies), so `upload_ledger` keeps bytes per UTC hour and the guard sums the last 24 (`db.bytes_sent_24h`) -- it used to reset at midnight UTC, into hours more of refusals. A 25 GB server-side copy takes ~1 s, so for large files the cap is the only limit. The
 refusal is `403 userRateLimitExceeded "User rate limit exceeded."` -- the same bytes as an
 ordinary rate limit, no Retry-After -- so a copier whose copy still fails that way after the
-whole retry ladder is spent for the day (`DailyQuotaGuard.exhaust`: it also spends its
+whole retry ladder is spent for the next 24 hours (`DailyQuotaGuard.exhaust`: it also spends its
 allowance outside our count) and the next takes the file. Copiers are the drive's members
 who can copy any file (Manager, Content manager, Contributor) and are this tenant's users,
 in that order; each has its own guard keyed by its address and is granted onto the staging

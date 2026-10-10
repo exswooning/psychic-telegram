@@ -5817,7 +5817,7 @@ async def migration_metrics(account_id: int, history: int = 60, users: str = "",
                     "LIMIT 200000", scope_args))
                 row = conn.execute(
                     "SELECT COALESCE(SUM(bytes_sent),0) b FROM upload_ledger "
-                    "WHERE day_utc = date('now')").fetchone()
+                    "WHERE day_utc >= strftime('%Y-%m-%dT%H', 'now', '-24 hours')").fetchone()
                 out["transfer"] = {
                     "bytesToday": row["b"] if row else 0,
                     # The daily cap is Google's, per target account, and the

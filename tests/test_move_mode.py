@@ -48,7 +48,7 @@ class TestAFileMoves:
         row = db.get_audit(SRC_USER, fid, "file")
         assert (row["status"], row["error_message"]) == ("SUCCESS", "moved")
         assert src.call_count("files.copy") == 0
-        assert db.bytes_sent_today(TGT_USER) == 0          # a move is not charged
+        assert db.bytes_sent_24h(TGT_USER) == 0          # a move is not charged
 
     def test_a_refused_move_leaves_it_on_the_source_and_says_what_to_change(self, mover, auth, db):
         src = _src(auth)

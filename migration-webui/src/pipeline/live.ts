@@ -107,7 +107,7 @@ export function liveFor({ stages, fleet, metrics, queue, deadman, now = Date.now
       const used = metrics.transfer.bytesToday
       const cap = metrics.transfer.dailyCapBytes
       out.quota = { color: used / cap > 0.9 ? RED : used / cap > 0.7 ? AMBER : GREEN,
-                    text: `${gb(used)}/${gb(cap)} GB today` }
+                    text: `${gb(used)}/${gb(cap)} GB in 24 h` }
     }
     if (metrics.host) {
       out.sizing = metrics.host.underMemoryPressure
