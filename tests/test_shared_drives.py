@@ -936,11 +936,11 @@ class TestAFileBiggerThanADay:
         # Four 100-byte files fill two days; the 300-byte one takes a third whole day.
         assert [db.bytes_sent_24h(m) for m in self.MANAGERS] == [200, 200, 200]
 
-    def test_google_refusing_it_lists_it_spends_nobody_and_the_drive_goes_on(
-            self, engine, auth, db, settings, quota):
-        import drive_engine
+    def test_google_refusing_the_copy_sends_it_up_as_an_upload_spending_no_copier(
+            self, engine, auth, db):
+        """No account may copy more than a day's allowance, but an upload already under way
+        may finish past it: refused as a copy, the file goes up through this host instead."""
         import resilience
-        from config import OVER_DAILY_CAP
         from tests.fakes import http_error
 
         main, huge = self._huge(auth)
@@ -962,27 +962,16 @@ class TestAFileBiggerThanADay:
 
         result = engine.run()
 
-        assert (result["files"], result["failed"]) == (4, 0)
+        assert (result["files"], result["failed"]) == (5, 0)
         row = self._row(db, huge)
-        assert row["status"] == OVER_DAILY_CAP
-        assert row["error_message"].startswith("file: huge.vmdk\n0 GB, more than one account")
-        assert "Google refused it even from an account with nothing charged to it today" in \
-            row["error_message"]
+        assert row["status"] == "SUCCESS" and "uploaded through this host" in row["error_message"]
+        assert "Google refused it even from an account with nothing charged" in row["error_message"]
         assert len(tries) == resilience.RATE_LIMIT_RETRY_BUDGET + 1    # one account's ladder
         assert sum(db.bytes_sent_24h(m) for m in self.MANAGERS) == 400  # refunded, none spent
+        assert all(kw.get("Range") for kw in main.calls_to("files.get_media"))   # by byte range
 
-        # Nothing is decided for good: the next run tries it again.
-        del main.files
-        again = drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota)
-        again.shared_drive, again.target_drive_id = "src-drive", "tgt-drive"
-        again.reader, again.copiers = SRC_USER, list(self.MANAGERS)
-        assert again.run()["files"] == 1           # the one fresh manager left takes it
-        assert self._row(db, huge)["status"] == "SUCCESS"
-
-    def test_with_nobody_fresh_today_it_is_listed_and_the_drive_goes_on(
+    def test_with_nobody_fresh_to_copy_it_it_is_uploaded_and_the_drive_goes_on(
             self, engine, auth, db, settings):
-        from config import OVER_DAILY_CAP
-
         settings.effective_upload_cap = lambda: 300
         _, huge = self._huge(auth, size=400)
         for m in self.MANAGERS:
@@ -990,19 +979,18 @@ class TestAFileBiggerThanADay:
 
         result = engine.run()
 
-        assert result["files"] == 4                 # the drive did not stop
+        assert result["files"] == 5                 # the drive did not stop, and it went up
         row = self._row(db, huge)
-        assert row["status"] == OVER_DAILY_CAP and "has copied something today" in \
+        assert row["status"] == "SUCCESS" and "has copied something today" in \
             row["error_message"]
         assert [db.bytes_sent_24h(m) for m in self.MANAGERS] == [201, 201, 1]
 
-    def test_a_users_own_one_is_never_streamed_through_this_host(self, auth, db, settings,
-                                                                 identity):
+    def test_a_users_own_one_is_streamed_never_saved_to_this_hosts_disk(self, auth, db, settings,
+                                                                        identity):
         import drive_engine
-        from config import OVER_DAILY_CAP
         from resilience import DailyQuotaGuard
 
-        settings.transfer_mode = "download_upload"     # streaming would be tried first
+        settings.transfer_mode = "download_upload"     # saving to disk would be tried first
         settings.effective_upload_cap = lambda: 200
         src = auth._get("source", "drive", SRC_USER)
         huge = src.add_binary("huge.vmdk", data=b"x" * 300)
@@ -1010,7 +998,13 @@ class TestAFileBiggerThanADay:
         m = drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER,
                                        DailyQuotaGuard(db, TGT_USER, 200))
 
+        m._download_via = lambda *a, **k: pytest.fail("a file bigger than a day went to disk")
+
         m.run()
 
-        assert db.get_audit(SRC_USER, huge, "file")["status"] == OVER_DAILY_CAP
-        assert src.call_count("files.get_media") == 0
+        assert db.get_audit(SRC_USER, huge, "file")["status"] == "SUCCESS"
+        assert auth._get("target", "drive", TGT_USER).content[
+            db.get_target_id(SRC_USER, huge, "file")] == b"x" * 300
+        assert all(kw.get("Range") for kw in src.calls_to("files.get_media"))
+        # Google lets the target upload nothing more today; in this mode its guard says so.
+        assert DailyQuotaGuard(db, TGT_USER, 200).remaining() == 0

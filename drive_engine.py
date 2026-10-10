@@ -32,7 +32,7 @@ from datetime import datetime, timedelta, timezone
 
 import metrics
 
-from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload  # noqa: F401
+from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload, MediaUpload  # noqa: F401
 
 from config import (EXPORT_MIME_MAP, FOLDER_MIME, MOVE_PENDING, OVER_DAILY_CAP, OWED_GRANT,
                     SHORTCUT_MIME, STAGING_MODES, Settings)
@@ -44,6 +44,34 @@ from resilience import (AdaptiveRateLimiter, DailyQuotaGuard, PermanentAPIError,
 log = logging.getLogger(__name__)
 
 LARGE_UPLOAD_THRESHOLD = 5 * 1024 * 1024  # switch to resumable above this size
+# One source read and one upload request per chunk of a file streamed through this
+# host (_upload_streamed); Google wants upload chunks in multiples of 256 KiB.
+STREAM_CHUNK = 64 * 1024 * 1024
+
+
+class _RangedUpload(MediaUpload):
+    """A source file as an upload body, read by byte range one chunk at a time. Answers
+    getbytes and has no stream on purpose: handed a stream, the client wraps it for
+    http.client, which reads a body 8 KB at a time -- here one ranged GET per 8 KB."""
+
+    def __init__(self, fetch, size: int, mimetype: str):
+        self._fetch, self._size, self._mimetype = fetch, size, mimetype
+
+    def chunksize(self):
+        return STREAM_CHUNK
+
+    def mimetype(self):
+        return self._mimetype
+
+    def size(self):
+        return self._size
+
+    def resumable(self):
+        return True
+
+    def getbytes(self, begin, length):
+        end = min(self._size, begin + length) - 1
+        return self._fetch(begin, end) if end >= begin else b""
 
 # files.list's own maximum. It was 200, so a big folder cost five round trips
 # where one would do; the fields asked for are what bound the response, not this.
@@ -1706,8 +1734,8 @@ class DriveMigrator:
                 raise
             # Bigger than a day, and every account that could take it has copied
             # something today: listed, and the rest of the drive goes on.
-            self._over_daily_cap(item, "and every account that could copy it has copied "
-                                       "something today. The next run tries again")
+            self._upload_streamed(item, tgt_parent, "and every account that could copy it "
+                                                    "has copied something today")
             return
 
         body = {"name": item["name"], "parents": [self._staging_drive_id]}
@@ -1771,9 +1799,9 @@ class DriveMigrator:
                         tried = quota.target_user if self.copiers else self.source_user
                         # "Charged", not "copied": a manager's own My Drive copies
                         # count under its user pair, not here.
-                        self._over_daily_cap(item, "and Google refused it even from an "
-                                                   "account with nothing charged to it today. "
-                                                   f"Tried as {tried}")
+                        self._upload_streamed(item, tgt_parent, "and Google refused it even "
+                                              "from an account with nothing charged to it "
+                                              f"today (tried as {tried})")
                         return
                     if not (capped and self.copiers):
                         raise
@@ -1981,6 +2009,67 @@ class DriveMigrator:
                              bytes_moved=int(item.get("size") or 0))
             # Neither: still on the source (the walk moves it again), or in another
             # shared drive's staging drive (that drive's run finishes it).
+
+    def _upload_streamed(self, item: dict, tgt_parent: str, why: str) -> None:
+        """A file bigger than any account may COPY in a day goes up as one UPLOAD: Google
+        lets an upload already under way finish past its 750 GB (its own help; the account
+        then uploads nothing more that day). Read from the source by byte range a chunk at
+        a time and written straight into one resumable upload as the target -- nothing on
+        this host's disk, one chunk in memory, and a retry resumes the same upload where
+        Google says it stopped. Every byte crosses this host twice: hours per terabyte.
+        ponytail: one chunk at a time; reading the next while this one uploads would
+        nearly double the rate, if it ever matters. Refused for today, the file is left
+        OVER_DAILY_CAP and the next run tries again."""
+        size = int(item.get("size") or 0)
+
+        def fetch(start: int, end: int) -> bytes:
+            def get():
+                req = self.src.files().get_media(fileId=item["id"], supportsAllDrives=True)
+                req.headers["Range"] = f"bytes={start}-{end}"
+                return req.execute()
+            return self._retry(get, label="drive.files.get_media", write=False, tenant="source")
+
+        media = _RangedUpload(fetch, size, item.get("mimeType") or "application/octet-stream")
+        body = {"name": item["name"], "parents": [tgt_parent]}
+        for k in ("modifiedTime", "createdTime", "description"):
+            if item.get(k):
+                body[k] = item[k]
+        body.update(carried_metadata(item))
+
+        def upload(b):
+            req = self.tgt.files().create(body=b, media_body=media, supportsAllDrives=True,
+                                          fields="id,md5Checksum,modifiedTime")
+            return self._retry(req.execute, label="drive.files.create")   # same request: resumes
+
+        log.info("[%s] %s is too big to copy in a day; uploading it through this host (%s GB)",
+                 self.source_user, item.get("name"), f"{size / 1024 ** 3:,.1f}")
+        try:
+            result = with_carried_fallback(upload, body)
+        except (PermanentAPIError, RuntimeError) as exc:
+            if "userRateLimitExceeded" in str(exc):
+                self._over_daily_cap(item, f"{why}, and the target could not upload it today "
+                                           "either. The next run tries again")
+            else:
+                self.db.log_audit(self.source_user, item["id"], "file", "FAILED",
+                                  f"upload through this host failed: {exc}")
+                self._bump("failed")
+            return
+        if item.get("md5Checksum") and result.get("md5Checksum") != item["md5Checksum"]:
+            try:
+                self._retry(lambda: self.tgt.files().delete(fileId=result["id"],
+                                                             supportsAllDrives=True).execute())
+            except (PermanentAPIError, RuntimeError):
+                pass
+            self.db.log_audit(self.source_user, item["id"], "file", "FAILED",
+                              "checksum mismatch after uploading it through this host")
+            self._bump("failed")
+            return
+        if not self.server_side:
+            # This guard paces the target's own uploads in this mode, and Google lets it
+            # upload nothing more today. (Server-side, it paces the SOURCE's copies.)
+            self.quota.exhaust()
+        self._landed(item, result["id"], tgt_parent, result, bytes_moved=size,
+                     note=f"uploaded through this host: more than one account may copy in a day, {why}")
 
     def _over_daily_cap(self, item: dict, why: str) -> None:
         """Leave a file bigger than one account's daily allowance for a person (or the

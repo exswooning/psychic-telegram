@@ -94,6 +94,17 @@ class SourceWriteRefused(PermanentAPIError):
 # write there: this is what refuses them, before Google sees the request. A name that
 # is not a Drive collection (a test fake's helper, the client's own internals) passes
 # through untouched -- the real client exposes nothing else.
+def _http(timeout: int = 300) -> httplib2.Http:
+    """An httplib2 connection that does not take 308 for a redirect. Google's resumable
+    uploads answer every chunk but the last with 308 "Resume Incomplete" and no Location,
+    which httplib2 (0.19 on) raised as RedirectMissingLocation -- so any upload needing a
+    second chunk failed: in download_upload, every file over the client's 100 MB chunk
+    (found live, 2026-10-10). googleapiclient's own build_http() drops 308 the same way."""
+    http = httplib2.Http(timeout=timeout)
+    http.redirect_codes = http.redirect_codes - {308}
+    return http
+
+
 _DRIVE_READS = {
     "about": {"get"},
     "accessproposals": {"get", "list", "list_next"},
@@ -357,7 +368,7 @@ class AuthManager:
             return svc
 
         creds = self._credentials(tenant, user)
-        http = google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=300))
+        http = google_auth_httplib2.AuthorizedHttp(creds, http=_http())
         # static_discovery is left at its default: with no discoveryServiceUrl
         # set, the client already resolves that to True and uses the bundled
         # document, so there is no network fetch to avoid here.
@@ -447,7 +458,7 @@ class AuthManager:
         creds = service_account.Credentials.from_service_account_file(
             self._key_path(tenant), scopes=scopes
         ).with_subject(admin)
-        http = google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=300))
+        http = google_auth_httplib2.AuthorizedHttp(creds, http=_http())
         return build("admin", "directory_v1", http=http, cache_discovery=False)
 
     def source_directory(self):
@@ -459,7 +470,7 @@ class AuthManager:
         id into something `identity_map` can be looked up with.
         """
         creds = self._credentials("source", self.settings.source_admin)
-        http = google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=300))
+        http = google_auth_httplib2.AuthorizedHttp(creds, http=_http())
         return build("admin", "directory_v1", http=http, cache_discovery=False)
 
     def source_people(self, user: str):
@@ -479,7 +490,7 @@ class AuthManager:
         assignment's org unit or group on the receiving side, where the ids
         from the source tenant mean nothing."""
         creds = self._credentials("target", self.settings.target_admin)
-        http = google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=300))
+        http = google_auth_httplib2.AuthorizedHttp(creds, http=_http())
         return build("admin", "directory_v1", http=http, cache_discovery=False)
 
     def cloud_identity(self, tenant: str):
@@ -497,7 +508,7 @@ class AuthManager:
                 f"{tenant.upper()}_ADMIN is not set; Cloud Identity has to be "
                 f"called as a super admin of that domain")
         creds = self._credentials(tenant, admin)
-        http = google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=300))
+        http = google_auth_httplib2.AuthorizedHttp(creds, http=_http())
         return build("cloudidentity", "v1", http=http, cache_discovery=False)
 
     def verify_delegation(self, tenant: str, user: str) -> tuple[bool, str]:
@@ -535,7 +546,7 @@ def list_domain_users(auth: AuthManager, tenant: str, domain: str) -> list[str]:
     """
     admin_email = auth.settings.source_admin if tenant == "source" else auth.settings.target_admin
     creds = auth._credentials(tenant, admin_email)
-    http = google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=300))
+    http = google_auth_httplib2.AuthorizedHttp(creds, http=_http())
     svc = build("admin", "directory_v1", http=http, cache_discovery=False)
 
     users: list[str] = []

@@ -502,3 +502,11 @@ def test_bar_and_truncate():
     assert tui.bar(2.0, 4) == "####"        # clamped
     assert tui.truncate("abcdefgh", 5) == "abcd\u2026"
     assert tui.fmt_duration(3725) == "01:02:05"
+
+
+def test_upload_connections_do_not_take_a_resume_for_a_redirect():
+    """Google answers each chunk of a resumable upload but the last with 308 and no
+    Location; taken for a redirect, every upload over one chunk died on its second."""
+    import auth
+    h = auth._http()
+    assert 308 not in h.redirect_codes and 301 in h.redirect_codes

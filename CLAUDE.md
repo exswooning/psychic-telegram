@@ -674,11 +674,14 @@ drive only when first picked; none left raises `QuotaExhausted` (the drive stops
 FAILED, the next run resumes). A user's own files still have one copier, the user, charged
 to `quota`. A file bigger than a whole day's allowance reserves the whole day
 (`_copier`: `min(size, cap)`), so only an account that has copied nothing yet today takes
-it -- Google lets an upload past the limit finish -- and it is only ever copied
-server-side (streamed, it would need its size in disk here). Refused even then (none is
-spent on it: the next would be refused too), or with nobody fresh, it is left
+it, and never through download_upload, which would need its size in disk here. Refused even then (none is
+spent on it: the next would be refused too), or with nobody fresh, it goes up as one
+UPLOAD instead (`_upload_streamed`): read from the source by byte range, 64 MiB at a time, straight
+into one resumable upload as the target -- nothing on disk, and Google lets an upload under way finish
+past its 750 GB. Measured live: 21 MiB/s through this host, ~14 h per TiB. Refused that too, it is left
 `OVER_DAILY_CAP`, owed not SKIPPED, listed with what no API can copy
-(`api_server.UNCOPYABLE`), and the rest of the drive goes on; the next run tries again. Each shared drive has its own staging drive (two migrate at once under the one
+(`api_server.UNCOPYABLE`), and the rest of the drive goes on; the next run tries again. Every engine connection drops 308 from httplib2's redirects (`auth._http`): Google answers each upload
+chunk but the last with 308, and until 2026-10-10 any upload over one 100 MB chunk died on its second. Each shared drive has its own staging drive (two migrate at once under the one
 admin, and a shared one was deleted by whichever finished first), and the engine is handed
 the member's *name* (`reader`), resolved per thread -- a client built on the caller's thread
 was driven by the whole file pool.

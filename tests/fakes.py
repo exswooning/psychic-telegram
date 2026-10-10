@@ -89,11 +89,17 @@ class _Call:
 
     def __init__(self, svc: "FakeService", name: str, fn: Callable, kwargs: dict):
         self.svc, self.name, self.fn, self.kwargs = svc, name, fn, kwargs
+        self.headers: dict = {}          # as on a real HttpRequest; "Range" is honoured
 
     def execute(self, num_retries: int = 0):
-        self.svc.calls.append((self.name, dict(self.kwargs)))
+        rng = self.headers.get("Range")
+        self.svc.calls.append((self.name, dict(self.kwargs, **({"Range": rng} if rng else {}))))
         self.svc._maybe_fail(self.name)
-        return self.fn(**self.kwargs)
+        out = self.fn(**self.kwargs)
+        if rng and isinstance(out, (bytes, bytearray)):
+            first, last = (int(x) for x in rng.split("=", 1)[1].split("-"))
+            out = out[first:last + 1]
+        return out
 
 
 class FakeService:

@@ -2036,6 +2036,29 @@ def test_a_copy_a_killed_run_left_in_place_is_adopted_not_copied_again(auth, db,
     assert [f for f in tgt.store.values() if f.get("name") == "statement 38.pdf"] == [tgt.store[left]]
 
 
+def test_a_file_too_big_to_copy_goes_up_through_this_host_leaving_the_copy_guard(
+        auth, db, settings, identity):
+    """No account may copy more than its day's allowance, but an upload already under way
+    may finish past it. Server-side, the user's guard paces the SOURCE's copies -- Google
+    charges a copy to whoever makes it -- so this upload, the target's, leaves it alone."""
+    import drive_engine
+    from resilience import DailyQuotaGuard
+
+    _server_side(settings)
+    settings.effective_upload_cap = lambda: 200
+    src = auth.source_drive(SRC_USER)
+    huge = src.add_binary("disk.vmdk", data=b"y" * 300)
+    src.fail_next("files.copy", status=403, reason="userRateLimitExceeded", times=50)
+    guard = DailyQuotaGuard(db, TGT_USER, 200)
+
+    drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, guard).run()
+
+    tid = db.get_target_id(SRC_USER, huge, "file")
+    assert tid and auth.target_drive(TGT_USER).content[tid] == b"y" * 300
+    assert all(kw.get("Range") for kw in src.calls_to("files.get_media"))
+    assert guard.remaining() == 200
+
+
 def test_a_look_alike_the_user_made_is_not_taken_for_the_copy(auth, db, settings, identity, quota):
     """Only Bitport's own copy carries the source's createdTime: a same-named file made
     at another moment, or holding other bytes, is the user's and is left alone."""
