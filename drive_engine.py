@@ -1859,9 +1859,8 @@ class DriveMigrator:
         except (PermanentAPIError, RuntimeError) as exc:
             # A lost response can hide a move that happened: ask where it is first.
             if not self._in_staging(fid):
-                hint = (" -- the source admin must set Drive and Docs > Sharing settings > "
-                        "Distributing content outside of the organisation to Anyone or to its "
-                        "own users" if "insufficientFilePermissions" in str(exc) else "")
+                hint = (f" -- the source admin's tenant needs {MOVE_OUT_NEEDS}"
+                        if "insufficientFilePermissions" in str(exc) else "")
                 self.db.log_audit(self.source_user, fid, "file", "FAILED",
                                   f"move refused: {exc}{hint}")
                 self._bump("failed")
@@ -3124,6 +3123,17 @@ class DriveMigrator:
                        self.source_user, target_id, exc)
 
 
+# What lets a file leave for another organisation's shared drive. Measured 2026-10-10 on the
+# sandbox pair -- two separate Business Starter customers, the setting at Anyone on both, both
+# admins at the root unit: refused (insufficientFilePermissions) for an admin and a plain user
+# alike, while the same move inside one organisation went through and the target drive had no
+# restriction set. Google lists the control for Enterprise and Education editions.
+MOVE_OUT_NEEDS = ("Drive and Docs > Sharing settings > Distributing content outside of the "
+                  "organisation set to Anyone or to its own users, AND an edition that lets content "
+                  "move to another organisation's shared drive (Google lists it for Enterprise and "
+                  "Education; Business Starter refused it even at Anyone)")
+
+
 def move_preflight(auth, settings, back: bool = False) -> str | None:
     """None when files can move from one tenant to the other; otherwise what to change.
 
@@ -3164,10 +3174,8 @@ def move_preflight(auth, settings, back: bool = False) -> str | None:
             holder = tgt
         except HttpError as exc:
             return (f"{from_dom} refused to move a file to {to_dom} "
-                    f"(HTTP {getattr(exc.resp, 'status', '?')}). In {from_dom}'s "
-                    "Admin console, set Apps > Google Workspace > Drive and Docs > Sharing "
-                    "settings > Distributing content outside of the organisation to Anyone, or "
-                    "to its own users, then run again")
+                    f"(HTTP {getattr(exc.resp, 'status', '?')}). {from_dom} needs "
+                    f"{MOVE_OUT_NEEDS}; then run again")
         return None
     except Exception as exc:      # noqa: BLE001 - nothing may move unproven
         return f"could not check that files can move: {type(exc).__name__}: {exc}"

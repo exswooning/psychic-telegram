@@ -30,7 +30,7 @@ from collections import Counter
 from auth import AuthManager
 from config import MOVED_BACK, Settings
 from db import MigrationDB
-from drive_engine import _grant_key, move_preflight
+from drive_engine import MOVE_OUT_NEEDS, _grant_key, move_preflight
 from resilience import PermanentAPIError, retry_on_google_error
 
 log = logging.getLogger("move_back")
@@ -177,9 +177,8 @@ class MoveBack:
                     fileId=fid, addParents=staging, removeParents=",".join(f.get("parents") or []),
                     supportsAllDrives=True, fields="id").execute())
             except (PermanentAPIError, RuntimeError) as exc:
-                hint = (" -- the TARGET admin must set Drive and Docs > Sharing settings > "
-                        "Distributing content outside of the organisation to Anyone or to its own "
-                        "users" if "insufficientFilePermissions" in str(exc) else "")
+                hint = (f" -- the TARGET admin's tenant needs {MOVE_OUT_NEEDS}"
+                        if "insufficientFilePermissions" in str(exc) else "")
                 return self._fail(key, fid, name, f"move back refused: {exc}{hint}")
         body = {"modifiedTime": f["modifiedTime"]} if f.get("modifiedTime") else None
         last = None
