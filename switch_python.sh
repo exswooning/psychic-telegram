@@ -8,9 +8,11 @@
 set -Eeuo pipefail
 cd /root/migration
 REQS="-r requirements.txt $([ -f requirements-control-plane.txt ] && echo -r requirements-control-plane.txt)"
-# Every enabled bitport service that runs on the venv (not the X display ones), whatever its state now.
-UNITS=$(systemctl list-unit-files --type=service --state=enabled --no-legend 'bitport*' | awk '{print $1}' \
-        | grep -v -e xvfb -e x11vnc -e vnc || true)
+# Every bitport service that runs on the venv (not the X display ones): enabled ones whatever
+# their state, and running ones even if not enabled -- bitport-fleet runs without being enabled.
+UNITS=$( { systemctl list-unit-files --type=service --state=enabled --no-legend 'bitport*'
+           systemctl list-units --type=service --state=active --no-legend 'bitport*'; } \
+        | awk '{print $1}' | sort -u | grep -v -e xvfb -e x11vnc -e vnc || true)
 
 busy() {
   # mirror.py too: a cycle in flight imports lazily from paths the switch moves away.
@@ -28,7 +30,9 @@ case "${1:-}" in
 build)
   if ! command -v python3.12 >/dev/null; then
     add-apt-repository -y ppa:deadsnakes/ppa
-    apt-get update -qq
+    # Another source failing must not stop this one: Caddy's Cloudsmith repo answers 402
+    # (2026-10-10). If deadsnakes' own index is what failed, the install below says so.
+    apt-get update -qq || echo "apt-get update reported errors in some source; continuing"
     apt-get install -y -qq python3.12 python3.12-venv python3.12-dev
   fi
   rm -rf .venv312

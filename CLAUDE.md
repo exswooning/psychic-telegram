@@ -74,10 +74,13 @@ root has no key).
 ## Architecture notes that span multiple files
 
 **Two Python versions matter.** Dev happens on macOS with a newer Python
-(3.14 at last check); the VPS runs **3.10**. Newer syntax (e.g. nested
-same-quote-type f-strings, a 3.12+ feature) parses locally and fails on
-deploy. `sync_vps.sh` syntax-checks under the target's interpreter for
-exactly this reason — trust that check over local `python -m py_compile`.
+(3.14 at last check); the VPS runs **3.12** since 2026-10-10 -- deadsnakes' python3.12
+beside Ubuntu 22.04's own 3.10, switched by `switch_python.sh` (measured on the box: the
+engine's own work 11% faster, a plain Python loop 36%); the 3.10 venv is kept as
+`.venv310` and `switch_python.sh rollback` puts it back. Syntax newer than 3.12 parses
+locally and fails on deploy. `sync_vps.sh` syntax-checks under the box's own venv
+interpreter for exactly this reason — trust that check over local `python -m py_compile`.
+A fresh `install.sh` on 22.04 builds 3.10 unless python3.12 is installed first.
 
 **Per-tenant isolation is by directory, not by column.** A SaaS account's
 tenant config lives in `keys/{account_id}/{source,target}-sa.json` and
