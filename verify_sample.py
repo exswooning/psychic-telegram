@@ -220,9 +220,11 @@ def compare_event(src: dict, tgt: dict, translate, lookup=None, notes: list | No
     if (src.get("recurrence") or []) != (tgt.get("recurrence") or []):
         out.append(f"recurrence: {src.get('recurrence')} -> {tgt.get('recurrence')}")
     a = sorted({translate((x.get("email") or "").lower()) for x in src.get("attendees") or []})
-    b = sorted({(x.get("email") or "").lower() for x in tgt.get("attendees") or []})
-    # The target calendar's own owner is added when it is not the primary; ignore
-    # only addresses the source never had AND that are the target's own account.
+    # The calendar an event lives in is added as its attendee when that is not the
+    # primary -- Google's import rule, not a guest -- and Google marks it `self`. Ignored
+    # only when the source never had it.
+    b = sorted({e for x in tgt.get("attendees") or [] for e in [(x.get("email") or "").lower()]
+                if e in a or not x.get("self")})
     if a != b:
         out.append(f"attendees: {a} -> {b}")
     return out
@@ -517,6 +519,13 @@ class Verifier:
                 a, b = self._export(src, sid, NATIVE_EXPORT[mime]), self._export(tgt, tid, NATIVE_EXPORT[mime])
                 ev.update(opened=True, how=f"exported as {NATIVE_EXPORT[mime]}", bytes=len(a),
                           sha256=sha256(a)[:16])
+                if a != b:
+                    # The migration repoints a Doc's links at the copies on purpose, so the
+                    # source put through the engine's own rewriter is what the target must be.
+                    import link_rewrite
+                    if link_rewrite.rewrite_bytes(a, self.db.target_for_source_id)[0] == b:
+                        ev["how"] += "; its Drive links repointed at the copies, as intended"
+                        return []
                 return [] if a == b else [f"content differs when exported ({len(a)} -> {len(b)} bytes)"]
             if mime.startswith("application/vnd.google-apps."):
                 ev["how"] = "not opened: this Google type has no text export"

@@ -84,3 +84,21 @@ def test_the_one_to_one_check_maps_a_calendar_guest_the_same_way(db, settings):
     assert verify_sample.compare_event(
         {"summary": "s", "attendees": [{"email": SRC_CAL}]},
         {"summary": "s", "attendees": [{"email": TGT_CAL}]}, v._translate) == []
+
+
+def test_a_calendar_that_organises_its_own_event_is_not_added_as_its_guest(db, settings):
+    """Live (seeduser200's mirror calendars): the source event had no guests and the
+    calendar itself as organizer; the copy listed that calendar as its only guest."""
+    m = _mig(db, settings)
+    assert m._attendees_for({"organizer": {"email": SRC_CAL}}, TGT_CAL) == []
+    assert [a["email"] for a in m._attendees_for({"organizer": {"email": "u@tenanta.com"}},
+                                                 TGT_CAL)] == [TGT_CAL]     # Google's rule still met
+
+
+def test_the_check_ignores_the_calendar_google_lists_as_its_own_guest(db, settings):
+    v = object.__new__(verify_sample.Verifier)
+    v.db = db
+    own = {"summary": "s", "attendees": [{"email": TGT_CAL, "self": True}]}
+    assert verify_sample.compare_event({"summary": "s"}, own, v._translate) == []
+    stranger = {"summary": "s", "attendees": [{"email": "x@elsewhere.example"}]}
+    assert verify_sample.compare_event({"summary": "s"}, stranger, v._translate)

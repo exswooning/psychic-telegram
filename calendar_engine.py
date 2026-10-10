@@ -162,7 +162,11 @@ class CalendarMigrator:
         # attendee satisfies that while leaving the real organizer intact --
         # setting organizer to the calendar id also works but destroys the
         # original organizer, which is the one thing this module exists to keep.
-        if tgt_cal_id != "primary":
+        # Not when the calendar already IS the organizer (an event it organises
+        # itself): the rule is met, and the extra attendee was then the only
+        # difference the one-to-one check found from the source.
+        organizer = self._map_address((item.get("organizer") or {}).get("email"))
+        if tgt_cal_id != "primary" and organizer != tgt_cal_id:
             if not any(a.get("email") == tgt_cal_id for a in attendees):
                 attendees = attendees + [{"email": tgt_cal_id,
                                          "responseStatus": "accepted"}]

@@ -399,7 +399,7 @@ user's whole tally row on any of its services being reset (there is no per-servi
 to preserve, unlike `user_verification`).
 
 **What happens to an item after it lands is one step, `drive_engine._finish_item`**:
-sharing, comments, then the modifiedTime those writes moved. Each stands alone (an
+sharing, comments, then the modifiedTime those writes moved. `_landed` records the mapping before any of them, so a run killed between a copy landing in its folder and that write left an unmapped copy the next run copied again (33 extras on account 3); the copy is now adopted instead (`_take_placed`: same folder, name, type and the createdTime every copy carries, MD5 for a binary). Each stands alone (an
 exception used to be logged at DEBUG by `_sync_with_fallback` and dropped, so the
 time was never restored). **A comment written to a Doc or Sheet moves its
 modifiedTime ~3 minutes later, to the comment's own write time** (measured on a

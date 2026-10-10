@@ -572,6 +572,10 @@ class DriveMigrator:
         self._staging_lock = threading.Lock()
         # Items whose ADOPTED staged copy also failed to move: those may cascade.
         self._adopted_move_failed: set[str] = set()
+        # Copies an earlier run put in place but never recorded, indexed at the
+        # first unmapped file (see _take_placed).
+        self._placed: dict[tuple, list[dict]] | None = None
+        self._placed_lock = threading.Lock()
         # Set up properly by _open_file_pool() at the start of run(). Defined
         # here too so a caller that drives _sync_files() directly -- several
         # tests do -- gets the serial path rather than an AttributeError.
@@ -1357,7 +1361,67 @@ class DriveMigrator:
             self._bump("files")
             return
 
+        placed = self._take_placed(item, tgt_parent)
+        if placed:
+            self._landed(item, placed["id"], tgt_parent, placed,
+                         note="adopted: an earlier run copied it and stopped before recording it")
+            return
         self._sync_with_fallback(item, tgt_parent, is_native)
+
+    @staticmethod
+    def _placed_key(f: dict, parent: str) -> tuple:
+        # createdTime is carried from the source by every copy path and never moves
+        # after, so with the folder, the name and the type it names Bitport's own copy.
+        return (parent, f.get("name"), f.get("mimeType"), (f.get("createdTime") or "")[:19])
+
+    def _take_placed(self, item: dict, tgt_parent: str) -> dict | None:
+        """A copy an earlier run put in its folder and was stopped before recording:
+        _landed writes the mapping first, so a kill between the copy landing and that
+        write left it unmapped -- and with no sharing, comments or time restore yet.
+        The next run copied the file again and the first copy stayed beside it (33 on
+        account 3's one-to-one check). Claimed here so no other worker takes it, and
+        finished by _landed exactly as if it had just landed. Not in move mode: a moved
+        file keeps its own id and cannot be left behind like this."""
+        if self.move or not item.get("createdTime"):
+            return None
+        key = self._placed_key(item, tgt_parent)
+        with self._placed_lock:
+            if self._placed is None:
+                self._placed = self._index_placed()
+            candidates = self._placed.get(key) or []
+            for i, f in enumerate(candidates):
+                if item.get("md5Checksum") and f.get("md5Checksum") != item["md5Checksum"]:
+                    continue
+                log.info("[%s] adopting the copy of %s an earlier run left unrecorded "
+                         "instead of copying again", self.source_user, item.get("name"))
+                return candidates.pop(i)
+        return None
+
+    def _index_placed(self) -> dict[tuple, list[dict]]:
+        """The target's files no mapping names, by _placed_key. One listing per user."""
+        mapped = set(self.db.mapped_ids(self.source_user, ("file",)).values())
+        where = (dict(corpora="drive", driveId=self.target_drive_id, includeItemsFromAllDrives=True,
+                      supportsAllDrives=True, q="trashed = false") if self.shared_drive
+                 else dict(spaces="drive", q="'me' in owners and trashed = false"))
+        out: dict[tuple, list[dict]] = {}
+        token = None
+        try:
+            while True:
+                resp = self._retry(lambda t=token: self.tgt.files().list(
+                    pageSize=1000, pageToken=t, **where,
+                    fields="nextPageToken,files(id,name,mimeType,createdTime,modifiedTime,"
+                           "md5Checksum,parents)").execute(), write=False)
+                for f in resp.get("files", []):
+                    if f["id"] not in mapped and f.get("mimeType") != FOLDER_MIME:
+                        for p in f.get("parents") or []:
+                            out.setdefault(self._placed_key(f, p), []).append(f)
+                token = resp.get("nextPageToken")
+                if not token:
+                    return out
+        except (PermanentAPIError, RuntimeError) as exc:
+            log.warning("[%s] could not list the target's files; a copy an earlier run left "
+                        "unrecorded will be copied again: %s", self.source_user, exc)
+            return out
 
     # -- strategy cascade ------------------------------------------------------
     def _file_strategies(self, is_native: bool) -> list:

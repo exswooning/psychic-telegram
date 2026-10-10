@@ -2013,6 +2013,50 @@ def test_a_stranded_staged_copy_is_adopted_not_copied_again(auth, db, settings, 
     assert m._staging_drive_id not in tgt.store[stranded]["parents"]      # moved out
 
 
+def test_a_copy_a_killed_run_left_in_place_is_adopted_not_copied_again(auth, db, settings,
+                                                                      identity, quota):
+    """_landed records the mapping first, so a run killed between a copy landing in its
+    folder and that write left it unmapped; the next run copied the file again and the
+    first copy stayed beside it -- 33 such extras on account 3's one-to-one check."""
+    import drive_engine
+
+    _server_side(settings)
+    born = "2026-09-18T15:22:03.790Z"
+    src = auth.source_drive(SRC_USER)
+    fid = src.add_binary("statement 38.pdf")
+    src.store[fid]["createdTime"] = born
+    tgt = auth.target_drive(TGT_USER)
+    left = tgt.add_binary("statement 38.pdf")                  # same bytes, same folder
+    tgt.store[left]["createdTime"] = born
+
+    drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota).run()
+
+    assert src.call_count("files.copy") == 0
+    assert db.get_target_id(SRC_USER, fid, "file") == left
+    assert [f for f in tgt.store.values() if f.get("name") == "statement 38.pdf"] == [tgt.store[left]]
+
+
+def test_a_look_alike_the_user_made_is_not_taken_for_the_copy(auth, db, settings, identity, quota):
+    """Only Bitport's own copy carries the source's createdTime: a same-named file made
+    at another moment, or holding other bytes, is the user's and is left alone."""
+    import drive_engine
+
+    _server_side(settings)
+    src = auth.source_drive(SRC_USER)
+    fid = src.add_binary("notes.pdf")
+    src.store[fid]["createdTime"] = "2026-09-18T15:22:03.790Z"
+    tgt = auth.target_drive(TGT_USER)
+    theirs = tgt.add_binary("notes.pdf")
+    tgt.store[theirs]["createdTime"] = "2026-10-01T09:00:00.000Z"
+    other_bytes = tgt.add_binary("notes.pdf", data=b"something else")
+    tgt.store[other_bytes]["createdTime"] = "2026-09-18T15:22:03.790Z"
+
+    drive_engine.DriveMigrator(auth, db, settings, SRC_USER, TGT_USER, quota).run()
+
+    assert src.call_count("files.copy") == 1
+    assert db.get_target_id(SRC_USER, fid, "file") not in (theirs, other_bytes)
+
+
 def test_a_stranded_copy_is_delivered_by_the_retry_with_no_second_copy(auth, db, settings,
                                                                      identity, quota):
     """The whole cycle: the move fails, nothing cascades, the retry adopts the

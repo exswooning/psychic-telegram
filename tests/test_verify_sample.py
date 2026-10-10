@@ -181,6 +181,22 @@ class TestARealMigrationIsFoundIdentical:
         plan = next(e for e in r["evidence"] if e.get("name") == "Plan")
         assert "exported" in plan["how"]
 
+    def test_a_doc_whose_links_were_repointed_at_the_copies_is_identical(self, migrated):
+        """The engine repoints a Doc's links at the copies on purpose, and a Drive id is
+        the same length on both sides: live, six such Docs read "content differs when
+        exported (210 -> 210 bytes)"."""
+        sid, tid = "1" + "s" * 32, "1" + "t" * 32
+        migrated.db.record_mapping("colleague@tenanta.com", sid, tid, "file")   # someone else's file
+        src, tgt = migrated.auth.source_drive(SRC_USER), migrated.auth.target_drive(TGT_USER)
+        plan = lambda d: next(f["id"] for f in d.store.values() if f.get("name") == "Plan")  # noqa: E731
+        src.exports[plan(src)] = f"see https://drive.google.com/file/d/{sid}/view".encode()
+        tgt.exports[plan(tgt)] = f"see https://drive.google.com/file/d/{tid}/view".encode()
+        r = verify(migrated)
+        assert r["verdict"] == "IDENTICAL", r["reasons"]
+        assert "repointed" in next(e for e in r["evidence"] if e.get("name") == "Plan")["how"]
+        tgt.exports[plan(tgt)] = f"see https://drive.google.com/file/d/{sid}/view, edited".encode()
+        assert verify(migrated)["verdict"] == "DIFFERENCES"                # a real edit still shows
+
     def test_it_writes_nothing_to_either_tenant(self, migrated):
         def snap():
             return ({k: dict(v) for k, v in migrated.auth.target_drive(TGT_USER).store.items()},
