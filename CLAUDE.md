@@ -698,7 +698,15 @@ refused with 403 insufficientFilePermissions for an admin and a plain user alike
 same move inside one organisation went through; Google lists the cross-organisation control
 for Enterprise and Education editions. Every other route was refused too -- a source shared
 drive in the middle, moved out by either admin, an ownership transfer, a pending owner -- so on
-such an edition only a copy crosses. The cross-org hop has never run live, and cannot on that
+such an edition only a copy crosses. So was the operator's own procedure in every variation
+tried (the source drive made by the source user or its admin; the target user its Manager or
+Content manager, then its only member; into the target's My Drive, a folder in it, or a new
+target drive; a file or a Google Doc; at once and up to 30 minutes later; API and Drive web UI),
+and the reverse direction. Google's `canMoveItemOutOfDrive` reads True for that Manager all the
+while, so it cannot stand in for the probe; a refused Google Doc can take ~5 minutes to answer;
+and the API will not take a folder into a shared drive at all (403
+teamDrivesFolderMoveInNotSupported) -- move mode moves files and re-creates folders. The
+cross-org hop has never run live, and cannot on that
 pair: `main._gate_on_move` runs `move_preflight` (a 1-byte probe moved and deleted) before
 anything moves and exits 2, "MOVE REFUSED: ...", otherwise. `MOVE_PENDING` is written before
 a file leaves the source, so `_resume_moves` (run start) finishes one a stopped run left
