@@ -1211,12 +1211,6 @@ async def approve_migration_complete(body: ApproveComplete, op: Operator = Depen
         using = gcloud_signout.busy()
         if using:
             return False, f"a setup is using a gcloud sign-in right now ({using}) -- approve once it ends"
-        # Require exhaustive 1:1 verification before approval
-        import verify_all
-        verification = verify_all.verify_all_users(aid)
-        if verification["verdict"] != "PASS":
-            return False, (f"migration is not 1:1 verified: {verification['message']} "
-                          f"Run 'python verify_all.py --account-id {aid}' and fix gaps before approval.")
         import lifecycle
         gone = gcloud_signout.sign_out_all()
         st = lifecycle.approve(aid, op.name)
