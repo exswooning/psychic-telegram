@@ -5908,6 +5908,9 @@ async def migration_detail(account_id: int, op: Operator = Depends(operator)):
             "skipped": [], "uncopyable": [], "uncopyableCount": 0, "handWork": None,
             "relink": [], "repair": None, "moves": None,
             "running": bool(_jobs_here),
+            # What a launch is refused over: a verify or tally only reads the ledger,
+            # and admission lets a migration start beside one.
+            "writing": any(j.get("job_name") not in _READ_ONLY_JOBS for j in _jobs_here),
             # Which job, and since when. A bare boolean could not tell a
             # delta from a full migration, so pressing Run delta changed
             # nothing visible on the page: it moves the same counters a

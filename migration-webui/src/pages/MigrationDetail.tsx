@@ -196,9 +196,9 @@ export const MigrationDetail: React.FC = () => {
         </Button>
         <Button size="small" variant="outlined" color="warning"
                 data-testid="run-full"
-                disabled={d?.running || fullBusy}
+                disabled={(d?.writing ?? d?.running) || fullBusy}
                 onClick={() => setAskFull(true)}>
-          {d?.running ? 'migration running' : 'Run full migration'}
+          {(d?.writing ?? d?.running) ? 'migration running' : 'Run full migration'}
         </Button>
         <IconButton size="small" onClick={refresh} aria-label="refresh">
           <RefreshIcon fontSize="small" />
@@ -256,9 +256,9 @@ export const MigrationDetail: React.FC = () => {
             <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
               <Typography variant="subtitle1" sx={{ fontWeight: 700, flexGrow: 1 }}>Migrate users</Typography>
               <Button variant="contained" size="small" data-testid="migrate-start"
-                      disabled={d.running || (who === 'some' && picked.length === 0)}
+                      disabled={(d.writing ?? d.running) || (who === 'some' && picked.length === 0)}
                       onClick={() => setAskFull(true)}>
-                {d.running ? 'migration running'
+                {(d.writing ?? d.running) ? 'migration running'
                   : who === 'some'
                     ? `Migrate ${picked.length} chosen user${picked.length === 1 ? '' : 's'}…`
                     : `Migrate all ${(d.users?.length ?? d.progress?.users ?? 0).toLocaleString()} users…`}

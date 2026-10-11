@@ -734,6 +734,8 @@ export interface MigrationDetail {
   sourceDomain: string
   targetDomain: string
   running: boolean
+  /** A job that writes the ledger is running; a verify or tally alone leaves this false. */
+  writing?: boolean
   progress: MigrationProgress
   /** Which pass a live ORDERED run is on. Status is per user, so after the Drive
    *  pass every user reads "done" while mail has not started; this says which
