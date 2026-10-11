@@ -22,20 +22,25 @@ After the migration completes, before approval:
 - For each user, it compares Drive files, Gmail, Calendar, Contacts, Tasks across both tenants
 - Each user gets a verdict: `COMPLETE`, `IDENTICAL`, `SHORT`, `INCOMPLETE`, or `FAILED`
 
-### 3. Approval gates on 1:1 proof
+### 3. Approval AUTO-REPAIRS gaps and gates on 1:1 proof
 
 When you click **Final Report → Approve as complete**:
 
-- The API calls `verify_all` again (ensuring fresh data)
+- The API calls `verify_all` (ensures fresh data)
+- If gaps found:
+  - ✓ Automatically runs `auto_repair_all()` on broken users
+  - ✓ For each SHORT/INCOMPLETE user, re-migrates gapped services
+  - ✓ Loops up to 3 times until 1:1 is achieved
 - **PASS** (approval allowed) if:
-  - ✓ All users are `COMPLETE` or `IDENTICAL`
+  - ✓ All users are `COMPLETE` or `IDENTICAL` (after auto-repair)
   - ✓ Zero `INCOMPLETE` verdicts (unfinished checks)
   - ✓ Zero `FAILED` verdicts (verification errors)
   - ✓ Parity = 100%
 
-- **FAIL** (approval blocked) if any user has a gap
-  - You get an error message: "Run `python verify_all.py --account-id X` and fix gaps"
-  - Fix the failing users (repair, re-run services, etc.)
+- **FAIL** (approval still blocked) if auto-repair cannot fix it
+  - You get an error: "X users still have issues. Manual repair required."
+  - The error lists which users are broken
+  - Run `python repair_gaps.py --account-id X` to manually repair
   - Then retry approval
 
 ## Manual verification (optional)
@@ -79,14 +84,24 @@ python verify_all.py --account-id 3 --json | jq .
 
 ## Repair workflows
 
-### One user is SHORT (missing items)
+### Automatic repair (runs at approval time)
+
+When you click "Approve as complete", the system:
+1. Verifies all users
+2. If gaps found, automatically re-migrates those services for those users
+3. Loops up to 3 times
+4. If successful, approves; if not, returns list of users still broken
+
+**You don't need to do anything.** Just click Approve.
+
+### Manual repair (if auto-repair fails)
 
 ```bash
-# Re-run that user's services
-python main.py migrate --account-id 3 --users user@example.com --services drive,gmail
-# Then verify again
-python verify_all.py --account-id 3
+# Run repair on problem users
+python repair_gaps.py --account-id 3
 ```
+
+This does the same thing as auto-repair but with full logging and control.
 
 ### One user is INCOMPLETE (check timed out)
 
@@ -96,14 +111,15 @@ python verify_sample.py --account-id 3 --users user@example.com
 # If it passes, approve
 ```
 
-### Multiple users have gaps
+### Deep issues (beyond auto-repair)
+
+If auto-repair loops 3 times and a user is still SHORT:
 
 ```bash
 # Run the full-tenant repair job (catches most strays)
 # Via UI: Maintenance → Run repair
 # Or CLI: python main.py repair --account-id 3
-# Then verify again
-python verify_all.py --account-id 3
+# Then try approval again
 ```
 
 ## What's being checked
@@ -125,10 +141,13 @@ Nothing is written to either tenant — the check is read-only.
 3. ✓ Click **Final Report**
 4. ✓ (Optional) Run `python verify_all.py --account-id X` manually to preview
 5. ✓ Click **Approve as complete**
-   - If PASS: approval succeeds, teardown scheduled
-   - If FAIL: see error, fix gaps, retry step 5
+   - Auto-repair runs if gaps detected
+   - If 1:1 achieved (auto-repair or no gaps): approval succeeds, teardown scheduled
+   - If still broken after auto-repair: error lists users, run `python repair_gaps.py`, retry step 5
 6. ✓ All gcloud sign-ins are revoked
 7. ✓ Teardown due in 30 days (can be undone)
+
+**The system ensures 1:1 before approval is possible.** You cannot accidentally approve a broken migration.
 
 ## Disabling the gate (not recommended)
 
