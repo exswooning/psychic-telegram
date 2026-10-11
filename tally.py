@@ -121,11 +121,16 @@ def compare_drive(src: dict, tgt: dict, mapping: dict, examples: int = 10) -> di
     return out
 
 
+# Google puts two welcome messages in every new account, the source's included, and the
+# migration copies the source's: a target always held 2 more and every user read DIFFERS.
+NOT_GOOGLE_WELCOME = "-from:mail-noreply@google.com"
+
+
 def count_mail(gmail, retry=lambda f: f) -> int:
     total, token = 0, None
     while True:
         resp = retry(lambda t=token: gmail.users().messages().list(
-            userId="me", maxResults=500, pageToken=t, includeSpamTrash=True,
+            userId="me", maxResults=500, pageToken=t, includeSpamTrash=True, q=NOT_GOOGLE_WELCOME,
             fields="messages/id,nextPageToken").execute())()
         total += len(resp.get("messages", []))
         token = resp.get("nextPageToken")
