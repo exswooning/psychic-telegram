@@ -48,8 +48,15 @@ log = logging.getLogger("job_admission")
 # box whose 8-worker pool becomes 4+4 rather than 8+8. Override with
 # BITPORT_MAX_CONCURRENT_JOBS on a machine with room for more; every worker
 # still costs MB_PER_WORKER of real memory.
-MAX_CONCURRENT_TENANT_JOBS = max(
-    1, int(os.getenv("BITPORT_MAX_CONCURRENT_JOBS", "2")))
+def _job_cap() -> int:
+    pinned = os.getenv("BITPORT_MAX_CONCURRENT_JOBS", "").strip()
+    if pinned and pinned != "auto":
+        return max(1, int(pinned))
+    import resources
+    return resources.auto_job_cap()
+
+
+MAX_CONCURRENT_TENANT_JOBS = _job_cap()
 
 
 def try_admit(account_id: int | None, job_name: str, pid: int | None = None) -> tuple[bool, str]:

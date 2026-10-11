@@ -1574,9 +1574,25 @@ def _migrate_shared_drives(db, auth, settings) -> None:
         log.warning("shared drives failed: %s -- repair retries them", exc)
 
 
+def _auto_processes() -> int:
+    """Processes for this pass, from the box as it is now: its cores and RAM shared with
+    every job running here (this one included -- it holds its admission slot already)."""
+    import resources
+    try:
+        import job_admission
+        jobs = len(job_admission.list_active()) or 1
+    except Exception:      # noqa: BLE001 - no control plane (a bare CLI run): this job alone
+        jobs = 1
+    n = resources.auto_processes(concurrent_jobs=jobs)
+    log.info("processes for this pass: %d (auto: %d job(s) sharing the box)", n, jobs)
+    return n
+
+
 def _run_pass(auth, db, settings, services, delta, delta_days, only) -> list[dict]:
     """One pass, in this process or split across several (MIGRATE_PROCESSES)."""
-    n = int(getattr(settings, "migrate_processes", 1) or 1)
+    n = int(getattr(settings, "migrate_processes", 0) or 0)
+    if n <= 0 and not settings.dry_run and not os.getenv("MIGRATE_SHARD"):
+        n = _auto_processes()
     if n <= 1 or settings.dry_run or os.getenv("MIGRATE_SHARD"):
         return run_batch(auth, db, settings, services, delta=delta,
                          delta_days=delta_days, only=only)

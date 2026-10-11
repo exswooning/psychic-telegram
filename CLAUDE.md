@@ -608,7 +608,11 @@ contact photos. The per-user tally compares every mapped Drive item and reads `D
 when counts agree but items do not.
 
 **A pass can be split across OS processes** (`MIGRATE_PROCESSES`, `StartMigration.
-processes`, default 1 until measured): `main._run_pass_in_processes` runs `main.py
+processes`; unset = auto, re-sized at every pass by `main._auto_processes` -> `resources.
+auto_processes`: one per core, cores shared with every job in `job_admission`, capped by
+RAM at `PROCESS_BASE_MB` (41, measured) + a worker each; a number pins it). The box-wide
+job cap is sized the same way (`resources.auto_job_cap`: one per core, RAM permitting;
+`BITPORT_MAX_CONCURRENT_JOBS` pins it). `main._run_pass_in_processes` runs `main.py
 run-shard` children, each a disjoint slice of the users (`MIGRATE_SHARD=k/n`), each
 sized to 1/n of the RAM and of the learned project rate (`PROCESS_SHARE`). The parent
 keeps the admission slot, the PASS markers, the memory watchdog and Stop (forwarded as

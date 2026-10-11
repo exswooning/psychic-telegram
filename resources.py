@@ -496,6 +496,33 @@ PRESSURE_FLOOR_FRACTION = 0.05
 # against one pair of tenants.
 HARD_CAP = 48
 
+# One migration process with every engine imported, before any worker: measured 41 MB
+# on the VPS (ru_maxrss after `import main, drive_engine, gmail_engine`, 2026-10-11).
+PROCESS_BASE_MB = 41
+MAX_PROCESSES = 8
+
+
+def _process_mb() -> int:
+    return PROCESS_BASE_MB + MB_PER_WORKER
+
+
+def auto_processes(r: "SystemResources | None" = None, concurrent_jobs: int = 1) -> int:
+    """OS processes one pass can use: a core each (the interpreter lock holds a process to
+    ~1 core), shared with the jobs already running, and never more than RAM can hold one
+    worker in each."""
+    r = r or probe()
+    jobs = max(1, int(concurrent_jobs))
+    cores = r.cpu_logical // jobs
+    fit = int(r.ram_usable_gb * 1024 / jobs // _process_mb())
+    return max(1, min(cores, fit, MAX_PROCESSES))
+
+
+def auto_job_cap(r: "SystemResources | None" = None) -> int:
+    """Jobs the whole box may run at once: one per core, as long as total RAM holds a
+    process and a worker for each (recommend() then splits RAM between them)."""
+    r = r or probe()
+    return max(1, min(r.cpu_logical, int(r.ram_total_gb * 1024 // _process_mb())))
+
 # The seeder gets a higher ceiling than HARD_CAP because the quota that
 # sets HARD_CAP does not apply to it. HARD_CAP is about Google's PER-USER
 # limits, which bind when many workers act on behalf of the same account.

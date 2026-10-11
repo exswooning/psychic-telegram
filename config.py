@@ -760,11 +760,10 @@ class Settings:
     # _start_tally_after_repair); TALLY_ON_COMPLETE=true brings the per-user hook back.
     tally_on_complete: bool = field(default_factory=lambda: _env_bool("TALLY_ON_COMPLETE", False))
     # How many OS processes each pass is split across (main._run_pass_in_processes).
-    # 1 keeps the whole run in one process, as always; more gets past the
-    # interpreter lock that holds a run to ~1.1 cores. Left at 1 until the perf
-    # test measures what a larger number buys on this box.
+    # 0 = size it from the box at the start of every pass (resources.auto_processes);
+    # a number pins it. More than one gets past the interpreter lock (~1.1 cores).
     migrate_processes: int = field(
-        default_factory=lambda: max(1, int(os.getenv("MIGRATE_PROCESSES", "1") or 1)))
+        default_factory=lambda: max(0, int(os.getenv("MIGRATE_PROCESSES", "0") or 0)))
     # Redo mail that was migrated before rewriting was switched on.
     #
     # Off, and destructive, so it stays opt-in. A migrated message cannot be
