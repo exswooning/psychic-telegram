@@ -277,6 +277,7 @@ class TestSideTables:
                               # so a re-run must still be charged for them
             "audit_rollup",   # cleared by type alongside audit_log, in the
                               # same statement -- see reset_service_ledger
+            "item_retries",   # cleared by type alongside audit_log
             "repair_runs",    # not per-user at all: a log of when the Repair
                               # button was pressed and what that pass reported.
                               # Nothing reads it to decide whether an item

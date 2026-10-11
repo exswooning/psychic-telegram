@@ -155,6 +155,10 @@ def reset_service_ledger(db: MigrationDB, source_email: str,
         audit_deleted += conn.execute(
             f"DELETE FROM audit_rollup WHERE source_user=? AND item_type IN "
             f"({placeholders})", (source_email, *types)).rowcount
+        # The retry history of the same items: kept, it would describe attempts at
+        # work this reset declares never done.
+        conn.execute(f"DELETE FROM item_retries WHERE source_user=? AND item_type IN "
+                     f"({placeholders})", (source_email, *types))
         side_deleted = 0
         for svc in services:
             for table, col in SERVICE_SIDE_TABLES.get(svc, ()):

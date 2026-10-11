@@ -62,7 +62,7 @@ BACKEND_5XX = "backendError"
 # different instructions, and only the second one is actionable.
 RETRYABLE_FAMILIES = {"acl_quota", "drive_scope_403", "auth_session_invalid",
                       "gmail_invalid_label", "transient_backend", "drive_stragglers",
-                      "shared_drives"}
+                      "shared_drives", "owed_shares"}
 
 # A shared drive whose create failed and that still has no mapping -- the whole
 # drive (members and contents) is missing on the target. Tenant-level, so NOT
@@ -127,6 +127,9 @@ def survey(db) -> dict:
             f"item_type IN ({','.join('?' for _ in DRIVE_STRAGGLER_TYPES)}) "
             "AND error_message NOT LIKE ? AND error_message NOT LIKE ?",
             (*DRIVE_STRAGGLER_TYPES, f"%{SCOPE_403}%", f"%{BACKEND_5XX}%")),
+        # Not FAILED: a file that landed but whose sharing never ran (an interrupted
+        # run). Nothing else counts it, and only a Drive walk over the file finishes it.
+        "owed_shares": len(pending_share_users(db)),
     }
 
 
@@ -326,6 +329,15 @@ def stranded_drive_users(db) -> list[str]:
     return [r["source_user"] for r in rows]
 
 
+def pending_share_users(db) -> list[str]:
+    """Source users with a copied item whose sharing was started and never finished
+    (an `acl_pass` PENDING mark), still in the corpus."""
+    return [r["source_user"] for r in db.conn.execute(
+        """SELECT DISTINCT source_user FROM audit_log a
+            WHERE item_type='acl_pass' AND status='PENDING'
+              AND EXISTS (SELECT 1 FROM identity_map m WHERE m.source_email = a.source_user)""")]
+
+
 def retry_drive_stragglers(auth, db, settings, apply: bool = False,
                           users: list[str] | None = None, _migrate_user=None) -> dict:
     """Re-run just Drive for users with a stranded file/folder/shortcut.
@@ -350,7 +362,9 @@ def retry_drive_stragglers(auth, db, settings, apply: bool = False,
     targets = dict(db.conn.execute(
         "SELECT source_email, target_email FROM identity_map").fetchall())
     stats = {"attempted": 0, "retried": 0, "unmapped_users": 0, "errors": []}
-    for src in (users if users is not None else stranded_drive_users(db)):
+    if users is None:
+        users = list(dict.fromkeys(stranded_drive_users(db) + pending_share_users(db)))
+    for src in users:
         tgt = targets.get(src)
         if not tgt:
             # No target account: nothing for a re-walk to write into.
@@ -818,7 +832,7 @@ def run_all(db, auth, settings, apply: bool = False,
 
     # Before the ACL passes below: a file ACLs would apply to has to exist first,
     # and a stranded file is exactly what an ACL grant has nothing to attach to.
-    if out["survey"].get("drive_stragglers"):
+    if out["survey"].get("drive_stragglers") or out["survey"].get("owed_shares"):
         try:
             dr = retry_drive_stragglers(auth, db, settings, apply=apply)
             out["stragglers"] = dr["attempted"]

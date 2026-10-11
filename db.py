@@ -427,7 +427,37 @@ CREATE TABLE IF NOT EXISTS mirror_retry (
     updated_at  TEXT NOT NULL,
     PRIMARY KEY (source_user, service, item_id)
 );
+
+-- A failed item written again: the failure it had, kept before the new write
+-- replaces it in audit_log (which holds only each item's latest state).
+CREATE TABLE IF NOT EXISTS item_retries (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_user TEXT NOT NULL,
+    item_id     TEXT NOT NULL,
+    item_type   TEXT NOT NULL,
+    prev_error  TEXT,
+    new_status  TEXT NOT NULL,
+    at          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_item_retries_user ON item_retries(source_user);
 """
+
+
+def retry_summary(conn) -> dict:
+    """Items that failed and were tried again (item_retries): how many came good, how many
+    attempts failed again, and the commonest errors -- what audit_log alone overwrites."""
+    try:
+        rows = conn.execute(
+            "SELECT new_status, COUNT(*), COUNT(DISTINCT source_user||'|'||item_id||'|'||item_type) "
+            "FROM item_retries GROUP BY new_status").fetchall()
+        top = conn.execute("SELECT substr(prev_error, 1, 120), COUNT(*) FROM item_retries "
+                           "GROUP BY 1 ORDER BY 2 DESC LIMIT 5").fetchall()
+    except Exception:      # noqa: BLE001 - a ledger from before the table: nothing retried yet
+        rows, top = [], []
+    return {"attempts": sum(r[1] for r in rows),
+            "recovered": sum(r[2] for r in rows if r[0] != "FAILED"),
+            "failedAgain": sum(r[1] for r in rows if r[0] == "FAILED"),
+            "topErrors": [{"error": e, "count": n} for e, n in top]}
 
 
 def utc_now() -> str:
@@ -1278,6 +1308,11 @@ class MigrationDB:
                   modified_time: Optional[str] = None,
                   bytes_moved: int = 0) -> None:
         with self.write() as conn:
+            conn.execute(
+                "INSERT INTO item_retries (source_user, item_id, item_type, prev_error, new_status, at) "
+                "SELECT source_user, item_id, item_type, error_message, ?, ? FROM audit_log "
+                "WHERE source_user=? AND item_id=? AND item_type=? AND status='FAILED'",
+                (status, utc_now(), source_user, item_id, item_type))
             conn.execute(
                 """INSERT INTO audit_log
                        (source_user, item_id, item_type, status, error_message,
