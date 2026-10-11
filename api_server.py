@@ -1211,12 +1211,20 @@ async def approve_migration_complete(body: ApproveComplete, op: Operator = Depen
         using = gcloud_signout.busy()
         if using:
             return False, f"a setup is using a gcloud sign-in right now ({using}) -- approve once it ends"
-        # Require exhaustive 1:1 verification before approval
+        # Require exhaustive 1:1 verification before approval. Auto-repair any gaps.
         import verify_all
+        import repair_gaps
+
         verification = verify_all.verify_all_users(aid)
         if verification["verdict"] != "PASS":
-            return False, (f"migration is not 1:1 verified: {verification['message']} "
-                          f"Run 'python verify_all.py --account-id {aid}' and fix gaps before approval.")
+            log.info(f"Approval: gaps detected, running auto-repair for account {aid}...")
+            repair_result = repair_gaps.auto_repair_all(aid)
+            if repair_result["verdict"] != "PASS":
+                return False, (f"migration has gaps that could not be auto-repaired. "
+                              f"{repair_result['still_broken']} users still have issues. "
+                              f"Manual repair required: python repair_gaps.py --account-id {aid}")
+            log.info(f"Approval: auto-repair succeeded, proceeding with approval")
+
         import lifecycle
         gone = gcloud_signout.sign_out_all()
         st = lifecycle.approve(aid, op.name)
