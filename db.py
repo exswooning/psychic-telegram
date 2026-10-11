@@ -820,13 +820,16 @@ class MigrationDB:
         """Users whose copied Drive items need their modifiedTimes checked: never checked, or
         written to since their own last check -- a landing, a grant, a comment or a link
         rewrite each can move a target file's time."""
+        # Users first, then one EXISTS per user: probed per id_mapping row it ran for hours
+        # on account 3's ledger (322k mappings x 1.47M audit rows) and held every repair.
         return {r[0] for r in self.conn.execute(
-            "SELECT DISTINCT m.source_user FROM id_mapping m "
-            "LEFT JOIN mtime_checks c ON c.source_user = m.source_user "
-            "WHERE m.type IN ('file', 'folder') AND (c.checked_at IS NULL OR EXISTS ("
-            "  SELECT 1 FROM audit_log a WHERE a.source_user = m.source_user AND a.item_type IN "
+            "WITH u AS (SELECT DISTINCT source_user FROM id_mapping WHERE type IN ('file', 'folder')) "
+            "SELECT u.source_user FROM u "
+            "LEFT JOIN mtime_checks c ON c.source_user = u.source_user "
+            "WHERE c.checked_at IS NULL OR EXISTS ("
+            "  SELECT 1 FROM audit_log a WHERE a.source_user = u.source_user AND a.item_type IN "
             "  ('file', 'folder', 'shortcut', 'acl', 'comment', 'link_rewrite') "
-            "  AND a.timestamp >= c.checked_at))")}
+            "  AND a.timestamp >= c.checked_at)")}
 
     def record_mtime_check(self, source_user: str, checked_at: str) -> None:
         with self.write() as conn:
