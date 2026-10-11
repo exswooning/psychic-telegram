@@ -1591,9 +1591,9 @@ def _auto_processes() -> int:
 def _run_pass(auth, db, settings, services, delta, delta_days, only) -> list[dict]:
     """One pass, in this process or split across several (MIGRATE_PROCESSES)."""
     n = int(getattr(settings, "migrate_processes", 0) or 0)
-    if n <= 0 and not settings.dry_run and not os.getenv("MIGRATE_SHARD"):
+    if n <= 0 and settings is not None and not settings.dry_run and not os.getenv("MIGRATE_SHARD"):
         n = _auto_processes()
-    if n <= 1 or settings.dry_run or os.getenv("MIGRATE_SHARD"):
+    if n <= 1 or getattr(settings, "dry_run", False) or os.getenv("MIGRATE_SHARD"):
         return run_batch(auth, db, settings, services, delta=delta,
                          delta_days=delta_days, only=only)
     return _run_pass_in_processes(settings, services, delta, delta_days, only, n)

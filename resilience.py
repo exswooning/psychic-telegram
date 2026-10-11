@@ -435,8 +435,8 @@ def retry_on_google_error(
                                    ok=True, retried=attempt > 0)
                     return result
                 except HttpError as exc:
-                    metrics.METRICS.record(label or "api", time.monotonic() - started,
-                                   ok=False)
+                    metrics.METRICS.record(label or "api", time.monotonic() - started)
+                    metrics.METRICS.refuse(label or "api")
                     status = _status_of(exc)
                     reason = _extract_reason(exc)
                     if status == 429 or reason in PACING_REASONS:
@@ -520,8 +520,8 @@ def retry_on_google_error(
                             return adopted
 
                 except TRANSPORT_ERRORS as exc:
-                    metrics.METRICS.record(label or "api", time.monotonic() - started,
-                                   ok=False)
+                    metrics.METRICS.record(label or "api", time.monotonic() - started)
+                    metrics.METRICS.refuse(label or "api")
                     # A multi-hour migration reliably sees connections reset,
                     # sockets time out and TLS renegotiate. None of these are
                     # HttpError, so every one of them used to permanently fail
@@ -560,7 +560,14 @@ def retry_on_google_error(
                     if adopted is not None:
                         return adopted
 
-        return wrapper
+        @functools.wraps(fn)
+        def counted(*args, **kwargs) -> T:
+            try:
+                return wrapper(*args, **kwargs)
+            except Exception:
+                metrics.METRICS.fail(label or "api")
+                raise
+        return counted
 
     return decorator
 

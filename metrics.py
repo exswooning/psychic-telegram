@@ -88,6 +88,7 @@ class Metrics:
             lambda: deque(maxlen=RECENT))
         self._calls: dict[str, int] = defaultdict(int)
         self._retries: dict[str, int] = defaultdict(int)
+        self._refused: dict[str, int] = defaultdict(int)
         self._failures: dict[str, int] = defaultdict(int)
         self._started = time.monotonic()
         self.enabled = True
@@ -104,6 +105,22 @@ class Metrics:
                 self._retries[label] += 1
             if not ok:
                 self._failures[label] += 1
+
+    def refuse(self, label: str) -> None:
+        """One attempt Google refused (a 429, a 5xx, a dropped connection). The call may
+        still succeed on a later try -- that is a retry, not a failure."""
+        if not self.enabled:
+            return
+        with self._lock:
+            self._refused[label] += 1
+
+    def fail(self, label: str) -> None:
+        """A call that gave up: its retries spent, or an error no retry fixes. Counted
+        once here, not per attempt -- a 429 the next try gets past is not a failure."""
+        if not self.enabled:
+            return
+        with self._lock:
+            self._failures[label] += 1
 
     def recent(self, label: str | None = None) -> dict:
         """
@@ -134,6 +151,7 @@ class Metrics:
             self._recent.clear()
             self._calls.clear()
             self._retries.clear()
+            self._refused.clear()
             self._failures.clear()
             self._started = time.monotonic()
 
@@ -190,6 +208,7 @@ class Metrics:
             "p95": self._pct(all_lat, 95),
             "p99": self._pct(all_lat, 99),
             "retries": sum(self._retries.values()),
+            "refused": sum(self._refused.values()),
             "failures": sum(self._failures.values()),
             "by_label": per_label,
         }

@@ -55,6 +55,7 @@ export function historyRows(h: MetricsSnapshot['history'] | undefined, avgWindow
   let prevFailures: number | null = null
   let prevCalls: number | null = null
   let prevRetries: number | null = null
+  let prevRefused: number | null = null
   const rows = ordered.map((p) => {
     const failures = prevFailures === null ? 0 : Math.max(0, p.failures - prevFailures)
     prevFailures = p.failures
@@ -64,13 +65,17 @@ export function historyRows(h: MetricsSnapshot['history'] | undefined, avgWindow
     const retries = p.retries
     const retriesDelta = prevRetries === null || retries === undefined ? 0 : Math.max(0, retries - prevRetries)
     if (retries !== undefined) prevRetries = retries
+    const refused = p.refused
+    const refusedDelta = prevRefused === null || refused === undefined ? 0 : Math.max(0, refused - prevRefused)
+    if (refused !== undefined) prevRefused = refused
     const p50Ms = Math.round((p.p50 ?? 0) * 1000)
     const p99Ms = Math.round((p.p99 ?? 0) * 1000)
     return {
       t: clock(p.recordedAt), rps: p.requestsPerSec,
       p50Ms, p95Ms: Math.round(p.p95 * 1000), p99Ms,
       spreadMs: Math.max(0, p99Ms - p50Ms),
-      failures, callsDelta, retriesDelta,
+      failures, callsDelta, retriesDelta, refusedDelta,
+      refusedRatePct: callsDelta > 0 ? round1((refusedDelta / callsDelta) * 100) : 0,
       retryRatePct: callsDelta > 0 ? round1((retriesDelta / callsDelta) * 100) : 0,
       failureRatePct: callsDelta > 0 ? round1((failures / callsDelta) * 100) : 0,
     }

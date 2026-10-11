@@ -113,7 +113,8 @@ export const MigrateMetricsCharts: React.FC<{ m: MetricsSnapshot }> = ({ m }) =>
         <ChartFrame title="Retry and failure rate" hint="% of that snapshot's own calls — normalizes for a burst of volume, which a raw count cannot"
                     empty={needTwo}>
           <SeriesChart data={hist} xKey="t" fmt={pct}
-                       series={[{ key: 'retryRatePct', name: 'retry rate', color: c.warning, type: 'line' },
+                       series={[{ key: 'refusedRatePct', name: 'refused by Google', color: c.info, type: 'line' },
+                                { key: 'retryRatePct', name: 'retry rate', color: c.warning, type: 'line' },
                                 { key: 'failureRatePct', name: 'failure rate', color: c.error, type: 'line' }]} />
         </ChartFrame>
 

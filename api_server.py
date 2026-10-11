@@ -5859,6 +5859,7 @@ async def migration_metrics(account_id: int, history: int = 60, users: str = "",
              "p99": s.get("p99", 0),
              "calls": s.get("calls", 0),
              "retries": s.get("retries", 0),
+             "refused": s.get("refused", 0),
              "failures": s.get("failures", 0)}
             for s in reversed(samples)]
         out["limiterHistory"] = _limiter_history(samples)

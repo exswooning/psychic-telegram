@@ -1511,6 +1511,8 @@ export interface MetricsSnapshot {
     /** Added alongside p95/failures -- optional so a snapshot from before this
      *  existed (or a test fixture that predates it) still type-checks. */
     p50?: number; p99?: number; calls?: number; retries?: number
+    /** Attempts Google refused, whether or not a later try got through. */
+    refused?: number
   }[]
   /** Each limiter's rate over the same window, oldest first -- the sawtooth. */
   limiterHistory?: Record<string, LimiterPoint[]>
