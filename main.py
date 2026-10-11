@@ -1580,7 +1580,9 @@ def _auto_processes() -> int:
     import resources
     try:
         import job_admission
-        jobs = len(job_admission.list_active()) or 1
+        # A verify or tally only reads (about 1% of a core, measured); it takes no core away.
+        reads = {"verify", "user-tally", "tally", "discover"}
+        jobs = len([j for j in job_admission.list_active() if j.get("job_name") not in reads]) or 1
     except Exception:      # noqa: BLE001 - no control plane (a bare CLI run): this job alone
         jobs = 1
     n = resources.auto_processes(concurrent_jobs=jobs)
