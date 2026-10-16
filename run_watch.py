@@ -393,6 +393,13 @@ def _cleared(inc: dict, ledger_path_for) -> str | None:
         since = ms.lag_since(s, ms.last_cycles(path))
         if since is not None and time.time() - since <= ms.LAG_INTERVALS * s["interval_min"] * 60:
             return "a good mirror cycle finished within the lag window"
+    if kind == "mirror_failing":
+        import mirror_scheduler as ms
+        if not ms.get_settings(aid)["enabled"]:
+            return "the mirror was switched off"
+        recent = ms.last_cycles(path).get("recent_errors") or []
+        if recent and not recent[0]:
+            return "a mirror cycle finished without errors"
     return None
 
 

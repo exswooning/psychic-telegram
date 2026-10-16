@@ -32,6 +32,8 @@ DEFAULTS = {"enabled": False, "interval_min": 15, "deletion_mode": "mirror",
             "last_started_at": None, "last_tally_on": None, "updated_at": None,
             "updated_by": None}
 LAG_INTERVALS = 3
+# Consecutive cycles with errors before the mirror is called failing.
+FAILING_CYCLES = 3
 # 21:00 UTC is 02:45 on the box's own (Nepal) clock -- its quietest hour.
 NIGHTLY_TALLY_HOUR_UTC = 21
 
@@ -138,10 +140,31 @@ def last_cycles(ledger_path: str) -> dict:
             last = conn.execute("SELECT started_at FROM mirror_cycles ORDER BY id DESC LIMIT 1").fetchone()
             good = conn.execute("SELECT finished_at FROM mirror_cycles WHERE status IN ('ok','partial') "
                                 "AND finished_at IS NOT NULL ORDER BY id DESC LIMIT 1").fetchone()
+            recent = conn.execute("SELECT errors FROM mirror_cycles WHERE finished_at IS NOT NULL "
+                                  "ORDER BY id DESC LIMIT ?", (FAILING_CYCLES,)).fetchall()
     except sqlite3.OperationalError:      # a ledger from before the mirror
         return {}
     return {"started": _epoch(last["started_at"]) if last else None,
-            "good": _epoch(good["finished_at"]) if good else None}
+            "good": _epoch(good["finished_at"]) if good else None,
+            "recent_errors": [_errors(r["errors"]) for r in recent]}
+
+
+def _errors(raw) -> list:
+    try:
+        return list(json.loads(raw or "[]"))
+    except (TypeError, ValueError):
+        return [str(raw)]
+
+
+def failing(last: dict) -> list | None:
+    """The newest cycle's errors when the last FAILING_CYCLES cycles all had some, else None.
+    A partial cycle counts as good for lag -- one stray error in a big cycle is not lag --
+    so without this a pair whose every cycle failed (live: 5 days of Drive 401 on the
+    source, 1,250 cycles) read as healthy."""
+    recent = last.get("recent_errors") or []
+    if len(recent) >= FAILING_CYCLES and all(recent[:FAILING_CYCLES]):
+        return recent[0]
+    return None
 
 
 def lag_since(s: dict, last: dict) -> Optional[float]:
@@ -214,6 +237,16 @@ class Scheduler:
                                  f"minutes ago, more than {LAG_INTERVALS} intervals of "
                                  f"{s['interval_min']} minutes. Check the Mirror page and Jobs: a "
                                  f"cycle may be failing, stuck, or queued behind a long job."))
+            errs = failing(last)
+            if errs and self.open_incident:
+                self.open_incident(
+                    kind="mirror_failing", severity="error", account_id=aid, job_name="mirror",
+                    fingerprint=f"mirror-failing-{aid}",
+                    title=f"Mirror cycles are failing ({len(errs)} error(s) in each of the last "
+                          f"{FAILING_CYCLES})",
+                    summary=("Every one of the last mirror cycles ended with errors, so changes on "
+                             "the source are not reaching the target. Newest: "
+                             + "; ".join(str(e)[:300] for e in errs[:3])))
             day = datetime.fromtimestamp(now, timezone.utc)
             if day.hour == NIGHTLY_TALLY_HOUR_UTC and s["last_tally_on"] != day.date().isoformat():
                 ok, _d = self.start_tally(aid)

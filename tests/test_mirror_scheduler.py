@@ -139,3 +139,40 @@ def test_held_deletions_pause_the_pair_and_open_an_incident(cp, tmp_path, monkey
     assert [r["kind"] for r in rows] == ["mirror_deletions_held"]
     ms.set_paused(3, False)
     assert ms.get_settings(3)["deletions_paused"] is False
+
+
+def test_cycles_that_all_fail_open_an_incident_even_though_partial_is_not_lag(cp):
+    """Live: the source answered Drive 401 for five days; every cycle ended partial, which
+    lag counts as good, and nothing said so for 1,250 cycles."""
+    ms.save_settings(3, enabled=True, interval_min=5, deletion_mode="mirror", cap_pct=2, by="t")
+    enabled_on(3, at(9))
+    err = ["seeduser200@source: HttpError 401 Active session is invalid"]
+    box = Box(at(12), last={"good": at(11, 58), "started": at(11, 58),
+                            "recent_errors": [err, err, []]})
+    box.sched().tick()
+    assert box.incidents == []                     # two failing cycles: not yet
+    box.last["recent_errors"] = [err, err, err]
+    box.sched().tick()
+    assert [i["kind"] for i in box.incidents] == ["mirror_failing"]
+    assert "401" in box.incidents[0]["summary"]
+    assert box.incidents[0]["fingerprint"] == "mirror-failing-3"
+
+
+def test_failing_reads_the_newest_cycles_first(cp):
+    assert ms.failing({"recent_errors": [["x"], ["y"], ["z"]]}) == ["x"]
+    assert ms.failing({"recent_errors": [[], ["y"], ["z"]]}) is None
+    assert ms.failing({"recent_errors": [["x"], ["y"]]}) is None
+    assert ms.failing({}) is None
+
+
+def test_last_cycles_reads_recent_errors_from_the_ledger(tmp_path):
+    import sqlite3
+    p = str(tmp_path / "m.db")
+    from db import MigrationDB
+    MigrationDB(p).close()
+    with sqlite3.connect(p) as c:
+        for i, e in enumerate(['["a"]', '[]', '["b"]']):
+            c.execute("INSERT INTO mirror_cycles (started_at, finished_at, status, errors) "
+                      "VALUES (?,?,?,?)", (f"2026-10-16T0{i}:00:00Z", f"2026-10-16T0{i}:01:00Z",
+                                            "partial", e))
+    assert ms.last_cycles(p)["recent_errors"] == [["b"], [], ["a"]]

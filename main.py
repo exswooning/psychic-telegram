@@ -1028,6 +1028,35 @@ def _gate_on_move(auth, settings) -> None:
     print("MOVE CHECK: the source lets files move to the target", flush=True)
 
 
+# A refusal for the whole tenant, not one user: Google answers a lapsed subscription or a
+# Drive switched off for the organisation this way, for every account and the admin alike.
+_SOURCE_DOWN = ("Active session is invalid", "HttpError 401", "returned 401")
+
+
+def _gate_on_source(auth, settings) -> None:
+    """Before anything is written, one read of the source admin's Drive. Live: the source
+    tenant began answering every user, its admin included, with 401 "Active session is
+    invalid"; a full run then stamped 292 users BLOCKED and 238 FAILED in 37 minutes. A
+    refusal like that stops the run here; any other error is only logged -- a blip must
+    never cost a run its start."""
+    admin = getattr(settings, "source_admin", "")
+    if getattr(settings, "dry_run", False) or not admin:
+        return
+    try:
+        auth.api("source", "drive", admin).about().get(fields="user(emailAddress)").execute()
+    except Exception as exc:      # noqa: BLE001 - classified below
+        text = f"{type(exc).__name__} {exc}"
+        if not any(s in text for s in _SOURCE_DOWN):
+            log.warning("source check could not be made (%s); running anyway", text[:200])
+            return
+        print(f"SOURCE REFUSED: the source tenant's Drive refuses its own admin ({admin}): "
+              f"{text[:300]}. This is the whole tenant, not one user -- check the source Admin "
+              f"console (Billing > Subscriptions; Apps > Google Workspace > Drive and Docs is "
+              f"on). Nothing was migrated.", flush=True)
+        raise SystemExit(2)
+    print("SOURCE CHECK: the source admin's Drive answers", flush=True)
+
+
 def _say_source_access(settings) -> None:
     """One line in every run's log: can this run write to the source? After the gate,
     so a pass it switched off is not counted -- the record a real client's run needs."""
@@ -1085,6 +1114,7 @@ def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
     """
     _gate_on_delegation(settings)
     _gate_on_move(auth, settings)
+    _gate_on_source(auth, settings)
     _say_source_access(settings)
     try:
         stale = demote_stale_running(db)
