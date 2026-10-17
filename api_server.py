@@ -669,6 +669,24 @@ def _reconcile_full_setup_state() -> None:
         # keeps the UI honest in the meantime.
         if alive:
             continue
+        # A run that FINISHED leaves this marker too: its result goes to the .partial
+        # beside it and nothing rewrites the marker. Live: a target setup that verified
+        # 22/22 scopes read "interrupted" after the next deploy. Promote that result.
+        try:
+            with open(path + ".partial", encoding="utf-8") as fh:
+                done = json.load(fh)
+        except (OSError, ValueError):
+            done = None
+        if isinstance(done, dict) and "phases" in done:
+            done.setdefault("domain", data.get("domain"))
+            tmp = path + ".tmp"
+            try:
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    json.dump(done, fh)
+                os.replace(tmp, path)
+            except OSError:
+                pass
+            continue
         result = {
             "running": False, "interrupted": True, "phases": [], "domain": data.get("domain"),
             "error": ("this setup run was interrupted when the server "

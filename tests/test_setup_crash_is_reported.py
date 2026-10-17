@@ -135,6 +135,26 @@ class TestAnInterruptedRunIsReconciledAtStartup:
         out = self._run(monkeypatch, {"running": True}, subdir="66")
         assert out["interrupted"] is True and out["running"] is False
 
+    def test_a_finished_run_keeps_its_result_over_the_marker(self, monkeypatch):
+        """Live: a target setup verified 22/22 scopes, then the next deploy's restart
+        found the launch marker still reading running and called it interrupted."""
+        import api_server
+        d = tempfile.mkdtemp()
+        logs = os.path.join(d, "logs", "3")
+        os.makedirs(logs)
+        path = os.path.join(logs, "full-setup-target.json")
+        with open(path, "w") as fh:
+            json.dump({"running": True, "domain": "t.example.com"}, fh)
+        done = {"side": "target", "ok": True, "phases": [{"name": "verify", "status": "ok"}]}
+        with open(path + ".partial", "w") as fh:
+            json.dump(done, fh)
+        monkeypatch.setattr(api_server, "HERE", d)
+        api_server._reconcile_full_setup_state()
+        with open(path) as fh:
+            out = json.load(fh)
+        assert out["ok"] is True and not out.get("interrupted")
+        assert out["domain"] == "t.example.com"
+
     def test_it_is_wired_into_startup(self):
         import api_server
         import inspect
