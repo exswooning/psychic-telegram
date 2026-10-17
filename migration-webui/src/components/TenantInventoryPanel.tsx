@@ -95,6 +95,19 @@ const describeAge = (sec: number): string => {
  *  reset or a migration can empty a tenant in far less. */
 const SCAN_LOOKS_STALE_AFTER_S = 30 * 60
 
+
+/** Google's token errors arrive as a Python tuple repr; say what they mean. */
+const plainError = (raw: string): string => {
+  if (/unauthorized_client/.test(raw)) {
+    return "Bitport's key is not allowed into this tenant yet: its domain-wide delegation " +
+      'is missing (or still propagating). Run this side\'s setup again; its delegation step adds it.'
+  }
+  if (/invalid_grant/.test(raw)) {
+    return 'Google refused the admin this key acts as (deleted, suspended, or not in this domain).'
+  }
+  return raw
+}
+
 export const TenantInventoryPanel: React.FC<TenantInventoryPanelProps> = ({
   inv, busy, error, domain, scanProgress, onRefresh, onDeepScan, ageSeconds,
 }) => {
@@ -159,8 +172,8 @@ export const TenantInventoryPanel: React.FC<TenantInventoryPanelProps> = ({
       </Box>
     )}
 
-    {error && <Alert severity="warning" sx={{ mb: 1 }}>{error}</Alert>}
-    {inv?.error && <Alert severity="warning" sx={{ mb: 1 }}>{inv.error}</Alert>}
+    {[...new Set([error, inv?.error].filter(Boolean).map((e) => plainError(e as string)))]
+      .map((e) => <Alert key={e} severity="warning" sx={{ mb: 1 }}>{e}</Alert>)}
 
     {inv && !inv.error && (
       <>

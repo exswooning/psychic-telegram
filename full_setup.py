@@ -133,12 +133,24 @@ def optional_missing_detail(scopes: list[str]) -> str:
             f"nothing else is affected)")
 
 
-def _vs_for(account_id: int | None):
-    """Settings for this account, falling back to the legacy tenant."""
+def _vs_for(account_id: int | None, side: str | None = None,
+            domain: str | None = None, admin: str | None = None):
+    """Settings for this account, falling back to the legacy tenant -- with the side
+    being set up pointed at the tenant being set up. Until the last phase saves it,
+    the account still names its PREVIOUS tenant on that side, so a probe signed in
+    as that one's admin. Live: gorkhatweed.com reused the old source's key, every
+    probe impersonated info@source.sarafgloabalexim.com, and setup said "18/18 scopes
+    confirmed live" for a key gorkhatweed.com refuses outright."""
     try:
-        return Settings(account_id=account_id)
+        st = Settings(account_id=account_id)
     except Exception:      # noqa: BLE001
-        return Settings()
+        st = Settings()
+    if side in ("source", "target"):
+        if domain:
+            setattr(st, f"{side}_domain", domain)
+        if admin:
+            setattr(st, f"{side}_admin", admin)
+    return st
 
 
 def _admin_can_reach_project(project: str, admin_email: str,
@@ -424,7 +436,7 @@ def run_full_setup(
             if reachable:
                 access.status, access.detail = "ok", "the admin can administer it"
             else:
-                working = _delegation_already_live(_vs_for(account_id), side,
+                working = _delegation_already_live(_vs_for(account_id, side, domain, admin_email), side,
                                                    client_id)
                 if working:
                     access.status = "skipped"
@@ -633,14 +645,10 @@ def run_full_setup(
     # whole retry budget while an account-scoped check of the very same
     # tenant returned 11/11. The account's tenant_configs row is written in
     # phase 1 above, before this runs, so it is available here.
-    try:
-        _vs = Settings(account_id=account_id)
-    except Exception:      # noqa: BLE001
-        # A tenant_configs row that cannot be read must not abort a setup
-        # that has already provisioned a project and granted delegation --
-        # fall back to the legacy resolution and let verification report
-        # whatever it finds, rather than crashing at the last phase.
-        _vs = Settings()
+    # A tenant_configs row that cannot be read must not abort a setup that has already
+    # provisioned a project and granted delegation -- _vs_for falls back to the legacy
+    # resolution and lets verification report whatever it finds.
+    _vs = _vs_for(account_id, side, domain, admin_email)
     # grant_scopes(), not required_scopes(): the console line carries the
     # optional extras too (apps.licensing, for per-account plans), so a
     # tenant set up by this runner has them from the start instead of

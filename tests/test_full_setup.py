@@ -1020,7 +1020,7 @@ class TestAnUnusableUploadedKeyProvisionsFresh:
                                 {"scope": s, "ok": True} for s in scopes])
         monkeypatch.setattr(fs.accounts_auth, "update_tenant_config",
                             lambda *a, **k: None)
-        monkeypatch.setattr(fs, "_vs_for", lambda account_id: None)
+        monkeypatch.setattr(fs, "_vs_for", lambda account_id, *a: None)
 
     def _uploaded(self, tmp_path, client_id="old-client"):
         up = tmp_path / "uploaded-sa.json"

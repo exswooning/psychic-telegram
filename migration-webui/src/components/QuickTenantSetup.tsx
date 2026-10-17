@@ -9,6 +9,7 @@ import {
   RocketLaunch as QuickIcon, Grass as SeedIcon, ContentCopy as CopyIcon,
   CheckCircle as OkIcon, UploadFile as UploadIcon, OpenInNew as OpenIcon,
   PersonAddAlt as AddUsersIcon, ArrowBack as BackIcon, Close as CloseIcon,
+  Error as FailIcon, RemoveCircleOutline as SkipIcon, HourglassEmpty as WaitIcon,
 } from '@mui/icons-material'
 import {
   FullSetupStatus, startFullSetup, fetchFullSetupStatus,
@@ -1098,15 +1099,29 @@ const QuickTenantSetup: React.FC<{
               {result.error}
             </Alert>
           )}
-          {result.phases.length > 0 && <Box component="pre" sx={{
-            fontSize: 11, p: 1.5, bgcolor: 'action.hover', borderRadius: 1,
-            overflowX: 'auto', maxHeight: 260, whiteSpace: 'pre-wrap', m: 0,
-          }}>
-            {result.phases.map((p) =>
-              `${p.status === 'ok' ? 'ok  ' : p.status === 'failed' ? 'FAIL' : p.status === 'skipped' ? '--  ' : '..  '} `
-              + `${p.name}${p.detail ? '  ' + p.detail : ''}`
-            ).join('\n')}
-          </Box>}
+          {result.phases.length > 0 && (
+            <Stack component="ol" spacing={1.25} data-testid={`qts-${side}-phases`}
+                   sx={{ listStyle: 'none', p: 1.5, m: 0, borderRadius: 1,
+                         border: '1px solid', borderColor: 'divider', bgcolor: 'background.default' }}>
+              {result.phases.map((p) => (
+                <Stack component="li" key={p.name} direction="row" spacing={1.25} alignItems="flex-start">
+                  {p.status === 'ok' ? <OkIcon color="success" fontSize="small" />
+                    : p.status === 'failed' ? <FailIcon color="error" fontSize="small" />
+                    : p.status === 'skipped' ? <SkipIcon color="disabled" fontSize="small" />
+                    : <WaitIcon color="warning" fontSize="small" />}
+                  <Box sx={{ minWidth: 0 }}>
+                    <Typography variant="body2" sx={{ fontWeight: 600 }}>{p.name}</Typography>
+                    {p.detail && (
+                      <Typography variant="caption" color="text.secondary"
+                                  sx={{ display: 'block', overflowWrap: 'anywhere', lineHeight: 1.5 }}>
+                        {p.detail}
+                      </Typography>
+                    )}
+                  </Box>
+                </Stack>
+              ))}
+            </Stack>
+          )}
           {result.missingScopes && result.missingScopes.length > 0 && (
             <Alert severity="warning" sx={{ mt: 1 }}>
               Delegation ran but {result.missingScopes.length} scope(s) still
@@ -1142,6 +1157,7 @@ const QuickTenantSetup: React.FC<{
             <Alert severity="success" sx={{ mb: 2 }}
                    action={
                      <Button size="small" variant="contained"
+                             sx={{ whiteSpace: 'nowrap' }}
                              data-testid="go-to-jobs"
                              onClick={() => navigate('/jobs')}>
                        View jobs
