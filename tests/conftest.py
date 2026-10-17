@@ -14,6 +14,10 @@ import pytest
 
 # Auto-sizing would split a test's pass across real child processes on a many-core machine.
 os.environ.setdefault("MIGRATE_PROCESSES", "1")
+# Never the developer's own ledger: Settings() defaults to ./migration.db, and a run
+# claims its ledger for the configured pair -- a test's fake pair archived the real one.
+import tempfile as _tempfile  # noqa: E402
+os.environ["MIGRATION_DB"] = os.path.join(_tempfile.mkdtemp(prefix="bitport-tests-"), "migration.db")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
