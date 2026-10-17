@@ -2911,6 +2911,32 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _claim_ledger(settings) -> None:
+    """A ledger serves one source -> target pair. Built for another, it is archived and a
+    fresh one started before anything reads it (db.claim_for_pair) -- and that account's
+    mirror is switched off, since it follows the old pair's users."""
+    import db as ledger
+    try:
+        archived = ledger.claim_for_pair(settings.db_path, settings.source_domain,
+                                         settings.target_domain)
+    except Exception as exc:      # noqa: BLE001 - a ledger we cannot judge is refused, not guessed at
+        print(f"LEDGER CHECK FAILED: {exc}", flush=True)
+        raise SystemExit(2)
+    if not archived:
+        return
+    print(f"LEDGER ARCHIVED: it belonged to another pair; kept as {archived}. This run "
+          f"starts a fresh ledger for {settings.source_domain} -> {settings.target_domain}.",
+          flush=True)
+    aid = getattr(settings, "account_id", None)
+    if aid is not None:
+        try:
+            import control_plane_db as cpdb
+            with cpdb.rw() as c:
+                c.execute("UPDATE mirror_settings SET enabled=0 WHERE account_id=?", (aid,))
+        except Exception as exc:      # noqa: BLE001 - the archive stands without it
+            log.warning("could not switch the old pair's mirror off: %s", exc)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
@@ -2935,6 +2961,7 @@ def main(argv: list[str] | None = None) -> int:
         log.warning("DRY RUN — no writes will be made to %s",
                     settings.target_domain)
 
+    _claim_ledger(settings)
     db = MigrationDB(settings.db_path)
     auth = AuthManager(settings)
 

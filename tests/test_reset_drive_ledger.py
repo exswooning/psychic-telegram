@@ -278,6 +278,8 @@ class TestSideTables:
             "audit_rollup",   # cleared by type alongside audit_log, in the
                               # same statement -- see reset_service_ledger
             "item_retries",   # cleared by type alongside audit_log
+            "ledger_pair",    # not per-user at all: which pair the whole ledger
+                              # serves; a reset keeps the pair it resets for
             "repair_runs",    # not per-user at all: a log of when the Repair
                               # button was pressed and what that pass reported.
                               # Nothing reads it to decide whether an item

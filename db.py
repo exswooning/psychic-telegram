@@ -428,6 +428,15 @@ CREATE TABLE IF NOT EXISTS mirror_retry (
     PRIMARY KEY (source_user, service, item_id)
 );
 
+-- Which source -> target pair this ledger belongs to (one row). A run for any other
+-- pair archives the ledger and starts a fresh one (claim_for_pair).
+CREATE TABLE IF NOT EXISTS ledger_pair (
+    id            INTEGER PRIMARY KEY CHECK (id = 1),
+    source_domain TEXT NOT NULL,
+    target_domain TEXT NOT NULL,
+    stamped_at    TEXT NOT NULL
+);
+
 -- A failed item written again: the failure it had, kept before the new write
 -- replaces it in audit_log (which holds only each item's latest state).
 CREATE TABLE IF NOT EXISTS item_retries (
@@ -441,6 +450,64 @@ CREATE TABLE IF NOT EXISTS item_retries (
 );
 CREATE INDEX IF NOT EXISTS ix_item_retries_user ON item_retries(source_user);
 """
+
+
+def _ledger_pair_of(conn) -> tuple[str, str | None] | None:
+    """The pair a ledger was stamped with. For one from before the stamp, its identity
+    map's source domain and None for the target -- a target address can sit on a
+    secondary domain, so only the source side is judged there. None for an empty ledger."""
+    try:
+        row = conn.execute("SELECT source_domain, target_domain FROM ledger_pair WHERE id=1").fetchone()
+        if row:
+            return row[0], row[1]
+    except sqlite3.OperationalError:
+        pass
+    try:
+        row = conn.execute(
+            "SELECT lower(substr(source_email, instr(source_email, '@') + 1)) s, COUNT(*) n "
+            "FROM identity_map GROUP BY s ORDER BY n DESC LIMIT 1").fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return (row[0], None) if row else None
+
+
+def claim_for_pair(path: str, source_domain: str, target_domain: str) -> str | None:
+    """Make the ledger at `path` belong to this pair. One built for another pair is
+    archived -- checkpointed, renamed beside it, never deleted -- and a fresh one started,
+    so nothing from a previous pair (users, mappings, retries, verdicts) reaches this
+    one. Live: account 3 was set up for gorkhatweed.com while its ledger still held the
+    old pair's 300 users and 322k mappings, and the setup page offered to provision them.
+    Returns the archive's path, or None when nothing was archived."""
+    src, tgt = (source_domain or "").strip().lower(), (target_domain or "").strip().lower()
+    if not src or not tgt:
+        return None
+    archived = None
+    if os.path.exists(path):
+        conn = sqlite3.connect(path, timeout=30)
+        try:
+            had = _ledger_pair_of(conn)
+            if had and (had[0] != src or (had[1] is not None and had[1] != tgt)):
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                conn.close()
+                stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                archived = f"{path}.pair-{had[0]}-{had[1] or 'unstamped'}-{stamp}"
+                os.replace(path, archived)
+                for side_file in (path + "-wal", path + "-shm"):
+                    if os.path.exists(side_file):
+                        os.remove(side_file)
+        finally:
+            try:
+                conn.close()
+            except Exception:      # noqa: BLE001
+                pass
+    fresh = MigrationDB(path)
+    try:
+        with fresh.write() as c:
+            c.execute("INSERT INTO ledger_pair (id, source_domain, target_domain, stamped_at) "
+                      "VALUES (1, ?, ?, ?) ON CONFLICT(id) DO NOTHING", (src, tgt, utc_now()))
+    finally:
+        fresh.close()
+    return archived
 
 
 def retry_summary(conn) -> dict:
