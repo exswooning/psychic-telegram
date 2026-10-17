@@ -458,6 +458,14 @@ def run_full_setup(
                     uploaded_key = None
                     key_path = os.path.join(keys_dir, f"{side}-sa.json")
                     client_id = ""
+                    # Out of the way, not deleted: provision_gcp.create_key keeps any key
+                    # already at the destination, so the fresh project was created and the
+                    # OLD key kept and delegated (live: wsmig-tgt-53867 made, Chat set up
+                    # on it, while target-sa.json stayed wsmig-tgt-66280's).
+                    if os.path.isfile(key_path):
+                        aside = f"{key_path}.unusable-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}"
+                        os.replace(key_path, aside)
+                        log(f"  moved the unusable key aside: {aside}")
                     # Fall through to real provisioning below instead of
                     # only claiming it: this is the fix for "no client ID
                     # from step 1".

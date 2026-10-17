@@ -1064,6 +1064,37 @@ class TestAnUnusableUploadedKeyProvisionsFresh:
         details = " ".join(p.get("detail", "") for p in res["phases"])
         assert "no client ID from step 1" not in details
 
+    def test_the_old_key_is_moved_aside_so_the_new_one_is_written(self, monkeypatch, tmp_path):
+        """provision_gcp.create_key keeps any key already at the destination. Live: the
+        fresh project was made and Chat configured on it, while target-sa.json stayed the
+        OLD project's key and that was what got delegated."""
+        self._common(monkeypatch)
+        up = tmp_path / "source-sa.json"          # the account's own key, at the destination
+        up.write_text(json.dumps({"client_id": "old-client", "project_id": "wsmig-src-20736"}))
+        monkeypatch.setattr(fs.accounts_auth, "get_tenant_config",
+                            lambda account_id, side: {"sa_key_path": str(up)})
+        monkeypatch.setattr(fs, "_admin_can_reach_project", lambda *a, **k: False)
+        monkeypatch.setattr(fs, "_delegation_already_live", lambda *a, **k: False)
+        monkeypatch.setattr(fs.provision_gcp, "gcloud_ready", lambda: (True, "me"))
+        monkeypatch.setattr(fs.provision_gcp, "can_create_projects", lambda a: True)
+        monkeypatch.setattr(fs.provision_gcp, "detect_org", lambda env=None: "")
+        seen = {}
+
+        def fake_provision_side(side, project, org, key_dest, dry_run, force,
+                                env=None, on_step=None, admin_email=""):
+            seen["dest_was_free"] = not os.path.exists(key_dest)
+            with open(key_dest, "w") as f:
+                json.dump({"client_id": "fresh-999", "project_id": project}, f)
+            return {"side": side, "project": project, "ok": True,
+                    "steps": [{"name": "x", "status": "ok", "detail": ""}], "clientId": "fresh-999"}
+        monkeypatch.setattr(fs.provision_gcp, "provision_side", fake_provision_side)
+        fs.run_full_setup("source", "gorkhatweed.com", "info@gorkhatweed.com", "pw",
+                          account_id=68, keys_dir=str(tmp_path))
+        assert seen["dest_was_free"] is True
+        kept = [p.name for p in tmp_path.iterdir() if ".unusable-" in p.name]
+        assert len(kept) == 1
+        assert json.loads((tmp_path / kept[0]).read_text())["client_id"] == "old-client"
+
     def test_a_live_delegation_is_not_thrown_away(self, monkeypatch, tmp_path):
         """The opposite case must still hold: an uploaded key whose project
         the admin cannot administer BUT which is already carrying a working
