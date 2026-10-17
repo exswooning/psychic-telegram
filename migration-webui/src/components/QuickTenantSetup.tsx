@@ -516,6 +516,16 @@ const QuickTenantSetup: React.FC<{
   const readinessKey = alreadyHere && !status?.running
     ? `${tenantCfg?.clientId}:${domain.trim().toLowerCase()}:${result?.ok ? 'ok' : ''}` : ''
   useEffect(() => { if (readinessKey) checkReadiness() }, [readinessKey, checkReadiness])
+  // A grant can take ~15 minutes to propagate: while only delegation/services fail,
+  // ask again every minute for 20 minutes instead of waiting for someone to press it.
+  const propagating = !!readiness && !readiness.ready && readiness.checks.every((c) =>
+    c.ok !== false || c.name === 'delegation' || c.name.startsWith('service:'))
+  useEffect(() => {
+    if (!propagating || !readinessKey) return undefined
+    let n = 0
+    const id = setInterval(() => { if (++n > 20) clearInterval(id); else checkReadiness() }, 60_000)
+    return () => clearInterval(id)
+  }, [propagating, readinessKey, checkReadiness])
   const readyHere = !!readiness?.ready
     && readiness.domain === domain.trim().toLowerCase()
   // A result is shown beside the domain it was for. One from before the domain was
