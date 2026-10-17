@@ -40,8 +40,9 @@ vi.mock('@/pages/SeedWizard', () => ({
     <div data-testid="seed-wizard">seeding {sourceDomain}</div>,
 }))
 vi.mock('@/components/QuickTenantSetup', () => ({
-  default: ({ side, initialDomain }: { side: string; initialDomain?: string }) =>
-    <div data-testid={`qts-${side}`}>{initialDomain}</div>,
+  default: ({ side, initialDomain, initialEmail }:
+             { side: string; initialDomain?: string; initialEmail?: string }) =>
+    <div data-testid={`qts-${side}`}>{initialDomain} {initialEmail}</div>,
 }))
 const narrowScopes = vi.fn().mockResolvedValue({ ok: true })
 const removeTenant = vi.fn().mockResolvedValue({ ok: true })
@@ -80,12 +81,8 @@ const signIn = async (email: string, password = 'hunter22222') => {
   fireEvent.click(screen.getByTestId('creds-next'))
 }
 
-/** Only the destination step still asks for a bare domain. */
-const enterDomain = async (d: string) => {
-  const box = await screen.findByTestId('wizard-domain')
-  fireEvent.change(box, { target: { value: d } })
-  fireEvent.click(screen.getByTestId('wizard-domain-next'))
-}
+/** The destination is a sign-in too: its domain comes out of its admin's address. */
+const enterDomain = async (d: string) => signIn(`admin@${d}`)
 
 /** Radio, then Continue -- the same two beats as Google Workspace signup's
  *  "Number of employees" step, which this flow is modelled on. */
@@ -231,13 +228,16 @@ describe('seeding goes straight to work', () => {
 })
 
 describe('migrating asks where it is going', () => {
-  it('asks for a second domain', async () => {
+  it("asks for the destination's admin, not a bare domain", async () => {
     view()
     await signIn('admin@acme.com')
     await choose('migrate')
     expect(await screen.findByRole('heading', { name: /where is it going/i }))
       .toBeInTheDocument()
-    expect(screen.getByLabelText(/destination domain/i)).toBeInTheDocument()
+    expect(screen.getByTestId('admin-email')).toHaveValue('')
+    fireEvent.change(screen.getByTestId('admin-email'),
+                     { target: { value: 'info@newco.com' } })
+    expect(screen.getByTestId('derived-domain')).toHaveTextContent('newco.com')
   })
 
   it('still names the source it is migrating away from', async () => {
@@ -251,9 +251,12 @@ describe('migrating asks where it is going', () => {
     view()
     await signIn('admin@acme.com')
     await choose('migrate')
-    fireEvent.change(await screen.findByTestId('wizard-domain'),
-                     { target: { value: 'acme.com' } })
-    expect(screen.getByTestId('wizard-domain-next')).toBeDisabled()
+    await screen.findByRole('heading', { name: /where is it going/i })
+    fireEvent.change(screen.getByTestId('admin-email'),
+                     { target: { value: 'other@acme.com' } })
+    fireEvent.change(screen.getByTestId('admin-password'),
+                     { target: { value: 'hunter22222' } })
+    expect(screen.getByTestId('creds-next')).toBeDisabled()
     expect(screen.getByText(/same tenant/)).toBeInTheDocument()
   })
 
@@ -272,6 +275,15 @@ describe('migrating asks where it is going', () => {
     await waitFor(() =>
       expect(screen.getByTestId('qts-source')).toHaveTextContent('acme.com'))
     expect(screen.getByTestId('qts-target')).toHaveTextContent('newco.com')
+  })
+
+  it("signs the target card in as the destination admin, not a second Google sign-in", async () => {
+    view()
+    await signIn('admin@acme.com')
+    await choose('migrate')
+    await enterDomain('newco.com')
+    await waitFor(() =>
+      expect(screen.getByTestId('qts-target')).toHaveTextContent('admin@newco.com'))
   })
 })
 

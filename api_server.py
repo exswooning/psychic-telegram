@@ -670,7 +670,7 @@ def _reconcile_full_setup_state() -> None:
         if alive:
             continue
         result = {
-            "running": False, "interrupted": True, "phases": [],
+            "running": False, "interrupted": True, "phases": [], "domain": data.get("domain"),
             "error": ("this setup run was interrupted when the server "
                       "restarted before it finished. Nothing was changed on "
                       "your tenant that a re-run will not simply redo -- "
@@ -3806,7 +3806,7 @@ async def full_setup_start(body: StartFullSetup, op: Operator = Depends(operator
         # PRIOR run would render as this run's progress for the several
         # seconds before it writes its own first checkpoint.
         with open(out, "w", encoding="utf-8") as fh:
-            json.dump({"running": True}, fh)
+            json.dump({"running": True, "domain": body.domain.strip().lower()}, fh)
         try:
             os.remove(progress)
         except OSError:
@@ -3875,15 +3875,22 @@ async def full_setup_status(side: str, account: int | None = None,
         # page beside a healthy tenant -- and the timeout it named had
         # already been removed from the code by then.
         result_at = None
+        launched_for = None
         for path in (partial, out):
             try:
                 with open(path, encoding="utf-8") as fh:
                     data = json.load(fh)
+                if path == out and isinstance(data, dict):
+                    launched_for = data.get("domain")
                 if isinstance(data, dict) and "phases" in data:
                     result = data
                     result_at = os.path.getmtime(path)
             except (OSError, ValueError):
                 continue
+        # Which domain the result belongs to: the card shows it only beside that domain
+        # (a September run's "interrupted" sat under a new pair set up in October).
+        if result is not None and not result.get("domain"):
+            result = {**result, "domain": launched_for}
 
         progress_pct = progress_label = challenge = None
         if running:

@@ -487,6 +487,12 @@ const QuickTenantSetup: React.FC<{
   const canLaunch = domain.trim() && email.trim() && password && !status?.running
   const result = status?.result
   const setUpOk = !!result?.ok && !status?.running
+  // A result is shown beside the domain it was for. One from before the domain was
+  // recorded shows only if it succeeded: an old failure or interruption for some other
+  // tenant read as this new pair's (two "interrupted" cards on a fresh setup).
+  const resultHere = !!result && (result.domain
+    ? result.domain === domain.trim().toLowerCase()
+    : result.ok)
 
   // -- Tenant inventory ------------------------------------------------------
   // What is actually in the tenant this setup just pointed at: how many
@@ -1048,7 +1054,7 @@ const QuickTenantSetup: React.FC<{
 
       {error && <Alert severity="error" sx={{ mt: 2 }}>{error}</Alert>}
 
-      {result && (
+      {resultHere && result && (
         <Box sx={{ mt: 2 }}>
           <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 0.5 }}>
             <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>Result</Typography>

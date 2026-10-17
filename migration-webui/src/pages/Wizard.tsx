@@ -168,18 +168,22 @@ const AdminSignInStep: React.FC<{
   sub: string
   aside: React.ReactNode
   initialEmail?: string
+  /** Rejected as the answer, because it is the other side of the pair. */
+  taken?: string
   onBack?: () => void
   onNext: (email: string, password: string, domain: string) => void
-}> = ({ heading, sub, aside, initialEmail = '', onBack, onNext }) => {
+}> = ({ heading, sub, aside, initialEmail = '', taken, onBack, onNext }) => {
   const [email, setEmail] = useState(initialEmail)
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
   const domain = domainOf(email)
   const shaped = /^[^@\s]+@[^@\s]+$/.test(email.trim()) && looksLikeDomain(domain)
+  const same = !!taken && domain === taken.trim().toLowerCase()
   const error = email.trim() === '' ? ''
     : !shaped ? 'Use the full admin address, like admin@acme.com.'
+    : same ? 'That is the same tenant. A migration needs two different domains.'
     : ''
-  const ready = shaped && password.length > 0
+  const ready = shaped && !same && password.length > 0
 
   return (
     <WizardShell heading={heading} sub={sub} onBack={onBack} aside={aside}>
@@ -237,48 +241,6 @@ const AdminSignInStep: React.FC<{
   )
 }
 
-const DomainStep: React.FC<{
-  heading: string
-  sub: string
-  label: string
-  initial?: string
-  /** Rejected as the answer, because it is the other side of the pair. */
-  taken?: string
-  aside: React.ReactNode
-  onBack?: () => void
-  onNext: (domain: string) => void
-}> = ({ heading, sub, label, initial = '', taken, aside, onBack, onNext }) => {
-  const [value, setValue] = useState(initial)
-  const d = value.trim().toLowerCase()
-  const same = !!taken && d === taken.trim().toLowerCase()
-  const shaped = looksLikeDomain(value)
-  // Only complain once there is something to complain about -- an error
-  // under an empty field the user has not reached yet is noise.
-  const error = value.trim() === '' ? ''
-    : same ? 'That is the same tenant. A migration needs two different domains.'
-    : !shaped ? 'That does not look like a domain (example: acme.com).'
-    : ''
-
-  return (
-    <WizardShell heading={heading} sub={sub} onBack={onBack} aside={aside}>
-      <TextField
-        fullWidth autoFocus label={label} value={value}
-        onChange={(e) => setValue(e.target.value)}
-        onKeyDown={(e) => { if (e.key === 'Enter' && shaped && !same) onNext(d) }}
-        error={!!error} helperText={error || ' '}
-        inputProps={{ 'data-testid': 'wizard-domain', spellCheck: false,
-                      autoCapitalize: 'none', autoCorrect: 'off' }}
-        sx={{ '& .MuiOutlinedInput-root': { height: 56 } }}
-      />
-      <Button variant="contained" size="large" sx={{ mt: 2, px: 4 }}
-              data-testid="wizard-domain-next"
-              disabled={!shaped || same} onClick={() => onNext(d)}>
-        Continue
-      </Button>
-    </WizardShell>
-  )
-}
-
 const Wizard: React.FC = () => {
   const [params] = useSearchParams()
   const [step, setStep] = useState<Step>('domain')
@@ -292,6 +254,10 @@ const Wizard: React.FC = () => {
   // audit log. See startFullSetup's own note.
   const [adminPassword, setAdminPassword] = useState('')
   const [otherDomain, setOtherDomain] = useState('')
+  // The destination's admin, asked for the same way as the source's: the domain
+  // comes out of the address, and the target card signs in with it.
+  const [targetEmail, setTargetEmail] = useState('')
+  const [targetPassword, setTargetPassword] = useState('')
   const [role, setRole] = useState<'source' | 'target'>('source')
   const [purpose, setPurpose] = useState<Purpose | null>(null)
   // Nothing preselected: the operator says what the domain is for.
@@ -687,10 +653,10 @@ const Wizard: React.FC = () => {
 
   if (step === 'counterpart') {
     return (
-      <DomainStep
+      <AdminSignInStep
         heading="Where is it going?"
-        sub={`${domain} is the source — it is read, never written. Which tenant should its data land in?`}
-        label="Destination domain" initial={otherDomain} taken={domain}
+        sub={`${domain} is the source — it is read, never written. Sign in as a super admin of the tenant its data should land in.`}
+        initialEmail={targetEmail} taken={domain}
         aside={<Aside art="migrate"
           title="Two tenants, one direction"
           body="Both sides get their own Cloud project and delegation grant.
@@ -698,7 +664,12 @@ const Wizard: React.FC = () => {
                 copy itself is resumable — it can be stopped and picked up."
           note="The source credential is read-only, so a migration cannot alter the tenant it reads." />}
         onBack={() => setStep('purpose')}
-        onNext={(d) => { setOtherDomain(d); setStep('run') }} />
+        onNext={(email, password, d) => {
+          setTargetEmail(email)
+          setTargetPassword(password)
+          setOtherDomain(d)
+          setStep('run')
+        }} />
     )
   }
 
@@ -724,7 +695,8 @@ const Wizard: React.FC = () => {
                       configured={seedFromPicker}
                       accountId={seedAccountId} />
         : <MigrateWizard sourceDomain={domain} targetDomain={otherDomain}
-                         adminEmail={adminEmail} adminPassword={adminPassword} />}
+                         adminEmail={adminEmail} adminPassword={adminPassword}
+                         targetEmail={targetEmail} targetPassword={targetPassword} />}
     </Box>
   )
 }
@@ -741,7 +713,9 @@ const MigrateWizard: React.FC<{
   targetDomain?: string
   adminEmail?: string
   adminPassword?: string
-}> = ({ sourceDomain, targetDomain, adminEmail, adminPassword }) => {
+  targetEmail?: string
+  targetPassword?: string
+}> = ({ sourceDomain, targetDomain, adminEmail, adminPassword, targetEmail, targetPassword }) => {
   const [route, setRoute] = useState<'automated' | 'manual'>('automated')
   const navigate = useNavigate()
 
@@ -787,6 +761,8 @@ const MigrateWizard: React.FC<{
           <Grid item xs={12} md={6}>
             <QuickTenantSetup side="target" view="automated" showProvisionUsers
                              initialDomain={targetDomain}
+                             initialEmail={targetEmail}
+                             initialPassword={targetPassword}
                              onRequestManual={() => setRoute('manual')} />
           </Grid>
         </Grid>

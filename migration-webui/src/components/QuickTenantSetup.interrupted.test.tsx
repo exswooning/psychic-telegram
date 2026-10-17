@@ -10,10 +10,11 @@ import { describe, it, expect, vi } from 'vitest'
 import QuickTenantSetup from './QuickTenantSetup'
 
 const none = vi.hoisted(() => () => Promise.resolve(null))
+const was = vi.hoisted(() => ({ domain: 'acme.com' as string | null }))
 vi.mock('@/api/controlPlane', () => ({
   fetchFullSetupStatus: () => Promise.resolve({
     running: false,
-    result: { side: 'source', ok: false, phases: [], interrupted: true,
+    result: { side: 'source', ok: false, phases: [], interrupted: true, domain: was.domain,
               error: 'this setup run was interrupted when the server restarted' },
   }),
   startFullSetup: none, startProvision: none, fetchProvisionStatus: none,
@@ -32,9 +33,20 @@ vi.mock('@/components/DomainSandboxToggle', () => ({ default: () => null }))
 
 describe('an interrupted setup run', () => {
   it('says so, in words, instead of a bare "failed"', async () => {
-    render(<MemoryRouter><QuickTenantSetup side="source" view="automated" /></MemoryRouter>)
+    was.domain = 'acme.com'
+    render(<MemoryRouter><QuickTenantSetup side="source" view="automated" initialDomain="acme.com" /></MemoryRouter>)
     expect(await screen.findByText(/interrupted when the server restarted/)).toBeInTheDocument()
     expect(screen.getByText('interrupted')).toBeInTheDocument()
     expect(screen.queryByText('failed')).toBeNull()
   })
+
+  /* Live: a fresh pair opened under two "interrupted" cards from runs a month
+     earlier for another tenant, which named no domain at all. */
+  it.each([['another tenant', 'old.com'], ['no recorded domain', null]])(
+    'is not shown beside a different setup (%s)', async (_why, d) => {
+      was.domain = d
+      render(<MemoryRouter><QuickTenantSetup side="source" view="automated" initialDomain="acme.com" /></MemoryRouter>)
+      await new Promise((r) => setTimeout(r, 50))
+      expect(screen.queryByText(/interrupted when the server restarted/)).toBeNull()
+    })
 })

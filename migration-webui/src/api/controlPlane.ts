@@ -617,6 +617,8 @@ export interface FullSetupResult {
   /** Set when the run never got to report phases -- e.g. a restart killed it
    *  (interrupted). Without it the result rendered as a bare "failed". */
   error?: string; interrupted?: boolean
+  /** The domain the run was started for; absent on a result from before it was recorded. */
+  domain?: string | null
 }
 export interface FullSetupStatus {
   running: boolean; result: FullSetupResult | null
