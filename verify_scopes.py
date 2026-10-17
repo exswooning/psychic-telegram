@@ -228,9 +228,10 @@ OFFERED_TRANSFER_MODES = ("download_upload", "server_side")
 
 
 def customer_source(settings) -> bool:
-    """A source nobody declared a sandbox is somebody's real tenant: it is only ever READ.
-    Its delegation is read scopes only (no `drive`, so no server-side copy -- Drive moves by
-    download_upload), and no seed key is made on it. Google enforces it, not this code."""
+    """A source nobody declared a sandbox is somebody's real tenant: no seed key (write
+    scopes) is made on it and nothing moves files out of it. Its one write scope is
+    `drive`, for server-side copy -- auth.ReadOnlyDrive lets through only files.copy into
+    the run's own staging drive on the target; every other source write is refused."""
     import domain_guard
     try:
         return domain_guard.is_protected(getattr(settings, "source_domain", "") or "")
@@ -252,7 +253,7 @@ def migrate_source_scopes(settings: Settings) -> list[str]:
 
     import fidelity
     out: set = set()
-    for mode in (("download_upload",) if customer_source(settings) else OFFERED_TRANSFER_MODES):
+    for mode in OFFERED_TRANSFER_MODES:
         for on in (True, False):
             for chat_mode in ("direct", "import"):
                 try:

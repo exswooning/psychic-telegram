@@ -1016,21 +1016,16 @@ def _gate_on_delegation(settings: Settings) -> None:
 
 
 def _customer_source_reads_only(settings) -> None:
-    """A customer's source (not a declared sandbox) is only read: its delegation holds no
-    write scope, so Drive content moves by download_upload; a server-side copy (needs
-    `drive`) is switched to it, and a move -- which takes files out of the source -- refused."""
+    """A customer's source (not a declared sandbox) is copied, never changed: the two modes
+    that write it outside auth.ReadOnlyDrive -- move (takes files out) and link_flip (makes
+    them public) -- are refused. Server-side copy, the default, stays."""
     import verify_scopes
     if not verify_scopes.customer_source(settings):
         return
-    if settings.transfer_mode == "move":
-        print(f"MOVE REFUSED: {settings.source_domain} is a customer tenant; files are never "
-              f"moved out of it. Use a copy.", flush=True)
+    if settings.transfer_mode in ("move", "link_flip"):
+        print(f"{settings.transfer_mode.upper()} REFUSED: {settings.source_domain} is a customer "
+              f"tenant; it is only read. Use server_side (default) or download_upload.", flush=True)
         raise SystemExit(2)
-    if settings.transfer_mode != "download_upload":
-        print(f"SOURCE READ-ONLY: {settings.source_domain} is a customer tenant, so Drive "
-              f"content moves by download_upload (was {settings.transfer_mode})", flush=True)
-        settings.transfer_mode = "download_upload"
-        os.environ["TRANSFER_MODE"] = "download_upload"
 
 
 def _gate_on_move(auth, settings) -> None:
