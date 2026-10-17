@@ -18,6 +18,7 @@ vi.mock('@/api/controlPlane', () => ({
               error: 'this setup run was interrupted when the server restarted' },
   }),
   startFullSetup: none, startProvision: none, fetchProvisionStatus: none,
+  fetchReadiness: () => Promise.resolve({ side: "source", purpose: "migrate", domain: "", admin: "", ready: false, checks: [] }),
   fetchTenantConfigStatus: none, uploadCredentials: none, fetchTenantInventory: none,
   startTenantScan: none, fetchTenantScan: none, buildIdentityMap: none,
   fetchIdentityMapStatus: none,

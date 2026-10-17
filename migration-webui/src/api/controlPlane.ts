@@ -1114,6 +1114,16 @@ export interface TenantConfigStatus {
   hasKey: boolean; clientId: string; scopes: string[]
 }
 
+/** readiness.py: asked of Google as the domain's own admin, per scope and per service.
+ *  ok null = could not be checked -- never a pass. */
+export interface ReadinessCheck { name: string; ok: boolean | null; detail: string }
+export interface Readiness {
+  side: 'source' | 'target'; purpose: 'migrate' | 'seed'; domain: string; admin: string
+  ready: boolean; checks: ReadinessCheck[]
+}
+export const fetchReadiness = (side: 'source' | 'target', purpose: 'migrate' | 'seed') =>
+  cpFetch<Readiness>(`/api/v2/setup/readiness?side=${side}&purpose=${purpose}`)
+
 export const fetchTenantConfigStatus = (side: 'source' | 'target') =>
   cpFetch<TenantConfigStatus>(`/api/v2/setup/tenant-config?side=${side}`)
 

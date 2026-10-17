@@ -11,8 +11,10 @@ import QuickTenantSetup from './QuickTenantSetup'
 const none = vi.hoisted(() => () => Promise.resolve(null))
 const started = vi.hoisted(() => vi.fn(() => Promise.resolve({ ok: true, detail: '' })))
 const cfg = vi.hoisted(() => ({ value: null as unknown }))
+const ready = vi.hoisted(() => ({ value: null as unknown }))
 vi.mock('@/api/controlPlane', () => ({
   fetchFullSetupStatus: () => Promise.resolve({ running: false, result: null }),
+  fetchReadiness: () => Promise.resolve(ready.value),
   fetchTenantConfigStatus: () => Promise.resolve(cfg.value),
   startFullSetup: started, startProvision: none, fetchProvisionStatus: none,
   uploadCredentials: none, fetchTenantInventory: none,
@@ -28,7 +30,7 @@ vi.mock('@/components/MfaBanner', () => ({ default: () => null }))
 vi.mock('./DomainSandboxToggle', () => ({ default: () => null }))
 vi.mock('@/components/DomainSandboxToggle', () => ({ default: () => null }))
 
-beforeEach(() => { started.mockClear(); cfg.value = null })
+beforeEach(() => { started.mockClear(); cfg.value = null; ready.value = null })
 
 describe('a password the wizard already has', () => {
   it('starts the real setup in one click, without the sign-in dialog', async () => {
@@ -59,5 +61,36 @@ describe('a tenant already set up in this slot', () => {
       initialDomain="newco.com" initialEmail="info@newco.com" /></MemoryRouter>)
     expect(await screen.findByTestId('qts-target-ready')).toHaveTextContent('already set up')
     expect(screen.queryByText(/Continue as/)).toBeNull()
+  })
+})
+
+describe('readiness, asked of Google rather than taken from setup', () => {
+  const setUp = () => {
+    cfg.value = { side: 'source', domain: 'acme.com', adminEmail: 'info@acme.com',
+                  hasKey: true, clientId: '115', scopes: [] }
+  }
+
+  it('shows Not ready with the failing check, for a key the tenant refuses', async () => {
+    setUp()
+    ready.value = { side: 'source', purpose: 'migrate', domain: 'acme.com', admin: 'info@acme.com',
+                    ready: false, checks: [
+                      { name: 'configured', ok: true, detail: 'acme.com' },
+                      { name: 'delegation', ok: false, detail: '18 of 18 scopes do not mint' }] }
+    render(<MemoryRouter><QuickTenantSetup side="source" view="automated"
+      initialDomain="acme.com" initialEmail="info@acme.com" /></MemoryRouter>)
+    const panel = await screen.findByTestId('qts-source-readiness')
+    await waitFor(() => expect(panel).toHaveTextContent('Not ready'))
+    expect(panel).toHaveTextContent('18 of 18 scopes do not mint')
+    expect(screen.queryByTestId('go-to-jobs')).toBeNull()
+  })
+
+  it('shows Ready when every check passes', async () => {
+    setUp()
+    ready.value = { side: 'source', purpose: 'migrate', domain: 'acme.com', admin: 'info@acme.com',
+                    ready: true, checks: [{ name: 'delegation', ok: true, detail: 'all 18' }] }
+    render(<MemoryRouter><QuickTenantSetup side="source" view="automated"
+      initialDomain="acme.com" initialEmail="info@acme.com" /></MemoryRouter>)
+    const panel = await screen.findByTestId('qts-source-readiness')
+    await waitFor(() => expect(panel).toHaveTextContent(/\bReady\b/))
   })
 })

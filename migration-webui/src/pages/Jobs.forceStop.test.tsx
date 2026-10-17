@@ -23,6 +23,7 @@ vi.mock('@/api/client', async () => {
 })
 vi.mock('@/api/controlPlane', () => ({
   fetchDomainGuardStatus: () => Promise.resolve({ domain: 'x', protected: false }),
+  fetchReadiness: () => Promise.resolve({ side: "source", purpose: "migrate", domain: "", admin: "", ready: false, checks: [] }),
   fetchTenantConfigStatus: () => Promise.resolve(null),
   fetchVerifiedDomains: () => Promise.resolve({ domains: [] }),
   fetchFullSetupStatus: () => Promise.resolve({}),

@@ -1115,6 +1115,8 @@ def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
     _gate_on_delegation(settings)
     _gate_on_move(auth, settings)
     _gate_on_source(auth, settings)
+    import readiness
+    readiness.gate(settings)
     _say_source_access(settings)
     try:
         stale = demote_stale_running(db)

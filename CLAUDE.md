@@ -432,6 +432,23 @@ trip) and forces the restore via `force_mtime_restore` when it disagrees.
 `drafts.create` reads raw 8-bit header bytes as Latin-1, one more layer of mojibake
 per copy.
 
+**Whether a tenant is ready is asked of Google, never taken from setup's result**
+(`readiness.py`). Setup said "ok" twice when it was not: it verified a reused key as
+the account's PREVIOUS tenant's admin (gorkhatweed.com "18/18 live" on a key it refused),
+and a lapsed source still minted tokens while Drive answered 401. `readiness.check(settings,
+side, purpose)`: an admin ON the configured domain; the key on file; every scope the run
+requests mints as that admin; for a migration's source, every seed write scope REFUSED;
+one real read per service the run uses; for seed, the sandbox flag; for migrate, whose
+ledger it is. `None` = could not check = not ready. Shown on each setup card (Ready / Not
+ready, the "is set up" banner only when Ready), `GET /api/v2/setup/readiness`, the CLI,
+and `readiness.gate` before every migration (a definite failure exits 2 "NOT READY"; an
+unknown is logged and the run goes on). Tests set `BITPORT_READINESS_GATE=0`.
+
+**A ledger serves one pair** (`db.claim_for_pair`, called by every `main.py` command):
+stamped with its pair (`ledger_pair`); a run for another pair archives it beside itself
+(`migration.db.pair-<src>-<tgt>-<time>`, never deleted), starts fresh and switches that
+account's mirror off. The same pair resumes. Tests point `MIGRATION_DB` at a temp file.
+
 **Only Google is implemented** (`providers.py`). OneDrive for Business and Zoho
 WorkDrive are scaffolds that refuse by name, and `tests/test_providers_scaffold.py`
 fails if one is marked implemented while its operations are still stubs. No engine

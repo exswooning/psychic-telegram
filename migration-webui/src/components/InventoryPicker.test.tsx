@@ -12,6 +12,7 @@ const inventory = vi.fn()
 const config = vi.fn()
 vi.mock('@/api/controlPlane', () => ({
   fetchTenantInventory: (...a: unknown[]) => inventory(...a),
+  fetchReadiness: () => Promise.resolve({ side: "source", purpose: "migrate", domain: "", admin: "", ready: false, checks: [] }),
   fetchTenantConfigStatus: (...a: unknown[]) => config(...a),
 }))
 vi.mock('@/components/TenantInventoryPanel', () => ({

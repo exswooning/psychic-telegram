@@ -8,6 +8,7 @@ import type { RunningJob } from '@/hooks/useRunningJobs'
    transcript counted every account it deleted. The window now reads what the job says. */
 
 vi.mock('@/api/controlPlane', () => ({
+  fetchReadiness: () => Promise.resolve({ side: "source", purpose: "migrate", domain: "", admin: "", ready: false, checks: [] }),
   fetchTenantConfigStatus: vi.fn(), fetchFullSetupStatus: vi.fn(), fetchFleet: vi.fn(),
   fetchActiveJobs: vi.fn(), fetchMe: vi.fn(), stopJob: vi.fn(), fetchProvisionStatus: vi.fn(),
   fetchMyMetrics: vi.fn(),

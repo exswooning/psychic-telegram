@@ -12,6 +12,7 @@ import type { RunningJob } from '@/hooks/useRunningJobs'
 // controlPlane reads localStorage at module load, and useRunningJobs
 // imports it -- this card only needs describeElapsed from that graph.
 vi.mock('@/api/controlPlane', () => ({
+  fetchReadiness: () => Promise.resolve({ side: "source", purpose: "migrate", domain: "", admin: "", ready: false, checks: [] }),
   fetchTenantConfigStatus: vi.fn(), fetchFullSetupStatus: vi.fn(),
   fetchFleet: vi.fn(), fetchActiveJobs: vi.fn(), fetchMe: vi.fn(),
   stopJob: vi.fn(), fetchProvisionStatus: vi.fn(),

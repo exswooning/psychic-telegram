@@ -15,6 +15,7 @@ import {
   FullSetupStatus, startFullSetup, fetchFullSetupStatus,
   startProvision, fetchProvisionStatus, ProvisionStatus,
   fetchTenantConfigStatus, uploadCredentials, TenantConfigStatus,
+  fetchReadiness, Readiness,
   fetchTenantInventory, TenantInventory,
   startTenantScan, fetchTenantScan,
   buildIdentityMap, fetchIdentityMapStatus, IdentityMapStatus,
@@ -353,6 +354,20 @@ const QuickTenantSetup: React.FC<{
   const [copied, setCopied] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
+  // Is this side actually ready -- Google asked as this domain's admin, per scope and
+  // per service (readiness.py)? Setup's own "ok" said yes twice when it was not.
+  const purpose: 'migrate' | 'seed' = showSeedOptions ? 'seed' : 'migrate'
+  const [readiness, setReadiness] = useState<Readiness | null>(null)
+  const [readinessBusy, setReadinessBusy] = useState(false)
+  const [readinessErr, setReadinessErr] = useState('')
+  const checkReadiness = useCallback(() => {
+    setReadinessBusy(true); setReadinessErr('')
+    fetchReadiness(side, purpose)
+      .then(setReadiness)
+      .catch((e) => setReadinessErr(e instanceof Error ? e.message : String(e)))
+      .finally(() => setReadinessBusy(false))
+  }, [side, purpose])
+
   const refreshTenantCfg = useCallback(() => {
     fetchTenantConfigStatus(side).then(setTenantCfg).catch(() => {})
   }, [side])
@@ -497,6 +512,12 @@ const QuickTenantSetup: React.FC<{
     && (tenantCfg.domain || '').toLowerCase() === domain.trim().toLowerCase()
   const result = status?.result
   const setUpOk = !!result?.ok && !status?.running
+  // Once per key on file for this domain, and again when a setup run finishes.
+  const readinessKey = alreadyHere && !status?.running
+    ? `${tenantCfg?.clientId}:${domain.trim().toLowerCase()}:${result?.ok ? 'ok' : ''}` : ''
+  useEffect(() => { if (readinessKey) checkReadiness() }, [readinessKey, checkReadiness])
+  const readyHere = !!readiness?.ready
+    && readiness.domain === domain.trim().toLowerCase()
   // A result is shown beside the domain it was for. One from before the domain was
   // recorded shows only if it succeeded: an old failure or interruption for some other
   // tenant read as this new pair's (two "interrupted" cards on a fresh setup).
@@ -1086,6 +1107,48 @@ const QuickTenantSetup: React.FC<{
 
       {error && <Alert severity="error" sx={{ mt: 2 }}>{error}</Alert>}
 
+      {(readiness || readinessBusy || readinessErr) && (
+        <Box sx={{ mt: 2 }} data-testid={`qts-${side}-readiness`}>
+          <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
+            <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
+              Ready for {purpose === 'seed' ? 'seeding' : 'migration'}?
+            </Typography>
+            {readinessBusy ? <CircularProgress size={14} />
+              : readiness && (
+                <Chip size="small" label={readiness.ready ? 'Ready' : 'Not ready'}
+                      color={readiness.ready ? 'success' : 'error'} />
+              )}
+            <Box sx={{ flex: 1 }} />
+            <Button size="small" onClick={checkReadiness} disabled={readinessBusy}>
+              Check again
+            </Button>
+          </Stack>
+          {readinessErr && <Alert severity="warning">{readinessErr}</Alert>}
+          {readiness && !readinessBusy && (
+            <Stack component="ol" spacing={1}
+                   sx={{ listStyle: 'none', p: 1.5, m: 0, borderRadius: 1,
+                         border: '1px solid', borderColor: readiness.ready ? 'divider' : 'error.light' }}>
+              {readiness.checks.map((c) => (
+                <Stack component="li" key={c.name} direction="row" spacing={1.25} alignItems="flex-start">
+                  {c.ok === true ? <OkIcon color="success" fontSize="small" />
+                    : c.ok === false ? <FailIcon color="error" fontSize="small" />
+                    : <WaitIcon color="warning" fontSize="small" />}
+                  <Box sx={{ minWidth: 0 }}>
+                    <Typography variant="body2" sx={{ fontWeight: 600 }}>{c.name}</Typography>
+                    {c.detail && (
+                      <Typography variant="caption" color="text.secondary"
+                                  sx={{ display: 'block', overflowWrap: 'anywhere' }}>
+                        {c.detail}
+                      </Typography>
+                    )}
+                  </Box>
+                </Stack>
+              ))}
+            </Stack>
+          )}
+        </Box>
+      )}
+
       {resultHere && result && (
         <Box sx={{ mt: 2 }}>
           <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 0.5 }}>
@@ -1149,7 +1212,7 @@ const QuickTenantSetup: React.FC<{
             </Alert>
           )}
 
-          {setUpOk && (
+          {setUpOk && readyHere && (
             /* Where the work actually is once setup finishes. Without this
                a completed wizard leaves you on the wizard, and a seed
                started from here is watched on a page you have to know

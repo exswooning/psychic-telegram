@@ -6534,6 +6534,24 @@ async def get_tenant_inventory(side: str, limit: int = 250, deep: bool = False,
     return await _off_loop(_read)
 
 
+@app.get("/api/v2/setup/readiness")
+async def setup_readiness(side: str, purpose: str = "migrate", account_id: int | None = None,
+                          op: Operator = Depends(operator)):
+    """Is this side ready for a migration or a seed -- asked of Google as that domain's own
+    admin, per scope and per service (readiness.py), not inferred from setup's result."""
+    if side not in ("source", "target") or purpose not in ("migrate", "seed"):
+        raise HTTPException(400, "side must be source|target and purpose migrate|seed")
+    require_reader(op)
+    aid = account_id if account_id is not None else op.account_id
+    _require_account_access(aid, op)
+
+    def _read() -> dict:
+        import readiness
+        from config import Settings
+        return readiness.check(Settings(account_id=aid), side, purpose)
+    return await _off_loop(_read)
+
+
 @app.get("/api/v2/setup/tenant-config")
 async def get_tenant_config_status(side: str, op: Operator = Depends(operator)):
     if side not in ("source", "target"):
