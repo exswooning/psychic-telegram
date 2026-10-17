@@ -431,13 +431,17 @@ def run_full_setup(
         if project_of_key and not dry_run:
             access = Phase(f"admin access to {project_of_key}")
             phases.append(access)
-            reachable = _admin_can_reach_project(
+            # One project, one domain: a key whose project serves another domain is
+            # never kept, whatever it can reach or mint (readiness._own_project).
+            import readiness
+            shared = readiness._own_project(project_of_key, domain.lower())["ok"] is False
+            reachable = not shared and _admin_can_reach_project(
                 project_of_key, admin_email, admin_password)
             if reachable:
                 access.status, access.detail = "ok", "the admin can administer it"
             else:
-                working = _delegation_already_live(_vs_for(account_id, side, domain, admin_email), side,
-                                                   client_id)
+                working = not shared and _delegation_already_live(
+                    _vs_for(account_id, side, domain, admin_email), side, client_id)
                 if working:
                     access.status = "skipped"
                     access.detail = (

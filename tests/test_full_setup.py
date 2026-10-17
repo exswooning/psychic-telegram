@@ -1095,6 +1095,35 @@ class TestAnUnusableUploadedKeyProvisionsFresh:
         assert len(kept) == 1
         assert json.loads((tmp_path / kept[0]).read_text())["client_id"] == "old-client"
 
+    def test_a_project_serving_another_domain_is_never_kept(self, monkeypatch, tmp_path):
+        """Even reachable and minting: one project serves one domain."""
+        import readiness
+        self._common(monkeypatch)
+        up = tmp_path / "source-sa.json"
+        up.write_text(json.dumps({"client_id": "old", "project_id": "wsmig-src-50758"}))
+        monkeypatch.setattr(fs.accounts_auth, "get_tenant_config",
+                            lambda account_id, side: {"sa_key_path": str(up)})
+        monkeypatch.setattr(readiness, "_own_project",
+                            lambda p, d: {"name": "own project", "ok": False, "detail": "shared"})
+        monkeypatch.setattr(fs, "_admin_can_reach_project", lambda *a, **k: True)
+        monkeypatch.setattr(fs, "_delegation_already_live", lambda *a, **k: True)
+        monkeypatch.setattr(fs.provision_gcp, "gcloud_ready", lambda: (True, "me"))
+        monkeypatch.setattr(fs.provision_gcp, "can_create_projects", lambda a: True)
+        monkeypatch.setattr(fs.provision_gcp, "detect_org", lambda env=None: "")
+        called = []
+
+        def fake_provision_side(side, project, org, key_dest, dry_run, force,
+                                env=None, on_step=None, admin_email=""):
+            called.append(project)
+            with open(key_dest, "w") as f:
+                json.dump({"client_id": "fresh", "project_id": project}, f)
+            return {"side": side, "project": project, "ok": True,
+                    "steps": [{"name": "x", "status": "ok", "detail": ""}], "clientId": "fresh"}
+        monkeypatch.setattr(fs.provision_gcp, "provision_side", fake_provision_side)
+        fs.run_full_setup("source", "gorkhatweed.com", "info@gorkhatweed.com", "pw",
+                          account_id=68, keys_dir=str(tmp_path))
+        assert called, "a project shared with another domain must be replaced"
+
     def test_a_live_delegation_is_not_thrown_away(self, monkeypatch, tmp_path):
         """The opposite case must still hold: an uploaded key whose project
         the admin cannot administer BUT which is already carrying a working

@@ -38,6 +38,7 @@ def tenant(tmp_path, monkeypatch):
     import googleapiclient.discovery as disc
     monkeypatch.setattr(disc, "build", fake_build)
     monkeypatch.setattr(readiness, "_creds", lambda *a: None)
+    monkeypatch.setattr(readiness, "_own_project", lambda p, d: readiness._row("own project", True))
     return st, state
 
 
@@ -106,3 +107,20 @@ def test_the_gate_refuses_a_definite_failure_and_runs_past_an_unknown(tenant, mo
     with pytest.raises(SystemExit) as e:
         readiness.gate(st)
     assert e.value.code == 2 and "NOT READY" in capsys.readouterr().out
+
+
+def test_a_project_on_file_for_another_domain_is_not_ready(tmp_path, monkeypatch):
+    import control_plane_db as cpdb
+    db = str(tmp_path / "cp.db")
+    cpdb.apply_migrations(db)
+    monkeypatch.setattr(cpdb, "_db_path", lambda: db)
+    old, mine = tmp_path / "old.json", tmp_path / "mine.json"
+    old.write_text(json.dumps({"project_id": "wsmig-src-50758"}))
+    mine.write_text(json.dumps({"project_id": "wsmig-src-1"}))
+    with cpdb.rw() as c:
+        c.execute("INSERT INTO accounts (email, password_hash, name) VALUES ('a@x','h','A')")
+        c.execute("INSERT INTO tenant_configs (account_id, side, domain, sa_key_path) VALUES (1,'source','source.old.com',?)",
+                  (str(old),))
+    assert readiness._own_project("wsmig-src-50758", "gorkhatweed.com")["ok"] is False
+    assert readiness._own_project("wsmig-src-50758", "source.old.com")["ok"] is True
+    assert readiness._own_project("wsmig-src-1", "gorkhatweed.com")["ok"] is True

@@ -112,6 +112,7 @@ def check(settings, side: str, purpose: str, *, gate: bool = False) -> dict:
     except (OSError, ValueError) as exc:
         rows.append(_row("key", False, f"unreadable: {exc}"))
         return _done(side, purpose, domain, admin, rows)
+    rows.append(_own_project(k.get("project_id"), domain))
 
     # delegation
     if seed:
@@ -211,6 +212,30 @@ def gate(settings) -> None:
         print("NOT READY: " + " | ".join(fails), flush=True)
         raise SystemExit(2)
     print("READINESS: both tenants ready for this migration", flush=True)
+
+
+def _own_project(project: str | None, domain: str) -> dict:
+    """A Cloud project serves one domain. Live: gorkhatweed.com sat on wsmig-src-50758,
+    made for source.sarafgloabalexim.com -- one project's delegation cannot be told apart
+    per tenant, and tearing one pair down would take the other's key with it."""
+    import control_plane_db as cpdb
+    others = set()
+    try:
+        with cpdb.ro() as c:
+            for r in c.execute("SELECT domain, sa_key_path FROM tenant_configs "
+                               "WHERE domain != '' AND sa_key_path != ''"):
+                try:
+                    with open(r["sa_key_path"], encoding="utf-8") as fh:
+                        if json.load(fh).get("project_id") == project and r["domain"].lower() != domain:
+                            others.add(r["domain"].lower())
+                except (OSError, ValueError):
+                    continue
+    except Exception as exc:      # noqa: BLE001 - unknown, so not ready
+        return _row("own project", None, f"could not check: {exc}")
+    return _row("own project", not others,
+                f"{project} serves only {domain}" if not others
+                else f"{project} is also on file for {', '.join(sorted(others))}; set this side up "
+                     f"again so it gets a project of its own")
 
 
 def _ledger_row(settings) -> dict:
