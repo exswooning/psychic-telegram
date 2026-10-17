@@ -17,7 +17,7 @@ import {
   uploadCredential, fetchDwd, checkDwdNow, diagnoseScopes, ActionSpec,
   StatusPayload, ConfigFields, ConfigPayload, DwdPayload, ScopeDiagnosis, UploadKind,
 } from '@/api/client'
-import { fetchMe, startFullSetup, fetchFullSetupStatus } from '@/api/controlPlane'
+import { fetchMe, startFullSetup, fetchFullSetupStatus, fetchAllDomains } from '@/api/controlPlane'
 import type { FullSetupStatus } from '@/api/controlPlane'
 import MfaBanner from '@/components/MfaBanner'
 import SeedDomainPicker from '@/components/SeedDomainPicker'
@@ -170,20 +170,36 @@ const AdminSignInStep: React.FC<{
   initialEmail?: string
   /** Rejected as the answer, because it is the other side of the pair. */
   taken?: string
+  /** Offer the tenants already set up on this box. One of those has its key on
+   *  file, so it needs no password -- the password exists to make that key. */
+  offerExisting?: boolean
   onBack?: () => void
   onNext: (email: string, password: string, domain: string) => void
-}> = ({ heading, sub, aside, initialEmail = '', taken, onBack, onNext }) => {
+}> = ({ heading, sub, aside, initialEmail = '', taken, offerExisting, onBack, onNext }) => {
   const [email, setEmail] = useState(initialEmail)
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
+  const [existing, setExisting] = useState<{ domain: string; adminEmail: string }[]>([])
+  useEffect(() => {
+    if (!offerExisting) return
+    fetchAllDomains().then((r) => {
+      const seen = new Set<string>()
+      const other = (taken || '').trim().toLowerCase()
+      setExisting(r.domains
+        .filter((d) => d.hasKey && !d.superseded && d.adminEmail)
+        .map((d) => ({ domain: d.domain.toLowerCase(), adminEmail: d.adminEmail }))
+        .filter((d) => d.domain !== other && !seen.has(d.domain) && !!seen.add(d.domain)))
+    }).catch(() => setExisting([]))
+  }, [offerExisting, taken])
   const domain = domainOf(email)
+  const known = existing.some((d) => d.domain === domain)
   const shaped = /^[^@\s]+@[^@\s]+$/.test(email.trim()) && looksLikeDomain(domain)
   const same = !!taken && domain === taken.trim().toLowerCase()
   const error = email.trim() === '' ? ''
     : !shaped ? 'Use the full admin address, like admin@acme.com.'
     : same ? 'That is the same tenant. A migration needs two different domains.'
     : ''
-  const ready = shaped && !same && password.length > 0
+  const ready = shaped && !same && (password.length > 0 || known)
 
   return (
     <WizardShell heading={heading} sub={sub} onBack={onBack} aside={aside}>
@@ -196,8 +212,25 @@ const AdminSignInStep: React.FC<{
                       autoComplete: 'username' }}
         sx={{ '& .MuiOutlinedInput-root': { height: 60 } }}
       />
+      {existing.length > 0 && (
+        <Box sx={{ mb: 2 }} data-testid="existing-tenants">
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+            Or pick a tenant already set up here:
+          </Typography>
+          <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
+            {existing.map((d) => (
+              <Chip key={d.domain} label={d.domain} clickable
+                    color={domain === d.domain ? 'primary' : 'default'}
+                    variant={domain === d.domain ? 'filled' : 'outlined'}
+                    data-testid={`existing-${d.domain}`}
+                    onClick={() => setEmail(d.adminEmail)} />
+            ))}
+          </Stack>
+        </Box>
+      )}
       <TextField
-        fullWidth type={showPassword ? 'text' : 'password'} label="Password"
+        fullWidth type={showPassword ? 'text' : 'password'}
+        label={known ? 'Password (not needed: its key is on file)' : 'Password'}
         value={password}
         onChange={(e) => setPassword(e.target.value)}
         onKeyDown={(e) => { if (e.key === 'Enter' && ready) onNext(email.trim(), password, domain) }}
@@ -375,7 +408,7 @@ const Wizard: React.FC = () => {
       // domain, which is why nothing failed loudly.
       if (adminPassword) {
         repairConsoleSetup(picked === 'seed' ? 'source' : role, adminPassword,
-                           { purpose: picked, chat: false })
+                           { purpose: picked, chat: false, domain })
           .catch(() => {})
       }
       setStep(picked === 'migrate' ? 'counterpart' : 'run')
@@ -656,7 +689,7 @@ const Wizard: React.FC = () => {
       <AdminSignInStep
         heading="Where is it going?"
         sub={`${domain} is the source — it is read, never written. Sign in as a super admin of the tenant its data should land in.`}
-        initialEmail={targetEmail} taken={domain}
+        initialEmail={targetEmail} taken={domain} offerExisting
         aside={<Aside art="migrate"
           title="Two tenants, one direction"
           body="Both sides get their own Cloud project and delegation grant.

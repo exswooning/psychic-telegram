@@ -298,6 +298,9 @@ export async function repairConsoleSetup(
      *  makes it untrue with nothing on screen to say so. 'seed' keeps them,
      *  because writing fabricated data into the source is what seeding is. */
     purpose?: 'seed' | 'migrate'
+    /** The tenant the password belongs to; the server refuses if it is not the
+     *  account's configured tenant on that side. */
+    domain?: string
   } = {},
 ): Promise<SeedResult> {
   const res = await fetch('/api/repair_console_setup', {
@@ -306,7 +309,7 @@ export async function repairConsoleSetup(
     body: JSON.stringify({
       side, admin_password: adminPassword,
       grant: opts.grant ?? true, chat: opts.chat ?? true,
-      purpose: opts.purpose ?? '',
+      purpose: opts.purpose ?? '', domain: opts.domain ?? '',
     }),
   })
   return res.json()

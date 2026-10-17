@@ -5767,6 +5767,19 @@ class Handler(BaseHTTPRequestHandler):
         if side not in ("source", "target"):
             self._json({"ok": False, "error": "side must be source or target"})
             return
+        # The domain the caller typed the password for. The job signs in to THIS
+        # account's configured tenant on that side; live, the wizard setting up a
+        # new pair sent the new admin's password to the old source's console sign-in.
+        asked = (body.get("domain") or "").strip().lower()
+        if asked:
+            st_ = __import__("config").Settings(account_id=account_id) if account_id \
+                else __import__("config").Settings()
+            have = (getattr(st_, f"{side}_domain", "") or "").strip().lower()
+            if asked != have:
+                self._json({"ok": False, "error": (
+                    f"{asked} is not this account's {side} ({have or 'none set up yet'}); "
+                    f"its delegation is set when it is set up, nothing to narrow here")})
+                return
         env = _account_env(account_id, dict(os.environ))
         # Environment, never argv -- a command line is readable by every
         # process on the box through ps.

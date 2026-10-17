@@ -19,7 +19,8 @@ import { looksLikeDomain, domainOf } from './Wizard.utils'
 const seedEnabled = vi.fn()
 const fullSetup = vi.fn()
 const setupStatus = vi.fn().mockResolvedValue({ running: false, result: null })
-const allDomains = vi.fn(() => Promise.resolve({ superadmin: true, domains: [] }))
+const allDomains = vi.fn(() => Promise.resolve(
+  { superadmin: true, domains: [] as import('@/api/controlPlane').ConfiguredDomain[] }))
 vi.mock('@/api/controlPlane', () => ({
   fetchMe: () => seedEnabled(),
   startFullSetup: (...a: unknown[]) => fullSetup(...a),
@@ -284,6 +285,41 @@ describe('migrating asks where it is going', () => {
     await enterDomain('newco.com')
     await waitFor(() =>
       expect(screen.getByTestId('qts-target')).toHaveTextContent('admin@newco.com'))
+  })
+})
+
+describe('the destination can be a tenant already set up', () => {
+  const row = (domain: string, side: 'source' | 'target', extra = {}) => ({
+    accountId: 3, accountEmail: 'a@x', side, domain, adminEmail: `info@${domain}`,
+    hasKey: true, clientId: '1', superseded: false, ...extra })
+
+  it('offers them, not the source itself, nor one with no key or one replaced', async () => {
+    allDomains.mockResolvedValueOnce({ superadmin: true, domains: [
+      row('acme.com', 'source'), row('newco.com', 'target'), row('newco.com', 'source'),
+      row('nokey.com', 'target', { hasKey: false }), row('old.com', 'target', { superseded: true }),
+    ] })
+    view()
+    await signIn('admin@acme.com')
+    await choose('migrate')
+    const box = await screen.findByTestId('existing-tenants')
+    expect(box).toHaveTextContent('newco.com')
+    expect(box).not.toHaveTextContent('acme.com')
+    expect(box).not.toHaveTextContent('nokey.com')
+    expect(box).not.toHaveTextContent('old.com')
+    expect(screen.getAllByTestId('existing-newco.com')).toHaveLength(1)
+  })
+
+  it('fills its admin and continues without a password', async () => {
+    allDomains.mockResolvedValueOnce({ superadmin: true, domains: [row('newco.com', 'target')] })
+    view()
+    await signIn('admin@acme.com')
+    await choose('migrate')
+    fireEvent.click(await screen.findByTestId('existing-newco.com'))
+    expect(screen.getByTestId('admin-email')).toHaveValue('info@newco.com')
+    expect(screen.getByTestId('creds-next')).toBeEnabled()
+    fireEvent.click(screen.getByTestId('creds-next'))
+    await waitFor(() =>
+      expect(screen.getByTestId('qts-target')).toHaveTextContent('newco.com'))
   })
 })
 

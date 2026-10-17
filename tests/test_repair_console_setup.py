@@ -132,3 +132,26 @@ class TestTheChatStepCanActuallyReachTheConsole:
         assert "provision_gcp.grant_admin_console_access" in \
             inspect.getsource(rcs.repair)
         assert callable(provision_gcp.grant_admin_console_access)
+
+
+def test_the_wizard_cannot_send_a_password_to_another_tenants_console(monkeypatch):
+    """Live: choosing Migrate while setting up gorkhatweed.com started a console sign-in
+    on the account's configured source, source.sarafgloabalexim.com, with gorkhatweed's
+    password -- twice, before anyone noticed."""
+    import types
+    import webui
+    started, sent = [], []
+    h = object.__new__(webui.Handler)
+    h._account_id = lambda: 3
+    h._json = lambda obj, code=200: sent.append(obj)
+    monkeypatch.setattr(webui, "resolve_target_account", lambda a, b: (3, None))
+    monkeypatch.setattr(webui, "get_job", lambda a: types.SimpleNamespace(
+        start=lambda *a, **k: started.append(a) or (True, "")))
+    import config
+    monkeypatch.setattr(config, "Settings", lambda **k: types.SimpleNamespace(
+        source_domain="source.sarafgloabalexim.com", target_domain="t.example.com",
+        source_admin="info@source.sarafgloabalexim.com"))
+    h._post_repair_console_setup({"side": "source", "admin_password": "pw", "purpose": "migrate",
+                                  "domain": "gorkhatweed.com"})
+    assert started == []
+    assert sent and sent[0]["ok"] is False and "gorkhatweed.com" in sent[0]["error"]
