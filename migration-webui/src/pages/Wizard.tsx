@@ -11,6 +11,7 @@ import {
   ArrowBack as BackIcon,
   AddCircleOutline as NewMigrationIcon,
   Visibility as ShowIcon, VisibilityOff as HideIcon,
+  CheckCircle as PickedIcon, Domain as TenantIcon,
 } from '@mui/icons-material'
 import {
   fetchStatus, checkStep, fetchConfig, saveConfig, setRunMode, fetchActions,
@@ -179,16 +180,20 @@ const AdminSignInStep: React.FC<{
   const [email, setEmail] = useState(initialEmail)
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
-  const [existing, setExisting] = useState<{ domain: string; adminEmail: string }[]>([])
+  const [existing, setExisting] = useState<{ domain: string; adminEmail: string; sides: string[] }[]>([])
   useEffect(() => {
     if (!offerExisting) return
     fetchAllDomains().then((r) => {
-      const seen = new Set<string>()
       const other = (taken || '').trim().toLowerCase()
-      setExisting(r.domains
-        .filter((d) => d.hasKey && !d.superseded && d.adminEmail)
-        .map((d) => ({ domain: d.domain.toLowerCase(), adminEmail: d.adminEmail }))
-        .filter((d) => d.domain !== other && !seen.has(d.domain) && !!seen.add(d.domain)))
+      const byDomain = new Map<string, { domain: string; adminEmail: string; sides: string[] }>()
+      for (const d of r.domains) {
+        const key = d.domain.toLowerCase()
+        if (!d.hasKey || d.superseded || !d.adminEmail || key === other) continue
+        const row = byDomain.get(key) ?? { domain: key, adminEmail: d.adminEmail, sides: [] }
+        if (!row.sides.includes(d.side)) row.sides.push(d.side)
+        byDomain.set(key, row)
+      }
+      setExisting([...byDomain.values()])
     }).catch(() => setExisting([]))
   }, [offerExisting, taken])
   const domain = domainOf(email)
@@ -213,19 +218,47 @@ const AdminSignInStep: React.FC<{
         sx={{ '& .MuiOutlinedInput-root': { height: 60 } }}
       />
       {existing.length > 0 && (
-        <Box sx={{ mb: 2 }} data-testid="existing-tenants">
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-            Or pick a tenant already set up here:
+        <Box sx={{ mb: 2.5 }} data-testid="existing-tenants">
+          <Typography variant="overline" color="text.secondary"
+                      sx={{ display: 'block', letterSpacing: '0.08em', mb: 1 }}>
+            Or pick a tenant already set up
           </Typography>
-          <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
-            {existing.map((d) => (
-              <Chip key={d.domain} label={d.domain} clickable
-                    color={domain === d.domain ? 'primary' : 'default'}
-                    variant={domain === d.domain ? 'filled' : 'outlined'}
-                    data-testid={`existing-${d.domain}`}
-                    onClick={() => setEmail(d.adminEmail)} />
-            ))}
-          </Stack>
+          <Box sx={{ display: 'grid', gap: 1.25,
+                     gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, minmax(0, 1fr))' } }}>
+            {existing.map((d) => {
+              const on = domain === d.domain
+              return (
+                <Card key={d.domain} variant="outlined"
+                      sx={{ borderColor: on ? 'primary.main' : 'divider',
+                            borderWidth: on ? 2 : 1,
+                            bgcolor: on ? 'action.selected' : 'background.paper',
+                            transition: 'border-color 120ms, background-color 120ms' }}>
+                  <CardActionArea data-testid={`existing-${d.domain}`}
+                                  aria-pressed={on}
+                                  onClick={() => { setEmail(d.adminEmail); setPassword('') }}
+                                  sx={{ p: 1.5 }}>
+                    <Stack direction="row" spacing={1.25} alignItems="flex-start">
+                      {on
+                        ? <PickedIcon color="primary" fontSize="small" sx={{ mt: 0.25 }} />
+                        : <TenantIcon color="action" fontSize="small" sx={{ mt: 0.25 }} />}
+                      <Box sx={{ minWidth: 0 }}>
+                        <Typography variant="body2" sx={{ fontWeight: 600, overflowWrap: 'anywhere' }}>
+                          {d.domain}
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary"
+                                    sx={{ display: 'block', overflowWrap: 'anywhere' }}>
+                          {d.adminEmail}
+                        </Typography>
+                        <Typography variant="caption" color="success.main" sx={{ display: 'block' }}>
+                          Key on file · set up as {d.sides.join(' and ')}
+                        </Typography>
+                      </Box>
+                    </Stack>
+                  </CardActionArea>
+                </Card>
+              )
+            })}
+          </Box>
         </Box>
       )}
       <TextField

@@ -304,7 +304,9 @@ const QuickTenantSetup: React.FC<{
   const [email, setEmail] = useState(initialEmail ?? '')
   const [password, setPassword] = useState(initialPassword ?? '')
   const [orgId, setOrgId] = useState('')
-  const [dryRun, setDryRun] = useState(true)
+  // A password handed over by the wizard means the operator already chose to set this
+  // tenant up; the dialog's own default stays a preview.
+  const [dryRun, setDryRun] = useState(!initialPassword)
   const [keepLogin, setKeepLogin] = useState(true)
   const [authDialogOpen, setAuthDialogOpen] = useState(false)
   const navigate = useNavigate()
@@ -485,6 +487,13 @@ const QuickTenantSetup: React.FC<{
   }
 
   const canLaunch = domain.trim() && email.trim() && password && !status?.running
+  // The wizard already asked for this admin's password; asking again in the dialog
+  // read as a second sign-in for the same tenant.
+  const handedOver = !!initialPassword && password === initialPassword
+    && email.trim() === (initialEmail ?? '').trim() && !!domain.trim()
+  // Picked from the tenants already set up: its key is on file for this slot.
+  const alreadyHere = !!tenantCfg?.hasKey
+    && (tenantCfg.domain || '').toLowerCase() === domain.trim().toLowerCase()
   const result = status?.result
   const setUpOk = !!result?.ok && !status?.running
   // A result is shown beside the domain it was for. One from before the domain was
@@ -917,6 +926,25 @@ const QuickTenantSetup: React.FC<{
             the Manual tab instead.
           </Typography>
 
+          {alreadyHere && !password ? (
+            <Alert severity="success" data-testid={`qts-${side}-ready`}
+                   action={<Button size="small" onClick={() => setAuthDialogOpen(true)}>
+                     Set it up again</Button>}>
+              {domain.trim()} is already set up — its key is on file
+              {tenantCfg?.clientId ? ` (client ${tenantCfg.clientId})` : ''}. Nothing to sign in for.
+            </Alert>
+          ) : handedOver ? (
+            <Stack direction="row" spacing={1.5} alignItems="center" useFlexGap flexWrap="wrap">
+              <Button variant="contained" startIcon={<GoogleG size={18} />}
+                      data-testid={`qts-${side}-go`}
+                      disabled={busy || !!status?.running}
+                      onClick={() => launch('set up from the wizard')}
+                      sx={{ textTransform: 'none', fontWeight: 500 }}>
+                {status?.running ? 'Setting up…' : `Set up ${side} as ${email.trim()}`}
+              </Button>
+              <Button size="small" onClick={() => setAuthDialogOpen(true)}>Change admin</Button>
+            </Stack>
+          ) : (
           <Button
             variant="outlined"
             onClick={() => setAuthDialogOpen(true)}
@@ -930,9 +958,12 @@ const QuickTenantSetup: React.FC<{
           >
             {domain.trim() && email.trim() ? `Continue as ${email.trim()}` : 'Sign in with Google'}
           </Button>
-          {domain.trim() && email.trim() && (
+          )}
+          {domain.trim() && email.trim() && !(alreadyHere && !password) && (
             <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
-              {domain.trim()} — click to change or enter the password
+              {handedOver
+                ? `${domain.trim()} — using the password from the previous step`
+                : `${domain.trim()} — click to change or enter the password`}
             </Typography>
           )}
 
