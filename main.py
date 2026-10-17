@@ -1015,6 +1015,24 @@ def _gate_on_delegation(settings: Settings) -> None:
         log.warning("source scope narrowing check could not run: %s", exc)
 
 
+def _customer_source_reads_only(settings) -> None:
+    """A customer's source (not a declared sandbox) is only read: its delegation holds no
+    write scope, so Drive content moves by download_upload; a server-side copy (needs
+    `drive`) is switched to it, and a move -- which takes files out of the source -- refused."""
+    import verify_scopes
+    if not verify_scopes.customer_source(settings):
+        return
+    if settings.transfer_mode == "move":
+        print(f"MOVE REFUSED: {settings.source_domain} is a customer tenant; files are never "
+              f"moved out of it. Use a copy.", flush=True)
+        raise SystemExit(2)
+    if settings.transfer_mode != "download_upload":
+        print(f"SOURCE READ-ONLY: {settings.source_domain} is a customer tenant, so Drive "
+              f"content moves by download_upload (was {settings.transfer_mode})", flush=True)
+        settings.transfer_mode = "download_upload"
+        os.environ["TRANSFER_MODE"] = "download_upload"
+
+
 def _gate_on_move(auth, settings) -> None:
     """A move run first proves the source lets files leave (drive_engine.move_preflight):
     refused, nothing has moved and the run stops saying what to change."""
@@ -1112,6 +1130,7 @@ def _run_with_memory_pause(auth, db, settings, services, delta, delta_days,
     the machine alone. Every path into run_batch goes through this function,
     so no future command can forget.
     """
+    _customer_source_reads_only(settings)
     _gate_on_delegation(settings)
     _gate_on_move(auth, settings)
     _gate_on_source(auth, settings)

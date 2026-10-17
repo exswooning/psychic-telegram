@@ -147,6 +147,15 @@ def separate(account_id: int | None, dry_run: bool = False, wait: int = PROPAGAT
         log(f"REFUSING: no source admin console login on file for {st.source_domain} "
             "(DWD_EMAIL_SOURCE / DWD_PASSWORD_SOURCE in /etc/bitport/dwd.env)")
         return 2
+    import verify_scopes
+    if verify_scopes.customer_source(st):
+        # A customer's tenant: no seed key (write scopes) is ever made on it; the
+        # migrate entry is written read-only and that is all.
+        log(f"{st.source_domain} is a customer tenant (not a sandbox): read-only, no seed key")
+        if not _grant(account_id, migrate_client, migrate, st.source_sa_key, login):
+            log("FAILED to write the migrate entry")
+            return 6
+        return 0
     if not key:
         key = os.path.join(os.path.dirname(st.source_sa_key), "seed-sa.json")
         ok, detail = _create_seed_key(st, key, login)

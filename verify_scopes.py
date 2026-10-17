@@ -227,6 +227,17 @@ def every_toggle_scopes(settings: Settings, tenant: str) -> set[str]:
 OFFERED_TRANSFER_MODES = ("download_upload", "server_side")
 
 
+def customer_source(settings) -> bool:
+    """A source nobody declared a sandbox is somebody's real tenant: it is only ever READ.
+    Its delegation is read scopes only (no `drive`, so no server-side copy -- Drive moves by
+    download_upload), and no seed key is made on it. Google enforces it, not this code."""
+    import domain_guard
+    try:
+        return domain_guard.is_protected(getattr(settings, "source_domain", "") or "")
+    except Exception:      # noqa: BLE001 - unknown: treat as a customer, the safe side
+        return True
+
+
 def migrate_source_scopes(settings: Settings) -> list[str]:
     """Exactly what a migration requests from the source, in every transfer mode a
     launch can choose. The seeder has a key of its own (separate_credentials), so
@@ -241,7 +252,7 @@ def migrate_source_scopes(settings: Settings) -> list[str]:
 
     import fidelity
     out: set = set()
-    for mode in OFFERED_TRANSFER_MODES:
+    for mode in (("download_upload",) if customer_source(settings) else OFFERED_TRANSFER_MODES):
         for on in (True, False):
             for chat_mode in ("direct", "import"):
                 try:
