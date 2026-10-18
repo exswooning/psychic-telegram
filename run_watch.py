@@ -626,8 +626,26 @@ class Watcher:
                           fingerprint=f"failing:{account_id}:{job_name}:{worst}")
 
     # -- when a run ends ---------------------------------------------------
+    def _regrade_last_migration(self, aid) -> None:
+        """A run's report is built when it exits, before its per-user tally follow-on has
+        counted anything, so it reads UNVERIFIED. When that tally finishes, the latest
+        migration's report is built again -- now graded against the users it ran
+        (run_report._run_users_fidelity) -- and replaces the ungraded one."""
+        last = next((r for r in list_runs(aid, limit=50)
+                     if r["jobName"] in MIGRATION_JOBS and r.get("finishedAt")), None)
+        if not last:
+            return
+        run = {"returnCode": last["rc"], "startedAt": last["startedAt"],
+               "finishedAt": last["finishedAt"], "name": last["jobName"]}
+        try:
+            self.make_report(aid, last["jobName"], "migration", run)
+        except Exception as exc:      # noqa: BLE001 - the earlier report stands
+            log.warning("regrading the report after the tally failed: %s", exc)
+
     def _handle_finished(self, ev: dict) -> None:
         name, aid, rc = ev["job_name"], ev["account_id"], ev["rc"]
+        if name == "user-tally" and rc == 0 and aid is not None:
+            self._regrade_last_migration(aid)
         kind = report_kind(name)
         run = {"returnCode": rc, "startedAt": ev.get("started_at"), "finishedAt": ev["at"], "name": name}
         report = None

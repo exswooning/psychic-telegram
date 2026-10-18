@@ -204,6 +204,70 @@ def _fidelity(conn) -> dict:
     return out
 
 
+def _run_users_fidelity(conn, run: dict) -> dict:
+    """Fidelity graded against the users this run wrote, from their own per-user tally
+    (counts on both tenants) and one-to-one check (checksums, modified times, sharing) --
+    used when there is no whole-tenant tally taken after the run began. Every one of those
+    users must have both, taken after the run began; otherwise {} (UNKNOWN, as before)."""
+    began = ((run or {}).get("startedAt") or "")[:19]
+    if not began:
+        return {}
+    users = [r[0] for r in conn.execute(
+        "SELECT DISTINCT source_user FROM audit_log WHERE timestamp >= ?", (began,))]
+    if not users:
+        return {}
+    exp = got = checked = 0
+    checksum = mtime = matched = missing_grants = extra = 0
+    shared_seen = False
+    for u in users:
+        t = conn.execute("SELECT recorded_at, payload FROM user_tally WHERE source_user=?", (u,)).fetchone()
+        v = conn.execute("SELECT verified_at, checked, payload FROM user_verification "
+                         "WHERE source_user=? AND service='drive'", (u,)).fetchone()
+        if not t or not v or str(t[0])[:19] < began or str(v[0])[:19] < began:
+            return {}
+        for c in (json.loads(t[1]).get("services") or {}).values():
+            e = c.get("expected") or 0
+            exp += e
+            got += min(c.get("target") or 0, e)
+        checked += v[1] or 0
+        p = json.loads(v[2])
+        for d in p.get("differences") or []:
+            for line in d.get("diffs") or []:
+                checksum += line.startswith(("MD5 differs", "content differs"))
+                mtime += line.startswith("modified time")
+                missing_grants += line.startswith("grant missing")
+                extra += line.startswith("extra grant")
+        for n in p.get("notes") or []:
+            m = re.match(r"sharing: (?:all )?(\d+) grants matched", n)
+            if m:
+                matched += int(m.group(1)); shared_seen = True
+    return {"source": "run users", "users": len(users), "recordedAt": utc_now_iso(),
+            "countParity": (got / exp) if exp else None,
+            "checksumFailures": checksum,
+            "timestampsPreserved": (1 - mtime / checked) if checked else None,
+            "aclFidelity": (matched / (matched + missing_grants)) if (shared_seen or missing_grants) else None,
+            "extraGrants": extra}
+
+
+def _per_user(conn) -> list[dict]:
+    """What the migration page shows per user: each service's one-to-one result and both
+    tenants' counts -- so a report says the same as the page."""
+    out = []
+    for (u,) in conn.execute("SELECT DISTINCT source_user FROM user_verification "
+                             "UNION SELECT source_user FROM user_tally"):
+        svcs = {r[0]: {"verdict": r[1], "checked": r[2], "identical": r[3]} for r in conn.execute(
+            "SELECT service, verdict, checked, identical FROM user_verification WHERE source_user=?", (u,))}
+        t = conn.execute("SELECT payload FROM user_tally WHERE source_user=?", (u,)).fetchone()
+        counts = {k: [c.get("source"), c.get("target")] for k, c in
+                  ((json.loads(t[0]).get("services") or {}).items() if t else [])}
+        out.append({"user": u, "services": svcs, "counts": counts})
+    return out
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _fresh_fidelity(fid: dict, run: dict) -> dict:
     """A tally taken before this run began describes some earlier state of the
     tenants, not this run's result -- so it is not used to judge it. Its
@@ -328,6 +392,11 @@ def collect_facts(db, settings, *, kind: str = "migration", run: dict | None = N
     facts["run"] = _normalise_run(run, span, "ledger")
     run, source, duration = facts["run"], facts["run"]["timingSource"], facts["run"]["durationSec"]
     facts["fidelity"] = _fresh_fidelity(facts["fidelity"], run)
+    if not facts["fidelity"] or facts["fidelity"].get("stale"):
+        ran = _guard(errors, "runUsersFidelity", lambda: _run_users_fidelity(conn, run), {})
+        if ran:
+            facts["fidelity"] = ran
+    facts["perUser"] = _guard(errors, "perUser", lambda: _per_user(conn), [])
 
     # -- performance: only from a job's own timing. A ledger's first and last
     # rows span idle days between passes, and dividing by that would report a
@@ -502,6 +571,7 @@ def load_overrides(account_id) -> dict:
 
 def save_report(report: dict, account_id) -> dict:
     os.makedirs(reports_dir(account_id), exist_ok=True)
+    _drop_earlier_of_same_run(report, account_id)
     path = report_file(account_id, report["id"], "json")
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
@@ -519,6 +589,29 @@ def save_report(report: dict, account_id) -> dict:
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(report, fh, indent=1, default=str)
     return summarise(report, files)
+
+
+def _drop_earlier_of_same_run(report: dict, account_id) -> None:
+    """One report per run: a regrade (after the run's tally) replaces the one built at exit."""
+    began = (((report.get("facts") or {}).get("run") or {}).get("startedAt"))
+    if not began:
+        return
+    d = reports_dir(account_id)
+    for n in os.listdir(d):
+        if not n.endswith(".json") or n[:-5] == report["id"]:
+            continue
+        try:
+            with open(os.path.join(d, n), encoding="utf-8") as fh:
+                old = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if old.get("kind") == report.get("kind") and \
+                ((old.get("facts") or {}).get("run") or {}).get("startedAt") == began:
+            for ext in ("json", "human.pdf", "claude.pdf"):
+                try:
+                    os.remove(os.path.join(d, f"{n[:-5]}.{ext}"))
+                except OSError:
+                    pass
 
 
 def summarise(report: dict, files: list[str] | None = None) -> dict:

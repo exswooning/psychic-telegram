@@ -271,12 +271,24 @@ def _one_to_one(report, st, width, detail=False):
     out.append(Paragraph(f"{summary or 'nothing checked yet'}, of {len(users):,} user(s). Each check reads a "
                          "sample of up to 25 of each kind of item, fresh from both tenants; nothing is "
                          "written to either.", st["body"]))
-    attention = [u for u in users if u["verdict"] in ("DIFFERENCES", "INCOMPLETE")]
+    # Every checked user, worst first, as the migration page shows them: each service as
+    # identical/compared, and both tenants' counts.
+    per = {p["user"]: p for p in (report["facts"].get("perUser") or [])}
+    names = {"drive_files": "files", "drive_folders": "folders", "mail": "mail",
+             "calendar": "events", "contacts": "contacts", "tasks": "tasks"}
+    rank = {"DIFFERENCES": 0, "INCOMPLETE": 1, "IDENTICAL": 2}
+    attention = sorted((u for u in users if u["verdict"] != "NOT_VERIFIED"),
+                       key=lambda u: (rank.get(u["verdict"], 3), u["user"]))
     if attention:
         rows = [[Paragraph(f"<b>{h}</b>", st["cell"]) for h in ("Verdict", "User", "Last checked", "Services")]]
         for u in attention[:(50 if detail else 10)]:
-            svc_txt = ", ".join(f"{s['service']} {s['verdict'].lower()}" for s in u["services"]) or "-"
-            rows.append([_status_cell("fail" if u["verdict"] == "DIFFERENCES" else "warn", st),
+            svc_txt = ", ".join(f"{s['service']} {s.get('identical', 0)}/{s.get('checked', 0)}"
+                                for s in u["services"]) or "-"
+            counts = (per.get(u["user"]) or {}).get("counts") or {}
+            cnt = ", ".join(f"{names.get(k, k)} {a}→{b}" for k, (a, b) in counts.items() if a or b)
+            if cnt:
+                svc_txt += f" | source→target: {cnt}"
+            rows.append([_status_cell({"DIFFERENCES": "fail", "IDENTICAL": "pass"}.get(u["verdict"], "warn"), st),
                         Paragraph(_t(u["user"]), st["cell"]), Paragraph(_t(u["verifiedAt"] or "-"), st["small"]),
                         Paragraph(_t(svc_txt), st["cell"])])
         out.append(_table(rows, [22 * mm, 58 * mm, 30 * mm, width - 22 * mm - 58 * mm - 30 * mm]))
