@@ -1499,10 +1499,74 @@ def _ensure_target_accounts(auth: AuthManager, settings: Settings,
         log.info("auto-provisioned %d target account(s) that did not "
                  "exist yet: %s%s", len(created), ", ".join(created[:10]), more)
         _wait_until_usable(auth, created)
+    licensed = _license_run_accounts(settings, [t for t in targets
+                                                if t not in {e for e, _ in result["failed"]}])
+    if licensed:
+        _wait_until_mail(auth, licensed)
     if result["failed"]:
         log.warning("%d target account(s) could not be auto-provisioned "
                     "and will fail migration: %s", len(result["failed"]),
                     ", ".join(e for e, _ in result["failed"][:10]))
+
+
+def _license_run_accounts(settings: Settings, emails: list[str]) -> list[str]:
+    """Give every target account this run writes into a licence, if it has none, of the
+    SKU the tenant already uses. Live, mdharan.com: three accounts created for a pilot had
+    no licence -- "Mail service not enabled", "must be signed up for Google Calendar",
+    "Google Chat is turned off" -- and their mail was skipped. Returns the newly licensed."""
+    import collections
+
+    import tenant_inventory
+    try:
+        held, err = tenant_inventory.licenses(settings, "target")
+    except Exception as exc:      # noqa: BLE001 - never block a run on this
+        log.warning("could not read the target's licences (%s); accounts left as they are", exc)
+        return []
+    if err:
+        log.warning("could not read the target's licences (%s); accounts left as they are", err)
+        return []
+    held = {k.lower(): v for k, v in held.items()}
+    skus = collections.Counter(v for v in held.values() if v)
+    missing = [e for e in emails if not held.get(e.lower())]
+    if not missing:
+        return []
+    if not skus:
+        log.warning("%d target account(s) have no licence and none on the tenant to copy: %s",
+                    len(missing), ", ".join(missing[:10]))
+        return []
+    sku = skus.most_common(1)[0][0]
+    done = []
+    for e in missing:
+        ok, msg = tenant_inventory.assign_license(settings, "target", e, sku)
+        (log.info if ok else log.warning)("licence for %s: %s", e, msg)
+        if ok:
+            done.append(e)
+    return done
+
+
+def _wait_until_mail(auth, emails: list[str], timeout_s: float = 900, every_s: float = 30,
+                     sleep=time.sleep, now=time.monotonic) -> list[str]:
+    """A licence switches Gmail on minutes later, not at once: wait, bounded, until each
+    newly licensed account's mailbox answers. Those still refused are migrated anyway and
+    show what they lack."""
+    waiting = list(dict.fromkeys(emails))
+    deadline = now() + timeout_s
+    while waiting:
+        still = []
+        for e in waiting:
+            try:
+                auth.target_gmail(e).users().getProfile(userId="me").execute()
+            except Exception:      # noqa: BLE001 - not yet
+                still.append(e)
+        waiting = still
+        if not waiting or now() >= deadline:
+            break
+        log.info("waiting for %d newly licensed mailbox(es): %s", len(waiting), ", ".join(waiting[:5]))
+        sleep(every_s)
+    if waiting:
+        log.warning("%d mailbox(es) still not enabled after %ds: %s",
+                    len(waiting), int(timeout_s), ", ".join(waiting[:10]))
+    return waiting
 
 
 def _wait_until_usable(auth, emails: list[str], timeout_s: float = 600, every_s: float = 15,
