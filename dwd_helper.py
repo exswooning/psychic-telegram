@@ -35,6 +35,7 @@ import argparse
 import atexit
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -202,7 +203,7 @@ def _dialog_open(dialog) -> bool:
     """
     try:
         return (dialog.count() > 0
-                and dialog.get_by_role("button", name="Authorize").count() > 0)
+                and dialog.get_by_role("button", name=AUTHORIZE).count() > 0)
     except Exception:      # noqa: BLE001 - a detached node counts as closed
         logging.getLogger(__name__).debug("ignored an error", exc_info=True)
         return False
@@ -424,6 +425,10 @@ def _installed_browser_launch(p, headful: bool):
 
 
 DWD_URL = "https://admin.google.com/ac/owl/domainwidedelegation"
+# The Admin console speaks the admin's language: "Authorise" in British English.
+# Live on mdharan.com: the US spelling found no button and the grant timed out,
+# where dharan.gov.np's US-English console took the same click.
+AUTHORIZE = re.compile(r"authori[sz]e", re.I)
 
 
 def _open_dwd_console(p, headful: bool, timeout: int, url: str = DWD_URL,
@@ -792,9 +797,9 @@ def run(client_id: str, scopes: str, timeout: int, headful: bool,
             browser.close()
             return 6
         log("filling done. clicking Authorize...")
-        auth_btn = dialog.get_by_role("button", name="Authorize")
+        auth_btn = dialog.get_by_role("button", name=AUTHORIZE)
         if auth_btn.count() == 0:
-            auth_btn = page.locator("[role=button]", has_text="Authorize")
+            auth_btn = page.locator("[role=button]", has_text=AUTHORIZE)
         auth_btn.first.click()
         page.wait_for_timeout(2500)
 
