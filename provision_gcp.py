@@ -347,16 +347,25 @@ def _self_grant_orgpolicy_admin(org: str, steps: list[Step], dry_run: bool,
     if rc != 0 or not account:
         s.status, s.detail = "skipped", "could not determine the calling account"
         return
-    rc, out = run(
-        ["gcloud", "organizations", "add-iam-policy-binding", org,
-         f"--member=user:{account}", "--role=roles/orgpolicy.policyAdmin"],
-        timeout=120, env=env)
+    # Retried: live on t.sarafgloabalexim.com the one try failed with gcloud's "This may
+    # be due to network connectivity issues", read as "cannot grant", and key creation
+    # then failed -- the same call succeeded the next time it was made. A real refusal
+    # (no permission) is not retried.
+    for attempt in range(4):
+        rc, out = run(
+            ["gcloud", "organizations", "add-iam-policy-binding", org,
+             f"--member=user:{account}", "--role=roles/orgpolicy.policyAdmin",
+             "--condition=None"],
+            timeout=120, env=env)
+        if rc == 0 or "PERMISSION_DENIED" in out or "does not have permission" in out:
+            break
+        time.sleep(10 * (attempt + 1))
     if rc == 0:
         s.status, s.detail = "ok", f"{account} now holds roles/orgpolicy.policyAdmin"
     else:
         s.status, s.detail = "skipped", (
             f"{account} cannot grant IAM roles on this org -- "
-            f"{out.strip()[-150:]}")
+            f"{out.strip()[-600:]}")
 
 
 def relax_key_policy(project: str, steps: list[Step], dry_run: bool,

@@ -785,6 +785,25 @@ class TestSelfGrantOrgpolicyAdmin:
         assert steps[0].status == "ok"
         assert "info@target.rohitrokaya.com.np" in steps[0].detail
 
+    def test_a_network_blip_is_retried_not_read_as_no_permission(self, monkeypatch):
+        """Live, t.sarafgloabalexim.com: the one try failed with gcloud's "may be due to
+        network connectivity issues", key creation then failed, and the same call
+        succeeded when made again by hand."""
+        tries = []
+        def fake_run(argv, **kw):
+            if argv[:3] == ["gcloud", "config", "get-value"]:
+                return 0, "info@t.sarafgloabalexim.com\n"
+            if "add-iam-policy-binding" in argv:
+                tries.append(1)
+                return (1, "ERROR: ... This may be due to network connectivity issues."
+                        ) if len(tries) < 3 else (0, "Updated IAM policy")
+            raise AssertionError(f"unexpected call: {argv}")
+        monkeypatch.setattr(pg, "run", fake_run)
+        monkeypatch.setattr(pg.time, "sleep", lambda _s: None)
+        steps: list[pg.Step] = []
+        pg._self_grant_orgpolicy_admin("217069425928", steps, dry_run=False)
+        assert steps[0].status == "ok" and len(tries) == 3
+
     def test_a_permission_denied_grant_is_skipped_not_fatal(self, monkeypatch):
         """The common case: the account is NOT the org owner and genuinely
         cannot grant IAM roles. Must fall through cleanly (the existing
