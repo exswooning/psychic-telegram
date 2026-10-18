@@ -53,11 +53,12 @@ describe('when a phone is asking', () => {
     expect(screen.getByTestId('mfa-banner')).toHaveTextContent('Pixel 7')
   })
 
-  it('says the server cannot answer it for you', () => {
-    /* Without this the natural reading is "it is working on it". */
+  it('says where to answer it, and opens the server\'s browser for what must be typed there', () => {
+    /* Without this the natural reading is "it is working on it". Live: Google asked
+       the server's browser for a phone number, which no device of yours can answer. */
     render(<MfaBanner challenge={CHALLENGE} />)
-    expect(screen.getByTestId('mfa-banner'))
-      .toHaveTextContent(/cannot do it for you/i)
+    expect(screen.getByTestId('mfa-banner')).toHaveTextContent(/answer this on your own device/i)
+    expect(screen.getByTestId('mfa-open-server-browser')).toHaveAttribute('href', 'vnc://localhost:5900')
   })
 
   it('announces itself to a screen reader', () => {

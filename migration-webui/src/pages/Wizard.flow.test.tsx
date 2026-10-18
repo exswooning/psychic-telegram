@@ -351,6 +351,24 @@ describe('the first tenant set up as the destination', () => {
   })
 })
 
+describe('a reload', () => {
+  it('keeps the setup page it was on, without the passwords', async () => {
+    const first = view()
+    await signIn('nestnepal@mdharan.com')
+    fireEvent.click(await screen.findByTestId('purpose-migrate'))
+    fireEvent.click(await screen.findByTestId('role-target'))
+    fireEvent.click(screen.getByTestId('purpose-next'))
+    await enterDomain('dharan.gov.np')
+    await waitFor(() => expect(screen.getByTestId('qts-source')).toBeInTheDocument())
+    first.unmount()
+    expect(sessionStorage.getItem('bitport.wizard')).not.toContain('hunter22222')
+    view()
+    await waitFor(() =>
+      expect(screen.getByTestId('qts-source')).toHaveTextContent('dharan.gov.np admin@dharan.gov.np'))
+    expect(screen.getByTestId('qts-target')).toHaveTextContent('mdharan.com nestnepal@mdharan.com')
+  })
+})
+
 describe('going back', () => {
   it('can change the tenant after choosing a purpose', async () => {
     view()

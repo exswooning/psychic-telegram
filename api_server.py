@@ -3855,7 +3855,10 @@ async def full_setup_start(body: StartFullSetup, op: Operator = Depends(operator
 
         env = dict(os.environ)
         env["DWD_PASSWORD"] = body.admin_password
-        if body.keep_login and not body.dry_run and setup_account is not None:
+        import domain_guard
+        # Never a government admin's password on this box (teardown is by hand there).
+        if (body.keep_login and not body.dry_run and setup_account is not None
+                and not domain_guard.is_government(body.domain)):
             import admin_secrets
             admin_secrets.save_teardown_login(setup_account, body.side, body.admin_email,
                                               body.admin_password)

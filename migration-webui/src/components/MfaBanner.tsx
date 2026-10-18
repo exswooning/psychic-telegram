@@ -15,7 +15,7 @@
  * nobody can get back.
  */
 import React from 'react'
-import { Box, Stack, Typography, CircularProgress } from '@mui/material'
+import { Box, Button, Stack, Typography, CircularProgress } from '@mui/material'
 import { PhonelinkRing as PhoneIcon } from '@mui/icons-material'
 
 export const MfaBanner: React.FC<{ challenge?: string | null }> = ({ challenge }) => {
@@ -48,9 +48,21 @@ export const MfaBanner: React.FC<{ challenge?: string | null }> = ({ challenge }
           ))}
           <Typography variant="body2"
                       sx={{ color: 'warning.dark', mt: 1.5, fontWeight: 500 }}>
-            Answer this on your own device. The browser doing the sign-in is
-            on the server and cannot do it for you.
+            Answer this on your own device. If it wants something typed into
+            the sign-in page itself (a phone number, a code), open the server's
+            browser and type it there.
           </Typography>
+          {/* x11vnc watches the display the sign-in runs on, bound to the server's
+              localhost; connect_vps.sh tunnels it to this Mac's 5900. */}
+          <Stack direction="row" spacing={1.5} alignItems="center" sx={{ mt: 1.5, flexWrap: 'wrap', gap: 1 }}>
+            <Button size="small" variant="contained" color="warning" href="vnc://localhost:5900"
+                    data-testid="mfa-open-server-browser">
+              Open the server's browser
+            </Button>
+            <Typography variant="caption" sx={{ color: 'warning.dark' }}>
+              Run ./connect_vps.sh on this Mac first; the password is in /root/.vnc/passwd on the server.
+            </Typography>
+          </Stack>
         </Box>
         <CircularProgress size={20} sx={{ color: 'warning.dark', mt: 1 }} />
       </Stack>

@@ -5,7 +5,8 @@ import '@testing-library/jest-dom/vitest'
 import { cleanup } from '@testing-library/react'
 import { afterEach } from 'vitest'
 
-afterEach(cleanup)
+// sessionStorage too: the Setup Wizard keeps its place there across a reload.
+afterEach(() => { cleanup(); sessionStorage.clear() })
 
 // jsdom has no layout engine, so it never implemented ResizeObserver --
 // recharts' ResponsiveContainer uses one to size a chart to its parent,

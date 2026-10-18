@@ -219,3 +219,16 @@ class TestTheGcloudCodePageIsNotAChallenge:
         prompt = ("Check your phone\nApprove the sign-in for the gcloud "
                   "project you are configuring.")
         assert sc.describe(prompt) != ""
+
+
+def test_a_refused_password_is_named_not_waited_on():
+    """Live: "Your password was changed 6 days ago" sat behind a 5% bar for the
+    sign-in's whole 15-minute timeout."""
+    from signin_challenge import describe, refused
+    page = ("Sign in with Google\nWelcome\nnestnepal@mdharan.com\nEnter your password\n"
+            "Your password was changed 6 days ago\nShow password\nForgot password?\nNext")
+    assert refused(page) == "Your password was changed 6 days ago"
+    assert refused("Wrong password. Try again or click Forgot password to reset it.")
+    assert refused("Couldn’t find your Google Account")
+    assert refused("Check your phone\nGoogle sent a notification to your Pixel") == ""
+    assert describe(page) == ""

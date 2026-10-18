@@ -46,6 +46,26 @@ CHALLENGE_PHRASES = (
     "yubikey",
 )
 
+# Google refusing what was typed. Nobody can answer these on a device: the job
+# should stop and say so, not wait out its whole timeout (live: "Your password
+# was changed 6 days ago" sat for 15 minutes behind a 5% bar).
+REFUSED_PHRASES = (
+    "wrong password",
+    "your password was changed",
+    "couldn't find your google account",
+    "couldn’t find your google account",
+    "enter a valid email",
+)
+
+
+def refused(text: str) -> str:
+    """Google's refusal line, or "" if the page is not refusing the sign-in."""
+    for line in _lines(text or ""):
+        if any(p in line.lower() for p in REFUSED_PHRASES):
+            return line
+    return ""
+
+
 # The gcloud --no-launch-browser flow ends on a page that DISPLAYS the
 # verification code for the terminal, headed "Sign in to the gcloud CLI"
 # ("You are seeing this page because you ran gcloud auth login ... you can

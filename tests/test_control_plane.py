@@ -796,6 +796,27 @@ class TestFullSetup:
         assert "hunter2-super-secret" not in argv
         assert kwargs.get("env", {}).get("DWD_PASSWORD") == "hunter2-super-secret"
 
+    @pytest.mark.parametrize("domain,kept", [("dharan.gov.np", False), ("acme.example.com", True)])
+    def test_a_government_admins_login_is_never_kept(self, monkeypatch, tmp_path, cp, domain, kept):
+        import admin_secrets
+        import api_server
+        monkeypatch.setattr(api_server, "HERE", str(tmp_path))
+
+        class _FakeProc:
+            pid = 9999
+            def wait(self):
+                return 0
+        monkeypatch.setattr(api_server.subprocess, "Popen", lambda argv, **kw: _FakeProc())
+        monkeypatch.setattr(api_server, "_resolve_account", lambda body, op: 424242)
+        saved = []
+        monkeypatch.setattr(admin_secrets, "save_teardown_login", lambda *a: saved.append(a))
+        r = cp.post("/api/v2/full-setup/start",
+                json={"reason": "test", "side": "source", "domain": domain,
+                      "admin_email": f"it@{domain}", "admin_password": "x", "dry_run": False},
+                    headers=ADMIN)
+        assert r.status_code == 200, r.text
+        assert bool(saved) is kept
+
     def test_seed_flag_is_ignored_for_the_target_side(self, monkeypatch, cp):
         """--seed only ever makes sense for the source; silently accepting it
         for target would be a confusing no-op at best.

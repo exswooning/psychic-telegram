@@ -59,6 +59,15 @@ const SEED_STEP_TITLE_MARKER = 'seeded'
 type Purpose = 'seed' | 'migrate'
 type Step = 'domain' | 'purpose' | 'counterpart' | 'run'
 
+// A reload put an operator watching two setups back on "Let's get started". The
+// migrate run step's place is kept for this tab -- addresses only, never a password.
+const SAVED = 'bitport.wizard'
+type Saved = { domain: string; adminEmail: string; otherDomain: string
+               targetEmail: string; role: 'source' | 'target' }
+const savedRun = (): Saved | null => {
+  try { return JSON.parse(sessionStorage.getItem(SAVED) || 'null') } catch { return null }
+}
+
 // Two purposes, because there are two. A third option ("set it up for
 // both") used to sit here and be the DEFAULT, which meant the page opened
 // having already answered its own question with the one answer that is not
@@ -317,23 +326,24 @@ const AdminSignInStep: React.FC<{
 
 const Wizard: React.FC = () => {
   const [params] = useSearchParams()
-  const [step, setStep] = useState<Step>('domain')
+  const [saved] = useState(savedRun)
+  const [step, setStep] = useState<Step>(saved ? 'run' : 'domain')
   // The tenant this wizard is setting up, and -- for a migration -- the one
   // it is moving into. Held here rather than inside each sub-wizard so the
   // question is asked once, at the front, instead of once per panel.
-  const [domain, setDomain] = useState('')
-  const [adminEmail, setAdminEmail] = useState('')
+  const [domain, setDomain] = useState(saved?.domain ?? '')
+  const [adminEmail, setAdminEmail] = useState(saved?.adminEmail ?? '')
   // Held in memory for exactly as long as this wizard is open, handed to the
   // server once, and never written anywhere -- not localStorage, not the
   // audit log. See startFullSetup's own note.
   const [adminPassword, setAdminPassword] = useState('')
-  const [otherDomain, setOtherDomain] = useState('')
+  const [otherDomain, setOtherDomain] = useState(saved?.otherDomain ?? '')
   // The destination's admin, asked for the same way as the source's: the domain
   // comes out of the address, and the target card signs in with it.
-  const [targetEmail, setTargetEmail] = useState('')
+  const [targetEmail, setTargetEmail] = useState(saved?.targetEmail ?? '')
   const [targetPassword, setTargetPassword] = useState('')
-  const [role, setRole] = useState<'source' | 'target'>('source')
-  const [purpose, setPurpose] = useState<Purpose | null>(null)
+  const [role, setRole] = useState<'source' | 'target'>(saved?.role ?? 'source')
+  const [purpose, setPurpose] = useState<Purpose | null>(saved ? 'migrate' : null)
   // Nothing preselected: the operator says what the domain is for.
   const [picked, setPicked] = useState<Purpose | ''>('')
   const [autoBusy, setAutoBusy] = useState(false)
@@ -372,6 +382,17 @@ const Wizard: React.FC = () => {
   useEffect(() => {
     fetchMe().then((a) => setSeedEnabled(a.seed_enabled)).catch(() => {})
   }, [])
+
+  useEffect(() => {
+    try {
+      if (step === 'run' && purpose === 'migrate') {
+        sessionStorage.setItem(SAVED, JSON.stringify(
+          { domain, adminEmail, otherDomain, targetEmail, role } satisfies Saved))
+      } else {
+        sessionStorage.removeItem(SAVED)
+      }
+    } catch { /* storage blocked: a reload starts over, as it always did */ }
+  }, [step, purpose, domain, adminEmail, otherDomain, targetEmail, role])
 
   // A ?mode=seed deep link still has to answer "which domain" first, and
   // still only takes effect once seed_enabled is confirmed -- the URL is

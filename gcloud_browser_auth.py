@@ -122,7 +122,11 @@ def login(email: str, password: str, timeout: int = 180) -> tuple[bool, str, str
         return False, (buf + rest).strip()[-300:] or "gcloud printed no sign-in URL", ""
 
     log(f"driving browser sign-in for {email}")
-    _drive_browser(proc, url, email, password, timeout)
+    no = _drive_browser(proc, url, email, password, timeout)
+    if no:
+        proc.kill()
+        shutil.rmtree(cloudsdk_config, ignore_errors=True)
+        return False, f"Google refused the sign-in for {email}: {no}", ""
 
     try:
         rc = proc.wait(timeout=max(timeout - 20, 10))
@@ -228,7 +232,7 @@ def _fill_visible(pg, selector: str, value: str) -> bool:
     return False
 
 
-def _drive_browser(proc, url: str, email: str, password: str, timeout: int) -> None:
+def _drive_browser(proc, url: str, email: str, password: str, timeout: int) -> str:
     """Types email/password, clicks through gcloud's own OAuth consent
     screen, then just watches `proc` -- the local `gcloud auth login`
     listener catching the browser's redirect to localhost is the only
@@ -284,6 +288,15 @@ def _drive_browser(proc, url: str, email: str, password: str, timeout: int) -> N
                     logging.getLogger(__name__).debug("ignored an error", exc_info=True)
                     continue
             challenge.check(browser.contexts[0].pages)
+            for pg in browser.contexts[0].pages:
+                try:
+                    no = signin_challenge.refused(pg.inner_text("body"))
+                except Exception:      # noqa: BLE001 - a page mid-navigation
+                    no = ""
+                if no:
+                    log(f"  REFUSED: {no}")
+                    browser.close()
+                    return no
             time.sleep(1)
 
         if proc.poll() is None:
@@ -309,6 +322,7 @@ def _drive_browser(proc, url: str, email: str, password: str, timeout: int) -> N
             except Exception as exc:      # noqa: BLE001 - best-effort
                 log(f"  Cloud Console ToS check raised ({exc}) -- continuing anyway")
         browser.close()
+    return ""
 
 
 # Wording changes without notice (same caveat dwd_helper.py's own
