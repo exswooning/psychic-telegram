@@ -183,7 +183,15 @@ def compare_draft(src_raw: bytes, tgt_raw: bytes, translate) -> tuple[str, list[
     return ("different" if diffs else "equivalent"), diffs
 
 
+# Gmail's coloured "superstars": shown in the Gmail UI, but no API can apply them, so a
+# copy never carries one. Not a difference this tool could close.
+SUPERSTARS = {"YELLOW_STAR", "ORANGE_STAR", "RED_STAR", "PURPLE_STAR", "BLUE_STAR", "GREEN_STAR",
+              "RED_BANG", "ORANGE_GUILLEMET", "YELLOW_BANG", "GREEN_CHECK", "BLUE_INFO",
+              "PURPLE_QUESTION"}
+
+
 def compare_labels(src_names: set[str], tgt_names: set[str]) -> list[str]:
+    src_names, tgt_names = set(src_names) - SUPERSTARS, set(tgt_names) - SUPERSTARS
     out = []
     if src_names - tgt_names:
         out.append(f"labels missing on the target: {sorted(src_names - tgt_names)}")
@@ -193,9 +201,17 @@ def compare_labels(src_names: set[str], tgt_names: set[str]) -> list[str]:
 
 
 def _norm_when(t: dict | None) -> str:
+    """The moment, in UTC: Calendar answers 14:00+05:45 on one side and 08:15Z on the other
+    for the same event, and those are equal."""
     if not t:
         return ""
-    return (t.get("dateTime") or t.get("date") or "")
+    if t.get("dateTime"):
+        try:
+            return datetime.fromisoformat(t["dateTime"].replace("Z", "+00:00")) \
+                .astimezone(timezone.utc).isoformat()
+        except ValueError:
+            return t["dateTime"]
+    return t.get("date") or ""
 
 
 def compare_event(src: dict, tgt: dict, translate, lookup=None, notes: list | None = None) -> list[str]:
@@ -424,6 +440,8 @@ class Verifier:
                         except Exception as exc:      # noqa: BLE001 - unread is INCOMPLETE, never a pass
                             res["errors"].append(f"file {sid}: the links inside could not be read: {str(exc)[:120]}")
                 sharing = self._sharing(src, tgt, sid, tid, res)
+                if getattr(self, "_not_owner", False):
+                    diffs = [d for d in diffs if not d.startswith("folder path differs")]
                 diffs += sharing
                 self.evidence.append({"service": "drive", **ev})
                 if diffs:
@@ -451,6 +469,9 @@ class Verifier:
                                 "reproduced because the person has no account on the target")
         elif sh:
             res["notes"].append(f"sharing: all {sh['matched']} grants matched")
+        if res.get("not_owner"):
+            res["notes"].append(f"{res.pop('not_owner')} file(s) shared with this user by someone "
+                                "else: their sharing and folder belong to the owner, not compared")
         res["notCopied"] = self._failed(("file", "folder", "drive"))
         return res
 
@@ -481,9 +502,16 @@ class Verifier:
     def _sharing(self, src, tgt, sid, tid, res) -> list[str]:
         """Compare who can see this item; returns the differences, and tallies the
         grants that were matched or deliberately not reproduced on `res`."""
+        self._not_owner = False
         try:
             sp, tp = self._perms(src, sid), self._perms(tgt, tid)
         except Exception as exc:      # noqa: BLE001
+            if "insufficientFilePermissions" in str(exc):
+                # Shared WITH this user by someone else: its sharing and its folder are
+                # the owner's, which this user cannot read -- nothing to compare.
+                self._not_owner = True
+                res["not_owner"] = res.get("not_owner", 0) + 1
+                return []
             res["errors"].append(f"sharing of {sid}: could not be read: {str(exc)[:100]}")
             return []
         if not hasattr(self, "_skipped_ids"):

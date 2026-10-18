@@ -1030,8 +1030,10 @@ class GmailMigrator:
         token = None
         while True:
             self.limiter.acquire()
+            # includeSpamTrash: a draft in the Trash is still the user's (and the tally
+            # counts it); live, 13 trashed drafts were skipped as messages and never listed.
             resp = self._retry(lambda t=token: self.src.users().drafts().list(
-                userId="me", maxResults=100, pageToken=t,
+                userId="me", maxResults=100, pageToken=t, includeSpamTrash=True,
             ).execute())
             for d in resp.get("drafts", []):
                 yield d
@@ -1094,7 +1096,16 @@ class GmailMigrator:
                         pass
 
             self.db.record_mapping(self.source_user, did, result["id"], "draft")
-            self.db.log_audit(self.source_user, did, "draft", "SUCCESS",
+            note = ""
+            if "TRASH" in ((full.get("message") or {}).get("labelIds") or []):
+                tmid = (result.get("message") or {}).get("id")
+                try:
+                    self._retry(lambda m=tmid: self.tgt.users().messages().trash(
+                        userId="me", id=m).execute())
+                    note = "in the Trash, as on the source"
+                except Exception as exc:      # noqa: BLE001 - the draft itself landed
+                    note = f"could not put it in the Trash: {str(exc)[:120]}"
+            self.db.log_audit(self.source_user, did, "draft", "SUCCESS", note,
                               bytes_moved=approx_bytes)
             self.stats["drafts_inserted"] += 1
 

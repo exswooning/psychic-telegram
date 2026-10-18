@@ -829,3 +829,17 @@ class TestStaleLabelMappingsAreRepaired:
         by_id = {l["id"]: l["name"] for l in tgt.labels}
         new_id = db.get_label_map(SRC_USER).get(src_id)
         assert new_id and by_id[new_id] == "Clients/Acme"
+
+
+def test_a_draft_in_the_trash_is_copied_and_put_in_the_trash(gmail_migrator, auth):
+    """Live: info@gorkhatweed.com had 13 empty drafts in the Trash; drafts.list without
+    includeSpamTrash never listed them, so the copy was 13 short."""
+    src = auth.source_gmail(SRC_USER)
+    did = src.add_draft(b"Subject: \r\n\r\n")
+    src.drafts[did]["message"]["labelIds"] = ["DRAFT", "TRASH"]
+    gmail_migrator.run()
+    tgt = auth.target_gmail(TGT_USER)
+    assert len(tgt.drafts) == 1
+    assert any(name == "messages.trash" for name, _ in tgt.calls)
+    lists = [kw for name, kw in src.calls if name == "drafts.list"]
+    assert lists and all(kw.get("includeSpamTrash") for kw in lists)
