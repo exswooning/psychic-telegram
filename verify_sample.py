@@ -834,12 +834,15 @@ class Verifier:
         src, tgt = self.auth.source_tasks(self.src_user), self.auth.target_tasks(self.tgt_user)
         task_map = {s: t for s, t, _ in self._pairs("task")}
         keep = {s for s, _, _ in self._pairs("task", sample=True)}
+        lists = seen = 0
         for slist, tlist, title in self._pairs("task_list"):
             try:
                 sts, tts = self._tasks_of(src, slist), self._tasks_of(tgt, tlist)
             except Exception as exc:      # noqa: BLE001
                 res["errors"].append(f"task list {title!r}: {str(exc)[:100]}")
                 continue
+            lists += 1
+            seen += len(sts)
             for sid, st in sts.items():
                 tid = task_map.get(sid)
                 if not tid or sid not in keep:
@@ -860,6 +863,10 @@ class Verifier:
                     res["identical"] += 1
         self._note_sample(res, "task")
         res["notCopied"] = self._failed(("task", "task_list", "tasks"))
+        # Every list read and none held a task: nothing to copy is 1:1, not unchecked.
+        if lists and not seen and not res["errors"]:
+            res["emptySource"] = True
+            res["notes"].append(f"the source's {lists} task list(s) hold no tasks")
         return res
 
 
@@ -941,7 +948,7 @@ def run(auth, db, settings, users: list[str] | None = None, services=ALL_SERVICE
     report["verdict"], report["reasons"] = verdict_of(report["users"], services)
     for u, per in report["users"].items():
         for svc, r in per.items():
-            if r["checked"] == 0 and not r["errors"]:
+            if r["checked"] == 0 and not r["errors"] and not r.get("emptySource"):
                 r["notes"].append("nothing was copied for this service, so there was nothing to check")
     tot = {"checked": 0, "identical": 0, "differences": 0, "missing": 0, "duplicates": 0, "extras": 0,
            "notCopied": 0, "errors": 0, "filesOpened": sum(1 for e in report["evidence"] if e.get("opened") and e["service"] == "drive"),
@@ -1044,8 +1051,8 @@ def save_user_results(db, report: dict) -> None:
     for user, per in report["users"].items():
         for svc, r in per.items():
             verdict, _ = verdict_of({user: {svc: r}}, (svc,))
-            if verdict == "IDENTICAL" and r["checked"] == 0:
-                verdict = "INCOMPLETE"          # nothing checked is not a pass
+            if verdict == "IDENTICAL" and r["checked"] == 0 and not r.get("emptySource"):
+                verdict = "INCOMPLETE"          # nothing checked is not a pass (an empty source is)
             db.save_user_verification(user, svc, verdict, r["checked"], r["identical"],
                                       (r.get("sampled") or {}).get("of"), {
                 "counts": {k: len(r[k]) for k in ("differences", "missing", "duplicates", "extras", "notCopied", "errors")},
