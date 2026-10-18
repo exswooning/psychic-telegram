@@ -5,7 +5,9 @@ import ApproveComplete from './ApproveComplete'
 const approve = vi.fn()
 const undo = vi.fn()
 const lifecycle = vi.fn()
+const restore = vi.fn()
 vi.mock('@/api/controlPlane', () => ({
+  restoreProjectCreation: (...a: unknown[]) => restore(...a),
   fetchGcloudIdentities: () => Promise.resolve({ identities: [
     { config: '/tmp/cloudsdk-x', accounts: ['old-admin@t.example'] }] }),
   fetchLifecycle: () => lifecycle(),
@@ -55,5 +57,32 @@ describe('approving a migration as complete', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
     await waitFor(() => expect(approve).toHaveBeenCalledWith('client signed off'))
     expect(await screen.findByText(/signed out of: old-admin/)).toBeTruthy()
+  })
+})
+
+
+/** Live: dharan.gov.np forbids creating Cloud projects; setup turns it on for the
+ *  migration, and it is turned back off once the migration is complete. */
+describe('project creation setup turned on', () => {
+  it('asks for the password once when no login was kept, and turns it back off', async () => {
+    lifecycle.mockResolvedValue({ ...view(), projectCreation: [{ side: 'source', domain: 'dharan.gov.np',
+      admin: 'it.department@dharan.gov.np', turnedOnAt: '2026-10-18T13:40:00Z', unattended: false }] })
+    restore.mockResolvedValue({ ok: true, actionId: 1, detail: 'turning project creation back off (source)' })
+    render(<ApproveComplete />)
+    expect(await screen.findByTestId('project-creation-source')).toHaveTextContent('Turn it back off once the migration is complete')
+    const off = screen.getByTestId('project-creation-source-off')
+    expect(off).toBeDisabled()
+    fireEvent.change(screen.getByTestId('project-creation-source-password'), { target: { value: 'pw' } })
+    fireEvent.click(off)
+    await waitFor(() => expect(restore).toHaveBeenCalledWith('source', 'pw'))
+  })
+
+  it('says approval will do it when a login is kept', async () => {
+    lifecycle.mockResolvedValue({ ...view(), projectCreation: [{ side: 'target', domain: 'acme.example',
+      admin: 'admin@acme.example', turnedOnAt: '2026-10-18T13:40:00Z', unattended: true }] })
+    render(<ApproveComplete />)
+    expect(await screen.findByTestId('project-creation-target'))
+      .toHaveTextContent('turned back off when you approve the migration as complete')
+    expect(screen.queryByTestId('project-creation-target-password')).toBeNull()
   })
 })

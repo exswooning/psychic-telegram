@@ -650,7 +650,7 @@ root-only JSON under `/etc/bitport/teardown/`), then the account's key files, th
 and gcloud. *Undo approval* stops the clock. It never acts while one of the account's jobs
 runs, and never tears down a project or client another account's key uses
 (`lifecycle.key_in_use`, which `_key_in_use` also answers) -- accounts share projects. A side
-with no kept login is left and reported (incident), retried daily. Every sweep also revokes
+with no kept login is left and reported (incident), retried daily. A tenant that forbids creating Cloud projects (dharan.gov.np) has it turned ON by setup (`project_creation.py`, the Admin console checkbox -- no API exists) and recorded (`logs/<id>/project-creation-<side>.json`); it stays on while the migration runs and approval turns it back off -- by itself with a kept login, otherwise the Final Report asks for the admin password once (never stored). Every sweep also revokes
 per-setup gcloud configs older than 24 h (a setup that died left them: one sat signed in as
 an old tenant's admin from August to October).
 

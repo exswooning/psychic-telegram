@@ -1182,3 +1182,46 @@ class TestAnUnusableUploadedKeyProvisionsFresh:
 
         assert called["provision_side"] is False, "a live delegation was re-provisioned"
         assert res["clientId"] == "old-client"
+
+
+class TestProjectCreationOffOnTheTenant:
+    """Live: dharan.gov.np refused `gcloud projects create` -- "Cloud Resource Manager
+    project creation is disabled". Setup turns it on and records that it did; it stays
+    on while the migration runs and is turned off when the migration is approved."""
+
+    def test_turned_on_recorded_and_never_turned_off_by_setup(self, monkeypatch):
+        import project_creation
+        calls, remembered = [], []
+        refused = {"side": "source", "ok": False, "steps": [
+            {"name": "project x", "status": "failed",
+             "detail": "Cloud Resource Manager project creation is disabled. Contact your administrator"}]}
+        tries = []
+
+        def fake_provision_side(side, project, org, key_dest, dry_run, force, env=None,
+                                on_step=None, admin_email=""):
+            tries.append(project)
+            return refused if len(tries) == 1 else {"side": side, "project": project, "ok": True, "steps": []}
+
+        monkeypatch.setattr(project_creation, "run", lambda want, timeout=900: calls.append(want) or False)
+        monkeypatch.setattr(project_creation, "remember", lambda *a: remembered.append(a))
+        monkeypatch.setattr(fs.time, "sleep", lambda _s: None)
+        monkeypatch.setattr(fs.provision_gcp, "gcloud_ready", lambda: (True, "me"))
+        monkeypatch.setattr(fs.provision_gcp, "detect_org", lambda env=None: "")
+        monkeypatch.setattr(fs.provision_gcp, "provision_side", fake_provision_side)
+        monkeypatch.setattr(fs.provision_gcp, "client_id_of", lambda p: "42")
+        monkeypatch.setattr(fs.dwd_helper, "run", lambda *a, **k: 0)
+        monkeypatch.setattr(fs.gcloud_browser_auth, "configure_chat_app", lambda *a, **k: (True, "mocked"))
+        monkeypatch.setattr(fs.verify_scopes, "verify",
+                            lambda settings, tenant, scopes: [{"scope": s, "ok": True} for s in scopes])
+        monkeypatch.setattr(fs.verify_scopes, "required_scopes", lambda settings, tenant: ["scope-a"])
+        monkeypatch.setattr(fs.accounts_auth, "get_tenant_config", lambda *a, **k: None)
+        monkeypatch.setattr(fs.accounts_auth, "update_tenant_config", lambda *a, **k: None)
+
+        res = fs.run_full_setup("source", "dharan.example.gov.np", "it@dharan.example.gov.np", "pw",
+                                account_id=7)
+
+        assert len(tries) == 2, "the project is tried again once creation is allowed"
+        assert calls == [True], "setup turns it on and never off -- approval does that"
+        assert remembered == [(7, "source", "dharan.example.gov.np", "it@dharan.example.gov.np")]
+        phase = next(p for p in res["phases"] if p["name"].startswith("allow project creation"))
+        assert phase["status"] == "ok" and "approved as complete" in phase["detail"]

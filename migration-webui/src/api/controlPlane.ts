@@ -177,7 +177,20 @@ export interface LifecycleView {
            torn_down_at?: string | null; last_result?: string | null; first_seen_at?: string }
   plan: TeardownSide[]
   teardownDays: number
+  /** Tenants whose "Allow users to create projects" setup turned on for this migration
+   *  and nobody has turned off yet. unattended: an admin login is kept, so approval does
+   *  it; otherwise the card asks for the password once. */
+  projectCreation?: { side: 'source' | 'target'; domain: string; admin: string
+                      turnedOnAt: string; unattended: boolean }[]
 }
+
+/** Turn a tenant's project creation back off; the password is used once, never kept. */
+export const restoreProjectCreation = (side: 'source' | 'target', adminPassword = '') =>
+  cpFetch<ActionResult>('/api/v2/project-creation/restore', {
+    method: 'POST',
+    body: JSON.stringify({ side, admin_password: adminPassword,
+                           reason: 'turn project creation back off after the migration' }),
+  })
 
 /** Where this pair is in its end of life, and what its teardown will do. */
 export const fetchLifecycle = (accountId?: number) =>

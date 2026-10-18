@@ -268,6 +268,12 @@ def no_browser_detail(crash_detail: str) -> str:
 GROUP_WRITE_SCOPE = "https://www.googleapis.com/auth/admin.directory.group"
 
 
+def _creation_refused(result: dict) -> bool:
+    """gcloud refused the project: the tenant forbids creating Cloud projects."""
+    return any("project creation is disabled" in (st.get("detail") or "")
+               for st in result.get("steps", []))
+
+
 def run_full_setup(
     side: str, domain: str, admin_email: str, admin_password: str,
     org_id: str = "", keys_dir: str = "keys", dry_run: bool = False,
@@ -344,6 +350,45 @@ def run_full_setup(
         signin_challenge.HANDOFF_AFTER = 45
         gcloud_browser_auth.HANDOFF = _on_handoff
         gcloud_browser_auth.CODE_FILE = progress_file + ".code"
+
+    def _allow_project_creation(provision, first: dict) -> dict:
+        """The tenant forbids creating Cloud projects (live: dharan.gov.np). Turn it on
+        and keep the project coming; it stays on while the migration runs and is turned
+        off again when the migration is approved as complete -- recorded here so that
+        is never forgotten (project_creation.remember)."""
+        import project_creation
+        ph = Phase(f"allow project creation ({side})")
+        phases.append(ph)
+        _progress(19, "project creation is off on this tenant -- turning it on for the migration")
+        saved = {k: os.environ.get(k) for k in ("DWD_EMAIL", "DWD_PASSWORD")}
+        os.environ["DWD_EMAIL"], os.environ["DWD_PASSWORD"] = admin_email, admin_password or ""
+        result = first
+        try:
+            was_on = project_creation.run(True, timeout)
+            if account_id is not None and not was_on:
+                project_creation.remember(account_id, side, domain, admin_email)
+            ph.status = "ok"
+            ph.detail = ("turned on for this migration; it is turned off again when the "
+                         "migration is approved as complete")
+        except Exception as exc:      # noqa: BLE001 - say what to do instead
+            ph.status = "failed"
+            ph.detail = (f"could not turn it on ({str(exc)[:160]}) -- tick 'Allow users to "
+                         f"create projects' at {project_creation.URL}, then set up again")
+            return result
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        # "Most changes take effect in a few minutes" -- the console's own words.
+        for wait in (30, 60, 60, 90, 120, 120, 180, 180):
+            _progress(19, "waiting for Google to allow project creation")
+            time.sleep(wait)
+            result = provision()
+            if not _creation_refused(result):
+                break
+        return result
 
     def _grant_on_device(client_id: str, scopes: str, required: list[str]) -> bool:
         """Delegation, authorised on the operator's device from a pre-filled Admin
@@ -572,15 +617,19 @@ def run_full_setup(
             # 18-75%: the slowest stretch, a project create plus a dozen
             # sequential API-enable calls -- on_step fires after each one,
             # so the bar actually moves through it instead of sitting still.
-            result = provision_gcp.provision_side(
-                side, project, org, key_path, dry_run, force=False, env=env,
-                on_step=lambda done, total, name: _progress(
-                    18 + int(57 * done / total), name),
-                # The console steps that follow (Chat app configuration) run
-                # as this admin, and a Workspace super admin holds nothing on
-                # a Cloud project by default -- see
-                # provision_gcp.grant_admin_console_access.
-                admin_email=admin_email)
+            def _provision() -> dict:
+                return provision_gcp.provision_side(
+                    side, project, org, key_path, dry_run, force=False, env=env,
+                    on_step=lambda done, total, name: _progress(
+                        18 + int(57 * done / total), name),
+                    # The console steps that follow (Chat app configuration) run
+                    # as this admin, and a Workspace super admin holds nothing on
+                    # a Cloud project by default -- see
+                    # provision_gcp.grant_admin_console_access.
+                    admin_email=admin_email)
+            result = _provision()
+            if not dry_run and _creation_refused(result):
+                result = _allow_project_creation(_provision, result)
         finally:
             if cloudsdk_config:
                 gcloud_browser_auth.cleanup(cloudsdk_config)

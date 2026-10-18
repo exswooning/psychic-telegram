@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
-import { Alert, Box, Button, Chip, Paper, Stack, Typography } from '@mui/material'
-import { approveMigrationComplete, fetchLifecycle, LifecycleView, undoApproval } from '@/api/controlPlane'
+import { Alert, Box, Button, Chip, Paper, Stack, TextField, Typography } from '@mui/material'
+import { approveMigrationComplete, fetchLifecycle, LifecycleView, restoreProjectCreation, undoApproval } from '@/api/controlPlane'
 import { daysUntil } from '@/utils/lifecycle'
 import GcloudHeld from './GcloudHeld'
 import ReasonCodeDialog from './ReasonCodeDialog'
@@ -67,6 +67,10 @@ const ApproveComplete: React.FC = () => {
         </Box>
       )}
 
+      {(life?.projectCreation ?? []).map((p) => (
+        <ProjectCreationOwed key={p.side} owed={p} approved={!!st.approved_at} onDone={load} />
+      ))}
+
       <GcloudHeld refresh={refresh} />
 
       {!st.torn_down_at && (
@@ -109,3 +113,45 @@ const ApproveComplete: React.FC = () => {
 }
 
 export default ApproveComplete
+
+/** Setup turned a tenant's project creation on; it is turned off when the migration is
+ *  done. With a kept login approval does it; a government tenant keeps none, so ask. */
+const ProjectCreationOwed: React.FC<{
+  owed: NonNullable<LifecycleView['projectCreation']>[number]
+  approved: boolean
+  onDone: () => void
+}> = ({ owed, approved, onDone }) => {
+  const [pw, setPw] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
+  return (
+    <Alert severity={approved ? 'warning' : 'info'} sx={{ mb: 1.5 }} data-testid={`project-creation-${owed.side}`}>
+      <Typography variant="body2" sx={{ mb: 1 }}>
+        Project creation on <strong>{owed.domain}</strong> was turned on for this migration
+        ({new Date(owed.turnedOnAt).toLocaleDateString()}).{' '}
+        {owed.unattended
+          ? 'It is turned back off when you approve the migration as complete.'
+          : 'Turn it back off once the migration is complete.'}
+      </Typography>
+      <Stack direction="row" spacing={1} alignItems="center" sx={{ flexWrap: 'wrap', gap: 1 }}>
+        {!owed.unattended && (
+          <TextField size="small" type="password" label={`Password for ${owed.admin}`} value={pw}
+                     onChange={(e) => setPw(e.target.value)}
+                     inputProps={{ 'data-testid': `project-creation-${owed.side}-password` }} />
+        )}
+        <Button size="small" variant="outlined" disabled={busy || (!owed.unattended && !pw)}
+                data-testid={`project-creation-${owed.side}-off`}
+                onClick={() => {
+                  setBusy(true)
+                  restoreProjectCreation(owed.side, pw)
+                    .then((r) => { setMsg({ ok: r.ok, text: r.detail }); if (r.ok) { setPw(''); onDone() } })
+                    .catch((e) => setMsg({ ok: false, text: String(e) }))
+                    .finally(() => setBusy(false))
+                }}>
+          Turn it back off now
+        </Button>
+      </Stack>
+      {msg && <Typography variant="caption" color={msg.ok ? 'success.main' : 'error'}>{msg.text}</Typography>}
+    </Alert>
+  )
+}

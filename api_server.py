@@ -1248,11 +1248,74 @@ async def approve_migration_complete(body: ApproveComplete, op: Operator = Depen
         import lifecycle
         gone = gcloud_signout.sign_out_all()
         st = lifecycle.approve(aid, op.name)
+        # Project creation setup turned on is turned off again now -- by itself where an
+        # admin login was kept; a government tenant's never is, so its card asks.
+        restoring = [p["domain"] for p in _project_creation_owed(aid)
+                     if _restore_project_creation(aid, p["side"], "") is None]
         return True, (f"migration for account {aid} approved as complete; teardown due "
                       f"{st.get('teardown_due_at') or '--'}; gcloud signed out of: "
-                      + (", ".join(gone) if gone else "nothing -- no sign-in was held"))
+                      + (", ".join(gone) if gone else "nothing -- no sign-in was held")
+                      + (f"; turning project creation back off on {', '.join(restoring)}"
+                         if restoring else ""))
     return await _gated(op, "migration.approve_complete", body, f"account:{aid}", _approve,
                         extra_check=require_superadmin)
+
+
+def _project_creation_owed(account_id: int | None) -> list[dict]:
+    """Sides whose project creation setup turned on and nobody has turned off yet, each
+    saying whether Bitport can do it alone (an admin login kept for that domain)."""
+    import admin_secrets
+    import project_creation
+    if account_id is None:
+        return []
+    out = []
+    for p in project_creation.pending(account_id):
+        email, password = admin_secrets.teardown_login(account_id, p["side"])
+        kept = bool(password) and email.rsplit("@", 1)[-1].lower() == (p.get("domain") or "").lower()
+        out.append({**p, "unattended": kept})
+    return out
+
+
+def _restore_project_creation(account_id: int, side: str, password: str) -> str | None:
+    """Start `project_creation.py off` for one side. None when started, else why not."""
+    import admin_secrets
+    owed = next((p for p in _project_creation_owed(account_id) if p["side"] == side), None)
+    if owed is None:
+        return f"nothing owed on the {side}: project creation was not turned on by setup"
+    email, kept = admin_secrets.teardown_login(account_id, side)
+    if not password:
+        if not owed["unattended"]:
+            return f"no admin login is kept for {owed['domain']}: enter its password"
+        password = kept
+    email = owed.get("admin") or email
+    out = _full_setup_state_path(side, account_id).replace(f"full-setup-{side}.json",
+                                                           f"project-creation-{side}.log")
+    env = dict(os.environ, DWD_EMAIL=email, DWD_PASSWORD=password)
+    with open(out, "ab") as fh:
+        subprocess.Popen([sys.executable, "project_creation.py", "off", "--account",
+                          str(account_id), "--side", side], cwd=HERE, stdout=fh,
+                         stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env,
+                         start_new_session=True)
+    return None
+
+
+class RestoreProjectCreation(WriteAction):
+    account_id: int | None = None
+    side: Literal["source", "target"]
+    # exclude=True: never into the audit log. Used once, never stored.
+    admin_password: str = Field(default="", exclude=True)
+
+
+@app.post("/api/v2/project-creation/restore")
+async def project_creation_restore(body: RestoreProjectCreation, op: Operator = Depends(operator)):
+    """Turn a tenant's project creation back off -- setup turned it on for the migration."""
+    require_admin(op)
+    aid = _resolve_account(body, op)
+
+    def _go() -> tuple[bool, str]:
+        why = _restore_project_creation(aid, body.side, body.admin_password)
+        return (False, why) if why else (True, f"turning project creation back off ({body.side})")
+    return await _gated(op, "project_creation.restore", body, body.side, _go)
 
 
 @app.get("/api/v2/lifecycle")
@@ -1265,6 +1328,7 @@ async def lifecycle_view(account_id: int | None = None, op: Operator = Depends(o
     def _read() -> dict:
         return {"accountId": aid, "state": lifecycle.state(aid) if aid else {},
                 "plan": lifecycle.plan(aid) if aid else [],
+                "projectCreation": _project_creation_owed(aid),
                 "teardownDays": lifecycle.TEARDOWN_DAYS}
     return await _off_loop(_read)
 
