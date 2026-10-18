@@ -23,8 +23,12 @@ export function domainOf(email: string): string {
 export async function placeMigration(src: string, tgt: string): Promise<void> {
   const [{ migrations }, me] = await Promise.all([fetchMigrations(), fetchMe()])
   const here = me.migration_id ?? me.id
-  const same = src && tgt
-    ? migrations.find((m) => m.sourceDomain === src && m.targetDomain === tgt) : undefined
+  // Its own: every side it has saved agrees with this pair (one side may not be set
+  // up yet -- the source finished, the target still to do).
+  const agrees = (m: typeof migrations[number]) => (!!m.sourceDomain || !!m.targetDomain)
+    && (!m.sourceDomain || m.sourceDomain === src) && (!m.targetDomain || m.targetDomain === tgt)
+  const same = migrations.find((m) => m.sourceDomain === src && m.targetDomain === tgt && src && tgt)
+    ?? migrations.find(agrees)
   if (same) {
     if (same.accountId !== here) chooseMigration(same.accountId === me.id ? null : same.accountId)
     return

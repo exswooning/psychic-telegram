@@ -903,6 +903,14 @@ describe('where a pair is set up', () => {
     expect(chosenMigration()).toBe('6')
   })
 
+  it('a pair half set up goes back to its own, not a new one', async () => {
+    migrations.mockResolvedValue({ migrations: [row(3, 'gorkhatweed.com', 's.sarafgloabalexim.com'),
+                                                { ...row(6, 's.sarafgloabalexim.com', ''), ownerId: 3 }] })
+    await placeMigration('s.sarafgloabalexim.com', 't.sarafgloabalexim.com')
+    expect(openMig).not.toHaveBeenCalled()
+    expect(chosenMigration()).toBe('6')
+  })
+
   it('the same pair goes back to its own', async () => {
     migrations.mockResolvedValue({ migrations: [row(3, 'gorkhatweed.com', 's.sarafgloabalexim.com'),
                                                 row(9, 'dharan.gov.np', 'mdharan.com')] })
