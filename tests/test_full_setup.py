@@ -22,6 +22,14 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import full_setup as fs  # noqa: E402
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_real_drive_probe(monkeypatch):
+    """_drive_sdk_off asks Google; a test never does (one did, for 60 s, on a key file
+    left in the checkout). The test about it sets its own answer."""
+    monkeypatch.setattr(fs, "_drive_sdk_off", lambda key, admin: False)
 
 
 class _Phase:
@@ -293,6 +301,8 @@ class TestDwdCrashIsRecoveredNotFatal:
             monkeypatch.setattr(mod, name, val)   # restored after: run_full_setup sets them
         monkeypatch.setattr(fs.dwd_helper, "run", lambda *a, **k: 1)
         monkeypatch.setattr(fs.time, "sleep", lambda _s: None)
+        monkeypatch.setattr(fs.verify_scopes, "verify",
+                            lambda settings, tenant, scopes: [{"scope": s, "ok": True} for s in scopes])
         prog = str(tmp_path / "setup.progress")
         published = []
 
@@ -1225,3 +1235,38 @@ class TestProjectCreationOffOnTheTenant:
         assert remembered == [(7, "source", "dharan.example.gov.np", "it@dharan.example.gov.np")]
         phase = next(p for p in res["phases"] if p["name"].startswith("allow project creation"))
         assert phase["status"] == "ok" and "approved as complete" in phase["detail"]
+
+    def test_drive_refusing_apps_turns_the_drive_sdk_on_and_records_it(self, monkeypatch):
+        """Live: dharan.gov.np delegated every scope and Drive still answered "The domain
+        administrators have disabled Drive apps"."""
+        import project_creation
+        calls, remembered = [], []
+        answers = iter([True, False])          # refused, then allowed once switched on
+        real_isfile = fs.os.path.isfile
+        monkeypatch.setattr(fs.os.path, "isfile",
+                            lambda p: True if str(p).endswith("-sa.json") else real_isfile(p))
+        monkeypatch.setattr(fs, "_drive_sdk_off", lambda key, admin: next(answers))
+        monkeypatch.setattr(project_creation, "run",
+                            lambda want, timeout=900, setting="project_creation": calls.append((want, setting)) or False)
+        monkeypatch.setattr(project_creation, "remember", lambda *a: remembered.append(a))
+        monkeypatch.setattr(fs.time, "sleep", lambda _s: None)
+        monkeypatch.setattr(fs.provision_gcp, "gcloud_ready", lambda: (True, "me"))
+        monkeypatch.setattr(fs.provision_gcp, "detect_org", lambda env=None: "")
+        monkeypatch.setattr(fs.provision_gcp, "provision_side",
+                            lambda *a, **k: {"side": "source", "project": "p", "ok": True, "steps": []})
+        monkeypatch.setattr(fs.provision_gcp, "client_id_of", lambda p: "42")
+        monkeypatch.setattr(fs.dwd_helper, "run", lambda *a, **k: 0)
+        monkeypatch.setattr(fs.gcloud_browser_auth, "configure_chat_app", lambda *a, **k: (True, "mocked"))
+        monkeypatch.setattr(fs.verify_scopes, "verify",
+                            lambda settings, tenant, scopes: [{"scope": s, "ok": True} for s in scopes])
+        monkeypatch.setattr(fs.verify_scopes, "required_scopes", lambda settings, tenant: ["scope-a"])
+        monkeypatch.setattr(fs.accounts_auth, "get_tenant_config", lambda *a, **k: None)
+        monkeypatch.setattr(fs.accounts_auth, "update_tenant_config", lambda *a, **k: None)
+
+        res = fs.run_full_setup("source", "dharan.example.gov.np", "it@dharan.example.gov.np", "pw",
+                                account_id=7)
+
+        assert calls == [(True, "drive_sdk")]
+        assert remembered == [(7, "source", "dharan.example.gov.np", "it@dharan.example.gov.np", "drive_sdk")]
+        ph = next(p for p in res["phases"] if p["name"].startswith("allow Drive SDK"))
+        assert ph["status"] == "ok"

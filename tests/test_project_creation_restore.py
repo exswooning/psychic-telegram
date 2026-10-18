@@ -60,7 +60,7 @@ def test_owed_restore_asks_for_the_password_when_no_login_is_kept(cp, monkeypatc
                 json={"reason": "done", "side": "source", "admin_password": "s3cret-pw"}).json()
     assert r["ok"] is True
     argv, env = cp.launched[0]
-    assert argv[-5:] == ["off", "--account", str(aid), "--side", "source"]
+    assert argv[-7:] == ["off", "--account", str(aid), "--side", "source", "--setting", "project_creation"]
     assert env["DWD_EMAIL"] == "it.department@dharan.gov.np" and env["DWD_PASSWORD"] == "s3cret-pw"
     actions = cp.get("/api/v2/actions").text
     assert "s3cret-pw" not in actions

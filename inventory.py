@@ -211,7 +211,13 @@ def scan_gmail(gmail) -> dict:
 
 
 def scan_calendar(cal) -> dict:
+    """Events on the calendars the account OWNS -- what a migration copies. A calendar
+    it only follows (a colleague's, a public holiday calendar) is counted as followed,
+    not by its events: live, administration@dharan.gov.np read "250 events", all of
+    them "Holidays in Nepal", with none of its own."""
     cals = cal.calendarList().list().execute().get("items", [])
+    followed = [c for c in cals if c.get("accessRole") != "owner"]
+    cals = [c for c in cals if c.get("accessRole") == "owner"]
     events = 0
     for c in cals:
         token = None
@@ -223,7 +229,7 @@ def scan_calendar(cal) -> dict:
             token = resp.get("nextPageToken")
             if not token:
                 break
-    return {"calendars": len(cals), "events": events}
+    return {"calendars": len(cals), "events": events, "followed": len(followed)}
 
 
 def scan_chat(chat) -> dict:

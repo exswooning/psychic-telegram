@@ -68,7 +68,8 @@ const ApproveComplete: React.FC = () => {
       )}
 
       {(life?.projectCreation ?? []).map((p) => (
-        <ProjectCreationOwed key={p.side} owed={p} approved={!!st.approved_at} onDone={load} />
+        <ProjectCreationOwed key={`${p.setting ?? 'project_creation'}-${p.side}`} owed={p}
+                             approved={!!st.approved_at} onDone={load} />
       ))}
 
       <GcloudHeld refresh={refresh} />
@@ -124,10 +125,13 @@ const ProjectCreationOwed: React.FC<{
   const [pw, setPw] = useState('')
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
+  const setting = owed.setting ?? 'project_creation'
+  const id = `${setting === 'drive_sdk' ? 'drive-sdk' : 'project-creation'}-${owed.side}`
+  const name = owed.name ?? 'project creation'
   return (
-    <Alert severity={approved ? 'warning' : 'info'} sx={{ mb: 1.5 }} data-testid={`project-creation-${owed.side}`}>
+    <Alert severity={approved ? 'warning' : 'info'} sx={{ mb: 1.5 }} data-testid={id}>
       <Typography variant="body2" sx={{ mb: 1 }}>
-        Project creation on <strong>{owed.domain}</strong> was turned on for this migration
+        {name[0].toUpperCase() + name.slice(1)} on <strong>{owed.domain}</strong> was turned on for this migration
         ({new Date(owed.turnedOnAt).toLocaleDateString()}).{' '}
         {owed.unattended
           ? 'It is turned back off when you approve the migration as complete.'
@@ -137,13 +141,13 @@ const ProjectCreationOwed: React.FC<{
         {!owed.unattended && (
           <TextField size="small" type="password" label={`Password for ${owed.admin}`} value={pw}
                      onChange={(e) => setPw(e.target.value)}
-                     inputProps={{ 'data-testid': `project-creation-${owed.side}-password` }} />
+                     inputProps={{ 'data-testid': `${id}-password` }} />
         )}
         <Button size="small" variant="outlined" disabled={busy || (!owed.unattended && !pw)}
-                data-testid={`project-creation-${owed.side}-off`}
+                data-testid={`${id}-off`}
                 onClick={() => {
                   setBusy(true)
-                  restoreProjectCreation(owed.side, pw)
+                  restoreProjectCreation(owed.side, pw, setting)
                     .then((r) => { setMsg({ ok: r.ok, text: r.detail }); if (r.ok) { setPw(''); onDone() } })
                     .catch((e) => setMsg({ ok: false, text: String(e) }))
                     .finally(() => setBusy(false))

@@ -268,6 +268,21 @@ def no_browser_detail(crash_detail: str) -> str:
 GROUP_WRITE_SCOPE = "https://www.googleapis.com/auth/admin.directory.group"
 
 
+def _drive_sdk_off(key_path: str, admin: str) -> bool:
+    """Drive refuses this tenant's apps outright (its Drive SDK setting is off). Anything
+    else -- a pass, or another error -- is not this, and is left to readiness to report."""
+    try:
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+        creds = service_account.Credentials.from_service_account_file(
+            key_path, scopes=["https://www.googleapis.com/auth/drive"]).with_subject(admin)
+        build("drive", "v3", credentials=creds, cache_discovery=False).about().get(
+            fields="user(emailAddress)").execute()
+        return False
+    except Exception as exc:      # noqa: BLE001
+        return "disabled Drive apps" in str(exc)
+
+
 def _creation_refused(result: dict) -> bool:
     """gcloud refused the project: the tenant forbids creating Cloud projects."""
     return any("project creation is disabled" in (st.get("detail") or "")
@@ -350,6 +365,39 @@ def run_full_setup(
         signin_challenge.HANDOFF_AFTER = 45
         gcloud_browser_auth.HANDOFF = _on_handoff
         gcloud_browser_auth.CODE_FILE = progress_file + ".code"
+
+    def _allow_drive_sdk() -> None:
+        import project_creation
+        ph = Phase(f"allow Drive SDK access ({side})")
+        phases.append(ph)
+        _progress(96, "Drive apps are off on this tenant -- turning them on for the migration")
+        saved = {k: os.environ.get(k) for k in ("DWD_EMAIL", "DWD_PASSWORD")}
+        os.environ["DWD_EMAIL"], os.environ["DWD_PASSWORD"] = admin_email, admin_password or ""
+        try:
+            was_on = project_creation.run(True, timeout, setting="drive_sdk")
+            if account_id is not None and not was_on:
+                project_creation.remember(account_id, side, domain, admin_email, "drive_sdk")
+        except Exception as exc:      # noqa: BLE001 - say what to do instead
+            ph.status = "failed"
+            ph.detail = (f"could not turn it on ({str(exc)[:160]}) -- tick 'Allow users to access "
+                         f"Google Drive with the Drive SDK API' at "
+                         f"{project_creation.SETTINGS['drive_sdk']['url']}, then set up again")
+            return
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        for wait in (20, 30, 60, 60, 90, 120, 180):
+            time.sleep(wait)
+            if not _drive_sdk_off(key_path, admin_email):
+                ph.status = "ok"
+                ph.detail = ("turned on for this migration; it is turned off again when the "
+                             "migration is approved as complete")
+                return
+        ph.status = "failed"
+        ph.detail = "turned on, but Drive still refused the API after ~9 minutes -- check again shortly"
 
     def _allow_project_creation(provision, first: dict) -> dict:
         """The tenant forbids creating Cloud projects (live: dharan.gov.np). Turn it on
@@ -991,6 +1039,13 @@ def run_full_setup(
         p.detail = f"{live}/{len(rows)} scopes confirmed live"
         if missing_optional:
             p.detail += optional_missing_detail(missing_optional)
+    # -- 3a. Drive answers through the API ------------------------------------
+    # Live: dharan.gov.np delegated every scope and still refused Drive -- "The domain
+    # administrators have disabled Drive apps" (its Drive SDK setting is off), which no
+    # scope can get past. Turned on for the migration like project creation, recorded,
+    # and turned off again when the migration is approved.
+    if not dry_run and os.path.isfile(key_path) and _drive_sdk_off(key_path, admin_email):
+        _allow_drive_sdk()
     _progress(97, "saving tenant configuration")
 
     # -- 3b. Point the REST of the tool at what was just built ---------------

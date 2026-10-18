@@ -1,7 +1,7 @@
 import React from 'react'
 import {
   Alert, Box, Button, Chip, CircularProgress, IconButton, LinearProgress,
-  Stack, Typography,
+  Stack, Tooltip, Typography,
 } from '@mui/material'
 import { Refresh as RefreshIcon } from '@mui/icons-material'
 import type { TenantInventory } from '@/api/controlPlane'
@@ -43,6 +43,15 @@ const numSx = { ...tdSx, textAlign: 'right' as const,
 
 /** One headline number. Value first at a readable size, label under it --
  * the number is what is being scanned for, not the word. */
+/** What could not be read, and why when it is known -- not a bare "could not read".
+ *  Live: dharan.gov.np's every account read "could not read" with the reason hidden:
+ *  its Drive SDK was off. */
+const unreadable = (error: string): string => {
+  if (error.includes('disabled Drive apps')) return 'Drive not readable: Drive apps (Drive SDK) are off on this tenant'
+  const what = [...new Set(error.split('; ').map((p) => p.split(':')[0].trim()).filter(Boolean))]
+  return `could not read ${what.join(', ') || 'this account'}`
+}
+
 const Stat: React.FC<{
   id: string; label: string; value: string
   /** Not measured yet. Renders an em dash rather than 0 -- a real measured
@@ -183,7 +192,11 @@ export const TenantInventoryPanel: React.FC<TenantInventoryPanelProps> = ({
           <Stat id="accounts" label="accounts"
                 value={inv.accounts.toLocaleString()} />
           <Stat id="emails" label="email" value={inv.totals.emails.toLocaleString()} />
-          <Stat id="drive" label="Drive" value={fmtBytes(inv.totals.driveBytes)} />
+          <Stat id="drive" pending={inv.totals.driveBytes == null}
+                label={inv.totals.driveBytes == null ? 'Drive — could not be read'
+                  : inv.totals.driveCovered != null && inv.totals.driveCovered < inv.accounts
+                    ? `Drive (${inv.totals.driveCovered} of ${inv.accounts} read)` : 'Drive'}
+                value={fmtBytes(inv.totals.driveBytes ?? 0)} />
           {/* Shown as pending rather than hidden while a scan runs.
               Absent columns read as "this tenant has no sharing"; a dash
               with a scan visibly in flight reads as "not counted yet",
@@ -191,13 +204,13 @@ export const TenantInventoryPanel: React.FC<TenantInventoryPanelProps> = ({
               looked like it had less information than it did an hour ago. */}
           {(inv.deep || scanning) && (
             <>
-              <Stat id="shared" label="shared files" pending={!inv.deep}
+              <Stat id="shared" label="shared files" pending={!inv.deep || inv.totals.shared == null}
                     value={(inv.totals.shared ?? 0).toLocaleString()} />
-              <Stat id="external" label="shared externally" pending={!inv.deep}
+              <Stat id="external" label="shared externally" pending={!inv.deep || inv.totals.external == null}
                     value={(inv.totals.external ?? 0).toLocaleString()} />
-              <Stat id="anyone" label="link-shared to anyone" pending={!inv.deep}
+              <Stat id="anyone" label="link-shared to anyone" pending={!inv.deep || inv.totals.anyone == null}
                     value={(inv.totals.anyone ?? 0).toLocaleString()} />
-              <Stat id="events" label="calendar events"
+              <Stat id="events" label="events on own calendars"
                     pending={!inv.deep || inv.totals.calendarEvents == null}
                     value={(inv.totals.calendarEvents ?? 0).toLocaleString()} />
               {/* null here means the scan could not read Chat at all --
@@ -311,10 +324,12 @@ export const TenantInventoryPanel: React.FC<TenantInventoryPanelProps> = ({
                   <Box component="td" sx={tdSx}>
                     {u.email}
                     {u.error && (
-                      <Typography variant="caption" color="warning.main"
-                                  sx={{ display: 'block' }}>
-                        could not read
-                      </Typography>
+                      <Tooltip title={u.error}>
+                        <Typography variant="caption" color="warning.main"
+                                    sx={{ display: 'block' }}>
+                          {unreadable(u.error)}
+                        </Typography>
+                      </Tooltip>
                     )}
                   </Box>
                   <Box component="td" sx={tdSx}>

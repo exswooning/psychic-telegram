@@ -1250,12 +1250,12 @@ async def approve_migration_complete(body: ApproveComplete, op: Operator = Depen
         st = lifecycle.approve(aid, op.name)
         # Project creation setup turned on is turned off again now -- by itself where an
         # admin login was kept; a government tenant's never is, so its card asks.
-        restoring = [p["domain"] for p in _project_creation_owed(aid)
-                     if _restore_project_creation(aid, p["side"], "") is None]
+        restoring = [f'{p["name"]} on {p["domain"]}' for p in _project_creation_owed(aid)
+                     if _restore_project_creation(aid, p["side"], "", p["setting"]) is None]
         return True, (f"migration for account {aid} approved as complete; teardown due "
                       f"{st.get('teardown_due_at') or '--'}; gcloud signed out of: "
                       + (", ".join(gone) if gone else "nothing -- no sign-in was held")
-                      + (f"; turning project creation back off on {', '.join(restoring)}"
+                      + (f"; turning back off: {', '.join(restoring)}"
                          if restoring else ""))
     return await _gated(op, "migration.approve_complete", body, f"account:{aid}", _approve,
                         extra_check=require_superadmin)
@@ -1276,12 +1276,15 @@ def _project_creation_owed(account_id: int | None) -> list[dict]:
     return out
 
 
-def _restore_project_creation(account_id: int, side: str, password: str) -> str | None:
-    """Start `project_creation.py off` for one side. None when started, else why not."""
+def _restore_project_creation(account_id: int, side: str, password: str,
+                              setting: str = "project_creation") -> str | None:
+    """Start `project_creation.py off` for one setting on one side. None when started,
+    else why not."""
     import admin_secrets
-    owed = next((p for p in _project_creation_owed(account_id) if p["side"] == side), None)
+    owed = next((p for p in _project_creation_owed(account_id)
+                 if p["side"] == side and p["setting"] == setting), None)
     if owed is None:
-        return f"nothing owed on the {side}: project creation was not turned on by setup"
+        return f"nothing owed on the {side}: setup did not turn {setting.replace('_', ' ')} on"
     email, kept = admin_secrets.teardown_login(account_id, side)
     if not password:
         if not owed["unattended"]:
@@ -1289,11 +1292,11 @@ def _restore_project_creation(account_id: int, side: str, password: str) -> str 
         password = kept
     email = owed.get("admin") or email
     out = _full_setup_state_path(side, account_id).replace(f"full-setup-{side}.json",
-                                                           f"project-creation-{side}.log")
+                                                           f"{setting}-{side}.log")
     env = dict(os.environ, DWD_EMAIL=email, DWD_PASSWORD=password)
     with open(out, "ab") as fh:
         subprocess.Popen([sys.executable, "project_creation.py", "off", "--account",
-                          str(account_id), "--side", side], cwd=HERE, stdout=fh,
+                          str(account_id), "--side", side, "--setting", setting], cwd=HERE, stdout=fh,
                          stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env,
                          start_new_session=True)
     return None
@@ -1302,6 +1305,7 @@ def _restore_project_creation(account_id: int, side: str, password: str) -> str 
 class RestoreProjectCreation(WriteAction):
     account_id: int | None = None
     side: Literal["source", "target"]
+    setting: Literal["project_creation", "drive_sdk"] = "project_creation"
     # exclude=True: never into the audit log. Used once, never stored.
     admin_password: str = Field(default="", exclude=True)
 
@@ -1313,8 +1317,8 @@ async def project_creation_restore(body: RestoreProjectCreation, op: Operator = 
     aid = _resolve_account(body, op)
 
     def _go() -> tuple[bool, str]:
-        why = _restore_project_creation(aid, body.side, body.admin_password)
-        return (False, why) if why else (True, f"turning project creation back off ({body.side})")
+        why = _restore_project_creation(aid, body.side, body.admin_password, body.setting)
+        return (False, why) if why else (True, f"turning {body.setting.replace('_', ' ')} back off ({body.side})")
     return await _gated(op, "project_creation.restore", body, body.side, _go)
 
 

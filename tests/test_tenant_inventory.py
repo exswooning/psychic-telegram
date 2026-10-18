@@ -131,7 +131,7 @@ class TestHeadcountAndData:
                     "b@x.com": {"usageInDrive": "250"}}))
         snap = tenant_inventory.snapshot(settings, "source")
         assert snap["accounts"] == 2
-        assert snap["totals"] == {"emails": 30, "threads": 13,
+        assert snap["totals"] == {"emails": 30, "threads": 13, "driveCovered": 2,
                                   "driveBytes": 350, "covered": 2}
         assert [u["email"] for u in snap["users"]] == ["a@x.com", "b@x.com"]
 

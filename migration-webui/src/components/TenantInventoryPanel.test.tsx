@@ -342,3 +342,20 @@ describe('TenantInventoryPanel scan age', () => {
     expect(screen.getByTestId('deep-scan').textContent).toBe('Scan sharing')
   })
 })
+
+/** Live: dharan.gov.np (Drive SDK off) read "0 Drive, 0 shared externally" and a bare
+ *  "could not read" on every account -- an unknown shown as a fact. */
+describe('only facts', () => {
+  const unread = { email: 'a@gov.example', emails: 10, threads: 4, driveBytes: null, license: '',
+                   error: 'drive: <HttpError 403 "The domain administrators have disabled Drive apps.">' }
+  it('shows a Drive nobody could read as unknown, and says why', () => {
+    render(<TenantInventoryPanel busy={false} error="" domain="gov.example" onRefresh={() => {}}
+      inv={inv({ accounts: 1, users: [unread], deep: true, deepSampled: 1,
+                 totals: { emails: 10, threads: 4, driveBytes: null, driveCovered: 0, covered: 1,
+                           shared: null, external: null, anyone: null } })} />)
+    expect(screen.getByTestId('stat-drive')).toHaveTextContent('—')
+    expect(screen.getByTestId('stat-drive')).toHaveTextContent('could not be read')
+    expect(screen.getByTestId('stat-external')).toHaveTextContent('—')
+    expect(screen.getByTestId('row-a@gov.example')).toHaveTextContent('Drive apps (Drive SDK) are off')
+  })
+})

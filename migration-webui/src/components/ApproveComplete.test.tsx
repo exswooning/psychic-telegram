@@ -74,7 +74,7 @@ describe('project creation setup turned on', () => {
     expect(off).toBeDisabled()
     fireEvent.change(screen.getByTestId('project-creation-source-password'), { target: { value: 'pw' } })
     fireEvent.click(off)
-    await waitFor(() => expect(restore).toHaveBeenCalledWith('source', 'pw'))
+    await waitFor(() => expect(restore).toHaveBeenCalledWith('source', 'pw', 'project_creation'))
   })
 
   it('says approval will do it when a login is kept', async () => {
@@ -84,5 +84,19 @@ describe('project creation setup turned on', () => {
     expect(await screen.findByTestId('project-creation-target'))
       .toHaveTextContent('turned back off when you approve the migration as complete')
     expect(screen.queryByTestId('project-creation-target-password')).toBeNull()
+  })
+})
+
+describe('Drive SDK access setup turned on', () => {
+  it('is listed and turned back off like project creation', async () => {
+    lifecycle.mockResolvedValue({ ...view(), projectCreation: [{ side: 'source', domain: 'dharan.gov.np',
+      admin: 'it.department@dharan.gov.np', turnedOnAt: '2026-10-19T03:00:00Z', unattended: false,
+      setting: 'drive_sdk', name: 'Drive SDK access' }] })
+    restore.mockResolvedValue({ ok: true, actionId: 1, detail: 'turning drive sdk back off (source)' })
+    render(<ApproveComplete />)
+    expect(await screen.findByTestId('drive-sdk-source')).toHaveTextContent('Drive SDK access on dharan.gov.np')
+    fireEvent.change(screen.getByTestId('drive-sdk-source-password'), { target: { value: 'pw' } })
+    fireEvent.click(screen.getByTestId('drive-sdk-source-off'))
+    await waitFor(() => expect(restore).toHaveBeenCalledWith('source', 'pw', 'drive_sdk'))
   })
 })

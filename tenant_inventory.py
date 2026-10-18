@@ -253,8 +253,10 @@ def deep_probe(auth: AuthManager, settings: Settings, side: str,
     """
     import inventory
 
-    out: dict = {"driveKinds": {}, "shared": 0, "external": 0, "anyone": 0,
-                 "calendarEvents": None, "calendars": None,
+    # None until Drive is read: a Drive that refused is unknown, not "0 shared" (live:
+    # dharan.gov.np, Drive SDK off, read 0 shared externally on every account).
+    out: dict = {"driveKinds": {}, "shared": None, "external": None, "anyone": None,
+                 "calendarEvents": None, "calendars": None, "calendarsFollowed": None,
                  "chatSpaces": None, "chatMessages": None, "error": ""}
     try:
         # Building the client is inside the try, not before it. An
@@ -279,6 +281,7 @@ def deep_probe(auth: AuthManager, settings: Settings, side: str,
         c = inventory.scan_calendar(cal)  # noqa: E501
         out["calendarEvents"] = c.get("events")
         out["calendars"] = c.get("calendars")
+        out["calendarsFollowed"] = c.get("followed")
     except Exception as exc:      # noqa: BLE001
         out["error"] = (out["error"] + "; " if out["error"] else "") \
             + f"calendar: {str(exc)[:80]}"
@@ -474,7 +477,8 @@ def snapshot(settings: Settings, side: str, limit: int | None = None,
         # totals and must not be presented as if they were. The UI reads
         # deepSampled to say what the denominator is.
         for key in ("shared", "external", "anyone"):
-            out["totals"][key] = sum(r.get(key) or 0 for r in sample)
+            vals = [r.get(key) for r in sample if r.get(key) is not None]
+            out["totals"][key] = sum(vals) if vals else None
         # None means "not measured" and must not sum as 0 -- the same
         # distinction the per-account em dash makes. A tenant whose Chat
         # could not be read reported a confident 0 for a tenant that has
@@ -504,4 +508,9 @@ def snapshot(settings: Settings, side: str, limit: int | None = None,
         out["totals"]["threads"] += r["threads"] or 0
         out["totals"]["driveBytes"] += r["driveBytes"] or 0
         out["totals"]["covered"] += 1
+    # Drive read for nobody is unknown, not 0 bytes -- and how many it WAS read for is
+    # what the total is out of.
+    out["totals"]["driveCovered"] = sum(1 for r in rows if r.get("driveBytes") is not None)
+    if rows and not out["totals"]["driveCovered"]:
+        out["totals"]["driveBytes"] = None
     return out

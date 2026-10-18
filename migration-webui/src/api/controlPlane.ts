@@ -181,15 +181,18 @@ export interface LifecycleView {
    *  and nobody has turned off yet. unattended: an admin login is kept, so approval does
    *  it; otherwise the card asks for the password once. */
   projectCreation?: { side: 'source' | 'target'; domain: string; admin: string
-                      turnedOnAt: string; unattended: boolean }[]
+                      turnedOnAt: string; unattended: boolean
+                      /** Which setting: Cloud project creation, or the Drive SDK. */
+                      setting?: 'project_creation' | 'drive_sdk'; name?: string }[]
 }
 
 /** Turn a tenant's project creation back off; the password is used once, never kept. */
-export const restoreProjectCreation = (side: 'source' | 'target', adminPassword = '') =>
+export const restoreProjectCreation = (side: 'source' | 'target', adminPassword = '',
+                                       setting: 'project_creation' | 'drive_sdk' = 'project_creation') =>
   cpFetch<ActionResult>('/api/v2/project-creation/restore', {
     method: 'POST',
-    body: JSON.stringify({ side, admin_password: adminPassword,
-                           reason: 'turn project creation back off after the migration' }),
+    body: JSON.stringify({ side, setting, admin_password: adminPassword,
+                           reason: `turn ${setting.replace('_', ' ')} back off after the migration` }),
   })
 
 /** Where this pair is in its end of life, and what its teardown will do. */
@@ -1226,9 +1229,12 @@ export interface TenantInventory {
   // mailbox answers 400/401 -- and the UI must show the denominator rather
   // than presenting a partial sum as the whole tenant.
   totals: {
-    emails: number; threads: number; driveBytes: number; covered: number
-    // Deep-scan only.
-    shared?: number; external?: number; anyone?: number
+    /** null when no account's Drive could be read -- unknown, not 0. */
+    emails: number; threads: number; driveBytes: number | null; covered: number
+    /** How many accounts the Drive total is out of. */
+    driveCovered?: number
+    // Deep-scan only; null when no Drive could be read.
+    shared?: number | null; external?: number | null; anyone?: number | null
     /** null when the scan could not read it -- distinct from a
      *  measured zero, and rendered as a dash rather than 0. */
     calendarEvents?: number | null

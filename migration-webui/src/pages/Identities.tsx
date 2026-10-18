@@ -118,7 +118,8 @@ const TenantStats: React.FC<{
             </Grid>
             <Grid item xs={6} sm={3}>
               <Stat label="Drive"
-                    value={`${GB(inv.totals.driveBytes).toFixed(1)} GB`} />
+                    value={inv.totals.driveBytes == null ? 'could not be read'
+                      : `${GB(inv.totals.driveBytes).toFixed(1)} GB`} />
             </Grid>
             <Grid item xs={6} sm={3}>
               <Stat label="Email" value={inv.totals.emails.toLocaleString()} />
