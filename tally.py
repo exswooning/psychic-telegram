@@ -123,7 +123,11 @@ def compare_drive(src: dict, tgt: dict, mapping: dict, examples: int = 10) -> di
 
 # Google puts two welcome messages in every new account, the source's included, and the
 # migration copies the source's: a target always held 2 more and every user read DIFFERS.
-NOT_GOOGLE_WELCOME = "-from:mail-noreply@google.com"
+# Google also mails the admin when a tenant gets its first Cloud project -- which
+# Bitport's own setup creates -- so a target read +1 (live: 486 against 485 on
+# t.sarafgloabalexim.com, and gorkhatweed's +1 on s.). Left out on both sides, as above.
+NOT_GOOGLE_WELCOME = ('-from:mail-noreply@google.com -(from:notify-noreply@google.com '
+                      'subject:"Google Cloud Organization is now available")')
 
 
 def count_mail(gmail, retry=lambda f: f) -> int:
