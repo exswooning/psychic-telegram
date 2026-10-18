@@ -6,6 +6,7 @@ import {
 import { AdminPanelSettings as AdminIcon, DeleteOutline as DeleteIcon } from '@mui/icons-material'
 import {
   Account, createAccount, deleteAccount, fetchAdminAccounts, setAccountSubscription, setAccountSeedEnabled,
+  setPairLimit,
 } from '@/api/controlPlane'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
 import LifecycleChip from '@/components/LifecycleChip'
@@ -74,8 +75,8 @@ const AdminAccounts: React.FC = () => {
 
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
 
-      {/* A new pair needs its own account: the Setup Wizard configures whoever is
-          signed in, and sign-up is closed once this install has an account. */}
+      {/* A new LOGIN: sign-up is closed once this install has an account. A new pair
+          does not need one -- the Setup Wizard opens a migration under the login. */}
       <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
         <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>New account</Typography>
         <Stack direction="row" sx={{ flexWrap: 'wrap', gap: 1.5 }} alignItems="center">
@@ -116,6 +117,9 @@ const AdminAccounts: React.FC = () => {
                 <TableCell align="center">Superadmin</TableCell>
                 <TableCell align="center">Subscription active</TableCell>
                 <TableCell align="center">Seed enabled</TableCell>
+                <TableCell align="center" title="How many migrations this login may hold, its own included">
+                  Migrations allowed
+                </TableCell>
                 <TableCell title="Only someone's click on Final Report approves a migration; its teardown follows 30 days later">
                   Lifecycle
                 </TableCell>
@@ -152,6 +156,15 @@ const AdminAccounts: React.FC = () => {
                       })}
                     />
                   </TableCell>
+                  <TableCell align="center">
+                    {a.owner_id != null ? (
+                      <Typography variant="caption" color="text.secondary">migration of #{a.owner_id}</Typography>
+                    ) : a.is_superadmin ? (
+                      <Typography variant="caption" color="text.secondary">any</Typography>
+                    ) : (
+                      <PairLimit accountId={a.id} limit={a.pair_limit ?? 1} />
+                    )}
+                  </TableCell>
                   <TableCell><LifecycleChip accountId={a.id} /></TableCell>
                   <TableCell align="center">
                     {!a.is_superadmin && (
@@ -165,7 +178,7 @@ const AdminAccounts: React.FC = () => {
                 </TableRow>
               ))}
               {accounts.length === 0 && (
-                <TableRow><TableCell colSpan={9}>No accounts yet.</TableCell></TableRow>
+                <TableRow><TableCell colSpan={10}>No accounts yet.</TableCell></TableRow>
               )}
             </TableBody>
           </Table>
@@ -211,3 +224,20 @@ const AdminAccounts: React.FC = () => {
 }
 
 export default AdminAccounts
+
+/** Saved as soon as it changes: a number, not a decision worth a dialog. */
+const PairLimit: React.FC<{ accountId: number; limit: number }> = ({ accountId, limit }) => {
+  const [value, setValue] = useState(String(limit))
+  const [saved, setSaved] = useState(limit)
+  const n = Number(value)
+  return (
+    <TextField size="small" type="number" value={value} sx={{ width: 80 }}
+               inputProps={{ min: 1, max: 1000, 'data-testid': `pair-limit-${accountId}` }}
+               onChange={(e) => setValue(e.target.value)}
+               onBlur={() => {
+                 if (Number.isInteger(n) && n >= 1 && n !== saved) {
+                   setPairLimit(accountId, n).then((r) => { if (r.ok) setSaved(n) }).catch(() => {})
+                 }
+               }} />
+  )
+}

@@ -149,6 +149,11 @@ def _apply_column_upgrades(conn: sqlite3.Connection) -> None:
             # account has no reason to want once they are live. Opt-in per
             # account from AdminAccounts, not grandfathered in.
             ("seed_enabled", "INTEGER NOT NULL DEFAULT 0"),
+            # A migration a login owns (accounts_auth.create_migration): one account is
+            # one pair, so a login runs several by owning several. NULL = a login.
+            ("owner_id", "INTEGER"),
+            # How many migrations a login may hold, its own included. Superadmins: any.
+            ("pair_limit", "INTEGER NOT NULL DEFAULT 1"),
         ],
         # What it takes to start this job again. The supervisor could kill a
         # wedged run and free its slot, but nothing could resume it -- a

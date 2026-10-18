@@ -242,6 +242,7 @@ def test_a_challenge_left_up_is_handed_off_only_when_a_caller_asked(monkeypatch)
             return "Verify it’s you\nEnter a phone number to get a text message with a verification code."
     clock = [1000.0]
     monkeypatch.setattr(sc.time, "time", lambda: clock[0])
+    monkeypatch.setattr(sc, "HANDOFF_AFTER", None)   # a full_setup run elsewhere sets it
     w = sc.Watcher(lambda _m: None)
     w.check([_Pg()])
     clock[0] += 3600

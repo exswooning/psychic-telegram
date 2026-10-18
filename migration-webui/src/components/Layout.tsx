@@ -59,6 +59,7 @@ import {
   FactCheck as TestsIconNav,
 } from '@mui/icons-material'
 import { useMigrationStore } from '@/store'
+import MigrationSwitcher from './MigrationSwitcher'
 import { fetchConfig, fetchJob, ConfigPayload, HostInfo, JobStatus, stopJob } from '@/api/client'
 import { fetchMe, fetchOwedGrants, logout, Account, OwedGrants } from '@/api/controlPlane'
 import Menu from '@mui/material/Menu'
@@ -387,6 +388,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
           <Typography variant="h6" noWrap component="div" sx={{ fontWeight: 700, mr: 1 }}>
             Bitport
           </Typography>
+          <MigrationSwitcher />
 
           {/* Live job indicator: same running/name/progress/eta/elapsed the
              inline UI's header dot shows, so both surfaces read the same

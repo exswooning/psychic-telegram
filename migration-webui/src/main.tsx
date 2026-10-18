@@ -3,6 +3,9 @@ import ReactDOM from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
 import App from '@/App'
 import { AppThemeProvider } from '@/AppThemeProvider'
+import { installMigrationHeader } from '@/api/migration'
+
+installMigrationHeader()
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

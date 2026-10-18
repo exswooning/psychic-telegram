@@ -70,7 +70,7 @@ from typing import Any, Callable, Literal
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
-    from fastapi import (Cookie, Depends, FastAPI, Header, HTTPException,
+    from fastapi import (Cookie, Depends, FastAPI, Header, HTTPException, Query,
                          Request, Response, WebSocket, WebSocketDisconnect)
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
@@ -146,6 +146,13 @@ class Operator(BaseModel):
     # for why this is opt-in (DEFAULT 0), the opposite polarity from
     # subscription_active.
     seed_enabled: bool = True
+    # The signed-in login itself. account_id is the MIGRATION the request is about:
+    # the login's own, or one it owns that the browser chose (X-Bitport-Migration;
+    # ?bp_migration= on the websocket, which cannot carry a header). Anything about
+    # the login -- who it is, deleting yourself -- reads this, never account_id.
+    login_id: int | None = None
+    # The browser chose that migration, so it wins over "whichever is running".
+    chosen: bool = False
 
 
 def _operator_token_ok(presented: str) -> bool:
@@ -163,7 +170,9 @@ def _operator_token_ok(presented: str) -> bool:
 
 async def operator(x_operator: str = Header(default=""),
                    x_operator_token: str = Header(default=""),
-                   bp_session: str = Cookie(default="")) -> Operator:
+                   bp_session: str = Cookie(default=""),
+                   x_bitport_migration: str = Header(default=""),
+                   bp_migration: str = Query(default="")) -> Operator:
     # A real signed-in account always wins over the header: the header is
     # the honor-system SSH-tunnel path, the cookie is an actual verified
     # credential. A request presenting both is trusting the cookie, not the
@@ -178,19 +187,23 @@ async def operator(x_operator: str = Header(default=""),
             # email alone loses the human-readable part of "who did this".
             name = (f"{account['name']} <{account['email']}>" if account
                     else f"account #{account_id}")
+            superadmin = bool(account["is_superadmin"]) if account else False
+            asked = (x_bitport_migration or bp_migration).strip()
+            migration = accounts_auth.pick_migration(account_id, superadmin, asked)
             # An account is always "admin" of its own resources -- there is
             # no team/role concept yet (see accounts_auth.py's docstring);
             # role here governs THIS account's own data only, never anyone
             # else's, which is what actually keeps require_admin() safe to
             # reuse unchanged for account-scoped write endpoints.
             return Operator(
-                name=name, role="admin", account_id=account_id,
+                name=name, role="admin", account_id=migration, login_id=account_id,
+                chosen=bool(asked) and str(migration) == asked,
                 # account can be None if the session outlived its account
                 # row (see auth_me's own comment on the same situation) --
                 # default to the operator-safe True/False rather than
                 # crashing on a dict index into None.
                 subscription_active=bool(account["subscription_active"]) if account else True,
-                is_superadmin=bool(account["is_superadmin"]) if account else False,
+                is_superadmin=superadmin,
                 seed_enabled=bool(account["seed_enabled"]) if account else True,
             )
     # The X-Operator header is a CLAIM, not a credential: a name in
@@ -765,7 +778,7 @@ def _account_in_context(op: Operator) -> int | None:
     -- Mission Control renders this server's user list under that server's
     header, and when the two disagree the page shows two tenants at once.
     """
-    return account_context.in_context(op.account_id, op.is_superadmin)
+    return account_context.in_context(op.account_id, op.is_superadmin, op.chosen)
 
 
 SUPERVISOR_POLL_SEC = int(os.getenv("JOB_SUPERVISOR_POLL_SEC", "120"))
@@ -1149,9 +1162,9 @@ async def auth_logout(response: Response, bp_session: str = Cookie(default="")):
 
 @app.get("/api/v2/auth/me")
 async def auth_me(op: Operator = Depends(operator)):
-    if op.account_id is None:
+    if op.login_id is None:
         raise HTTPException(401, "not signed in")
-    account = await _off_loop(accounts_auth.get_account, op.account_id)
+    account = await _off_loop(accounts_auth.get_account, op.login_id)
     if account is None:  # session outlived the account row somehow
         raise HTTPException(401, "not signed in")
     return {"id": account["id"], "email": account["email"],
@@ -1159,7 +1172,9 @@ async def auth_me(op: Operator = Depends(operator)):
             "created_at": account["created_at"],
             "subscription_active": bool(account["subscription_active"]),
             "is_superadmin": bool(account["is_superadmin"]),
-            "seed_enabled": bool(account["seed_enabled"])}
+            "seed_enabled": bool(account["seed_enabled"]),
+            # The migration this request was about (the switcher's choice, or the login's own).
+            "migration_id": op.account_id}
 
 
 # ======================================================================
@@ -1287,6 +1302,45 @@ async def admin_set_seed_enabled(account_id: int, body: SetSeedEnabled,
                         f"account:{account_id}", _set, extra_check=require_superadmin)
 
 
+class SetPairLimit(WriteAction):
+    limit: int = Field(ge=1, le=1000)
+
+
+@app.post("/api/v2/admin/accounts/{account_id}/pair-limit")
+async def admin_set_pair_limit(account_id: int, body: SetPairLimit,
+                               op: Operator = Depends(operator)):
+    """How many migrations a login may hold, its own included."""
+    def _set() -> tuple[bool, str]:
+        accounts_auth.set_pair_limit(account_id, body.limit)
+        return True, f"pair_limit={body.limit}"
+    return await _gated(op, "admin.set_pair_limit", body,
+                        f"account:{account_id}", _set, extra_check=require_superadmin)
+
+
+class OpenMigration(WriteAction):
+    name: str = Field(default="", max_length=120)
+
+
+@app.post("/api/v2/migrations")
+async def open_migration(body: OpenMigration, op: Operator = Depends(operator)):
+    """A new, empty migration owned by the signed-in login -- its own keys, ledger
+    and jobs -- so a second pair never displaces the first. Refused at the login's
+    pair_limit (superadmins: none)."""
+    require_login(op)
+    made: dict = {}
+
+    def _open() -> tuple[bool, str]:
+        try:
+            made["id"] = accounts_auth.create_migration(op.login_id, body.name,
+                                                        op.is_superadmin)
+        except accounts_auth.AccountError as exc:
+            return False, str(exc)
+        return True, f"migration {made['id']} opened"
+    resp = await _gated(op, "migration.open", body, body.name or None, _open)
+    return JSONResponse({**json.loads(resp.body), "accountId": made.get("id")},
+                        status_code=resp.status_code)
+
+
 class DeleteAccount(WriteAction):
     confirm_email: str
 
@@ -1302,8 +1356,10 @@ async def admin_delete_account(account_id: int, body: DeleteAccount,
             return False, "no such account"
         if body.confirm_email.strip().lower() != (acct.get("email") or "").lower():
             return False, "type the account's email to confirm"
-        if account_id == op.account_id or acct.get("is_superadmin"):
+        if account_id == op.login_id or acct.get("is_superadmin"):
             return False, "a superadmin account, or your own, is not deleted from here"
+        if accounts_auth.owned_migrations(account_id):
+            return False, "it owns migrations -- delete those first"
         if any((accounts_auth.get_tenant_config(account_id, side) or {}).get("domain")
                for side in ("source", "target")):
             return False, "it has a tenant set up -- remove that setup first (Identities)"
@@ -1723,7 +1779,9 @@ def _require_account_access(account_id: int | None, op: Operator) -> None:
     The path-parameter half of the same rule _resolve_account applies to a
     body. Six hand-written copies of these two lines existed before this.
     """
-    if not op.is_superadmin and account_id != op.account_id:
+    login = getattr(op, "login_id", None)
+    login = login if login is not None else op.account_id
+    if not accounts_auth.may_open(login, op.is_superadmin, account_id):
         raise HTTPException(403, "that migration belongs to another account")
 
 
@@ -4757,8 +4815,9 @@ async def list_migrations(op: Operator = Depends(operator)):
         if op.is_superadmin:
             accounts = accounts_auth.list_accounts()
         else:
-            acct = accounts_auth.get_account(op.account_id)
-            accounts = [dict(acct)] if acct else []
+            accounts = [dict(a) for a in map(accounts_auth.get_account,
+                                             [op.login_id, *accounts_auth.owned_migrations(op.login_id)])
+                        if a]
 
         active = {}
         for row in job_admission.list_active():
@@ -4769,13 +4828,15 @@ async def list_migrations(op: Operator = Depends(operator)):
             aid = acct["id"]
             src = accounts_auth.get_tenant_config(aid, "source") or {}
             tgt = accounts_auth.get_tenant_config(aid, "target") or {}
-            if not src.get("domain") and not tgt.get("domain"):
-                # An account that has never been set up is not a migration.
+            if not src.get("domain") and not tgt.get("domain") and acct.get("owner_id") is None:
+                # A login that has never set up a tenant is not a migration (one it
+                # opened for a migration is, before anything is set up in it).
                 continue
             jobs = active.get(aid, [])
             out.append({
                 "accountId": aid,
                 "accountName": acct.get("name") or acct.get("email") or f"#{aid}",
+                "ownerId": acct.get("owner_id"),
                 "sourceDomain": src.get("domain") or "",
                 "targetDomain": tgt.get("domain") or "",
                 "running": bool(jobs),
@@ -5652,7 +5713,9 @@ class IncidentStatusRequest(BaseModel):
 def _incident_for(op: Operator, incident_id: int) -> dict:
     import run_watch
     inc = run_watch.get_incident(incident_id)
-    if not inc or not (op.is_superadmin or (op.account_id and inc["account_id"] == op.account_id)):
+    login = getattr(op, "login_id", None)
+    login = login if login is not None else op.account_id
+    if not inc or not accounts_auth.may_open(login, op.is_superadmin, inc["account_id"]):
         raise HTTPException(404, "no such incident")
     return inc
 

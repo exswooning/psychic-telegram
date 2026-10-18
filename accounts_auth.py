@@ -123,6 +123,87 @@ def create_account(email: str, password: str, name: str, plan: str = "trial") ->
     return account_id
 
 
+# ----------------------------------------------------------------------
+# Migrations a login owns
+# ----------------------------------------------------------------------
+# One account is one pair -- its own keys/<id>/, ledger and jobs, the isolation the
+# engine was built on. So a login runs several migrations by OWNING several accounts:
+# each has owner_id set and no usable password, and is reachable only through its
+# owner (or a superadmin). Live: setting up a second pair on the one account moved
+# the first pair's keys aside, with a user still waiting to migrate on it.
+def owned_migrations(owner_id: int) -> list[int]:
+    with cpdb.ro() as conn:
+        return [int(r["id"]) for r in conn.execute(
+            "SELECT id FROM accounts WHERE owner_id=? ORDER BY id", (owner_id,))]
+
+
+def may_open(login_id: int | None, is_superadmin: bool, account_id: int | None) -> bool:
+    """May this login see and act on that account's migration?"""
+    if account_id is None or login_id is None:
+        return account_id == login_id
+    if is_superadmin or account_id == login_id:
+        return True
+    try:
+        acct = get_account(account_id)
+    except sqlite3.Error:
+        return False        # unreadable: refuse, never guess yes
+    return bool(acct) and acct.get("owner_id") == login_id
+
+
+def pick_migration(login_id: int | None, is_superadmin: bool, requested) -> int | None:
+    """The migration a request is about: the one the browser chose, when this login
+    may open it, else the login's own. A stale or foreign choice is ignored, never
+    an error -- it only ever narrows back to what the login could reach anyway."""
+    try:
+        wanted = int(requested)
+    except (TypeError, ValueError):
+        return login_id
+    return wanted if may_open(login_id, is_superadmin, wanted) else login_id
+
+
+def _set_up(conn, account_id: int) -> bool:
+    return conn.execute("SELECT 1 FROM tenant_configs WHERE account_id=? AND "
+                        "COALESCE(domain,'') != '' LIMIT 1", (account_id,)).fetchone() is not None
+
+
+def create_migration(owner_id: int, name: str, is_superadmin: bool = False) -> int:
+    """A new, empty migration owned by this login, with its own key folder and
+    ledger. Refused (AccountError) once the login holds its pair_limit -- its own
+    account counts once it has a tenant set up."""
+    with cpdb.rw() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        owner = conn.execute("SELECT pair_limit, seed_enabled, owner_id FROM accounts "
+                             "WHERE id=?", (owner_id,)).fetchone()
+        if owner is None or owner["owner_id"] is not None:
+            raise AccountError("only a login can own migrations")
+        held = conn.execute("SELECT COUNT(*) AS n FROM accounts WHERE owner_id=?",
+                            (owner_id,)).fetchone()["n"] + (1 if _set_up(conn, owner_id) else 0)
+        if not is_superadmin and held >= owner["pair_limit"]:
+            raise AccountError(f"this login may hold {owner['pair_limit']} migration(s) "
+                               f"and holds {held}; ask for more to be provisioned")
+        cur = conn.execute(
+            "INSERT INTO accounts (email, password_hash, name, plan, seed_enabled, owner_id) "
+            "VALUES (?,?,?,?,?,?)",
+            (f"migration-{owner_id}-{secrets.token_hex(4)}@migrations.bitport.local",
+             "!", (name or "Migration").strip()[:120], "migration",
+             owner["seed_enabled"], owner_id))
+        account_id = int(cur.lastrowid)
+        db_path = os.path.join("data", "accounts", str(account_id), "migration.db")
+        for side in ("source", "target"):
+            conn.execute("INSERT INTO tenant_configs (account_id, side, sa_key_path, db_path) "
+                         "VALUES (?,?,?,?)",
+                         (account_id, side,
+                          os.path.join("keys", str(account_id), f"{side}-sa.json"), db_path))
+    os.makedirs(os.path.join(HERE, "data", "accounts", str(account_id)), exist_ok=True)
+    os.makedirs(os.path.join(HERE, "keys", str(account_id)), exist_ok=True)
+    return account_id
+
+
+def set_pair_limit(account_id: int, limit: int) -> None:
+    with cpdb.rw() as conn:
+        conn.execute("UPDATE accounts SET pair_limit=? WHERE id=?", (max(1, int(limit)), account_id))
+
+
 # How many wrong passwords before an account stops answering, and for how
 # long. Short on purpose: keyed by email, so a long window would let anyone
 # lock out a user they can name. Long enough that guessing is pointless --
@@ -446,7 +527,7 @@ def get_account(account_id: int) -> dict | None:
     with cpdb.ro() as conn:
         row = conn.execute(
             "SELECT id, email, name, plan, created_at, subscription_active, "
-            "is_superadmin, seed_enabled FROM accounts WHERE id=?",
+            "is_superadmin, seed_enabled, owner_id, pair_limit FROM accounts WHERE id=?",
             (account_id,)
         ).fetchone()
     return dict(row) if row else None
@@ -466,6 +547,7 @@ def list_accounts() -> list[dict]:
         rows = conn.execute(
             "SELECT a.id, a.email, a.name, a.plan, a.created_at, "
             "       a.subscription_active, a.is_superadmin, a.seed_enabled, "
+            "       a.owner_id, a.pair_limit, "
             "       s.domain AS source_domain, t.domain AS target_domain "
             "  FROM accounts a "
             "  LEFT JOIN tenant_configs s "

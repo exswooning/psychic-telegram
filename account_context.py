@@ -27,9 +27,11 @@ log = logging.getLogger(__name__)
 OWNED_JOB_NAMES = {"migrate", "delta", "full_setup"}
 
 
-def in_context(account_id: int | None, is_superadmin: bool = False) -> int | None:
-    """The account a nav-reached page should report on."""
-    if is_superadmin:
+def in_context(account_id: int | None, is_superadmin: bool = False,
+               chosen: bool = False) -> int | None:
+    """The account a nav-reached page should report on. A migration the browser
+    chose (the header switcher) is the answer outright, running or not."""
+    if is_superadmin and not chosen:
         try:
             active = [j for j in job_admission.list_active()
                       if j.get("job_name") in OWNED_JOB_NAMES

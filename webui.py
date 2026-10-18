@@ -3140,8 +3140,11 @@ def resolve_target_account(caller_id: int | None,
         return None, f"{requested!r} is not an account id"
     if wanted == caller_id:
         return wanted, ""
-    account = accounts_auth.get_account(caller_id) if caller_id else None
-    if not (account and account.get("is_superadmin")):
+    # The caller may be a migration its login chose: decide as that login.
+    caller = accounts_auth.get_account(caller_id) if caller_id else None
+    login = (caller or {}).get("owner_id") or caller_id
+    account = accounts_auth.get_account(login) if login else None
+    if not accounts_auth.may_open(login, bool(account and account.get("is_superadmin")), wanted):
         return None, "that migration belongs to another account"
     return wanted, ""
 
@@ -5233,7 +5236,26 @@ class Handler(BaseHTTPRequestHandler):
         header came from one and its "11 users tracked" from the other,
         and they named different tenants.
         """
-        return account_context.in_context(*self._caller())
+        return account_context.in_context(*self._caller(), self._chosen())
+
+    def _asked_migration(self) -> str:
+        """The migration the browser chose (api_server.operator reads the same)."""
+        from urllib.parse import parse_qs, urlparse
+        return ((self.headers.get("X-Bitport-Migration") or "").strip()
+                or (parse_qs(urlparse(self.path).query).get("bp_migration") or [""])[0].strip())
+
+    def _chosen(self) -> bool:
+        asked = self._asked_migration()
+        return bool(asked) and str(self._account_id()) == asked
+
+    def _login_superadmin(self, login: int | None) -> bool:
+        try:
+            account = accounts_auth.get_account(login) if login is not None else None
+        except sqlite3.Error as exc:
+            # The safe reading of an unclear elevation is "not elevated".
+            log.warning("cannot read account %s: %r", login, exc)
+            return False
+        return bool(account and account.get("is_superadmin"))
 
     def _caller(self) -> tuple[int | None, bool]:
         """(account, is_superadmin) -- what account_context.in_context needs.
@@ -5242,17 +5264,11 @@ class Handler(BaseHTTPRequestHandler):
         fact that decides whether a nav click means "my migration" or "the
         migration that is running".
         """
-        aid = self._account_id()
-        if aid is None:
+        login = self._login_id()
+        if login is None:
             return None, False
-        try:
-            account = accounts_auth.get_account(aid)
-        except sqlite3.Error as exc:
-            # The caller is still known; only the elevation is unclear, and
-            # the safe reading of an unclear elevation is "not elevated".
-            log.warning("cannot read account %s: %r", aid, exc)
-            return aid, False
-        return aid, bool(account and account.get("is_superadmin"))
+        # Elevation is the LOGIN's; the account is the migration it is looking at.
+        return self._account_id(), self._login_superadmin(login)
 
     # The page shells and Google's OAuth redirect. Everything else this
     # server exposes reads or writes one tenant's data.
@@ -5322,6 +5338,15 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"ok": False, "error": "sign in required"}, 401)
 
     def _account_id(self) -> int | None:
+        """The migration this request is about: the login's own, or one it may open
+        that the browser chose. Every route scopes by this."""
+        login = self._login_id()
+        if login is None:
+            return None
+        return accounts_auth.pick_migration(login, self._login_superadmin(login),
+                                            self._asked_migration())
+
+    def _login_id(self) -> int | None:
         """None for the legacy path (no cookie, or one that doesn't resolve
         -- same handling api_server.py's operator() dependency gives an
         absent/invalid bp_session). Stdlib http.cookies rather than a hand

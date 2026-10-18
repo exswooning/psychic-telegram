@@ -30,7 +30,7 @@ import QuickTenantSetup from '@/components/QuickTenantSetup'
 import WizardArt from '@/components/WizardArt'
 import FitHeading from '@/components/FitHeading'
 import type { ArtKind } from '@/components/WizardArt'
-import { looksLikeDomain, domainOf } from './Wizard.utils'
+import { looksLikeDomain, domainOf, placeMigration } from './Wizard.utils'
 
 /**
  * One doorway for both "I need a real migration set up" and "I need a test
@@ -382,6 +382,20 @@ const Wizard: React.FC = () => {
   useEffect(() => {
     fetchMe().then((a) => setSeedEnabled(a.seed_enabled)).catch(() => {})
   }, [])
+
+  const srcDomain = role === 'target' ? otherDomain : domain
+  const tgtDomain = role === 'target' ? domain : otherDomain
+  // 'ready', 'checking', or why a new migration could not be opened (its limit).
+  const [slot, setSlot] = useState('ready')
+  useEffect(() => {
+    if (step !== 'run' || purpose !== 'migrate') return undefined
+    let live = true
+    setSlot('checking')
+    placeMigration(srcDomain, tgtDomain)
+      .then(() => { if (live) setSlot('ready') })
+      .catch((e) => { if (live) setSlot(e instanceof Error ? e.message : String(e)) })
+    return () => { live = false }
+  }, [step, purpose, srcDomain, tgtDomain])
 
   useEffect(() => {
     try {
@@ -796,6 +810,12 @@ const Wizard: React.FC = () => {
                       adminPassword={adminPassword}
                       configured={seedFromPicker}
                       accountId={seedAccountId} />
+        : slot === 'checking'
+          ? <LinearProgress data-testid="placing-migration" />
+          : slot !== 'ready'
+            ? <Alert severity="warning" data-testid="migration-limit">
+                {slot}. Nothing was set up, so the migration already here is untouched.
+              </Alert>
         : role === 'target'
           ? <MigrateWizard sourceDomain={otherDomain} targetDomain={domain}
                            adminEmail={targetEmail} adminPassword={targetPassword}

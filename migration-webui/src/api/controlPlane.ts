@@ -14,6 +14,7 @@
 // dashboard already loaded in a browser can be pointed at a different
 // tunnel/port without a rebuild -- see the "VPS Connection" panel in
 // Settings, which is the only place this setter is called from.
+import { chosenMigration } from './migration'
 import { coalesce } from './inflight'
 
 const CP_BASE_DEFAULT = import.meta.env.VITE_CP_BASE ?? 'http://localhost:8090'
@@ -24,7 +25,11 @@ export const setCpBase = (url: string) => {
   CP_BASE = url.replace(/\/+$/, '') || CP_BASE_DEFAULT
   localStorage.setItem('cp_base', CP_BASE)
 }
-const cpWs = () => CP_BASE.replace(/^http/, 'ws') + '/ws'
+// A websocket cannot carry a header, so the chosen migration rides in the query.
+const cpWs = () => {
+  const id = chosenMigration()
+  return CP_BASE.replace(/^http/, 'ws') + '/ws' + (id ? `?bp_migration=${encodeURIComponent(id)}` : '')
+}
 
 /** Set once at login. Sent on every request; the server resolves it to a
  *  role and records it against every action in operator_actions_log. */
@@ -117,6 +122,10 @@ export interface Account {
    *  somebody signed up with. */
   source_domain?: string | null
   target_domain?: string | null
+  /** The migration requests are about now: the one chosen, else this login's own. */
+  migration_id?: number | null
+  owner_id?: number | null
+  pair_limit?: number
 }
 
 export const signup = (email: string, password: string, name: string, plan = 'trial') =>
@@ -739,6 +748,8 @@ export interface MigrationRow {
   running: boolean
   jobs: string[]
   progress: MigrationProgress
+  /** The login that owns it; null when it is a login's own. */
+  ownerId?: number | null
 }
 
 export interface MigrationFailure {
@@ -844,6 +855,17 @@ export const startDelta = (
 export const fetchMigrationDetail = (accountId: number) =>
   cpFetch<MigrationDetail>(`/api/v2/migrations/${accountId}`)
 
+/** A new, empty migration owned by this login (refused at its provisioned limit). */
+export const openMigration = (name: string) =>
+  cpFetch<ActionResult & { accountId: number | null }>('/api/v2/migrations', {
+    method: 'POST',
+    body: JSON.stringify({ name, reason: `new migration: ${name}` }),
+  })
+export const setPairLimit = (accountId: number, limit: number) =>
+  cpFetch<ActionResult>(`/api/v2/admin/accounts/${accountId}/pair-limit`, {
+    method: 'POST',
+    body: JSON.stringify({ limit, reason: 'provisioned migrations' }),
+  })
 export const fetchMigrations = () =>
   cpFetch<{ migrations: MigrationRow[]; maxConcurrent: number; activeTotal: number }>(
     '/api/v2/migrations')

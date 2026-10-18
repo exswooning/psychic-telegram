@@ -14,15 +14,20 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import Wizard from './Wizard'
-import { looksLikeDomain, domainOf } from './Wizard.utils'
+import { chosenMigration } from '@/api/migration'
+import { looksLikeDomain, domainOf, placeMigration } from './Wizard.utils'
 
 const seedEnabled = vi.fn()
 const fullSetup = vi.fn()
 const setupStatus = vi.fn().mockResolvedValue({ running: false, result: null })
 const allDomains = vi.fn(() => Promise.resolve(
   { superadmin: true, domains: [] as import('@/api/controlPlane').ConfiguredDomain[] }))
+const migrations = vi.fn(() => Promise.resolve({ migrations: [] as import('@/api/controlPlane').MigrationRow[] }))
+const openMig = vi.fn()
 vi.mock('@/api/controlPlane', () => ({
   fetchMe: () => seedEnabled(),
+  fetchMigrations: () => migrations(),
+  openMigration: (...a: unknown[]) => openMig(...a),
   startFullSetup: (...a: unknown[]) => fullSetup(...a),
   fetchFullSetupStatus: (...a: unknown[]) => setupStatus(...a),
   // AuthenticatorCode renders beside the 2-Step banner. Every export a
@@ -859,5 +864,57 @@ describe('the setup reports itself while it runs', () => {
     fireEvent.click(await screen.findByTestId('purpose-seed'))
     fireEvent.click(screen.getByTestId('purpose-auto'))
     expect(await screen.findByTestId('setup-done')).toBeInTheDocument()
+  })
+})
+
+
+/** Live: setting up dharan.gov.np -> mdharan.com on the account holding
+ *  gorkhatweed.com -> s.sarafgloabalexim.com moved gorkhatweed's keys aside. */
+describe('where a pair is set up', () => {
+  const row = (accountId: number, sourceDomain: string, targetDomain: string) =>
+    ({ accountId, accountName: '', sourceDomain, targetDomain, running: false, jobs: [],
+       progress: {} as import('@/api/controlPlane').MigrationProgress })
+  beforeEach(() => {
+    // This Node shadows jsdom's localStorage with an undefined one.
+    const store = new Map<string, string>()
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => { store.set(k, String(v)) },
+      removeItem: (k: string) => { store.delete(k) },
+      clear: () => store.clear(),
+    })
+    openMig.mockReset()
+    seedEnabled.mockResolvedValue({ id: 3, seed_enabled: true, migration_id: 3 })
+  })
+
+  it('a different pair gets its own migration, never the one in hand', async () => {
+    migrations.mockResolvedValue({ migrations: [row(3, 'gorkhatweed.com', 's.sarafgloabalexim.com')] })
+    openMig.mockResolvedValue({ ok: true, accountId: 9, actionId: 1, detail: '' })
+    await placeMigration('dharan.gov.np', 'mdharan.com')
+    expect(openMig).toHaveBeenCalledWith('dharan.gov.np → mdharan.com')
+    expect(chosenMigration()).toBe('9')
+  })
+
+  it('the same pair goes back to its own', async () => {
+    migrations.mockResolvedValue({ migrations: [row(3, 'gorkhatweed.com', 's.sarafgloabalexim.com'),
+                                                row(9, 'dharan.gov.np', 'mdharan.com')] })
+    await placeMigration('dharan.gov.np', 'mdharan.com')
+    expect(openMig).not.toHaveBeenCalled()
+    expect(chosenMigration()).toBe('9')
+  })
+
+  it('a login with nothing set up uses its own', async () => {
+    migrations.mockResolvedValue({ migrations: [] })
+    await placeMigration('dharan.gov.np', '')
+    expect(openMig).not.toHaveBeenCalled()
+    expect(chosenMigration()).toBe('')
+  })
+
+  it('stops, and says why, at the login\'s limit -- touching nothing', async () => {
+    migrations.mockResolvedValue({ migrations: [row(3, 'gorkhatweed.com', 's.sarafgloabalexim.com')] })
+    openMig.mockResolvedValue({ ok: false, accountId: null, actionId: 1,
+                                detail: 'this login may hold 1 migration(s) and holds 1' })
+    await expect(placeMigration('dharan.gov.np', 'mdharan.com')).rejects.toThrow(/may hold 1/)
+    expect(chosenMigration()).toBe('')
   })
 })
