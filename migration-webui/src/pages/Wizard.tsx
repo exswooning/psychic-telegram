@@ -175,8 +175,10 @@ const AdminSignInStep: React.FC<{
    *  file, so it needs no password -- the password exists to make that key. */
   offerExisting?: boolean
   onBack?: () => void
+  /** Skip this sign-in; the run step leaves that side's card to fill in. */
+  later?: { label: string; onClick: () => void }
   onNext: (email: string, password: string, domain: string) => void
-}> = ({ heading, sub, aside, initialEmail = '', taken, offerExisting, onBack, onNext }) => {
+}> = ({ heading, sub, aside, initialEmail = '', taken, offerExisting, onBack, later, onNext }) => {
   const [email, setEmail] = useState(initialEmail)
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
@@ -303,6 +305,12 @@ const AdminSignInStep: React.FC<{
               onClick={() => onNext(email.trim(), password, domain)}>
         Continue
       </Button>
+      {later && (
+        <Button variant="text" sx={{ mt: 2.5, ml: 1 }} data-testid="creds-later"
+                onClick={later.onClick}>
+          {later.label}
+        </Button>
+      )}
     </WizardShell>
   )
 }
@@ -732,6 +740,10 @@ const Wizard: React.FC = () => {
                 copy itself is resumable — it can be stopped and picked up."
           note="The source credential is read-only, so a migration cannot alter the tenant it reads." />}
         onBack={() => setStep('purpose')}
+        later={{
+          label: role === 'target' ? 'Choose the source later' : 'Choose the destination later',
+          onClick: () => { setTargetEmail(''); setTargetPassword(''); setOtherDomain(''); setStep('run') },
+        }}
         onNext={(email, password, d) => {
           setTargetEmail(email)
           setTargetPassword(password)

@@ -337,6 +337,18 @@ describe('the first tenant set up as the destination', () => {
       expect(screen.getByTestId('qts-source')).toHaveTextContent('gorkhatweed.com admin@gorkhatweed.com'))
     expect(screen.getByTestId('qts-target')).toHaveTextContent('mdharan.com nestnepal@mdharan.com')
   })
+
+  it('can leave the source to choose later', async () => {
+    view()
+    await signIn('nestnepal@mdharan.com')
+    fireEvent.click(await screen.findByTestId('purpose-migrate'))
+    fireEvent.click(await screen.findByTestId('role-target'))
+    fireEvent.click(screen.getByTestId('purpose-next'))
+    fireEvent.click(await screen.findByRole('button', { name: /choose the source later/i }))
+    await waitFor(() =>
+      expect(screen.getByTestId('qts-target')).toHaveTextContent('mdharan.com nestnepal@mdharan.com'))
+    expect(screen.getByTestId('qts-source')).not.toHaveTextContent(/@/)
+  })
 })
 
 describe('going back', () => {
