@@ -53,7 +53,7 @@ const Services: React.FC<{ u: TallyUser }> = ({ u }) => {
 const UserRow: React.FC<{ u: TallyUser; selected: boolean; onSelect: (on: boolean) => void }> = ({ u, selected, onSelect }) => {
   const [open, setOpen] = useState(false)
   const v = VERDICT[u.verdict]
-  const hasDetail = Object.keys(u.services).length > 0 || u.worst.length > 0 || !!u.driveItems
+  const hasDetail = Object.keys(u.services).length > 0 || u.worst.length > 0 || !!u.driveItems || !!u.items
   const items = u.driveItems
   return (
     <>
@@ -92,6 +92,14 @@ const UserRow: React.FC<{ u: TallyUser; selected: boolean; onSelect: (on: boolea
                       (source {w.source.toLocaleString()}, skipped {w.skipped.toLocaleString()}, target {w.target.toLocaleString()})
                     </Typography>
                   ))}
+                {Object.entries(u.items ?? {}).map(([svc, x]) => (
+                  <Typography key={svc} variant="body2" data-testid={`each-${svc}-${u.user}`}>
+                    {svc}, item by item: {x.matched.toLocaleString()} of {x.compared.toLocaleString()} match
+                    {x.notMigrated ? `, ${x.notMigrated.toLocaleString()} never copied` : ''}
+                    {x.missingOnTarget ? `, ${x.missingOnTarget.toLocaleString()} missing on the target` : ''}
+                    {x.extraOnTarget ? `, ${x.extraOnTarget.toLocaleString()} on the target that were not copied there` : ''}
+                  </Typography>
+                ))}
                 {items && (
                   <Box sx={{ mt: 1 }} data-testid={`items-${u.user}`}>
                     <Typography variant="body2">

@@ -1792,15 +1792,20 @@ def tally_rollup(users, tallies: list[dict], deferred: dict[str, int] | None = N
     for u in users:
         t = by_user.get(u["source_email"])
         items = (t or {}).get("driveItems") or {}
+        # Every other service, item by item (tally.compare_services): a copy missing or
+        # never made is short, whatever the counts say; an extra on the target differs.
+        each = ((t or {}).get("items") or {}).values()
+        lost = any(x.get("notMigrated") or x.get("missingOnTarget") for x in each)
+        extra = any(x.get("extraOnTarget") for x in ((t or {}).get("items") or {}).values())
         if t is None:
             verdict = "NOT_TALLIED"
         elif t.get("countParity") is None:
             verdict = "UNKNOWN"
-        elif _counted(t.get("services") or {}, short=True) or t["countParity"] < 1.0:
+        elif _counted(t.get("services") or {}, short=True) or t["countParity"] < 1.0 or lost:
             verdict = ("OWED_TO_DMS" if _short_only_by_owed_mail(t, deferred.get(u["source_email"], 0))
                        else "SHORT")
         elif (_counted(t.get("services") or {}, short=False)
-              or items.get("differ") or items.get("missingOnTarget")):
+              or items.get("differ") or items.get("missingOnTarget") or extra):
             # Counts equal is not the same as every item matching: DIFFERS is a
             # copy that is there but not the same (name, size, checksum,
             # modifiedTime), a mapped item no longer there, or MORE on the target.
@@ -1811,7 +1816,8 @@ def tally_rollup(users, tallies: list[dict], deferred: dict[str, int] | None = N
         out_users.append({"user": u["source_email"], "target": u["target_email"], "status": u["status"],
                           "verdict": verdict, "countParity": (t or {}).get("countParity"),
                           "recordedAt": (t or {}).get("recordedAt"), "services": (t or {}).get("services") or {},
-                          "worst": (t or {}).get("worst") or [], "driveItems": items or None})
+                          "worst": (t or {}).get("worst") or [], "driveItems": items or None,
+                          "items": (t or {}).get("items") or None})
     return {"users": out_users, "totals": totals}
 
 

@@ -1793,6 +1793,10 @@ export interface TallyUser {
   worst: TallyWorst[]
   /** Every mapped Drive item compared with its copy (tally.compare_drive). */
   driveItems?: TallyDriveItems | null
+  /** Every other service, item by item against the ledger and the target. */
+  items?: Record<string, { compared: number; matched: number; notMigrated: number
+                           missingOnTarget: number; extraOnTarget: number
+                           examples: { id: string; why: string }[] }> | null
 }
 export interface TallyDriveItems {
   compared: number
