@@ -720,8 +720,10 @@ const Wizard: React.FC = () => {
   if (step === 'counterpart') {
     return (
       <AdminSignInStep
-        heading="Where is it going?"
-        sub={`${domain} is the source — it is read, never written. Sign in as a super admin of the tenant its data should land in.`}
+        heading={role === 'target' ? 'Where is it coming from?' : 'Where is it going?'}
+        sub={role === 'target'
+          ? `${domain} is the destination — it is written to. Sign in as a super admin of the tenant its data comes from; that one is only read.`
+          : `${domain} is the source — it is read, never written. Sign in as a super admin of the tenant its data should land in.`}
         initialEmail={targetEmail} taken={domain} offerExisting
         aside={<Aside art="migrate"
           title="Two tenants, one direction"
@@ -747,11 +749,12 @@ const Wizard: React.FC = () => {
                 onClick={() => setStep('domain')}>
           Change
         </Button>
-        <Chip size="small" variant="outlined" label={domain} />
+        <Chip size="small" variant="outlined"
+              label={purpose === 'migrate' && otherDomain && role === 'target' ? otherDomain : domain} />
         {purpose === 'migrate' && otherDomain && (
           <>
             <Typography variant="caption" color="text.secondary">into</Typography>
-            <Chip size="small" variant="outlined" label={otherDomain} />
+            <Chip size="small" variant="outlined" label={role === 'target' ? domain : otherDomain} />
           </>
         )}
       </Stack>
@@ -760,9 +763,13 @@ const Wizard: React.FC = () => {
                       adminPassword={adminPassword}
                       configured={seedFromPicker}
                       accountId={seedAccountId} />
-        : <MigrateWizard sourceDomain={domain} targetDomain={otherDomain}
-                         adminEmail={adminEmail} adminPassword={adminPassword}
-                         targetEmail={targetEmail} targetPassword={targetPassword} />}
+        : role === 'target'
+          ? <MigrateWizard sourceDomain={otherDomain} targetDomain={domain}
+                           adminEmail={targetEmail} adminPassword={targetPassword}
+                           targetEmail={adminEmail} targetPassword={adminPassword} />
+          : <MigrateWizard sourceDomain={domain} targetDomain={otherDomain}
+                           adminEmail={adminEmail} adminPassword={adminPassword}
+                           targetEmail={targetEmail} targetPassword={targetPassword} />}
     </Box>
   )
 }

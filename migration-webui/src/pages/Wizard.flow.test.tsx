@@ -323,6 +323,22 @@ describe('the destination can be a tenant already set up', () => {
   })
 })
 
+describe('the first tenant set up as the destination', () => {
+  it('asks where the data comes from, and hands each domain to its side', async () => {
+    view()
+    await signIn('nestnepal@mdharan.com')
+    fireEvent.click(await screen.findByTestId('purpose-migrate'))
+    fireEvent.click(await screen.findByTestId('role-target'))
+    fireEvent.click(screen.getByTestId('purpose-next'))
+    expect(await screen.findByRole('heading', { name: /where is it coming from/i })).toBeInTheDocument()
+    expect(screen.getByText(/mdharan\.com is the destination/)).toBeInTheDocument()
+    await enterDomain('gorkhatweed.com')
+    await waitFor(() =>
+      expect(screen.getByTestId('qts-source')).toHaveTextContent('gorkhatweed.com admin@gorkhatweed.com'))
+    expect(screen.getByTestId('qts-target')).toHaveTextContent('mdharan.com nestnepal@mdharan.com')
+  })
+})
+
 describe('going back', () => {
   it('can change the tenant after choosing a purpose', async () => {
     view()
