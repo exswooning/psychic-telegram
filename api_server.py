@@ -5449,8 +5449,19 @@ async def run_reports(account_id: int | None = None, op: Operator = Depends(oper
     aid = _reports_account(op, account_id)
     if not aid:
         return {"accountId": 0, "scope": "account", "reports": [], "error": "no account in context"}
+    def _this_pair() -> list[dict]:
+        # Only this account's CURRENT pair: a previous pair's reports (kept on disk) put
+        # "latest FAIL" over a pair that had not run yet.
+        from config import Settings
+        st = Settings(account_id=aid)
+        pair = ((st.source_domain or "").lower(), (st.target_domain or "").lower())
+        if not all(pair):
+            return run_report.list_reports(aid)
+        return [r for r in run_report.list_reports(aid)
+                if ((r.get("tenants") or {}).get("source") or "").lower() == pair[0]
+                and ((r.get("tenants") or {}).get("target") or "").lower() == pair[1]]
     return {"accountId": aid, "scope": "account",
-            "reports": await _off_loop(run_report.list_reports, aid), "error": ""}
+            "reports": await _off_loop(_this_pair), "error": ""}
 
 
 @app.post("/api/v2/reports/generate")

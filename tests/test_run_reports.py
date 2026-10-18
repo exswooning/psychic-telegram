@@ -486,3 +486,21 @@ class TestReportApi:
         assert made.status_code == 200, made.text
         assert made.json()["kind"] == "seed" and made.json()["id"].startswith("seed-")
         assert cp.get(f"/api/v2/reports/{made.json()['id']}/pdf", params={"audience": "claude"}).status_code == 200
+
+
+def test_an_account_lists_only_its_current_pairs_reports(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    import api_server
+    import config
+    import run_report
+    reps = [{"id": "a", "tenants": {"source": "old.com", "target": "t.com"}},
+            {"id": "b", "tenants": {"source": "gorkhatweed.com", "target": "t.com"}}]
+    monkeypatch.setattr(run_report, "list_reports", lambda aid: reps)
+    monkeypatch.setattr(config, "Settings", lambda **k: SimpleNamespace(
+        source_domain="gorkhatweed.com", target_domain="t.com"))
+    monkeypatch.setattr(api_server, "require_reader", lambda op: None, raising=False)
+    monkeypatch.setattr(api_server, "_account_in_context", lambda op: 3, raising=False)
+    op = SimpleNamespace(account_id=3, is_superadmin=False, name="x", role="admin")
+    out = asyncio.run(api_server.run_reports(account_id=3, op=op))
+    assert [r["id"] for r in out["reports"]] == ["b"], out
