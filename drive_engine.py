@@ -1084,13 +1084,27 @@ class DriveMigrator:
         if with_owners:
             fields += ",owners"
         token = None
+        owners_refused = False
         while True:
-            resp = self._retry(lambda t=token: self.src.files().list(
-                q=q, pageSize=LIST_PAGE_SIZE, pageToken=t, fields=fields,
-                spaces="drive", supportsAllDrives=True, **extra,
-            ).execute(), label="drive.files.list", write=False,
-                               tenant="source")
+            try:
+                resp = self._retry(lambda t=token, fl=fields: self.src.files().list(
+                    q=q, pageSize=LIST_PAGE_SIZE, pageToken=t, fields=fl,
+                    spaces="drive", supportsAllDrives=True, **extra,
+                ).execute(), label="drive.files.list", write=False,
+                                   tenant="source")
+            except Exception as exc:      # noqa: BLE001 - only the one refusal is handled
+                # A folder in a shared drive: its items have no owners, and Google
+                # refuses to list them when asked for that field (live, dharan.gov.np:
+                # "Invalid field selection owners" ended a user's whole external-share
+                # pass). Listed without it; each item is marked owner-unknown.
+                if not with_owners or owners_refused or "Invalid field selection owners" not in str(exc):
+                    raise
+                owners_refused = True
+                fields = f"nextPageToken, files({ITEM_FIELDS})"
+                continue
             for f in resp.get("files", []):
+                if owners_refused:
+                    f["_inSharedDrive"] = True
                 yield f
             token = resp.get("nextPageToken")
             if not token:
@@ -1160,6 +1174,16 @@ class DriveMigrator:
             if tgt_id is not None:
                 for child in self._list_children(item["id"], owned_only=False,
                                                  with_owners=True):
+                    if child.get("_inSharedDrive"):
+                        # Another organisation's shared drive: its content is theirs and
+                        # stays with them -- recorded, so it is never silently missing.
+                        self.db.log_audit(self.source_user, child["id"], "file",
+                                          "SKIPPED_OTHER_ORG_SHARED_DRIVE",
+                                          f"{child.get('name')}\nin another organisation's "
+                                          "shared drive, shared with this user -- it stays "
+                                          "there; share it with the new account to keep access")
+                        self._bump("skipped")
+                        continue
                     if self._owned_by_source_org(child):
                         continue
                     self._sync_shared_item(child, tgt_id, depth + 1)
