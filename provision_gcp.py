@@ -178,6 +178,19 @@ def detect_org(env: dict | None = None) -> str:
     return ids[0] if len(ids) == 1 else ""
 
 
+def _org_of_project(project: str, env: dict | None = None) -> str:
+    """The organization a project sits under, from its own ancestry ('' if none)."""
+    rc, out = run(["gcloud", "projects", "get-ancestors", project, "--format=value(id,type)"],
+                  env=env)
+    if rc != 0:
+        return ""
+    for ln in out.splitlines():
+        parts = ln.split()
+        if len(parts) == 2 and parts[1] == "organization":
+            return parts[0]
+    return ""
+
+
 def project_exists(project: str, env: dict | None = None) -> bool:
     rc, _ = run(["gcloud", "projects", "describe", project], env=env)
     return rc == 0
@@ -366,6 +379,11 @@ def relax_key_policy(project: str, steps: list[Step], dry_run: bool,
     # attempt unconditionally on every run. Runs first (and is itself
     # dry-run-aware) so the step count -- and so provision_side()'s own
     # `total` estimate -- stays right in both modes, not just the real one.
+    # The org a new project landed in is the org whose policy blocks its keys. Live:
+    # `organizations list` gave nothing usable for info@gorkhatweed.com, the self-grant
+    # was skipped ("no organization id known"), and the override was denied for want of
+    # the very role that grant gives.
+    org = org or (_org_of_project(project, env) if not dry_run else "")
     _self_grant_orgpolicy_admin(org, steps, dry_run, env=env)
 
     s = Step(f"allow SA keys on {project}")
@@ -626,10 +644,9 @@ def create_key(project: str, sa_email: str, dest: str, steps: list[Step],
     explained = _explain_key_create_failure(out.strip()[-250:])
     if retried:
         explained = (
-            f"Retried {len(backoffs) + 1} times over ~{sum(backoffs)}s after the org-policy "
-            f"override was applied -- Google's enforcement still hadn't caught up. "
-            f"{explained} It may just need more time than this run waited; "
-            "re-running often succeeds on its own once propagation finishes.")
+            f"Retried {len(backoffs) + 1} times over ~{sum(backoffs)}s. {explained} "
+            "If the 'allow SA keys' step above is ok, the override may still be "
+            "propagating and a re-run often succeeds; if it was refused, that is the cause.")
     s.status, s.detail = "failed", explained
     return False
 

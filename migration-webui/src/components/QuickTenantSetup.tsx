@@ -528,6 +528,9 @@ const QuickTenantSetup: React.FC<{
   }, [propagating, readinessKey, checkReadiness])
   const readyHere = !!readiness?.ready
     && readiness.domain === domain.trim().toLowerCase()
+  // What is on file changes when a setup run ends (a key moved aside, a new one made).
+  useEffect(() => { if (!status?.running) refreshTenantCfg() },
+    [status?.running, result?.ok, refreshTenantCfg])
   // A result is shown beside the domain it was for. One from before the domain was
   // recorded shows only if it succeeded: an old failure or interruption for some other
   // tenant read as this new pair's (two "interrupted" cards on a fresh setup).
@@ -958,7 +961,7 @@ const QuickTenantSetup: React.FC<{
             the Manual tab instead.
           </Typography>
 
-          {alreadyHere && !password ? (
+          {alreadyHere && readyHere && !password ? (
             <Alert severity="success" data-testid={`qts-${side}-ready`}
                    action={<Button size="small" onClick={() => setAuthDialogOpen(true)}>
                      Set it up again</Button>}>
@@ -991,7 +994,7 @@ const QuickTenantSetup: React.FC<{
             {domain.trim() && email.trim() ? `Continue as ${email.trim()}` : 'Sign in with Google'}
           </Button>
           )}
-          {domain.trim() && email.trim() && !(alreadyHere && !password) && (
+          {domain.trim() && email.trim() && !(alreadyHere && readyHere && !password) && (
             <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
               {handedOver
                 ? `${domain.trim()} — using the password from the previous step`

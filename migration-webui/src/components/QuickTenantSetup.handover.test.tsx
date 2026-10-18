@@ -57,10 +57,23 @@ describe('a tenant already set up in this slot', () => {
   it('says so instead of offering a sign-in', async () => {
     cfg.value = { side: 'target', domain: 'newco.com', adminEmail: 'info@newco.com',
                   hasKey: true, clientId: '1136', scopes: [] }
+    ready.value = { side: 'target', purpose: 'migrate', domain: 'newco.com', admin: 'info@newco.com',
+                    ready: true, checks: [{ name: 'delegation', ok: true, detail: 'all' }] }
     render(<MemoryRouter><QuickTenantSetup side="target" view="automated"
       initialDomain="newco.com" initialEmail="info@newco.com" /></MemoryRouter>)
     expect(await screen.findByTestId('qts-target-ready')).toHaveTextContent('already set up')
     expect(screen.queryByText(/Continue as/)).toBeNull()
+  })
+
+  it('does not claim it while readiness says Not ready (a key on file is not enough)', async () => {
+    cfg.value = { side: 'target', domain: 'newco.com', adminEmail: 'info@newco.com',
+                  hasKey: true, clientId: '1136', scopes: [] }
+    ready.value = { side: 'target', purpose: 'migrate', domain: 'newco.com', admin: 'info@newco.com',
+                    ready: false, checks: [{ name: 'delegation', ok: false, detail: 'refused' }] }
+    render(<MemoryRouter><QuickTenantSetup side="target" view="automated"
+      initialDomain="newco.com" initialEmail="info@newco.com" /></MemoryRouter>)
+    await screen.findByText(/Continue as info@newco.com/)
+    expect(screen.queryByTestId('qts-target-ready')).toBeNull()
   })
 })
 

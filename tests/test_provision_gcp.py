@@ -681,6 +681,8 @@ class TestRelaxKeyPolicyRetriesThroughApiEnablementPropagation:
                 if attempts["set_policy"] < 3:
                     return 1, "reason: SERVICE_DISABLED (orgpolicy.googleapis.com)"
                 return 0, ""
+            if "get-ancestors" in argv:
+                return 1, ""             # no org found: the self-grant is skipped
             raise AssertionError(f"unexpected call: {argv}")
 
         monkeypatch.setattr(pg, "run", fake_run)
@@ -707,6 +709,8 @@ class TestRelaxKeyPolicyRetriesThroughApiEnablementPropagation:
             if "org-policies" in argv:
                 attempts["set_policy"] += 1
                 return 1, "ERROR: policy file malformed"
+            if "get-ancestors" in argv:
+                return 1, ""             # no org found: the self-grant is skipped
             raise AssertionError(f"unexpected call: {argv}")
 
         monkeypatch.setattr(pg, "run", fake_run)
@@ -771,6 +775,8 @@ class TestSelfGrantOrgpolicyAdmin:
                 assert "--member=user:info@target.rohitrokaya.com.np" in argv
                 assert "--role=roles/orgpolicy.policyAdmin" in argv
                 return 0, "updated"
+            if "get-ancestors" in argv:
+                return 1, ""             # no org found: the self-grant is skipped
             raise AssertionError(f"unexpected call: {argv}")
 
         monkeypatch.setattr(pg, "run", fake_run)
@@ -788,6 +794,8 @@ class TestSelfGrantOrgpolicyAdmin:
                 return 0, "someone@example.com\n"
             if "add-iam-policy-binding" in argv:
                 return 1, "ERROR: PERMISSION_DENIED: caller lacks permission"
+            if "get-ancestors" in argv:
+                return 1, ""             # no org found: the self-grant is skipped
             raise AssertionError(f"unexpected call: {argv}")
 
         monkeypatch.setattr(pg, "run", fake_run)
@@ -813,6 +821,8 @@ class TestSelfGrantOrgpolicyAdmin:
                 return 0, "already-has-it@example.com\n"
             if "add-iam-policy-binding" in argv:
                 return 0, "updated"  # gcloud's own idempotent behaviour
+            if "get-ancestors" in argv:
+                return 1, ""             # no org found: the self-grant is skipped
             raise AssertionError(f"unexpected call: {argv}")
 
         monkeypatch.setattr(pg, "run", fake_run)
@@ -839,6 +849,8 @@ class TestRelaxKeyPolicyAttemptsSelfGrantFirst:
             if "org-policies" in argv:
                 call_order.append("set-policy")
                 return 0, ""
+            if "get-ancestors" in argv:
+                return 1, ""             # no org found: the self-grant is skipped
             raise AssertionError(f"unexpected call: {argv}")
 
         monkeypatch.setattr(pg, "run", fake_run)
