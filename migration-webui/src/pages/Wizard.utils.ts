@@ -33,6 +33,13 @@ export async function placeMigration(src: string, tgt: string): Promise<void> {
   const clash = !!cur && ((!!cur.sourceDomain && !!src && cur.sourceDomain !== src)
                           || (!!cur.targetDomain && !!tgt && cur.targetDomain !== tgt))
   if (!clash) return
+  // An empty one this login already opened: a setup that failed leaves its migration
+  // without domains, and trying again must not open another beside it.
+  const empty = migrations.find((m) => m.ownerId === me.id && !m.sourceDomain && !m.targetDomain)
+  if (empty) {
+    chooseMigration(empty.accountId)
+    return
+  }
   const made = await openMigration(`${src || 'source to choose'} → ${tgt || 'destination to choose'}`)
   if (!made.ok || made.accountId == null) throw new Error(made.detail || 'could not open a new migration')
   chooseMigration(made.accountId)
