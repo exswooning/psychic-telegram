@@ -428,7 +428,7 @@ const QuickTenantSetup: React.FC<{
   // unnecessary browser-based DWD sign-in for something that needs neither
   // a browser nor a password.
   const [postAction, setPostAction] = useState<
-    'seed' | 'provision' | 'maxUsers' | 'mapUsers' | null>(null)
+    'seed' | 'provision' | 'maxUsers' | 'mapUsers' | 'mapOnly' | null>(null)
   const [postBusy, setPostBusy] = useState(false)
   const [postError, setPostError] = useState<string | null>(null)
   const [postDone, setPostDone] = useState<string | null>(null)
@@ -796,6 +796,13 @@ const QuickTenantSetup: React.FC<{
         await buildIdentityMap(reason, true)
         setPostDone('mapping users from the source directory, then creating '
                     + 'the ones that do not exist yet')
+        fetchIdentityMapStatus().then(setIdentityStatus).catch(() => {})
+      } else if (postAction === 'mapOnly') {
+        // Pairs every user, creates no account: a run creates the accounts IT needs
+        // (main._ensure_run_accounts) -- so a 3-user pilot makes 3 accounts, not 45.
+        identityRunningRef.current = true
+        await buildIdentityMap(reason, true)
+        setPostDone('mapping users -- accounts are created by the migration, only for the users it moves')
         fetchIdentityMapStatus().then(setIdentityStatus).catch(() => {})
       } else if (postAction === 'provision') {
         await startProvision(reason, 'target', false)
@@ -1382,6 +1389,11 @@ const QuickTenantSetup: React.FC<{
                     onClick={() => setPostAction('mapUsers')}>
               {identityStatus?.running ? 'Mapping…' : 'Map & create users from source'}
             </Button>
+            <Button variant="text" disabled={postBusy || identityStatus?.running}
+                    data-testid="map-users-only"
+                    onClick={() => setPostAction('mapOnly')}>
+              Map users only
+            </Button>
             <Typography variant="caption" color="text.secondary"
                         data-testid="identity-count">
               {identityStatus
@@ -1506,6 +1518,7 @@ const QuickTenantSetup: React.FC<{
         title={
           postAction === 'seed' ? `Seed ${domain || 'the source tenant'}`
           : postAction === 'maxUsers' ? `Add max users to ${domain || 'the source tenant'}`
+          : postAction === 'mapOnly' ? 'Map users (no accounts created)'
           : 'Provision target accounts'
         }
         description={
