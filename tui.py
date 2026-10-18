@@ -137,11 +137,19 @@ class UserRow:
         return self.exp_drive + self.exp_mail
 
     @property
+    def reached(self) -> int:
+        """Items reached (copied, failed or skipped) of the services discovery
+        expected, each capped at its own expectation. `done` also counts calendar,
+        which nothing expected -- live, a run read 111% with an ETA of -49s."""
+        return (min(self.drive_done + self.drive_failed + self.drive_skipped, self.exp_drive)
+                + min(self.mail_done + self.mail_failed + self.mail_skipped, self.exp_mail))
+
+    @property
     def fraction(self) -> Optional[float]:
         """None when discovery has not run, so the UI can say so honestly."""
         if self.expected <= 0:
             return None
-        return min(1.0, self.done / self.expected)
+        return min(1.0, self.reached / self.expected)
 
 
 @dataclass
@@ -267,7 +275,7 @@ def collect_snapshot(conn: sqlite3.Connection, cap_bytes: int,
         "cap_gb_per_user": cap_gb_per_user,
         "cap_gb_total": cap_gb_per_user * max(1, len(snap.users)),
         "worst_user_quota_frac": min(1.0, worst),
-        "fraction": (done / expected) if expected > 0 else None,
+        "fraction": (sum(u.reached for u in snap.users) / expected) if expected > 0 else None,
     }
     return snap
 
