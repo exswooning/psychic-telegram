@@ -270,18 +270,24 @@ GROUP_WRITE_SCOPE = "https://www.googleapis.com/auth/admin.directory.group"
 
 
 def _drive_sdk_off(key_path: str, admin: str) -> bool:
-    """Drive refuses this tenant's apps outright (its Drive SDK setting is off). Anything
-    else -- a pass, or another error -- is not this, and is left to readiness to report."""
-    try:
-        from google.oauth2 import service_account
-        from googleapiclient.discovery import build
-        creds = service_account.Credentials.from_service_account_file(
-            key_path, scopes=["https://www.googleapis.com/auth/drive"]).with_subject(admin)
-        build("drive", "v3", credentials=creds, cache_discovery=False).about().get(
-            fields="user(emailAddress)").execute()
-        return False
-    except Exception as exc:      # noqa: BLE001
-        return "disabled Drive apps" in str(exc)
+    """Drive refuses this tenant's apps outright (its Drive SDK setting is off). Asked
+    with each Drive scope a grant may hold -- a government source holds only
+    drive.readonly, a target only `drive`; asking for one it lacks answers
+    "unauthorized_client", which is not this (live: dharan.gov.np's SDK was left off).
+    Anything other than that refusal is left to readiness to report."""
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+    for scope in ("drive.readonly", "drive"):
+        try:
+            creds = service_account.Credentials.from_service_account_file(
+                key_path, scopes=[f"https://www.googleapis.com/auth/{scope}"]).with_subject(admin)
+            build("drive", "v3", credentials=creds, cache_discovery=False).about().get(
+                fields="user(emailAddress)").execute()
+            return False
+        except Exception as exc:      # noqa: BLE001
+            if "disabled Drive apps" in str(exc):
+                return True
+    return False
 
 
 def _creation_refused(result: dict) -> bool:
