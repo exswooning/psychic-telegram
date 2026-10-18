@@ -255,6 +255,9 @@ def _ensure_display() -> str:
     """
     global _XVFB
 
+    # macOS draws windows natively: no X server, and no DISPLAY to look for.
+    if sys.platform == "darwin":
+        return "macos"
     if os.environ.get("DISPLAY"):
         return os.environ["DISPLAY"]
     if not sys.platform.startswith("linux"):
