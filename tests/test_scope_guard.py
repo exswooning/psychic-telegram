@@ -670,6 +670,7 @@ class TestMissingBrowserIsNotBlamedOnTwoFactor:
         import dwd_helper
 
         monkeypatch.delenv("DISPLAY", raising=False)
+        monkeypatch.setattr(dwd_helper.sys, "platform", "linux")   # the VPS, not a Mac
         monkeypatch.setattr(dwd_helper, "_ensure_display", lambda: "")
         with pytest.raises(dwd_helper.NoBrowserAvailable) as err:
             dwd_helper._installed_browser_launch(self._fake_p(tmp_path),

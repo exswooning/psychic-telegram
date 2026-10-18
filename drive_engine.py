@@ -1487,6 +1487,10 @@ class DriveMigrator:
                  ("download_upload", native_or_binary)]
         if self.settings.transfer_mode == "download_upload":
             order.reverse()
+        if getattr(self.settings, "source_read_only", False):
+            # A government source: not even an attempt at a copy made AS the source
+            # user -- its credential holds no Drive write scope (config.__post_init__).
+            order = [o for o in order if o[0] != "server_side"]
         # native_api LAST, and only for native files.
         #
         # Last because it rebuilds a document rather than moving one: it is

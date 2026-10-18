@@ -33,6 +33,8 @@ def box(tmp_path):
     (bindir / "ssh").write_text(
         '#!/usr/bin/env bash\nlast="${@: -1}"\n'
         'if [[ "$last" == *repair_runs* ]]; then bash -c "$last"; exit 0; fi\n'
+        # No restart left unfinished by an earlier deploy (sync_vps.sh RESTART_PENDING).
+        'if [[ "$*" == *"test -f"*"RESTART_PENDING"* ]]; then exit 1; fi\n'
         'echo "ssh: $*" >> "$FAKE_LOG"; exit 0\n')
     for f in bindir.iterdir():
         f.chmod(f.stat().st_mode | stat.S_IEXEC)

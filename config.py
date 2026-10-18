@@ -646,6 +646,8 @@ class Settings:
     shared_drive_workers: int = field(
         default_factory=lambda: int(os.getenv("SHARED_DRIVE_WORKERS", "0")) or 2
     )
+    # Set by __post_init__ for a government source: reads only, enforced by Google.
+    source_read_only: bool = False
     transfer_mode: str = field(
         default_factory=lambda: os.getenv("TRANSFER_MODE", "server_side")
     )
@@ -921,6 +923,14 @@ class Settings:
     def __post_init__(self) -> None:
         if self.account_id is not None:
             self._load_account_tenant_config()
+        # A government source is only ever READ, and Google enforces it: no Drive write
+        # scope is asked for (server-side copy needs one), so every file goes by
+        # download_upload whatever a launch asked for. Bitport's own guard
+        # (auth.ReadOnlyDrive) stays, but no longer has to be the thing that holds.
+        import domain_guard
+        if domain_guard.is_government(self.source_domain or ""):
+            self.source_read_only = True
+            self.transfer_mode = "download_upload"
         # An unrecognised transfer mode used to be accepted and silently behave
         # as download_upload, because every check was `== "server_side"`. So a
         # typo, or a mode that is documented but not yet wired, quietly

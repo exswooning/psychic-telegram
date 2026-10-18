@@ -139,10 +139,17 @@ def check(settings, side: str, purpose: str, *, gate: bool = False) -> dict:
     if side == "source" and not seed:
         try:
             import separate_credentials
-            writes = sorted(set(separate_credentials.seed_scopes()) - set(want))
+            strict = getattr(settings, "source_read_only", False)
+            # A government source is read-only by Google's own refusal, Drive included:
+            # its key must not be able to write ANYTHING, not just what the seeder writes.
+            from config import DRIVE_WRITE_SCOPE
+            writes = sorted((set(separate_credentials.seed_scopes())
+                             | ({DRIVE_WRITE_SCOPE} if strict else set())) - set(want))
             holds = [s.rsplit("/", 1)[-1] for s in writes if verify_scopes.probe_scope(key, admin, s)[0]]
             rows.append(_row("read-only", not holds,
-                             f"all {len(writes)} seed write scopes refused" if not holds
+                             (f"all {len(writes)} write scopes refused by Google, Drive included"
+                              if strict else f"all {len(writes)} seed write scopes refused")
+                             if not holds
                              else "this key can still WRITE to the source: " + ", ".join(holds)))
         except Exception as exc:      # noqa: BLE001 - unknown, so not ready
             rows.append(_row("read-only", None, f"could not check: {exc}"))

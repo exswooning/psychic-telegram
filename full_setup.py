@@ -82,6 +82,7 @@ import dwd_helper           # noqa: E402
 import gcloud_browser_auth  # noqa: E402
 import provision_gcp        # noqa: E402
 import verify_scopes        # noqa: E402
+from config import DRIVE_WRITE_SCOPE  # noqa: E402
 from config import Settings  # noqa: E402
 
 
@@ -842,7 +843,13 @@ def run_full_setup(
     already_granted = False
     try:
         import scope_guard
-        if scope_guard.is_complete(_vs, side, scopes.split(",")):
+        # A government source's grant wider than read-only (dharan.gov.np's held
+        # `drive`) is rewritten, not taken as done.
+        too_wide = (side == "source" and getattr(_vs, "source_read_only", False)
+                    and scope_guard.is_complete(_vs, side, [DRIVE_WRITE_SCOPE]))
+        if too_wide:
+            log("  the source grant still lets Drive write -- rewriting it read-only")
+        elif scope_guard.is_complete(_vs, side, scopes.split(",")):
             already_granted = True
             p.status = "ok"
             p.detail = ("already granted -- every required scope minted in "

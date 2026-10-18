@@ -256,9 +256,6 @@ def _ensure_display() -> str:
     """
     global _XVFB
 
-    # macOS draws windows natively: no X server, and no DISPLAY to look for.
-    if sys.platform == "darwin":
-        return "macos"
     if os.environ.get("DISPLAY"):
         return os.environ["DISPLAY"]
     if not sys.platform.startswith("linux"):
@@ -354,7 +351,9 @@ def _installed_browser_launch(p, headful: bool):
     """
     import shutil
 
-    if headful and not _ensure_display():
+    # macOS draws windows natively: no X server to need (live: setup run from a Mac
+    # refused here, "no X display and no Xvfb").
+    if headful and sys.platform != "darwin" and not _ensure_display():
         raise NoBrowserAvailable(
             "this host has no X display and no Xvfb to start one, so a "
             "headed browser cannot run. The sign-in must be headed (Google "
