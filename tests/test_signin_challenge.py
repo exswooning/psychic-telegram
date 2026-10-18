@@ -232,3 +232,25 @@ def test_a_refused_password_is_named_not_waited_on():
     assert refused("Couldn’t find your Google Account")
     assert refused("Check your phone\nGoogle sent a notification to your Pixel") == ""
     assert describe(page) == ""
+
+
+def test_a_challenge_left_up_is_handed_off_only_when_a_caller_asked(monkeypatch):
+    import signin_challenge as sc
+
+    class _Pg:
+        def inner_text(self, _sel):
+            return "Verify it’s you\nEnter a phone number to get a text message with a verification code."
+    clock = [1000.0]
+    monkeypatch.setattr(sc.time, "time", lambda: clock[0])
+    w = sc.Watcher(lambda _m: None)
+    w.check([_Pg()])
+    clock[0] += 3600
+    assert not w.should_hand_off()          # nobody set HANDOFF_AFTER: wait, as before
+    monkeypatch.setattr(sc, "HANDOFF_AFTER", 45)
+    w2 = sc.Watcher(lambda _m: None)
+    w2.check([_Pg()])
+    clock[0] += 30
+    w2.check([_Pg()])
+    assert not w2.should_hand_off()
+    clock[0] += 20
+    assert w2.should_hand_off()

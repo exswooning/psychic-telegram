@@ -641,6 +641,10 @@ export interface FullSetupStatus {
    *  can be seen; without it the phase just sits there until it times out
    *  and reports "likely 2FA" as a guess. Null when nothing is asking. */
   challenge?: string | null
+  /** Google kept challenging the server's browser, so this sign-in is finished on the
+   *  operator's own device: open `url` there (and, for `signin`, paste back the code
+   *  Google shows). Null when the server is doing it itself. */
+  handoff?: { kind: 'signin' | 'dwd'; url: string; clientId?: string; scopes?: string } | null
 }
 
 /**
@@ -655,6 +659,12 @@ export interface FullSetupStatus {
  * serialization at the type level specifically so no future write endpoint
  * can forget and log it in plaintext).
  */
+/** The code Google showed after a sign-in finished on this device, for the setup waiting on it. */
+export const sendFullSetupCode = (side: 'source' | 'target', code: string) =>
+  cpFetch<ActionResult>('/api/v2/full-setup/code', {
+    method: 'POST',
+    body: JSON.stringify({ side, code, reason: 'signed in on own device' }),
+  })
 /** Kill a side's running setup (and the browser it drives) so it can be started again. */
 export const stopFullSetup = (side: 'source' | 'target') =>
   cpFetch<ActionResult>('/api/v2/full-setup/stop', {

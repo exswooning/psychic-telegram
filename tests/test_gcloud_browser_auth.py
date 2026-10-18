@@ -629,3 +629,31 @@ class TestFillChatAppForm:
 
         assert ok is True
         assert page.save_button.clicked is True
+
+
+def test_a_handed_over_sign_in_takes_the_code_pasted_on_the_card(monkeypatch, tmp_path):
+    """Live: Google asked the server's browser for a phone number. The same gcloud
+    sign-in is finished on the operator's device; the code they paste reaches gcloud."""
+    import io
+
+    import gcloud_browser_auth as g
+
+    code_file = tmp_path / "progress.code"
+    seen = []
+
+    class _Proc:
+        stdin = io.StringIO()
+        def poll(self):
+            return 0 if self.stdin.getvalue() else None
+    monkeypatch.setattr(g, "HANDOFF", seen.append)
+    monkeypatch.setattr(g, "CODE_FILE", str(code_file))
+    pasted = []
+    def _sleep(_s):     # the operator pastes once, a second into the wait
+        if not pasted:
+            pasted.append(code_file.write_text("4/0AbC-d_e\n"))
+    monkeypatch.setattr(g.time, "sleep", _sleep)
+    proc = _Proc()
+    g._await_device(proc, "https://accounts.google.com/o/oauth2/auth?x", 60)
+    assert proc.stdin.getvalue() == "4/0AbC-d_e\n"
+    assert seen == [{"kind": "signin", "url": "https://accounts.google.com/o/oauth2/auth?x"}, None]
+    assert not code_file.exists()

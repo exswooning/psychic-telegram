@@ -281,6 +281,40 @@ class TestDwdCrashIsRecoveredNotFatal:
         assert "crashed unexpectedly" in dwd_phase["detail"]
         assert "30000ms" in dwd_phase["detail"]
 
+    def test_a_challenged_grant_is_finished_on_the_operators_device(self, monkeypatch, tmp_path):
+        """Live: Google asked the server's browser for a phone number. The grant is
+        handed to the operator's own browser as a pre-filled link, and setup carries
+        on by itself once the scopes mint."""
+        self._common(monkeypatch)
+        import scope_guard
+        for mod, name, val in ((fs.signin_challenge, "HANDOFF_AFTER", None),
+                               (fs.gcloud_browser_auth, "HANDOFF", None),
+                               (fs.gcloud_browser_auth, "CODE_FILE", "")):
+            monkeypatch.setattr(mod, name, val)   # restored after: run_full_setup sets them
+        monkeypatch.setattr(fs.dwd_helper, "run", lambda *a, **k: 1)
+        monkeypatch.setattr(fs.time, "sleep", lambda _s: None)
+        prog = str(tmp_path / "setup.progress")
+        published = []
+
+        def is_complete(_vs, _side, _scopes):
+            try:
+                with open(prog) as fh:
+                    h = json.load(fh).get("handoff")
+            except (OSError, ValueError):
+                h = None
+            if h:
+                published.append(h)
+            return bool(h and h["kind"] == "dwd")
+        monkeypatch.setattr(scope_guard, "is_complete", is_complete)
+
+        res = fs.run_full_setup("source", "c.example.com", "admin@c.example.com", "pw",
+                                progress_file=prog)
+
+        assert res["ok"] is True, res
+        assert published and f"clientIdToAdd={published[0]['clientId']}&" in published[0]["url"]
+        with open(prog) as fh:
+            assert json.load(fh)["handoff"] is None
+
     def test_the_password_is_still_cleaned_up_after_a_crash(self, monkeypatch):
         """The whole point of the try/finally this sits inside -- a crash
         must not be a way to accidentally leave the password sitting in

@@ -48,6 +48,7 @@ import logging
 
 import os
 import re
+from typing import Callable  # noqa: F401 - in a string annotation
 import shutil
 import subprocess
 import sys
@@ -64,6 +65,13 @@ def log(msg: str) -> None:
     # progress lines, making the whole thing unparseable.
     print(f"[gcloud-auth] {msg}", file=sys.stderr, flush=True)
 
+
+# Set by full_setup. HANDOFF publishes a sign-in for the operator to finish on their
+# own device ({"kind": "signin", "url": ...}, None when done); the code Google then
+# shows them is pasted on the setup card and lands in CODE_FILE.
+HANDOFF: "Callable[[dict | None], None] | None" = None
+CODE_FILE = ""
+_HANDED_OVER = "\0handed-over"
 
 _AUTH_URL_RE = re.compile(r"https://accounts\.google\.com/o/oauth2/auth\S+")
 
@@ -123,6 +131,11 @@ def login(email: str, password: str, timeout: int = 180) -> tuple[bool, str, str
 
     log(f"driving browser sign-in for {email}")
     no = _drive_browser(proc, url, email, password, timeout)
+    if no == _HANDED_OVER:
+        _await_device(proc, url, timeout)
+        if proc.poll() is None:
+            proc.kill()
+        no = ""
     if no:
         proc.kill()
         shutil.rmtree(cloudsdk_config, ignore_errors=True)
@@ -232,6 +245,27 @@ def _fill_visible(pg, selector: str, value: str) -> bool:
     return False
 
 
+def _await_device(proc, url: str, timeout: int) -> None:
+    """The same gcloud sign-in, finished on the operator's device: they open `url`
+    where they are already signed in, Google shows them a code, they paste it on the
+    setup card, and it is handed to the gcloud still waiting for it here."""
+    HANDOFF({"kind": "signin", "url": url})
+    deadline = time.time() + timeout
+    try:
+        while time.time() < deadline and proc.poll() is None:
+            if CODE_FILE and os.path.exists(CODE_FILE):
+                with open(CODE_FILE, encoding="utf-8") as fh:
+                    code = fh.read().strip()
+                os.remove(CODE_FILE)
+                if code:
+                    proc.stdin.write(code + "\n")
+                    proc.stdin.flush()
+                    log("  handed the operator's code to gcloud")
+            time.sleep(1)
+    finally:
+        HANDOFF(None)
+
+
 def _drive_browser(proc, url: str, email: str, password: str, timeout: int) -> str:
     """Types email/password, clicks through gcloud's own OAuth consent
     screen, then just watches `proc` -- the local `gcloud auth login`
@@ -288,6 +322,10 @@ def _drive_browser(proc, url: str, email: str, password: str, timeout: int) -> s
                     logging.getLogger(__name__).debug("ignored an error", exc_info=True)
                     continue
             challenge.check(browser.contexts[0].pages)
+            if HANDOFF is not None and challenge.should_hand_off():
+                log("  handing this sign-in to the operator's own device")
+                browser.close()
+                return _HANDED_OVER
             for pg in browser.contexts[0].pages:
                 try:
                     no = signin_challenge.refused(pg.inner_text("body"))

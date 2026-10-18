@@ -919,6 +919,22 @@ class TestFullSetup:
         assert body["running"] is False
         assert body["result"]["interrupted"] and body["result"]["domain"] == "d.example.com"
 
+    def test_a_code_from_the_operators_device_reaches_the_running_setup(
+            self, monkeypatch, tmp_path, cp):
+        import api_server
+        monkeypatch.setattr(api_server, "HERE", str(tmp_path))
+        monkeypatch.setattr(api_server, "_full_setup_pid", lambda side, aid: 4321)
+        r = cp.post("/api/v2/full-setup/code",
+                    json={"reason": "own device", "side": "source", "code": "4/0AbC-d_e"},
+                    headers=ADMIN)
+        assert r.status_code == 200, r.text
+        path = api_server._full_setup_state_path("source", None) + ".progress.code"
+        assert open(path).read() == "4/0AbC-d_e"
+        assert oct(os.stat(path).st_mode & 0o777) == "0o600"
+        bad = cp.post("/api/v2/full-setup/code",
+                      json={"reason": "x", "side": "source", "code": "a b\nrm"}, headers=ADMIN)
+        assert bad.status_code == 422
+
     def test_stop_with_nothing_running_kills_nothing(self, monkeypatch, cp):
         import api_server
         monkeypatch.setattr(api_server.subprocess, "run",

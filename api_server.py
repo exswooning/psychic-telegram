@@ -3938,6 +3938,32 @@ async def full_setup_stop(body: StopFullSetup, op: Operator = Depends(operator))
     return await _gated(op, "full_setup.stop", body, body.side, _stop)
 
 
+class FullSetupCode(WriteAction):
+    account_id: int | None = None
+    side: Literal["source", "target"]
+    # exclude=True: kept out of the audit log like a password -- it signs gcloud in.
+    code: str = Field(min_length=4, max_length=512, pattern=r"^[A-Za-z0-9/_.~+=-]+$",
+                      exclude=True)
+
+
+@app.post("/api/v2/full-setup/code")
+async def full_setup_code(body: FullSetupCode, op: Operator = Depends(operator)):
+    """The code Google showed the operator after they signed in on their own device,
+    for the setup's gcloud waiting on it (gcloud_browser_auth._await_device)."""
+    require_admin(op)
+    aid = _resolve_account(body, op)
+
+    def _hand() -> tuple[bool, str]:
+        if _full_setup_pid(body.side, aid) is None:
+            return False, f"no {body.side} setup is running"
+        path = _full_setup_state_path(body.side, aid) + ".progress.code"
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(body.code.strip())
+        return True, f"code handed to the {body.side} setup"
+    return await _gated(op, "full_setup.code", body, body.side, _hand)
+
+
 @app.get("/api/v2/full-setup/status")
 async def full_setup_status(side: str, account: int | None = None,
                             op: Operator = Depends(operator)):
@@ -3985,7 +4011,7 @@ async def full_setup_status(side: str, account: int | None = None,
         if result is not None and not result.get("domain"):
             result = {**result, "domain": launched_for}
 
-        progress_pct = progress_label = challenge = None
+        progress_pct = progress_label = challenge = handoff = None
         if running:
             # Only meaningful while something is actually running -- once
             # it isn't, this is the last checkpoint a (possibly crashed)
@@ -4000,6 +4026,8 @@ async def full_setup_status(side: str, account: int | None = None,
                 # seen -- without it the phase just sits there until it
                 # times out and reports "likely 2FA".
                 challenge = prog.get("challenge") or None
+                # A sign-in moved to the operator's own device: what to open there.
+                handoff = prog.get("handoff") or None
             except (OSError, ValueError):
                 pass
         # `{"running": true}` in the state file, specifically -- not merely
@@ -4060,7 +4088,7 @@ async def full_setup_status(side: str, account: int | None = None,
                 }]}
         return {"running": running, "pid": pid, "result": result,
                 "progressPct": progress_pct, "progressLabel": progress_label,
-                "challenge": challenge,
+                "challenge": challenge, "handoff": handoff,
                 "resultAt": result_at}
     return await _off_loop(_read)
 

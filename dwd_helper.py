@@ -543,6 +543,11 @@ def _open_dwd_console(p, headful: bool, timeout: int, url: str = DWD_URL,
         # A 2-Step prompt is rendered to an Xvfb display nobody is looking
         # at. Reading it into the transcript is what puts it on the screen.
         challenge.check(browser.contexts[0].pages)
+        if challenge.should_hand_off():
+            # The caller finishes this on the operator's own device instead.
+            log("  handing this sign-in to the operator's own device")
+            browser.close()
+            return None
         if admin_page is not None:
             page = admin_page
             if not page.url.startswith(ready_prefix):

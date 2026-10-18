@@ -302,6 +302,8 @@ def run_full_setup(
     # several frames down inside dwd_helper/gcloud_browser_auth, and none of
     # the phases in between know or care that a phone is buzzing.
     _challenge = {"text": ""}
+    # A sign-in moved to the operator's own device (see _on_handoff below).
+    _handoff: dict = {"v": None, "used": False}
     _last_pct, _last_label = {"v": 0}, {"v": ""}
 
     def _progress(pct: int, label: str) -> None:
@@ -312,7 +314,8 @@ def run_full_setup(
             tmp = progress_file + ".tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump({"pct": pct, "label": label,
-                           "challenge": _challenge["text"]}, fh)
+                           "challenge": _challenge["text"],
+                           "handoff": _handoff["v"]}, fh)
             os.replace(tmp, progress_file)
         except OSError:
             pass
@@ -328,6 +331,42 @@ def run_full_setup(
         _progress(_last_pct["v"], _last_label["v"])
 
     signin_challenge.REPORTER = _on_challenge
+
+    def _on_handoff(h: dict | None) -> None:
+        """Google keeps challenging the server's browser (live: it asked it for a phone
+        number), so the sign-in is finished where the admin already is signed in."""
+        _handoff["v"] = h
+        _handoff["used"] = _handoff["used"] or h is not None
+        _challenge["text"] = ""
+        _progress(_last_pct["v"], _last_label["v"])
+
+    if progress_file:
+        signin_challenge.HANDOFF_AFTER = 45
+        gcloud_browser_auth.HANDOFF = _on_handoff
+        gcloud_browser_auth.CODE_FILE = progress_file + ".code"
+
+    def _grant_on_device(client_id: str, scopes: str, required: list[str]) -> bool:
+        """Delegation, authorised on the operator's device from a pre-filled Admin
+        console link; done when every required scope mints, as verification asks."""
+        import urllib.parse
+        import scope_guard
+        _on_handoff({"kind": "dwd", "clientId": client_id, "scopes": scopes,
+                     "url": "https://admin.google.com/ac/owl/domainwidedelegation?"
+                            + urllib.parse.urlencode({"overwriteClientId": "true",
+                                                      "clientIdToAdd": client_id,
+                                                      "clientScopeToAdd": scopes})})
+        try:
+            deadline = time.time() + 30 * 60
+            while time.time() < deadline:
+                try:
+                    if scope_guard.is_complete(_vs, side, required):
+                        return True
+                except Exception:      # noqa: BLE001 - not granted yet reads as an error
+                    pass
+                time.sleep(20)
+            return False
+        finally:
+            _on_handoff(None)
 
     phases: list[Phase] = []
     _progress(2, "starting")
@@ -742,7 +781,9 @@ def run_full_setup(
         # to know whether Authorize was accepted.
         crash_detail = None
         try:
-            rc = dwd_helper.run(client_id, scopes, timeout, headful=True)
+            # Already challenged once on this server: straight to the device.
+            rc = 1 if _handoff["used"] else dwd_helper.run(client_id, scopes, timeout,
+                                                           headful=True)
         except Exception as exc:      # noqa: BLE001
             rc, crash_detail = None, str(exc)[:200]
         finally:
@@ -785,6 +826,11 @@ def run_full_setup(
                 p.detail = ("required delegation already complete; the "
                             "optional extras could not be added this run")
                 already_granted = True
+                crash_detail, rc = None, 0
+
+        if (crash_detail is not None or rc != 0) and progress_file:
+            _progress(82, "authorise delegation on your own device")
+            if _grant_on_device(client_id, scopes, sorted(required)):
                 crash_detail, rc = None, 0
 
         if crash_detail is not None and is_no_browser(crash_detail):

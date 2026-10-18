@@ -27,6 +27,7 @@ import ReasonCodeDialog from './ReasonCodeDialog'
 import JobProgress from './JobProgress'
 import TenantInventoryPanel from './TenantInventoryPanel'
 import ReprovisionPanel from './ReprovisionPanel'
+import DeviceHandoff from './DeviceHandoff'
 import DomainSandboxToggle from './DomainSandboxToggle'
 
 const REPO_CLONE_CMD =
@@ -840,6 +841,7 @@ const QuickTenantSetup: React.FC<{
           it goes unnoticed is a second of a ten-minute timeout nobody gets
           back. */}
       <MfaBanner challenge={status?.challenge} />
+      <DeviceHandoff side={side} handoff={status?.handoff} />
 
       {/* No narration: full_setup.py's own step text ("signing in to
           Google Cloud as ...") used to render here verbatim. The bar and

@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 
 import re
+import time
 from typing import Callable
 
 # Phrases that mean "a human has to do something on another device".
@@ -166,6 +167,13 @@ def _report(text: str) -> None:
         logging.getLogger(__name__).debug("ignored an error", exc_info=True)
 
 
+# Set by a caller that can finish a sign-in on the operator's own device instead
+# (full_setup): a challenge still up after this many seconds ends the server's own
+# attempt. Live: Google asked the server's browser for a phone number -- something
+# no device of the operator's can answer -- and the setup waited out 15 minutes.
+HANDOFF_AFTER: "float | None" = None
+
+
 class Watcher:
     """Logs a challenge once, and again only when it changes.
 
@@ -177,6 +185,12 @@ class Watcher:
     def __init__(self, log) -> None:
         self._log = log
         self._last = ""
+        self._since = 0.0
+
+    def should_hand_off(self) -> bool:
+        """A challenge has been up longer than HANDOFF_AFTER (when a caller set one)."""
+        return bool(HANDOFF_AFTER and self._last
+                    and time.time() - self._since >= HANDOFF_AFTER)
 
     def check(self, pages) -> str:
         for pg in pages:
@@ -184,6 +198,8 @@ class Watcher:
             if not found:
                 continue
             if found != self._last:
+                if not self._last:
+                    self._since = time.time()
                 self._last = found
                 self._log(f"  [2-STEP] {found}")
                 self._log("  [2-STEP] this is waiting for you on a device -- "
