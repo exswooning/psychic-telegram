@@ -19,7 +19,7 @@ import {
 } from '@mui/material'
 import { KeyboardArrowDown as OpenIcon, KeyboardArrowUp as CloseIcon, Refresh as RefreshIcon } from '@mui/icons-material'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
-import { fetchMe, fetchOneToOne, runOneToOne } from '@/api/controlPlane'
+import { fetchMe, fetchOneToOne, runOneToOne, migrationOf } from '@/api/controlPlane'
 import type { OneToOneService, OneToOneUser, OneToOneVerdict, OneToOneView } from '@/api/controlPlane'
 
 // Shared with MigrationDetail's compact summary section, from its own module (not
@@ -143,7 +143,7 @@ const OneToOne: React.FC = () => {
 
   useEffect(() => {
     if (accountId) return
-    fetchMe().then((m) => setAccountId(m.id)).catch((e) => setError(e instanceof Error ? e.message : String(e)))
+    fetchMe().then((m) => setAccountId(migrationOf(m))).catch((e) => setError(e instanceof Error ? e.message : String(e)))
   }, [accountId])
 
   const load = useCallback(() => {

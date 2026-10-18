@@ -18,7 +18,7 @@ import {
 import { PlayArrow as RunIcon, Refresh as RefreshIcon } from '@mui/icons-material'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
 import {
-  decideMirrorDeletions, fetchMe, fetchMirror, runMirrorCycle, saveMirrorSettings, fetchMirrorMigrations, MirrorMigration } from '@/api/controlPlane'
+  decideMirrorDeletions, fetchMe, fetchMirror, runMirrorCycle, saveMirrorSettings, fetchMirrorMigrations, MirrorMigration, migrationOf } from '@/api/controlPlane'
 import type { MirrorCycle, MirrorDeletionMode, MirrorView } from '@/api/controlPlane'
 import { KINDS, duration } from '@/mirrorKinds'
 
@@ -53,7 +53,7 @@ const Mirror: React.FC = () => {
 
   useEffect(() => {
     if (accountId) return
-    fetchMe().then((m) => setAccountId(m.id)).catch((e) => setError(e instanceof Error ? e.message : String(e)))
+    fetchMe().then((m) => setAccountId(migrationOf(m))).catch((e) => setError(e instanceof Error ? e.message : String(e)))
   }, [accountId])
 
   const load = useCallback(() => {

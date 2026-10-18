@@ -9,8 +9,10 @@ import OneToOne from './OneToOne'
 import type { OneToOneService, OneToOneView } from '@/api/controlPlane'
 
 const cp = vi.hoisted(() => ({ view: vi.fn(), run: vi.fn() }))
+const me = vi.hoisted(() => ({ value: { id: 3 } as { id: number; migration_id?: number } }))
 vi.mock('@/api/controlPlane', () => ({
-  fetchMe: () => Promise.resolve({ id: 3 }),
+  fetchMe: () => Promise.resolve(me.value),
+  migrationOf: (m: { id: number; migration_id?: number }) => m.migration_id ?? m.id,
   fetchOneToOne: cp.view,
   runOneToOne: cp.run,
 }))
@@ -188,5 +190,17 @@ describe('the automatic check', () => {
     show()
     expect(await screen.findByText('boom')).toBeInTheDocument()
     within(document.body).getByText('One-to-one check')
+  })
+})
+
+
+/** Live: One-to-one showed gorkhatweed.com's users while s. -> t. was the migration
+ *  chosen in the header -- the page asked about the login, not the migration. */
+describe('the migration chosen in the header', () => {
+  it('is the one this page reports on', async () => {
+    me.value = { id: 3, migration_id: 6 }
+    render(<MemoryRouter initialEntries={['/one-to-one']}><OneToOne /></MemoryRouter>)
+    await waitFor(() => expect(cp.view).toHaveBeenCalledWith(6))
+    me.value = { id: 3 }
   })
 })

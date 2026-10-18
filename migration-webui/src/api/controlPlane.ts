@@ -240,6 +240,10 @@ export const reopenUser = (sourceEmail: string, services: string[], reason: stri
 export const logout = () => cpFetch<{ ok: boolean }>('/api/v2/auth/logout', { method: 'POST' })
 
 export const fetchMe = () => cpFetch<Account>('/api/v2/auth/me')
+/** The migration this browser is on: the one chosen in the header, else the login's
+ *  own. Not `me.id` -- live, One-to-one and Tally showed gorkhatweed.com's users
+ *  while s. -> t. was the migration chosen. */
+export const migrationOf = (me: Account) => me.migration_id ?? me.id
 
 export interface FleetNode {
   node_id: string

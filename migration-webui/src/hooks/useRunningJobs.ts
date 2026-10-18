@@ -2,8 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import {
   fetchTenantConfigStatus, fetchFullSetupStatus, fetchFleet, FleetNode,
   fetchActiveJobs, fetchMe, stopJob as stopFleetJob,
-  fetchProvisionStatus, ProvisionStatus,
-} from '@/api/controlPlane'
+  fetchProvisionStatus, ProvisionStatus } from '@/api/controlPlane'
 import { fetchJob, stopJob as stopSeedJob } from '@/api/client'
 
 /** What the job IS, so a card can say so rather than showing a bare name.
@@ -131,7 +130,7 @@ export function useRunningJobs() {
         await Promise.all((['source', 'target'] as const).map(async (t) =>
           [t, await fetchProvisionStatus(t).catch(() => null)] as
             ['source' | 'target', ProvisionStatus | null]))
-      const myAccountId = me?.id ?? null
+      const myAccountId = me ? (me.migration_id ?? me.id) : null   // the chosen migration, as migrationOf
       const found: RunningJob[] = []
       if (srcSetup?.running) {
         found.push({

@@ -15,7 +15,7 @@ import {
   TableHead, TableRow, Tooltip, Typography,
 } from '@mui/material'
 import { Refresh as RefreshIcon } from '@mui/icons-material'
-import { fetchHistory, fetchMe, HistoryRun } from '@/api/controlPlane'
+import { fetchHistory, fetchMe, HistoryRun, migrationOf } from '@/api/controlPlane'
 import { describeElapsed } from '@/hooks/useRunningJobs'
 
 const when = (iso: string | null) => {
@@ -51,7 +51,7 @@ export const History: React.FC = () => {
 
   useEffect(() => {
     if (accountId) return
-    fetchMe().then((m) => setAccountId(m.id)).catch((e) => setError(e instanceof Error ? e.message : String(e)))
+    fetchMe().then((m) => setAccountId(migrationOf(m))).catch((e) => setError(e instanceof Error ? e.message : String(e)))
   }, [accountId])
 
   const load = useCallback(() => {

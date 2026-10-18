@@ -20,7 +20,7 @@ import {
 } from '@mui/material'
 import { KeyboardArrowDown as OpenIcon, KeyboardArrowUp as CloseIcon, Refresh as RefreshIcon } from '@mui/icons-material'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
-import { fetchMe, fetchTally, runTally } from '@/api/controlPlane'
+import { fetchMe, fetchTally, runTally, migrationOf } from '@/api/controlPlane'
 import type { TallyUser, TallyVerdict, TallyView } from '@/api/controlPlane'
 import { ORDER, VERDICT } from '@/tallyVerdicts'
 
@@ -130,7 +130,7 @@ const Tally: React.FC = () => {
 
   useEffect(() => {
     if (accountId) return
-    fetchMe().then((m) => setAccountId(m.id)).catch((e) => setError(e instanceof Error ? e.message : String(e)))
+    fetchMe().then((m) => setAccountId(migrationOf(m))).catch((e) => setError(e instanceof Error ? e.message : String(e)))
   }, [accountId])
 
   const load = useCallback(() => {
