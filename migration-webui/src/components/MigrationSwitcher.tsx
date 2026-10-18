@@ -8,7 +8,7 @@
 import React, { useEffect, useState } from 'react'
 import { MenuItem, TextField } from '@mui/material'
 import { fetchMe, fetchMigrations, MigrationRow } from '@/api/controlPlane'
-import { chooseMigration } from '@/api/migration'
+import { chooseMigration, CHANGED } from '@/api/migration'
 
 const label = (m: MigrationRow) =>
   m.sourceDomain || m.targetDomain
@@ -21,11 +21,16 @@ export const MigrationSwitcher: React.FC = () => {
   const [login, setLogin] = useState<number | null>(null)
 
   useEffect(() => {
-    Promise.resolve().then(() => Promise.all([fetchMigrations(), fetchMe()])).then(([m, me]) => {
-      setRows(m.migrations)
-      setCurrent(me.migration_id ?? me.id)
-      setLogin(me.id)
-    }).catch(() => {})
+    const load = () => {
+      Promise.resolve().then(() => Promise.all([fetchMigrations(), fetchMe()])).then(([m, me]) => {
+        setRows(m.migrations)
+        setCurrent(me.migration_id ?? me.id)
+        setLogin(me.id)
+      }).catch(() => {})
+    }
+    load()
+    window.addEventListener(CHANGED, load)
+    return () => window.removeEventListener(CHANGED, load)
   }, [])
 
   if (rows.length < 2 || current == null) return null

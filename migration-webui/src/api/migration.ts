@@ -17,7 +17,12 @@ export const chooseMigration = (id: number | null): void => {
     if (id == null) localStorage.removeItem(KEY)
     else localStorage.setItem(KEY, String(id))
   } catch { /* storage blocked: requests stay on the login's own migration */ }
+  // The header names the migration in hand; the wizard switching it must not leave
+  // that showing the previous one (live: gorkhatweed above an s. -> t. setup).
+  window.dispatchEvent(new Event(CHANGED))
 }
+
+export const CHANGED = 'bitport:migration-changed'
 
 /** One place for every request: client.ts, controlPlane.ts and pages that call
  *  fetch directly all go through window.fetch. Another tab switching reloads this
