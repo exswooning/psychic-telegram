@@ -5512,7 +5512,15 @@ async def generate_run_report(body: GenerateReportRequest, op: Operator = Depend
                 pass
             d = _D()
             d.conn = conn
-            return run_report.generate(d, st, aid, kind=body.kind,
+            # The account's latest finished migration, as the automatic report has it:
+            # without it a report had no exit code or job timing, and "did the run
+            # complete" (required) read unknown -- UNVERIFIED however clean the run.
+            import run_watch
+            last = next((r for r in run_watch.list_runs(aid, limit=50)
+                         if r["jobName"] in run_watch.MIGRATION_JOBS and r.get("finishedAt")), None)
+            run = ({"returnCode": last["rc"], "startedAt": last["startedAt"],
+                    "finishedAt": last["finishedAt"], "name": last["jobName"]} if last else None)
+            return run_report.generate(d, st, aid, kind=body.kind, run=run,
                                        transcript=_job_log_tail(aid))
     return await _off_loop(_go)
 
