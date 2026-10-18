@@ -3755,6 +3755,7 @@ async def full_setup_redo(body: RedoFullSetup, op: Operator = Depends(operator))
     kept (admin_secrets, root-only) -- refused unless that login is on the domain set up
     in this slot now."""
     import admin_secrets
+    require_admin(op)
     aid = _resolve_account(body, op)
     cfg = accounts_auth.get_tenant_config(aid, body.side) or {}
     domain = (cfg.get("domain") or "").strip().lower()

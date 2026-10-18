@@ -14,6 +14,7 @@ from fastapi import HTTPException  # noqa: E402
 def _run(monkeypatch, login, domain="gorkhatweed.com"):
     started = []
     monkeypatch.setattr(api_server, "_resolve_account", lambda body, op: 3)
+    monkeypatch.setattr(api_server, "require_admin", lambda op: None)
     monkeypatch.setattr(api_server.accounts_auth, "get_tenant_config",
                         lambda aid, side: {"domain": domain})
     monkeypatch.setattr(admin_secrets, "teardown_login", lambda aid, side: login)

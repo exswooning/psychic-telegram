@@ -14,6 +14,9 @@ import pytest
 
 # Auto-sizing would split a test's pass across real child processes on a many-core machine.
 os.environ.setdefault("MIGRATE_PROCESSES", "1")
+# The code's default is server_side now; these tests were written against the
+# download_upload path and say so here rather than in every Settings() they build.
+os.environ.setdefault("TRANSFER_MODE", "download_upload")
 # readiness.gate asks Google about the configured tenants before every run; a test's
 # fake pair has none. tests/test_readiness.py drives it directly.
 os.environ.setdefault("BITPORT_READINESS_GATE", "0")

@@ -110,8 +110,15 @@ def protected_domains() -> set[str]:
     return (configured_domains() - set(revocations())) | env_domains()
 
 
+def is_government(domain: str) -> bool:
+    """A government domain (*.gov, *.gov.np, ...): never a sandbox, whatever anyone
+    declares -- it is only ever read, never seeded, reset or wiped."""
+    labels = _norm(domain).split(".")
+    return "gov" in labels[1:]
+
+
 def is_protected(domain: str) -> bool:
-    return _norm(domain) in protected_domains()
+    return is_government(domain) or _norm(domain) in protected_domains()
 
 
 def refuse_reason(domain: str, action: str = "Emptying") -> str:
@@ -132,6 +139,8 @@ def refuse_reason(domain: str, action: str = "Emptying") -> str:
     d = _norm(domain)
     if not is_protected(d):
         return ""
+    if is_government(d):
+        return f"{d} is a government domain. {action} it is refused, always."
     if d in env_domains():
         # No --revoke hint here: a revocation cannot lift this one, and
         # offering a way out that does not work is worse than none.
@@ -152,6 +161,8 @@ def revoke(domain: str, by: str, reason: str) -> dict:
     d = _norm(domain)
     if not d:
         raise ValueError("domain is required")
+    if is_government(d):
+        raise ValueError(f"{d} is a government domain; it can never be declared a sandbox")
     if not (reason or "").strip():
         raise ValueError("a reason is required to unprotect a domain")
     data = revocations()

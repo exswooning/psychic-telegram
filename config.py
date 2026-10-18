@@ -647,7 +647,7 @@ class Settings:
         default_factory=lambda: int(os.getenv("SHARED_DRIVE_WORKERS", "0")) or 2
     )
     transfer_mode: str = field(
-        default_factory=lambda: os.getenv("TRANSFER_MODE", "download_upload")
+        default_factory=lambda: os.getenv("TRANSFER_MODE", "server_side")
     )
     # files.copy() preserves content checksums by contract -- the whole reason
     # server_side never streams bytes through this host. Verifying the returned

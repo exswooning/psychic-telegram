@@ -322,8 +322,12 @@ that fails logs a warning and falls back to the old guess-and-discover behavior;
 never be able to stop a migration starting or running.
 
 **The production default for how Drive content moves is `server_side`, not `download_upload`**
-— set as `TRANSFER_MODE=server_side` in `systemd/bitport-api.service`, not in `config.py`
-itself (whose own fallback stays `download_upload`, for a bare/local run with no unit).
+— `config.py`'s own default since 2026-10-18 (and `TRANSFER_MODE=server_side` in
+`systemd/bitport-api.service`); tests pin `download_upload`, the path they were written for.
+A customer source (protected, not a sandbox) keeps it: its one write scope, `drive`, is held
+by `auth.ReadOnlyDrive` to files.copy into the run's own staging drive; move and link_flip
+are refused on it, and no seed key is made. **A government domain (`*.gov`, `*.gov.np`, ...)
+is always protected** (`domain_guard.is_government`): it can never be declared a sandbox.
 `download_upload` streams every file's bytes through the box running `api_server.py`;
 confirmed live, that host's own CPU/network was the actual bottleneck, not Google's quota
 — the rate limiter sat at its own configured ceiling (1,200 calls/sec, near-zero pushback)
