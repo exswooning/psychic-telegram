@@ -440,6 +440,7 @@ class BuildIdentityMap(WriteAction):
     reports nothing to create.
     """
     include_missing: bool = True
+    account_id: int | None = None
 
 
 class StartProvision(WriteAction):
@@ -3027,10 +3028,13 @@ async def identities_auto_map(body: BuildIdentityMap,
     request should hold.
     """
     require_login(op)
+    # The account on screen, not the caller's own: a superadmin mapping another
+    # account's pair mapped its OWN empty account instead.
+    aid = _resolve_account(body, op)
 
     def _launch() -> tuple[bool, str]:
-        log = _identity_map_log_path(op.account_id)
-        argv = ([PY, "main.py"] + _account_argv(op.account_id)
+        log = _identity_map_log_path(aid)
+        argv = ([PY, "main.py"] + _account_argv(aid)
                 + ["init-db", "--auto-map"])
         if body.include_missing:
             argv.append("--include-missing")
@@ -3039,22 +3043,24 @@ async def identities_auto_map(body: BuildIdentityMap,
                                     stderr=subprocess.STDOUT,
                                     stdin=subprocess.DEVNULL,
                                     start_new_session=True)
-        threading.Thread(target=_discover_when_mapped, args=(proc, op.account_id), daemon=True).start()
+        threading.Thread(target=_discover_when_mapped, args=(proc, aid), daemon=True).start()
         return True, f"building the identity map, pid {proc.pid}; the source is indexed when it finishes"
 
     return await _gated(op, "identities.auto_map", body, "identity_map", _launch)
 
 
 @app.get("/api/v2/identities/status")
-async def identities_status(op: Operator = Depends(operator)):
+async def identities_status(account_id: int | None = None, op: Operator = Depends(operator)):
     """How many users are mapped, and how the last build went."""
     require_login(op)
+    aid = account_id if account_id is not None else op.account_id
+    _require_account_access(aid, op)
 
     def _read() -> dict:
-        log = _identity_map_log_path(op.account_id)
+        log = _identity_map_log_path(aid)
         running = False
-        needle = (f"--account-id {op.account_id}"
-                  if op.account_id is not None else None)
+        needle = (f"--account-id {aid}"
+                  if aid is not None else None)
         ps = subprocess.run(["ps", "-eo", "args="], capture_output=True,
                             text=True).stdout
         for line in ps.splitlines():
@@ -3068,7 +3074,7 @@ async def identities_status(op: Operator = Depends(operator)):
             with open(log, encoding="utf-8", errors="replace") as fh:
                 tail = [ln.rstrip() for ln in fh.readlines()[-25:]]
         return {"running": running,
-                "mapped": cpdb.identity_count(op.account_id),
+                "mapped": cpdb.identity_count(aid),
                 "tail": tail}
 
     return await _off_loop(_read)
