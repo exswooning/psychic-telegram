@@ -507,6 +507,16 @@ describe('MigrationDetail: who to migrate', () => {
     expect(call[5]).toBe('engine')
   })
 
+  it('opens short: the options stay folded until asked for', async () => {
+    await card()
+    fireEvent.click(screen.getByTestId('migrate-start'))
+    const more = await screen.findByTestId('run-more-options')
+    expect(more).toHaveTextContent('More options')
+    expect(screen.getByText('Who moves the mail?')).not.toBeVisible()
+    fireEvent.click(more)
+    await waitFor(() => expect(screen.getByText('Who moves the mail?')).toBeVisible())
+  })
+
   it('says plainly what Split means for chosen users, and still allows it', async () => {
     await card()
     fireEvent.click(radio('who-some'))

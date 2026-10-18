@@ -7,6 +7,7 @@ import {
   Radio,
   Checkbox,
   FormControlLabel,
+  Collapse,
 } from '@mui/material'
 import {
   Refresh as RefreshIcon, ArrowBack as BackIcon,
@@ -69,6 +70,7 @@ export const MigrationDetail: React.FC = () => {
   // Split by default: the tool moves the mail that needs its links rewritten and
   // Google's DMS moves the rest, which is most of a mailbox. See the dialog.
   const [mailBy, setMailBy] = useState<MailMode>('split')
+  const [moreOpen, setMoreOpen] = useState(false)
   // Start Google's DMS on its own (api_server._start_dms); on unless switched off.
   const [dmsAuto, setDmsAuto] = useState(true)
   // '' = the server's own default (config.TRANSFER_MODES via TRANSFER_MODE) --
@@ -257,7 +259,12 @@ export const MigrationDetail: React.FC = () => {
               <Typography variant="subtitle1" sx={{ fontWeight: 700, flexGrow: 1 }}>Migrate users</Typography>
               <Button variant="contained" size="small" data-testid="migrate-start"
                       disabled={(d.writing ?? d.running) || (who === 'some' && picked.length === 0)}
-                      onClick={() => setAskFull(true)}>
+                      onClick={() => {
+                        // Chosen users get no DMS afterwards, so split would leave their
+                        // mail waiting: this tool moves all of it unless changed below.
+                        if (who === 'some') setMailBy('engine')
+                        setMoreOpen(false); setAskFull(true)
+                      }}>
                 {(d.writing ?? d.running) ? 'migration running'
                   : who === 'some'
                     ? `Migrate ${picked.length} chosen user${picked.length === 1 ? '' : 's'}…`
@@ -882,12 +889,15 @@ export const MigrationDetail: React.FC = () => {
                 : `all ${(d?.users?.length ?? d?.progress?.users ?? 0).toLocaleString()} users`}.
               {' '}Change it in the Migrate users card on the page.
             </Typography>
-            Copies everything the ledger does not already record, for
-            {who === 'some' ? ` the ${picked.length} chosen user(s)` : ` all ${d?.progress?.users ?? 0} users`}. Use this after a ledger
-            reset, where a delta would not do: a delta asks the source what
-            changed in a short window, so it would re-copy only recent mail
-            and events and leave everything older unmigrated. Anything still
-            in the ledger is skipped, so this is safe to re-run.
+            Copies what is not migrated yet; anything already done is skipped, so it is safe
+            to run again. The defaults suit almost every run.
+            <Box sx={{ mt: 1.5 }}>
+              <Button size="small" onClick={() => setMoreOpen((v) => !v)}
+                      data-testid="run-more-options">
+                {moreOpen ? 'Fewer options' : 'More options'}
+              </Button>
+            </Box>
+            <Collapse in={moreOpen}>
             {/* Mail was 349,560 of 593,816 items in the last real run -- 58.9% -- and
                 it is the only service behind a ceiling that cannot be raised (3
                 sustained writes/sec/account, which Google states is not
@@ -1054,6 +1064,7 @@ export const MigrationDetail: React.FC = () => {
                 </Stack>
               </Stack>
             </Box>
+            </Collapse>
           </>
         }
         onCancel={() => { setAskFull(false); setFullError(null) }}
