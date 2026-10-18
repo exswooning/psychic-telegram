@@ -19,6 +19,7 @@ import {
   fetchTenantInventory, TenantInventory,
   startTenantScan, fetchTenantScan,
   buildIdentityMap, fetchIdentityMapStatus, IdentityMapStatus,
+  redoFullSetup,
 } from '@/api/controlPlane'
 import { runSeed, fetchSeedScopes } from '@/api/client'
 import MfaBanner from '@/components/MfaBanner'
@@ -439,6 +440,8 @@ const QuickTenantSetup: React.FC<{
   const [seedJobRunning, setSeedJobRunning] = useState(false)
   const [provisionStatus, setProvisionStatus] = useState<ProvisionStatus | null>(null)
   const [stopping, setStopping] = useState(false)
+  const [redoBusy, setRedoBusy] = useState(false)
+  const [redoMsg, setRedoMsg] = useState('')
 
   const poll = useCallback(() => {
     return fetchFullSetupStatus(side).then(setStatus).catch(() => {})
@@ -1014,6 +1017,23 @@ const QuickTenantSetup: React.FC<{
             {domain.trim() && email.trim() ? `Continue as ${email.trim()}` : 'Sign in with Google'}
           </Button>
           )}
+          {/* Live: re-running mdharan.com's setup meant finding "Redo setup" inside a
+              collapsed card on Identities. The login setup kept (never a government
+              one) does it from here; the server refuses when none is kept. */}
+          {!handedOver && !status?.running && domain.trim() && email.trim() && (
+            <Button size="small" sx={{ mt: 1, ml: 1 }} data-testid={`qts-${side}-redo`}
+                    disabled={redoBusy}
+                    onClick={() => {
+                      setRedoBusy(true); setRedoMsg('')
+                      redoFullSetup(side)
+                        .then((r) => { setRedoMsg(r.ok ? '' : (r.detail || 'could not start')); poll() })
+                        .catch((e) => setRedoMsg(e instanceof Error ? e.message : String(e)))
+                        .finally(() => setRedoBusy(false))
+                    }}>
+              Set up again with the kept login
+            </Button>
+          )}
+          {redoMsg && <Typography variant="caption" color="error" sx={{ display: 'block' }}>{redoMsg}</Typography>}
           {domain.trim() && email.trim() && !(alreadyHere && readyHere && !password) && (
             <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
               {handedOver

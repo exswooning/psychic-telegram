@@ -134,6 +134,13 @@ if WOULD_CHANGE="$(rsync -azcn --out-format='%n' -e "${SSH[*]}" "${SYNC_EXCLUDES
 else
   RUNTIME_CHANGES="(could not compare with the target)"
 fi
+# An earlier deploy copied code to the box and then stopped before restarting (live: an
+# SSH timeout during the syntax check). Its files already match, so the comparison above
+# sees nothing -- and the box would keep running the old code. The marker says so.
+if "${SSH[@]}" "$TARGET" "test -f $DEST/RESTART_PENDING" 2>/dev/null; then
+  RUNTIME_CHANGES="${RUNTIME_CHANGES:+$RUNTIME_CHANGES
+}(an earlier deploy copied code to the box but never restarted it)"
+fi
 
 # Refuse, before a byte is copied, a deploy that would restart services under a
 # running job. Before the copy, not just before the restart: new code on disk under
@@ -170,6 +177,8 @@ fi
 try_rsync -az --partial --timeout=90 -e "${SSH[*]}" "${SYNC_EXCLUDES[@]}" \
   "$SRC_DIR/" "$TARGET:$DEST/" || exit 1
 echo "  synced to $TARGET:$DEST"
+# New code is on disk from here on; only a completed restart clears this.
+[[ -n "$RUNTIME_CHANGES" ]] && "${SSH[@]}" "$TARGET" "touch $DEST/RESTART_PENDING"
 
 # Second pass, scoped to the built frontend, WITH --delete.
 #
@@ -381,6 +390,7 @@ if "${SSH[@]}" "$TARGET" "systemctl list-unit-files bitport-webui.service >/dev/
     systemctl restart bitport-fleet 2>/dev/null || true; sleep 2; \
     if systemctl is-active --quiet bitport-webui && systemctl is-active --quiet bitport-api; then \
       echo '  restarted via systemd: bitport-webui, bitport-api both active'; \
+      rm -f $DEST/RESTART_PENDING; \
       systemctl is-active --quiet bitport-fleet && echo '  restarted via systemd: bitport-fleet active'; \
     else \
       echo '  RESTART DID NOT TAKE: one or both services failed to start' >&2; \

@@ -63,7 +63,11 @@ def box(tmp_path):
         '#!/usr/bin/env bash\n'
         'if [[ " $* " == *" -azcn "* ]]; then echo "dry: $*" >> "$FAKE_LOG"; cat "$FAKE_WOULD"; exit "${FAKE_DRY_RC:-0}"; fi\n'
         'echo "rsync: $*" >> "$FAKE_LOG"; exit 0\n')
-    (bindir / "ssh").write_text('#!/usr/bin/env bash\necho "ssh: $*" >> "$FAKE_LOG"; exit 0\n')
+    (bindir / "ssh").write_text(
+        '#!/usr/bin/env bash\necho "ssh: $*" >> "$FAKE_LOG"\n'
+        # An unfinished restart left by an earlier deploy: only when the test says so.
+        'if [[ "$*" == *"test -f"*"RESTART_PENDING"* ]]; then [[ "${FAKE_PENDING:-0}" == 1 ]]; exit $?; fi\n'
+        'exit 0\n')
     for f in bindir.iterdir():
         f.chmod(f.stat().st_mode | stat.S_IEXEC)
 
@@ -94,6 +98,13 @@ class TestTheDeployItself:
         r, log = box(["migration-webui/src/pages/Jobs.tsx"])
         for touched in ("pip install", "compileall", "daemon-reload", "harden.sh", "systemctl"):
             assert touched not in log, touched
+
+    def test_a_restart_an_earlier_deploy_never_finished_is_finished_now(self, box):
+        """Live: a deploy copied the code, then lost SSH during the compile check; the
+        retry found nothing to change and restarted nothing, leaving old code running."""
+        r, log = box(["migration-webui/src/pages/Jobs.tsx"], FAKE_PENDING=1)
+        assert restarts(log) and "never restarted it" in r.stdout
+        assert "rm -f" in log and "RESTART_PENDING" in log
 
     def test_it_still_records_what_is_deployed(self, box):
         r, log = box(["migration-webui/src/pages/Jobs.tsx"])

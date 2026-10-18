@@ -19,7 +19,7 @@ import {
   fetchVerifiedDomains, VerifiedDomain,
   fetchTenantInventory, TenantInventory,
   fetchAllDomains, ConfiguredDomain,
-  redoFullSetup,
+  redoFullSetup, restoreKey,
 } from '@/api/controlPlane'
 import JobRunner from '@/components/JobRunner'
 import LinkDomainsDialog from '@/components/LinkDomainsDialog'
@@ -268,6 +268,8 @@ const ConfigDomainCard: React.FC<{ d: ConfiguredDomain }> = ({ d }) => {
   const [open, setOpen] = useState(false)
   const [delOpen, setDelOpen] = useState(false)
   const [wipeOpen, setWipeOpen] = useState(false)
+  const [keyBusy, setKeyBusy] = useState(false)
+  const [keyMsg, setKeyMsg] = useState<{ ok: boolean; text: string } | null>(null)
   // A superseded domain's live stats can't be read: the inventory endpoint
   // reads the slot's ACTIVE domain, which is the one that replaced this. So
   // its card explains what happened instead of fetching a stranger's numbers.
@@ -327,7 +329,23 @@ const ConfigDomainCard: React.FC<{ d: ConfiguredDomain }> = ({ d }) => {
                 a superadmin can wipe another account's. Same switch and same
                 typed-domain dialog as there. */}
             <DomainSandboxToggle domain={d.domain} />
+            {keyMsg && <Alert severity={keyMsg.ok ? 'success' : 'warning'} sx={{ mb: 1 }}>{keyMsg.text}</Alert>}
             <Stack direction="row" spacing={1}>
+              {/* Live: gorkhatweed's keys were moved aside by another pair's setup and
+                  only a shell could put them back. */}
+              {!d.hasKey && (
+                <Button size="small" variant="contained" disabled={keyBusy}
+                        data-testid={`restore-key-${d.accountId}-${d.side}`}
+                        onClick={() => {
+                          setKeyBusy(true)
+                          restoreKey(d.side, d.accountId)
+                            .then((r) => setKeyMsg({ ok: r.ok, text: r.detail }))
+                            .catch((e) => setKeyMsg({ ok: false, text: String(e) }))
+                            .finally(() => setKeyBusy(false))
+                        }}>
+                  Put the key back
+                </Button>
+              )}
               {d.hasKey && (
                 <Button size="small" color="warning" startIcon={<WipeIcon />}
                         data-testid={`wipe-config-${d.accountId}-${d.side}`}

@@ -23,6 +23,7 @@ import type { JobKind, RunningJob } from '@/hooks/useRunningJobs'
 import { describeElapsed } from '@/hooks/useRunningJobs'
 import { useProgressHistory } from '@/hooks/useProgressHistory'
 import ProgressSparkline from '@/components/ProgressSparkline'
+import DeviceHandoff from '@/components/DeviceHandoff'
 import { formatPct } from '@/utils/formatPct'
 
 const KIND: Record<JobKind, { label: string; icon: React.ReactElement;
@@ -115,6 +116,14 @@ export const RunningJobCard: React.FC<{
           : <LinearProgress />)}
 
         {!finished && <ProgressSparkline samples={history} />}
+
+        {/* Live: this card read "authorise delegation on your own device" with nothing
+            to press. The same controls the setup card shows, so it is never a dead end. */}
+        {!finished && job.handoff && (
+          <Box sx={{ mt: 1 }} onClick={(e) => e.stopPropagation()}>
+            <DeviceHandoff side={job.handoff.side} handoff={job.handoff} />
+          </Box>
+        )}
 
         <Stack direction="row" justifyContent="space-between" sx={{ mt: 0.5 }}>
           {/* Only when the detail line does not already lead with it. The

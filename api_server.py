@@ -3884,6 +3884,49 @@ def _full_setup_state_path(side: str, account_id: int | None) -> str:
     return os.path.join(d, f"full-setup-{side}.json")
 
 
+class RestoreKey(WriteAction):
+    account_id: int | None = None
+    side: Literal["source", "target"]
+
+
+_SET_ASIDE = re.compile(r"\.(unusable|superseded|bak)-(\d{8}T\d{6}Z)$")
+
+
+@app.post("/api/v2/keys/restore")
+async def restore_key(body: RestoreKey, op: Operator = Depends(operator)):
+    """Put back the key most recently set aside for this slot. Live: setting up another
+    pair on gorkhatweed's account moved its keys aside, and only a shell could put them
+    back. Never over a key on file; the set-aside copy stays; readiness then asks Google."""
+    require_admin(op)
+    aid = _resolve_account(body, op)
+
+    def _put_back() -> tuple[bool, str]:
+        import shutil
+        cfg = accounts_auth.get_tenant_config(aid, body.side) or {}
+        rel = cfg.get("sa_key_path") or os.path.join("keys", str(aid), f"{body.side}-sa.json")
+        dest = rel if os.path.isabs(rel) else os.path.join(HERE, rel)
+        if os.path.isfile(dest) and os.path.getsize(dest) > 0:
+            return False, "a key is already on file for this side -- nothing to put back"
+        found = []
+        for name in os.listdir(os.path.dirname(dest)) if os.path.isdir(os.path.dirname(dest)) else []:
+            m = _SET_ASIDE.search(name)
+            if name.startswith(os.path.basename(dest) + ".") and m:
+                try:
+                    with open(os.path.join(os.path.dirname(dest), name), encoding="utf-8") as fh:
+                        k = json.load(fh)
+                except (OSError, ValueError):
+                    continue
+                if k.get("private_key") and k.get("client_email"):
+                    found.append((m.group(2), name, k.get("project_id")))
+        if not found:
+            return False, "no set-aside key for this side"
+        when, name, project = max(found)
+        shutil.copy2(os.path.join(os.path.dirname(dest), name), dest)
+        os.chmod(dest, 0o600)
+        return True, f"put back {name} (project {project}); readiness will confirm it with Google"
+    return await _gated(op, "keys.restore", body, f"account:{aid}:{body.side}", _put_back)
+
+
 class RedoFullSetup(WriteAction):
     account_id: int | None = None
     side: Literal["source", "target"]

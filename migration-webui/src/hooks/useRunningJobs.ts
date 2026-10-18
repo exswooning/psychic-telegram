@@ -30,6 +30,8 @@ export interface RunningJob {
   users?: string[]
   startedAt?: string
   key: string; label: string; detail: string; pct: number | null
+  /** A setup waiting on the operator's own device: the card carries what to open. */
+  handoff?: { side: 'source' | 'target'; kind: 'signin' | 'dwd'; url: string; clientId?: string; scopes?: string } | null
   /** seed | migrate | ... -- what the rectangle announces. */
   kind: JobKind
   /** The tenant this is happening to, when the source knows it. */
@@ -137,6 +139,7 @@ export function useRunningJobs() {
           key: 'setup-source', kind: 'setup', domain: srcCfg?.domain, pid: srcSetup.pid ?? undefined,
           label: srcCfg?.domain || 'source',
           detail: srcSetup.progressLabel || 'setting up…', pct: srcSetup.progressPct ?? null,
+          handoff: srcSetup.handoff ? { side: 'source', ...srcSetup.handoff } : null,
           stop: async (reason, force) => {
             if (!srcSetup.pid) throw new Error('no pid recorded for this run yet -- try again shortly')
             const r = await stopFleetJob(srcSetup.pid, reason, force)
@@ -149,6 +152,7 @@ export function useRunningJobs() {
           key: 'setup-target', kind: 'setup', domain: tgtCfg?.domain, pid: tgtSetup.pid ?? undefined,
           label: tgtCfg?.domain || 'target',
           detail: tgtSetup.progressLabel || 'setting up…', pct: tgtSetup.progressPct ?? null,
+          handoff: tgtSetup.handoff ? { side: 'target', ...tgtSetup.handoff } : null,
           stop: async (reason, force) => {
             if (!tgtSetup.pid) throw new Error('no pid recorded for this run yet -- try again shortly')
             const r = await stopFleetJob(tgtSetup.pid, reason, force)

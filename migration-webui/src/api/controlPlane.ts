@@ -697,6 +697,12 @@ export const stopFullSetup = (side: 'source' | 'target') =>
     method: 'POST',
     body: JSON.stringify({ side, reason: 'stopped from the setup card' }),
   })
+/** Put back the key most recently set aside for this side (never over a key on file). */
+export const restoreKey = (side: 'source' | 'target', accountId?: number) =>
+  cpFetch<ActionResult>('/api/v2/keys/restore', {
+    method: 'POST',
+    body: JSON.stringify({ side, account_id: accountId, reason: 'put back the set-aside key' }),
+  })
 /** Run a side's setup again with the admin login a previous setup kept on the server. */
 export const redoFullSetup = (side: 'source' | 'target', accountId?: number) =>
   cpFetch<ActionResult>('/api/v2/full-setup/redo', {
