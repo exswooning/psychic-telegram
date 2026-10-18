@@ -37,6 +37,12 @@ import OneToOneSummary from '@/components/OneToOneSummary'
 /** Chat is left out of a quick run: it writes messages into spaces other people
  *  can see, which is not something to do for a sample. */
 // Chat too: it honours the sample limit (one item per message), like the rest.
+// Statuses whose own name misleads: these items are not lost.
+const SKIP_LABEL: Record<string, string> = {
+  SKIPPED_IS_DRAFT: 'drafts (copied by the drafts pass)',
+  SKIPPED_NO_PERMISSION: "sharing on others' files (owner's to read)",
+}
+
 const QUICK_SERVICES = ['drive', 'gmail', 'calendar', 'contacts', 'tasks', 'chat']
 
 const Stat: React.FC<{ id: string; label: string; value: number; tone?: 'error' }> =
@@ -584,8 +590,8 @@ export const MigrationDetail: React.FC = () => {
                 {d.skipped.map((s) => (
                   <Chip key={s.status} size="small" variant="outlined"
                         data-testid={`skip-${s.status}`}
-                        label={`${s.status.replace(/^SKIPPED_?/, '').toLowerCase()
-                          .replace(/_/g, ' ') || 'skipped'} · ${s.count.toLocaleString()}`} />
+                        label={`${SKIP_LABEL[s.status] ?? (s.status.replace(/^SKIPPED_?/, '').toLowerCase()
+                          .replace(/_/g, ' ') || 'skipped')} · ${s.count.toLocaleString()}`} />
                 ))}
               </Stack>
             </Paper>

@@ -8,8 +8,8 @@ import { MemoryRouter } from 'react-router-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import OneToOneSummary from './OneToOneSummary'
 
-const api = vi.hoisted(() => ({ fetchOneToOne: vi.fn() }))
-vi.mock('@/api/controlPlane', () => ({ fetchOneToOne: api.fetchOneToOne }))
+const api = vi.hoisted(() => ({ fetchOneToOne: vi.fn(), fetchTally: vi.fn() }))
+vi.mock('@/api/controlPlane', () => ({ fetchOneToOne: api.fetchOneToOne, fetchTally: api.fetchTally }))
 
 const view = (over = {}) => ({
   accountId: 3, onComplete: true, perService: 25,
@@ -22,7 +22,10 @@ const view = (over = {}) => ({
 
 // Braces: a hook that RETURNS a function has it called afterwards as cleanup, and mockReset()
 // returns the mock -- without them this calls the mock a second time after every test.
-beforeEach(() => { api.fetchOneToOne.mockReset() })
+beforeEach(() => {
+  api.fetchOneToOne.mockReset()
+  api.fetchTally.mockReset().mockResolvedValue({ accountId: 3, onComplete: true, users: [], totals: {} })
+})
 
 const put = (ui: React.ReactElement) => render(<MemoryRouter>{ui}</MemoryRouter>)
 
@@ -73,5 +76,26 @@ describe('OneToOneSummary', () => {
     api.fetchOneToOne.mockRejectedValue(new Error('HTTP 500'))
     put(<OneToOneSummary accountId={3} />)
     expect(await screen.findByTestId('one-to-one-summary-error')).toHaveTextContent('HTTP 500')
+  })
+})
+
+describe('OneToOneSummary: what each user came back as', () => {
+  it('lists an identical user too, with each service and both tenants\' counts', async () => {
+    api.fetchOneToOne.mockResolvedValue(view({ users: [{
+      user: 'info@g.com', target: 'info@s.com', status: 'DONE', verdict: 'IDENTICAL',
+      verifiedAt: '2026-10-18T07:00:00Z',
+      services: [{ service: 'drive', verdict: 'IDENTICAL', verifiedAt: '', checked: 25, identical: 25, sampledOf: 136 },
+                 { service: 'gmail', verdict: 'IDENTICAL', verifiedAt: '', checked: 38, identical: 38, sampledOf: 471 }],
+    }] }))
+    api.fetchTally.mockResolvedValue({ accountId: 3, onComplete: true, totals: {}, users: [{
+      user: 'info@g.com', target: 'info@s.com', status: 'DONE', verdict: 'COMPLETE', countParity: 1,
+      recordedAt: '', worst: [], services: {
+        drive_files: { source: 121, target: 136, skipped: 0, expected: 121, parity: 1, surplus: 15 },
+        mail: { source: 484, target: 485, skipped: 0, expected: 484, parity: 1, surplus: 1 },
+        tasks: { source: 0, target: 0, skipped: 0, expected: 0, parity: null, surplus: 0 } } }] })
+    put(<OneToOneSummary accountId={3} />)
+    expect(await screen.findByText('drive 25/25 · gmail 38/38')).toBeInTheDocument()
+    await waitFor(() =>
+      expect(screen.getByTestId('o2o-counts-info@g.com')).toHaveTextContent('files 121→136 · mail 484→485'))
   })
 })

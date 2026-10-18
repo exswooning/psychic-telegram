@@ -11,8 +11,8 @@ import { Link as RouterLink } from 'react-router-dom'
 import {
   Alert, Box, Chip, Link, Paper, Stack, Table, TableBody, TableCell, TableHead, TableRow, Typography,
 } from '@mui/material'
-import { fetchOneToOne } from '@/api/controlPlane'
-import type { OneToOneView } from '@/api/controlPlane'
+import { fetchOneToOne, fetchTally } from '@/api/controlPlane'
+import type { OneToOneView, TallyView } from '@/api/controlPlane'
 import { ORDER, VERDICT } from '@/oneToOneVerdicts'
 
 const when = (iso: string | null) => {
@@ -25,11 +25,13 @@ const MAX_ROWS = 8
 
 export const OneToOneSummary: React.FC<{ accountId: number }> = ({ accountId }) => {
   const [view, setView] = useState<OneToOneView | null>(null)
+  const [tally, setTally] = useState<TallyView | null>(null)
   const [error, setError] = useState('')
 
   const load = useCallback(() => {
     fetchOneToOne(accountId).then((v) => { setView(v); setError('') })
       .catch((e) => setError(e instanceof Error ? e.message : String(e)))
+    fetchTally(accountId).then(setTally).catch(() => setTally(null))
   }, [accountId])
   useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t) }, [load])
 
@@ -42,8 +44,13 @@ export const OneToOneSummary: React.FC<{ accountId: number }> = ({ accountId }) 
   const nothingYet = ORDER.every((k) => !(totals[k] ?? 0))
   if (nothingYet) return null
 
-  const attention = [...view.users].filter((u) => u.verdict === 'DIFFERENCES' || u.verdict === 'INCOMPLETE')
-    .sort((a, b) => (a.verdict === b.verdict ? a.user.localeCompare(b.user) : a.verdict === 'DIFFERENCES' ? -1 : 1))
+  // Every checked user, worst first: what each service compared, and what each tenant holds.
+  const rank = (v: string) => ['DIFFERENCES', 'INCOMPLETE', 'IDENTICAL'].indexOf(v)
+  const attention = [...view.users].filter((u) => u.verdict !== 'NOT_VERIFIED')
+    .sort((a, b) => (rank(a.verdict) - rank(b.verdict)) || a.user.localeCompare(b.user))
+  const counts = new Map((tally?.users ?? []).map((t) => [t.user, t]))
+  const NAMES: Record<string, string> = { drive_files: 'files', drive_folders: 'folders', mail: 'mail',
+                                          calendar: 'events', contacts: 'contacts', tasks: 'tasks' }
 
   return (
     <Paper variant="outlined" sx={{ p: 2, mb: 3 }} data-testid="one-to-one-summary">
@@ -62,13 +69,23 @@ export const OneToOneSummary: React.FC<{ accountId: number }> = ({ accountId }) 
       {attention.length > 0 && (
         <Table size="small">
           <TableHead>
-            <TableRow><TableCell>User</TableCell><TableCell>Verdict</TableCell><TableCell>Last checked</TableCell></TableRow>
+            <TableRow><TableCell>User</TableCell><TableCell>Verdict</TableCell>
+              <TableCell>Checked (identical / compared)</TableCell><TableCell>Source → target</TableCell>
+              <TableCell>Last checked</TableCell></TableRow>
           </TableHead>
           <TableBody>
             {attention.slice(0, MAX_ROWS).map((u) => (
               <TableRow key={u.user}>
                 <TableCell>{u.user}</TableCell>
                 <TableCell><Chip size="small" color={VERDICT[u.verdict].color} label={VERDICT[u.verdict].label} /></TableCell>
+                <TableCell><Typography variant="caption">
+                  {u.services.map((s) => `${s.service} ${s.identical}/${s.checked}`).join(' · ') || '—'}
+                </Typography></TableCell>
+                <TableCell><Typography variant="caption" data-testid={`o2o-counts-${u.user}`}>
+                  {Object.entries(counts.get(u.user)?.services ?? {})
+                    .filter(([, c]) => c.source || c.target)
+                    .map(([k, c]) => `${NAMES[k] ?? k} ${c.source}→${c.target}`).join(' · ') || 'not counted yet'}
+                </Typography></TableCell>
                 <TableCell><Typography variant="caption">{when(u.verifiedAt)}</Typography></TableCell>
               </TableRow>
             ))}
