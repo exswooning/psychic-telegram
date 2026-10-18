@@ -3891,6 +3891,50 @@ async def full_setup_start(body: StartFullSetup, op: Operator = Depends(operator
                         f"{body.side}:{body.domain}", _launch)
 
 
+def _full_setup_pid(side: str, account_id: int | None) -> int | None:
+    """The running full_setup.py for this side and account, from ps -- nothing else
+    records its pid (unlike migrate/delta, which fleet_agent.py's ps scan finds)."""
+    needle = f"--account-id {account_id}" if account_id is not None else "full_setup.py"
+    for ln in subprocess.run(["ps", "-eo", "pid=,args="], capture_output=True,
+                             text=True).stdout.splitlines():
+        if f"full_setup.py --side {side}" in ln and needle in ln and "grep" not in ln:
+            parts = ln.split(None, 1)
+            return int(parts[0]) if parts and parts[0].isdigit() else None
+    return None
+
+
+class StopFullSetup(WriteAction):
+    account_id: int | None = None
+    side: Literal["source", "target"]
+
+
+@app.post("/api/v2/full-setup/stop")
+async def full_setup_stop(body: StopFullSetup, op: Operator = Depends(operator)):
+    """Kill this side's setup -- the browser and gcloud with it -- so it can be started
+    again. A sign-in stuck on a challenge the server's browser cannot answer (Google
+    asking it for a phone number) otherwise waits out its whole timeout."""
+    require_admin(op)
+    aid = _resolve_account(body, op)
+
+    def _stop() -> tuple[bool, str]:
+        pid = _full_setup_pid(body.side, aid)
+        if pid is None:
+            return False, f"no {body.side} setup is running"
+        # start_new_session=True made it a group leader: the group is the browser too.
+        os.killpg(pid, 9)
+        out = _full_setup_state_path(body.side, aid)
+        try:
+            with open(out, encoding="utf-8") as fh:
+                domain = json.load(fh).get("domain")
+        except (OSError, ValueError):
+            domain = None
+        with open(out, "w", encoding="utf-8") as fh:
+            json.dump({"side": body.side, "ok": False, "phases": [], "interrupted": True,
+                       "domain": domain, "error": "stopped by you -- start it again"}, fh)
+        return True, f"SIGKILL -> group {pid}"
+    return await _gated(op, "full_setup.stop", body, body.side, _stop)
+
+
 @app.get("/api/v2/full-setup/status")
 async def full_setup_status(side: str, account: int | None = None,
                             op: Operator = Depends(operator)):
@@ -3910,21 +3954,7 @@ async def full_setup_status(side: str, account: int | None = None,
         _require_account_access(account, op)
 
     def _read() -> dict:
-        needle = (f"--account-id {watching}" if watching is not None
-                  else "full_setup.py")
-        # pid=,args= (not args= alone): a running setup could only ever be
-        # reported, never stopped, without it -- there is no other place
-        # that records this process's pid anywhere queryable later (unlike
-        # migrate/delta, which fleet_agent.py's own ps scan already finds).
-        pid = None
-        for ln in subprocess.run(["ps", "-eo", "pid=,args="], capture_output=True,
-                                 text=True).stdout.splitlines():
-            if (f"full_setup.py --side {side}" in ln and needle in ln
-                    and "grep" not in ln):
-                parts = ln.split(None, 1)
-                if parts and parts[0].isdigit():
-                    pid = int(parts[0])
-                break
+        pid = _full_setup_pid(side, watching)
         running = pid is not None
         out = _full_setup_state_path(side, watching)
         partial = out + ".partial"

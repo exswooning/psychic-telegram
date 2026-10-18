@@ -12,7 +12,7 @@ import {
   Error as FailIcon, RemoveCircleOutline as SkipIcon, HourglassEmpty as WaitIcon,
 } from '@mui/icons-material'
 import {
-  FullSetupStatus, startFullSetup, fetchFullSetupStatus,
+  FullSetupStatus, startFullSetup, fetchFullSetupStatus, stopFullSetup,
   startProvision, fetchProvisionStatus, ProvisionStatus,
   fetchTenantConfigStatus, uploadCredentials, TenantConfigStatus,
   fetchReadiness, Readiness,
@@ -437,6 +437,7 @@ const QuickTenantSetup: React.FC<{
   const [jobActive, setJobActive] = useState(false)
   const [seedJobRunning, setSeedJobRunning] = useState(false)
   const [provisionStatus, setProvisionStatus] = useState<ProvisionStatus | null>(null)
+  const [stopping, setStopping] = useState(false)
 
   const poll = useCallback(() => {
     return fetchFullSetupStatus(side).then(setStatus).catch(() => {})
@@ -815,6 +816,16 @@ const QuickTenantSetup: React.FC<{
         {status?.running && (
           <Chip size="small" color="primary" icon={<CircularProgress size={10} />}
                 label="running…" />
+        )}
+        {status?.running && (
+          <Button size="small" color="error" variant="outlined" data-testid={`qts-${side}-stop`}
+                  disabled={stopping}
+                  onClick={() => {
+                    setStopping(true)
+                    stopFullSetup(side).then(poll).catch(() => {}).finally(() => setStopping(false))
+                  }}>
+            {stopping ? 'Stopping…' : 'Stop'}
+          </Button>
         )}
       </Stack>
 

@@ -655,6 +655,12 @@ export interface FullSetupStatus {
  * serialization at the type level specifically so no future write endpoint
  * can forget and log it in plaintext).
  */
+/** Kill a side's running setup (and the browser it drives) so it can be started again. */
+export const stopFullSetup = (side: 'source' | 'target') =>
+  cpFetch<ActionResult>('/api/v2/full-setup/stop', {
+    method: 'POST',
+    body: JSON.stringify({ side, reason: 'stopped from the setup card' }),
+  })
 /** Run a side's setup again with the admin login a previous setup kept on the server. */
 export const redoFullSetup = (side: 'source' | 'target', accountId?: number) =>
   cpFetch<ActionResult>('/api/v2/full-setup/redo', {

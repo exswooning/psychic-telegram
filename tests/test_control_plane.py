@@ -873,6 +873,40 @@ class TestFullSetup:
         assert body["running"] is True
         assert body["pid"] == 1234
 
+    def test_stop_kills_the_setup_and_its_browser_and_leaves_it_restartable(
+            self, monkeypatch, tmp_path, cp):
+        """Live: a government admin's sign-in sat on Google asking the server's browser
+        for a phone number, with nothing on the card to end it."""
+        import api_server
+
+        class _Ps:
+            stdout = ("  4321 /root/migration/.venv/bin/python full_setup.py "
+                      "--side source --domain d.example.com --json\n")
+        monkeypatch.setattr(api_server, "HERE", str(tmp_path))
+        monkeypatch.setattr(api_server.subprocess, "run", lambda argv, **kw: _Ps())
+        killed = []
+        monkeypatch.setattr(api_server.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
+        with open(api_server._full_setup_state_path("source", None), "w") as fh:
+            json.dump({"running": True, "domain": "d.example.com"}, fh)
+        r = cp.post("/api/v2/full-setup/stop", json={"reason": "stuck", "side": "source"},
+                    headers=ADMIN)
+        assert r.status_code == 200, r.text
+        assert killed == [(4321, 9)]
+        monkeypatch.setattr(api_server.subprocess, "run",
+                            lambda argv, **kw: type("P", (), {"stdout": ""})())
+        body = cp.get("/api/v2/full-setup/status?side=source", headers=ADMIN).json()
+        assert body["running"] is False
+        assert body["result"]["interrupted"] and body["result"]["domain"] == "d.example.com"
+
+    def test_stop_with_nothing_running_kills_nothing(self, monkeypatch, cp):
+        import api_server
+        monkeypatch.setattr(api_server.subprocess, "run",
+                            lambda argv, **kw: type("P", (), {"stdout": ""})())
+        monkeypatch.setattr(api_server.os, "killpg", lambda *a: pytest.fail("killed"))
+        r = cp.post("/api/v2/full-setup/stop", json={"reason": "stuck", "side": "target"},
+                    headers=ADMIN)
+        assert r.status_code != 200 or not r.json().get("ok", True)
+
     def test_an_unknown_side_is_rejected(self, cp):
         r = cp.get("/api/v2/full-setup/status?side=sideways", headers=ADMIN)
         assert r.status_code == 400
