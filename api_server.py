@@ -2567,7 +2567,19 @@ async def quick_latest(account_id: int | None = None, op: Operator = Depends(ope
         return {"report": None}
     _require_account_access(aid, op)
     import verify_sample
-    return {"report": await _off_loop(verify_sample.latest, aid)}
+
+    def _this_pair():
+        # A previous pair's quick check is not this pair's (it read "seeduser122" under
+        # gorkhatweed.com -> s.sarafgloabalexim.com).
+        from config import Settings
+        rep = verify_sample.latest(aid)
+        st = Settings(account_id=aid)
+        pair = ((st.source_domain or "").lower(), (st.target_domain or "").lower())
+        if rep and all(pair) and ((rep.get("sourceDomain") or "").lower(),
+                                  (rep.get("targetDomain") or "").lower()) != pair:
+            return None
+        return rep
+    return {"report": await _off_loop(_this_pair)}
 
 
 @app.get("/api/v2/quick/latest.md")
