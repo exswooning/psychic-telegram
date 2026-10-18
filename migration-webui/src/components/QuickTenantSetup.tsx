@@ -511,7 +511,10 @@ const QuickTenantSetup: React.FC<{
   const alreadyHere = !!tenantCfg?.hasKey
     && (tenantCfg.domain || '').toLowerCase() === domain.trim().toLowerCase()
   const result = status?.result
-  const setUpOk = !!result?.ok && !status?.running
+  // Only a result for THIS domain: the slot's last run may have been another tenant's
+  // (target2.sarafgloabalexim.com's "Setup done" and its users showed on mdharan.com).
+  const setUpOk = !!result?.ok && !status?.running && (result.domain
+    ? result.domain === domain.trim().toLowerCase() : alreadyHere)
   // Once per key on file for this domain, and again when a setup run finishes.
   const readinessKey = alreadyHere && !status?.running
     ? `${tenantCfg?.clientId}:${domain.trim().toLowerCase()}:${result?.ok ? 'ok' : ''}` : ''
@@ -534,6 +537,10 @@ const QuickTenantSetup: React.FC<{
   // A result is shown beside the domain it was for. One from before the domain was
   // recorded shows only if it succeeded: an old failure or interruption for some other
   // tenant read as this new pair's (two "interrupted" cards on a fresh setup).
+  // The last provisioning run may have been for another tenant on this slot.
+  const provHere = provisionStatus && (!provisionStatus.users?.length
+    || provisionStatus.users.some((u) => u.email.toLowerCase().endsWith('@' + domain.trim().toLowerCase())))
+    ? provisionStatus : null
   const resultHere = !!result && (result.domain
     ? result.domain === domain.trim().toLowerCase()
     : result.ok)
@@ -1107,7 +1114,7 @@ const QuickTenantSetup: React.FC<{
 
       {showProvisionUsers && (
         <FormControlLabel
-          sx={{ mt: 0.5, display: 'block' }}
+          sx={{ mt: 0.5, display: 'flex' }}
           control={<Switch checked={provisionUsers}
                            onChange={(e) => setProvisionUsers(e.target.checked)} />}
           label={
@@ -1356,13 +1363,13 @@ const QuickTenantSetup: React.FC<{
                     onClick={() => setPostAction('provision')}>
               {provisionStatus?.running ? 'Running…' : 'Provision users now'}
             </Button>
-            {provisionStatus && (provisionStatus.created || provisionStatus.total) && (
+            {provHere && (provHere.created || provHere.total) && (
               <Typography variant="caption" color="text.secondary"
                           data-testid="provision-counts">
-                {provisionStatus.created}/{provisionStatus.total} created
-                {provisionStatus.existing
-                  ? `, ${provisionStatus.existing} already existed` : ''}
-                {provisionStatus.failed ? `, ${provisionStatus.failed} failed` : ''}
+                {provHere.created}/{provHere.total} created
+                {provHere.existing
+                  ? `, ${provHere.existing} already existed` : ''}
+                {provHere.failed ? `, ${provHere.failed} failed` : ''}
               </Typography>
             )}
           </Stack>
@@ -1373,20 +1380,20 @@ const QuickTenantSetup: React.FC<{
               how this read when it was clicked repeatedly and appeared to do
               nothing. Naming the address and its state is what makes
               "already there" legible as a result. */}
-          {provisionStatus?.users && provisionStatus.users.length > 0 && (
+          {provHere && provHere.users && provHere.users.length > 0 && (
             <Box sx={{ mt: 1.5 }} data-testid="provision-users">
-              {provisionStatus.running && (
+              {provHere.running && (
                 <LinearProgress
-                  variant={provisionStatus.total ? 'determinate' : 'indeterminate'}
-                  value={provisionStatus.total
+                  variant={provHere.total ? 'determinate' : 'indeterminate'}
+                  value={provHere.total
                     ? Math.min(100, Math.round(
-                        100 * provisionStatus.users.length / provisionStatus.total))
+                        100 * provHere.users.length / provHere.total))
                     : undefined}
                   sx={{ mb: 1, borderRadius: 1 }} />
               )}
               <Box sx={{ maxHeight: 200, overflowY: 'auto', border: '1px solid',
                          borderColor: 'divider', borderRadius: 1, p: 1 }}>
-                {provisionStatus.users.map((u) => (
+                {provHere.users.map((u) => (
                   <Stack key={u.email} direction="row" spacing={1}
                          alignItems="center" sx={{ py: 0.25 }}
                          data-testid={`prov-${u.email}`}>
