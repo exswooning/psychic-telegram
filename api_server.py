@@ -3744,6 +3744,29 @@ def _full_setup_state_path(side: str, account_id: int | None) -> str:
     return os.path.join(d, f"full-setup-{side}.json")
 
 
+class RedoFullSetup(WriteAction):
+    account_id: int | None = None
+    side: Literal["source", "target"]
+
+
+@app.post("/api/v2/full-setup/redo")
+async def full_setup_redo(body: RedoFullSetup, op: Operator = Depends(operator)):
+    """Run this side's setup again, in one click, with the admin login an earlier setup
+    kept (admin_secrets, root-only) -- refused unless that login is on the domain set up
+    in this slot now."""
+    import admin_secrets
+    aid = _resolve_account(body, op)
+    cfg = accounts_auth.get_tenant_config(aid, body.side) or {}
+    domain = (cfg.get("domain") or "").strip().lower()
+    email, password = admin_secrets.teardown_login(aid, body.side)
+    if not domain or not password or email.rsplit("@", 1)[-1].lower() != domain:
+        raise HTTPException(409, f"no kept admin login for {domain or 'this slot'}; "
+                                 "set it up from the Setup Wizard once")
+    return await full_setup_start(StartFullSetup(
+        reason=body.reason, side=body.side, domain=domain, admin_email=email,
+        admin_password=password, account_id=aid, dry_run=False), op)
+
+
 @app.post("/api/v2/full-setup/start")
 async def full_setup_start(body: StartFullSetup, op: Operator = Depends(operator)):
     """Runs full_setup.py detached.

@@ -655,6 +655,13 @@ export interface FullSetupStatus {
  * serialization at the type level specifically so no future write endpoint
  * can forget and log it in plaintext).
  */
+/** Run a side's setup again with the admin login a previous setup kept on the server. */
+export const redoFullSetup = (side: 'source' | 'target', accountId?: number) =>
+  cpFetch<ActionResult>('/api/v2/full-setup/redo', {
+    method: 'POST',
+    body: JSON.stringify({ side, reason: 'redo setup from Identities', account_id: accountId }),
+  })
+
 export const startFullSetup = (
   reason: string, side: 'source' | 'target', domain: string,
   adminEmail: string, adminPassword: string, opts: {

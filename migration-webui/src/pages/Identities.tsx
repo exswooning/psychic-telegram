@@ -19,6 +19,7 @@ import {
   fetchVerifiedDomains, VerifiedDomain,
   fetchTenantInventory, TenantInventory,
   fetchAllDomains, ConfiguredDomain,
+  redoFullSetup,
 } from '@/api/controlPlane'
 import JobRunner from '@/components/JobRunner'
 import LinkDomainsDialog from '@/components/LinkDomainsDialog'
@@ -173,6 +174,15 @@ const DomainCard: React.FC<{ d: VerifiedDomain }> = ({ d }) => {
   const setUp = d.total > 0 && !d.error
   const [open, setOpen] = useState(false)
   const [delOpen, setDelOpen] = useState(false)
+  const [redo, setRedo] = useState<{ busy: boolean; msg: string; ok: boolean } | null>(null)
+  const redoSetup = () => {
+    setRedo({ busy: true, msg: '', ok: true })
+    redoFullSetup(d.side)
+      .then((r) => setRedo({ busy: false, ok: !!r.ok, msg: r.ok
+        ? 'Setup started with the kept login — watch it in the Setup Wizard; approve any 2-Step prompt on your phone.'
+        : (r.detail || 'could not start') }))
+      .catch((e) => setRedo({ busy: false, ok: false, msg: e instanceof Error ? e.message : String(e) }))
+  }
 
   return (
     <Card elevation={0} data-testid={`domain-card-${d.side}`}
@@ -231,11 +241,18 @@ const DomainCard: React.FC<{ d: VerifiedDomain }> = ({ d }) => {
         <TenantStats side={d.side} canRead={setUp}
                      testId={`domain-stats-${d.side}`} />
         <Box sx={{ px: 2, pb: 2 }}>
-          <Button size="small" color="error" startIcon={<DeleteIcon />}
-                  data-testid={`delete-domain-${d.side}`}
-                  onClick={() => setDelOpen(true)}>
-            Delete this setup
-          </Button>
+          {redo?.msg && <Alert severity={redo.ok ? 'info' : 'error'} sx={{ mb: 1 }}>{redo.msg}</Alert>}
+          <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
+            <Button size="small" variant="contained" disabled={!d.domain || redo?.busy}
+                    data-testid={`redo-setup-${d.side}`} onClick={redoSetup}>
+              {redo?.busy ? 'Starting…' : 'Redo setup'}
+            </Button>
+            <Button size="small" color="error" startIcon={<DeleteIcon />}
+                    data-testid={`delete-domain-${d.side}`}
+                    onClick={() => setDelOpen(true)}>
+              Delete this setup
+            </Button>
+          </Stack>
         </Box>
       </Collapse>
       <DeleteSetupDialog open={delOpen} onClose={() => setDelOpen(false)}
