@@ -803,29 +803,45 @@ class DriveMigrator:
         except Exception:      # noqa: BLE001 - unknown is treated as protected
             return True
 
-    def _source_tripwire(self, since: str) -> None:
-        """A protected source must come out of a run as it went in. Anything created in
-        this user's own source Drive while their Drive was being copied is recorded,
-        never silent: by the user themselves, or by this run (live, dharan.gov.np: Form
-        copies left "Copy of ..." beside the originals). Reads only."""
+    def _source_files(self) -> dict[str, dict] | None:
+        """Every file this user owns on the source, by id -- or None if it could not be read."""
         try:
-            made = self._retry(lambda: self.auth.source_drive(self.source_user).files().list(
-                q=f"createdTime > '{since}' and 'me' in owners", pageSize=100,
-                fields="files(id,name,mimeType,createdTime)").execute(),
-                write=False, tenant="source").get("files", [])
+            d, out, token = self.auth.source_drive(self.source_user), {}, None
+            while True:
+                r = self._retry(lambda t=token: d.files().list(
+                    q="'me' in owners", pageSize=1000, pageToken=t,
+                    fields="nextPageToken,files(id,name,mimeType,createdTime)").execute(),
+                    write=False, tenant="source")
+                out.update({f["id"]: f for f in r.get("files", [])})
+                token = r.get("nextPageToken")
+                if not token:
+                    return out
         except Exception as exc:      # noqa: BLE001 - a check that cannot run says so
-            log.warning("[%s] could not check the source for changes: %s", self.source_user, exc)
+            log.warning("[%s] could not list the source for the change check: %s", self.source_user, exc)
+            return None
+
+    def _source_tripwire(self, before: dict[str, dict] | None) -> None:
+        """A protected source must come out of a run as it went in. Its files are listed
+        before this user's Drive pass and after it, and anything added or gone is recorded,
+        never silent -- by the user themselves, or by this run. By id, not createdTime: a
+        copy carries its original's createdTime (live, dharan.gov.np: Apps Script copies
+        with the original's to the millisecond). Reads only."""
+        after = self._source_files() if before is not None else None
+        if after is None:
             return
-        for f in made:
-            self.db.log_audit(self.source_user, f["id"], "source_change", "SOURCE_CHANGED", _named(
-                f, f"created on the source at {f.get('createdTime')}, while this user's Drive was "
-                   "being copied -- by the user, or by this run; Bitport must never write there"))
-            log.error("[%s] SOURCE CHANGED: %r (%s) was created on the source during the run",
-                      self.source_user, f.get("name"), f.get("mimeType"))
+        for fid, what in [(f, "created") for f in after.keys() - before.keys()] + \
+                         [(f, "gone") for f in before.keys() - after.keys()]:
+            f = (after if what == "created" else before)[fid]
+            self.db.log_audit(self.source_user, fid, "source_change", "SOURCE_CHANGED", _named(
+                f, f"{what} on the source while this user's Drive was being copied -- by the "
+                   "user, or by this run; Bitport must never write there"))
+            log.error("[%s] SOURCE CHANGED: %r (%s) %s on the source during the run",
+                      self.source_user, f.get("name"), f.get("mimeType"), what)
 
     def run(self, delta: bool = False) -> dict:
         self.delta = delta
-        began = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+        watch = (self._protected_source and not self.shared_drive and not self.settings.dry_run)
+        before = self._source_files() if watch else None
         # (item, target id, export mime) for native files that mentioned a
         # Drive id. Drained at the end of the user, when every id is known.
         self._pending_link_rewrites: list[tuple[dict, str, str]] = []
@@ -878,8 +894,8 @@ class DriveMigrator:
             self._rewrite_pending_links()
             self._rewrite_native_links()
             self._verify_modified_times()
-            if self._protected_source and not self.shared_drive and not self.settings.dry_run:
-                self._source_tripwire(began)
+            if watch:
+                self._source_tripwire(before)
         finally:
             # `_staging_drive_id`, not `self.server_side`.
             #
@@ -1508,12 +1524,20 @@ class DriveMigrator:
             return out
 
     # -- strategy cascade ------------------------------------------------------
+    # The Google types a server-side copy lands where it is asked to. Live, dharan.gov.np:
+    # Forms ("Copy of <name>") and Apps Script projects (same name, same createdTime)
+    # copied into the run's staging drive ALSO left copies in the source user's own My
+    # Drive, and each later pass copied those again.
+    _COPIES_IN_PLACE = {"application/vnd.google-apps.document", "application/vnd.google-apps.spreadsheet",
+                        "application/vnd.google-apps.presentation", "application/vnd.google-apps.drawing"}
+
     def _strategies_for(self, item: dict, is_native: bool) -> list:
         strategies = self._file_strategies(is_native)
-        if item.get("mimeType") == FORM_MIME and self._protected_source:
-            # Live, dharan.gov.np: a server-side copy of a Form landed on the target AND,
-            # for 7 of 18, left a "Copy of <name>" in the SOURCE user's own My Drive.
-            # Nothing else can carry a Form, so it is listed for a person instead.
+        mime = item.get("mimeType") or ""
+        if (self._protected_source and mime.startswith("application/vnd.google-apps.")
+                and mime not in self._COPIES_IN_PLACE):
+            # A protected source is never written to: any other Google type goes another
+            # way, or is listed for a person, rather than risk a copy beside the original.
             strategies = [s for s in strategies if s[0] != "server_side"]
         return strategies
 
