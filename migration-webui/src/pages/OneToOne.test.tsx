@@ -8,13 +8,15 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import OneToOne from './OneToOne'
 import type { OneToOneService, OneToOneView } from '@/api/controlPlane'
 
-const cp = vi.hoisted(() => ({ view: vi.fn(), run: vi.fn() }))
+const cp = vi.hoisted(() => ({ view: vi.fn(), run: vi.fn(), tenant: vi.fn(), tenantRun: vi.fn() }))
 const me = vi.hoisted(() => ({ value: { id: 3 } as { id: number; migration_id?: number } }))
 vi.mock('@/api/controlPlane', () => ({
   fetchMe: () => Promise.resolve(me.value),
   migrationOf: (m: { id: number; migration_id?: number }) => m.migration_id ?? m.id,
   fetchOneToOne: cp.view,
   runOneToOne: cp.run,
+  fetchTenantOneToOne: cp.tenant,
+  runTenantOneToOne: cp.tenantRun,
 }))
 
 const svc = (service: string, verdict: OneToOneService['verdict'], extra: Partial<OneToOneService> = {}): OneToOneService => ({
@@ -38,6 +40,7 @@ const view = (over: Partial<OneToOneView> = {}): OneToOneView => ({
 const show = () => render(<MemoryRouter initialEntries={['/one-to-one?account=3']}><OneToOne /></MemoryRouter>)
 
 beforeEach(() => {
+  cp.tenant.mockResolvedValue({ report: null })
   cp.view.mockReset().mockResolvedValue(view())
   cp.run.mockReset().mockResolvedValue({ ok: true, detail: 'started pid 1' })
 })
@@ -202,5 +205,36 @@ describe('the migration chosen in the header', () => {
     render(<MemoryRouter initialEntries={['/one-to-one']}><OneToOne /></MemoryRouter>)
     await waitFor(() => expect(cp.view).toHaveBeenCalledWith(6))
     me.value = { id: 3 }
+  })
+})
+
+describe('two checks: the whole tenant and each user', () => {
+  const sec = (status: 'IDENTICAL' | 'DIFFERENCES' | 'INCOMPLETE', extra = {}) => ({
+    status, compared: 3, matched: status === 'IDENTICAL' ? 3 : 2, differenceCount: 0, differences: [],
+    notes: [], error: null, ...extra })
+  beforeEach(() => {
+    cp.view.mockResolvedValue({ accountId: 3, onComplete: true, perService: 25, users: [], totals: {} })
+  })
+
+  it('shows the tenant verdict, each tenant section, and a section nobody could check as incomplete', async () => {
+    cp.tenant.mockResolvedValue({ report: {
+      source: 'a.gov.np', target: 'b.com', checkedAt: '2026-10-19T04:00:00Z', verdict: 'INCOMPLETE',
+      sections: { users: sec('IDENTICAL'), groups: sec('INCOMPLETE', { error: '403 no scope' }),
+                  sharedDrives: sec('DIFFERENCES', { differenceCount: 1,
+                    differences: [{ item: 'Finance (SD)', diffs: ['d.pdf: never copied'] }] }),
+                  rooms: sec('IDENTICAL', { compared: 0, matched: 0 }), perUser: sec('IDENTICAL') } } })
+    show()
+    expect(await screen.findByTestId('tenant-verdict')).toHaveTextContent('Incomplete')
+    expect(screen.getByText('Each user')).toBeInTheDocument()
+    expect(within(screen.getByTestId('tenant-section-groups')).getByText('could not be checked')).toBeInTheDocument()
+    expect(within(screen.getByTestId('tenant-section-rooms')).getByText('none on the source')).toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText('details of Shared drives'))
+    expect(await screen.findByText('d.pdf: never copied')).toBeInTheDocument()
+  })
+
+  it('says the tenant was never checked rather than showing nothing', async () => {
+    cp.tenant.mockResolvedValue({ report: null })
+    show()
+    expect(await screen.findByText('Not checked yet')).toBeInTheDocument()
   })
 })

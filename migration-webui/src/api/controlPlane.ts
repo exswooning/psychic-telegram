@@ -1783,6 +1783,24 @@ export const runOneToOne = (reason: string, opts: { accountId?: number; users?: 
                            ...(opts.limit !== undefined ? { limit: opts.limit } : {}) }),
   })
 
+/** The tenant's own one-to-one check (tenant_verify.py): what belongs to the tenant, not a user. */
+export interface TenantSection {
+  status: 'IDENTICAL' | 'DIFFERENCES' | 'INCOMPLETE'; compared: number; matched: number
+  differenceCount: number; differences: { item: string; diffs: string[] }[]
+  notes: string[]; error: string | null
+}
+export interface TenantReport {
+  source: string; target: string; checkedAt: string
+  verdict: TenantSection['status']
+  sections: Record<'users' | 'groups' | 'sharedDrives' | 'rooms' | 'perUser', TenantSection>
+}
+export const fetchTenantOneToOne = (accountId?: number) =>
+  cpFetch<{ report: TenantReport | null }>(`/api/v2/one-to-one/tenant${accountId ? `?account_id=${accountId}` : ''}`)
+export const runTenantOneToOne = (reason: string, accountId?: number) =>
+  cpFetch<ActionResult>('/api/v2/one-to-one/tenant/run', {
+    method: 'POST', body: JSON.stringify({ reason, account_id: accountId ?? null }),
+  })
+
 /** An exhaustive per-user count on both tenants (tally.py), not a sample -- distinct from
  *  one-to-one above. COMPLETE/SHORT read off count_parity against the same bar
  *  benchmarks.py's own count_parity check uses; UNKNOWN is a tally that measured nothing. */

@@ -1691,7 +1691,7 @@ def _auto_processes() -> int:
     try:
         import job_admission
         # A verify or tally only reads (about 1% of a core, measured); it takes no core away.
-        reads = {"verify", "user-tally", "tally", "discover"}
+        reads = {"verify", "verify-tenant", "user-tally", "tally", "discover"}
         jobs = len([j for j in job_admission.list_active() if j.get("job_name") not in reads]) or 1
     except Exception:      # noqa: BLE001 - no control plane (a bare CLI run): this job alone
         jobs = 1

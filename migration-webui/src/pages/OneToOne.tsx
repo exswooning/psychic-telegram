@@ -19,6 +19,7 @@ import {
 } from '@mui/material'
 import { KeyboardArrowDown as OpenIcon, KeyboardArrowUp as CloseIcon, Refresh as RefreshIcon } from '@mui/icons-material'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
+import TenantOneToOne from '@/components/TenantOneToOne'
 import { fetchMe, fetchOneToOne, runOneToOne, migrationOf } from '@/api/controlPlane'
 import type { OneToOneService, OneToOneUser, OneToOneVerdict, OneToOneView } from '@/api/controlPlane'
 
@@ -187,6 +188,10 @@ const OneToOne: React.FC = () => {
       </Typography>
 
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+
+      <TenantOneToOne accountId={accountId} />
+
+      <Typography variant="h6" sx={{ fontWeight: 700, mb: 1 }}>Each user</Typography>
       {note && <Alert severity={note.ok ? 'success' : 'error'} sx={{ mb: 2 }} onClose={() => setNote(null)}>{note.text}</Alert>}
 
       <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 2 }} flexWrap="wrap" useFlexGap>

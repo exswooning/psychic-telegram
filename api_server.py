@@ -1485,7 +1485,7 @@ async def admin_delete_account(account_id: int, body: DeleteAccount,
 
 
 # Jobs that only read a ledger; anything else may rewrite a user's markers under us.
-_READ_ONLY_JOBS = frozenset({"verify", "user-tally", "tally", "discover"})
+_READ_ONLY_JOBS = frozenset({"verify", "verify-tenant", "user-tally", "tally", "discover"})
 
 
 def _ledger_writer_running(account_id: int | None) -> list[str]:
@@ -2438,6 +2438,33 @@ async def one_to_one_run(body: RunVerification, op: Operator = Depends(operator)
     target = ",".join(body.users) if body.users else "ALL"
     return await _gated(op, "one-to-one.run", body, target,
                         lambda: _run_admitted(argv, account_id, "verify"))
+
+
+class RunTenantVerification(WriteAction):
+    account_id: int | None = None
+
+
+@app.get("/api/v2/one-to-one/tenant")
+async def one_to_one_tenant(account_id: int | None = None, op: Operator = Depends(operator)):
+    """The tenant's own one-to-one check, as last run (tenant_verify.py): users, groups,
+    shared drives item by item, rooms, and the per-user verdicts. None until it has run."""
+    require_login(op)
+    aid = account_id if account_id is not None else op.account_id
+    if not aid:
+        return {"report": None}
+    _require_account_access(aid, op)
+    import tenant_verify
+    return {"report": await _off_loop(tenant_verify.latest, aid)}
+
+
+@app.post("/api/v2/one-to-one/tenant/run")
+async def one_to_one_tenant_run(body: RunTenantVerification, op: Operator = Depends(operator)):
+    """Check the whole tenant one to one, now: reads both, writes nothing to either. A job of
+    its own (`verify-tenant`), so it shows on the Jobs page with its log."""
+    account_id = _resolve_account(body, op)
+    argv = [PY, "tenant_verify.py"] + _account_argv(account_id)
+    return await _gated(op, "one-to-one.tenant", body, "TENANT",
+                        lambda: _run_admitted(argv, account_id, "verify-tenant"))
 
 
 def _tally_view(account_id: int | None) -> dict:

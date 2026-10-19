@@ -1543,7 +1543,9 @@ _EXT_SCRIPTS = {"seed_sandbox.py": "seed", "reset_target.py": "reset target",
                 "dms_migrate.py": "dms",
                 # "Verify everything" reads every item on both tenants for hours;
                 # after a restart it was running with no card and no Stop.
-                "verify_sample.py": "verify"}
+                "verify_sample.py": "verify",
+                # The tenant's own one-to-one check: shared drives item by item.
+                "tenant_verify.py": "verify-tenant"}
 # Last-seen output tail per external pid, for the suffix-diff that turns the
 # unbounded migration.log into the same "just the new lines" contract the
 # webui-launched Job streams.
