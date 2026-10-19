@@ -16,6 +16,8 @@ vi.mock('@/components/OneToOneSummary', () => ({
   default: ({ accountId }: { accountId: number }) => <div data-testid="one-to-one-summary-panel">{accountId}</div>,
 }))
 vi.mock('@/api/controlPlane', () => ({
+  fetchSourceGuard: () => Promise.resolve({ snapshotTakenAt: null, snapshotUsers: 0, latest: null }),
+  runSourceGuard: () => Promise.resolve({ ok: true, actionId: 1, detail: '' }),
   fetchMigrationDetail: (...a: unknown[]) => fetchMigrationDetail(...a),
   startDelta: (...a: unknown[]) => startDelta(...a),
   startMigration: (...a: unknown[]) => startMigration(...a),

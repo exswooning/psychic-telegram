@@ -9,6 +9,8 @@ vi.mock('@/components/RunReports', () => ({ default: () => null }))
 vi.mock('@/components/QuickVerification', () => ({ default: () => null }))
 vi.mock('@/components/OneToOneSummary', () => ({ default: () => null }))
 vi.mock('@/api/controlPlane', () => ({
+  fetchSourceGuard: () => Promise.resolve({ snapshotTakenAt: null, snapshotUsers: 0, latest: null }),
+  runSourceGuard: () => Promise.resolve({ ok: true, actionId: 1, detail: '' }),
   fetchMigrationDetail: (...a: unknown[]) => fetchMigrationDetail(...a),
   runRepair: (...a: unknown[]) => runRepair(...a),
   startDelta: vi.fn(),

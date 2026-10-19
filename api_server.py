@@ -870,9 +870,11 @@ async def lifespan(_: FastAPI):
     mirrors = asyncio.create_task(_mirror_loop())
     ends = asyncio.create_task(_lifecycle_loop())
     owed = asyncio.create_task(_owed_grants_loop())
+    guard = asyncio.create_task(_source_guard_loop())
     try:
         yield
     finally:
+        guard.cancel()
         task.cancel()
         watchdog.cancel()
         observer.cancel()
@@ -4436,6 +4438,127 @@ def _grant_owed_everywhere() -> list[str]:
             out.append(f"account {aid}: {got.get('granted', 0)} granted, "
                        f"{got.get('covered', 0)} already had access, {len(got.get('errors') or [])} error(s)")
     return out
+
+
+SOURCE_GUARD_POLL_SEC = int(os.getenv("SOURCE_GUARD_POLL_SEC", "600"))
+
+
+def _source_guard_one(aid, force: bool = False) -> dict | None:
+    """One source-guard check for one account: a protected source with a baseline, not
+    yet approved (or `force`). A change Bitport made opens an incident."""
+    import domain_guard
+    import lifecycle
+    import source_guard
+    from auth import AuthManager
+    from config import Settings
+    from db import MigrationDB
+    path = _account_db_path(aid)
+    if not path or not os.path.isfile(path):
+        return None
+    st = Settings(account_id=aid)
+    if not domain_guard.is_protected(st.source_domain or ""):
+        return None
+    if not force and lifecycle.state(aid).get("approved_at"):
+        return None
+    d = MigrationDB(path)
+    try:
+        if not source_guard.snapshot_taken(d):
+            return None
+        with open(st.source_sa_key, encoding="utf-8") as fh:
+            client_id = json.load(fh).get("client_id")
+        rep = source_guard.check(AuthManager(st), st, d, client_id)
+    finally:
+        d.close()
+    # Admin-console changes from this tool's addresses are setup's own (a delegation
+    # grant, a setting it records and turns back off): listed, but only a change to the
+    # source's DATA opens an incident.
+    mine = [r for r in (rep.get("auditLog") or {}).get("byBitport") or [] if r.get("app") != "admin"]
+    if mine:
+        import run_watch
+        run_watch.open_incident(
+            kind="source_changed", title=f"Bitport changed something on {st.source_domain}",
+            summary=f"{len(mine)} change(s) from this tool's own addresses in Google's audit log, "
+                    f"e.g. {mine[0].get('event')} {mine[0].get('item')!r}",
+            account_id=aid, job_name="source-guard", fingerprint=f"source-guard:{aid}")
+    return rep
+
+
+async def _source_guard_loop() -> None:
+    """Every protected source with a baseline is compared and its audit log read, every
+    SOURCE_GUARD_POLL_SEC, until its migration is approved (source_guard.py)."""
+    while True:
+        try:
+            await asyncio.sleep(SOURCE_GUARD_POLL_SEC)
+            for acct in accounts_auth.list_accounts():
+                aid = acct.get("id") if isinstance(acct, dict) else acct
+                try:
+                    rep = await _off_loop(_source_guard_one, aid)
+                    if rep:
+                        log.info("source guard: account %s %s (%s change(s))", aid,
+                                 rep.get("verdict"), rep.get("changeCount", 0))
+                except Exception as exc:      # noqa: BLE001 - one account must not stop the rest
+                    log.warning("source guard failed for account %s: %r", aid, exc)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:      # noqa: BLE001
+            log.warning("source guard sweep failed: %r", exc)
+
+
+class SourceGuardAction(WriteAction):
+    account_id: int | None = None
+    action: Literal["check", "baseline"]
+
+
+@app.get("/api/v2/source-guard")
+async def source_guard_view(account_id: int | None = None, op: Operator = Depends(operator)):
+    """The source's baseline and the latest comparison and audit-log reading."""
+    require_login(op)
+    aid = account_id if account_id is not None else op.account_id
+    _require_account_access(aid, op)
+    import source_guard
+    from db import MigrationDB
+
+    def _read() -> dict:
+        path = _account_db_path(aid)
+        if not path or not os.path.isfile(path):
+            return {"snapshotTakenAt": None, "snapshotUsers": 0, "latest": None}
+        d = MigrationDB(path)
+        try:
+            return source_guard.latest(d)
+        finally:
+            d.close()
+    return await _off_loop(_read)
+
+
+@app.post("/api/v2/source-guard")
+async def source_guard_run(body: SourceGuardAction, op: Operator = Depends(operator)):
+    """Check now, or (re)take the baseline -- both read the source only, in the background."""
+    aid = _resolve_account(body, op)
+
+    def _go() -> tuple[bool, str]:
+        import source_guard
+        from auth import AuthManager
+        from config import Settings
+        from db import MigrationDB
+
+        def work():
+            try:
+                if body.action == "check":
+                    _source_guard_one(aid, force=True)
+                else:
+                    st = Settings(account_id=aid)
+                    d = MigrationDB(_account_db_path(aid))
+                    try:
+                        source_guard.snapshot(AuthManager(st), st, d)
+                    finally:
+                        d.close()
+            except Exception as exc:      # noqa: BLE001
+                log.warning("source guard %s failed for account %s: %r", body.action, aid, exc)
+        threading.Thread(target=work, daemon=True, name=f"source-guard-{aid}").start()
+        return True, ("checking the source now; the result appears here in a few minutes"
+                      if body.action == "check" else
+                      "counting the source now -- the new baseline replaces the old one")
+    return await _gated(op, f"source_guard.{body.action}", body, f"account:{aid}", _go)
 
 
 async def _owed_grants_loop() -> None:

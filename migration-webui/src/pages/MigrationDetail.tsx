@@ -19,6 +19,7 @@ import {
   MigrationDetail as Detail, RepairSurvey,
 } from '@/api/controlPlane'
 import type { MailMode, TransferMode } from '@/api/controlPlane'
+import SourceGuardPanel from '@/components/SourceGuardPanel'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
 import RunReports from '@/components/RunReports'
 import QuickVerification from '@/components/QuickVerification'
@@ -257,6 +258,8 @@ export const MigrationDetail: React.FC = () => {
           {/* Who to migrate, on the page rather than inside a dialog: the choice is the
               first thing anyone migrating a few users needs, and ?run=full (the Migrate...
               button on the Migrations list) lands here, highlighted. */}
+          <SourceGuardPanel accountId={Number(accountId) || undefined} sourceDomain={d.sourceDomain} />
+
           <Paper variant="outlined" id="migrate-card" data-testid="migrate-card"
                  data-highlighted={wantCard ? 'true' : 'false'}
                  sx={{ p: 2, mb: 2, borderColor: wantCard ? 'primary.main' : undefined,

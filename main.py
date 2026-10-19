@@ -2280,6 +2280,24 @@ def ordered_passes(services: set[str]) -> list[set[str]]:
     return [set(p) & services for p in ORDERED_PASSES if set(p) & services]
 
 
+def _source_guard_baseline(auth, db, settings) -> None:
+    """Counts of everything on a protected source, before anything moves -- once per
+    pair; the API's source guard compares against it while the migration is open
+    (source_guard.py). Never stops a run: a baseline that cannot be taken is logged."""
+    import domain_guard
+    if settings.dry_run or not domain_guard.is_protected(settings.source_domain or ""):
+        return
+    try:
+        import source_guard
+        if source_guard.snapshot_taken(db):
+            return
+        got = source_guard.snapshot(auth, settings, db)
+        print(f"SOURCE GUARD: counted the source before anything moves -- {got['users']} "
+              f"user(s), {got['files']} Drive file(s)", flush=True)
+    except Exception as exc:      # noqa: BLE001
+        log.warning("source guard: could not count the source beforehand: %s", exc)
+
+
 def cmd_migrate(args, settings: Settings, db: MigrationDB, auth: AuthManager):
     services = resolve_services(args.services)
     _enable_selected_services(settings, services)
@@ -2295,6 +2313,7 @@ def cmd_migrate(args, settings: Settings, db: MigrationDB, auth: AuthManager):
         # Inside the registration too. Live, dharan.gov.np pilot: an 11-minute repair after
         # the slot was freed made the watcher record the run's exit as never observed.
         _auto_repair(db, auth, settings)
+    _source_guard_baseline(auth, db, settings)
     results = _run_with_memory_pause(
         auth, db, settings, services, delta=False, delta_days=0,
         only=args.user,
@@ -2319,6 +2338,7 @@ def cmd_delta(args, settings: Settings, db: MigrationDB, auth: AuthManager):
     # typo'd name did nothing quietly rather than exiting.
     services = resolve_services(args.services)
     _enable_selected_services(settings, services)
+    _source_guard_baseline(auth, db, settings)
     results = _run_with_memory_pause(
         auth, db, settings, services, delta=True, delta_days=args.days,
         only=args.user)

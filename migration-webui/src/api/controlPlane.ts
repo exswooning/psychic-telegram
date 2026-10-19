@@ -1542,6 +1542,23 @@ export interface HostMetrics {
  *  its rate at a snapshot, the only kind in history recorded before events. */
 export interface LimiterPoint { t: number; rate: number; kind: 'probe' | 'backoff' | 'sample' }
 
+/** source_guard.py: counts of the source before, compared while the migration is open,
+ *  plus what Google's own audit log says this tool's addresses changed. */
+export interface SourceGuardChange { user?: string; what: string; name?: string; id?: string; from?: unknown; to?: unknown }
+export interface SourceGuardLogRow { at: string; app: string; event: string; actor?: string; item?: string; id?: string }
+export interface SourceGuardReport {
+  checkedAt: string; since: string; verdict: 'CLEAN' | 'CHANGED' | 'INCOMPLETE' | 'NO_SNAPSHOT'
+  changes: SourceGuardChange[]; changeCount: number; unread: { user: string; errors: Record<string, string> }[]
+  auditLog: { bitportAddresses?: string[]; byBitport?: SourceGuardLogRow[]; deletionsByOthers?: SourceGuardLogRow[]; error?: string }
+}
+export interface SourceGuard { snapshotTakenAt: string | null; snapshotUsers: number; latest: SourceGuardReport | null }
+export const fetchSourceGuard = (accountId?: number) =>
+  cpFetch<SourceGuard>(`/api/v2/source-guard${accountId ? `?account_id=${accountId}` : ''}`)
+export const runSourceGuard = (action: 'check' | 'baseline', reason: string, accountId?: number) =>
+  cpFetch<ActionResult>('/api/v2/source-guard', {
+    method: 'POST', body: JSON.stringify({ action, reason, account_id: accountId ?? null }),
+  })
+
 /** HOW a migration is moving each service (api_server._movement): the pass it is on,
  *  each service's method as the running process has it, and done against the source. */
 export interface Movement {
