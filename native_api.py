@@ -30,6 +30,8 @@ Both need only readonly scopes on the source. Neither touches it.
 """
 from __future__ import annotations
 
+import json
+
 from typing import Callable
 
 DOC = "application/vnd.google-apps.document"
@@ -94,6 +96,10 @@ API_FIDELITY: dict[str, str] = {
     DOC: ("text, headings, lists, tables and links. Inline images, drawings "
           "and suggestions are not rebuilt -- prefer an alternative export "
           "for a Doc unless it is text-only."),
+    FORM: ("questions, sections, choices, branching, grids, scales, quiz answers and "
+           "points, images and videos. Not carried: past responses (they are in the "
+           "copied responses Sheet), the link to that Sheet (relinked by hand), and "
+           "file-upload questions, which the Forms API cannot create."),
     SLIDES: ("not implemented. presentations.batchUpdate can rebuild shapes "
              "and text but not faithfully enough to be worth claiming; an "
              ".odp or .pdf export is a more honest result."),
@@ -106,7 +112,7 @@ def alt_formats(mime: str) -> list[tuple[str, str, str]]:
 
 def can_rebuild(mime: str) -> bool:
     """Whether copy_via_api will actually attempt this type."""
-    return mime in (SHEET, DOC)
+    return mime in (SHEET, DOC, FORM)
 
 
 # ---------------------------------------------------------------------------
@@ -181,4 +187,120 @@ def copy_doc(src_docs, tgt_docs, file_id: str, name: str) -> tuple[str, str]:
     return doc_id, f"rebuilt via the Docs API ({API_FIDELITY[DOC]})"
 
 
-REBUILDERS: dict[str, Callable] = {SHEET: copy_sheet, DOC: copy_doc}
+# ---------------------------------------------------------------------------
+# Forms
+# ---------------------------------------------------------------------------
+def _form_item(item: dict) -> dict:
+    """A source item as forms.batchUpdate createItem takes it: ids dropped (the target
+    mints its own), images re-pointed from their temporary contentUri to sourceUri."""
+    item = json.loads(json.dumps(item))
+    item.pop("itemId", None)
+
+    def walk(node):
+        if isinstance(node, dict):
+            node.pop("questionId", None)
+            if "contentUri" in node:
+                node["sourceUri"] = node.pop("contentUri")
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+    walk(item)
+    return item
+
+
+def _hold_jumps(item: dict) -> list[tuple] | None:
+    """A question that jumps to a SECTION names it by id, and the target mints new ids,
+    so its jumps are held back and set once the sections exist. Google takes a jump on
+    every option or on none ("Either all or no options should be go to enabled"), so ALL
+    of that question's jumps are held -- actions too -- as (value, action, section)."""
+    q = (item.get("questionItem") or {}).get("question") or {}
+    options = (q.get("choiceQuestion") or {}).get("options", [])
+    if not any(o.get("goToSectionId") for o in options):
+        return None
+    held = [(o.get("value"), o.pop("goToAction", None), o.pop("goToSectionId", None)) for o in options]
+    return held
+
+
+def copy_form(src_forms, tgt_forms, file_id: str, name: str) -> tuple[str, str]:
+    """Rebuild a Form on the target from forms.get: read-only on the source, so a
+    government source is never written to (a cross-organisation files.copy of a Form
+    made Google drop a "Copy of" into the source owner's Drive -- see drive_engine).
+
+    forms.create takes only a title; everything else is batchUpdate. Branching names
+    sections by id, and the target mints new ids, so items are created first with the
+    jumps held back, then the jumps are set with the target's own section ids."""
+    form = src_forms.forms().get(formId=file_id).execute()
+    info = form.get("info") or {}
+    created = tgt_forms.forms().create(body={"info": {
+        "title": info.get("title") or name, "documentTitle": name}}).execute()
+    form_id = created["formId"]
+
+    setup = []
+    if info.get("description"):
+        setup.append({"updateFormInfo": {"info": {"description": info["description"]},
+                                         "updateMask": "description"}})
+    quiz = ((form.get("settings") or {}).get("quizSettings") or {}).get("isQuiz")
+    if quiz:
+        setup.append({"updateSettings": {"settings": {"quizSettings": {"isQuiz": True}},
+                                         "updateMask": "quizSettings.isQuiz"}})
+    if setup:
+        tgt_forms.forms().batchUpdate(formId=form_id, body={"requests": setup}).execute()
+
+    left_out, made, jumps = [], [], []          # made: (source item id, index on target)
+    creates = []
+    for item in form.get("items", []):
+        q = (item.get("questionItem") or {}).get("question") or {}
+        if "fileUploadQuestion" in q:
+            left_out.append(item.get("title") or "an untitled file-upload question")
+            continue
+        new = _form_item(item)
+        held = _hold_jumps(new)
+        if held:
+            jumps.append((len(creates), held))
+        creates.append({"createItem": {"item": new, "location": {"index": len(creates)}}})
+        made.append(item.get("itemId"))
+    ids: list[str] = []
+    if creates:
+        reply = tgt_forms.forms().batchUpdate(
+            formId=form_id, body={"requests": creates, "includeFormInResponse": True}).execute()
+        ids = [r.get("createItem", {}).get("itemId") for r in reply.get("replies", [])]
+    if jumps:
+        new_id = dict(zip(made, ids))
+        rebuilt = {i["itemId"]: i for i in (reply.get("form") or {}).get("items", [])}
+        updates = []
+        for index, held in jumps:
+            target_item = rebuilt.get(ids[index]) if index < len(ids) else None
+            if not target_item:
+                continue
+            want = {value: (action, new_id.get(section)) for value, action, section in held}
+            if any(section and not want[value][1] for value, _a, section in held):
+                left_out.append(f"the branching of {target_item.get('title') or 'a question'}")
+                continue
+            for o in target_item["questionItem"]["question"]["choiceQuestion"]["options"]:
+                action, to = want.get(o.get("value"), (None, None))
+                if to:
+                    o["goToSectionId"] = to
+                elif action:
+                    o["goToAction"] = action
+            updates.append({"updateItem": {"item": target_item, "location": {"index": index},
+                                           "updateMask": "questionItem.question.choiceQuestion.options"}})
+        if updates:
+            tgt_forms.forms().batchUpdate(formId=form_id, body={"requests": updates}).execute()
+    # Open or closed to responses, as on the source. A new Form starts published and
+    # accepting (measured on t.); only a different state is set.
+    state = (form.get("publishSettings") or {}).get("publishState")
+    if state and state != {"isPublished": True, "isAcceptingResponses": True}:
+        try:
+            tgt_forms.forms().setPublishSettings(formId=form_id, body={
+                "publishSettings": {"publishState": state}, "updateMask": "publishState"}).execute()
+        except Exception:      # noqa: BLE001 - the Form itself is rebuilt; say what is not
+            left_out.append(f"its response state ({state})")
+    note = f"rebuilt via the Forms API ({API_FIDELITY[FORM]})"
+    if left_out:
+        note += f"; {len(left_out)} thing(s) to add by hand: " + "; ".join(left_out[:5])
+    return form_id, note
+
+
+REBUILDERS: dict[str, Callable] = {SHEET: copy_sheet, DOC: copy_doc, FORM: copy_form}

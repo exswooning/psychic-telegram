@@ -215,6 +215,10 @@ TOKENS_READONLY_SCOPE = (
 # linkedSheetId is output-only, and Apps Script's setDestination cannot run as a
 # delegated account -- so the pairs are recorded for a person to relink.
 FORMS_READONLY_SCOPE = "https://www.googleapis.com/auth/forms.body.readonly"
+# Rebuilding a Form on the target through the Forms API (native_api.copy_form). The
+# source is only read (FORMS_READONLY_SCOPE): no Form is copied across organisations,
+# which made Google drop a "Copy of" into the source owner's Drive (dharan.gov.np).
+FORMS_WRITE_SCOPE = "https://www.googleapis.com/auth/forms.body"
 
 # Adding the original participants to a recreated space. Needed by both space
 # modes, for different reasons: under `direct` a user cannot post into a space
@@ -289,7 +293,7 @@ def source_scopes(settings: "Settings") -> list[str]:
         scopes.append(CALENDAR_ACLS_READONLY_SCOPE)
     if settings.migrate_resources:
         scopes.append(RESOURCE_READONLY_SCOPE)
-    if settings.migrate_form_links:
+    if settings.migrate_form_links or settings.migrate_forms:
         scopes.append(FORMS_READONLY_SCOPE)
     return scopes
 
@@ -327,6 +331,8 @@ def target_scopes(settings: "Settings") -> list[str]:
         scopes.append(TASKS_WRITE_SCOPE)
     if settings.migrate_sso:
         scopes.append(SSO_WRITE_SCOPE)
+    if settings.migrate_forms:
+        scopes.append(FORMS_WRITE_SCOPE)
     return scopes
 
 
@@ -877,6 +883,11 @@ class Settings:
     # target (Migration detail lists them). Read-only on the source.
     migrate_form_links: bool = field(
         default_factory=lambda: _env_bool("MIGRATE_FORM_LINKS", True)
+    )
+    # Rebuild a Form on the target through the Forms API when nothing else can carry
+    # it (native_api.copy_form): read-only on the source, forms.body on the target.
+    migrate_forms: bool = field(
+        default_factory=lambda: _env_bool("MIGRATE_FORMS", True)
     )
     # Creating groups on the target. Reading them needs nothing extra --
     # admin.directory.group.readonly is already in the base scopes, which is

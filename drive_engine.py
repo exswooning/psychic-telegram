@@ -1639,14 +1639,15 @@ class DriveMigrator:
         """
         import native_api
         mime = item.get("mimeType") or ""
-        if not native_api.can_rebuild(mime):
+        if not native_api.can_rebuild(mime) or (
+                mime == native_api.FORM and not getattr(self.settings, "migrate_forms", True)):
             self.db.log_audit(
                 self.source_user, item["id"], "file", "SKIPPED_UNEXPORTABLE",
                 _named(item, native_api.API_FIDELITY.get(mime, f"no API rebuild for {mime}")))
             self._bump("skipped")
             return
 
-        kind = "sheets" if mime == native_api.SHEET else "docs"
+        kind = {native_api.SHEET: "sheets", native_api.FORM: "forms"}.get(mime, "docs")
         src_api = self.auth.api("source", kind, self.reader or self.source_user)
         tgt_api = self.auth.api("target", kind, self.target_user)
         tgt_id, note = native_api.REBUILDERS[mime](

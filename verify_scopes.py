@@ -195,7 +195,9 @@ def every_toggle_scopes(settings: Settings, tenant: str) -> set[str]:
          "chat_allow_delete": cd,
          # Groups and rooms: each widens only the directory grant, and a
          # setup that never wrote them left "full fidelity" nothing to turn on.
-         "migrate_groups": gr, "migrate_resources": rs}
+         "migrate_groups": gr, "migrate_resources": rs,
+         # Only ever adds a scope, so on in every combination rather than doubling them.
+         "migrate_forms": True}
         for m in TRANSFER_MODES
         for g in (False, True)
         for c in (False, True)

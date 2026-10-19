@@ -85,6 +85,9 @@ REQUIRED_APIS = {
     "docs.googleapis.com": "Docs (native files)",
     "sheets.googleapis.com": "Sheets (native files)",
     "slides.googleapis.com": "Slides (native files)",
+    # A Form rebuilt on the target (native_api.copy_form), read on the source. Live, off on
+    # every project: forms.get answered 403 SERVICE_DISABLED for each responses-Sheet note.
+    "forms.googleapis.com": "Forms (rebuild a Form)",
 }
 
 CLOUD_PLATFORM = "https://www.googleapis.com/auth/cloud-platform"

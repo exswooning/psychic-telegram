@@ -181,6 +181,15 @@ def _tick_overwrite(dialog, label) -> bool:
         return False
 
 
+def _overwrite_ticked(dialog) -> bool:
+    """Is the "Overwrite existing client ID" box ticked right now?"""
+    try:
+        boxes = dialog.get_by_role("checkbox")
+        return boxes.count() > 0 and boxes.first.is_checked()
+    except Exception:      # noqa: BLE001 - unknown reads as not ticked
+        return False
+
+
 def _row_scope_count(row_text: str) -> int | None:
     """How many scopes a delegation-table row lists: the scopes it shows plus its
     "+N More". None when the row reads neither."""
@@ -847,6 +856,17 @@ def run(client_id: str, scopes: str, timeout: int, headful: bool,
                     sc2.fill(scopes)
                 except Exception as exc:      # noqa: BLE001
                     log(f"  could not re-fill the scopes: {str(exc)[:120]}")
+                # The re-fill can re-render the dialog and clear the tick (live, on a
+                # Mac: Authorize then sat on "Client ID already exists"). Ticked again,
+                # and proven, right before Authorize.
+                if not _overwrite_ticked(dialog):
+                    log("  the overwrite tick was cleared by the re-fill -- ticking it again")
+                    if not _tick_overwrite(dialog, dialog.locator(
+                            "text=Overwrite existing client ID").first):
+                        log("REFUSING: could not keep 'Overwrite existing client ID' "
+                            "ticked -- nothing was changed")
+                        browser.close()
+                        return 7
                 _dump_dialog(page, dialog, "overwrite-before")
                 # Confirmed live: this re-click can time out -- the dialog
                 # this Authorize button lives in can close, re-render, or

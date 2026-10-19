@@ -352,8 +352,13 @@ owner's My Drive as "Copy of <form>" (event `copy`, `copy_type: internal`, actor
 no app); an **Apps Script** copy lands there too ("Copy of", then renamed). 12 such copies,
 no original touched. So on a protected source (`DriveMigrator._strategies_for`) only Docs,
 Sheets not linked to a Form (`_form_sheets`; unknown = not safe), Slides, Drawings and
-non-Google files take a server-side copy; a type every route declines stays
-`SKIPPED_UNEXPORTABLE`; and each user's Drive pass lists their source files before and after
+non-Google files take a server-side copy; a Form is REBUILT instead (`native_api.copy_form`:
+forms.get on the source, forms.create + batchUpdate on the target -- items, sections, quiz,
+images, video, and branching set in a second step with the target's own section ids, since
+Google takes a jump on every option of a question or on none; not carried: past responses,
+the responses-Sheet link, file-upload questions; `migrate_forms`, `forms.body` on the
+target, forms.googleapis.com in `ensure_apis`; tested 15/15 identical on s.->t., source
+untouched); a type every route declines stays `SKIPPED_UNEXPORTABLE`; and each user's Drive pass lists their source files before and after
 (`_source_tripwire`, by id -- a copy keeps its original's createdTime) and records anything
 added or gone as `SOURCE_CHANGED`.
 
