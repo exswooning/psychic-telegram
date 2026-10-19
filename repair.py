@@ -865,7 +865,7 @@ def run_all(db, auth, settings, apply: bool = False,
     try:
         import retry_failed
         rf = retry_failed.retry(auth, db, settings, apply=apply)
-        out["stranded"] = rf["messages"] + rf["events"]
+        out["stranded"] = rf["messages"] + rf["events"] + rf.get("drafts", 0)
         out["stranded_retried"] = rf["retried"]
         out["errors"].extend(rf["errors"])
     except Exception as exc:          # noqa: BLE001

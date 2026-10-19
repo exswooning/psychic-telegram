@@ -366,7 +366,7 @@ class Verifier:
     def _drive_meta(self, svc, fid):
         return self._x(lambda: svc.files().get(
             fileId=fid, supportsAllDrives=True,
-            fields="id,name,mimeType,parents,size,md5Checksum,modifiedTime,trashed").execute())
+            fields="id,name,mimeType,parents,size,md5Checksum,modifiedTime,trashed,ownedByMe").execute())
 
     def _drive_path(self, svc, fid, cache: dict) -> str:
         parts, cur, guard = [], fid, 0
@@ -442,6 +442,14 @@ class Verifier:
                 sharing = self._sharing(src, tgt, sid, tid, res)
                 if getattr(self, "_not_owner", False):
                     diffs = [d for d in diffs if not d.startswith("folder path differs")]
+                if sm.get("ownedByMe") is False:
+                    # Carried in: owned by someone outside the source and shared with this
+                    # user, copied for them (drive_engine._walk_shared_with_me). The copy is
+                    # theirs, in their Drive; the owner's folder and sharing stay with the
+                    # owner's original -- by design, not a difference (live, dharan.gov.np).
+                    res["carriedIn"] = res.get("carriedIn", 0) + 1
+                    diffs = [d for d in diffs if not d.startswith("folder path differs")]
+                    sharing = []
                 diffs += sharing
                 self.evidence.append({"service": "drive", **ev})
                 if diffs:
@@ -516,7 +524,10 @@ class Verifier:
             return []
         if not hasattr(self, "_skipped_ids"):
             self._skipped_ids = {r["item_id"] for r in self.db.conn.execute(
-                "SELECT item_id FROM audit_log WHERE source_user=? AND item_type='acl' AND status LIKE 'SKIPPED%'",
+                # OWED too: a share with a colleague not migrated yet is recorded and granted
+                # once they arrive (repair.reapply_owed_grants) -- explained, not missing.
+                "SELECT item_id FROM audit_log WHERE source_user=? AND item_type='acl' "
+                "AND (status LIKE 'SKIPPED%' OR status LIKE 'OWED%')",
                 (self.src_user,))}
         g = compare_grants(sp, tp, self._translate, self.settings.source_domain, self.settings.target_domain,
                            self._skipped_ids, sid)
@@ -786,6 +797,22 @@ class Verifier:
             res["notes"].append(f"{ev_notes.count(text)} time(s), {text}")
         self._note_sample(res, "event")
         res["notCopied"] = self._failed(("event", "calendar"))
+        # Nothing recorded and nothing failed: read the source's own calendars. None holding
+        # an event is 1:1 with nothing to copy, not unchecked (live, dharan.gov.np pilot:
+        # three users with no events of their own read "incomplete 0/0").
+        if res["checked"] == 0 and not res["errors"] and not res["notCopied"]:
+            try:
+                import inventory
+                n = inventory.scan_calendar(src)
+                # At least the primary must have been read: no calendar at all is not
+                # evidence of an empty one.
+                if n.get("calendars") and not n.get("events"):
+                    res["emptySource"] = True
+                    res["notes"].append(f"the source's {n.get('calendars', 0)} own calendar(s) hold no events"
+                                        + (f"; {n['followed']} followed calendar(s) are re-followed, not copied"
+                                           if n.get("followed") else ""))
+            except Exception as exc:      # noqa: BLE001 - unread stays INCOMPLETE
+                res["errors"].append(f"the source's calendars could not be read: {str(exc)[:100]}")
         return res
 
     # -- Contacts ---------------------------------------------------------
@@ -807,7 +834,10 @@ class Verifier:
                 res["missing"].append({"source": sid, "target": tid, "why": f"not on the target ({str(exc)[:80]})"})
                 continue
             name = ((sp.get("names") or [{}])[0]).get("displayName") or sid
-            diffs = compare_contact(sp, tp, self._translate)
+            # As written: contacts_engine copies a contact's addresses exactly, so a
+            # colleague's old address stays old (live, dharan.gov.np pilot: the check
+            # translated them and called 20 exact copies different).
+            diffs = compare_contact(sp, tp, lambda v: v)
             self.evidence.append({"service": "contacts", "name": name, "opened": True, "how": "fields compared"})
             if diffs:
                 res["differences"].append({"item": name, "source": sid, "target": tid, "diffs": diffs})

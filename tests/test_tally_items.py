@@ -30,3 +30,18 @@ def test_equal_counts_with_a_lost_item_is_short_not_complete():
     assert _rollup({"mail": ok, "calendar": ok}) == "COMPLETE"
     assert _rollup({"mail": {**ok, "matched": 2, "notMigrated": 1, "extraOnTarget": 1}}) == "SHORT"
     assert _rollup({"mail": {**ok, "extraOnTarget": 1}}) == "DIFFERS"
+
+
+def test_files_carried_in_from_outside_are_expected_on_the_target():
+    """Live, dharan.gov.np pilot: 9 copies of files shared in by Gmail accounts read as
+    'more on the target than the source'."""
+    class DB:
+        def mapped_ids(self, user, types):
+            return {"file": {"own1": "t1", "outside": "t2", "moved": "moved"},
+                    "folder": {"outfolder": "t3"}}[types[0]]
+    assert tally.carried_in(DB(), "a@s", {"own1": {}}) == {"drive_files": 1, "drive_folders": 1}
+    row = {"user": "a@s", "target_user": "a@t", "skipped": {}, "carried": {"drive_files": 1},
+           "source": {"counts": {"drive_files": 1}, "errors": {}},
+           "target": {"counts": {"drive_files": 2}, "errors": {}}}
+    svc = tally.aggregate([row])["services"]["drive_files"]
+    assert svc["expected"] == 2 and svc["surplus"] == 0

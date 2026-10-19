@@ -316,7 +316,8 @@ def aggregate(rows: list[dict]) -> dict:
             skipped = min(src, (r.get("skipped") or {}).get(svc, 0))
             # A MOVED file left the source for the target: the source no longer counts
             # it, the target does, and it is owed all the same.
-            expected = src - skipped + (r.get("moved") or {}).get(svc, 0)
+            expected = (src - skipped + (r.get("moved") or {}).get(svc, 0)
+                        + (r.get("carried") or {}).get(svc, 0))
             s["source"] += src
             s["target"] += tgt
             s["skipped"] += skipped
@@ -517,12 +518,28 @@ def tally_user(auth, settings, db, source_user: str, target_user: str,
                                 ids=src_ids),
            "target": count_side(auth, settings, "target", target_user, retry, keep=tgt_items,
                                 ids=tgt_ids)}
+    if src_items:
+        row["carried"] = carried_in(db, source_user, src_items)
     payload = aggregate([row])
     if src_items:
+        payload["carriedIn"] = row["carried"]
         payload["driveItems"] = compare_drive(
             src_items, tgt_items, db.mapped_ids(source_user, ("file", "folder")))
     payload["items"] = compare_services(db, source_user, src_ids, tgt_ids)
     return payload
+
+
+def carried_in(db, source_user: str, owned: dict) -> dict[str, int]:
+    """Copies of files the user does not own -- shared INTO them by someone outside the
+    source (drive_engine._walk_shared_with_me), which no other run carries. They land in
+    the user's Drive by design, so the target holds them beyond the user's own files.
+    Live, dharan.gov.np pilot: 9 such copies (owned by personal Gmail accounts) read as
+    "more on the target than the source". A moved file (same id both sides) is not one."""
+    out = {}
+    for svc, kind in (("drive_files", "file"), ("drive_folders", "folder")):
+        out[svc] = sum(1 for sid, tid in db.mapped_ids(source_user, (kind,)).items()
+                       if sid not in owned and sid != tid)
+    return out
 
 
 def compare_services(db, source_user: str, src_ids: dict, tgt_ids: dict) -> dict:

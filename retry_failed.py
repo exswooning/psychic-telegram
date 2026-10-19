@@ -22,7 +22,7 @@ log = logging.getLogger("retry_failed")
 
 # Only what a retry can actually reach. A failed 'user' row means the whole
 # user errored, which is a migration's job, not this pass's.
-RETRYABLE_TYPES = ("message", "event")
+RETRYABLE_TYPES = ("message", "event", "draft")
 
 
 def failed_items(db, item_types=RETRYABLE_TYPES) -> dict:
@@ -57,7 +57,7 @@ def retry(auth, db, settings, apply: bool = False, limit: int | None = None,
     calendar_cls = _calendar_cls or CalendarMigrator
 
     targets = _targets(db)
-    stats = {"messages": 0, "events": 0, "retried": 0, "unmapped_users": 0,
+    stats = {"messages": 0, "events": 0, "drafts": 0, "retried": 0, "unmapped_users": 0,
              "errors": []}
     for src_user, by_type in failed_items(db).items():
         tgt_user = targets.get(src_user)
@@ -84,6 +84,21 @@ def retry(auth, db, settings, apply: bool = False, limit: int | None = None,
                         stats["retried"] += 1
                 except Exception as exc:      # noqa: BLE001 - report, never abort
                     stats["errors"].append(f"{src_user} gmail: {str(exc)[:120]}")
+
+        # A failed draft is offered again only by the drafts pass, which a finished
+        # mail service never re-runs (live, dharan.gov.np pilot: livestock@'s 12 drafts,
+        # refused before its licence, stayed FAILED while all its messages were retried).
+        # The pass skips every draft already copied, so re-running it retries just these.
+        drafts = by_type.get("draft", [])
+        if drafts:
+            stats["drafts"] += len(drafts)
+            if apply:
+                try:
+                    gm = gmail_cls(auth, db, settings, src_user, tgt_user)
+                    gm._migrate_drafts()
+                    stats["retried"] += len(drafts)
+                except Exception as exc:      # noqa: BLE001
+                    stats["errors"].append(f"{src_user} drafts: {str(exc)[:120]}")
 
         if events:
             stats["events"] += len(events)
