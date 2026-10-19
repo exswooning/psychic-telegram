@@ -100,3 +100,16 @@ def test_a_form_closed_to_responses_stays_closed_and_an_open_one_is_left_alone()
     native_api.copy_form(FakeForms(dict(closed, publishSettings={"publishState": {
         "isPublished": True, "isAcceptingResponses": True}})), tgt, "S", "Q")
     assert not any(k == "publish" for k, _ in tgt.calls)
+
+
+def test_repair_revisits_the_owners_of_forms_left_for_a_person(db, settings):
+    """Live, dharan.gov.np: 9 Forms recorded for a person before the rebuild existed; their
+    owners had finished Drive, so a resumed run never walked them again."""
+    import repair
+    db.log_audit("a@src", "f1", "file", "SKIPPED_UNEXPORTABLE",
+                 "file: Survey\\nno API rebuild for application/vnd.google-apps.form")
+    db.log_audit("b@src", "s1", "file", "SKIPPED_UNEXPORTABLE", "file: Site\\nno export mapping for application/vnd.google-apps.site")
+    settings.migrate_forms = True
+    assert repair.forms_to_rebuild_users(db, settings) == ["a@src"]
+    settings.migrate_forms = False
+    assert repair.forms_to_rebuild_users(db, settings) == []

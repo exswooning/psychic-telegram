@@ -311,6 +311,18 @@ def reapply_owed_grants(auth, db, settings, apply: bool = False) -> dict:
     return out
 
 
+def forms_to_rebuild_users(db, settings) -> list[str]:
+    """Users with a Form left for a person -- recorded before the Forms API rebuild
+    existed, or while its pass was off -- now that a Drive re-walk can rebuild it
+    (native_api.copy_form). Live, dharan.gov.np: 9 Forms whose owners had finished their
+    Drive pass, so a resumed run never revisited them."""
+    if not getattr(settings, "migrate_forms", False):
+        return []
+    return [r[0] for r in db.conn.execute(
+        "SELECT DISTINCT source_user FROM audit_log WHERE status='SKIPPED_UNEXPORTABLE' "
+        "AND item_type='file' AND error_message LIKE '%application/vnd.google-apps.form%'")]
+
+
 def stranded_drive_users(db) -> list[str]:
     """Source users with a file/folder/shortcut that permanently failed its copy,
     scoped to the current corpus and excluding the two families that already have
@@ -363,7 +375,8 @@ def retry_drive_stragglers(auth, db, settings, apply: bool = False,
         "SELECT source_email, target_email FROM identity_map").fetchall())
     stats = {"attempted": 0, "retried": 0, "unmapped_users": 0, "errors": []}
     if users is None:
-        users = list(dict.fromkeys(stranded_drive_users(db) + pending_share_users(db)))
+        users = list(dict.fromkeys(stranded_drive_users(db) + pending_share_users(db)
+                                   + forms_to_rebuild_users(db, settings)))
     for src in users:
         tgt = targets.get(src)
         if not tgt:
