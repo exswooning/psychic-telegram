@@ -39,7 +39,8 @@ const SourceGuardPanel: React.FC<{ accountId?: number; sourceDomain?: string }> 
       <Stack direction="row" alignItems="center" spacing={1} flexWrap="wrap" useFlexGap>
         <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>Source guard</Typography>
         {v && <Chip size="small" color={v.color} label={v.label} data-testid="source-guard-verdict" />}
-        {r && mine.length > 0 && <Chip size="small" color="error" label={`Bitport changed ${mine.length}`} />}
+        {r && (mine.length > 0 || (r.changedByTool ?? 0) > 0) && (
+          <Chip size="small" color="error" label={`Bitport changed ${mine.length + (r.changedByTool ?? 0)}`} />)}
         <Box sx={{ flexGrow: 1 }} />
         <Button size="small" onClick={() => { setNote(null); setAsking('check') }} disabled={!g.snapshotTakenAt}>
           Check now
@@ -83,6 +84,7 @@ const SourceGuardPanel: React.FC<{ accountId?: number; sourceDomain?: string }> 
               {r.changes.slice(0, 50).map((c, i) => (
                 <Typography key={`${c.user}${c.id}${i}`} variant="caption" sx={{ display: 'block', overflowWrap: 'anywhere' }}>
                   {c.user} · {c.what}{c.name ? ` · ${c.name}` : ''}{c.from !== undefined ? ` · ${String(c.from)} → ${String(c.to)}` : ''}
+                  {c.by ? ` — by ${c.by}` : ''}
                 </Typography>
               ))}
               {others.length > 0 && (

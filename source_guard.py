@@ -10,6 +10,9 @@ for every protected source (a government's or a customer's):
 2. A CHECK while the migration is open (`check`, every 10 minutes from the API):
    the same read again, compared with the snapshot -- a file gone, created or
    modified; a count that went down.
+   Then each difference is looked up in the audit log by its file id (`explain`), so
+   the two sources check each other: made by this tool, a person, Google itself, or
+   not logged yet.
 3. GOOGLE'S OWN AUDIT LOG since the last check (Reports API, read-only:
    admin.reports.audit.readonly, on every protected source's grant): any change
    made from this tool's own addresses -- learned from the token log, where every
@@ -159,8 +162,51 @@ def audit(settings, since: str, client_id: str, events=None) -> dict:
     return {"bitportAddresses": sorted(ours), "byBitport": by_bitport, "deletionsByOthers": deletions}
 
 
+# -- the two sources, against each other -----------------------------------------
+EXPLAIN_MAX = 50          # one filtered audit query per changed file; a flood is sampled
+
+
+def explain(changes: list[dict], ours: set, events_for=None, settings=None, since: str = "") -> list[dict]:
+    """Each difference the count found, looked up in Google's audit log by its file id:
+    who made it -- this tool (its own address), a person (their address), or Google
+    itself (no app, no address: live, dharan.gov.np's Form copies) -- or 'not in the
+    log yet' (it lags), so the two sources check each other instead of only sitting side
+    by side. Changes past EXPLAIN_MAX are marked unchecked, never assumed."""
+    if events_for is None:
+        svc = _reports(settings)
+
+        def events_for(doc_id):
+            r = svc.activities().list(userKey="all", applicationName="drive", startTime=since,
+                                      filters=f"doc_id=={doc_id}", maxResults=200).execute()
+            for x in r.get("items", []):
+                for e in x.get("events", []):
+                    yield x, e
+    out = []
+    for i, c in enumerate(changes):
+        c = dict(c)
+        if not c.get("id"):
+            out.append(c)
+            continue
+        if i >= EXPLAIN_MAX:
+            c["by"] = "not looked up (too many changes in one check)"
+            out.append(c)
+            continue
+        made = [(x, e) for x, e in events_for(c["id"]) if e.get("name") not in READS]
+        if not made:
+            c["by"] = "not in Google's audit log yet (it can lag) -- looked up again next check"
+        else:
+            x, e = made[0]
+            ip, who = x.get("ipAddress"), (x.get("actor") or {}).get("email")
+            c["by"] = (f"this tool ({e.get('name')} as {who})" if ip in ours
+                       else f"a person: {who} from {ip} ({e.get('name')})" if ip
+                       else f"Google itself, on {who}'s behalf ({e.get('name')}, no app, no address)")
+            c["byTool"] = ip in ours
+        out.append(c)
+    return out
+
+
 # -- the check ------------------------------------------------------------------
-def check(auth, settings, db, client_id: str, read=read_user, audit_fn=audit) -> dict:
+def check(auth, settings, db, client_id: str, read=read_user, audit_fn=audit, explain_fn=None) -> dict:
     """Compare every user with the snapshot, and read the audit log since the last check
     (or the snapshot). CHANGED if anything differs or Bitport changed anything; CLEAN if
     nothing did and the log was read; INCOMPLETE if any part could not be read."""
@@ -181,10 +227,21 @@ def check(auth, settings, db, client_id: str, read=read_user, audit_fn=audit) ->
         log_part = audit_fn(settings, since, client_id)
     except Exception as exc:      # noqa: BLE001 - said, never taken as "nothing happened"
         log_part = {"error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+    if changes and not log_part.get("error"):
+        # Source one (the count) explained by source two (the log), file by file -- from
+        # the snapshot on, since a count difference can predate the last check.
+        first = min(r[0] for r in db.conn.execute("SELECT taken_at FROM source_guard_snapshot"))
+        try:
+            changes = (explain_fn or (lambda ch, ours: explain(ch, ours, settings=settings, since=first)))(
+                changes, set(log_part.get("bitportAddresses") or []))
+        except Exception as exc:      # noqa: BLE001
+            log_part["explainError"] = f"{type(exc).__name__}: {str(exc)[:200]}"
+    by_tool = [c for c in changes if c.get("byTool")]
     verdict = ("CHANGED" if changes or log_part.get("byBitport")
                else "INCOMPLETE" if unread or log_part.get("error") else "CLEAN")
     report = {"checkedAt": _now(), "since": since, "verdict": verdict, "changes": changes[:500],
-              "changeCount": len(changes), "unread": unread, "auditLog": log_part}
+              "changeCount": len(changes), "changedByTool": len(by_tool), "unread": unread,
+              "auditLog": log_part}
     with db.write() as c:
         c.execute("INSERT INTO source_guard_checks(checked_at, since, verdict, report) VALUES (?,?,?,?)",
                   (report["checkedAt"], since, verdict, json.dumps(report)))

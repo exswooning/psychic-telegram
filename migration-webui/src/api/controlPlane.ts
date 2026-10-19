@@ -1544,11 +1544,11 @@ export interface LimiterPoint { t: number; rate: number; kind: 'probe' | 'backof
 
 /** source_guard.py: counts of the source before, compared while the migration is open,
  *  plus what Google's own audit log says this tool's addresses changed. */
-export interface SourceGuardChange { user?: string; what: string; name?: string; id?: string; from?: unknown; to?: unknown }
+export interface SourceGuardChange { user?: string; what: string; name?: string; id?: string; from?: unknown; to?: unknown; by?: string; byTool?: boolean }
 export interface SourceGuardLogRow { at: string; app: string; event: string; actor?: string; item?: string; id?: string }
 export interface SourceGuardReport {
   checkedAt: string; since: string; verdict: 'CLEAN' | 'CHANGED' | 'INCOMPLETE' | 'NO_SNAPSHOT'
-  changes: SourceGuardChange[]; changeCount: number; unread: { user: string; errors: Record<string, string> }[]
+  changes: SourceGuardChange[]; changeCount: number; changedByTool?: number; unread: { user: string; errors: Record<string, string> }[]
   auditLog: { bitportAddresses?: string[]; byBitport?: SourceGuardLogRow[]; deletionsByOthers?: SourceGuardLogRow[]; error?: string }
 }
 export interface SourceGuard { snapshotTakenAt: string | null; snapshotUsers: number; latest: SourceGuardReport | null }

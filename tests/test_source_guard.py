@@ -96,3 +96,20 @@ def test_the_loop_guards_only_an_open_migration_on_a_protected_source(monkeypatc
     monkeypatch.setattr(domain_guard, "is_protected", lambda d: False)
     monkeypatch.setattr(lifecycle, "state", lambda aid: {})
     assert api_server._source_guard_one(5) is None                     # a sandbox source
+
+
+def test_each_counted_difference_is_explained_by_the_audit_log():
+    """The two sources check each other: a count difference is looked up by file id."""
+    def ev(ip, name, who="u@src"):
+        return ({"ipAddress": ip, "actor": {"email": who}}, {"name": name})
+    log = {"f1": [ev("9.9.9.9", "download"), ev("9.9.9.9", "create")],       # this tool
+           "f2": [ev(None, "copy")],                                         # Google itself
+           "f3": [ev("5.5.5.5", "edit", "person@src")],                       # a person
+           "f4": []}                                                         # log lagging
+    changes = [{"what": "file created", "id": i} for i in ("f1", "f2", "f3", "f4")] + [{"what": "mail count went down"}]
+    got = G.explain(changes, {"9.9.9.9"}, events_for=lambda i: log[i])
+    assert got[0]["by"].startswith("this tool") and got[0]["byTool"]
+    assert got[1]["by"].startswith("Google itself") and not got[1]["byTool"]
+    assert got[2]["by"].startswith("a person: person@src from 5.5.5.5")
+    assert got[3]["by"].startswith("not in Google's audit log yet")
+    assert "by" not in got[4]                                                 # no id: nothing to look up

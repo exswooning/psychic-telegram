@@ -4473,6 +4473,7 @@ def _source_guard_one(aid, force: bool = False) -> dict | None:
     # grant, a setting it records and turns back off): listed, but only a change to the
     # source's DATA opens an incident.
     mine = [r for r in (rep.get("auditLog") or {}).get("byBitport") or [] if r.get("app") != "admin"]
+    mine += [{"event": c.get("what"), "item": c.get("name")} for c in rep.get("changes") or [] if c.get("byTool")]
     if mine:
         import run_watch
         run_watch.open_incident(
