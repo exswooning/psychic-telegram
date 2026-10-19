@@ -2227,14 +2227,31 @@ class DriveMigrator:
                   "is allowed to finish), or use Google's Domain Transfer"))
         self._bump("skipped")
 
+    def _download_flagged_too(self, item: dict):
+        """Download a file's bytes -- and one Google has flagged as possibly harmful
+        ("cannotDownloadAbusiveFile") with its warning acknowledged, which is still a read,
+        recorded so the report can name it (live, dharan.gov.np: 6 files; the operator chose
+        to copy them). COPY_FLAGGED_FILES=false leaves them FAILED instead."""
+        try:
+            return self._download_via(lambda: self.src.files().get_media(fileId=item["id"]))
+        except (PermanentAPIError, RuntimeError) as exc:
+            if "cannotDownloadAbusiveFile" not in str(exc) or not getattr(
+                    self.settings, "copy_flagged_files", True):
+                raise
+        got = self._download_via(lambda: self.src.files().get_media(
+            fileId=item["id"], acknowledgeAbuse=True))
+        self.db.log_audit(self.source_user, item["id"], "flagged_file", "COPIED_FLAGGED", _named(
+            item, "Google flags this file as possibly harmful; copied with its warning acknowledged"))
+        log.warning("[%s] %s is flagged by Google as possibly harmful -- copied with the warning "
+                    "acknowledged", self.source_user, item.get("name"))
+        return got
+
     def _sync_binary(self, item: dict, tgt_parent: str) -> None:
         size = int(item.get("size") or 0)
         self.quota.reserve(size)   # QuotaExhausted propagates and halts the user
 
         try:
-            path, _ = self._download_via(
-                lambda: self.src.files().get_media(fileId=item["id"])
-            )
+            path, _ = self._download_flagged_too(item)
         except (PermanentAPIError, RuntimeError) as exc:
             self.quota.refund(size)
             self.db.log_audit(self.source_user, item["id"], "file", "FAILED", str(exc))
@@ -2611,9 +2628,7 @@ class DriveMigrator:
             size = int(item.get("size") or 0)
             self.quota.reserve(size)
             try:
-                path, size = self._download_via(
-                    lambda: self.src.files().get_media(fileId=item["id"])
-                )
+                path, size = self._download_flagged_too(item)
             except (PermanentAPIError, RuntimeError) as exc:
                 self.quota.refund(size)
                 self.db.log_audit(self.source_user, item["id"], "file", "FAILED", str(exc))

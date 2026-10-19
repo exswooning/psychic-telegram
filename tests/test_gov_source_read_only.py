@@ -131,3 +131,31 @@ def test_a_forms_responses_sheet_is_never_copied_server_side_from_a_protected_so
     assert "server_side" not in sheet("responses") and "server_side" in sheet("budget")
     monkeypatch.setattr(migrator, "_form_sheets", lambda: None)      # could not tell
     assert "server_side" not in sheet("budget")
+
+
+def test_a_file_google_flags_as_harmful_is_copied_with_the_warning_acknowledged(migrator, monkeypatch):
+    """Live, dharan.gov.np: 6 files failed 403 cannotDownloadAbusiveFile; the operator chose to copy them."""
+    from resilience import PermanentAPIError
+    asked = []
+
+    def via(fn):
+        req = fn()
+        asked.append(req)
+        if len(asked) == 1:
+            raise PermanentAPIError("HTTP 403 (cannotDownloadAbusiveFile): flagged")
+        return "/tmp/x", 3
+
+    class Files:
+        def get_media(self, **kw):
+            return kw
+    monkeypatch.setattr(migrator, "_download_via", via)
+    monkeypatch.setattr(type(migrator), "src", property(lambda self: type("S", (), {"files": lambda s: Files()})()))
+    item = {"id": "bad1", "name": "setup.exe"}
+    assert migrator._download_flagged_too(item) == ("/tmp/x", 3)
+    assert asked[1] == {"fileId": "bad1", "acknowledgeAbuse": True}
+    assert migrator.db.get_audit(migrator.source_user, "bad1", "flagged_file")["status"] == "COPIED_FLAGGED"
+    migrator.settings.copy_flagged_files = False
+    asked.clear()
+    import pytest
+    with pytest.raises(PermanentAPIError):
+        migrator._download_flagged_too(item)

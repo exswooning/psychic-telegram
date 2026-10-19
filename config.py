@@ -889,6 +889,11 @@ class Settings:
     migrate_forms: bool = field(
         default_factory=lambda: _env_bool("MIGRATE_FORMS", True)
     )
+    # A file Google flags as possibly harmful is downloaded with the warning acknowledged
+    # (still a read) and recorded COPIED_FLAGGED; false leaves it FAILED.
+    copy_flagged_files: bool = field(
+        default_factory=lambda: _env_bool("COPY_FLAGGED_FILES", True)
+    )
     # Creating groups on the target. Reading them needs nothing extra --
     # admin.directory.group.readonly is already in the base scopes, which is
     # why the inventory worked while the migration could not: the write scope
