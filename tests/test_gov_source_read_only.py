@@ -56,3 +56,13 @@ def test_the_switch_is_a_file_beside_the_ledger(tmp_path, monkeypatch):
     assert not config.government_exact_copy(5) and not config.government_exact_copy(None)
     (tmp_path / "5").write_text("x")
     assert config.government_exact_copy(5) and not config.government_exact_copy(6)
+
+
+
+def test_readiness_never_shadows_domain_guard():
+    """Live: the read-only row read 'could not check: cannot access local variable
+    domain_guard' -- an import further down check() made the name local to all of it."""
+    import inspect
+
+    import readiness
+    assert "import domain_guard" not in inspect.getsource(readiness.check)

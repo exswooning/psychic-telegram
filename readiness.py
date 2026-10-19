@@ -192,7 +192,6 @@ def check(settings, side: str, purpose: str, *, gate: bool = False) -> dict:
     # sandbox (seed)
     if seed:
         try:
-            import domain_guard
             prot = domain_guard.is_protected(domain)
             rows.append(_row("sandbox", not prot, "declared a sandbox" if not prot
                              else f"{domain} is protected; declare it a sandbox before seeding"))
