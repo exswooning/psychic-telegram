@@ -5138,6 +5138,68 @@ _DETAIL_CACHE = _SingleFlightCache(ttl=15.0)
 _THROUGHPUT_CACHE = _SingleFlightCache(ttl=60.0)
 
 
+def _movement(conn, account_id, run_users=(), qs="") -> dict:
+    """HOW a migration is moving Drive and mail, not only how fast: the pass it is on,
+    each service's method (read from the running process itself, so a launch override
+    and the government read-only rule both show), and done against the source's count.
+    Counts from the ledger and discovery; nothing estimated."""
+    import domain_guard
+    import config as cfg
+    from config import Settings
+    st = Settings(account_id=account_id)
+    env: dict = {}
+    for j in job_admission.list_active():
+        if j.get("account_id") == account_id and j.get("job_name") in ("migrate", "delta") and j.get("pid"):
+            try:
+                with open(f"/proc/{j['pid']}/environ", "rb") as fh:
+                    env = dict(x.split("=", 1) for x in fh.read().decode(errors="replace").split("\0") if "=" in x)
+            except OSError:
+                pass
+    mode = env.get("TRANSFER_MODE") or st.transfer_mode
+    if domain_guard.is_government(st.source_domain or "") and not (
+            mode == "server_side" and cfg.government_exact_copy(account_id)):
+        mode = "download_upload"
+    split = (env.get("MAIL_ONLY_WITH_LINKS") or "").lower() in ("1", "true", "yes")
+    src, tgt = st.source_domain or "the source", st.target_domain or "the target"
+    drive_how = {
+        "download_upload": f"downloaded from {src} and uploaded to {tgt} through this server "
+                           "-- the source is only read",
+        "server_side": f"copied by Google straight into {tgt} -- no bytes pass through this server",
+        "move": f"moved out of {src} into {tgt} -- one file, not a copy",
+    }.get(mode, mode)
+    mail_how = (f"messages carrying a Drive link inserted into {tgt} by this tool, links repointed; "
+                "the rest by Google's Data Migration Service after the run") if split else (
+                f"each message read from {src} and inserted into {tgt} by this tool, "
+                "with its labels, read state, date and thread")
+    where = (f" AND source_user IN ({qs})" if run_users else "")
+    args = tuple(run_users)
+    exp = conn.execute(
+        "SELECT COALESCE(SUM(d.file_count),0) f, COALESCE(SUM(d.messages_total),0) m FROM discovery d "
+        "JOIN (SELECT source_user, MAX(scanned_at) ts FROM discovery"
+        + (f" WHERE source_user IN ({qs})" if run_users else "") + " GROUP BY source_user) x "
+        "ON d.source_user=x.source_user AND d.scanned_at=x.ts", args).fetchone()
+    files = conn.execute("SELECT COUNT(*) FROM id_mapping WHERE type='file'" + where, args).fetchone()[0]
+    msgs = conn.execute("SELECT COUNT(*) FROM id_mapping WHERE type='message'" + where, args).fetchone()[0]
+    forms = conn.execute("SELECT COUNT(*) FROM audit_log WHERE item_type='file' AND status='SUCCESS' "
+                         "AND error_message LIKE 'copied by native_api%'" + where, args).fetchone()[0]
+    stage = None
+    try:
+        lines = _job_log_lines(account_id, ("migrate", "delta"), 2_000_000)
+        start = max((i for i, ln in enumerate(lines) if ln.startswith("=== run started")), default=0)
+        marks = [ln for ln in lines[start:] if ln.startswith("PASS ")]
+        if marks:
+            m = re.match(r"PASS (\d+)/(\d+) pid=\d+: (.+)", marks[-1])
+            if m:
+                stage = {"pass": int(m.group(1)), "of": int(m.group(2)), "services": m.group(3).strip()}
+    except Exception:      # noqa: BLE001 - no log: no stage, never a guess
+        stage = None
+    return {"stage": stage,
+            "drive": {"method": mode, "how": drive_how, "filesCopied": files,
+                      "filesOnSource": exp["f"] if exp else 0, "formsRebuilt": forms},
+            "mail": {"method": "split" if split else "engine", "how": mail_how,
+                     "messagesCopied": msgs, "messagesOnSource": exp["m"] if exp else 0}}
+
+
 def _throughput(conn) -> dict:
     """Items and bytes actually recorded, by day, plus a couple of ratios.
 
@@ -6208,6 +6270,7 @@ async def migration_metrics(account_id: int, history: int = 60, users: str = "",
                                          "remainingItems": max(0, exp["n"] - reached),
                                          "bytesMovedTotal": moved, "expectedBytes": exp["b"],
                                          "remainingBytes": max(0, exp["b"] - moved) if exp["b"] else 0}
+                out["movement"] = _movement(conn, account_id, run_users, qs)
                 # Same grouped-by-cause failures the Migrations detail page already shows
                 # as a table (see _migration_detail, same query) -- reused here for the
                 # Metrics page's pie chart, so both name the same causes the same way and

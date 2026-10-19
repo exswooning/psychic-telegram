@@ -1542,9 +1542,18 @@ export interface HostMetrics {
  *  its rate at a snapshot, the only kind in history recorded before events. */
 export interface LimiterPoint { t: number; rate: number; kind: 'probe' | 'backoff' | 'sample' }
 
+/** HOW a migration is moving each service (api_server._movement): the pass it is on,
+ *  each service's method as the running process has it, and done against the source. */
+export interface Movement {
+  stage: { pass: number; of: number; services: string } | null
+  drive: { method: string; how: string; filesCopied: number; filesOnSource: number; formsRebuilt: number }
+  mail: { method: string; how: string; messagesCopied: number; messagesOnSource: number }
+}
+
 export interface MetricsSnapshot {
   accountId: number
   error: string
+  movement?: Movement
   volume?: { itemType: string; status: string; count: number }[]
   mappings?: { type: string; count: number }[]
   transfer?: { bytesToday: number; dailyCapBytes: number }

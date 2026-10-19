@@ -22,6 +22,7 @@ import { describeElapsed } from '@/hooks/useRunningJobs'
 import SeedRunDashboard from '@/components/SeedRunDashboard'
 import MigrateMetricsCharts from '@/components/MigrateMetricsCharts'
 import { fetchMyMetrics, MetricsSnapshot } from '@/api/controlPlane'
+import type { Movement } from '@/api/controlPlane'
 import { bytes } from '@/utils/metricsSeries'
 import { formatPct } from '@/utils/formatPct'
 import { jobFacts, projectedEta } from './RunningJobDetail.utils'
@@ -146,6 +147,8 @@ export const RunningJobDetail: React.FC<{
           )}
         </Stack>
 
+        {isMigrate && m?.movement && <HowItMoves mv={m.movement} />}
+
         {/* An indeterminate bar means "working, can't say how far". On a
             run that already ended it means nothing at all, so a finished
             job with no percentage gets no bar rather than a perpetual one. */}
@@ -227,6 +230,45 @@ export const RunningJobDetail: React.FC<{
         )}
       </DialogContent>
     </Dialog>
+  )
+}
+
+const NAMES: Record<string, string> = { drive: 'Drive', gmail: 'mail', calendar: 'calendar', contacts: 'contacts',
+                                         tasks: 'tasks', chat: 'chat' }
+
+/** How Drive and mail are moving: the pass, each method in words, and counts against
+ *  the source -- separate figures, never one blended percentage. */
+const HowItMoves: React.FC<{ mv: Movement }> = ({ mv }) => {
+  const of = (done: number, total: number) =>
+    total ? `${done.toLocaleString()} of ${total.toLocaleString()}` : `${done.toLocaleString()} (source not counted)`
+  const stage = mv.stage
+    ? `Pass ${mv.stage.pass} of ${mv.stage.of}: ${mv.stage.services.split(',').map((x) => NAMES[x.trim()] ?? x.trim()).join(', ')}`
+    : 'Pass not reported yet'
+  return (
+    <Box sx={{ mb: 2, p: 1.5, border: '1px solid', borderColor: 'divider', borderRadius: 1 }} data-testid="how-it-moves">
+      <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>How it is moving</Typography>
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }} data-testid="how-stage">{stage}</Typography>
+      <Stack direction={{ xs: 'column', sm: 'row' }} gap={2}>
+        <Box sx={{ flex: 1, minWidth: 0 }} data-testid="how-drive">
+          <Typography variant="body2" sx={{ fontWeight: 600 }}>
+            Drive · {of(mv.drive.filesCopied, mv.drive.filesOnSource)} files
+          </Typography>
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>{mv.drive.how}</Typography>
+          {mv.drive.formsRebuilt > 0 && (
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+              {mv.drive.formsRebuilt.toLocaleString()} Google file(s) rebuilt through their own API (Forms, and
+              Sheets or Docs no route could carry)
+            </Typography>
+          )}
+        </Box>
+        <Box sx={{ flex: 1, minWidth: 0 }} data-testid="how-mail">
+          <Typography variant="body2" sx={{ fontWeight: 600 }}>
+            Mail · {of(mv.mail.messagesCopied, mv.mail.messagesOnSource)} messages
+          </Typography>
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>{mv.mail.how}</Typography>
+        </Box>
+      </Stack>
+    </Box>
   )
 }
 

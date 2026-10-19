@@ -92,3 +92,10 @@ def test_an_ordered_runs_tenant_steps_are_not_its_progress():
     lines = ["SOURCE ACCESS: can write (drive)", "  [1/2] allwards@x.gov.np",
              "  [2/2] classroom_teachers@x.gov.np", "PASS 1/3 pid=7: drive", "drive_engine: copying"]
     assert webui._counter_progress_pct(webui._current_phase(lines)) is None
+
+
+def test_a_migrations_progress_is_never_a_sub_steps_counter(monkeypatch):
+    """Live, dharan.gov.np: the shared-drives step's '[1/1]' read as the run at 100%."""
+    monkeypatch.setattr(webui, "_ledger_progress_fraction", lambda *a, **k: 0.42)
+    lines = ["PASS 1/3 pid=7: drive", "  [0/1] shared drives", "  [1/1] Finance"]
+    assert webui._job_progress("migrate", lines, 600, None, None)[0] == 42

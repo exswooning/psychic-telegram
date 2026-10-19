@@ -4486,7 +4486,10 @@ def _job_progress(name: str, lines: list[str], elapsed: float,
     lines = _current_phase(lines)
     if name in ("migrate", "delta"):
         lines = [ln for ln in lines if not _NOT_JOB_PROGRESS_RE.match(ln)]
-    pct = _counter_progress_pct(lines)
+    # A migration's own counters are its sub-steps' (groups "[2/2]", shared drives "[1/1]"),
+    # never the run: live, dharan.gov.np read 100% minutes into a pass. Its progress is the
+    # ledger's done over discovery's expected, below.
+    pct = None if name in ("migrate", "delta") else _counter_progress_pct(lines)
     if pct is not None:
         pass
     elif name == "seed":

@@ -160,6 +160,21 @@ describe('a running migrate job\'s own metrics', () => {
     expect(screen.getByText("mail and Drive, incl. shared in; users' own Drives held 2.00 TB when counted")).toBeInTheDocument()
   })
 
+  it('shows how Drive and mail are moving: the pass, each method, and counts against the source', async () => {
+    fetchMyMetrics.mockResolvedValue({ ...snapshot(), movement: {
+      stage: { pass: 2, of: 3, services: 'gmail' },
+      drive: { method: 'download_upload', how: 'downloaded from a.gov.np and uploaded to b.com through this server -- the source is only read',
+               filesCopied: 31000, filesOnSource: 31419, formsRebuilt: 39 },
+      mail: { method: 'engine', how: 'each message read from a.gov.np and inserted into b.com by this tool',
+              messagesCopied: 114042, messagesOnSource: 207797 } } })
+    render(<RunningJobDetail job={job({ kind: 'migrate' })} onClose={() => {}} />)
+    expect(await screen.findByTestId('how-stage')).toHaveTextContent('Pass 2 of 3: mail')
+    expect(screen.getByTestId('how-drive')).toHaveTextContent('31,000 of 31,419 files')
+    expect(screen.getByTestId('how-drive')).toHaveTextContent('the source is only read')
+    expect(screen.getByTestId('how-drive')).toHaveTextContent('39 Google file(s) rebuilt')
+    expect(screen.getByTestId('how-mail')).toHaveTextContent('114,042 of 207,797 messages')
+  })
+
   it('shows no Data stat when discovery has never run, rather than a fabricated total', async () => {
     fetchMyMetrics.mockResolvedValue(snapshot())
     render(<RunningJobDetail job={job({ kind: 'migrate' })} onClose={() => {}} />)

@@ -111,3 +111,28 @@ def test_a_user_a_stopped_run_left_part_way_is_checked_too(auth, db, settings, i
     out = repair.fix_modified_times(auth, db, settings, apply=True)
     assert (out["users"], out["fixed"]) == (1, 1)
     assert tgt.store[ta]["modifiedTime"] == "2023-01-01T00:00:00Z"
+
+
+def test_a_shared_in_copy_the_owners_listing_never_names_is_put_back_too(auth, db, settings, identity, monkeypatch):
+    """Live, dharan.gov.np: two Sheets shared INTO users kept the copy's time through every
+    repair -- the user's own listing never names someone else's file."""
+    import repair
+    import tally
+    from db import bulk_seed_identities  # noqa: F401
+    src, tgt = auth.source_drive(SRC_USER), auth.target_drive(TGT_USER)
+    s = src.add_native("Shared in", mtime="2026-06-03T08:21:27Z")
+    t = tgt.add_native("Shared in", mtime="2026-10-19T04:58:25Z")
+    db.record_mapping(SRC_USER, s, t, "file")
+    real = tally.count_drive
+
+    seen = {"popped": False}
+
+    def listing(svc, st, keep=None, **kw):
+        out = real(svc, st, keep=keep, **kw)
+        if keep is not None and s in keep:
+            keep.pop(s, None)                        # the source listing: not the user's own file
+            seen["popped"] = True
+        return out
+    monkeypatch.setattr(tally, "count_drive", listing)
+    out = repair.fix_modified_times(auth, db, settings, apply=True)
+    assert seen["popped"] and out["fixed"] == 1 and tgt.store[t]["modifiedTime"] == "2026-06-03T08:21:27Z"

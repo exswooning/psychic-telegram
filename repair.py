@@ -631,8 +631,19 @@ def fix_modified_times(auth, db, settings, apply: bool = False,
             tally.count_drive(auth.source_drive(pair[0]), settings, keep=src_items)
             tally.count_drive(auth.target_drive(pair[1]), settings, keep=tgt_items)
             tgt = auth.target_drive(pair[1])
+            src = auth.source_drive(pair[0])
             for sid, tid in db.mapped_ids(pair[0], ("file", "folder")).items():
                 s, t = src_items.get(sid), tgt_items.get(tid)
+                if t and not s:
+                    # Not the user's own file -- shared in and copied into their Drive, so
+                    # the owner's listing never names it (live, dharan.gov.np: two Sheets
+                    # kept the copy's time through every repair). Asked for one by one.
+                    try:
+                        s = retry_on_google_error(max_retries=settings.max_retries)(
+                            lambda f=sid: src.files().get(fileId=f, fields="modifiedTime",
+                                                         supportsAllDrives=True).execute())()
+                    except Exception:      # noqa: BLE001 - gone or unreadable: nothing to compare
+                        s = None
                 if not s or not t:
                     continue
                 got["checked"] += 1
