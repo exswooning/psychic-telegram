@@ -68,6 +68,14 @@ describe('the job log', () => {
     expect(screen.queryByTestId('job-log-k1')).toBeNull()
   })
 
+  it('starts at this run, not the runs before it in the same file', () => {
+    render(<RunningJobCard job={job({ lines: ['old run line', '=== run started 2026-10-19T03:34:03Z: migrate ===',
+                                              'this run line'] })} />)
+    const text = screen.getByTestId('job-log-k1').textContent ?? ''
+    expect(text).toContain('this run line')
+    expect(text).not.toContain('old run line')
+  })
+
   it('is not shown for a finished run', () => {
     render(<RunningJobCard job={job({ lines })} finished={{ rc: 0 }} />)
     expect(screen.queryByTestId('job-log-k1')).toBeNull()

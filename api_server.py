@@ -1727,7 +1727,12 @@ def _child_output(job_name: str, account_id: int | None):
     from webui import job_log_path
     path = job_log_path(account_id, job_name)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    return open(path, "ab", buffering=0)
+    fh = open(path, "ab", buffering=0)
+    # Where this run begins: the Jobs page's log shows only what follows the newest one
+    # (live, a migrate card's log opened on the previous day's run).
+    fh.write(f"=== run started {_dt.datetime.now(_dt.timezone.utc):%Y-%m-%dT%H:%M:%SZ}: "
+             f"{job_name} ===\n".encode())
+    return fh
 
 
 def _spawn(argv: list[str], env: dict[str, str] | None = None) -> tuple[bool, str]:

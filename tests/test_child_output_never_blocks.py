@@ -79,6 +79,8 @@ class TestNoLauncherUsesAnUnreadPipe:
         body = open(os.path.join(str(tmp_path), "logs", "jobs", "7",
                                  "delta.log"), "rb").read()
         assert b"run one" in body and b"run two" in body
+        # Each launch marks where its own run begins, for the Jobs page's log.
+        assert body.count(b"=== run started ") == 2 and body.index(b"run one") < body.rindex(b"=== run")
 
     def test_an_accountless_job_still_gets_a_home(self, tmp_path, monkeypatch):
         fh = api_server._child_output("seed", None)

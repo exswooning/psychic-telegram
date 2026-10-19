@@ -60,7 +60,9 @@ const NOISE = /^(warnings\.warn|FutureWarning|\s*$)|site-packages/
 export const JobLog: React.FC<{ lines: string[]; keyName: string }> = ({ lines, keyName }) => {
   const [open, setOpen] = useState(true)
   const box = useRef<HTMLDivElement>(null)
-  const shown = lines.filter((l) => !NOISE.test(l)).slice(-80)
+  // A job's log file holds every run before it too; the launcher marks where each starts.
+  const from = lines.map((l) => l.startsWith('=== run started ')).lastIndexOf(true)
+  const shown = lines.slice(Math.max(from, 0)).filter((l) => !NOISE.test(l)).slice(-80)
   const text = shown.join('\n')
   useEffect(() => {
     const el = box.current
