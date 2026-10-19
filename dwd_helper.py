@@ -181,6 +181,11 @@ def _tick_overwrite(dialog, label) -> bool:
         return False
 
 
+# run()'s exit code when Authorize was accepted but the console still lists a different
+# number of scopes than were submitted: nothing changed, and setup must say so.
+SCOPES_NOT_SAVED = 6
+
+
 def _overwrite_ticked(dialog) -> bool:
     """Is the "Overwrite existing client ID" box ticked right now?"""
     try:
@@ -926,7 +931,12 @@ def run(client_id: str, scopes: str, timeout: int, headful: bool,
             want_n = len([x for x in scopes.split(",") if x.strip()])
             log(f"console lists {shown} scope(s) for {client_id}; submitted {want_n}")
             if shown is not None and shown != want_n:
+                # Live, mdharan.com: Authorize closed the dialog with no "already
+                # exists" prompt and the old 22-scope line stayed; setup then reported
+                # ok while waiting 15 minutes for a scope that was never saved.
                 log("MISMATCH: the console did not save the submitted scope list")
+                browser.close()
+                return SCOPES_NOT_SAVED
         except Exception as exc:      # noqa: BLE001 - diagnostics only
             log(f"could not read the row back ({str(exc)[:90]})")
         page.wait_for_timeout(2000)

@@ -959,6 +959,12 @@ def run_full_setup(
             return {"side": side, "ok": False, "phases": [x.as_dict() for x in phases],
                     "clientId": client_id}
 
+        if rc == dwd_helper.SCOPES_NOT_SAVED:
+            p.status = "failed"
+            p.detail = ("the Admin console accepted Authorize but kept its old scope list "
+                        "-- nothing changed. Set this side up again.")
+            return {"side": side, "ok": False, "phases": [x.as_dict() for x in phases],
+                    "clientId": client_id}
         if rc != 0:
             p.status = "failed"
             p.detail = ("dwd_helper exited nonzero -- likely needs a human for "

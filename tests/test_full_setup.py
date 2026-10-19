@@ -1282,3 +1282,22 @@ class TestProjectCreationOffOnTheTenant:
         assert remembered == [(7, "source", "dharan.example.gov.np", "it@dharan.example.gov.np", "drive_sdk")]
         ph = next(p for p in res["phases"] if p["name"].startswith("allow Drive SDK"))
         assert ph["status"] == "ok"
+
+
+def test_a_scope_list_the_console_did_not_save_fails_setup(monkeypatch):
+    """Live, mdharan.com: Authorize closed with the old 22-scope line still there and setup
+    reported ok, then waited 15 minutes for a scope that was never saved."""
+    monkeypatch.setattr(fs.provision_gcp, "gcloud_ready", lambda: (True, "me"))
+    monkeypatch.setattr(fs.provision_gcp, "detect_org", lambda env=None: "")
+    monkeypatch.setattr(fs.provision_gcp, "provision_side", lambda side, project, *a, **k: {
+        "side": side, "project": project, "ok": True, "steps": []})
+    monkeypatch.setattr(fs.provision_gcp, "client_id_of", lambda p: "42")
+    monkeypatch.setattr(fs.dwd_helper, "run", lambda *a, **k: fs.dwd_helper.SCOPES_NOT_SAVED)
+    monkeypatch.setattr(fs.gcloud_browser_auth, "configure_chat_app", lambda *a, **k: (True, "mocked"))
+    monkeypatch.setattr(fs.verify_scopes, "verify", lambda settings, tenant, scopes: [
+        {"scope": s, "ok": False} for s in scopes])
+    monkeypatch.setattr(fs.verify_scopes, "required_scopes", lambda settings, tenant: ["scope-a"])
+    res = fs.run_full_setup("target", "a.example.com", "admin@a.example.com", "pw")
+    assert res["ok"] is False
+    phase = next(p for p in res["phases"] if p["name"].startswith("domain-wide delegation"))
+    assert phase["status"] == "failed" and "kept its old scope list" in phase["detail"]
