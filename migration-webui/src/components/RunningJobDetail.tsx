@@ -137,9 +137,12 @@ export const RunningJobDetail: React.FC<{
               average would be fiction. Absent entirely (not a zero) when discovery
               has never run, same reasoning as the ETA above having no baseline. */}
           {isMigrate && t && t.expectedBytes > 0 && (
-            <Stat label="Data"
+            /* Not "X of Y": copied counts mail, shared drives and files shared in from
+               outside too; discovery counted only the users' own Drives. Live,
+               dharan.gov.np read "114.6 GB of 103.5 GB" 8% of the way in. */
+            <Stat label="Data copied"
                   value={bytes(t.bytesMovedTotal)}
-                  hint={`of ${bytes(t.expectedBytes)} discovered ${job.users?.length ? `for ${job.users.length === 1 ? 'this user' : 'these users'}` : 'total'}`} />
+                  hint={`mail and Drive, incl. shared in; users' own Drives held ${bytes(t.expectedBytes)} when counted`} />
           )}
         </Stack>
 

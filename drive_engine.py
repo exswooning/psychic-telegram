@@ -1739,6 +1739,13 @@ class DriveMigrator:
                              ", ".join(attempts[:-1]))
                 return
 
+        # Every route declined it for a reason no retry changes -- a Form or an Apps
+        # Script project from a protected source: no export, no API rebuild, no
+        # server-side copy (live, dharan.gov.np: 21 read FAILED). That is a skip, listed
+        # for a person to recreate, not a failure the next run will retry forever.
+        last = self.db.get_audit(self.source_user, item["id"], "file")
+        if not local_failures and last is not None and (last["status"] or "").startswith("SKIPPED"):
+            return
         # Every strategy is spent. The last one's FAILED row and counter
         # stand; the others were corrected only on the recovery path above,
         # so correct them here too -- one file that could not be copied is

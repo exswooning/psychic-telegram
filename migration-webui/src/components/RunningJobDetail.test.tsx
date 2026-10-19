@@ -155,9 +155,9 @@ describe('a running migrate job\'s own metrics', () => {
       bytesMovedTotal: 3 * 1024 ** 3, expectedBytes: 2 * 1024 ** 4,
     }))
     render(<RunningJobDetail job={job({ kind: 'migrate' })} onClose={() => {}} />)
-    expect(await screen.findByText('Data')).toBeInTheDocument()
+    expect(await screen.findByText('Data copied')).toBeInTheDocument()
     expect(screen.getByText('3.0 GB')).toBeInTheDocument()
-    expect(screen.getByText('of 2.00 TB discovered total')).toBeInTheDocument()
+    expect(screen.getByText("mail and Drive, incl. shared in; users' own Drives held 2.00 TB when counted")).toBeInTheDocument()
   })
 
   it('shows no Data stat when discovery has never run, rather than a fabricated total', async () => {

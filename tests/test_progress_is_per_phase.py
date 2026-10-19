@@ -77,8 +77,18 @@ def test_a_migration_run_starts_its_own_phase_and_verify_lines_are_not_its_progr
              "SOURCE ACCESS: can write (drive)", "PASS 1/3 pid=9: drive",
              "verify: [1/1] george@src checked"]
     cur = webui._current_phase(lines)
-    assert cur[0].startswith("SOURCE ACCESS")
+    # The newest phase: this run's pass, never the earlier run's verify counter.
+    assert cur[0].startswith("PASS 1/3") and not any("seeduser122" in x for x in cur)
     pct, eta = webui._job_progress("migrate", lines, 600, None, None)
     assert pct != 100.0 and eta != 0
     # A verify job's own counter still is its progress.
     assert webui._job_progress("verify", ["verify: [1/4] a@src checked"], 60)[0] == 25.0
+
+
+def test_an_ordered_runs_tenant_steps_are_not_its_progress():
+    """Live, dharan.gov.np: groups printed [1/2], [2/2] before the Drive pass, and the run read
+    100% two minutes in. From the newest PASS marker on, nothing counts itself, so the
+    ledger's fraction is used instead."""
+    lines = ["SOURCE ACCESS: can write (drive)", "  [1/2] allwards@x.gov.np",
+             "  [2/2] classroom_teachers@x.gov.np", "PASS 1/3 pid=7: drive", "drive_engine: copying"]
+    assert webui._counter_progress_pct(webui._current_phase(lines)) is None

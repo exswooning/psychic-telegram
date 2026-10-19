@@ -675,8 +675,10 @@ def _pct(done: int, total: int) -> float:
 # output is appended to the job's one log file, so without it the "current phase"
 # reached back into earlier runs -- live, an old "verify: [1/1] ... checked" made
 # george's run read "100%, ETA 0s" with his Drive pass still copying.
+# PASS i/n: an ordered migrate's own pass marker. Live, dharan.gov.np: the groups step's
+# "[2/2] classroom_teachers@..." read as the whole run at 100% two minutes in.
 _PHASE_START_RE = re.compile(r"^\s*(?:Seeding \d+ users? in\b"
-                             r"|About to DELETE all\b|Mirror pass:|SOURCE ACCESS:)")
+                             r"|About to DELETE all\b|Mirror pass:|SOURCE ACCESS:|PASS \d+/\d+ )")
 # Inside a migrate/delta run, the per-user verifier's [done/total] is how far IT
 # is, not the run: a user verified the moment one pass ends would put the bar at
 # 100% with passes to go. (A verify job's own lines ARE its progress.)

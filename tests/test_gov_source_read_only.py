@@ -97,3 +97,16 @@ def test_anything_added_or_gone_on_a_protected_source_is_recorded_whatever_its_d
     assert made["status"] == gone["status"] == "SOURCE_CHANGED"
     assert "created on the source" in made["error_message"] and "gone on the source" in gone["error_message"]
     assert migrator.db.get_audit(migrator.source_user, "a", "source_change") is None
+
+
+def test_a_file_every_route_declines_stays_a_skip_for_a_person_not_a_failure(migrator, monkeypatch):
+    """Live, dharan.gov.np: Forms with no server-side copy read FAILED and would be retried forever."""
+    def declines(item, parent):
+        migrator.db.log_audit(migrator.source_user, item["id"], "file", "SKIPPED_UNEXPORTABLE",
+                              f"file: {item['name']}\nno export, no API rebuild")
+    monkeypatch.setattr(migrator, "_strategies_for", lambda item, native: [("download_upload", declines),
+                                                                           ("native_api", declines)])
+    item = {"id": "f1", "name": "Survey", "mimeType": "application/vnd.google-apps.form"}
+    migrator._sync_with_fallback(item, "parent", True)
+    row = migrator.db.get_audit(migrator.source_user, "f1", "file")
+    assert row["status"] == "SKIPPED_UNEXPORTABLE" and row["error_message"].startswith("file: Survey")
