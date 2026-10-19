@@ -25,7 +25,7 @@ import type { OneToOneService, OneToOneUser, OneToOneVerdict, OneToOneView } fro
 
 // Shared with MigrationDetail's compact summary section, from its own module (not
 // exported from here) so this page file keeps exporting only its component.
-import { VERDICT, ORDER } from '@/oneToOneVerdicts'
+import { VERDICT, ORDER, serviceSummary } from '@/oneToOneVerdicts'
 
 const when = (iso: string | null) => {
   if (!iso) return '—'
@@ -39,7 +39,7 @@ const ServiceChip: React.FC<{ s: OneToOneService }> = ({ s }) => {
   return (
     <Tooltip title={`${v.hint} Checked ${s.checked.toLocaleString()}${of}; ${s.identical.toLocaleString()} identical.`}>
       <Chip size="small" color={v.color} variant={s.verdict === 'IDENTICAL' ? 'outlined' : 'filled'}
-            label={`${s.service} ${s.identical}/${s.checked}${of}`} data-testid={`svc-${s.service}`} />
+            label={serviceSummary(s)} data-testid={`svc-${s.service}`} />
     </Tooltip>
   )
 }

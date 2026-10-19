@@ -94,7 +94,7 @@ describe('OneToOneSummary: what each user came back as', () => {
         mail: { source: 484, target: 485, skipped: 0, expected: 484, parity: 1, surplus: 1 },
         tasks: { source: 0, target: 0, skipped: 0, expected: 0, parity: null, surplus: 0 } } }] })
     put(<OneToOneSummary accountId={3} />)
-    expect(await screen.findByText('drive 25/25 · gmail 38/38')).toBeInTheDocument()
+    expect(await screen.findByText('drive: 25 checked of 136 · all identical; gmail: 38 checked of 471 · all identical')).toBeInTheDocument()
     await waitFor(() =>
       expect(screen.getByTestId('o2o-counts-info@g.com')).toHaveTextContent('files 121→136 · mail 484→485'))
   })

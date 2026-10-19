@@ -13,7 +13,7 @@ import {
 } from '@mui/material'
 import { fetchOneToOne, fetchTally } from '@/api/controlPlane'
 import type { OneToOneView, TallyView } from '@/api/controlPlane'
-import { ORDER, VERDICT } from '@/oneToOneVerdicts'
+import { ORDER, VERDICT, serviceSummary } from '@/oneToOneVerdicts'
 
 const when = (iso: string | null) => {
   if (!iso) return '—'
@@ -70,7 +70,7 @@ export const OneToOneSummary: React.FC<{ accountId: number }> = ({ accountId }) 
         <Table size="small">
           <TableHead>
             <TableRow><TableCell>User</TableCell><TableCell>Verdict</TableCell>
-              <TableCell>Checked (identical / compared)</TableCell><TableCell>Source → target</TableCell>
+              <TableCell>Checked</TableCell><TableCell>Source → target</TableCell>
               <TableCell>Last checked</TableCell></TableRow>
           </TableHead>
           <TableBody>
@@ -79,7 +79,7 @@ export const OneToOneSummary: React.FC<{ accountId: number }> = ({ accountId }) 
                 <TableCell>{u.user}</TableCell>
                 <TableCell><Chip size="small" color={VERDICT[u.verdict].color} label={VERDICT[u.verdict].label} /></TableCell>
                 <TableCell><Typography variant="caption">
-                  {u.services.map((s) => `${s.service} ${s.identical}/${s.checked}`).join(' · ') || '—'}
+                  {u.services.map(serviceSummary).join('; ') || '—'}
                 </Typography></TableCell>
                 <TableCell><Typography variant="caption" data-testid={`o2o-counts-${u.user}`}>
                   {Object.entries(counts.get(u.user)?.services ?? {})

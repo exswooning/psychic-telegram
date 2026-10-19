@@ -68,7 +68,7 @@ describe('the verdicts', () => {
 
   it('says how much of the user a sample was', async () => {
     show()
-    expect(await screen.findAllByText(/drive 25\/25 of 4,180/)).toHaveLength(1)
+    expect(await screen.findAllByText(/drive: 25 checked of 4,180/)).toHaveLength(1)
   })
 
   it('counts every verdict in the header', async () => {
@@ -236,5 +236,15 @@ describe('two checks: the whole tenant and each user', () => {
     cp.tenant.mockResolvedValue({ report: null })
     show()
     expect(await screen.findByText('Not checked yet')).toBeInTheDocument()
+  })
+})
+
+describe('what a service line says', () => {
+  it('names a file that differs as not identical, never as one fewer', async () => {
+    const { serviceSummary } = await import('@/oneToOneVerdicts')
+    const s = { service: 'drive', verdict: 'DIFFERENCES' as const, verifiedAt: '', checked: 15, identical: 14,
+                sampledOf: null, counts: { differences: 1, missing: 0, extras: 0 } }
+    expect(serviceSummary(s)).toBe('drive: 15 checked · 14 identical · 1 not identical')
+    expect(serviceSummary({ ...s, identical: 15, counts: {} })).toBe('drive: 15 checked · all identical')
   })
 })
