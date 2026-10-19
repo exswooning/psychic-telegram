@@ -402,8 +402,11 @@ def skipped_by_user(conn) -> dict[str, dict[str, int]]:
     # recreated as a draft, and both tenants count it among their messages. Live,
     # george's 4 drafts were on the target and subtracted from what it expected, so
     # an exact mailbox read "4 more on the target".
+    # Not SKIPPED_OTHER_ORG_SHARED_DRIVE: another organisation's file, never in the user's
+    # own count. Live, dharan.gov.np pilot: livestock@'s 4 took its 14 files down to 10.
     for r in conn.execute("SELECT source_user, item_type, COUNT(*) n FROM audit_log "
-                          "WHERE status LIKE 'SKIPPED%' AND status NOT IN (?, 'SKIPPED_IS_DRAFT') "
+                          "WHERE status LIKE 'SKIPPED%' AND status NOT IN "
+                          "(?, 'SKIPPED_IS_DRAFT', 'SKIPPED_OTHER_ORG_SHARED_DRIVE') "
                           "GROUP BY 1, 2", (DEFERRED_TO_DMS,)):
         svc = SKIP_TYPE.get(r["item_type"])
         if svc:

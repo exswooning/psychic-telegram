@@ -149,6 +149,13 @@ class TestSkips:
         db.conn.commit()
         assert T.skipped_by_user(db.conn) == {}
 
+    def test_another_orgs_shared_drive_file_is_not_the_users_own(self, settings, db):
+        """Live, dharan.gov.np pilot: 4 such skips took livestock@'s expected 14 down to 10."""
+        db.conn.execute("INSERT INTO audit_log(source_user,item_id,item_type,status) "
+                        "VALUES('l','f1','file','SKIPPED_OTHER_ORG_SHARED_DRIVE')")
+        db.conn.commit()
+        assert T.skipped_by_user(db.conn) == {}
+
 
 class TestRun:
     def _wire(self, db, n=4, done=True):
