@@ -10,9 +10,9 @@
  * job, which tenant it is happening to, how far along, and whether it is
  * still going.
  */
-import React from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import {
-  Box, Card, CardContent, Chip, LinearProgress, Stack, Tooltip, Typography,
+  Box, Button, Card, CardContent, Chip, LinearProgress, Stack, Tooltip, Typography,
 } from '@mui/material'
 import {
   Bolt as RunningIcon, Grass as SeedIcon, RocketLaunch as MigrateIcon,
@@ -50,6 +50,38 @@ const OutcomeChip: React.FC<{ rc: number | null }> = ({ rc }) => {
   return (
     <Chip size="small" label={rc === 0 ? 'completed' : rc == null ? 'ended' : `exit ${rc}`}
           color={rc === 0 ? 'success' : 'error'} />
+  )
+}
+
+// Every Google client prints these on import; they say nothing about the work.
+const NOISE = /^(warnings\.warn|FutureWarning|\s*$)|site-packages/
+
+/** What the job is printing, newest at the bottom and kept in view. */
+export const JobLog: React.FC<{ lines: string[]; keyName: string }> = ({ lines, keyName }) => {
+  const [open, setOpen] = useState(true)
+  const box = useRef<HTMLDivElement>(null)
+  const shown = lines.filter((l) => !NOISE.test(l)).slice(-80)
+  const text = shown.join('\n')
+  useEffect(() => {
+    const el = box.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [text, open])
+  if (!shown.length) return null
+  return (
+    <Box sx={{ mt: 1 }} onClick={(e) => e.stopPropagation()}>
+      <Button size="small" onClick={() => setOpen(!open)} sx={{ px: 0.5, minWidth: 0 }}
+              data-testid={`job-log-toggle-${keyName}`}>
+        {open ? 'Hide log' : `Show log (${shown.length} lines)`}
+      </Button>
+      {open && (
+        <Box ref={box} component="pre" data-testid={`job-log-${keyName}`}
+             sx={{ m: 0, mt: 0.5, p: 1, maxHeight: 220, overflow: 'auto', borderRadius: 1,
+                   bgcolor: 'action.hover', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                   fontSize: 11.5, lineHeight: 1.45, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
+          {text}
+        </Box>
+      )}
+    </Box>
   )
 }
 
@@ -124,6 +156,8 @@ export const RunningJobCard: React.FC<{
             <DeviceHandoff side={job.handoff.side} handoff={job.handoff} />
           </Box>
         )}
+
+        {!finished && job.lines?.length ? <JobLog lines={job.lines} keyName={job.key} /> : null}
 
         <Stack direction="row" justifyContent="space-between" sx={{ mt: 0.5 }}>
           {/* Only when the detail line does not already lead with it. The

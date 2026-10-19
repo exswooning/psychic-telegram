@@ -36,11 +36,9 @@ export interface RunningJob {
   kind: JobKind
   /** The tenant this is happening to, when the source knows it. */
   domain?: string
-  // Only ever populated for the webui.py Job entry (seed/reset target/
-  // reset drive ledger) -- that's the one source here with real printed
-  // output. full-setup's own progress file only ever carries a
-  // pct+label checkpoint, not a transcript; fleet/cross-account entries
-  // have no output source at all.
+  // What the job has printed, newest last: the webui.py Job entry (seed, reset,
+  // migrate) and full setup (its stderr transcript). Fleet/cross-account entries
+  // have no output source at all. The Jobs card shows it as a live log.
   lines?: string[]
   /** Wall-clock seconds so far, for the observed-throughput figures the
    *  seed dashboard derives. Same source as `detail`, kept numeric. */
@@ -140,6 +138,7 @@ export function useRunningJobs() {
           label: srcCfg?.domain || 'source',
           detail: srcSetup.progressLabel || 'setting up…', pct: srcSetup.progressPct ?? null,
           handoff: srcSetup.handoff ? { side: 'source', ...srcSetup.handoff } : null,
+          lines: srcSetup.lines,
           stop: async (reason, force) => {
             if (!srcSetup.pid) throw new Error('no pid recorded for this run yet -- try again shortly')
             const r = await stopFleetJob(srcSetup.pid, reason, force)
@@ -153,6 +152,7 @@ export function useRunningJobs() {
           label: tgtCfg?.domain || 'target',
           detail: tgtSetup.progressLabel || 'setting up…', pct: tgtSetup.progressPct ?? null,
           handoff: tgtSetup.handoff ? { side: 'target', ...tgtSetup.handoff } : null,
+          lines: tgtSetup.lines,
           stop: async (reason, force) => {
             if (!tgtSetup.pid) throw new Error('no pid recorded for this run yet -- try again shortly')
             const r = await stopFleetJob(tgtSetup.pid, reason, force)

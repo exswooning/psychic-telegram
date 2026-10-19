@@ -4,7 +4,7 @@
  * survive onto a card for a job that has already finished (there is
  * nothing left in flight for a trend to describe).
  */
-import { render } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, it, expect, vi } from 'vitest'
 import RunningJobCard from './RunningJobCard'
 import type { RunningJob } from '@/hooks/useRunningJobs'
@@ -52,5 +52,24 @@ describe('the progress sparkline', () => {
     // the previous job's trend onto this one's card.
     rr(<RunningJobCard job={job({ key: 'k5', pct: 5 })} />)
     expect(hasChart()).toBe(false)
+  })
+})
+
+describe('the job log', () => {
+  const lines = ['[gcloud-auth] signed in as admin', '/x/site-packages/y.py: FutureWarning',
+                 '[dwd] Authorize accepted. verifying...']
+
+  it('shows what a running job printed, without import noise', () => {
+    render(<RunningJobCard job={job({ lines })} />)
+    const log = screen.getByTestId('job-log-k1')
+    expect(log.textContent).toContain('[dwd] Authorize accepted')
+    expect(log.textContent).not.toContain('FutureWarning')
+    fireEvent.click(screen.getByTestId('job-log-toggle-k1'))
+    expect(screen.queryByTestId('job-log-k1')).toBeNull()
+  })
+
+  it('is not shown for a finished run', () => {
+    render(<RunningJobCard job={job({ lines })} finished={{ rc: 0 }} />)
+    expect(screen.queryByTestId('job-log-k1')).toBeNull()
   })
 })

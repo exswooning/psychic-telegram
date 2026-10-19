@@ -4244,6 +4244,16 @@ async def full_setup_status(side: str, account: int | None = None,
                 handoff = prog.get("handoff") or None
             except (OSError, ValueError):
                 pass
+        # The run's own transcript (its stderr, truncated at each launch), for the Jobs
+        # page's log: a percentage and a label were all it ever showed of a setup.
+        log_lines: list[str] = []
+        if running:
+            try:
+                with open(os.path.join(os.path.dirname(out), f"full-setup-{side}.err"),
+                          encoding="utf-8", errors="replace") as fh:
+                    log_lines = [x.rstrip() for x in fh if x.strip()][-200:]
+            except OSError:
+                pass
         # `{"running": true}` in the state file, specifically -- not merely
         # that the file exists. The launcher writes that marker the moment
         # it starts a child and nothing else ever does, so it means "a run
@@ -4303,7 +4313,7 @@ async def full_setup_status(side: str, account: int | None = None,
         return {"running": running, "pid": pid, "result": result,
                 "progressPct": progress_pct, "progressLabel": progress_label,
                 "challenge": challenge, "handoff": handoff,
-                "resultAt": result_at}
+                "resultAt": result_at, "lines": log_lines}
     return await _off_loop(_read)
 
 

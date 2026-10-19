@@ -674,6 +674,8 @@ export interface FullSetupStatus {
    *  operator's own device: open `url` there (and, for `signin`, paste back the code
    *  Google shows). Null when the server is doing it itself. */
   handoff?: { kind: 'signin' | 'dwd'; url: string; clientId?: string; scopes?: string } | null
+  /** The running setup's own transcript, newest last -- empty when nothing runs. */
+  lines?: string[]
 }
 
 /**

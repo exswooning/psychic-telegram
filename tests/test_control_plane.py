@@ -935,6 +935,19 @@ class TestFullSetup:
                       json={"reason": "x", "side": "source", "code": "a b\nrm"}, headers=ADMIN)
         assert bad.status_code == 422
 
+    def test_a_running_setup_shows_its_own_log(self, monkeypatch, tmp_path, cp):
+        """The Jobs page showed only a percentage and a label of a setup."""
+        import api_server
+        monkeypatch.setattr(api_server, "HERE", str(tmp_path))
+        out = api_server._full_setup_state_path("source", None)
+        with open(os.path.join(os.path.dirname(out), "full-setup-source.err"), "w") as fh:
+            fh.write("[gcloud-auth] signed in\n\n[dwd] Authorize accepted. verifying...\n")
+        monkeypatch.setattr(api_server, "_full_setup_pid", lambda side, aid: 4321)
+        body = cp.get("/api/v2/full-setup/status?side=source", headers=ADMIN).json()
+        assert body["lines"] == ["[gcloud-auth] signed in", "[dwd] Authorize accepted. verifying..."]
+        monkeypatch.setattr(api_server, "_full_setup_pid", lambda side, aid: None)
+        assert cp.get("/api/v2/full-setup/status?side=source", headers=ADMIN).json()["lines"] == []
+
     def test_stop_with_nothing_running_kills_nothing(self, monkeypatch, cp):
         import api_server
         monkeypatch.setattr(api_server.subprocess, "run",
