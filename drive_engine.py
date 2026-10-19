@@ -794,8 +794,38 @@ class DriveMigrator:
         return path, os.path.getsize(path)
 
     # -- entry point ----------------------------------------------------------
+    @property
+    def _protected_source(self) -> bool:
+        """A real customer's (or a government's) source: never written to, and checked."""
+        import domain_guard
+        try:
+            return domain_guard.is_protected(self.settings.source_domain or "")
+        except Exception:      # noqa: BLE001 - unknown is treated as protected
+            return True
+
+    def _source_tripwire(self, since: str) -> None:
+        """A protected source must come out of a run as it went in. Anything created in
+        this user's own source Drive while their Drive was being copied is recorded,
+        never silent: by the user themselves, or by this run (live, dharan.gov.np: Form
+        copies left "Copy of ..." beside the originals). Reads only."""
+        try:
+            made = self._retry(lambda: self.auth.source_drive(self.source_user).files().list(
+                q=f"createdTime > '{since}' and 'me' in owners", pageSize=100,
+                fields="files(id,name,mimeType,createdTime)").execute(),
+                write=False, tenant="source").get("files", [])
+        except Exception as exc:      # noqa: BLE001 - a check that cannot run says so
+            log.warning("[%s] could not check the source for changes: %s", self.source_user, exc)
+            return
+        for f in made:
+            self.db.log_audit(self.source_user, f["id"], "source_change", "SOURCE_CHANGED", _named(
+                f, f"created on the source at {f.get('createdTime')}, while this user's Drive was "
+                   "being copied -- by the user, or by this run; Bitport must never write there"))
+            log.error("[%s] SOURCE CHANGED: %r (%s) was created on the source during the run",
+                      self.source_user, f.get("name"), f.get("mimeType"))
+
     def run(self, delta: bool = False) -> dict:
         self.delta = delta
+        began = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
         # (item, target id, export mime) for native files that mentioned a
         # Drive id. Drained at the end of the user, when every id is known.
         self._pending_link_rewrites: list[tuple[dict, str, str]] = []
@@ -848,6 +878,8 @@ class DriveMigrator:
             self._rewrite_pending_links()
             self._rewrite_native_links()
             self._verify_modified_times()
+            if self._protected_source and not self.shared_drive and not self.settings.dry_run:
+                self._source_tripwire(began)
         finally:
             # `_staging_drive_id`, not `self.server_side`.
             #
@@ -1476,6 +1508,15 @@ class DriveMigrator:
             return out
 
     # -- strategy cascade ------------------------------------------------------
+    def _strategies_for(self, item: dict, is_native: bool) -> list:
+        strategies = self._file_strategies(is_native)
+        if item.get("mimeType") == FORM_MIME and self._protected_source:
+            # Live, dharan.gov.np: a server-side copy of a Form landed on the target AND,
+            # for 7 of 18, left a "Copy of <name>" in the SOURCE user's own My Drive.
+            # Nothing else can carry a Form, so it is listed for a person instead.
+            strategies = [s for s in strategies if s[0] != "server_side"]
+        return strategies
+
     def _file_strategies(self, is_native: bool) -> list:
         """The copy strategies to try, best-first for this configuration.
 
@@ -1624,7 +1665,7 @@ class DriveMigrator:
         # thread-safe.
         local_failures = 0
         last_error = ""
-        strategies = self._file_strategies(is_native)
+        strategies = self._strategies_for(item, is_native)
         if int(item.get("size") or 0) > self.settings.effective_upload_cap():
             # More than a whole day: only a server-side copy can carry it. Streamed, it
             # would need its size in disk on this host first.

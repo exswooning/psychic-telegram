@@ -66,3 +66,32 @@ def test_readiness_never_shadows_domain_guard():
 
     import readiness
     assert "import domain_guard" not in inspect.getsource(readiness.check)
+
+
+def test_a_form_is_never_copied_server_side_from_a_protected_source(migrator, monkeypatch):
+    """Live, dharan.gov.np: 7 Form copies left "Copy of ..." in the source users' own Drive."""
+    import drive_engine
+    monkeypatch.setattr(type(migrator), "_protected_source", property(lambda self: True))
+    migrator.settings.transfer_mode = "server_side"
+    form = {"mimeType": drive_engine.FORM_MIME}
+    assert "server_side" not in [n for n, _ in migrator._strategies_for(form, True)]
+    assert "server_side" in [n for n, _ in migrator._strategies_for({"mimeType": "application/pdf"}, False)]
+    monkeypatch.setattr(type(migrator), "_protected_source", property(lambda self: False))
+    assert "server_side" in [n for n, _ in migrator._strategies_for(form, True)]
+
+
+def test_anything_created_on_a_protected_source_during_the_pass_is_recorded(migrator, monkeypatch):
+    seen = {}
+
+    class Files:
+        def list(self, **kw):
+            seen.update(kw)
+            return type("R", (), {"execute": lambda s: {"files": [
+                {"id": "x1", "name": "Copy of Form", "mimeType": "application/vnd.google-apps.form",
+                 "createdTime": "2026-10-19T04:58:05Z"}]}})()
+    monkeypatch.setattr(migrator.auth, "source_drive", lambda u, writable=False: type("D", (), {"files": lambda s: Files()})(),
+                        raising=False)
+    migrator._source_tripwire("2026-10-19T04:52:53")
+    assert "createdTime > '2026-10-19T04:52:53'" in seen["q"] and "'me' in owners" in seen["q"]
+    row = migrator.db.get_audit(migrator.source_user, "x1", "source_change")
+    assert row["status"] == "SOURCE_CHANGED" and row["error_message"].startswith("file: Copy of Form")
