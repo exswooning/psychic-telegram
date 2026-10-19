@@ -214,6 +214,17 @@ class TestTheCheckAfterTheRun:
         main.cmd_migrate(argparse.Namespace(services="drive,gmail", user=None, ordered=True, verify_after=True), settings, db, None)
         assert got["users"] == ["a@x.com", "b@x.com"] and got["services"] == ("drive", "gmail")
 
+    def test_the_post_run_repair_runs_inside_the_run(self, monkeypatch, settings, db):
+        """Live, dharan.gov.np pilot: an 11-minute repair after the slot was freed made the
+        watcher record the run's exit code as never observed."""
+        order = []
+        monkeypatch.setattr(main, "_run_with_memory_pause",
+                            lambda *a, **kw: (order.append("run"), kw["after"]([]), order.append("left"))[-1] or [])
+        monkeypatch.setattr(main, "_print_batch_summary", lambda *a, **k: None)
+        monkeypatch.setattr(main, "_auto_repair", lambda *a, **k: order.append("repair"))
+        main.cmd_migrate(argparse.Namespace(services="drive", user=None, ordered=False), settings, db, None)
+        assert order == ["run", "repair", "left"]
+
 
 class TestRepairBetweenPasses:
     """Narrower than _auto_repair (see main._repair_between_passes' own docstring for

@@ -2283,9 +2283,8 @@ def ordered_passes(services: set[str]) -> list[set[str]]:
 def cmd_migrate(args, settings: Settings, db: MigrationDB, auth: AuthManager):
     services = resolve_services(args.services)
     _enable_selected_services(settings, services)
-    after = None
-    if getattr(args, "verify_after", False):
-        def after(results):
+    def after(results):
+        if getattr(args, "verify_after", False):
             # Every user this run touched, checked one to one against the target.
             import verify_sample
             from resilience import retry_on_google_error
@@ -2293,13 +2292,15 @@ def cmd_migrate(args, settings: Settings, db: MigrationDB, auth: AuthManager):
             verify_sample.run_and_save(
                 auth, db, settings, users, tuple(sorted(services)),
                 retry=retry_on_google_error(max_retries=settings.max_retries), progress=lambda m: print(m, flush=True))
+        # Inside the registration too. Live, dharan.gov.np pilot: an 11-minute repair after
+        # the slot was freed made the watcher record the run's exit as never observed.
+        _auto_repair(db, auth, settings)
     results = _run_with_memory_pause(
         auth, db, settings, services, delta=False, delta_days=0,
         only=args.user,
         passes=ordered_passes(services) if getattr(args, "ordered", False) else None,
         after=after)
     _print_batch_summary(results, services)
-    _auto_repair(db, auth, settings)
 
 
 def cmd_delta(args, settings: Settings, db: MigrationDB, auth: AuthManager):
