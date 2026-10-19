@@ -28,6 +28,8 @@ import json
 import os
 import sys
 
+import domain_guard
+
 G = "https://www.googleapis.com/auth/"
 
 # One read per service, and the scopes that allow it (first one the run requests wins).
@@ -148,7 +150,10 @@ def check(settings, side: str, purpose: str, *, gate: bool = False) -> dict:
             holds = [s.rsplit("/", 1)[-1] for s in writes if verify_scopes.probe_scope(key, admin, s)[0]]
             rows.append(_row("read-only", not holds,
                              (f"all {len(writes)} write scopes refused by Google, Drive included"
-                              if strict else f"all {len(writes)} seed write scopes refused")
+                              if strict else f"all {len(writes)} seed write scopes refused"
+                              + ("; Drive may copy (exact copies are on: Bitport's own guard "
+                                 "allows only a copy into its holding drive)"
+                                 if domain_guard.is_government(domain) else ""))
                              if not holds
                              else "this key can still WRITE to the source: " + ", ".join(holds)))
         except Exception as exc:      # noqa: BLE001 - unknown, so not ready

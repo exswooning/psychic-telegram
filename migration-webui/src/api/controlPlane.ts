@@ -1195,6 +1195,14 @@ export interface Readiness {
 export const fetchReadiness = (side: 'source' | 'target', purpose: 'migrate' | 'seed') =>
   cpFetch<Readiness>(`/api/v2/setup/readiness?side=${side}&purpose=${purpose}`)
 
+/** A government source copied server-side (exact copies): off unless the operator says so. */
+export interface ExactCopy { government: boolean; domain: string; on: boolean }
+export const fetchExactCopy = () => cpFetch<ExactCopy>('/api/v2/setup/exact-copy')
+export const setExactCopy = (on: boolean, reason: string) =>
+  cpFetch<ActionResult>('/api/v2/setup/exact-copy', {
+    method: 'POST', body: JSON.stringify({ on, reason }),
+  })
+
 export const fetchTenantConfigStatus = (side: 'source' | 'target') =>
   cpFetch<TenantConfigStatus>(`/api/v2/setup/tenant-config?side=${side}`)
 

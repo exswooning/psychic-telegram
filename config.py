@@ -238,6 +238,18 @@ CHAT_MEMBERSHIP_READONLY_SCOPE = (
 CHAT_IMPORT_SCOPE = "https://www.googleapis.com/auth/chat.import"
 
 
+def exact_copy_flag(account_id) -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "accounts",
+                        str(account_id), "government-exact-copy")
+
+
+def government_exact_copy(account_id) -> bool:
+    """Has the operator switched on server-side (exact) copies from this migration's
+    government source? Live, dharan.gov.np: download_upload rebuilt a Slides deck through
+    .pptx and Google dropped its one soft line break. Off unless the file is there."""
+    return account_id is not None and os.path.isfile(exact_copy_flag(account_id))
+
+
 def source_scopes(settings: "Settings") -> list[str]:
     """Scopes the source service account actually needs for this run."""
     scopes = list(SOURCE_SCOPES)
@@ -927,8 +939,13 @@ class Settings:
         # scope is asked for (server-side copy needs one), so every file goes by
         # download_upload whatever a launch asked for. Bitport's own guard
         # (auth.ReadOnlyDrive) stays, but no longer has to be the thing that holds.
+        # The one exception is the operator's own switch (government_exact_copy): a
+        # server-side copy, so the grant holds `drive` and auth.ReadOnlyDrive is what
+        # holds the source to reads plus that one copy. Only server_side: move and
+        # link_flip still fall to download_upload.
         import domain_guard
-        if domain_guard.is_government(self.source_domain or ""):
+        if domain_guard.is_government(self.source_domain or "") and not (
+                self.transfer_mode == "server_side" and government_exact_copy(self.account_id)):
             self.source_read_only = True
             self.transfer_mode = "download_upload"
         # An unrecognised transfer mode used to be accepted and silently behave

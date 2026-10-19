@@ -1322,6 +1322,51 @@ async def project_creation_restore(body: RestoreProjectCreation, op: Operator = 
     return await _gated(op, "project_creation.restore", body, body.side, _go)
 
 
+class ExactCopy(WriteAction):
+    account_id: int | None = None
+    on: bool
+
+
+@app.get("/api/v2/setup/exact-copy")
+async def exact_copy_view(account_id: int | None = None, op: Operator = Depends(operator)):
+    """Whether this migration's government source may be copied server-side
+    (config.government_exact_copy). Not a government source: not applicable."""
+    require_reader(op)
+    aid = account_id if account_id is not None else op.account_id
+    _require_account_access(aid, op)
+    import config
+    import domain_guard
+    src = (accounts_auth.get_tenant_config(aid, "source") or {}).get("domain") or ""
+    return {"government": domain_guard.is_government(src), "domain": src,
+            "on": config.government_exact_copy(aid)}
+
+
+@app.post("/api/v2/setup/exact-copy")
+async def exact_copy_set(body: ExactCopy, op: Operator = Depends(operator)):
+    """Switch exact (server-side) copies from a government source on or off. Takes effect
+    on the grant only once the source is set up again: on adds `drive`, off rewrites it
+    read-only (full_setup's too-wide rule)."""
+    require_admin(op)
+    aid = _resolve_account(body, op)
+    import config
+    import domain_guard
+    src = (accounts_auth.get_tenant_config(aid, "source") or {}).get("domain") or ""
+
+    def _go() -> tuple[bool, str]:
+        if not domain_guard.is_government(src):
+            return False, f"{src or 'this source'} is not a government domain; nothing to switch"
+        path = config.exact_copy_flag(aid)
+        if body.on:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(f"{op.name} {datetime.now(_dt.timezone.utc).isoformat()}\n")
+        elif os.path.exists(path):
+            os.remove(path)
+        return True, (f"exact copies {'on' if body.on else 'off'} for {src}; set the source up "
+                      f"again to {'add Drive copy to' if body.on else 'take Drive copy off'} its grant")
+    return await _gated(op, "exact_copy.set", body, src, _go)
+
+
 @app.get("/api/v2/lifecycle")
 async def lifecycle_view(account_id: int | None = None, op: Operator = Depends(operator)):
     """Where this pair is in its end of life, and exactly what its teardown will do."""

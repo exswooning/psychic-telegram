@@ -28,6 +28,7 @@ import ReasonCodeDialog from './ReasonCodeDialog'
 import JobProgress from './JobProgress'
 import TenantInventoryPanel from './TenantInventoryPanel'
 import ReprovisionPanel from './ReprovisionPanel'
+import GovExactCopy from './GovExactCopy'
 import DeviceHandoff from './DeviceHandoff'
 import DomainSandboxToggle from './DomainSandboxToggle'
 
@@ -1208,6 +1209,8 @@ const QuickTenantSetup: React.FC<{
           )}
         </Box>
       )}
+
+      {side === 'source' && purpose === 'migrate' && alreadyHere && <GovExactCopy />}
 
       {resultHere && result && (
         <Box sx={{ mt: 2 }}>

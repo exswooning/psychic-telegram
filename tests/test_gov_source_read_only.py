@@ -36,3 +36,23 @@ def test_the_engine_never_attempts_a_copy_as_a_government_source_user(migrator):
     for native in (False, True):
         names = [n for n, _ in migrator._file_strategies(native)]
         assert "server_side" not in names and "download_upload" in names
+
+
+def test_the_operators_exact_copy_switch_allows_a_server_side_copy_only(monkeypatch):
+    """Live, dharan.gov.np: a Slides deck rebuilt through .pptx lost its soft line break."""
+    import config
+    import verify_scopes
+    monkeypatch.setattr(config, "government_exact_copy", lambda aid: True)
+    s = _settings(monkeypatch, "dharan.gov.np", "server_side")
+    assert not s.source_read_only and s.transfer_mode == "server_side"
+    assert DRIVE_WRITE_SCOPE in verify_scopes.migrate_source_scopes(s)
+    for mode in ("move", "link_flip"):
+        assert _settings(monkeypatch, "dharan.gov.np", mode).transfer_mode == "download_upload"
+
+
+def test_the_switch_is_a_file_beside_the_ledger(tmp_path, monkeypatch):
+    import config
+    monkeypatch.setattr(config, "exact_copy_flag", lambda aid: str(tmp_path / f"{aid}"))
+    assert not config.government_exact_copy(5) and not config.government_exact_copy(None)
+    (tmp_path / "5").write_text("x")
+    assert config.government_exact_copy(5) and not config.government_exact_copy(6)

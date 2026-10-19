@@ -15,6 +15,7 @@ const ready = vi.hoisted(() => ({ value: null as unknown }))
 vi.mock('@/api/controlPlane', () => ({
   fetchFullSetupStatus: () => Promise.resolve({ running: false, result: null }),
   fetchReadiness: () => Promise.resolve(ready.value),
+  fetchExactCopy: () => Promise.resolve({ government: false, domain: "", on: false }),
   fetchTenantConfigStatus: () => Promise.resolve(cfg.value),
   startFullSetup: started, startProvision: none, fetchProvisionStatus: none,
   uploadCredentials: none, fetchTenantInventory: none,
