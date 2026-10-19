@@ -223,7 +223,8 @@ def _hold_jumps(item: dict) -> list[tuple] | None:
     return held
 
 
-def copy_form(src_forms, tgt_forms, file_id: str, name: str) -> tuple[str, str]:
+def copy_form(src_forms, tgt_forms, file_id: str, name: str,
+              run=lambda req: req.execute()) -> tuple[str, str]:
     """Rebuild a Form on the target from forms.get: read-only on the source, so a
     government source is never written to (a cross-organisation files.copy of a Form
     made Google drop a "Copy of" into the source owner's Drive -- see drive_engine).
@@ -231,10 +232,10 @@ def copy_form(src_forms, tgt_forms, file_id: str, name: str) -> tuple[str, str]:
     forms.create takes only a title; everything else is batchUpdate. Branching names
     sections by id, and the target mints new ids, so items are created first with the
     jumps held back, then the jumps are set with the target's own section ids."""
-    form = src_forms.forms().get(formId=file_id).execute()
+    form = run(src_forms.forms().get(formId=file_id))
     info = form.get("info") or {}
-    created = tgt_forms.forms().create(body={"info": {
-        "title": info.get("title") or name, "documentTitle": name}}).execute()
+    created = run(tgt_forms.forms().create(body={"info": {
+        "title": info.get("title") or name, "documentTitle": name}}))
     form_id = created["formId"]
 
     setup = []
@@ -246,7 +247,7 @@ def copy_form(src_forms, tgt_forms, file_id: str, name: str) -> tuple[str, str]:
         setup.append({"updateSettings": {"settings": {"quizSettings": {"isQuiz": True}},
                                          "updateMask": "quizSettings.isQuiz"}})
     if setup:
-        tgt_forms.forms().batchUpdate(formId=form_id, body={"requests": setup}).execute()
+        run(tgt_forms.forms().batchUpdate(formId=form_id, body={"requests": setup}))
 
     left_out, made, jumps = [], [], []          # made: (source item id, index on target)
     creates = []
@@ -263,8 +264,8 @@ def copy_form(src_forms, tgt_forms, file_id: str, name: str) -> tuple[str, str]:
         made.append(item.get("itemId"))
     ids: list[str] = []
     if creates:
-        reply = tgt_forms.forms().batchUpdate(
-            formId=form_id, body={"requests": creates, "includeFormInResponse": True}).execute()
+        reply = run(tgt_forms.forms().batchUpdate(
+            formId=form_id, body={"requests": creates, "includeFormInResponse": True}))
         ids = [r.get("createItem", {}).get("itemId") for r in reply.get("replies", [])]
     if jumps:
         new_id = dict(zip(made, ids))
@@ -287,14 +288,14 @@ def copy_form(src_forms, tgt_forms, file_id: str, name: str) -> tuple[str, str]:
             updates.append({"updateItem": {"item": target_item, "location": {"index": index},
                                            "updateMask": "questionItem.question.choiceQuestion.options"}})
         if updates:
-            tgt_forms.forms().batchUpdate(formId=form_id, body={"requests": updates}).execute()
+            run(tgt_forms.forms().batchUpdate(formId=form_id, body={"requests": updates}))
     # Open or closed to responses, as on the source. A new Form starts published and
     # accepting (measured on t.); only a different state is set.
     state = (form.get("publishSettings") or {}).get("publishState")
     if state and state != {"isPublished": True, "isAcceptingResponses": True}:
         try:
-            tgt_forms.forms().setPublishSettings(formId=form_id, body={
-                "publishSettings": {"publishState": state}, "updateMask": "publishState"}).execute()
+            run(tgt_forms.forms().setPublishSettings(formId=form_id, body={
+                "publishSettings": {"publishState": state}, "updateMask": "publishState"}))
         except Exception:      # noqa: BLE001 - the Form itself is rebuilt; say what is not
             left_out.append(f"its response state ({state})")
     note = f"rebuilt via the Forms API ({API_FIDELITY[FORM]})"

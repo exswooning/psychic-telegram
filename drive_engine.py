@@ -1650,8 +1650,12 @@ class DriveMigrator:
         kind = {native_api.SHEET: "sheets", native_api.FORM: "forms"}.get(mime, "docs")
         src_api = self.auth.api("source", kind, self.reader or self.source_user)
         tgt_api = self.auth.api("target", kind, self.target_user)
+        # A Form's rebuild is many calls; each goes through the engine's retry (live,
+        # dharan.gov.np: 3 of 9 Forms in one repair burst were lost to an unretried call).
+        extra = ({"run": lambda req: self._retry(req.execute, label="forms", tenant="target")}
+                 if mime == native_api.FORM else {})
         tgt_id, note = native_api.REBUILDERS[mime](
-            src_api, tgt_api, item["id"], item["name"])
+            src_api, tgt_api, item["id"], item["name"], **extra)
 
         # Created at the API's own default location -- the user's root -- so
         # MOVE it rather than adding a parent. addParents alone leaves the
@@ -1741,8 +1745,12 @@ class DriveMigrator:
             except QuotaExhausted:
                 raise
             except Exception as exc:      # noqa: BLE001 - try the next one
-                log.debug("[%s] %s failed for %s: %s",
-                          self.source_user, name, item.get("name"), exc)
+                log.warning("[%s] %s failed for %s: %s",
+                            self.source_user, name, item.get("name"), exc)
+                # Recorded, so it is never hidden behind an earlier strategy's skip (live:
+                # a Form rebuild that raised read as "no export mapping").
+                self.db.log_audit(self.source_user, item["id"], "file", "FAILED",
+                                  f"{name}: {type(exc).__name__}: {str(exc)[:1500]}")
             attempts.append(name)
             row = self.db.get_audit(self.source_user, item["id"], "file")
             if row is not None and row["status"] == "FAILED":

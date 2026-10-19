@@ -45,6 +45,8 @@ def test_the_scope_is_asked_for_only_while_the_pass_is_on(settings):
     settings.migrate_form_links = True
     assert FORMS_READONLY_SCOPE in source_scopes(settings)
     settings.migrate_form_links = False
+    assert FORMS_READONLY_SCOPE in source_scopes(settings)      # the Forms rebuild reads it too
+    settings.migrate_forms = False
     assert FORMS_READONLY_SCOPE not in source_scopes(settings)
 
 

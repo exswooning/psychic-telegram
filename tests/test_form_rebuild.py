@@ -113,3 +113,22 @@ def test_repair_revisits_the_owners_of_forms_left_for_a_person(db, settings):
     assert repair.forms_to_rebuild_users(db, settings) == ["a@src"]
     settings.migrate_forms = False
     assert repair.forms_to_rebuild_users(db, settings) == []
+
+
+def test_every_forms_call_goes_through_the_callers_retry():
+    seen = []
+    native_api.copy_form(FakeForms(SOURCE), FakeForms(), "SRC", "Survey",
+                         run=lambda req: (seen.append(1), req.execute())[1])
+    assert len(seen) >= 4          # get, create, setup, items, jumps -- each one, not the whole
+
+
+def test_a_strategy_that_raises_is_recorded_not_hidden_behind_a_skip(migrator, monkeypatch):
+    def declines(item, parent):
+        migrator.db.log_audit(migrator.source_user, item["id"], "file", "SKIPPED_UNEXPORTABLE", "no export")
+    def raises(item, parent):
+        raise RuntimeError("429 rateLimitExceeded")
+    monkeypatch.setattr(migrator, "_strategies_for", lambda item, native: [("download_upload", declines),
+                                                                           ("native_api", raises)])
+    migrator._sync_with_fallback({"id": "f9", "name": "Survey", "mimeType": native_api.FORM}, "p", True)
+    row = migrator.db.get_audit(migrator.source_user, "f9", "file")
+    assert row["status"] == "FAILED" and "429 rateLimitExceeded" in row["error_message"]
