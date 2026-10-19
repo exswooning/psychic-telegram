@@ -266,6 +266,9 @@ def migrate_source_scopes(settings: Settings) -> list[str]:
     return sorted(out)
 
 
+SOURCE_AUDIT_SCOPE = "https://www.googleapis.com/auth/admin.reports.audit.readonly"
+
+
 def grant_scopes(settings: Settings, tenant: str) -> list[str]:
     """Everything to put on the Admin Console line for this tenant.
 
@@ -280,7 +283,14 @@ def grant_scopes(settings: Settings, tenant: str) -> list[str]:
     this run start".
     """
     if tenant == "source":
-        return migrate_source_scopes(settings)
+        out = migrate_source_scopes(settings)
+        import domain_guard
+        if domain_guard.is_protected(getattr(settings, "source_domain", "") or ""):
+            # Read-only: Google's own audit log of the source, so a change there can be
+            # attributed to a person or to this tool's client. Live, dharan.gov.np: Form
+            # copies appeared with nothing in Bitport's code that writes them.
+            out = sorted(set(out) | {SOURCE_AUDIT_SCOPE})
+        return out
     want = set(required_scopes(settings, tenant)) | OPTIONAL_SCOPES
     try:
         want |= every_toggle_scopes(settings, tenant)

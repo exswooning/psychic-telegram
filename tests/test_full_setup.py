@@ -26,6 +26,18 @@ import pytest  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
+def _tenant_env_restored(monkeypatch):
+    """run_full_setup writes SOURCE_/TARGET_ DOMAIN and ADMIN into the process
+    environment. A .gov.np domain left there made every later test's Settings() a
+    government source (read-only, no server-side copy)."""
+    for k in ("SOURCE_DOMAIN", "SOURCE_ADMIN", "TARGET_DOMAIN", "TARGET_ADMIN"):
+        if k in os.environ:
+            monkeypatch.setenv(k, os.environ[k])
+        else:
+            monkeypatch.delenv(k, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_drive_probe(monkeypatch):
     """_drive_sdk_off asks Google; a test never does (one did, for 60 s, on a key file
     left in the checkout). The test about it sets its own answer."""

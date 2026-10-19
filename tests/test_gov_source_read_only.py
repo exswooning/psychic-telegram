@@ -110,3 +110,11 @@ def test_a_file_every_route_declines_stays_a_skip_for_a_person_not_a_failure(mig
     migrator._sync_with_fallback(item, "parent", True)
     row = migrator.db.get_audit(migrator.source_user, "f1", "file")
     assert row["status"] == "SKIPPED_UNEXPORTABLE" and row["error_message"].startswith("file: Survey")
+
+
+def test_a_protected_sources_grant_can_read_its_audit_log_and_still_write_nothing(monkeypatch):
+    import verify_scopes
+    s = _settings(monkeypatch, "dharan.gov.np")
+    g = verify_scopes.grant_scopes(s, "source")
+    assert verify_scopes.SOURCE_AUDIT_SCOPE in g and DRIVE_WRITE_SCOPE not in g
+    assert verify_scopes.SOURCE_AUDIT_SCOPE not in verify_scopes.required_scopes(s, "source")
