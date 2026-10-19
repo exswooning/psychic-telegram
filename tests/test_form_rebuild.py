@@ -132,3 +132,17 @@ def test_a_strategy_that_raises_is_recorded_not_hidden_behind_a_skip(migrator, m
     migrator._sync_with_fallback({"id": "f9", "name": "Survey", "mimeType": native_api.FORM}, "p", True)
     row = migrator.db.get_audit(migrator.source_user, "f9", "file")
     assert row["status"] == "FAILED" and "429 rateLimitExceeded" in row["error_message"]
+
+
+def test_a_line_break_in_displayed_text_becomes_a_space_and_is_counted():
+    """Live, dharan.gov.np: 'Displayed text cannot contain newlines' for two Forms."""
+    form = {"info": {"title": "Citizen\nReport"}, "items": [
+        {"itemId": "a", "title": "Name\nand ward", "description": "keeps\nits break",
+         "questionItem": {"question": {"choiceQuestion": {"type": "RADIO", "options": [{"value": "Yes\nplease"}]}}}}]}
+    tgt = FakeForms()
+    _, note = native_api.copy_form(FakeForms(form), tgt, "S", "Citizen Report")
+    assert tgt.calls[0] == ("create", {"info": {"title": "Citizen Report", "documentTitle": "Citizen Report"}})
+    item = next(b for k, b in tgt.calls if k == "batchUpdate")["requests"][0]["createItem"]["item"]
+    assert item["title"] == "Name and ward" and item["description"] == "keeps\nits break"
+    assert item["questionItem"]["question"]["choiceQuestion"]["options"][0]["value"] == "Yes please"
+    assert "2 title(s) or choice(s) had a line break" in note

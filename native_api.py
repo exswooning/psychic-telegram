@@ -190,9 +190,11 @@ def copy_doc(src_docs, tgt_docs, file_id: str, name: str) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 # Forms
 # ---------------------------------------------------------------------------
-def _form_item(item: dict) -> dict:
+def _form_item(item: dict, flattened: list | None = None) -> dict:
     """A source item as forms.batchUpdate createItem takes it: ids dropped (the target
-    mints its own), images re-pointed from their temporary contentUri to sourceUri."""
+    mints its own), images re-pointed from their temporary contentUri to sourceUri, and
+    line breaks in titles and choices made spaces (counted in `flattened`)."""
+    flattened = flattened if flattened is not None else [0]
     item = json.loads(json.dumps(item))
     item.pop("itemId", None)
 
@@ -201,6 +203,13 @@ def _form_item(item: dict) -> dict:
             node.pop("questionId", None)
             if "contentUri" in node:
                 node["sourceUri"] = node.pop("contentUri")
+            for key in ("title", "value"):
+                # The Forms API refuses a line break in displayed text ("Displayed text
+                # cannot contain newlines") though the editor once allowed one -- live,
+                # dharan.gov.np. A space instead, counted in the note.
+                if isinstance(node.get(key), str) and ("\n" in node[key] or "\r" in node[key]):
+                    node[key] = " ".join(node[key].split())
+                    flattened[0] += 1
             for v in node.values():
                 walk(v)
         elif isinstance(node, list):
@@ -235,7 +244,7 @@ def copy_form(src_forms, tgt_forms, file_id: str, name: str,
     form = run(src_forms.forms().get(formId=file_id))
     info = form.get("info") or {}
     created = run(tgt_forms.forms().create(body={"info": {
-        "title": info.get("title") or name, "documentTitle": name}}))
+        "title": " ".join((info.get("title") or name).split()), "documentTitle": name}}))
     form_id = created["formId"]
 
     setup = []
@@ -250,13 +259,14 @@ def copy_form(src_forms, tgt_forms, file_id: str, name: str,
         run(tgt_forms.forms().batchUpdate(formId=form_id, body={"requests": setup}))
 
     left_out, made, jumps = [], [], []          # made: (source item id, index on target)
+    flattened = [0]
     creates = []
     for item in form.get("items", []):
         q = (item.get("questionItem") or {}).get("question") or {}
         if "fileUploadQuestion" in q:
             left_out.append(item.get("title") or "an untitled file-upload question")
             continue
-        new = _form_item(item)
+        new = _form_item(item, flattened)
         held = _hold_jumps(new)
         if held:
             jumps.append((len(creates), held))
@@ -299,6 +309,9 @@ def copy_form(src_forms, tgt_forms, file_id: str, name: str,
         except Exception:      # noqa: BLE001 - the Form itself is rebuilt; say what is not
             left_out.append(f"its response state ({state})")
     note = f"rebuilt via the Forms API ({API_FIDELITY[FORM]})"
+    if flattened[0]:
+        note += (f"; {flattened[0]} title(s) or choice(s) had a line break, which the Forms "
+                 "API does not accept -- written with a space instead")
     if left_out:
         note += f"; {len(left_out)} thing(s) to add by hand: " + "; ".join(left_out[:5])
     return form_id, note
