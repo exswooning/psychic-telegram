@@ -118,3 +118,16 @@ def test_a_protected_sources_grant_can_read_its_audit_log_and_still_write_nothin
     g = verify_scopes.grant_scopes(s, "source")
     assert verify_scopes.SOURCE_AUDIT_SCOPE in g and DRIVE_WRITE_SCOPE not in g
     assert verify_scopes.SOURCE_AUDIT_SCOPE not in verify_scopes.required_scopes(s, "source")
+
+
+def test_a_forms_responses_sheet_is_never_copied_server_side_from_a_protected_source(migrator, monkeypatch):
+    """Google's audit log, dharan.gov.np: copying a Form's responses Sheet across
+    organisations made Google copy the Form too, into the source owner's My Drive."""
+    monkeypatch.setattr(type(migrator), "_protected_source", property(lambda self: True))
+    migrator.settings.transfer_mode = "server_side"
+    sheet = lambda i: [n for n, _ in migrator._strategies_for(
+        {"id": i, "mimeType": "application/vnd.google-apps.spreadsheet"}, True)]
+    monkeypatch.setattr(migrator, "_form_sheets", lambda: {"responses"})
+    assert "server_side" not in sheet("responses") and "server_side" in sheet("budget")
+    monkeypatch.setattr(migrator, "_form_sheets", lambda: None)      # could not tell
+    assert "server_side" not in sheet("budget")

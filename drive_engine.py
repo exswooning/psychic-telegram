@@ -1531,9 +1531,45 @@ class DriveMigrator:
     _COPIES_IN_PLACE = {"application/vnd.google-apps.document", "application/vnd.google-apps.spreadsheet",
                         "application/vnd.google-apps.presentation", "application/vnd.google-apps.drawing"}
 
+    def _form_sheets(self) -> set | None:
+        """Ids of the Sheets that collect a Form's responses, for every Form this user can
+        see -- or None when any of them could not be read (then no Sheet is known safe).
+        Read-only. Google's audit log on dharan.gov.np: copying a Form's responses Sheet
+        to another organisation made Google copy the Form too, as "Copy of <form>" in the
+        source owner's My Drive (copy_type internal, no app) -- nothing Bitport asked for."""
+        if getattr(self, "_form_sheets_cache", False) is not False:
+            return self._form_sheets_cache
+        found: set | None = set()
+        try:
+            d, token = self.src, None
+            while True:
+                r = self._retry(lambda t=token: d.files().list(
+                    q=f"mimeType='{FORM_MIME}' and trashed=false", pageSize=1000, pageToken=t,
+                    fields="nextPageToken,files(id)").execute(), write=False, tenant="source")
+                for f in r.get("files", []):
+                    got = self._retry(lambda fid=f["id"]: self.auth.api(
+                        "source", "forms", self.reader or self.source_user).forms().get(
+                        formId=fid, fields="linkedSheetId").execute(), label="forms.get")
+                    if got.get("linkedSheetId"):
+                        found.add(got["linkedSheetId"])
+                token = r.get("nextPageToken")
+                if not token:
+                    break
+        except Exception as exc:      # noqa: BLE001 - unknown: no Sheet is known safe
+            log.info("[%s] could not read which Sheets collect Form responses (%s); "
+                     "no Sheet is copied server-side", self.source_user, exc)
+            found = None
+        self._form_sheets_cache = found
+        return found
+
     def _strategies_for(self, item: dict, is_native: bool) -> list:
         strategies = self._file_strategies(is_native)
         mime = item.get("mimeType") or ""
+        if (self._protected_source and mime == "application/vnd.google-apps.spreadsheet"
+                and any(n == "server_side" for n, _ in strategies)):
+            sheets = self._form_sheets()
+            if sheets is None or item.get("id") in sheets:
+                strategies = [s for s in strategies if s[0] != "server_side"]
         if (self._protected_source and mime.startswith("application/vnd.google-apps.")
                 and mime not in self._COPIES_IN_PLACE):
             # A protected source is never written to: any other Google type goes another

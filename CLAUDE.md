@@ -343,6 +343,20 @@ this per launch, passed as an env var to just that subprocess; the Start Migrati
 config) rather than assuming every target tenant's sharing settings allow the staging-drive
 grant.
 
+**A government source is read-only by Google's refusal; "exact copies" is the operator's
+switch out of that, and it can write to the source without Bitport asking.** Google's own
+Drive audit log on dharan.gov.np (2026-10-19, read with `admin.reports.audit.readonly`, now on
+every protected source's grant): a cross-organisation server-side copy of a **Form**, or of a
+**Sheet that collects a Form's responses**, makes Google also copy the Form into the source
+owner's My Drive as "Copy of <form>" (event `copy`, `copy_type: internal`, actor = the user,
+no app); an **Apps Script** copy lands there too ("Copy of", then renamed). 12 such copies,
+no original touched. So on a protected source (`DriveMigrator._strategies_for`) only Docs,
+Sheets not linked to a Form (`_form_sheets`; unknown = not safe), Slides, Drawings and
+non-Google files take a server-side copy; a type every route declines stays
+`SKIPPED_UNEXPORTABLE`; and each user's Drive pass lists their source files before and after
+(`_source_tripwire`, by id -- a copy keeps its original's createdTime) and records anything
+added or gone as `SOURCE_CHANGED`.
+
 **A share with a colleague who has no target account yet is owed, not lost**
 (`config.OWED_GRANT`). A run for a few users shares their files with colleagues not
 migrated yet. The engine asks the target directory once per colleague
