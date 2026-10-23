@@ -684,6 +684,9 @@ def retry_drive_stragglers(auth, db, settings, apply: bool = False,
                                   delta=False, delta_days=0)
             if result.get("status") not in ("FAILED", "BLOCKED"):
                 stats["retried"] += 1
+            else:
+                why = "; ".join(f"{k}: {str(v)[:160]}" for k, v in (result.get("failed_services") or {}).items())
+                stats["errors"].append(f"{src} drive re-walk {result.get('status')}: {why or 'see the user note'}")
         except Exception as exc:      # noqa: BLE001 - report, never abort the caller
             stats["errors"].append(f"{src} drive: {str(exc)[:120]}")
     return stats

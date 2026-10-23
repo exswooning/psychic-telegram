@@ -2283,6 +2283,8 @@ def _start_repair(account_id: int | None, why: str, *,
                 if verification_report is not None:
                     out["verified_gmail_labels"] = repair.repair_verified_gmail_labels(
                         AuthManager(st), d, st, verification_report, apply=True)
+                for e in out.get("errors") or []:
+                    log.warning("repair account %s: %s", account_id, e)
                 d.repair_finished(run_id, repair.summarise(out))
             except Exception as exc:      # noqa: BLE001
                 d.repair_finished(run_id, "", str(exc)[:500])

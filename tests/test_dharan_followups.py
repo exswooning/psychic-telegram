@@ -149,3 +149,12 @@ def test_finished_repairs_show_with_the_finished_jobs(monkeypatch, tmp_path):
     assert [(r["runId"], r["name"], r["rc"]) for r in rows] == [(f"repair-{run}", "repair", 0)]
     assert rows[0]["lines"] == ["11 stranded item(s) re-imported", "7/13 drive straggler(s) re-copied"]
     assert api_server._repair_runs_as_jobs(5, run)[0]["lineCount"] == 2
+
+
+def test_a_re_walk_that_fails_says_why(db, settings):
+    import repair
+    from db import bulk_seed_identities
+    bulk_seed_identities(db, [("u@src", "u@tgt")])
+    out = repair.retry_drive_stragglers(None, db, settings, apply=True, users=["u@src"],
+        _migrate_user=lambda *a, **k: {"status": "FAILED", "failed_services": {"drive": "coverage incomplete"}})
+    assert out["errors"] == ["u@src drive re-walk FAILED: drive: coverage incomplete"]
