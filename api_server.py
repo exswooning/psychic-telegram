@@ -865,6 +865,10 @@ async def lifespan(_: FastAPI):
         thread_name_prefix="offloop"))
 
     await _off_loop(cpdb.apply_migrations)
+    # A Repair is a thread in this process, so none can still be running now: one the
+    # last process left unfinished was cut off by its restart. Said so, or Migration
+    # detail read "Repair is running" for ever and every deploy refused over it.
+    await _off_loop(_close_orphaned_repairs)
     # Idempotent: only inserts account id=1 the very first time this ever
     # runs against a given migration.db. Must come after apply_migrations,
     # not before -- it writes into tables that migration just created.
@@ -2226,6 +2230,27 @@ def _start_tally_after_repair(account_id: int | None, users: list[str] | None = 
     return True, "tally will run once repair finishes"
 
 
+def _close_orphaned_repairs() -> int:
+    """Mark every repair run a previous process left unfinished as interrupted."""
+    import sqlite3 as _sq
+    closed = 0
+    for acct in accounts_auth.list_accounts():
+        aid = acct.get("id") if isinstance(acct, dict) else acct
+        path = _account_db_path(aid)
+        if not path or not os.path.isfile(path):
+            continue
+        try:
+            with _sq.connect(path, timeout=30) as conn:
+                closed += conn.execute(
+                    "UPDATE repair_runs SET finished_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'), "
+                    "error='interrupted: the API restarted while it ran' WHERE finished_at IS NULL").rowcount
+        except _sq.Error as exc:
+            log.warning("could not close orphaned repairs for account %s: %s", aid, exc)
+    if closed:
+        log.info("closed %d repair run(s) a restart had cut off", closed)
+    return closed
+
+
 def _start_repair(account_id: int | None, why: str, *,
                   actor: str = "auto", role: str = "system",
                   verification_report: dict | None = None) -> tuple[bool, str]:
@@ -3146,6 +3171,41 @@ async def seed_trim_filler_status(account_id: int | None = None, op: Operator = 
     return await _off_loop(_trim_status, aid)
 
 
+def _repair_runs_as_jobs(account_id: int, run_id: int | None = None) -> list[dict]:
+    """An account's Repair runs, shaped like the Jobs page's finished runs. A repair is a
+    thread in this process and writes no job archive, so it was on no list once it
+    ended (live, 2026-10-23); its record is repair_runs, and its output its summary."""
+    path = _account_db_path(account_id)
+    if not path or not os.path.isfile(path):
+        return []
+
+    def epoch(t):
+        try:
+            return _dt.datetime.strptime(t, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=_dt.timezone.utc).timestamp()
+        except (TypeError, ValueError):
+            return None
+    try:
+        with cpdb.ro(path) as conn:
+            q = "SELECT id, started_at, finished_at, summary, error FROM repair_runs"
+            rows = conn.execute(q + (" WHERE id=?" if run_id else " ORDER BY id DESC LIMIT 50"),
+                                (run_id,) if run_id else ()).fetchall()
+    except sqlite3.OperationalError:          # a ledger from before repair_runs
+        return []
+    out = []
+    for r in rows:
+        if not r["finished_at"]:
+            continue                          # still running: listed as running, not here
+        started, finished = epoch(r["started_at"]), epoch(r["finished_at"])
+        lines = [x for x in (r["summary"] or "").split("; ") if x] + (
+            ["error: " + r["error"]] if r["error"] else [])
+        out.append({"runId": f"repair-{r['id']}", "name": "repair", "rc": 1 if r["error"] else 0,
+                    "started": started, "finished": finished,
+                    "elapsed": (finished - started) if started and finished else None,
+                    "lineCount": len(lines), "fromTranscript": False, "retryable": False,
+                    "lines": lines})
+    return out
+
+
 def _completed_across(account_ids: list[int] | None) -> list[dict]:
     """Finished runs, newest first, each labelled with the account and tenant it
     belongs to. `None` means every account that has any record.
@@ -3172,6 +3232,9 @@ def _completed_across(account_ids: list[int] | None) -> list[dict]:
             src = tgt = None
         for r in webui.completed_jobs(aid):
             rows.append({**r, "accountId": aid, "sourceDomain": src, "targetDomain": tgt})
+        for r in _repair_runs_as_jobs(aid):
+            r = {k: v for k, v in r.items() if k != "lines"}
+            rows.append({**r, "accountId": aid, "sourceDomain": src, "targetDomain": tgt})
     rows.sort(key=lambda r: r.get("finished") or 0, reverse=True)
     return rows[:300]
 
@@ -3195,6 +3258,9 @@ async def jobs_history(run: str, account_id: int, op: Operator = Depends(operato
 
     def _load():
         import webui
+        if run.startswith("repair-") and run[7:].isdigit():
+            found = _repair_runs_as_jobs(account_id, int(run[7:]))
+            return found[0] if found else None
         return webui.load_job_archive(account_id, run)     # validates `run` against its own pattern
     return {"result": await _off_loop(_load)}
 

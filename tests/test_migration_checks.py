@@ -133,6 +133,20 @@ def test_drive_gate_lists_unattempted_files_instead_of_trusting_success_rows(aut
     assert tuple(queue) == ("drive", sid, "notCopied")
 
 
+def test_a_reasoned_skip_is_accounted_for_and_a_failure_is_still_a_gap(auth, db, settings, identity):
+    """dharan: files in another organisation's shared drive are skipped on purpose and
+    said so; counting them as gaps failed every user holding one."""
+    src = auth.source_drive(SRC_USER)
+    skipped = src.add_binary("theirs.pdf", data=b"x")
+    failed = src.add_binary("broke.bin", data=b"y")
+    db.log_audit(SRC_USER, skipped, "file", "SKIPPED_OTHER_ORG_SHARED_DRIVE", "in another organisation's shared drive")
+    check = C.drive_completion(auth, db, settings, SRC_USER, TGT_USER)
+    assert check["accounted"] == 1 and check["notCopied"] == 1 and not check["complete"]
+    db.log_audit(SRC_USER, failed, "file", "SKIPPED_UNEXPORTABLE", "a Site")
+    check = C.drive_completion(auth, db, settings, SRC_USER, TGT_USER)
+    assert check["accounted"] == 2 and check["complete"]
+
+
 def test_storage_after_check_compares_destination_against_its_baseline(db, monkeypatch):
     values = iter([{"source": {"drive": {"usageInDrive": "100"}}, "target": {"drive": {"usageInDrive": "20"}}, "comparison": {}},
                    {"source": {"drive": {"usageInDrive": "100"}}, "target": {"drive": {"usageInDrive": "120"}}, "comparison": {}}])

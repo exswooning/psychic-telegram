@@ -123,6 +123,10 @@ def mailbox_completion(auth, db, settings, source_user, target_user, retry=lambd
             "scope": "full source ID and mapped destination presence; content checked separately"}
 
 
+# Unmapped on purpose, and owed or said so: a decision, not a gap (SKIPPED_* also counts).
+ACCOUNTED_STATUSES = ("OVER_DAILY_CAP", "OWED_GRANTEE_NO_ACCOUNT", "RELINK_BY_HAND", "MOVED_BACK")
+
+
 def drive_completion(auth, db, settings, source_user, target_user, retry=lambda f: f,
                      persist=True, finding_result=None):
     """Cover the configured My Drive inventory, not merely successful mappings."""
@@ -143,6 +147,17 @@ def drive_completion(auth, db, settings, source_user, target_user, retry=lambda 
             if token in seen:
                 raise RuntimeError("Drive completion inventory repeated a page token")
             seen.add(token)
+    # The ledger's own last word on each item: a reasoned skip (another organisation's
+    # shared drive, not exportable, no download allowed, ...) or an owed item is
+    # accounted for -- listed with its reason, never a silent gap and never a match.
+    # Counting them as gaps failed every user holding one (dharan: ward1 773, ward12
+    # 316, ward15 98 files in another organisation's shared drive).
+    decided = {r[0]: (r[1], r[2]) for r in db.conn.execute(
+        "SELECT item_id, status, error_message FROM audit_log a WHERE source_user=? "
+        "AND item_type IN ('file','folder','shortcut') AND id=(SELECT MAX(id) FROM audit_log b "
+        "WHERE b.source_user=a.source_user AND b.item_id=a.item_id AND b.item_type=a.item_type)",
+        (source_user,))}
+    accounted = []
     try:
         source = inventory(auth.source_drive(source_user))
         target = inventory(auth.target_drive(target_user))
@@ -150,6 +165,10 @@ def drive_completion(auth, db, settings, source_user, target_user, retry=lambda 
             mime = item.get("mimeType", "")
             kind = "folder" if mime == V.FOLDER else "shortcut" if mime.endswith(".shortcut") else "file"
             tid = db.get_target_id(source_user, sid, kind)
+            status, why = decided.get(sid, (None, None))
+            if not tid and status and (status.startswith("SKIPPED") or status in ACCOUNTED_STATUSES):
+                accounted.append({"type": kind, "id": sid, "status": status, "why": (why or "")[:200]})
+                continue
             if not tid:
                 result["notCopied"].append({"type": kind, "id": sid, "status": "UNMAPPED_SOURCE",
                     "error": "Live source item in the configured Drive scope has no migration mapping"})
@@ -162,7 +181,13 @@ def drive_completion(auth, db, settings, source_user, target_user, retry=lambda 
     gap = any(result[k] for k in ("notCopied", "missing", "differences", "errors"))
     if gap and persist:
         V.save_user_results(db, {"users": {source_user: {"drive": result}}})
-    return {"complete": not gap, "notCopied": len(result["notCopied"]), "missing": len(result["missing"]),
+    if accounted:
+        by = {}
+        for a in accounted:
+            by[a["status"]] = by.get(a["status"], 0) + 1
+        result["notes"].append("Not copied by a recorded decision (listed, not counted as matching): "
+                               + ", ".join(f"{n} {k}" for k, n in sorted(by.items())))
+    return {"complete": not gap, "accounted": len(accounted), "notCopied": len(result["notCopied"]), "missing": len(result["missing"]),
             "differences": len(result["differences"]), "errors": result["errors"],
             "scope": "configured My Drive source IDs and destination presence/binary checksums; native fidelity and ACLs require separate checks"}
 

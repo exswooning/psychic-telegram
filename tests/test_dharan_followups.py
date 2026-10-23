@@ -116,3 +116,36 @@ def test_a_repair_re_walk_leaves_verification_to_the_one_to_one_run(db, settings
     st = seen[0]
     assert (st.first_pass_acceptance, st.verify_on_complete, st.tally_on_complete) == (False, False, False)
     assert settings.first_pass_acceptance is True               # the run's own settings untouched
+
+
+def test_a_repair_cut_off_by_a_restart_is_closed_at_startup(monkeypatch, tmp_path):
+    """Live: repair 27 read 'running' after the API restarted, and the deploy guard
+    refused for twelve hours over a thread that no longer existed."""
+    import api_server
+    from db import MigrationDB
+    path = str(tmp_path / "m.db")
+    d = MigrationDB(path)
+    run = d.repair_started()
+    monkeypatch.setattr(api_server.accounts_auth, "list_accounts", lambda: [{"id": 5}])
+    monkeypatch.setattr(api_server, "_account_db_path", lambda aid: path)
+    assert api_server._close_orphaned_repairs() == 1
+    row = d.conn.execute("SELECT finished_at, error FROM repair_runs WHERE id=?", (run,)).fetchone()
+    assert row["finished_at"] and "restarted" in row["error"]
+    assert api_server._close_orphaned_repairs() == 0
+
+
+def test_finished_repairs_show_with_the_finished_jobs(monkeypatch, tmp_path):
+    """A repair is a thread, writes no job archive, and vanished from the Jobs page
+    when it ended. Listed from repair_runs now, and opens to its summary."""
+    import api_server
+    from db import MigrationDB
+    path = str(tmp_path / "m.db")
+    d = MigrationDB(path)
+    run = d.repair_started()
+    d.repair_finished(run, "11 stranded item(s) re-imported; 7/13 drive straggler(s) re-copied")
+    d.repair_started()                                           # still running: not "finished"
+    monkeypatch.setattr(api_server, "_account_db_path", lambda aid: path)
+    rows = api_server._repair_runs_as_jobs(5)
+    assert [(r["runId"], r["name"], r["rc"]) for r in rows] == [(f"repair-{run}", "repair", 0)]
+    assert rows[0]["lines"] == ["11 stranded item(s) re-imported", "7/13 drive straggler(s) re-copied"]
+    assert api_server._repair_runs_as_jobs(5, run)[0]["lineCount"] == 2
