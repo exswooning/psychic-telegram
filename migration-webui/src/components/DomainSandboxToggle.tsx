@@ -30,6 +30,8 @@ import {
 
 export const DomainSandboxToggle: React.FC<{ domain: string }> = ({ domain }) => {
   const [protectedState, setProtectedState] = useState<boolean | null>(null)
+  const [immutable, setImmutable] = useState(false)
+  const [guardReason, setGuardReason] = useState('')
   const [revokedBy, setRevokedBy] = useState('')
   const [revokedReason, setRevokedReason] = useState('')
   const [open, setOpen] = useState(false)
@@ -45,6 +47,8 @@ export const DomainSandboxToggle: React.FC<{ domain: string }> = ({ domain }) =>
     fetchDomainGuardStatus(d)
       .then((r) => {
         setProtectedState(r.protected)
+        setImmutable(Boolean(r.immutable))
+        setGuardReason(r.reason || '')
         setRevokedBy(r.revokedBy || '')
         setRevokedReason(r.revokedReason || '')
       })
@@ -94,14 +98,16 @@ export const DomainSandboxToggle: React.FC<{ domain: string }> = ({ domain }) =>
           sx={{ ml: 0 }}
           control={
             <Switch size="small" inputProps={{ 'data-testid': 'sandbox-toggle' } as never}
-                    checked={!protectedState} disabled={busy}
+                    checked={!protectedState} disabled={busy || immutable}
                     onChange={(e) => (e.target.checked
                       ? setOpen(true)
                       : restore())} />
           }
           label={
             <Typography variant="body2">
-              {protectedState
+              {immutable
+                ? guardReason || `${d} is permanently protected`
+                : protectedState
                 ? `${d} is protected — seeding and reset are refused`
                 : `${d} is a declared sandbox — protection is off`}
             </Typography>

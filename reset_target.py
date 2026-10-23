@@ -83,21 +83,7 @@ def _load_seeder():
 
 def assert_sandbox(settings: Settings, confirm_domain: str,
                    side: str = "target") -> None:
-    """The seeder's guards, pointed at whichever tenant is being emptied.
-
-    side="source" exists because deleting the source corpus is sometimes
-    exactly the intent -- reseeding under different usernames, say, which
-    needs the old accounts gone rather than merely emptied. It is NOT the
-    default, and it keeps every guard: SANDBOX_MODE, the typed domain, and
-    PROTECTED_DOMAINS all still apply, just against the domain actually
-    being destroyed.
-
-    The same-domain check is the one that changes shape. Against the target
-    it means "you are about to delete the corpus you are supposed to be
-    migrating". Against the source it means the same thing from the other
-    end, so it stays -- what it can no longer be is a proxy for "this is
-    the target", because now it might not be.
-    """
+    """Refuse every source wipe, including sandbox/typed-confirm overrides."""
     if side not in ("source", "target"):
         raise ValueError(f"side must be source or target, got {side!r}")
     domain = (settings.source_domain if side == "source"
@@ -109,6 +95,8 @@ def assert_sandbox(settings: Settings, confirm_domain: str,
     if confirm_domain.lower() != domain:
         sys.exit(f"REFUSING: --confirm-domain {confirm_domain!r} does not match "
                  f"{env_name} {domain!r}.")
+    if side == "source" or domain_guard._norm(domain) == domain_guard._norm(settings.source_domain):
+        sys.exit(f"REFUSING: {domain} is a source domain; it can never be wiped.")
     refusal = domain_guard.refuse_reason(domain)
     if refusal:
         sys.exit("REFUSING: " + refusal)
@@ -159,6 +147,8 @@ def reset_all(settings: Settings, auth: AuthManager, users: list[str],
     run. Completion order, not submission order, so one slow mailbox does not
     hold the count back.
     """
+    domain_guard.require_not_source(settings.target_domain, settings.source_domain)
+    domain_guard.require_wipe_subjects(users, settings.source_domain)
     totals = {"drive": 0, "gmail": 0, "calendar": 0, "chat": 0}
     unreached = []
     print(f"  [0/{len(users)}] users reset", flush=True)
@@ -178,6 +168,8 @@ def reset_all(settings: Settings, auth: AuthManager, users: list[str],
 
 def reset_one(settings: Settings, auth: AuthManager, user: str,
               services: tuple[str, ...] = ALL_SERVICES) -> dict:
+    domain_guard.require_not_source(settings.target_domain, settings.source_domain)
+    domain_guard.require_wipe_subjects([user], settings.source_domain)
     seed = _load_seeder()
 
     local = user.split("@")[0]

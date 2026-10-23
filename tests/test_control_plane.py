@@ -30,7 +30,7 @@ import control_plane_db as cpdb
 from db import MigrationDB
 
 fastapi = pytest.importorskip("fastapi", reason="control plane deps not installed")
-pytest.importorskip("httpx2", reason="starlette TestClient needs httpx2")
+pytest.importorskip("httpx", reason="starlette TestClient needs httpx")
 from fastapi.testclient import TestClient  # noqa: E402
 
 

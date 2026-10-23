@@ -42,10 +42,10 @@ CREATE TABLE IF NOT EXISTS accounts (
 );
 
 -- ---------------------------------------------------------------------------
--- sessions -- opaque bearer tokens, not JWT. A stolen JWT is valid until it
--- expires no matter what the server does; a stolen session row can be
--- deleted the moment it is noticed. For a product this size, "can revoke
--- instantly" beats "one fewer database read per request".
+-- sessions -- SHA-256 hashes of opaque bearer tokens, not JWT. The raw token
+-- is returned once to the browser and never stored. A database copy alone
+-- cannot be replayed, while a stolen live token can still be revoked by
+-- deleting its row. Existing plaintext rows are upgraded on first use.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS sessions (
     token       TEXT PRIMARY KEY,

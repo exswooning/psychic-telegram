@@ -136,7 +136,7 @@ export interface JobStatus {
   elapsed: number
   lines: string[]
   total: number
-  // Only ever set for a seed job (its own printed lines) or a migrate/
+  // Only ever set for seed/verify jobs (their own printed lines) or a migrate/
   // delta/discover job (the ledger's completion fraction) -- see webui.py's
   // _job_progress(). null everywhere else, including when nothing is
   // running at all.

@@ -146,3 +146,15 @@ class TestItActuallyRetries:
         assert any("mailbox unavailable" in e for e in out["errors"])
         assert FakeCalendar.last.migrated == ["e1"]
         d.close()
+
+
+def test_scoped_retry_never_reaches_another_users_failures(tmp_path):
+    d = _db(tmp_path, pairs=(('a@src','a@tgt'),('b@src','b@tgt')))
+    d.log_audit('a@src','ma','message','FAILED','backendError')
+    d.log_audit('b@src','mb','message','FAILED','backendError')
+    FakeGmail.made = []
+    result = _run(d, apply=True, users={'a@src'})
+    assert FakeGmail.made == [('a@src','a@tgt')]
+    assert FakeGmail.last.seen == ['ma']
+    assert result['messages'] == 1
+    d.close()

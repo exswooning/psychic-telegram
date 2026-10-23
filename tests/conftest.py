@@ -27,6 +27,11 @@ os.environ["MIGRATION_DB"] = os.path.join(_tempfile.mkdtemp(prefix="bitport-test
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import control_plane_db as _test_cpdb  # noqa: E402
+# Source protection must see a real readable registry, even for fake tenants.
+# MIGRATION_DB above is a fresh temporary path, never the checkout's ledger.
+_test_cpdb.apply_migrations(os.environ["MIGRATION_DB"])
+
 import calendar_engine  # noqa: E402
 import drive_engine  # noqa: E402
 import gmail_engine  # noqa: E402
@@ -76,7 +81,11 @@ def settings(tmp_path) -> Settings:
     # Same again: on in production (a user is verified as they finish), off here so a
     # migration test does not grow a checker thread it never asked for. The default is
     # pinned in test_verify_on_completion.py.
+    s.first_pass_acceptance = False  # exercised explicitly by first-pass tests
+    s.auto_provision_users = False  # profile tests opt into provisioning
     s.verify_on_complete = False
+    s.migration_checks_enabled = False
+    s.auto_repair_on_verification = False
     # Real Drive takes minutes to move a commented file's time; a test must not sleep for them.
     s.mtime_settle_sec = 0
     os.makedirs(s.scratch_dir, exist_ok=True)

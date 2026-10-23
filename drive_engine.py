@@ -24,6 +24,7 @@ import concurrent.futures as futures
 import json
 import logging
 import os
+import re
 import threading
 import time
 import uuid
@@ -101,10 +102,12 @@ def carried_metadata(item: dict) -> dict:
         out["properties"] = item["properties"]
     if item.get("mimeType") == FOLDER_MIME and item.get("folderColorRgb"):
         out["folderColorRgb"] = item["folderColorRgb"]
+    if item.get("_bitport_source_user") and item.get("id"):
+        out["appProperties"] = {"bitportSourceId": item["id"], "bitportSourceUser": item["_bitport_source_user"]}
     return out
 
 
-CARRIED_KEYS = tuple(_CARRIED_DEFAULTS) + ("properties", "folderColorRgb", "createdTime")
+CARRIED_KEYS = tuple(_CARRIED_DEFAULTS) + ("properties", "folderColorRgb", "createdTime", "appProperties")
 
 
 def with_carried_fallback(send, body: dict):
@@ -115,7 +118,7 @@ def with_carried_fallback(send, body: dict):
         return send(body)
     except PermanentAPIError as exc:
         extra = [k for k in CARRIED_KEYS if k in body]
-        if not extra:
+        if not extra or not re.search(r"(?:HTTP|HttpError)\s+400\b",str(exc)):
             raise
         log.warning("Drive refused a write carrying %s (%s); retrying without them",
                     ",".join(extra), exc)
@@ -1394,6 +1397,7 @@ class DriveMigrator:
 
     # -- folders ---------------------------------------------------------------
     def _sync_folder(self, item: dict, tgt_parent: str) -> str | None:
+        item = {**item, "_bitport_source_user": self.source_user}
         existing = self.db.get_target_id(self.source_user, item["id"], "folder")
         if existing:
             if self.db.acl_pending(self.source_user, item["id"]) and not self.settings.dry_run:
@@ -1431,6 +1435,7 @@ class DriveMigrator:
 
     # -- files -------------------------------------------------------------------
     def _sync_file(self, item: dict, tgt_parent: str) -> None:
+        item = {**item, "_bitport_source_user": self.source_user}
         is_native = str(item.get("mimeType", "")).startswith("application/vnd.google-apps.")
         existing = self.db.get_target_id(self.source_user, item["id"], "file")
         if existing:
@@ -1575,6 +1580,14 @@ class DriveMigrator:
             # A protected source is never written to: any other Google type goes another
             # way, or is listed for a person, rather than risk a copy beside the original.
             strategies = [s for s in strategies if s[0] != "server_side"]
+        from transfer_policy import choose
+        decision = choose(self.settings, item, [name for name, _ in strategies])
+        if decision["adaptive"]:
+            self.db.log_audit(self.source_user, item["id"], "transfer_route", "SELECTED", json.dumps(decision))
+            methods = dict(strategies)
+            strategies = [(name, methods[name]) for name in decision["order"]]
+            if not strategies:
+                raise RuntimeError(decision["reason"] + "; no safe copy route available")
         return strategies
 
     def _file_strategies(self, is_native: bool) -> list:
@@ -1771,6 +1784,8 @@ class DriveMigrator:
                 # failures and the export ceiling earn a second attempt.
                 return
             if self.db.get_target_id(self.source_user, item["id"], "file"):
+                self.db.log_audit(self.source_user,item["id"],"transfer_route","SUCCESS",json.dumps({
+                    "method":name,"mimeType":item.get("mimeType"),"adaptive":self.settings.transfer_mode=="adaptive", "fallback":len(attempts)>1}))
                 if len(attempts) > 1:
                     if local_failures:
                         self._bump("failed", -local_failures)
@@ -1884,6 +1899,7 @@ class DriveMigrator:
             return
 
         body = {"name": item["name"], "parents": [self._staging_drive_id]}
+        body.update(carried_metadata(item))
         # copy() does not carry modifiedTime across on its own.
         if item.get("modifiedTime"):
             body["modifiedTime"] = item["modifiedTime"]
@@ -2732,59 +2748,17 @@ class DriveMigrator:
         honest -- silently reattributing a colleague's comment to whoever ran
         the migration is worse.
         """
-        written = 0
+        if self.settings.dry_run:
+            return 0
+        from migration_comments import reconcile
         try:
-            resp = self._retry(lambda: self.src.comments().list(
-                fileId=source_id, pageSize=100,
-                fields="comments(id,content,author,createdTime,resolved,"
-                       "replies(id,content,author,createdTime))",
-            ).execute(), write=False, tenant="source")
-        except (PermanentAPIError, RuntimeError) as exc:
-            log.debug("[%s] comments unavailable on %s: %s",
-                     self.source_user, source_id, exc)
+            written=reconcile(self,source_id,target_id)
+            self._bump("comments",written)
             return written
-
-        for c in resp.get("comments", []):
-            if self.db.get_target_id(self.source_user, c["id"], "comment"):
-                continue
-            author = (c.get("author") or {}).get("displayName") or "unknown"
-            when = (c.get("createdTime") or "")[:10]
-            body = {"content": f"[{author}, {when}] {c.get('content', '')}"}
-            try:
-                created = self._retry(lambda b=body: self.tgt.comments().create(
-                    fileId=target_id, body=b, fields="id",
-                ).execute())
-            except (PermanentAPIError, RuntimeError) as exc:
-                self.db.log_audit(self.source_user, c["id"], "comment",
-                                  "FAILED", str(exc))
-                continue
-
-            self.db.record_mapping(self.source_user, c["id"], created["id"], "comment")
-            self.db.log_audit(self.source_user, c["id"], "comment", "SUCCESS")
-            self._bump("comments")
-            written += 1
-
-            for r in (c.get("replies") or []):
-                r_author = (r.get("author") or {}).get("displayName") or "unknown"
-                r_when = (r.get("createdTime") or "")[:10]
-                r_body = {"content": f"[{r_author}, {r_when}] {r.get('content', '')}"}
-                try:
-                    self._retry(lambda b=r_body, cid=created["id"]:
-                                self.tgt.replies().create(
-                                    fileId=target_id, commentId=cid, body=b,
-                                    fields="id",
-                                ).execute())
-                except (PermanentAPIError, RuntimeError) as exc:
-                    # Was silent. A reply that cannot be recreated simply
-                    # vanished -- no audit row, no counter -- so the comment
-                    # thread came out shorter on the target with nothing
-                    # anywhere saying so.
-                    self.db.log_audit(
-                        self.source_user, f"{source_id}:reply", "comment",
-                        "FAILED", f"reply not recreated: {exc}")
-                else:
-                    written += 1
-        return written
+        except Exception as exc:
+            self.db.log_audit(self.source_user,source_id,"comment","FAILED",str(exc))
+            log.warning("[%s] comment thread remains unresolved on %s: %s",self.source_user,source_id,exc)
+            return 0
 
     # -- ACL translation -----------------------------------------------------------
     def _sync_acls(self, source_id: str, target_id: str,
@@ -2987,7 +2961,9 @@ class DriveMigrator:
                                       "permission has no emailAddress (likely an "
                                       "orphaned grant from a deleted account)")
                     continue
-                mapped = self.db.resolve_identity(email)
+                mapped = (self.db.resolve_identity(email)
+                          or (self.db.target_for_source_id(email.lower(), ("group",))
+                              if p["type"] == "group" else None))
                 if mapped:
                     body["emailAddress"] = mapped
                 elif email.split("@")[-1].lower() == self.settings.source_domain.lower():
@@ -3057,7 +3033,8 @@ class DriveMigrator:
         if not grants:
             return 0
 
-        batch_size = max(int(getattr(self.settings, "acl_batch_size", 1) or 1), 1)
+        batch_size = (1 if getattr(self.settings,"first_pass_acceptance",False) else
+                      max(int(getattr(self.settings, "acl_batch_size", 1) or 1), 1))
         applied = 0
         for start in range(0, len(grants), batch_size):
             chunk = grants[start:start + batch_size]

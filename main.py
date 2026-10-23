@@ -319,6 +319,10 @@ def _services_that_succeeded(services: dict) -> list[str]:
         if not isinstance(stats, dict):
             done.append(name)
             continue
+        if stats.get("interrupted"):
+            continue
+        if stats.get("completion_incomplete") or stats.get("awaiting_dms"):
+            continue
         failed = sum(v for k, v in stats.items()
                      if isinstance(v, int) and "fail" in k.lower())
         skipped = sum(v for k, v in stats.items()
@@ -407,6 +411,13 @@ def explain_user_failure(exc: Exception, source_user: str,
     return raw
 
 
+def inline_acceptance_enabled(settings, *, delta=False, track_status=True):
+    """Full engine jobs only: a sample or DMS handoff must never expand itself."""
+    return (track_status and not delta and getattr(settings,"first_pass_acceptance",False)
+            and getattr(settings,"sample_limit",None) is None
+            and not getattr(settings,"mail_only_with_links",False))
+
+
 def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
                  source_user: str, target_user: str, services: set[str],
                  delta: bool, delta_days: int) -> dict:
@@ -440,6 +451,8 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
         result["elapsed_sec"] = 0.0
         return result
 
+    acceptance = None
+    acceptance_enabled = inline_acceptance_enabled(settings,delta=delta,track_status=track_status)
     prior_status = ""
     if track_status:
         row = db.conn.execute(
@@ -448,6 +461,10 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
         prior_status = (row["status"] if row else "") or ""
         db.set_identity_status(source_user, "RUNNING")
     quota = DailyQuotaGuard(db, target_user, settings.effective_upload_cap())
+    checkpoints = track_status and getattr(settings, "migration_checks_enabled", False)
+    if checkpoints:
+        from migration_checks import capture_and_save
+        capture_and_save(auth, db, source_user, target_user, services, "before")
 
     def _drive():
         dm = DriveMigrator(auth, db, settings, source_user, target_user, quota)
@@ -457,7 +474,13 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
         # file came from whom.
         if db.sources_for_target(target_user) > 1:
             dm.consolidate_under = source_user
-        return dm.run(delta=delta)
+        stats = dm.run(delta=delta)
+        if checkpoints and not SHUTDOWN.is_set() and not delta:
+            from migration_checks import drive_completion
+            check = drive_completion(auth, db, settings, source_user, target_user)
+            stats["coverage_check"] = check
+            stats["completion_incomplete"] = not check["complete"]
+        return stats
 
     # A user whose Drive failed earlier in this ordered run: their mail and calendar would
     # go in with every link still naming the source tenant, and an inserted message is
@@ -472,9 +495,18 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
 
     def _gmail():
         _held("mail")
-        return GmailMigrator(auth, db, settings, source_user, target_user).run(
+        stats = GmailMigrator(auth, db, settings, source_user, target_user).run(
             delta=delta, since_epoch_days=delta_days,
             drive_in_scope="drive" in services)
+        # A narrow delta intentionally leaves older mail outside its scope;
+        # a full migration must cover every live source ID before completion.
+        if (checkpoints or settings.mail_only_with_links) and not SHUTDOWN.is_set() and not delta:
+            from migration_checks import mailbox_completion
+            check = mailbox_completion(auth, db, settings, source_user, target_user)
+            stats["coverage_check"] = check
+            stats["awaiting_dms"] = check.get("awaitingDms", 0)
+            stats["completion_incomplete"] = (not check["complete"] and not check.get("handoffReady")) or bool(stats.get("inline_verification_failed"))
+        return stats
 
     def _calendar():
         _held("calendar")
@@ -512,6 +544,13 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
     failures: dict[str, str] = {}
 
     try:
+        if acceptance_enabled:
+            from migration_acceptance import Acceptance, dependency_preflight
+            dependency_preflight(auth,db,settings,source_user,target_user)
+            acceptance = Acceptance(auth,db,settings,source_user,target_user,services)
+            result["acceptanceRunId"] = acceptance.run_id
+            if not acceptance.ready():
+                raise RuntimeError("Source manifest could not be completed: "+json.dumps(acceptance.errors))
         # One service failing must not take the others with it. A user whose
         # Drive is switched off used to lose their mail as well: Drive
         # raised, the single try block around every service caught it, and
@@ -523,6 +562,8 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
                 continue
             try:
                 result["services"][name] = run_service()
+                if isinstance(result["services"][name], dict) and result["services"][name].get("completion_incomplete"):
+                    failures[name] = "Full source/destination ID coverage is incomplete; findings scheduled for repair"
             except QuotaExhausted as exc:
                 # Still the whole user's problem, not this service's. The cap
                 # is a daily byte budget for the TARGET account, so it is
@@ -556,9 +597,24 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
                     log.exception("[%s] %s failed", source_user, name)
                     db.log_audit(source_user, source_user, name, "FAILED", detail)
 
-        status = "INTERRUPTED" if SHUTDOWN.is_set() else "DONE"
-        if failures:
+        if acceptance is not None:
+            result["acceptance"] = acceptance.finish(repair=True,
+                progress=lambda message: log.info("[%s] acceptance: %s", source_user,message))
+            if not result["acceptance"]["complete"]:
+                failures["acceptance"] = "Selected scope has unresolved validation, inventory or source-change findings"
+            else:
+                # Fresh same-job acceptance can resolve a deterministic initial copy failure.
+                for service in list(failures):
+                    if service in result["acceptance"]["services"]:
+                        failures.pop(service,None)
+                        stats=result["services"].get(service)
+                        if isinstance(stats,dict):stats["completion_incomplete"]=False
+        interrupted = SHUTDOWN.is_set() or (result.get("acceptance") or {}).get("state") == "INTERRUPTED"
+        status = "INTERRUPTED" if interrupted else "DONE"
+        if failures and not interrupted:
             status = "FAILED"
+        elif any(isinstance(v, dict) and v.get("awaiting_dms") for v in result["services"].values()) and status == "DONE":
+            status = "AWAITING_DMS"
         elif no_access and not result["services"]:
             # Nothing this account has was in scope. BLOCKED, not FAILED:
             # waiting on a licence, not on a fix here.
@@ -587,7 +643,7 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
             result["status"] = "NOOP"
         elif track_status:
             db.set_identity_status(source_user, status, note)
-            if status == "DONE":
+            if status in ("DONE", "AWAITING_DMS"):
                 # Only what actually ran. The skipped services stay absent,
                 # which is what makes _already_done return False and bring
                 # this user back once the licence is there.
@@ -627,16 +683,20 @@ def migrate_user(auth: AuthManager, db: MigrationDB, settings: Settings,
         result["error"] = detail
 
     result["elapsed_sec"] = round(time.time() - started, 1)
+    if checkpoints:
+        from migration_checks import capture_and_save
+        result["storage_check"] = capture_and_save(auth, db, source_user, target_user, services, "after")
     log.info("[%s] finished in %.1fs: %s", source_user,
              result["elapsed_sec"], json.dumps(result.get("services", {})))
     # A finished user is checked against both tenants straight away -- what THIS pass
     # finished, so an ordered run verifies Drive as soon as Drive is done and mail when
     # mail is. Never for a dry run or a sample (track_status is off for both: neither
     # finished anything), and never able to fail the migration.
-    if track_status and result.get("status") == "DONE" and getattr(settings, "verify_on_complete", False):
+    if track_status and result.get("status") == "DONE" and getattr(settings, "verify_on_complete", False) and acceptance is None:
         import verify_sample
         from resilience import retry_on_google_error
-        done = [s for s in verify_sample.ALL_SERVICES if s in _services_that_succeeded(result["services"])]
+        done = [s for s in verify_sample.ALL_SERVICES
+                if s == "directory" or s in _services_that_succeeded(result["services"])]
         if done:
             VERIFY.submit(verify_sample.verify_user, auth, db, settings, source_user, tuple(done),
                           settings.verify_sample_per_service,
@@ -730,6 +790,9 @@ def _services_already_done(db, r, services) -> bool:
     done = db.services_done(r["source_email"])
     if not done:
         done = _services_proven(db, r["source_email"])
+        # A few successful messages prove a partial copy, not that pagination
+        # reached the end. A stopped legacy mail run must be walked again.
+        done.discard("gmail")
         missing = set(services) - done
         if missing:
             log.warning("%s is DONE with no per-service record; the ledger shows "
@@ -785,12 +848,15 @@ def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
         return []
 
     try:
-        _ensure_target_accounts(auth, settings, pairs)
-    except Exception as exc:      # noqa: BLE001 - a provisioning hiccup must
-        # not cancel a run that would otherwise migrate the accounts that
-        # DO already exist; the ones still missing simply fail as before,
-        # with a real error instead of a silent skip.
-        log.warning("could not auto-provision missing target accounts: %s", exc)
+        profile_failed = _ensure_target_accounts(auth, settings, pairs, db=db)
+    except Exception as exc:
+        log.error("could not read/sync source-backed profiles: %s", exc)
+        profile_failed = {source for source, _ in pairs}
+    for source in profile_failed:
+        db.set_identity_status(source, "BLOCKED", "Directory profile reconciliation failed; see user profile findings")
+    pairs = [(source, target) for source, target in pairs if source not in profile_failed]
+    if not pairs:
+        return []
 
     _warn_if_ledger_is_stale(db, auth, pairs)
 
@@ -820,6 +886,12 @@ def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
 
     log.info("dispatching %d users across %d workers (services=%s, delta=%s)",
              len(pairs), settings.user_workers, ",".join(sorted(services)), delta)
+    automatic_repairs = (not settings.dry_run and getattr(settings, "sample_limit", None) is None
+                         and getattr(settings, "auto_repair_on_verification", False)
+                         and not inline_acceptance_enabled(settings,delta=delta))
+    if automatic_repairs:
+        import verification_repairs
+        verification_repairs.enable(db)
 
     results: list[dict] = []
     coordinated = _coordination_enabled()
@@ -881,6 +953,8 @@ def run_batch(auth: AuthManager, db: MigrationDB, settings: Settings,
                     results.append(out)
             except Exception as exc:  # noqa: BLE001
                 log.exception("worker for %s crashed: %s", pending[fut], exc)
+    if automatic_repairs and SHUTDOWN.is_set():
+        verification_repairs.pause(db)
     return results
 
 
@@ -1454,59 +1528,35 @@ def _ensure_run_accounts(auth, db, settings, only=None) -> None:
         pairs = [(r["source_email"], r["target_email"]) for r in db.all_identities()
                  if r["entity_type"] == "user"
                  and (wanted is None or r["source_email"].lower() in wanted)]
-        _ensure_target_accounts(auth, settings, pairs)
+        _ensure_target_accounts(auth, settings, pairs, db=db)
     except Exception as exc:      # noqa: BLE001 - each pass tries again for its own users
         log.warning("could not create the run's target accounts up front: %s", exc)
 
 
 def _ensure_target_accounts(auth: AuthManager, settings: Settings,
-                            pairs: list[tuple[str, str]]) -> None:
-    """Create whatever target account this run is about to write into but
-    that does not exist yet.
+                            pairs: list[tuple[str, str]], db=None) -> set[str]:
+    """Source-backed profile creation/sync before any per-user data pass.
 
-    Most target tenants start with nothing but the admin. Without this, a
-    fresh migration discovered that the hard way: every one of 299 mapped
-    users failed on every service with `invalid_grant: Invalid email or
-    User ID`, which reads as a broken migration rather than the missing
-    provisioning step it actually was -- `provision-users` existed but
-    nothing ran it first.
-
-    Reuses provision.py's own creation path rather than a second one; see
-    its module docstring for the rules it holds to (only creates, never a
-    typo'd domain, one audit trail, one place license cost is incurred).
-    `auth.directory("target", writable=True)` used to have exactly one
-    caller (cmd_provision_users) by design -- this is now a second,
-    deliberate one, not a bypass of it.
-
-    settings.auto_provision_users is the escape hatch for a tenant that
-    provisions target accounts through its own IdP and wants an
-    unexpected gap in identity_map to fail loudly instead of an account
-    being created for it.
+    Existing mapped users are reconciled too. Failed profile reads or writes
+    block the affected user rather than inventing a name or declaring Done.
+    External-IdP installations retain their AUTO_PROVISION_USERS opt-out.
     """
-    if settings.dry_run or not settings.auto_provision_users:
-        return
-    import provision
-
-    domain_suffix = "@" + settings.target_domain
-    targets = sorted({tgt for _, tgt in pairs if tgt.endswith(domain_suffix)})
-    if not targets:
-        return
-    directory = auth.directory("target", writable=True)
-    result = provision.ensure_users(directory, targets)
+    if not pairs or settings.dry_run or not settings.auto_provision_users:
+        return set()
+    import user_profiles
+    db = db or MigrationDB(settings.db_path)
+    result = user_profiles.sync_profiles(auth, db, settings, pairs, apply=True,
+                                        create_missing=True, progress=log.info)
     created = [e for e, _ in result["created"]]
     if created:
-        more = f", +{len(created) - 10} more" if len(created) > 10 else ""
-        log.info("auto-provisioned %d target account(s) that did not "
-                 "exist yet: %s%s", len(created), ", ".join(created[:10]), more)
+        log.info("auto-provisioned %d source-backed target profiles", len(created))
         _wait_until_usable(auth, created)
-    licensed = _license_run_accounts(settings, [t for t in targets
-                                                if t not in {e for e, _ in result["failed"]}])
+    failures = {email for email, _ in result["failed"]}
+    targets = [t for _, t in pairs if t.strip().lower() not in failures]
+    licensed = _license_run_accounts(settings, targets)
     if licensed:
         _wait_until_mail(auth, licensed)
-    if result["failed"]:
-        log.warning("%d target account(s) could not be auto-provisioned "
-                    "and will fail migration: %s", len(result["failed"]),
-                    ", ".join(e for e, _ in result["failed"][:10]))
+    return {source for source, target in pairs if target.strip().lower() in failures}
 
 
 def _license_run_accounts(settings: Settings, emails: list[str]) -> list[str]:
@@ -2032,7 +2082,8 @@ def cmd_provision_users(args, settings: Settings, db: MigrationDB,
     remains the deliberate, standalone way to do it: it can provision
     either side, previews with --dry-run before spending a licence on
     anything, and works with no migration in flight at all. It only ever
-    creates -- an address that already exists is left exactly as it is.
+    Target names and supported metadata are read from the source and checked
+    after updates; existing mapped target profiles are reconciled too.
     """
     import provision
 
@@ -2063,12 +2114,25 @@ def cmd_provision_users(args, settings: Settings, db: MigrationDB,
             print("Aborted.")
             return
 
-    directory = auth.directory(which, writable=not args.dry_run)
-    result = provision.ensure_users(directory, emails, dry_run=args.dry_run)
-    provision.report(result, dry_run=args.dry_run)
-
-    if result["failed"]:
-        sys.exit(1)
+    import job_admission
+    admitted, detail = job_admission.adopt_or_admit(settings.account_id, "provision-users", os.getpid())
+    if not admitted:
+        sys.exit(detail)
+    try:
+        if which == "target":
+            import user_profiles
+            pairs = [(r["source_email"], r["target_email"]) for r in rows]
+            result = user_profiles.sync_profiles(auth, db, settings, pairs,
+                apply=not args.dry_run, create_missing=True)
+        else:
+            directory = auth.directory(which, writable=not args.dry_run)
+            result = provision.ensure_users(directory, emails, dry_run=args.dry_run)
+        provision.report(result, dry_run=args.dry_run)
+        if result["failed"]:
+            sys.exit(1)
+    finally:
+        if not getattr(args, "launcher_admitted", False):
+            job_admission.release(settings.account_id, "provision-users")
 
 
 def identity_domain_mismatch(rows, settings: Settings) -> str:
@@ -2880,14 +2944,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_verify_ledger)
 
     s = sub.add_parser("provision-users",
-                       help="create missing accounts for identity_map entries "
-                            "(never runs as part of migrate)")
+                       help="create mapped target users with source profiles and reconcile existing profiles")
     s.add_argument("--tenant", choices=["source", "target"], required=True)
     s.add_argument("--dry-run", action="store_true",
                    help="report what would be created, create nothing")
     s.add_argument("--yes", action="store_true",
                    help="skip the interactive domain confirmation "
                         "(for non-interactive callers like the web UI)")
+    s.add_argument("--launcher-admitted", action="store_true", help=argparse.SUPPRESS)
     s.set_defaults(func=cmd_provision_users)
 
     s = sub.add_parser("discover", help="read-only pre-migration scan")

@@ -14,7 +14,8 @@
 import React, { useEffect, useState } from 'react'
 import {
   Alert, Box, Chip, CircularProgress, Dialog, DialogContent, DialogTitle, Divider,
-  IconButton, LinearProgress, Stack, Typography,
+  IconButton, LinearProgress, Stack, Table, TableBody, TableCell, TableContainer,
+  TableHead, TableRow, Paper, Typography,
 } from '@mui/material'
 import { Close as CloseIcon } from '@mui/icons-material'
 import type { RunningJob } from '@/hooks/useRunningJobs'
@@ -25,7 +26,7 @@ import { fetchMyMetrics, MetricsSnapshot } from '@/api/controlPlane'
 import type { Movement } from '@/api/controlPlane'
 import { bytes } from '@/utils/metricsSeries'
 import { formatPct } from '@/utils/formatPct'
-import { jobFacts, projectedEta } from './RunningJobDetail.utils'
+import { jobFacts, jobProgressPct, projectedEta, verificationEstimate, verificationMetrics } from './RunningJobDetail.utils'
 import ProcessPanel from './ProcessPanel'
 
 /** Fetched here, once, rather than inside the charts section below: the top
@@ -61,6 +62,11 @@ const Stat: React.FC<{ label: string; value: string; hint?: string }> = ({
   </Box>
 )
 
+const formatRate = (rate: number): string => {
+  const digits = rate >= 10 ? 0 : rate >= 1 ? 1 : rate >= 0.1 ? 2 : 3
+  return `${rate.toFixed(digits)} / min`
+}
+
 export const RunningJobDetail: React.FC<{
   job: RunningJob | null
   onClose: () => void
@@ -74,7 +80,12 @@ export const RunningJobDetail: React.FC<{
   // Every job that has no dashboard of its own is measured from what it prints.
   const facts = !isMigrate && job.kind !== 'seed' && job.lines?.length
     ? jobFacts(job.lines, job.elapsedSec) : null
-  const eta = facts?.etaSec ?? projectedEta(job.pct, job.elapsedSec)
+  const verifyEstimate = job.kind === 'verify'
+    ? verificationEstimate(job.lines ?? [], job.elapsedSec) : null
+  const verifyMetrics = job.kind === 'verify'
+    ? verificationMetrics(job.lines ?? [], job.elapsedSec) : null
+  const progressPct = verifyEstimate?.progressPct ?? jobProgressPct(job.label, job.pct, job.lines)
+  const eta = verifyEstimate?.etaSec ?? facts?.etaSec ?? projectedEta(progressPct, job.elapsedSec)
   const t = m?.throughput
   return (
     <Dialog open onClose={onClose} maxWidth="md" fullWidth>
@@ -102,23 +113,67 @@ export const RunningJobDetail: React.FC<{
               nothing at all, every one of its 76 attempts a failure. A bar
               that reads as a success rate is the misreading to prevent. */}
           <Stat label="Progress"
-                value={typeof job.pct === 'number' ? formatPct(job.pct) : '--'}
-                hint={typeof job.pct === 'number' ? 'of the work attempted'
+                value={typeof progressPct === 'number' ? formatPct(progressPct) : '--'}
+                hint={verifyEstimate ? 'estimated from completed service checks'
+                  : typeof progressPct === 'number' ? 'of the work attempted'
                   : 'not reported'} />
+          {verifyEstimate && (
+            <Stat label="Service checks"
+                  value={`${Math.floor(verifyEstimate.doneServices)} of ${verifyEstimate.totalServices}`}
+                  hint="finished plus current item progress" />
+          )}
           {facts && (
             <Stat label="Done"
-                  value={facts.done !== null && facts.total !== null
+                  value={job.kind !== 'verify' && facts.done !== null && facts.total !== null
                     ? `${facts.done.toLocaleString()} of ${facts.total.toLocaleString()}` : '--'}
-                  hint={facts.total !== null ? 'counted by the job itself' : 'this job prints no count'} />
+                  hint={job.kind === 'verify' ? 'see verification metrics below'
+                    : facts.total !== null ? 'counted by the job itself' : 'this job prints no count'} />
           )}
           {facts && (
             <Stat label="Rate"
-                  value={facts.perMinute !== null ? `${facts.perMinute.toFixed(facts.perMinute < 10 ? 1 : 0)} / min` : '--'}
-                  hint={facts.perMinute !== null ? 'measured since it started' : 'nothing done yet'} />
+                  value={job.kind === 'verify' ? '--'
+                    : facts.perMinute !== null ? formatRate(facts.perMinute) : '--'}
+                  hint={job.kind === 'verify' ? 'see item rate below'
+                    : facts.perMinute !== null ? 'measured since it started' : 'nothing done yet'} />
           )}
-          <Stat label={facts?.etaSec != null ? 'ETA (measured)' : 'ETA (projected)'}
+          {verifyMetrics && (
+            <>
+              <Stat label="Users complete"
+                    value={`${verifyMetrics.completedUsers} of ${verifyMetrics.usersExpected}`} />
+              <Stat label="User concurrency"
+                    value={verifyMetrics.activeUsers !== null
+                      ? `${verifyMetrics.activeUsers} active / ${verifyMetrics.workers ?? '—'} workers`
+                      : `${verifyMetrics.workers ?? '—'} workers`}
+                    hint={`${verifyMetrics.pendingUsers ?? '—'} users waiting; auto-sized up to ${verifyMetrics.maxWorkers ?? '—'}`} />
+              <Stat label="Items checked"
+                    value={verifyMetrics.checked.toLocaleString()}
+                    hint={verifyMetrics.inFlightItems
+                      ? `includes ${verifyMetrics.inFlightItems.toLocaleString()} in active checks`
+                      : 'finished service results'} />
+              <Stat label="Identical"
+                    value={verifyMetrics.identical.toLocaleString()}
+                    hint="confirmed matches from finished services" />
+              <Stat label="Differences"
+                    value={verifyMetrics.differences.toLocaleString()}
+                    hint="confirmed mismatches so far" />
+              <Stat label="Missing"
+                    value={verifyMetrics.missing.toLocaleString()}
+                    hint="not found on target" />
+              <Stat label="Read errors"
+                    value={verifyMetrics.errors.toLocaleString()}
+                    hint="incomplete checks from finished services" />
+              <Stat label="Item rate"
+                    value={verifyMetrics.itemsPerMinute !== null
+                      ? formatRate(verifyMetrics.itemsPerMinute) : '--'}
+                    hint="items examined per minute" />
+            </>
+          )}
+          <Stat label={facts?.etaSec != null && !verifyEstimate ? 'ETA (measured)' : 'ETA (projected)'}
                 value={eta != null ? describeElapsed(Math.round(eta)) : '--'}
-                hint={eta != null ? 'at the current rate' : 'needs a count or a percentage'} />
+                hint={eta != null ? verifyEstimate
+                  ? 'early estimate; service sizes vary and it recalculates as checks finish'
+                  : 'at the current rate'
+                  : 'needs a count or a percentage'} />
           {facts && (
             <Stat label="Failures"
                   value={facts.failures.length.toLocaleString()}
@@ -147,13 +202,68 @@ export const RunningJobDetail: React.FC<{
           )}
         </Stack>
 
+        {verifyMetrics && verifyMetrics.services.length > 0 && (
+          <Box sx={{ mb: 2 }}>
+            <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>
+              Verification by service
+            </Typography>
+            <TableContainer component={Paper} variant="outlined">
+              <Table size="small">
+                <TableHead>
+                  <TableRow>
+                    <TableCell>Service</TableCell><TableCell>State</TableCell>
+                    <TableCell align="right">Items in progress</TableCell>
+                    <TableCell align="right">Checked</TableCell><TableCell align="right">Identical</TableCell>
+                    <TableCell align="right">Differences</TableCell><TableCell align="right">Missing</TableCell>
+                    <TableCell align="right">Read errors</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {verifyMetrics.services.map((s) => (
+                    <TableRow key={s.service}>
+                      <TableCell sx={{ textTransform: 'capitalize' }}>{s.service}</TableCell>
+                      <TableCell>
+                        {s.active ? `${s.active} active` : s.finished ? `${s.finished} finished` : 'queued'}
+                      </TableCell>
+                      <TableCell align="right" sx={{ fontVariantNumeric: 'tabular-nums' }}>
+                        {s.active ? `${s.activeItems.toLocaleString()}${s.activeTotal ? ` / ${s.activeTotal.toLocaleString()}` : ''}` : '—'}
+                      </TableCell>
+                      <TableCell align="right">{s.checked.toLocaleString()}</TableCell>
+                      <TableCell align="right">{s.identical.toLocaleString()}</TableCell>
+                      <TableCell align="right">{s.differences.toLocaleString()}</TableCell>
+                      <TableCell align="right">{s.missing.toLocaleString()}</TableCell>
+                      <TableCell align="right">{s.errors.toLocaleString()}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          </Box>
+        )}
+
         {isMigrate && m?.movement && <HowItMoves mv={m.movement} />}
+
+        {facts && facts.warnings.length > 0 && (
+          <Alert severity="warning" sx={{ mb: 2 }} data-testid="job-quota-warnings">
+            <Typography variant="body2" sx={{ fontWeight: 700 }}>
+              Google API rate limit reported ({facts.warnings.length} response{facts.warnings.length === 1 ? '' : 's'}).
+            </Typography>
+            <Typography variant="body2">
+              The run logged quota errors. Check the completed count before deciding whether to retry.
+            </Typography>
+            {facts.warnings.slice(-2).map((w, i) => (
+              <Typography key={i} variant="body2" sx={{ fontFamily: 'ui-monospace, monospace', fontSize: 12 }}>
+                {w.trim()}
+              </Typography>
+            ))}
+          </Alert>
+        )}
 
         {/* An indeterminate bar means "working, can't say how far". On a
             run that already ended it means nothing at all, so a finished
             job with no percentage gets no bar rather than a perpetual one. */}
-        {typeof job.pct === 'number'
-          ? <LinearProgress variant="determinate" value={job.pct} />
+        {typeof progressPct === 'number'
+          ? <LinearProgress variant="determinate" value={progressPct} />
           : !job.done ? <LinearProgress /> : null}
 
         <Divider sx={{ my: 2 }} />

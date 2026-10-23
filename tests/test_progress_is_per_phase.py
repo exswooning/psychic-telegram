@@ -85,6 +85,15 @@ def test_a_migration_run_starts_its_own_phase_and_verify_lines_are_not_its_progr
     assert webui._job_progress("verify", ["verify: [1/4] a@src checked"], 60)[0] == 25.0
 
 
+def test_a_new_verify_run_does_not_inherit_an_old_run_percent():
+    lines = ["verify: [45/45] old@src checked", "VERIFY START: 45 user(s), 5 service(s)",
+             "verify: new@src | service 1 of 5 contacts started",
+             "verify: [1/45] new@src checked"]
+    current = webui._current_phase(lines)
+    assert current[0].startswith("VERIFY START:")
+    assert webui._job_progress("verify", lines, 60)[0] == 2.22
+
+
 def test_an_ordered_runs_tenant_steps_are_not_its_progress():
     """Live, dharan.gov.np: groups printed [1/2], [2/2] before the Drive pass, and the run read
     100% two minutes in. From the newest PASS marker on, nothing counts itself, so the

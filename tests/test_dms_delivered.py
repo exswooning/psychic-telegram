@@ -16,7 +16,13 @@ def test_owed_mail_becomes_delivered_and_nothing_else_moves(db):
     db.log_audit(SRC_USER, "m2", "message", "SUCCESS")
     db.log_audit(SRC_USER, "f1", "file", "SKIPPED_NO_DOWNLOAD")
     assert D.deferred_mail_by_user(db.conn) == {SRC_USER: 1}
-    assert db.mark_dms_delivered() == 1
+    # Console completion alone cannot attest delivery.
+    assert db.mark_dms_delivered() == 0
+    db.record_mapping(SRC_USER, "m1", "target1", "message")
+    with db.write() as c:
+        c.execute("CREATE TABLE migration_item_receipts(source_user,service,source_id,target_id,status)")
+        c.execute("INSERT INTO migration_item_receipts VALUES(?,?,?,?,?)",(SRC_USER,"gmail","m1","target1","VERIFIED"))
+    assert db.mark_dms_delivered([(SRC_USER,"m1","target1")]) == 1
     assert D.deferred_mail_by_user(db.conn) == {}
     assert db.get_audit(SRC_USER, "m1", "message")["status"] == DELIVERED_BY_DMS
     assert db.get_audit(SRC_USER, "m2", "message")["status"] == "SUCCESS"
@@ -52,7 +58,7 @@ def test_a_complete_status_read_records_it(monkeypatch, db):
     assert out["status"] == "complete"
     import db as D
     fresh = D.MigrationDB(db.path)
-    assert fresh.get_audit(SRC_USER, "m1", "message")["status"] == DELIVERED_BY_DMS
+    assert fresh.get_audit(SRC_USER, "m1", "message")["status"] == DEFERRED_TO_DMS
 
 
 def test_a_later_split_run_does_not_put_delivered_mail_back_to_owed(

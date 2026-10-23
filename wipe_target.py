@@ -116,16 +116,22 @@ def delete_users(directory, emails: list[str], dry_run: bool = True,
     account must not strand the rest of the tenant half-removed, which is a
     worse state than either finishing or not starting.
     """
-    stats: dict = {"deleted": 0, "failed": 0, "errors": []}
+    import domain_guard
+    domain_guard.require_wipe_subjects(emails)
+    stats: dict = {"deleted": 0, "failed": 0, "errors": [],
+                   "deleted_users": [], "failed_users": []}
     for i, email in enumerate(emails, 1):
         if dry_run:
             stats["deleted"] += 1
             continue
         try:
+            domain_guard.require_wipe_subjects([email])
             directory.users().delete(userKey=email).execute()
             stats["deleted"] += 1
+            stats["deleted_users"].append(email)
         except Exception as exc:      # noqa: BLE001
             stats["failed"] += 1
+            stats["failed_users"].append(email)
             if len(stats["errors"]) < 10:
                 stats["errors"].append(f"{email}: {str(exc)[:120]}")
         if on_progress:
@@ -140,7 +146,8 @@ DERIVED_PER_USER = ("user_verification", "user_tally", "tenant_claims",
                     "mirror_marker", "mirror_fingerprint", "mirror_retry")
 
 
-def invalidate_ledger(db, dry_run: bool = True) -> dict:
+def invalidate_ledger(db, dry_run: bool = True,
+                      source_users: list[str] | None = None) -> dict:
     """Forget everything that named a target object, and reopen every user.
 
     Three records claimed the work was finished last time, and each had to
@@ -163,27 +170,72 @@ def invalidate_ledger(db, dry_run: bool = True) -> dict:
     (run_fidelity) and the mirror's record of cycles and decisions stay, like
     audit_log: they are history, not a claim about now.
     """
+    # Keep the ledger's canonical key spelling; only the tenant-address lookup
+    # below is case-folded. SQLite mapping keys are exact text values.
+    users = sorted({(u or "").strip() for u in source_users or [] if u})
+    scoped = source_users is not None
+    if scoped and not users:
+        return {"id_mapping": 0, "label_map": 0, "users_reopened": 0}
+    where = (f" WHERE source_user IN ({','.join('?' for _ in users)})"
+             if scoped else "")
+    params = tuple(users) if scoped else ()
+    identity_where = (f" WHERE status IS NOT NULL AND status != 'PENDING' "
+                      f"AND source_email IN ({','.join('?' for _ in users)})"
+                      if scoped else
+                      " WHERE status IS NOT NULL AND status != 'PENDING'")
+    identity_params = tuple(users) if scoped else ()
     counts = {
         "id_mapping": db.conn.execute(
-            "SELECT COUNT(*) c FROM id_mapping").fetchone()["c"],
+            "SELECT COUNT(*) c FROM id_mapping" + where, params).fetchone()["c"],
         "label_map": db.conn.execute(
-            "SELECT COUNT(*) c FROM label_map").fetchone()["c"],
+            "SELECT COUNT(*) c FROM label_map" + where, params).fetchone()["c"],
         "users_reopened": db.conn.execute(
-            "SELECT COUNT(*) c FROM identity_map "
-            "WHERE status IS NOT NULL AND status != 'PENDING'").fetchone()["c"],
+            "SELECT COUNT(*) c FROM identity_map" + identity_where,
+            identity_params).fetchone()["c"],
     }
     if dry_run:
         return counts
     with db.write() as conn:
-        conn.execute("DELETE FROM id_mapping")
-        conn.execute("DELETE FROM label_map")
-        for table in DERIVED_PER_USER:
-            conn.execute(f"DELETE FROM {table}")
-        conn.execute("UPDATE identity_map SET status='PENDING', "
-                     "services_done='', status_at=?", (_now(),))
+        if scoped:
+            conn.execute("DELETE FROM id_mapping" + where, params)
+            conn.execute("DELETE FROM label_map" + where, params)
+            for table in DERIVED_PER_USER:
+                owner = "owner" if table == "tenant_claims" else "source_user"
+                conn.execute(
+                    f"DELETE FROM {table} WHERE {owner} IN "
+                    f"({','.join('?' for _ in users)})", params)
+            conn.execute(
+                "UPDATE identity_map SET status='PENDING', services_done='', "
+                f"status_at=? WHERE source_email IN ({','.join('?' for _ in users)})",
+                (_now(), *users))
+        else:
+            conn.execute("DELETE FROM id_mapping")
+            conn.execute("DELETE FROM label_map")
+            for table in DERIVED_PER_USER:
+                conn.execute(f"DELETE FROM {table}")
+            conn.execute("UPDATE identity_map SET status='PENDING', "
+                         "services_done='', status_at=?", (_now(),))
     db._mapping_cache.clear()
     db._mapping_cached_users.clear()
     return counts
+
+
+def source_users_for_deleted(db, emails: list[str], side: str) -> list[str]:
+    """Map deleted account addresses back to user ledger keys.
+
+    A partial wipe must invalidate only users whose Workspace account was
+    actually deleted. A failed deletion keeps that user's mappings usable for
+    retry and for the operator to inspect.
+    """
+    addresses = sorted({(e or "").strip().lower() for e in emails if e})
+    if not addresses:
+        return []
+    column = "source_email" if side == "source" else "target_email"
+    rows = db.conn.execute(
+        f"SELECT source_email FROM identity_map WHERE entity_type='user' "
+        f"AND lower({column}) IN ({','.join('?' for _ in addresses)})",
+        addresses).fetchall()
+    return [r["source_email"] for r in rows]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -281,15 +333,22 @@ def main(argv: list[str] | None = None) -> int:
         if args.keep_ledger:
             print("ledger left alone (--keep-ledger). The next run will skip "
                   "everything it believes is already migrated.")
-            return 0
-        counts = invalidate_ledger(db, dry_run=False)
-        print(f"ledger invalidated: {counts['id_mapping']:,} id_mapping and "
-              f"{counts['label_map']:,} label_map row(s) forgotten, "
-              f"{counts['users_reopened']:,} user(s) reopened. "
-              f"audit_log kept.")
+        else:
+            source_users = source_users_for_deleted(
+                db, stats["deleted_users"], args.side)
+            counts = invalidate_ledger(
+                db, dry_run=False, source_users=source_users)
+            print(f"ledger invalidated for {len(source_users):,} successfully "
+                  f"deleted user(s): {counts['id_mapping']:,} id_mapping and "
+                  f"{counts['label_map']:,} label_map row(s) forgotten, "
+                  f"{counts['users_reopened']:,} user(s) reopened. "
+                  f"audit_log kept.")
+        if stats["failed"]:
+            print(f"{stats['failed']:,} account deletion(s) failed; their ledger "
+                  "records were retained for retry and review.")
     finally:
         db.close()
-    return 0
+    return 1 if args.apply and stats["failed"] else 0
 
 
 if __name__ == "__main__":

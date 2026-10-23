@@ -307,18 +307,27 @@ class GmailMigrator:
         try:
             self.limiter.acquire()
             resp = self._retry(lambda: self.tgt.users().messages().list(
-                userId="me", q=query, maxResults=1 if ignore is None else 10,
+                userId="me", q=query, maxResults=100 if getattr(self, "recover_unmapped", False) else (2 if self.settings.mail_only_with_links else (1 if ignore is None else 10)),
                 includeSpamTrash=True).execute())
         except (PermanentAPIError, RuntimeError):
+            if getattr(self, "recover_unmapped", False) or self.settings.mail_only_with_links:
+                raise  # recovery must not insert after an inconclusive lookup
             # Cannot tell -- fall through and let the caller insert. A possible
             # duplicate beats refusing to migrate the message at all.
             return None
         found = [m["id"] for m in (resp.get("messages") or [])
                  if m["id"] != ignore]
+        if getattr(self, "recover_unmapped", False):
+            claimed = {r[0] for r in self.db.conn.execute("SELECT target_id FROM id_mapping WHERE source_user=? AND type='message'", (self.source_user,))}
+            found = [tid for tid in found if tid not in claimed]
+            if len(found) > 1 or resp.get("nextPageToken"):
+                raise RuntimeError("Ambiguous unclaimed destination Message-ID; recovery blocked")
+        if self.settings.mail_only_with_links and (len(found) > 1 or resp.get("nextPageToken")):
+            raise RuntimeError("Ambiguous destination Message-ID; split delivery blocked")
         return found[0] if found else None
 
     def _insert_once(self, body: dict, media, raw: str,
-                     replacing: str | None = None) -> dict:
+                     replacing: str | None = None, source_id: str | None = None) -> dict:
         """
         Insert a message, tolerating a transport failure without duplicating it.
 
@@ -362,6 +371,15 @@ class GmailMigrator:
             existing = self._find_by_message_id(msgid, ignore=replacing)
             if not existing:
                 return None
+            if getattr(self, "recover_unmapped", False) or self.settings.mail_only_with_links:
+                from verify_sample import compare_message
+                target = self._retry(lambda: self.tgt.users().messages().get(
+                    userId="me", id=existing, format="raw").execute())
+                decode = lambda r: base64.urlsafe_b64decode(r + "=" * (-len(r) % 4))
+                verdict, _ = compare_message(decode(raw), decode(target.get("raw", "")))
+                if verdict == "different":
+                    raise RuntimeError("Existing destination Message-ID has different content; manual review required")
+                return {"id": existing, "threadId": target.get("threadId"), "adopted": True}
             log.info("[%s] a previous attempt had already delivered %s; "
                      "adopting it instead of inserting a duplicate",
                      self.source_user, msgid)
@@ -371,6 +389,15 @@ class GmailMigrator:
             userId="me", body=body, media_body=media,
             internalDateSource="dateHeader").execute()
         try:
+            if not msgid:
+                if self.settings.mail_only_with_links or not source_id:
+                    raise RuntimeError("Missing-ID delivery requires a source identity and qualified non-split path")
+                from mail_identity import insert_without_message_id
+                return insert_without_message_id(self, source_id, raw, insert)
+            if getattr(self, "recover_unmapped", False) or self.settings.mail_only_with_links:
+                adopted = adopt_if_already_delivered()
+                if adopted is not None:
+                    return adopted
             return self._retry(insert, before_retry=adopt_if_already_delivered,
                                label="gmail.messages.insert")
         except TransportExhausted:
@@ -399,11 +426,37 @@ class GmailMigrator:
             if not token:
                 return
 
+    def _split_unknown_link(self, fid):
+        # Positive external ownership evidence is required. A 403/404,
+        # source-owned item or unknown Shared Drive cannot be handed off.
+        meta = self._retry(lambda: self.auth.source_drive(self.source_user).files().get(
+            fileId=fid, fields="id,owners(emailAddress),driveId", supportsAllDrives=True).execute(),
+            label="gmail.split.link_owner")
+        owners = [o.get("emailAddress", "").rsplit("@", 1)[-1].lower() for o in meta.get("owners", [])]
+        return "external" if owners and all(x and x != self.settings.source_domain.lower() for x in owners) else "unresolved"
+
+    def _split_classify(self, mid):
+        from split_mail import classify_payload
+        self.limiter.acquire()
+        full = self._retry(lambda: self.src.users().messages().get(
+            userId="me", id=mid, format="full").execute(), label="gmail.split.text")
+        if set(full.get("labelIds") or []) & {"DRAFT", "CHAT"}:
+            return full, None
+        def text_attachment(aid):
+            self.limiter.acquire()
+            return self._retry(lambda: self.src.users().messages().attachments().get(
+                userId="me", messageId=mid, id=aid).execute(), label="gmail.split.text_attachment")
+        return full, classify_payload(full, self._drive_link_target, text_attachment, self._split_unknown_link)
+
     def _migrate_one_message(self, ref: dict) -> None:
         """One message, start to finish. Extracted so a pool can run
         several at once -- every branch that used to `continue` the
         loop now simply returns."""
         mid = ref["id"]
+        prior = self.db.get_audit(self.source_user, mid, "message")
+        if prior and prior["status"] == "FAILED_SPLIT" and not self.settings.mail_only_with_links:
+            self._bump("failed")
+            return
         already = self.db.get_target_id(self.source_user, mid, "message")
         # The cheap skip, and the reason this lookup comes before any API
         # call. Redo mode has to give it up: whether a migrated message needs
@@ -416,12 +469,36 @@ class GmailMigrator:
         if already and not redo:
             self._bump("skipped")
             return
+        if self.settings.mail_only_with_links and not already:
+            try:
+                classified, plan = self._split_classify(mid)
+                if plan and plan["route"] == "BLOCKED":
+                    raise RuntimeError("Unresolved Drive link mapping: " + ", ".join(plan["unresolved"]))
+                if plan and plan["route"] == "DMS":
+                    prior = self.db.get_audit(self.source_user, mid, "message")
+                    if not (prior and prior["status"] == DELIVERED_BY_DMS):
+                        self.db.log_audit(self.source_user, mid, "message", DEFERRED_TO_DMS,
+                                          "no changed Drive link; awaiting verified DMS delivery")
+                    self._bump("skipped")
+                    return
+                if plan and not self.settings.rewrite_drive_links:
+                    raise RuntimeError("Split mail with changed links requires rewriting enabled")
+                if plan is None:
+                    label_ids = classified.get("labelIds") or []
+                    self.db.log_audit(self.source_user, mid, "message",
+                                      "SKIPPED_IS_DRAFT" if "DRAFT" in label_ids else "SKIPPED_CHAT")
+                    self._bump("skipped")
+                    return
+            except Exception as exc:
+                self.db.log_audit(self.source_user, mid, "message", "FAILED_SPLIT" if self.settings.mail_only_with_links else "FAILED",
+                                  "Split classification incomplete: " + str(exc)[:300])
+                self._bump("failed")
+                return
         try:
-            full = self._retry(lambda m=mid: self.src.users().messages().get(
-                userId="me", id=m, format="raw",
-            ).execute(), label="gmail.messages.get")
+            from verification_reads import gmail_raw
+            _, full = gmail_raw(self.src, mid, lambda fn: self._retry(fn, label="gmail.messages.get"))
         except (PermanentAPIError, RuntimeError) as exc:
-            self.db.log_audit(self.source_user, mid, "message", "FAILED", str(exc))
+            self.db.log_audit(self.source_user, mid, "message", "FAILED_SPLIT" if self.settings.mail_only_with_links else "FAILED", str(exc))
             self._bump("failed")
             return
         label_ids = full.get("labelIds") or []
@@ -499,21 +576,14 @@ class GmailMigrator:
         # instead: base64 is 4 chars per 3 bytes, and `raw` is unpadded
         # urlsafe, so this is exact to within two bytes -- far tighter than
         # a threshold whose job is only to choose an upload strategy.
-        # Split mode: only mail that actually carries a Drive link is inserted
-        # here; DMS moves the rest and dedupes on Message-ID, so nothing is
-        # copied twice. Checked on the decoded bytes for the same reason the
-        # rewrite decodes first -- a quoted-printable fold lands inside the id
-        # and a base64 part contains no readable URL at all.
+        # Classification used decoded text parts. Re-evaluate the exact raw
+        # delivery body before inserting, in case the message changed meanwhile.
         if self.settings.mail_only_with_links:
-            if not has_drive_link(raw):
-                # Already on the target through a completed DMS import: a later
-                # run must not put it back to owed.
-                prior = self.db.get_audit(self.source_user, mid, "message")
-                if not (prior and prior["status"] == DELIVERED_BY_DMS):
-                    self.db.log_audit(self.source_user, mid, "message",
-                                      DEFERRED_TO_DMS,
-                                      "no Drive link; left for the DMS pass")
-                self._bump("skipped")
+            _, changed_now = rewrite_raw(raw, self._drive_link_target)
+            if not changed_now:
+                self.db.log_audit(self.source_user, mid, "message", "FAILED_SPLIT" if self.settings.mail_only_with_links else "FAILED",
+                                  "Split classification changed before delivery; re-inventory required")
+                self._bump("failed")
                 return
 
         if self.settings.rewrite_drive_links:
@@ -584,7 +654,7 @@ class GmailMigrator:
             # been trashed. It keeps this exact Message-ID, so the adopt path
             # must not resume onto it.
             try:
-                result = self._insert_once(body, media, raw, replacing=already)
+                result = self._insert_once(body, media, raw, replacing=already, source_id=mid)
             except PermanentAPIError:
                 if "threadId" not in body:
                     raise
@@ -593,9 +663,9 @@ class GmailMigrator:
                 body.pop("threadId")
                 if path:
                     media = MediaFileUpload(path, mimetype="message/rfc822", resumable=True)
-                result = self._insert_once(body, media, raw, replacing=already)
+                result = self._insert_once(body, media, raw, replacing=already, source_id=mid)
         except (PermanentAPIError, RuntimeError) as exc:
-            self.db.log_audit(self.source_user, mid, "message", "FAILED", str(exc))
+            self.db.log_audit(self.source_user, mid, "message", "FAILED_SPLIT" if self.settings.mail_only_with_links else "FAILED", str(exc))
             self._bump("failed")
             return
         finally:
@@ -611,6 +681,12 @@ class GmailMigrator:
         self.db.log_audit(self.source_user, mid, "message", "SUCCESS",
                           bytes_moved=approx_bytes)
         self._bump("inserted")
+        if getattr(self.settings, "migration_checks_enabled", False) or self.settings.mail_only_with_links:
+            from migration_checks import verify_written_mail
+            if not verify_written_mail(self, mid, result["id"], raw, mapped_labels,
+                                       allow_label_fix=not result.get("adopted", False)):
+                with self._stats_lock:
+                    self.stats["inline_verification_failed"] = self.stats.get("inline_verification_failed", 0) + 1
 
     def run(self, delta: bool = False, since_epoch_days: int = 0,
             drive_in_scope: bool = True) -> dict:
@@ -706,6 +782,9 @@ class GmailMigrator:
                 for f in futures.as_completed(pending):
                     f.result()
 
+        if shutdown_requested():
+            self.stats["interrupted"] = True
+            return dict(self.stats)
         self._migrate_drafts()
         # Filters and signatures both need gmail.settings.basic on both
         # tenants; skip entirely unless that grant was deliberately added.

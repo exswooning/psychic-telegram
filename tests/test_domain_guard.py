@@ -95,15 +95,21 @@ class TestItFailsSafe:
         assert leftovers == [], leftovers
         assert json.load(open(G.REVOCATIONS_PATH))["client.example"]
 
-    def test_a_missing_control_plane_does_not_unprotect_anything(self,
-                                                                monkeypatch,
-                                                                tmp_path):
-        """configured_domains swallows a database it cannot read. It must
-        return nothing rather than raise -- and nothing must not become
-        permission."""
-        monkeypatch.setattr(G, "REVOCATIONS_PATH", str(tmp_path / "u.json"))
-        monkeypatch.setenv("SOURCE_DOMAIN", "client.example")
-        assert "client.example" in G.env_configured_domains()
+    def test_a_control_plane_read_failure_refuses_unknown_domains(self, monkeypatch):
+        def unavailable():
+            raise G.DomainGuardUnavailable("database unavailable")
+
+        monkeypatch.setattr(G, "configured_domains", unavailable)
+        assert G.is_protected("client.example")
+        reason = G.refuse_reason("client.example", "Seeding")
+        assert "control-plane database is available" in reason
+        assert "Seeding" in reason
+
+    def test_government_domain_remains_protected_during_database_failure(self, monkeypatch):
+        monkeypatch.setattr(
+            G, "configured_domains",
+            lambda: (_ for _ in ()).throw(G.DomainGuardUnavailable("offline")))
+        assert "government domain" in G.refuse_reason("dharan.gov.np")
 
 
 class TestTheRefusalTellsYouWhatToDo:

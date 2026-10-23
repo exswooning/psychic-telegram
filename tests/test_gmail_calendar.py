@@ -140,7 +140,7 @@ def test_messages_are_never_double_inserted_on_resume(gmail_migrator, auth,
 def test_large_message_switches_to_media_upload(gmail_migrator, auth):
     big = b"X" * (5 * 1024 * 1024)
     auth.source_gmail(SRC_USER).add_message(
-        b"Subject: big\r\nDate: Mon, 3 Jun 2019 10:00:00 +0000\r\n\r\n" + big,
+        b"Message-ID: <large-upload@test>\r\nSubject: big\r\nDate: Mon, 3 Jun 2019 10:00:00 +0000\r\n\r\n" + big,
         ["INBOX"],
     )
     gmail_migrator.run()

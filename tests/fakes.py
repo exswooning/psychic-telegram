@@ -1126,6 +1126,11 @@ class _GmailMessages:
         # As Gmail does: the bin is left out unless asked for.
         ids = sorted(i for i, m in self.s.messages.items()
                      if includeSpamTrash or "TRASH" not in (m.get("labelIds") or []))
+        if q.startswith("rfc822msgid:"):
+            from email.parser import BytesHeaderParser
+            wanted = q.split(":", 1)[1].strip().strip("<>")
+            ids = [i for i in ids if str(BytesHeaderParser().parsebytes(
+                base64.urlsafe_b64decode(self.s.messages[i]["raw"])).get("Message-ID", "")).strip().strip("<>") == wanted]
         start = int(pageToken or 0)
         page = ids[start: start + maxResults]
         out: dict[str, Any] = {"messages": [{"id": i} for i in page]}
@@ -1146,9 +1151,17 @@ class _GmailMessages:
             import email as _email
             raw = out.get("raw") or ""
             msg = _email.message_from_bytes(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)))
-            out["payload"] = {"headers": [{"name": k, "value": str(v)} for k, v in msg.items()]}
-            if format != "full":
-                out.pop("raw", None)
+            def payload(part):
+                result = {"mimeType": part.get_content_type(),
+                          "headers": [{"name": k, "value": str(v)} for k, v in part.items()]}
+                if part.is_multipart():
+                    result["parts"] = [payload(x) for x in part.get_payload()]
+                else:
+                    data = part.get_payload(decode=True) or b""
+                    result["body"] = {"data": base64.urlsafe_b64encode(data).decode(), "size": len(data)}
+                return result
+            out["payload"] = payload(msg)
+            out.pop("raw", None)
         return out
 
     def insert(self, **kw):
@@ -2205,6 +2218,21 @@ class _PeoplePeople:
         if resourceName not in self.s.contacts:
             raise http_error(404, "notFound", resourceName)
         return copy.deepcopy(self.s.contacts[resourceName])
+
+    def getBatchGet(self, **kw):
+        return _Call(self.s, "people.getBatchGet", self._batch_get, kw)
+
+    def _batch_get(self, resourceNames: list[str], **_):
+        if len(resourceNames) > 200:
+            raise http_error(400, "invalidArgument", "too many resource names")
+        responses = []
+        for name in resourceNames:
+            if name in self.s.contacts:
+                responses.append({"person": copy.deepcopy(self.s.contacts[name])})
+            else:
+                responses.append({"requestedResourceName": name,
+                                  "status": {"code": 5, "message": "not found"}})
+        return {"responses": responses}
 
     def createContact(self, **kw):
         return _Call(self.s, "people.createContact", self._create, kw)

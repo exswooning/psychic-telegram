@@ -190,3 +190,13 @@ class TestListActive:
         ja.try_admit(1, "seed")
         ja.release(1, "seed")
         assert ja.list_active() == []
+
+
+def test_verify_waits_for_other_work_in_same_account(db):
+    assert ja.try_admit(501, 'migrate')[0]
+    assert not ja.try_admit(501, 'verify')[0]
+
+
+def test_other_work_waits_for_verification_repair_in_same_account(db):
+    assert ja.try_admit(501, 'verify')[0]
+    assert not ja.try_admit(501, 'migrate')[0]

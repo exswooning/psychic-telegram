@@ -83,6 +83,60 @@ def _strip_source_metadata(value):
     return value
 
 
+def _name_text(name: dict) -> str:
+    """A searchable fallback for a secondary name the People API cannot store as
+    a second name on the target contact source."""
+    display = (name.get("displayName") or "").strip()
+    if display:
+        return display
+    return " ".join(str(name.get(field) or "").strip()
+                    for field in ("honorificPrefix", "givenName", "middleName",
+                                  "familyName", "honorificSuffix")
+                    if str(name.get(field) or "").strip())
+
+
+def _contact_write_body(person: dict) -> tuple[dict, int]:
+    """Build a People API write body, collapsing source/profile name variants.
+
+    People can return more than one name for a person because values can come
+    from both CONTACT and PROFILE sources. The migration removes source IDs
+    before writing, so those values would all become names on one target
+    contact source and Google rejects the whole create/update. Keep the
+    primary (or first) structured name and retain distinct alternatives as
+    nicknames so their searchable text is not discarded.
+    """
+    body = {field: _strip_source_metadata(person[field])
+            for field in WRITE_FIELDS if person.get(field)}
+    names = person.get("names") or []
+    if len(names) <= 1:
+        return body, 0
+
+    def priority(name):
+        metadata = name.get("metadata") or {}
+        source = metadata.get("source") or {}
+        return (bool(metadata.get("primary")), source.get("type") == "CONTACT")
+
+    preferred = max(enumerate(names), key=lambda item: (priority(item[1]), -item[0]))[1]
+    body["names"] = [_strip_source_metadata(preferred)]
+
+    nicknames = list(person.get("nicknames") or [])
+    existing = {" ".join(str(n.get("value") or "").split()).casefold()
+                for n in nicknames if n.get("value")}
+    added = 0
+    preferred_text = " ".join(_name_text(preferred).split()).casefold()
+    for name in names:
+        text = _name_text(name)
+        key = " ".join(text.split()).casefold()
+        if not key or key == preferred_text or key in existing:
+            continue
+        nicknames.append({"value": text})
+        existing.add(key)
+        added += 1
+    if nicknames:
+        body["nicknames"] = _strip_source_metadata(nicknames)
+    return body, added
+
+
 def _update_time(person: dict) -> str | None:
     """When People last changed this contact.
 
@@ -272,8 +326,7 @@ class ContactsMigrator:
         describes a different object entirely. So the target is read first;
         that is one extra call, paid only for contacts that actually changed.
         """
-        body = {f: _strip_source_metadata(person[f])
-                for f in WRITE_FIELDS if person.get(f)}
+        body, alternate_names = _contact_write_body(person)
         if not body:
             self.stats["skipped"] += 1
             return
@@ -292,7 +345,9 @@ class ContactsMigrator:
                               f"update: {exc}")
             self.stats["failed"] += 1
             return
-        self.db.log_audit(self.source_user, rid, "contact", "SUCCESS",
+        note = (f"{alternate_names} alternate name(s) retained as nicknames; "
+                "People API accepts one name per contact source" if alternate_names else "")
+        self.db.log_audit(self.source_user, rid, "contact", "SUCCESS", note,
                           modified_time=_update_time(person))
         self.stats["updated"] += 1
 
@@ -314,8 +369,7 @@ class ContactsMigrator:
             self.stats["contacts"] += 1
             return
 
-        body = {f: _strip_source_metadata(person[f])
-                for f in WRITE_FIELDS if person.get(f)}
+        body, alternate_names = _contact_write_body(person)
         if not body:
             # A contact with no name, address or number is not a contact; it
             # is usually a stub left by an app. Recorded so the count still
@@ -336,7 +390,9 @@ class ContactsMigrator:
 
         self.db.record_mapping(self.source_user, rid, created["resourceName"],
                                "contact")
-        self.db.log_audit(self.source_user, rid, "contact", "SUCCESS",
+        note = (f"{alternate_names} alternate name(s) retained as nicknames; "
+                "People API accepts one name per contact source" if alternate_names else "")
+        self.db.log_audit(self.source_user, rid, "contact", "SUCCESS", note,
                           modified_time=_update_time(person))
         self.stats["contacts"] += 1
         self._apply_memberships(person, created, group_map)

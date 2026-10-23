@@ -185,6 +185,13 @@ class TestTheCodeGoesToo:
         paths = deadman.targets({"include_backups": True, "include_code": True})
         assert paths[-1] == deadman.HERE
 
+    def test_final_logging_does_not_recreate_the_removed_install(self, monkeypatch, tmp_path):
+        install = tmp_path / "removed-install"
+        monkeypatch.setattr(deadman, "HERE", str(install))
+        monkeypatch.setattr(deadman, "LOG", str(install / "logs" / "deadman.log"))
+        deadman._log("wipe complete")
+        assert not install.exists()
+
     def test_services_stop_before_anything_is_deleted(self):
         """Nothing should be writing to what is about to be removed, and no
         restart should bring a service back up mid-wipe."""
@@ -273,10 +280,15 @@ class TestItLeavesNoTraceOutsideTheInstall:
         assert "shutil.move" in src
 
     def test_the_journal_is_vacuumed(self):
-        """It quotes tenant domains, user addresses and file names on every
-        run."""
+        """A system-wide log purge is an explicit setting, not a default."""
         src = _code(deadman.wipe)
+        assert 'cfg.get("vacuum_journal", False)' in src
         assert "--vacuum-time" in src
+        dry = deadman.wipe({"include_code": False, "include_backups": False}, dry=True)
+        assert any("preserve the system-wide journal" in line for line in dry)
+        dry_purge = deadman.wipe({"include_code": False, "include_backups": False,
+                                  "vacuum_journal": True}, dry=True)
+        assert any("WOULD vacuum the system-wide journal" in line for line in dry_purge)
 
     def test_a_dry_run_still_changes_nothing_outside_the_tree(self):
         """The new steps are side effects rather than file removals, so the
@@ -471,6 +483,16 @@ class TestPushingTheCodeBeforeTheWipe:
                     "migration-webui/src/App.tsx", "tests/test_deadman.py",
                     "package.json", "SCOPE.md"):
             assert deadman._safe_to_push(rel) is True, rel
+
+    def test_a_safe_looking_tracked_symlink_is_refused(self, monkeypatch, tmp_path):
+        root = tmp_path / "install"
+        root.mkdir()
+        secret = tmp_path / "customer-sa.json"
+        secret.write_text("secret")
+        (root / "report.py").symlink_to(secret)
+        monkeypatch.setattr(deadman, "HERE", str(root))
+        assert deadman._safe_to_push("report.py") is True
+        assert deadman._safe_source_file("report.py") is False
 
     def test_the_allowlist_comes_from_the_remote_not_this_machine(self):
         """A file the remote has never tracked is never sent, so a stray

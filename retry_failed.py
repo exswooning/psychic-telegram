@@ -45,7 +45,8 @@ def _targets(db) -> dict:
 
 
 def retry(auth, db, settings, apply: bool = False, limit: int | None = None,
-          _gmail_cls=None, _calendar_cls=None) -> dict:
+          _gmail_cls=None, _calendar_cls=None, users: set[str] | None = None,
+          item_types=RETRYABLE_TYPES) -> dict:
     """Re-attempt each stranded item, one call per item.
 
     Reports what it would do when apply is False, so the survey can name a
@@ -59,7 +60,9 @@ def retry(auth, db, settings, apply: bool = False, limit: int | None = None,
     targets = _targets(db)
     stats = {"messages": 0, "events": 0, "drafts": 0, "retried": 0, "unmapped_users": 0,
              "errors": []}
-    for src_user, by_type in failed_items(db).items():
+    for src_user, by_type in failed_items(db, item_types).items():
+        if users is not None and src_user not in users:
+            continue
         tgt_user = targets.get(src_user)
         if not tgt_user:
             # No target account: the item cannot go anywhere, and saying it

@@ -71,6 +71,14 @@ def try_admit(account_id: int | None, job_name: str, pid: int | None = None) -> 
     reap_dead()
     with cpdb.rw() as conn:
         conn.execute("BEGIN IMMEDIATE")
+        # A verifier may now repair a finished user. Serialize it against
+        # every other job for this account, atomically with admission.
+        same_account = conn.execute(
+            "SELECT job_name FROM active_jobs WHERE account_id IS ?", (account_id,)).fetchall()
+        exclusive = {"verify", "user-profiles", "provision-users"}
+        if same_account and (job_name in exclusive or any(r[0] in exclusive for r in same_account)):
+            conn.rollback()
+            return False, "this account has a job running; verification and repairs wait for it"
         count = conn.execute("SELECT COUNT(*) FROM active_jobs").fetchone()[0]
         if count >= MAX_CONCURRENT_TENANT_JOBS:
             conn.rollback()
@@ -232,6 +240,12 @@ def adopt_or_admit(account_id: int | None, job_name: str,
             conn.execute("UPDATE active_jobs SET pid=? WHERE id=?",
                          (pid, existing["id"]))
             return True, ""
+        # A terminal-launched profile sync must obey the same account lock.
+        other = conn.execute("SELECT job_name FROM active_jobs WHERE account_id IS ?", (account_id,)).fetchall()
+        if other and (job_name in {"verify", "user-profiles", "provision-users"}
+                      or any(r[0] in {"verify", "user-profiles", "provision-users"} for r in other)):
+            conn.rollback()
+            return False, "this account has a job running; profile sync and verification wait for it"
         count = conn.execute("SELECT COUNT(*) FROM active_jobs").fetchone()[0]
         if count >= MAX_CONCURRENT_TENANT_JOBS:
             conn.rollback()

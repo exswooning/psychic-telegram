@@ -332,12 +332,9 @@ class StartMigration(WriteAction):
     #           field existed, so it stays the API's own default.
     #   dms     Google's Data Migration Service moves all of it; this run
     #           migrates everything else.
-    #   split   this tool moves only the mail that carries a Drive link,
-    #           rewriting those links; the rest is left for the DMS pass, which
-    #           must run AFTER this one (see migrate_start). The migration
-    #           dialog defaults to this.
-    # Left out, it is `split` for a whole-tenant run that moves both Drive and
-    # mail (_default_mail_mode) and `engine` for anything else.
+    #   split   experimental: this tool copies changed-link mail, then DMS
+    #           imports the mailbox. Fresh reconciliation checks the overlap.
+    # Left out, it is `engine`; unqualified handoff is never the default.
     mail_mode: Literal["engine", "dms", "split"] | None = None
     # A SAMPLE run: consider at most this many items of each service per user
     # (the first N found), and leave the users UNFINISHED so the next full
@@ -364,7 +361,7 @@ class StartMigration(WriteAction):
     # LEAVES the source (no copy, no 750 GB a day, the same id, revisions and comments),
     # so it is launched only with `confirm_move` set to "MOVE", and refused before
     # anything moves unless the source admin lets content leave (main._gate_on_move).
-    transfer_mode: Literal["download_upload", "server_side", "move"] | None = None
+    transfer_mode: Literal["download_upload", "server_side", "move", "adaptive"] | None = None
     confirm_move: str | None = None
     # Repoint Drive links in mail and events this tool already copied before their
     # Drive files had migrated (REDO_UNREWRITTEN_LINKS): a message is trashed and
@@ -459,12 +456,16 @@ class BuildIdentityMap(WriteAction):
 class StartProvision(WriteAction):
     """Create missing accounts for identity_map entries on one tenant.
 
-    Mirrors `provision-users` exactly (create-only, never touches an
-    existing account) -- this is a UI front end for that command, not a
-    second implementation of it.
+    Target users use source-backed profiles, including existing accounts.
+    This delegates to the same provisioning implementation as migration.
     """
     tenant: Literal["source", "target"] = "target"
     dry_run: bool = False
+
+
+class SyncUserProfiles(WriteAction):
+    account_id: int | None = None
+    dry_run: bool = True
 
 
 class StartBenchmark(WriteAction):
@@ -871,9 +872,11 @@ async def lifespan(_: FastAPI):
     ends = asyncio.create_task(_lifecycle_loop())
     owed = asyncio.create_task(_owed_grants_loop())
     guard = asyncio.create_task(_source_guard_loop())
+    verification_repairs_task = asyncio.create_task(_verification_repair_loop())
     try:
         yield
     finally:
+        verification_repairs_task.cancel()
         guard.cancel()
         task.cancel()
         watchdog.cancel()
@@ -1487,7 +1490,7 @@ async def admin_delete_account(account_id: int, body: DeleteAccount,
 
 
 # Jobs that only read a ledger; anything else may rewrite a user's markers under us.
-_READ_ONLY_JOBS = frozenset({"verify", "verify-tenant", "user-tally", "tally", "discover"})
+_READ_ONLY_JOBS = frozenset({"verify-tenant", "user-tally", "tally", "discover"})
 
 
 def _ledger_writer_running(account_id: int | None) -> list[str]:
@@ -1863,14 +1866,27 @@ def _start_admitted(argv: list[str], account_id: int | None, job_name: str,
         except Exception as exc:      # noqa: BLE001 - recording must never block the release
             print(f"could not record the exit of {job_name!r}: {exc}", flush=True)
         job_admission.release(account_id, job_name)
+        # A verification-triggered repair/recheck must get its chance to act
+        # before the just-freed slot is handed to the next queued tenant job.
+        # Other follow-ons keep the longstanding dispatch-first behavior.
+        followups = ([then] if isinstance(then, str) else then) if then else []
+        verify_repair_first = bool(rc == 0 and any(
+            isinstance(kind, str) and kind.startswith("verify-repair:")
+            for kind in followups))
+        if verify_repair_first:
+            for kind in followups:
+                try:
+                    _follow_on(kind, account_id)
+                except Exception as exc:      # noqa: BLE001 - never wedge the next job
+                    print(f"follow-on {kind!r} after {job_name!r} failed: {exc}", flush=True)
         # The slot is free for exactly one instant that anything notices;
         # hand it to whoever is waiting before something else takes it.
         try:
             job_queue.dispatch_one(_queue_starter, job_queue.RUNNER_API)
         except Exception as exc:      # noqa: BLE001 - never wedge the waiter
             print(f"queue dispatch after {job_name!r} failed: {exc}", flush=True)
-        if then and rc == 0:
-            for kind in ([then] if isinstance(then, str) else then):
+        if then and rc == 0 and not verify_repair_first:
+            for kind in followups:
                 try:
                     _follow_on(kind, account_id)
                 except Exception as exc:      # noqa: BLE001 - one follow-on must never wedge the waiter,
@@ -1933,13 +1949,14 @@ def _mail_plan(services: list[str], mail_mode: str, rewrite: bool = True) -> tup
     (a split run always does; otherwise the account's REWRITE_DRIVE_LINKS): with it off, ordering
     would cost the run its interleaving and buy nothing.
 
-    split is the one that needs more care. The engine inserts only mail that carries a Drive link
-    and rewrites it, marking the rest SKIPPED_NO_DRIVE_LINK for the DMS. Rewriting is forced ON:
+    Split selects only mail whose mapped Drive links actually change. Unresolved
+    source references block the handoff. Unchanged mail stays owed to DMS. Rewriting is forced ON:
     a config that had it off would insert the link mail unrewritten and leave the rest to DMS,
     which cannot rewrite anything.
 
-    DMS must run AFTER this: DMS first moves link-bearing mail unrewritten, and the engine then
-    adopts that copy instead of replacing it.
+    DMS must run AFTER this. Split delivery refuses an existing copy with
+    unrewritten content; post-import reconciliation detects overlap, duplicate
+    identities and label drift instead of trusting DMS completion counters.
     """
     wanted = list(_ALL_SERVICES) if "all" in services else list(services)
     env = None
@@ -1956,13 +1973,12 @@ def _mail_plan(services: list[str], mail_mode: str, rewrite: bool = True) -> tup
 
 
 def _default_mail_mode(body: "StartMigration") -> str:
-    """Who moves the mail when the caller did not say: the tool moves the mail with Drive links and
-    the DMS the rest, for a whole-tenant run that moves both. Not for a sample (its mail is
-    compared one to one, so it is all ours), and not for a few chosen users: the DMS is never
-    started for those, so the mail split off would simply not arrive."""
-    wanted = set(_ALL_SERVICES) if "all" in body.services else set(body.services)
-    whole = body.sample is None and not body.users and {"drive", "gmail"} <= wanted
-    return "split" if whole else "engine"
+    """DMS mailbox overlap is not a proven per-message handoff.
+
+    Keep split available as an explicit choice while sandbox qualification is
+    incomplete. Callers omitting a mode get the tracked engine.
+    """
+    return "engine"
 
 
 def _export_identities_csv(account_id: int | None) -> tuple[str, int]:
@@ -2015,7 +2031,9 @@ def _start_dms(account_id: int | None, *, require_clean: bool, why: str) -> tupl
         if p["failed"] or p["running"] or p["blocked"]:
             return decline(f"{p['failed']} user(s) failed, {p['running']} still running, "
                            f"{p['blocked']} blocked on something outside the tool")
-        if not p["done"]:
+        if p.get("itemsFailed", 0):
+            return decline(f"{p['itemsFailed']} unresolved item failures; split handoff is incomplete")
+        if not p["done"] and not p.get("awaitingDms", 0):
             return decline("no user finished")
     st = Settings(account_id=account_id)
     if not (st.source_domain and st.target_admin):
@@ -2190,7 +2208,8 @@ def _start_tally_after_repair(account_id: int | None, users: list[str] | None = 
 
 
 def _start_repair(account_id: int | None, why: str, *,
-                  actor: str = "auto", role: str = "system") -> tuple[bool, str]:
+                  actor: str = "auto", role: str = "system",
+                  verification_report: dict | None = None) -> tuple[bool, str]:
     """Fix what can be fixed without guessing -- the same work /api/v2/repair/{id} does
     by hand (repair.run_all), backgrounded because the ACL reconcile takes minutes. The
     two share this one implementation so they cannot drift (see _repair_payload's own
@@ -2213,6 +2232,9 @@ def _start_repair(account_id: int | None, why: str, *,
             run_id = d.repair_started()
             try:
                 out = repair.run_all(d, AuthManager(st), st, apply=True)
+                if verification_report is not None:
+                    out["verified_gmail_labels"] = repair.repair_verified_gmail_labels(
+                        AuthManager(st), d, st, verification_report, apply=True)
                 d.repair_finished(run_id, repair.summarise(out))
             except Exception as exc:      # noqa: BLE001
                 d.repair_finished(run_id, "", str(exc)[:500])
@@ -2232,13 +2254,71 @@ def _start_repair(account_id: int | None, why: str, *,
     return True, "repair started; it checks each grant against the target and takes a few minutes"
 
 
+def _dispatch_verification_repairs():
+    from db import MigrationDB
+    import verification_repairs
+    if job_queue.waiting():
+        return  # operator requests take priority over historical backfill
+    for acct in accounts_auth.list_accounts():
+        aid = acct.get("id") if isinstance(acct, dict) else acct
+        path = _account_db_path(aid)
+        t = _REPAIR_THREADS.get(aid)
+        if not path or not os.path.isfile(path) or (t is not None and t.is_alive()):
+            continue
+        d = MigrationDB(path)
+        try:
+            if not verification_repairs.enabled(d):
+                with cpdb.ro() as conn:
+                    globally_idle = conn.execute("SELECT 1 FROM active_jobs LIMIT 1").fetchone() is None
+                if globally_idle:
+                    verification_repairs.reconcile_stopped_verification(d)
+            users = verification_repairs.due_users(d)[:4]
+        finally:
+            d.close()
+        if not users:
+            continue
+        admitted, _ = job_admission.try_admit(aid, "verify")
+        if not admitted:
+            continue
+        argv = [PY, "verify_sample.py"] + _account_argv(aid) + ["--repair-after-user"]
+        for user in users:
+            argv += ["--user", user]
+        try:
+            ok, detail = _start_admitted(argv, aid, "verify", dict(os.environ, VERIFY_WORKERS="auto"))
+            if not ok:
+                job_admission.release(aid, "verify")
+            log.info("verification repair backlog account %s: %s", aid, detail)
+        except Exception:
+            job_admission.release(aid, "verify")
+            raise
+
+
+async def _verification_repair_loop():
+    while True:
+        try:
+            await _off_loop(_dispatch_verification_repairs)
+        except Exception:
+            log.exception("verification repair backlog dispatcher failed")
+        await asyncio.sleep(60)
+
+
 def _follow_users(kind: str) -> list[str] | None:
     return [u for u in kind.split("@", 1)[1].split(",") if u] if "@" in kind else None
 
 
 def _follow_on(kind: str, account_id: int | None) -> None:
     """What a job that just exited cleanly asked to have done next."""
-    if kind == "repair":
+    if kind.startswith("verify-repair:"):
+        # Compatibility with already queued launches: the durable scanner will
+        # freshly verify each unresolved user and use only scoped repair paths.
+        from db import MigrationDB
+        import verification_repairs
+        d = MigrationDB(_account_db_path(account_id))
+        try:
+            verification_repairs.enable(d)
+        finally:
+            d.close()
+    elif kind == "repair":
         _start_repair(account_id, why="started automatically: the migration finished cleanly, so any "
                                       "failures it left (a rate-limit burst, a grantee not yet on Google "
                                       "when it was tried, ...) are checked against the target and fixed now, "
@@ -2278,6 +2358,11 @@ async def migrate_start(body: StartMigration, op: Operator = Depends(operator)):
     if body.transfer_mode == "move" and (body.confirm_move or "").strip().upper() != "MOVE":
         raise HTTPException(400, "a move takes every Drive file out of the source -- "
                                  "type MOVE to confirm")
+    if body.transfer_mode == "adaptive":
+        selected=Settings(account_id=account_id)
+        from transfer_policy import SANDBOX
+        if (selected.source_domain.lower(),selected.target_domain.lower()) != SANDBOX:
+            raise HTTPException(400,"Adaptive transfer is currently limited to the s. to t. sandbox")
     if body.transfer_mode:
         env = {**(env or os.environ), "TRANSFER_MODE": body.transfer_mode}
     if body.redo_links:
@@ -2400,14 +2485,24 @@ def _verification_view(account_id: int | None) -> dict:
     if not os.path.isfile(path):
         return out
     with cpdb.ro(path) as conn:
-        users = conn.execute("SELECT source_email, target_email, status FROM identity_map "
+        users = conn.execute("SELECT source_email, target_email, status, services_done FROM identity_map "
                              "WHERE entity_type='user' ORDER BY source_email").fetchall()
         try:
             rows = conn.execute("SELECT * FROM user_verification ORDER BY service").fetchall()
         except sqlite3.OperationalError:          # a ledger from before this table existed
             rows = []
+        try:
+            repairs = conn.execute("SELECT source_user,state,started_at,finished_at,summary "
+                                   "FROM verification_repairs ORDER BY started_at DESC").fetchall()
+        except sqlite3.OperationalError:
+            repairs = []
     verifications = db_module.parse_user_verification_rows(rows)
     rollup = db_module.verification_rollup(users, verifications)
+    latest_repairs = {}
+    for r in repairs:
+        latest_repairs.setdefault(r["source_user"], dict(r))
+    for user in rollup["users"]:
+        user["automaticRepair"] = latest_repairs.get(user["user"])
     return {**out, **rollup}
 
 
@@ -2423,10 +2518,56 @@ async def one_to_one_status(account_id: int | None = None, op: Operator = Depend
     return await _off_loop(_verification_view, aid)
 
 
+def _migration_checks_view(account_id, offset=0):
+    out = {"accountId": account_id, "storage": [], "repairQueue": [], "queueTotals": [], "repairActions": [], "actionTotals": [], "mailRecovery": [], "offset": offset,"acceptanceRuns":[],"manifestTotals":[],"receiptTotals":[],"transferRoutes":[]}
+    path = _ledger_path(account_id)
+    if not os.path.isfile(path):
+        return out
+    with cpdb.ro(path) as conn:
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "migration_acceptance_runs" in tables:
+            out["acceptanceRuns"]=[{**dict(row),"services":json.loads(row["services"]),"report":json.loads(row["report"] or "{}")} for row in conn.execute("SELECT * FROM migration_acceptance_runs ORDER BY started_at DESC LIMIT 50")]
+        if "migration_source_manifest" in tables:
+            out["manifestTotals"]=[dict(row) for row in conn.execute("SELECT service,state,COUNT(*) AS count FROM migration_source_manifest WHERE run_id IN (SELECT run_id FROM migration_acceptance_runs r WHERE r.rowid=(SELECT x.rowid FROM migration_acceptance_runs x WHERE x.source_user=r.source_user ORDER BY x.started_at DESC,x.rowid DESC LIMIT 1)) GROUP BY service,state")]
+        if "migration_item_receipts" in tables:
+            out["receiptTotals"]=[dict(row) for row in conn.execute("SELECT service,status AS state,COUNT(*) AS count FROM migration_item_receipts GROUP BY service,status")]
+        out["transferRoutes"]=[{**dict(row),"decision":json.loads(row["error_message"] or "{}")} for row in conn.execute("SELECT source_user,item_id,status,error_message FROM audit_log WHERE item_type='transfer_route' ORDER BY timestamp DESC LIMIT 200 OFFSET ?",(offset,))]
+        if "migration_storage_snapshots" in tables:
+            rows = conn.execute("SELECT s.* FROM migration_storage_snapshots s WHERE id=(SELECT MAX(id) "
+                                "FROM migration_storage_snapshots WHERE source_user=s.source_user AND phase=s.phase) "
+                                "ORDER BY observed_at DESC LIMIT 200").fetchall()
+            out["storage"] = [{**dict(r), "payload": json.loads(r["payload"])} for r in rows]
+        if "finding_repair_actions" in tables:
+            out["actionTotals"] = [dict(r) for r in conn.execute(
+                "SELECT state,COUNT(*) AS count FROM finding_repair_actions GROUP BY state")]
+            out["repairActions"] = [{**dict(r), "detail": json.loads(r["detail"])} for r in conn.execute(
+                "SELECT * FROM finding_repair_actions ORDER BY checked_at DESC,source_user,service,item_id LIMIT 200 OFFSET ?", (offset,))]
+        if "mail_recovery_attempts" in tables:
+            out["mailRecovery"] = [dict(r) for r in conn.execute(
+                "SELECT source_user,source_id,target_user,state,target_id,updated_at FROM mail_recovery_attempts "
+                "ORDER BY updated_at DESC LIMIT 200 OFFSET ?", (offset,))]
+        if "verification_repair_queue" in tables:
+            out["queueTotals"] = [dict(r) for r in conn.execute(
+                "SELECT state,COUNT(*) AS count FROM verification_repair_queue GROUP BY state")]
+            out["repairQueue"] = [{**dict(r), "detail": json.loads(r["detail"])} for r in conn.execute(
+                "SELECT * FROM verification_repair_queue ORDER BY CASE WHEN state='RESOLVED' THEN 1 ELSE 0 END,"
+                "last_seen DESC,source_user,service,finding_key LIMIT 200 OFFSET ?", (offset,))]
+    return out
+
+
+@app.get("/api/v2/migration-checks")
+async def migration_checks_view(account_id: int | None = None, offset: int = Query(default=0, ge=0),
+                                op: Operator = Depends(operator)):
+    require_login(op)
+    aid = account_id if account_id is not None else op.account_id
+    _require_account_access(aid, op)
+    return await _off_loop(_migration_checks_view, aid, offset)
+
+
 @app.post("/api/v2/one-to-one/run")
 async def one_to_one_run(body: RunVerification, op: Operator = Depends(operator)):
-    """Verify again, now: opens both tenants and compares, writing nothing to either. Runs as
-    a job of its own (`verify`), so it shows on the Jobs page and counts against the cap."""
+    """Compare both tenants, then repair supported target differences per finished user.
+    Runs as a job of its own (`verify`), including repairs and rechecks, under admission."""
     account_id = _resolve_account(body, op)
     limit = body.limit
     if limit is None:
@@ -2438,8 +2579,10 @@ async def one_to_one_run(body: RunVerification, op: Operator = Depends(operator)
     for u in body.users:
         argv += ["--user", u]
     target = ",".join(body.users) if body.users else "ALL"
+    env = dict(os.environ, VERIFY_WORKERS="auto")
+    argv += ["--repair-after-user"]
     return await _gated(op, "one-to-one.run", body, target,
-                        lambda: _run_admitted(argv, account_id, "verify"))
+                        lambda: _run_admitted(argv, account_id, "verify", env=env))
 
 
 class RunTenantVerification(WriteAction):
@@ -2485,7 +2628,7 @@ def _tally_view(account_id: int | None) -> dict:
     if not os.path.isfile(path):
         return out
     with cpdb.ro(path) as conn:
-        users = conn.execute("SELECT source_email, target_email, status FROM identity_map "
+        users = conn.execute("SELECT source_email, target_email, status, services_done FROM identity_map "
                              "WHERE entity_type='user' ORDER BY source_email").fetchall()
         try:
             rows = conn.execute("SELECT * FROM user_tally ORDER BY source_user").fetchall()
@@ -3077,9 +3220,11 @@ class Heartbeat(BaseModel):
 
 
 def _provision_log_path(tenant: str, account_id: int | None) -> str:
-    d = os.path.join(HERE, "logs") if account_id is None \
-        else os.path.join(HERE, "logs", str(account_id))
-    os.makedirs(d, exist_ok=True)
+    from webui import job_log_path
+    current = job_log_path(account_id, "provision-users")
+    if os.path.isfile(current):
+        return current
+    d = os.path.join(HERE, "logs") if account_id is None else os.path.join(HERE, "logs", str(account_id))
     return os.path.join(d, f"provision-{tenant}.log")
 
 
@@ -3092,16 +3237,46 @@ async def provision_start(body: StartProvision, op: Operator = Depends(operator)
     """
     def _launch() -> tuple[bool, str]:
         argv = ([PY, "main.py"] + _account_argv(op.account_id)
-                + ["provision-users", "--tenant", body.tenant, "--yes"])
+                + ["provision-users", "--tenant", body.tenant, "--yes", "--launcher-admitted"])
         if body.dry_run:
             argv.append("--dry-run")
-        log = _provision_log_path(body.tenant, op.account_id)
-        with open(log, "wb") as fh:
-            proc = subprocess.Popen(argv, cwd=HERE, stdout=fh, stderr=fh,
-                                    stdin=subprocess.DEVNULL,
-                                    start_new_session=True)
-        return True, f"provisioning {body.tenant} started pid {proc.pid} -> {log}"
+        return _run_admitted(argv, op.account_id, "provision-users")
     return await _gated(op, "provision.start", body, body.tenant, _launch)
+
+
+@app.get("/api/v2/user-profiles")
+async def user_profiles_status(account_id: int | None = None, op: Operator = Depends(operator)):
+    require_login(op)
+    aid = account_id if account_id is not None else op.account_id
+    _require_account_access(aid, op)
+    def read():
+        from types import SimpleNamespace
+        import user_profiles
+        path = _ledger_path(aid)
+        if not os.path.isfile(path):
+            return []
+        with cpdb.ro(path) as c:
+            return user_profiles.latest(SimpleNamespace(conn=c))
+    return {"profiles": await _off_loop(read)}
+
+
+@app.get("/api/v2/user-profiles/export.csv")
+async def user_profiles_csv(account_id: int | None = None, op: Operator = Depends(operator)):
+    result = await user_profiles_status(account_id, op)
+    import user_profiles
+    from fastapi.responses import Response
+    return Response(user_profiles.export_csv(result["profiles"]), media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="user-profile-comparison.csv"'})
+
+
+@app.post("/api/v2/user-profiles/start")
+async def user_profiles_start(body: SyncUserProfiles, op: Operator = Depends(operator)):
+    aid = _resolve_account(body, op)
+    argv = [PY, "user_profiles.py"] + _account_argv(aid) + ["--launcher-admitted"]
+    if not body.dry_run:
+        argv.append("--apply")
+    return await _gated(op, "user-profiles.sync", body, "TARGET_PROFILES",
+        lambda: _run_admitted(argv, aid, "user-profiles"))
 
 
 # Matches provision.py's own log lines exactly (`log.info("created %s", email)`
@@ -3208,6 +3383,9 @@ async def provision_status(tenant: str = "target", op: Operator = Depends(operat
                     "failed": 0, "total": cpdb.identity_count(op.account_id), "tail": []}
         with open(log_path, encoding="utf-8", errors="replace") as fh:
             lines = fh.readlines()
+        starts = [i for i, line in enumerate(lines) if line.startswith("=== run started ")]
+        if starts:
+            lines = lines[starts[-1] + 1:]
         parsed = _parse_provision_log(lines)
         return {"running": pid is not None, "pid": pid,
                 "created": parsed["created"], "existing": parsed["existing"],
@@ -4900,7 +5078,7 @@ def _migration_progress(account_id: int | None) -> dict:
              "itemsSkipped": 0,
              # Mail left for the DMS: owed, so counted apart from a skip (which is a
              # decision). In split mode this is most of the mailbox.
-             "itemsDeferred": 0,
+             "itemsDeferred": 0, "awaitingDms": 0,
              # Waiting on something outside the tool (a Workspace licence),
              # not broken. Counted apart so a failure list keeps meaning
              # "investigate this".
@@ -4919,6 +5097,8 @@ def _migration_progress(account_id: int | None) -> dict:
                     "SELECT status, COUNT(*) n FROM identity_map "
                     "WHERE entity_type='user' GROUP BY status"):
                 out["users"] += row["n"]
+                if row["status"] == "AWAITING_DMS":
+                    out["awaitingDms"] += row["n"]
                 key = {"DONE": "done", "RUNNING": "running",
                        "FAILED": "failed",
                        "BLOCKED": "blocked"}.get(row["status"], "pending")
@@ -7410,9 +7590,12 @@ async def domain_guard_status(domain: str, op: Operator = Depends(operator)):
         import domain_guard
         d = domain.strip().lower()
         protected = domain_guard.is_protected(d)
-        rec = domain_guard.revocations().get(d)
+        source_reason = domain_guard.source_refuse_reason(d)
+        rec = None if source_reason else domain_guard.revocations().get(d)
         return {
             "domain": d, "protected": protected,
+            "immutable": bool(source_reason) or domain_guard.is_government(d),
+            "reason": source_reason or domain_guard.refuse_reason(d),
             "revokedBy": (rec or {}).get("by"),
             "revokedReason": (rec or {}).get("reason"),
             "revokedAt": (rec or {}).get("at"),
@@ -7440,7 +7623,10 @@ async def domain_guard_revoke(body: DomainGuardRevoke,
 
     def _revoke() -> tuple[bool, str]:
         import domain_guard
-        rec = domain_guard.revoke(domain, op.name, body.reason)
+        try:
+            rec = domain_guard.revoke(domain, op.name, body.reason)
+        except (ValueError, domain_guard.DomainGuardUnavailable) as exc:
+            return False, str(exc)
         return True, f"protection off since {rec['at']}"
     return await _gated(op, "domain_guard.revoke", body, domain, _revoke,
                         extra_check=require_superadmin)

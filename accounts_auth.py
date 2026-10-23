@@ -12,8 +12,9 @@ module from having to touch db.py, main.py, or any *_engine.py at all.
 No bcrypt/JWT dependency, on purpose -- same reasoning as
 requirements-control-plane.txt's existing minimalism. Passwords are hashed
 with stdlib `hashlib.pbkdf2_hmac`; sessions are opaque `secrets.token_urlsafe`
-bearer tokens stored server-side (not JWT), because a stolen session row can
-be deleted the instant it's noticed and a stolen JWT cannot.
+bearer tokens stored as SHA-256 hashes (not plaintext or JWT). A database
+copy alone cannot be replayed as a browser session, and a stolen session can
+still be revoked immediately by deleting its row.
 
 Uses control_plane_db.rw()/ro() for the same reason control_plane_db.py
 itself does: WAL read-only connections for reads so a browser can never
@@ -609,12 +610,17 @@ def delete_account(account_id: int) -> None:
 # ----------------------------------------------------------------------
 def create_session(account_id: int) -> str:
     token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
     expires_at = time.strftime(
         "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + SESSION_LIFETIME_S))
     with cpdb.rw() as conn:
+        # Opportunistically prune expired rows so accounts that never sign in
+        # again do not leave dead bearer records in the database forever.
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        conn.execute("DELETE FROM sessions WHERE expires_at <= ?", (now,))
         conn.execute(
             "INSERT INTO sessions (token, account_id, expires_at) VALUES (?,?,?)",
-            (token, account_id, expires_at),
+            (token_hash, account_id, expires_at),
         )
     return token
 
@@ -622,20 +628,35 @@ def create_session(account_id: int) -> str:
 def resolve_session(token: str) -> int | None:
     if not token:
         return None
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
     with cpdb.ro() as conn:
         row = conn.execute(
-            "SELECT account_id, expires_at FROM sessions WHERE token=?", (token,)
+            "SELECT token, account_id, expires_at FROM sessions WHERE token IN (?,?) "
+            "ORDER BY CASE WHEN token=? THEN 0 ELSE 1 END LIMIT 1",
+            (token_hash, token, token_hash),
         ).fetchone()
     if row is None:
         return None
     if row["expires_at"] < time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()):
+        delete_session(token)
         return None
+    if row["token"] == token:
+        # Upgrade a pre-hashing session on first successful use without
+        # forcing every active customer to sign in again after this release.
+        with cpdb.rw() as conn:
+            conn.execute("UPDATE sessions SET token=? WHERE token=?",
+                         (token_hash, token))
     return int(row["account_id"])
 
 
 def delete_session(token: str) -> None:
+    if not token:
+        return
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
     with cpdb.rw() as conn:
-        conn.execute("DELETE FROM sessions WHERE token=?", (token,))
+        # Plaintext is included for sessions issued before this change and
+        # not yet upgraded by resolve_session().
+        conn.execute("DELETE FROM sessions WHERE token IN (?,?)", (token_hash, token))
 
 
 # ----------------------------------------------------------------------

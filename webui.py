@@ -678,7 +678,8 @@ def _pct(done: int, total: int) -> float:
 # PASS i/n: an ordered migrate's own pass marker. Live, dharan.gov.np: the groups step's
 # "[2/2] classroom_teachers@..." read as the whole run at 100% two minutes in.
 _PHASE_START_RE = re.compile(r"^\s*(?:Seeding \d+ users? in\b"
-                             r"|About to DELETE all\b|Mirror pass:|SOURCE ACCESS:|PASS \d+/\d+ )")
+                             r"|About to DELETE all\b|Mirror pass:|SOURCE ACCESS:|PASS \d+/\d+ "
+                             r"|VERIFY START:|=== run started\b)")
 # Inside a migrate/delta run, the per-user verifier's [done/total] is how far IT
 # is, not the run: a user verified the moment one pass ends would put the bar at
 # 100% with passes to go. (A verify job's own lines ARE its progress.)
@@ -1027,12 +1028,14 @@ class Job:
                 if self.started else 0
             total = len(self.lines)
             lines = self.lines[since:]
-            all_lines = self.lines if name == "seed" else None
-        # Only seed_sandbox.py's own printed lines and the migrate/delta/
-        # discover ledger have a real completion fraction to read --
-        # everything else (deploy, reset target, provisioning, ...) has no
-        # meaningful percentage at all, so this stays null there rather
-        # than guessing. See _job_progress(). Percentage is still worth
+            # Verification prints its own [done/total] user count. Keep the
+            # whole current-run transcript for that parser even when the API
+            # caller asks only for a delta of output lines (the nav bar does).
+            all_lines = self.lines if name in ("seed", "verify") else None
+        # Seed and verify print their own progress; migrate/delta/discover
+        # read the ledger; other counting jobs use their own counters. Jobs
+        # with no reliable source report None rather than a guessed number.
+        # See _job_progress(). Percentage is still worth
         # showing after the job stops (a finished run's final 100%); an ETA
         # is not -- "time left" on a job that already ended is nonsense, so
         # that half is dropped the moment running goes false.
@@ -4502,7 +4505,11 @@ def _job_progress(name: str, lines: list[str], elapsed: float,
         pct = round(frac * 100) if frac is not None else None
         if frac is not None:
             return pct, _ledger_eta((account_id, tuple(users or ())), frac, elapsed)
-    if pct is None or pct <= 0 or elapsed <= 0:
+    # A live process can still be doing cleanup after its counted work hits
+    # 100%, but there is no meaningful time-left projection at that point.
+    # Returning zero produced the contradictory "100% · ETA 0s" pill while
+    # the job was still running (and, for stale counters, still had work).
+    if pct is None or pct <= 0 or pct >= 100 or elapsed <= 0:
         return pct, None
     eta = round(elapsed * (100 - pct) / pct)
     return pct, eta

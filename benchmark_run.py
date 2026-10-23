@@ -243,7 +243,7 @@ def judge(result: dict, dead: set[str]) -> tuple[bool, list[str]]:
                 f"world-readable this way)")
         # 2. Grant loss. B4 scored 0 here while reporting a clean run.
         fid = acl.get("fidelityPct")
-        if fid is not None and fid < 99.0:
+        if acl.get("missingGrants", 0) > 0 or (fid is not None and fid < 100.0):
             fails.append(f"FIDELITY: only {fid}% of source grants preserved "
                          f"({acl['missingGrants']} missing)")
         if acl.get("missingFiles", 0) > 0:
@@ -306,7 +306,7 @@ def render_markdown(r: dict) -> str:
         "| check | value | gate |",
         "|---|---|---|",
         f"| grants preserved | {acl.get('grantsMatched', 0):,} / "
-        f"{acl.get('grantsSource', 0):,} ({acl.get('fidelityPct')}%) | ≥99% |",
+        f"{acl.get('grantsSource', 0):,} ({acl.get('fidelityPct')}%) | 100% |",
         f"| **extra grants (over-share)** | **{acl.get('extraGrants', 0)}** | **0** |",
         f"| missing files | {acl.get('missingFiles', 0)} | 0 |",
         f"| MD5 mismatches | {r['checksumFailures']} | 0 |",
@@ -335,7 +335,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="keep this identical across runs you intend to compare")
     ap.add_argument("--yes", action="store_true", help="non-interactive")
     ap.add_argument("--skip-wipe", action="store_true",
-                    help="measure only; do not wipe or reset the ledger")
+                    help="still migrates data; skips the target wipe and ledger reset")
     args = ap.parse_args(argv)
 
     os.makedirs(OUT_DIR, exist_ok=True)

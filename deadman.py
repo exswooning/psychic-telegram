@@ -34,6 +34,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -112,6 +113,10 @@ def notify(subject: str, body: str) -> bool:
 def _log(msg: str) -> None:
     line = f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}  {msg}"
     print(line, flush=True)
+    # wipe() removes HERE last. Do not recreate its logs/ directory while
+    # reporting the final result, or the supposedly removed install returns.
+    if not os.path.isdir(HERE):
+        return
     try:
         os.makedirs(os.path.dirname(LOG), exist_ok=True)
         with open(LOG, "a", encoding="utf-8") as fh:
@@ -454,6 +459,35 @@ def _safe_to_push(rel: str) -> bool:
     return not _NEVER_PUSH.search(rel)
 
 
+def _safe_source_file(rel: str) -> bool:
+    """Only copy regular files physically inside the install tree.
+
+    The path-name denylist does not protect a harmless-looking tracked name
+    whose source is a symlink to a credential. Inspect every component with
+    lstat and resolve containment before copying it to the public snapshot.
+    """
+    if not _safe_to_push(rel) or os.path.isabs(rel):
+        return False
+    parts = rel.replace("\\", "/").split("/")
+    if not parts or any(part in ("", ".", "..") for part in parts):
+        return False
+    root = os.path.realpath(HERE)
+    path = root
+    try:
+        for index, part in enumerate(parts):
+            path = os.path.join(path, part)
+            info = os.lstat(path)
+            if stat.S_ISLNK(info.st_mode):
+                return False
+            if index < len(parts) - 1 and not stat.S_ISDIR(info.st_mode):
+                return False
+        resolved = os.path.realpath(path)
+        return (stat.S_ISREG(info.st_mode)
+                and os.path.commonpath((root, resolved)) == root)
+    except (OSError, ValueError):
+        return False
+
+
 def push_code(cfg: dict, dry: bool = True) -> list[str]:
     """Save the code to GitHub before destroying the machine it is on.
 
@@ -526,17 +560,21 @@ def push_code(cfg: dict, dry: bool = True) -> list[str]:
             if not _safe_to_push(rel):
                 continue
             src = os.path.join(HERE, rel)
-            if not os.path.isfile(src):
+            if not os.path.lexists(src):
                 continue
+            if not _safe_source_file(rel):
+                out.append(f"REFUSED to push: tracked path is not a regular, "
+                           f"non-symlink file inside the install: {rel}")
+                return out
             dst = os.path.join(work, rel)
             os.makedirs(os.path.dirname(dst), exist_ok=True)
-            shutil.copy2(src, dst)
+            shutil.copy2(src, dst, follow_symlinks=False)
             copied += 1
         # Stage by explicit path, never `git add .`: an untracked secret in
         # the working tree is exactly what that would sweep up.
         subprocess.run(["git", "-C", work, "add", "--"] +
                        [r for r in tracked if _safe_to_push(r)],
-                       capture_output=True, timeout=120)
+                       capture_output=True, timeout=120, check=True)
         staged = subprocess.run(["git", "-C", work, "diff", "--cached",
                                  "--name-only"], capture_output=True,
                                 text=True, timeout=60).stdout.split()
@@ -555,7 +593,7 @@ def push_code(cfg: dict, dry: bool = True) -> list[str]:
                         "commit", "-m",
                         f"Snapshot before dead man switch wipe "
                         f"({time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())})"],
-                       capture_output=True, timeout=120)
+                       capture_output=True, timeout=120, check=True)
         r = subprocess.run(git + ["-C", work, "push", remote,
                                   f"HEAD:refs/heads/{branch}"],
                            capture_output=True, text=True, timeout=300, env=genv)
@@ -575,6 +613,20 @@ def push_code(cfg: dict, dry: bool = True) -> list[str]:
 
 def wipe(cfg: dict, dry: bool = True) -> list[str]:
     done = []
+
+    def run_recorded(label: str, command: list[str], timeout: int,
+                     input_text: str | None = None) -> None:
+        try:
+            result = subprocess.run(command, capture_output=True, text=True,
+                                    timeout=timeout, input=input_text)
+            if result.returncode:
+                detail = (result.stderr or result.stdout or "").strip()[-180:]
+                done.append(f"FAILED {label} (exit {result.returncode})"
+                            + (f": {detail}" if detail else ""))
+            else:
+                done.append(label)
+        except Exception as exc:      # noqa: BLE001 - every failure must be visible
+            done.append(f"FAILED {label}: {str(exc)[:160]}")
     # BEFORE anything is removed, and before the services are stopped: the
     # push reads the working tree, so it has to happen while there still is
     # one. It cannot block the wipe -- push_code swallows its own failures.
@@ -589,10 +641,9 @@ def wipe(cfg: dict, dry: bool = True) -> list[str]:
         # single credential was removed, which is the one failure this
         # function must not have.
         try:
-            subprocess.run(["systemctl", "stop", "bitport-api",
-                            "bitport-webui", "bitport-fleet"],
-                           capture_output=True, timeout=60)
-            done.append("stopped the services")
+            run_recorded("stopped the services",
+                         ["systemctl", "stop", "bitport-api",
+                          "bitport-webui", "bitport-fleet"], 60)
         except Exception as exc:      # noqa: BLE001
             done.append(f"could not stop the services ({exc}) -- continuing")
         # The cron runs this with the install directory as the working
@@ -629,15 +680,15 @@ def wipe(cfg: dict, dry: bool = True) -> list[str]:
             done.append(f"FAILED {unit}: {exc}")
 
     if dry:
-        done.append("WOULD remove the cron entry, restore the Caddyfile "
-                    "and vacuum the journal")
+        done.append("WOULD remove the cron entry and restore the Caddyfile")
+        done.append("WOULD vacuum the system-wide journal" if cfg.get("vacuum_journal", False)
+                    else "WOULD preserve the system-wide journal")
         return done
 
-    subprocess.run(["systemctl", "disable", "bitport-api", "bitport-webui",
-                    "bitport-fleet", "bitport-backup.timer"],
-                   capture_output=True, timeout=60)
-    subprocess.run(["systemctl", "daemon-reload"], capture_output=True, timeout=60)
-    done.append("disabled the services and reloaded systemd")
+    run_recorded("disabled the services",
+                 ["systemctl", "disable", "bitport-api", "bitport-webui",
+                  "bitport-fleet", "bitport-backup.timer"], 60)
+    run_recorded("reloaded systemd", ["systemctl", "daemon-reload"], 60)
 
     # The cron entry outlives everything it refers to, and goes on firing
     # every ten minutes against an interpreter that is no longer there.
@@ -646,9 +697,9 @@ def wipe(cfg: dict, dry: bool = True) -> list[str]:
                              text=True, timeout=30).stdout
         kept = [ln for ln in cur.splitlines() if HERE not in ln]
         if len(kept) != len(cur.splitlines()):
-            subprocess.run(["crontab", "-"], input="\n".join(kept) + "\n",
-                           text=True, capture_output=True, timeout=30)
-            done.append("removed the cron entries pointing at the install")
+            run_recorded("removed the cron entries pointing at the install",
+                         ["crontab", "-"], 30,
+                         input_text="\n".join(kept) + "\n")
     except Exception as exc:      # noqa: BLE001
         done.append(f"could not edit crontab: {exc}")
 
@@ -663,17 +714,18 @@ def wipe(cfg: dict, dry: bool = True) -> list[str]:
         elif os.path.exists("/etc/caddy/Caddyfile"):
             os.remove("/etc/caddy/Caddyfile")
             done.append("removed Bitport's Caddyfile")
-        subprocess.run(["systemctl", "reload", "caddy"],
-                       capture_output=True, timeout=30)
+        run_recorded("reloaded Caddy", ["systemctl", "reload", "caddy"], 30)
     except OSError as exc:
         done.append(f"could not clear the Caddyfile: {exc}")
 
-    # The journal and syslog quote tenant domains, user addresses and file
-    # names on every run. Vacuuming is the only lever available; it is not
-    # a secure erase, and neither is anything else here.
-    subprocess.run(["journalctl", "--vacuum-time=1s"],
-                   capture_output=True, timeout=120)
-    done.append("vacuumed the systemd journal")
+    # Journald is system-wide: vacuuming it also erases records belonging to
+    # unrelated services and users. Preserve it unless the operator explicitly
+    # armed this action with --vacuum-journal.
+    if cfg.get("vacuum_journal", False):
+        run_recorded("vacuumed the systemd journal",
+                     ["journalctl", "--vacuum-time=1s"], 120)
+    else:
+        done.append("preserved the system-wide systemd journal")
     return done
 
 
@@ -741,6 +793,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="with --checkin: which account's code this is")
     ap.add_argument("--require-checkin", action="store_true",
                     help="with --arm: ONLY a 2-Step check-in counts as life")
+    ap.add_argument("--vacuum-journal", action="store_true",
+                    help="with --arm: explicitly allow wiping the system-wide journal")
     args = ap.parse_args(argv)
     cfg = load()
 
@@ -785,6 +839,7 @@ def main(argv: list[str] | None = None) -> int:
             cfg["require_checkin"] = True
         cfg.update({"armed": True, "days": args.days,
                     "confirmed": bool(args.yes),
+                    "vacuum_journal": bool(args.vacuum_journal),
                     "armed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                               time.gmtime())})
         os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
@@ -862,10 +917,15 @@ def main(argv: list[str] | None = None) -> int:
            f"No sign of life for {age_days:.1f} days on "
            f"{os.uname().nodename}. Credentials and tenant data have been "
            f"permanently destroyed.")
-    for line in wipe(cfg, dry=False):
+    results = wipe(cfg, dry=False)
+    for line in results:
         _log(f"  {line}")
-    _log("dead man switch complete")
-    return 0
+    failures = [line for line in results
+                if line.startswith(("FAILED", "could not", "push failed", "no git remote"))
+                or line.startswith("REFUSED to push")]
+    _log("dead man switch complete" if not failures else
+         f"dead man switch completed with {len(failures)} failure(s)")
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":

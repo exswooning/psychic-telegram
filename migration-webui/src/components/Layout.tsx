@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import {
   Box,
@@ -62,6 +62,9 @@ import { useMigrationStore } from '@/store'
 import MigrationSwitcher from './MigrationSwitcher'
 import { fetchConfig, fetchJob, ConfigPayload, HostInfo, JobStatus, stopJob } from '@/api/client'
 import { fetchMe, fetchOwedGrants, logout, Account, OwedGrants } from '@/api/controlPlane'
+import { formatDuration } from '@/utils/formatters'
+import { formatPct } from '@/utils/formatPct'
+import { jobProgressPct } from './RunningJobDetail.utils'
 import Menu from '@mui/material/Menu'
 import MenuItem from '@mui/material/MenuItem'
 import Logout from '@mui/icons-material/Logout'
@@ -232,11 +235,47 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   // Job is one global background process, so a seed (or migrate) kicked
   // off from the Seed/Setup Wizard must still show here while you are
   // looking at Dashboard or Settings.
+  const jobLogRef = useRef<{
+    name: string; running: boolean; total: number; elapsed: number;
+    lines: string[]; external: boolean
+  } | null>(null)
   useEffect(() => {
-    const poll = () => fetchJob(1_000_000_000).then(setJob).catch(() => {})
+    let cancelled = false
+    let polling = false
+    const poll = async () => {
+      if (polling) return
+      polling = true
+      try {
+        const previous = jobLogRef.current
+        // The nav normally asks for metadata only. For verify, carry a line
+        // cursor so its own counter can override a stale percentage without
+        // downloading the full transcript every three seconds.
+        const cursor = previous?.name === 'verify' && !previous.external
+          ? previous.total : 1_000_000_000
+        let next = await fetchJob(cursor)
+        if (cancelled) return
+        if (next.name.trim().toLowerCase() === 'verify') {
+          const newRun = !previous || previous.name.trim().toLowerCase() !== 'verify'
+            || previous.external || (!previous.running && next.running)
+            || next.elapsed + 2 < previous.elapsed || next.total < previous.total
+          if (next.external || newRun) next = await fetchJob(0)
+          if (cancelled) return
+          const lines = next.external || newRun
+            ? next.lines
+            : [...(previous?.lines ?? []), ...next.lines]
+          next = { ...next, lines }
+          jobLogRef.current = { name: next.name, running: next.running,
+            total: next.total, elapsed: next.elapsed, lines, external: next.external }
+        } else {
+          jobLogRef.current = null
+        }
+        setJob(next)
+      } catch { /* The previous status remains useful through a transient poll error. */ }
+      finally { polling = false }
+    }
     poll()
     const id = setInterval(poll, 3000)
-    return () => clearInterval(id)
+    return () => { cancelled = true; clearInterval(id) }
   }, [])
 
   // Shares owed to colleagues with no target account yet. A minute is plenty: they
@@ -269,8 +308,17 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
   // baseline exists yet, shown as an indeterminate bar rather than a
   // fabricated number.
   const jobRunning = job?.running ?? false
-  const progressPct = jobRunning && job!.progressPct !== null ? job!.progressPct : ledgerProgress
-  const progressIndeterminate = jobRunning && job!.progressPct === null
+  const liveJobPct = job ? jobProgressPct(job.name, job.progressPct, job.lines) : null
+  const progressPct = jobRunning && liveJobPct !== null ? liveJobPct : ledgerProgress
+  const progressIndeterminate = jobRunning && liveJobPct === null
+  // The older verifier has no heartbeat, so its server ETA is only a stale
+  // average from the entire run. Until a heartbeat proves the current verifier
+  // is reporting activity, show its count and elapsed time without a guess.
+  const latestRunStart = job?.lines.map((line) => line.startsWith('=== run started ')).lastIndexOf(true) ?? -1
+  const currentRunLines = latestRunStart >= 0 ? job!.lines.slice(latestRunStart) : job?.lines ?? []
+  const verifyHasHeartbeat = job?.name.trim().toLowerCase() === 'verify'
+    && currentRunLines.some((line) => /^\s*verify: heartbeat\b/.test(line))
+  const showJobEta = job?.name.trim().toLowerCase() !== 'verify' || verifyHasHeartbeat
 
   const handleInterrupt = () => {
     if (!confirm(`Interrupt the running job (${job?.name})?`)) return
@@ -433,12 +481,14 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
               {!progressIndeterminate && (
                 <>
                   <Divider orientation="vertical" flexItem sx={{ borderColor: 'primary.main', opacity: 0.4 }} />
-                  <Typography variant="caption" sx={{ fontWeight: 700, color: 'primary.dark' }}>{progressPct}%</Typography>
+                  <Typography variant="caption" sx={{ fontWeight: 700, color: 'primary.dark' }}>{formatPct(progressPct)}</Typography>
                 </>
               )}
               <Divider orientation="vertical" flexItem sx={{ borderColor: 'primary.main', opacity: 0.4 }} />
-              <Typography variant="caption" color="text.secondary">{job!.elapsed}s elapsed</Typography>
-              {job!.etaSeconds != null && (
+              <Typography variant="caption" color="text.secondary">
+                {formatDuration(job!.elapsed * 1000)} elapsed
+              </Typography>
+              {job!.etaSeconds != null && showJobEta && (
                 <>
                   <Divider orientation="vertical" flexItem sx={{ borderColor: 'primary.main', opacity: 0.4 }} />
                   <Typography variant="caption" color="text.secondary">ETA {formatEta(job!.etaSeconds)}</Typography>

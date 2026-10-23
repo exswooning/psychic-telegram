@@ -470,17 +470,17 @@ def rewrite_native(kind: str, svc, file_id: str, lookup: Callable[[str], str | N
             svc.presentations().batchUpdate(presentationId=file_id,
                                             body={"requests": reqs}).execute()
     elif kind == "sheets":
-        go("read")
-        meta = svc.spreadsheets().get(spreadsheetId=file_id,
-                                      fields="sheets.properties.title").execute()
-        ranges = ["'" + s["properties"]["title"].replace("'", "''") + "'"
-                  for s in meta.get("sheets") or []]
-        got = {}
-        if ranges:
-            go("read")
-            got = svc.spreadsheets().values().batchGet(
-                spreadsheetId=file_id, ranges=ranges, valueRenderOption="FORMULA").execute()
-        reqs = sheet_requests(got.get("valueRanges") or [], lookup)
+        from verification_reads import sheet_values
+        reqs = []
+        for vr in sheet_values(svc, file_id, go):
+            part = sheet_requests([vr], lookup)
+            if part and vr.get("sheetType") == "DATA_SOURCE":
+                raise RuntimeError("Connected Sheets contains source Drive references; data-source definitions require explicit repair")
+            for request in part:
+                if vr.get("sheetId") is not None:
+                    request["findReplace"].pop("allSheets", None)
+                    request["findReplace"]["sheetId"] = vr["sheetId"]
+            reqs.extend(part)
         if reqs and apply:
             go("write")
             svc.spreadsheets().batchUpdate(spreadsheetId=file_id, body={"requests": reqs}).execute()

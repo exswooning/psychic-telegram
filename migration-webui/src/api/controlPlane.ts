@@ -17,7 +17,9 @@
 import { chosenMigration } from './migration'
 import { coalesce } from './inflight'
 
-const CP_BASE_DEFAULT = import.meta.env.VITE_CP_BASE ?? 'http://localhost:8090'
+// Production uses the public origin, including its API and WebSocket proxy.
+// An empty production setting must not fall back to a developer's localhost.
+const CP_BASE_DEFAULT = import.meta.env.VITE_CP_BASE || window.location.origin
 let CP_BASE = localStorage.getItem('cp_base') || CP_BASE_DEFAULT
 
 export const getCpBase = () => CP_BASE
@@ -1383,6 +1385,8 @@ export type LinkEnd = {
 }
 
 export interface DomainGuardStatus {
+  immutable?: boolean
+  reason?: string
   domain: string
   protected: boolean
   revokedBy?: string | null
@@ -1769,7 +1773,17 @@ export const quickReportUrl = (accountId?: number) =>
 export type OneToOneVerdict = 'IDENTICAL' | 'DIFFERENCES' | 'INCOMPLETE' | 'NOT_VERIFIED'
 export interface OneToOneService {
   service: string
-  verdict: Exclude<OneToOneVerdict, 'NOT_VERIFIED'>
+  itemVerdict?: OneToOneVerdict
+  scopeVersion?: number
+  coverageComplete?: boolean
+  coverageNote?: string
+  emptySource?: boolean
+  sharing?: { filesCompared?: number; matched?: number; notReproduced?: number }
+  sourceInventory?: Record<string, number>
+  checks?: Array<{key:string; label:string; status:string; checked:number; matched:number; required?:boolean; note?:string|null}>
+  verdict: OneToOneVerdict
+  /** Whether every requested check for this service returned a usable result. */
+  completion?: 'COMPLETE' | 'INCOMPLETE'
   verifiedAt: string
   checked: number
   identical: number
@@ -1790,6 +1804,7 @@ export interface OneToOneUser {
   verdict: OneToOneVerdict
   verifiedAt: string | null
   services: OneToOneService[]
+  automaticRepair?: { state: string; started_at: string; finished_at: string | null; summary: string | null } | null
 }
 export interface OneToOneView {
   accountId: number | null
@@ -2118,4 +2133,23 @@ export const runRepair = (accountId: number, reason: string) =>
   cpFetch<ActionResult>(`/api/v2/repair/${accountId}`, {
     method: 'POST',
     body: JSON.stringify({ reason }),
+  })
+
+export interface UserProfileCheck {
+  checkedAt?: string
+  source: string
+  target: string
+  status: string
+  changedFields: string[]
+  remainingFields: string[]
+  separateReview: string[]
+  error: string | null
+  sourceName?: { givenName?: string; familyName?: string; displayName?: string }
+  targetName?: { givenName?: string; familyName?: string; displayName?: string }
+}
+export const fetchUserProfiles = (accountId: number) =>
+  cpFetch<{ profiles: UserProfileCheck[] }>(`/api/v2/user-profiles?account_id=${accountId}`)
+export const startUserProfileSync = (reason: string, accountId: number, dryRun = true) =>
+  cpFetch<ActionResult>('/api/v2/user-profiles/start', {
+    method: 'POST', body: JSON.stringify({ reason, account_id: accountId, dry_run: dryRun }),
   })

@@ -42,6 +42,9 @@ DELETE_ORDER = ["message", "file", "shortcut", "folder", "event", "calendar"]
 
 def undo_user(auth: AuthManager, db: MigrationDB, settings: Settings,
               source_user: str, target_user: str, dry_run: bool) -> dict:
+    import domain_guard
+    domain_guard.require_not_source(settings.target_domain, settings.source_domain)
+    domain_guard.require_wipe_subjects([target_user], settings.source_domain)
     stats = {"deleted": 0, "already_gone": 0, "failed": 0}
 
     drive = auth.target_drive(target_user)
@@ -118,6 +121,45 @@ def undo_user(auth: AuthManager, db: MigrationDB, settings: Settings,
     return stats
 
 
+def reset_ledger_for_users(db: MigrationDB, users: list[tuple[str, str]]) -> None:
+    """Clear only users whose target items were all deleted or already gone.
+
+    A failed item keeps the user's ledger intact so the operator can retry
+    undo against the same target IDs. Callers pass only fully completed users.
+    """
+    if not users:
+        return
+    src = [source for source, _target in users]
+    tgt = [target for _source, target in users]
+    ph_s = ",".join("?" * len(src))
+    ph_t = ",".join("?" * len(tgt))
+    with db.write() as conn:
+        # Not a moved file's row, nor its folders': the target holds its only copy,
+        # left in place above, and this record is all that says where it came from.
+        conn.execute(f"DELETE FROM id_mapping WHERE source_user IN ({ph_s}) AND NOT ("
+                     "type IN ('file', 'folder', 'shortcut') AND source_user IN ("
+                     "SELECT source_user FROM id_mapping WHERE type='file' "
+                     "AND source_id = target_id))", src)
+        conn.execute(f"DELETE FROM audit_log WHERE source_user IN ({ph_s}) AND NOT ("
+                     "item_type IN ('file', 'folder', 'shortcut', 'acl') AND source_user IN ("
+                     "SELECT source_user FROM id_mapping WHERE type='file' "
+                     "AND source_id = target_id))", src)
+        conn.execute(f"DELETE FROM label_map WHERE source_user IN ({ph_s})", src)
+        conn.execute(f"DELETE FROM upload_ledger WHERE target_user IN ({ph_t})", tgt)
+        conn.execute(
+            f"UPDATE identity_map SET status='PENDING', notes=NULL "
+            f"WHERE source_email IN ({ph_s})", src)
+
+
+def reset_completed_users(db: MigrationDB, rows: list, outcomes: dict[str, dict]) -> list:
+    """Reset users whose undo had no failed item; retain failed users intact."""
+    completed = [r for r in rows
+                 if outcomes.get(r["source_email"], {}).get("failed", 1) == 0]
+    reset_ledger_for_users(
+        db, [(r["source_email"], r["target_email"]) for r in completed])
+    return completed
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="Delete exactly the items a migration created on the target."
@@ -163,10 +205,12 @@ def main(argv: list[str] | None = None) -> int:
         print("DRY RUN — nothing will be deleted\n")
 
     totals = {"deleted": 0, "already_gone": 0, "failed": 0}
+    outcomes: dict[str, dict] = {}
     for r in rows:
         print(f"{r['source_email']} -> {r['target_email']}")
         st = undo_user(auth, db, settings, r["source_email"],
                        r["target_email"], args.dry_run)
+        outcomes[r["source_email"]] = st
         print(f"    deleted {st['deleted']}, already gone {st['already_gone']}, "
               f"failed {st['failed']}")
         for k in totals:
@@ -183,29 +227,14 @@ def main(argv: list[str] | None = None) -> int:
         # target with no record of it: a re-run would copy it all again, and
         # undo could never find it to remove. The blast radius of the reset has
         # to match the blast radius of the deletion.
-        src = [r["source_email"] for r in rows]
-        tgt = [r["target_email"] for r in rows]
-        ph_s = ",".join("?" * len(src))
-        ph_t = ",".join("?" * len(tgt))
-        with db.write() as conn:
-            # Not a moved file's row, nor its folders': the target holds its only copy,
-            # left in place above, and this record is all that says where it came from.
-            conn.execute(f"DELETE FROM id_mapping WHERE source_user IN ({ph_s}) AND NOT ("
-                         "type IN ('file', 'folder', 'shortcut') AND source_user IN ("
-                         "SELECT source_user FROM id_mapping WHERE type='file' "
-                         "AND source_id = target_id))", src)
-            conn.execute(f"DELETE FROM audit_log WHERE source_user IN ({ph_s}) AND NOT ("
-                         "item_type IN ('file', 'folder', 'shortcut', 'acl') AND source_user IN ("
-                         "SELECT source_user FROM id_mapping WHERE type='file' "
-                         "AND source_id = target_id))", src)
-            conn.execute(f"DELETE FROM label_map WHERE source_user IN ({ph_s})", src)
-            conn.execute(f"DELETE FROM upload_ledger WHERE target_user IN ({ph_t})", tgt)
-            conn.execute(
-                f"UPDATE identity_map SET status='PENDING', notes=NULL "
-                f"WHERE source_email IN ({ph_s})", src)
-        scope = "all users" if not args.user else f"{len(src)} selected user(s)"
-        print(f"Ledger reset for {scope}: id_mapping, audit_log, label_map and "
-              f"upload_ledger cleared; identity_map back to PENDING.")
+        reset_rows = reset_completed_users(db, rows, outcomes)
+        failed_users = len(rows) - len(reset_rows)
+        print(f"Ledger reset for {len(reset_rows)} fully undone user(s): "
+              "id_mapping, audit_log, label_map and upload_ledger cleared; "
+              "identity_map back to PENDING.")
+        if failed_users:
+            print(f"Ledger retained for {failed_users} user(s) with failed deletions "
+                  "so undo can be retried safely.")
 
     db.close()
     return 1 if totals["failed"] else 0

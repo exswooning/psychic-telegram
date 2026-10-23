@@ -360,7 +360,8 @@ const Jobs: React.FC = () => {
         <Typography variant="h4" sx={{ fontWeight: 700, flexGrow: 1 }}>Jobs</Typography>
         <Tooltip title="Refresh">
           <span>
-            <IconButton size="small" onClick={refresh} disabled={loading}>
+            <IconButton size="small" onClick={refresh} disabled={loading}
+                        aria-label="Refresh jobs">
               <RefreshIcon fontSize="small" />
             </IconButton>
           </span>
@@ -389,6 +390,8 @@ const Jobs: React.FC = () => {
                     ? 'Force stop -- it took the stop and is still running' : 'Stop this job'}>
                     <span>
                       <IconButton size="small" color="error"
+                                  aria-label={stopAsked.has(j.key) || j.stopAsked
+                                    ? `Force stop ${j.label}` : `Stop ${j.label}`}
                                   data-testid={`stop-${j.key}`}
                                   onClick={() => setStopping(j)}>
                         <StopIcon fontSize="small" />
@@ -528,12 +531,14 @@ const Jobs: React.FC = () => {
                           <Button size="small" color="warning" variant="outlined"
                                   startIcon={<WipeIcon />}
                                   data-testid={`wipe-runs-${domain}`}
+                                  disabled={side === 'source'}
                                   onClick={() => setActOn({ domain, side, mode: 'wipe' })}>
                             Wipe data
                           </Button>
                           <Button size="small" color="error" variant="outlined"
                                   startIcon={<UsersIcon />}
                                   data-testid={`delete-users-runs-${domain}`}
+                                  disabled={side === 'source'}
                                   onClick={() => setActOn({ domain, side,
                                                             mode: 'delete_users' })}>
                             Delete users

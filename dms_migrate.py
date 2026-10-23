@@ -361,9 +361,8 @@ def read_metrics(page) -> dict:
 
 
 def _record_delivered() -> None:
-    """Google says the import is complete: the mail the engine left for it is on
-    the target now. Recorded, or the migration page goes on saying hundreds of
-    thousands of messages are still waiting for the DMS. Never fails a read."""
+    """Record only previously verified destination receipts. Console completion
+    is not evidence for individual items. Status refresh never performs repairs."""
     try:
         from config import Settings
         from db import MigrationDB
@@ -910,6 +909,20 @@ def wait_then_tally(minutes: int, timeout: int, headful: bool) -> int:
         state = got.get("status", "unknown")
         log(f"import status: {state} {got.get('metrics') or ''}")
         if state in ("complete", "Stopped"):
+            if state == "complete":
+                from config import Settings
+                from auth import AuthManager
+                from db import MigrationDB
+                from split_mail import reconcile_dms
+                st = Settings()
+                db = MigrationDB(st.db_path)
+                try:
+                    checked = reconcile_dms(AuthManager(st), db, st, progress=log)
+                    log("DMS delivery reconciliation: " + json.dumps(checked, default=str))
+                    if checked["blocked"]:
+                        return 2
+                finally:
+                    db.close()
             log("the import has finished -- tallying both tenants")
             return subprocess.call([sys.executable, "tally.py"],
                                    cwd=os.path.dirname(os.path.abspath(__file__)))

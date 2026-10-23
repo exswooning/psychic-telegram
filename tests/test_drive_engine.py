@@ -1281,10 +1281,11 @@ def test_a_dropped_comment_reply_is_recorded(migrator):
 
     src = inspect.getsource(migrator.__class__)
     # the reply handler must record, not `pass`
-    reply_bit = src[src.index("replies().create"):]
-    handler = reply_bit[:reply_bit.index("# -- ACL translation")]
-    assert "log_audit" in handler
-    assert "reply not recreated" in handler
+    import migration_comments
+    reply_bit = inspect.getsource(migration_comments.reconcile)
+    assert "replies()" in reply_bit and "UNCERTAIN" in reply_bit
+    assert "comment_delivery_attempts" in reply_bit
+    assert '"FAILED"' in src and "log_audit" in src
 
 
 # ----------------------------------------------------------------------
@@ -1530,7 +1531,7 @@ class TestIntraUserFileConcurrency:
         import resources
         rec = resources.recommend()
         healthy = not rec["resources"].under_memory_pressure
-        assert rec["drive_file_workers"] == (4 if healthy else 2)
+        assert rec["drive_file_workers"] == (resources.migrate_file_workers() if healthy else 2)
 
     def test_one_worker_is_still_a_clean_serial_path(self, migrator, auth, settings):
         """DRIVE_FILE_WORKERS=1 is the documented escape hatch, so it has to
@@ -1560,7 +1561,7 @@ class TestIntraUserFileConcurrency:
         self._tree(auth, 20)
         migrator.run()
         assert migrator.stats == {"folders": 0, "files": 20, "skipped": 0,
-                                  "failed": 0, "acl_failed": 0}
+                                  "failed": 0, "acl_failed": 0, "comments": 0}
 
     def test_stats_are_not_lost_under_concurrent_increment(self, migrator, auth,
                                                            settings):

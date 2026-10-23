@@ -88,7 +88,9 @@ def test_allowing_a_copy_keeps_everything_else_refused():
 
 class TestAuthManagerHandsOutTheGuard:
     def _auth(self, raw):
+        from types import SimpleNamespace
         am = object.__new__(auth.AuthManager)
+        am.settings = SimpleNamespace(source_domain="source.example")
         am._service = lambda tenant, api, user: raw
         return am
 
@@ -96,9 +98,11 @@ class TestAuthManagerHandsOutTheGuard:
         raw = _Drive()
         assert isinstance(self._auth(raw).source_drive("u"), ReadOnlyDrive)
 
-    def test_writable_only_when_asked(self):
+    def test_source_write_client_is_refused_even_when_explicitly_asked(self):
         raw = _Drive()
-        assert self._auth(raw).source_drive("u", writable=True) is raw
+        with pytest.raises(ValueError, match="source domain"):
+            self._auth(raw).source_drive("u", writable=True)
+        assert raw.log == []
 
 
 class TestTheEngine:

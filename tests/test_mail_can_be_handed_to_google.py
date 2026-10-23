@@ -12,16 +12,10 @@ Google states the 3/sec ceiling is not adjustable on request, so
 many nodes. Google's own Data Migration Service moves mail inside Google
 and spends none of this project's Gmail quota.
 
-The engine keeps its own Gmail migration. DMS gives per-user console status,
-not the per-item ledger that makes a re-run here idempotent, so handing ALL mail
-over is a deliberate per-run choice. The migration dialog now defaults to SPLIT --
-the engine moves the mail that carries a Drive link (it is the only thing that can
-rewrite one) and the DMS moves the rest -- while the API's own default stays the
-engine, so nothing else that starts a migration changes.
-
-The one thing that must not happen is both moving the same mail: the ledger cannot
-see what Google did internally, so every message would be inserted twice. Which
-services each mode runs is decided server-side (api_server._mail_plan).
+The engine keeps its per-item ledger. Split is an explicit experimental choice:
+DMS imports the mailbox, not an arbitrary list of deferred message IDs. Its
+completion counters cannot certify rewritten content, labels or overlap.
+The engine remains the default until that handoff is qualified.
 """
 import os
 
@@ -39,18 +33,16 @@ class TestTheChoiceIsOffered:
         for option in ("mail-by-split", "mail-by-engine", "mail-by-dms"):
             assert option in src
 
-    def test_the_dialog_defaults_to_split(self):
-        """Deliberately: only a fortieth or so of mail carries a Drive link, and
-        those are the messages that need this tool. See the dialog's own comment."""
-        assert "useState<MailMode>('split')" in _detail()
+    def test_the_dialog_defaults_to_engine_until_split_is_qualified(self):
+        assert "useState<MailMode>('engine')" in _detail()
+        assert "Split (experimental)" in _detail()
 
     def test_the_api_decides_when_a_caller_names_no_mode(self):
-        """A whole-tenant run that moves Drive and mail is a split; anything else is the engine,
-        so a script asking for one user or one service still gets what it always got."""
+        """DMS is an explicit choice, including for a whole tenant."""
         import api_server
         S = api_server.StartMigration
         assert S.model_fields["mail_mode"].default is None
-        assert api_server._default_mail_mode(S(reason="full run", services=["all"])) == "split"
+        assert api_server._default_mail_mode(S(reason="full run", services=["all"])) == "engine"
         assert api_server._default_mail_mode(S(reason="one user", services=["all"], users=["a@x.com"])) == "engine"
         assert api_server._default_mail_mode(S(reason="a sample", services=["all"], sample=5)) == "engine"
         assert api_server._default_mail_mode(S(reason="drive only", services=["drive"])) == "engine"

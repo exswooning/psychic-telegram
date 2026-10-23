@@ -58,7 +58,10 @@ const Findings: React.FC<{ s: OneToOneService }> = ({ s }) => {
   const shown = Math.min(rows.length, 8)
   return (
     <Box sx={{ mb: 1.5 }}>
-      <Typography variant="subtitle2">{s.service} · {VERDICT[s.verdict].label} · {when(s.verifiedAt)}</Typography>
+      <Typography variant="subtitle2">
+        {s.service} · {VERDICT[s.verdict].label}
+        {s.completion === 'INCOMPLETE' ? ' · check incomplete' : ''} · {when(s.verifiedAt)}
+      </Typography>
       {rows.slice(0, 8).map((r, i) => (
         <Typography key={i} variant="body2" sx={{ fontFamily: 'ui-monospace, monospace', fontSize: 12, wordBreak: 'break-word' }}>{r}</Typography>
       ))}
@@ -87,6 +90,13 @@ const UserRow: React.FC<{ u: OneToOneUser; selected: boolean; onSelect: (on: boo
         </TableCell>
         <TableCell>
           <Tooltip title={v.hint}><Chip size="small" color={v.color} label={v.label} sx={{ fontWeight: 700 }} data-testid={`verdict-${u.user}`} /></Tooltip>
+          {u.automaticRepair && <Typography variant="caption" display="block" color="text.secondary" sx={{ mt: 0.5 }}>
+            {u.automaticRepair.state === 'RUNNING' ? 'Repair and recheck running'
+              : u.automaticRepair.state === 'VERIFIED' ? 'Repair recheck passed'
+              : u.automaticRepair.state === 'INTERRUPTED' ? 'Repair interrupted — waiting for restart'
+              : u.automaticRepair.state === 'ERROR' ? 'Repair failed — review needed'
+              : 'Repair checked — review remaining findings'}
+          </Typography>}
         </TableCell>
         <TableCell>
           <Stack direction="row" flexWrap="wrap" gap={0.5}>
@@ -184,7 +194,7 @@ const OneToOne: React.FC = () => {
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2, maxWidth: 760 }}>
         {view?.onComplete === false
           ? 'Automatic checking is switched off for this account (VERIFY_ON_COMPLETE=0); use Verify now.'
-          : `Each user is compared against both tenants the moment their migration finishes: a sample of up to ${view?.perService ?? 25} of each kind of item, opened on both sides. Nothing is written to either tenant.`}
+          : `Each user is compared against both tenants the moment their migration finishes: a sample of up to ${view?.perService ?? 25} of each kind of item, opened on both sides. The check reads both tenants. Supported differences are repaired on the target, then checked again.`}
       </Typography>
 
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
@@ -234,8 +244,9 @@ const OneToOne: React.FC = () => {
       <ReasonCodeDialog
         open={asking} busy={busy} title="Verify now"
         description={<>
-          Opens {picked.size ? `${picked.size} selected user(s)` : 'every user'} on both tenants and compares them. It writes
-          nothing to either tenant. It runs as a job of its own and the result appears here.
+          Opens {picked.size ? `${picked.size} selected user(s)` : 'every user'} on both tenants and compares them. As each user finishes, supported differences are repaired on the target
+          and that user is checked again. Unresolved findings remain visible for review. Older unresolved checks
+          are picked up automatically when this account is idle. The source is only read.
           <FormControlLabel sx={{ display: 'block', mt: 1 }} control={
             <Checkbox size="small" checked={everything} onChange={(e) => setEverything(e.target.checked)} inputProps={{ 'aria-label': 'check every item' }} />}
             label="Check every item, not a sample (slow on a large user)" />

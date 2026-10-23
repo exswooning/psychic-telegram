@@ -64,10 +64,12 @@ class TenantCheck:
 
     # -- users ----------------------------------------------------------------
     def _users(self, tenant: str) -> dict[str, dict]:
+        import user_profiles
         d = self.auth.directory(tenant)
         rows = self._x(lambda: _pages(lambda t: d.users().list(
             customer="my_customer", maxResults=500, pageToken=t,
-            fields="nextPageToken,users(primaryEmail,name,suspended)"), "users"))
+            projection="full", viewType="admin_view",
+            fields="nextPageToken,users(" + user_profiles.READ_FIELDS + ",suspended)"), "users"))
         return {u["primaryEmail"].lower(): u for u in rows}
 
     def users(self) -> dict:
@@ -87,10 +89,10 @@ class TenantCheck:
             d = []
             if r["status"] != "DONE":
                 d.append(f"not migrated yet ({r['status']})")
-            for k in ("givenName", "familyName"):
-                a, b = (u.get("name") or {}).get(k), (t.get("name") or {}).get(k)
-                if a != b:
-                    d.append(f"{k} {a!r} -> {b!r}")
+            import user_profiles
+            mapping = {email: (r["target_email"] or "").lower() for email, r in pairs.items()}
+            wanted = user_profiles.profile_body(u, t["primaryEmail"], mapping)
+            d += [f"Directory profile differs: {field}" for field in user_profiles.differences(wanted, t)]
             if bool(u.get("suspended")) != bool(t.get("suspended")):
                 d.append(f"suspended {bool(u.get('suspended'))} -> {bool(t.get('suspended'))}")
             if d:
@@ -98,6 +100,7 @@ class TenantCheck:
         mine = {(r["target_email"] or "").lower() for r in pairs.values()}
         only = sorted(set(tgt) - mine)
         notes = [f"{len(only)} account(s) only on the target: " + ", ".join(only[:10])] if only else []
+        notes.append("Profile scope covers supported writable metadata. Photos, aliases, custom schemas, OU/security controls require separate checks; this is not a complete account-fidelity certificate.")
         return _section(len(src), diffs, notes)
 
     # -- groups ---------------------------------------------------------------
@@ -124,7 +127,8 @@ class TenantCheck:
                 if to:
                     want[to.lower()] = m.get("role", "MEMBER")
                 else:
-                    unmapped += 1          # recorded SKIPPED_UNMAPPED_IDENTITY, never invented
+                    unmapped += 1
+                    d.append("source group member has no target identity mapping: " + (m.get("email") or m.get("id") or "unknown"))
             have = {(m.get("email") or "").lower(): m.get("role", "MEMBER")
                     for m in self._x(lambda e=te: gm.read_members("target", e))}
             d += [f"member missing: {m} ({r})" for m, r in sorted(want.items()) if m not in have]
@@ -146,7 +150,7 @@ class TenantCheck:
         rows = self._x(lambda: _pages(lambda t: svc.files().list(
             q="trashed = false", corpora="drive", driveId=drive_id,
             includeItemsFromAllDrives=True, supportsAllDrives=True, pageSize=1000, pageToken=t,
-            fields="nextPageToken,files(id,name,mimeType,md5Checksum)"), "files"))
+            fields="nextPageToken,files(id,name,mimeType,md5Checksum,parents,shortcutDetails)"), "files"))
         return {f["id"]: f for f in rows}
 
     def shared_drives(self) -> dict:
@@ -176,20 +180,25 @@ class TenantCheck:
                 continue
             if t.get("name") != drv.get("name"):
                 d.append(f"name {drv.get('name')!r} -> {t.get('name')!r}")
-            want, members = {}, self._x(lambda: sd._members(sid))
-            for p in members:
-                if p.get("type") == "user" and p.get("emailAddress"):
-                    to = self.db.resolve_identity(p["emailAddress"])
-                    if to:
-                        want[to.lower()] = p.get("role")
-            have = {(p.get("emailAddress") or "").lower(): p.get("role")
-                    for p in self._x(lambda: sd._members(tid, tsvc)) if p.get("type") == "user"}
+            members = self._x(lambda: sd._members(sid))
+            def grant_key(permission, source=False):
+                kind = permission.get("type")
+                value = permission.get("emailAddress") or permission.get("domain") or ""
+                if source and kind in ("user", "group"):
+                    value = (self.db.resolve_identity(value)
+                        or self.db.target_for_source_id(value.lower(), ("group",)) or value)
+                if source and kind == "domain" and value.lower() == s.source_domain.lower():
+                    value = s.target_domain
+                return kind, value.lower()
+            want = {grant_key(p, True): p.get("role") for p in members}
+            have = {grant_key(p): p.get("role")
+                    for p in self._x(lambda: sd._members(tid, tsvc))}
             d += [f"member missing: {m} ({r})" for m, r in sorted(want.items()) if m not in have]
             d += [f"member {m}: role {r} -> {have[m]}" for m, r in sorted(want.items())
                   if m in have and have[m] != r]
             # The target admin made the drive, so Google made it an organizer.
             d += [f"member on the target only: {m}" for m in sorted(set(have) - set(want))
-                  if m != (s.target_admin or "").lower()]
+                  if m != ("user", (s.target_admin or "").lower())]
             # A member reads it (domain-admin access cannot list a drive's files). Picked
             # here, not by sd.reader_for, which records a skip in the ledger: a check writes nothing.
             people = sorted((p for p in members if p.get("type") == "user" and p.get("emailAddress")),
@@ -216,16 +225,31 @@ class TenantCheck:
                         g = tgt_items[to]
                         if g.get("name") != f.get("name"):
                             d.append(f"{f.get('name')}: renamed {g.get('name')!r}")
-                        if f.get("md5Checksum") and g.get("md5Checksum") \
-                                and f["md5Checksum"] != g["md5Checksum"]:
-                            d.append(f"{f.get('name')}: content differs (md5)")
+                        expected_parents = {tid if parent == sid else mapping.get(parent)
+                                            for parent in f.get("parents", [])}
+                        if None in expected_parents or expected_parents != set(g.get("parents", [])):
+                            d.append(f"{f.get('name')}: mapped parent folders differ")
+                        if f.get("mimeType") != g.get("mimeType"):
+                            d.append(f"{f.get('name')}: file type differs")
+                        if f.get("md5Checksum") and f["md5Checksum"] != g.get("md5Checksum"):
+                            d.append(f"{f.get('name')}: content checksum differs or target checksum unavailable")
+                        shortcut = f.get("shortcutDetails", {})
+                        if shortcut and (mapping.get(shortcut.get("targetId"))
+                            or self.db.target_for_source_id(shortcut.get("targetId"))
+                            or shortcut.get("targetId")) != g.get("shortcutDetails", {}).get("targetId"):
+                            d.append(f"{f.get('name')}: shortcut target differs")
                 d += [f"{g.get('name')}: on the target only" for k, g in tgt_items.items()
                       if k not in placed]
             if d:
                 diffs.append({"item": label, "diffs": d})
         if items:
             notes.append(f"{items} item(s) inside them compared one by one")
-        return _section(len(drives), diffs, notes)
+        out = _section(len(drives), diffs, notes)
+        out["coverageComplete"] = not drives
+        out["notes"].append("Shared Drive member roles include users, groups, domains and public grants. Item scope covers mapped IDs, parents, names, types, shortcuts and available binary checksums. Native features, comments and per-item access overrides are not yet certified by this tenant check.")
+        if drives and out["status"] == "IDENTICAL":
+            out["status"] = "INCOMPLETE"
+        return out
 
     # -- rooms ----------------------------------------------------------------
     def _rooms(self, tenant: str) -> list[dict]:
@@ -284,7 +308,7 @@ class TenantCheck:
             progress(f"tenant check: {key}: {s['status']} ({s['matched']} of {s['compared']} "
                      f"identical{'; ' + s['error'] if s['error'] else ''})")
         verdict = max((s["status"] for s in sections.values()), key=RANK.get)
-        return {"source": self.settings.source_domain, "target": self.settings.target_domain,
+        return {"scopeVersion": 2, "source": self.settings.source_domain, "target": self.settings.target_domain,
                 "checkedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "verdict": verdict, "sections": sections}
 

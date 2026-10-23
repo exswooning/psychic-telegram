@@ -15,6 +15,7 @@ domain or key file out from under itself.
 from __future__ import annotations
 
 import os
+import hashlib
 import tempfile
 
 import pytest
@@ -185,6 +186,22 @@ class TestSessions:
         account_id = aa.create_account("sess@example.com", "hunter22222", "Sess User")
         token = aa.create_session(account_id)
         assert aa.resolve_session(token) == account_id
+        with cpdb.ro() as conn:
+            stored = conn.execute("SELECT token FROM sessions").fetchone()["token"]
+        assert stored == hashlib.sha256(token.encode("utf-8")).hexdigest()
+        assert stored != token
+
+    def test_a_legacy_plaintext_session_is_upgraded_on_use(self, db):
+        account_id = aa.create_account("legacy-sess@example.com", "hunter22222", "Legacy")
+        token = "legacy-session-token"
+        expires = "2999-01-01T00:00:00Z"
+        with cpdb.rw() as conn:
+            conn.execute("INSERT INTO sessions (token, account_id, expires_at) VALUES (?,?,?)",
+                         (token, account_id, expires))
+        assert aa.resolve_session(token) == account_id
+        with cpdb.ro() as conn:
+            stored = conn.execute("SELECT token FROM sessions").fetchone()["token"]
+        assert stored == hashlib.sha256(token.encode("utf-8")).hexdigest()
 
     def test_an_unknown_token_resolves_to_none(self, db):
         assert aa.resolve_session("not-a-real-token") is None
@@ -203,7 +220,7 @@ class TestSessions:
         token = aa.create_session(account_id)
         with cpdb.rw() as conn:
             conn.execute("UPDATE sessions SET expires_at='2000-01-01T00:00:00Z' "
-                        "WHERE token=?", (token,))
+                        "WHERE token=?", (hashlib.sha256(token.encode("utf-8")).hexdigest(),))
         assert aa.resolve_session(token) is None
 
     def test_two_accounts_get_different_tokens(self, db):

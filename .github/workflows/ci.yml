@@ -41,6 +41,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install -r requirements-control-plane.txt
           pip install pytest
 
       - name: Tests
@@ -89,3 +90,26 @@ jobs:
         # hard failure once the baseline is clean -- see mypy.ini.
         continue-on-error: true
         run: mypy . 2>&1 | tail -40
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: migration-webui/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci --prefix migration-webui
+
+      - name: Build frontend
+        run: npm run build --prefix migration-webui
+
+      - name: Lint frontend
+        run: npm run lint --prefix migration-webui
+
+      - name: Test frontend
+        run: npm test --prefix migration-webui

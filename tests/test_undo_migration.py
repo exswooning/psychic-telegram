@@ -18,6 +18,7 @@ from __future__ import annotations
 import pytest
 
 from db import MigrationDB
+import undo_migration
 
 
 @pytest.fixture
@@ -46,18 +47,9 @@ def ledger(tmp_path):
 
 
 def reset_scoped(db, rows):
-    """The production reset block, exercised directly."""
-    src = [r["source_email"] for r in rows]
-    tgt = [r["target_email"] for r in rows]
-    ph_s = ",".join("?" * len(src))
-    ph_t = ",".join("?" * len(tgt))
-    with db.write() as conn:
-        conn.execute(f"DELETE FROM id_mapping WHERE source_user IN ({ph_s})", src)
-        conn.execute(f"DELETE FROM audit_log WHERE source_user IN ({ph_s})", src)
-        conn.execute(f"DELETE FROM label_map WHERE source_user IN ({ph_s})", src)
-        conn.execute(f"DELETE FROM upload_ledger WHERE target_user IN ({ph_t})", tgt)
-        conn.execute(f"UPDATE identity_map SET status='PENDING', notes=NULL "
-                     f"WHERE source_email IN ({ph_s})", src)
+    """Exercise the production reset helper, not a copy of its SQL."""
+    undo_migration.reset_ledger_for_users(
+        db, [(r["source_email"], r["target_email"]) for r in rows])
 
 
 def owners(db, table, col="source_user"):
@@ -107,6 +99,22 @@ class TestScopedLedgerReset:
         mapping itself, and the next run would have nothing to migrate."""
         reset_scoped(ledger, ledger.all_identities())
         assert len(ledger.all_identities()) == 3
+
+    def test_a_failed_user_keeps_their_ledger_while_other_users_reset(self, ledger):
+        rows = ledger.all_identities()
+        outcomes = {
+            "alice@c.com": {"failed": 0},
+            "bob@c.com": {"failed": 1},
+            "carol@c.com": {"failed": 0},
+        }
+        reset = undo_migration.reset_completed_users(ledger, rows, outcomes)
+
+        assert {r["source_email"] for r in reset} == {"alice@c.com", "carol@c.com"}
+        assert owners(ledger, "id_mapping") == {"bob@c.com"}
+        assert owners(ledger, "audit_log") == {"bob@c.com"}
+        status = {r["source_email"]: r["status"] for r in ledger.all_identities()}
+        assert status == {"alice@c.com": "PENDING", "bob@c.com": "DONE",
+                          "carol@c.com": "PENDING"}
 
 
 class TestUndoSafety:

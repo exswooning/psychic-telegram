@@ -13,7 +13,10 @@ writes a tenant_configs row, and that row is the protection. Nothing to
 remember, nothing to add, and no window between "a client's domain is in
 this system" and "this system will refuse to empty it".
 
-The sandbox is the exception, and exceptions are declared rather than
+A source domain can never be unprotected. Source roles are retained in an
+append-only registry, even if the account is removed or its role changes.
+
+For target-only domains, the sandbox is the exception, declared rather than
 assumed: an operator revokes protection explicitly, by name, and the
 revocation records who did it and why. That record is what a startup
 banner reads back, so a revocation left in place is visible rather than
@@ -22,12 +25,9 @@ silent.
 The environment variable still works and is unioned in, so a deployment
 that set it loses nothing.
 
-WHAT THIS DOES NOT DO
-    It does not stop the migration touching a source tenant, because the
-    migration cannot: source_scopes() requests readonly scopes only, and
-    Google refuses a write before any code here runs. This guards the
-    seeding and reset tooling, which holds write scopes on purpose and is
-    the only thing in the system that can empty a tenant.
+This is an application guard on destructive tooling. It is separate from
+source API scopes and the source audit monitor; it does not claim to prevent
+changes made outside this application by a Google administrator or root.
 """
 
 from __future__ import annotations
@@ -44,8 +44,17 @@ REVOCATIONS_PATH = os.path.join(HERE, "unprotected_domains.json")
 ENV_NAME = "PROTECTED_DOMAINS"
 
 
+class DomainGuardUnavailable(RuntimeError):
+    """The authoritative tenant list could not be read.
+
+    An empty result is not evidence that a domain is safe: tenant_configs is
+    the protection source for multi-tenant installs. Keep this distinct from
+    a valid empty table so destructive callers can refuse with a useful reason.
+    """
+
+
 def _norm(d: str) -> str:
-    return (d or "").strip().lower()
+    return (d or "").strip().rstrip(".").lower()
 
 
 def env_domains() -> set[str]:
@@ -68,9 +77,9 @@ def configured_domains() -> set[str]:
     """Every domain this deployment knows about, from any account.
 
     Read from tenant_configs (what the setup wizard writes) and from the
-    environment a single-tenant install uses. Best-effort on both: a guard
-    that raises when it cannot read its own list would be a guard that
-    fails open the moment the control plane is unavailable.
+    environment a single-tenant install uses. If the database cannot be
+    read, fail closed: the caller cannot distinguish "no tenants configured"
+    from "the protection list is unavailable".
     """
     out: set[str] = set(env_configured_domains())
     try:
@@ -80,9 +89,73 @@ def configured_domains() -> set[str]:
             for row in conn.execute("SELECT domain FROM tenant_configs"):
                 if row["domain"]:
                     out.add(_norm(row["domain"]))
-    except Exception:      # noqa: BLE001 - absence is not permission
-        logging.getLogger(__name__).debug("ignored an error", exc_info=True)
+    except Exception as exc:      # noqa: BLE001 - absence is not permission
+        logging.getLogger(__name__).warning(
+            "could not read configured tenant domains; destructive domain "
+            "checks will be refused (%s)", type(exc).__name__)
+        raise DomainGuardUnavailable(
+            "tenant domain configuration could not be read") from exc
     return {d for d in out if d}
+
+
+def source_domains() -> set[str]:
+    """Sources across every account, including retained source history.
+
+    A sandbox revocation never overrides a source role. Query on each check
+    so changing account context or an already-running server cannot bypass it.
+    Older installations still enforce live sources before migration 013 runs.
+    """
+    out = {_norm(os.getenv("SOURCE_DOMAIN", ""))}
+    try:
+        import control_plane_db as cpdb
+        with cpdb.ro() as conn:
+            tables = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            queries = ["SELECT domain FROM tenant_configs WHERE side='source'"]
+            if "superseded_configs" in tables:
+                queries.append("SELECT domain FROM superseded_configs WHERE side='source'")
+            if "source_domain_protections" in tables:
+                queries.append("SELECT domain FROM source_domain_protections")
+            for query in queries:
+                out.update(_norm(r[0]) for r in conn.execute(query))
+    except Exception as exc:
+        raise DomainGuardUnavailable(
+            "source domain protection could not be read") from exc
+    return {d for d in out if d}
+
+
+def source_refuse_reason(domain: str, source_domain: str = "") -> str:
+    """Non-revocable source protection; source_domain covers direct CLI settings."""
+    d = _norm(domain)
+    if not d:
+        return "The domain is unknown; destructive actions are refused."
+    if is_government(d):
+        return f"{d} is a government domain. Destructive actions are permanently refused."
+    if d == _norm(source_domain) or d == _norm(os.getenv("SOURCE_DOMAIN", "")):
+        return f"{d} is a source domain. Destructive actions are permanently refused; protection cannot be revoked."
+    try:
+        source = d in source_domains()
+    except DomainGuardUnavailable:
+        return f"Cannot read source domain protection. Destructive actions on {d} are refused."
+    if source:
+        return f"{d} is a source domain. Destructive actions are permanently refused; protection cannot be revoked."
+    return ""
+
+
+def require_not_source(domain: str, source_domain: str = "") -> None:
+    """Raise before constructing write clients or deleting anything."""
+    reason = source_refuse_reason(domain, source_domain)
+    if reason:
+        raise ValueError(reason)
+
+
+def require_wipe_subjects(subjects, source_domain: str = "") -> None:
+    """Preflight the entire set before a multi-user operation can write."""
+    for subject in subjects:
+        value = (subject or "").strip()
+        if value.count("@") != 1 or not all(value.split("@")):
+            raise ValueError("A complete user email is required for destructive actions.")
+        require_not_source(value.rsplit("@", 1)[1], source_domain)
 
 
 def revocations() -> dict[str, dict]:
@@ -98,7 +171,7 @@ def revocations() -> dict[str, dict]:
 def protected_domains() -> set[str]:
     """Configured domains minus revocations, plus the environment list.
 
-    The environment list is ABSOLUTE and a revocation cannot lift it. The
+    Sources and the environment list are ABSOLUTE; revocations cannot lift them. The
     two say different things: a configured domain is protected because this
     deployment happens to know about it, which an operator may legitimately
     override for a sandbox; a domain typed into PROTECTED_DOMAINS is
@@ -107,7 +180,7 @@ def protected_domains() -> set[str]:
     one -- and this is a guard, so where the two disagree it takes the
     safer reading.
     """
-    return (configured_domains() - set(revocations())) | env_domains()
+    return (configured_domains() - set(revocations())) | env_domains() | source_domains()
 
 
 def is_government(domain: str) -> bool:
@@ -118,7 +191,14 @@ def is_government(domain: str) -> bool:
 
 
 def is_protected(domain: str) -> bool:
-    return is_government(domain) or _norm(domain) in protected_domains()
+    if is_government(domain):
+        return True
+    try:
+        return _norm(domain) in protected_domains()
+    except DomainGuardUnavailable:
+        # Boolean-only callers are also safety checks (migration source guards,
+        # preflight and readiness). Uncertainty must never authorize a write.
+        return True
 
 
 def refuse_reason(domain: str, action: str = "Emptying") -> str:
@@ -137,10 +217,18 @@ def refuse_reason(domain: str, action: str = "Emptying") -> str:
     it, on the one screen where the operator most needs to believe it.
     """
     d = _norm(domain)
-    if not is_protected(d):
-        return ""
     if is_government(d):
         return f"{d} is a government domain. {action} it is refused, always."
+    try:
+        protected = d in protected_domains()
+    except DomainGuardUnavailable:
+        return (f"Cannot read configured tenant domains. {action} {d} is "
+                "refused until the control-plane database is available.")
+    source_reason = source_refuse_reason(d)
+    if source_reason:
+        return source_reason
+    if not protected:
+        return ""
     if d in env_domains():
         # No --revoke hint here: a revocation cannot lift this one, and
         # offering a way out that does not work is worse than none.
@@ -163,6 +251,7 @@ def revoke(domain: str, by: str, reason: str) -> dict:
         raise ValueError("domain is required")
     if is_government(d):
         raise ValueError(f"{d} is a government domain; it can never be declared a sandbox")
+    require_not_source(d)
     if not (reason or "").strip():
         raise ValueError("a reason is required to unprotect a domain")
     data = revocations()
@@ -210,7 +299,11 @@ def startup_report() -> str:
     domain someone turned protection OFF for is the one that should be
     impossible to forget.
     """
-    revoked = revocations()
+    try:
+        sources = source_domains()
+    except DomainGuardUnavailable:
+        return "Source protection could not be read; destructive actions are refused."
+    revoked = {d: r for d, r in revocations().items() if d not in sources}
     if not revoked:
         return ""
     lines = ["", "=" * 70,

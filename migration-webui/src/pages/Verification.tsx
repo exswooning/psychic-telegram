@@ -32,11 +32,149 @@ import {
 } from '@mui/icons-material'
 import { useMigrationStore } from '@/store'
 import { statusLabel, statusColor } from '@/utils/formatters'
-import { fetchVerifiedDomains, VerifiedDomain, fetchMe } from '@/api/controlPlane'
+import {
+  fetchVerifiedDomains, VerifiedDomain, fetchMe, fetchHistory, HistoryRun, migrationOf,
+} from '@/api/controlPlane'
+import { fetchJob, JobStatus } from '@/api/client'
 import JobRunner from '@/components/JobRunner'
 import { fetchActions, ActionSpec } from '@/api/client'
 import { VERIFICATION_KEYS } from '@/actionHomes'
 import { tint } from '@/theme'
+import { describeElapsed } from '@/hooks/useRunningJobs'
+import { verificationEstimate } from '@/components/RunningJobDetail.utils'
+
+const runWhen = (value: string | null): string => {
+  if (!value) return '—'
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
+}
+
+const runDuration = (run: HistoryRun): string => {
+  const start = run.startedAt ? Date.parse(run.startedAt) : NaN
+  if (Number.isNaN(start)) return '—'
+  const end = run.finishedAt ? Date.parse(run.finishedAt) : Date.now()
+  return describeElapsed(Math.max(0, Math.round((end - start) / 1000)))
+}
+
+const RunOutcome: React.FC<{ run: HistoryRun }> = ({ run }) => {
+  if (run.running) return <Chip size="small" color="info" label="running" />
+  if (run.rc === null) return <Chip size="small" color="warning" label="result unknown" />
+  if (run.rc === 0) return <Chip size="small" color="success" label="finished; inspect result" />
+  return <Chip size="small" color="error" label={run.rc < 0 ? `stopped (signal ${-run.rc})` : `failed (exit ${run.rc})`} />
+}
+
+/** Verification and its follow-up repair history, plus a live ETA while a
+ *  one-to-one run is still checking its current user. */
+const VerificationRuns: React.FC = () => {
+  const [accountId, setAccountId] = useState<number | undefined>()
+  const [runs, setRuns] = useState<HistoryRun[] | null>(null)
+  const [job, setJob] = useState<JobStatus | null>(null)
+  const [error, setError] = useState('')
+  useEffect(() => {
+    fetchMe().then((me) => setAccountId(migrationOf(me)))
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)))
+  }, [])
+
+  const load = useCallback(() => {
+    if (!accountId) return
+    Promise.all([
+      fetchHistory(accountId),
+      fetchJob(0, String(accountId), 'verify').catch(() => null),
+    ]).then(([history, current]) => {
+      setRuns(history.runs.filter((r) => r.jobName === 'verify' || r.jobName === 'repair'))
+      setJob(current)
+      setError('')
+    }).catch((e) => setError(e instanceof Error ? e.message : String(e)))
+  }, [accountId])
+
+  useEffect(() => {
+    load()
+    const timer = window.setInterval(load, 15000)
+    return () => window.clearInterval(timer)
+  }, [load])
+
+  const estimate = job?.running
+    ? verificationEstimate(job.lines, job.elapsed) : null
+
+  return (
+    <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 3 }}>
+      <CardContent sx={{ p: 3 }}>
+        <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
+          <VerifiedIcon color="action" fontSize="small" />
+          <Typography variant="h6" sx={{ fontWeight: 600, flexGrow: 1 }}>Verification runs</Typography>
+          <IconButton size="small" onClick={load} aria-label="refresh verification runs">
+            <RefreshIcon fontSize="small" />
+          </IconButton>
+        </Stack>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+          Every recorded verification run and its repair follow-up. A successful process exit does not by itself mean the data matched; open the one-to-one results for the verdict.
+        </Typography>
+
+        {error && <Alert severity="warning" sx={{ mb: 2 }}>{error}</Alert>}
+        {job?.running && (
+          <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
+            <Stack direction="row" alignItems="center" flexWrap="wrap" gap={2}>
+              <Chip size="small" color="info" label="Verification in progress" />
+              <Typography variant="body2" color="text.secondary">
+                Elapsed {describeElapsed(job.elapsed)}
+              </Typography>
+              {estimate && (
+                <>
+                  <Typography variant="body2" sx={{ fontVariantNumeric: 'tabular-nums' }}>
+                    {estimate.etaSec != null
+                      ? `ETA about ${describeElapsed(Math.round(estimate.etaSec))}`
+                      : 'ETA calibrating'}
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    {Math.floor(estimate.doneServices)} of {estimate.totalServices} service checks; early projection, recalculated as checks finish
+                  </Typography>
+                </>
+              )}
+              {!estimate && <Typography variant="body2" color="text.secondary">ETA is calibrating until item progress appears.</Typography>}
+            </Stack>
+            {estimate && <LinearProgress variant="determinate" value={estimate.progressPct} sx={{ mt: 1.5, height: 6, borderRadius: 3 }} />}
+          </Paper>
+        )}
+
+        <TableContainer sx={{ maxHeight: 420 }}>
+          <Table size="small" stickyHeader>
+            <TableHead>
+              <TableRow>
+                <TableCell>Run</TableCell>
+                <TableCell>Started</TableCell>
+                <TableCell>Finished</TableCell>
+                <TableCell>Duration</TableCell>
+                <TableCell>Process status</TableCell>
+                <TableCell>Details</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {(runs ?? []).map((run, i) => (
+                <TableRow key={`${run.jobName}-${run.pid}-${run.startedAt}-${i}`} hover>
+                  <TableCell><Chip size="small" variant="outlined" label={run.jobName === 'repair' ? 'repair' : 'verify'} /></TableCell>
+                  <TableCell><Typography variant="body2">{runWhen(run.startedAt)}</Typography></TableCell>
+                  <TableCell><Typography variant="body2">{runWhen(run.finishedAt)}</Typography></TableCell>
+                  <TableCell><Typography variant="body2" sx={{ fontVariantNumeric: 'tabular-nums' }}>{runDuration(run)}</Typography></TableCell>
+                  <TableCell><RunOutcome run={run} /></TableCell>
+                  <TableCell sx={{ maxWidth: 320 }}>
+                    {run.detail && <Tooltip title={run.detail}><Typography variant="body2" color="text.secondary" noWrap>{run.detail}</Typography></Tooltip>}
+                  </TableCell>
+                </TableRow>
+              ))}
+              {(runs ?? []).length === 0 && (
+                <TableRow><TableCell colSpan={6}>
+                  <Typography variant="body2" color="text.secondary" sx={{ py: 2 }}>
+                    {runs ? 'No verification or repair runs recorded yet.' : 'Loading…'}
+                  </Typography>
+                </TableCell></TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </TableContainer>
+      </CardContent>
+    </Card>
+  )
+}
 
 /**
  * Which domain(s) this account has actually finished setting up (via the
@@ -204,6 +342,8 @@ const Verification: React.FC = () => {
       <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>Data integrity checks across all migrated services</Typography>
 
       <VerifiedDomains />
+
+      <VerificationRuns />
 
       <Card elevation={0} sx={{ borderRadius: 2, border: '1px solid', borderColor: 'divider', mb: 3 }}>
         <CardContent sx={{ p: 3, display: 'flex', alignItems: 'center', gap: 3 }}>

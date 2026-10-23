@@ -241,6 +241,8 @@ def wipe_shared_drives(drive_admin) -> int:
 
 def wipe_groups(directory, domain: str) -> int:
     """Every group on the domain, as the admin. Tenant-level, like shared drives."""
+    import domain_guard
+    domain_guard.require_not_source(domain)
     n, token = 0, None
     while True:
         r = directory.groups().list(domain=domain, maxResults=200, pageToken=token).execute()
@@ -265,6 +267,8 @@ def key_clients(key_path: str) -> Callable[[str, str], object]:
     from googleapiclient.discovery import build
 
     def make(service: str, user: str):
+        import domain_guard
+        domain_guard.require_wipe_subjects([user])
         creds = service_account.Credentials.from_service_account_file(
             key_path, scopes=SCOPES[service], subject=user)
         name, ver = _API[service]
@@ -293,6 +297,10 @@ def wipe(users: list[str], clients: Callable[[str, str], object], admin: str,
     """Wipe every service for every user, side by side, then every shared drive.
     Returns counts by service and, for each service, whether it was emptied for every
     user -- which is what decides whether its ledger may be reset."""
+    import domain_guard
+    domain_guard.require_wipe_subjects([admin, *users])
+    if groups_domain:
+        domain_guard.require_not_source(groups_domain)
     totals = {s: 0 for s in services}
     failed: dict[str, list[str]] = {s: [] for s in services}
 

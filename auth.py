@@ -401,8 +401,12 @@ class AuthManager:
     def source_drive(self, user: str, writable: bool = False):
         """Read-only unless the caller says otherwise, like directory(writable=).
         Only link_flip and the contract probe ever do."""
+        if writable:
+            import domain_guard
+            domain_guard.require_not_source(self.settings.source_domain,
+                                            self.settings.source_domain)
         svc = self._service("source", "drive", user)
-        return svc if writable else ReadOnlyDrive(svc)
+        return ReadOnlyDrive(svc)
 
     def target_drive(self, user: str):
         return self._service("target", "drive", user)
@@ -431,17 +435,22 @@ class AuthManager:
         Directory API for either tenant.
 
         `writable` swaps in admin.directory.user (create) in place of the
-        read-only scope. Two deliberate callers pass it: the provision-users
-        command, and migrate's own _ensure_target_accounts (main.py) --
-        which auto-creates a target account it is about to write into,
-        gated by settings.auto_provision_users. No other code path reaches
-        this with writable=True.
+        read-only scope. Target provisioning and user_profiles reconciliation
+        request it explicitly. Migration's automatic profile path is gated by
+        settings.auto_provision_users; source-domain guards run before any
+        write client is constructed.
 
         `groups` adds admin.directory.group, for the group migration. Kept
         separate from `writable` so a run that creates groups cannot also
         create users by accident.
         """
         from config import DIRECTORY_WRITE_SCOPE, GROUP_WRITE_SCOPE
+
+        if writable:
+            import domain_guard
+            domain = (self.settings.source_domain if tenant == "source"
+                      else self.settings.target_domain)
+            domain_guard.require_not_source(domain, self.settings.source_domain)
 
         admin = (self.settings.source_admin if tenant == "source"
                  else self.settings.target_admin)

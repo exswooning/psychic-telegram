@@ -67,9 +67,10 @@ const ProvisionUsers: React.FC = () => {
     }
   }
 
+  const present = status ? status.created + (status.existing ?? 0) : 0
   const pct = status && status.total > 0
-    ? Math.round((status.created / status.total) * 100) : 0
-  const missing = status ? Math.max(0, status.total - status.created) : 0
+    ? Math.min(100, Math.round((present / status.total) * 100)) : 0
+  const missing = status ? Math.max(0, status.total - present) : 0
 
   return (
     <Paper variant="outlined" sx={{ borderRadius: 2, p: 2 }}>
@@ -82,9 +83,9 @@ const ProvisionUsers: React.FC = () => {
       </Stack>
 
       <Typography variant="caption" color="text.secondary">
-        Creates any account in <code>identity_map</code> that is missing on
-        the chosen tenant. Never touches an account that already exists —
-        same guarantee as running <code>provision-users</code> by hand.
+        Creates mapped target accounts using source names and profile details.
+        Reconciles supported profile fields on existing target accounts too.
+        Source accounts are never modified.
       </Typography>
 
       <Stack direction="row" spacing={2} sx={{ mt: 2, alignItems: 'center', flexWrap: 'wrap', gap: 2 }}>
@@ -99,7 +100,7 @@ const ProvisionUsers: React.FC = () => {
           variant="contained" disabled={status?.running}
           onClick={() => setAsk(true)}
         >
-          {status?.running ? 'Provisioning…' : 'Provision missing users'}
+          {status?.running ? 'Provisioning…' : 'Provision users and profiles'}
         </Button>
       </Stack>
 
@@ -107,7 +108,7 @@ const ProvisionUsers: React.FC = () => {
         <Box sx={{ mt: 2 }}>
           <Stack direction="row" justifyContent="space-between" sx={{ mb: 0.5 }}>
             <Typography variant="caption" color="text.secondary">
-              {status.created} / {status.total} account(s) present
+              {present} / {status.total} account(s) present
               {status.failed > 0 && ` · ${status.failed} failed`}
             </Typography>
             <Typography variant="caption" sx={{ fontVariantNumeric: 'tabular-nums' }}>{pct}%</Typography>
@@ -121,7 +122,7 @@ const ProvisionUsers: React.FC = () => {
               {missing} account(s) still missing after this run — check the log below.
             </Alert>
           )}
-          {!status.running && missing === 0 && status.created === status.total && (
+          {!status.running && missing === 0 && present >= status.total && (
             <Alert severity="success" sx={{ mt: 1 }}>
               All {status.total} account(s) present on {tenant}.
             </Alert>
@@ -146,7 +147,8 @@ const ProvisionUsers: React.FC = () => {
           <>
             Creates real, licensed accounts for every address in{' '}
             <code>identity_map</code> not already on <code>{tenant}</code>.
-            Passwords are generated, shown once in the log, and never stored —
+            For the target, copies source names and supported metadata, including
+            correcting existing profiles. Passwords are generated only for new accounts —
             the migration itself never needs them, it reaches these accounts
             through domain-wide delegation.
             <Stack direction="row" spacing={1} sx={{ mt: 1.5 }}>

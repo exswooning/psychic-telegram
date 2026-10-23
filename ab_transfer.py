@@ -155,8 +155,10 @@ def one_mode(mode: str, settings: Settings, auth: AuthManager,
 
     print(f"\n=== {mode}: emptying the target ({len(users_src)} user(s)) ===",
           flush=True)
-    run([PY, "reset_target.py", "--confirm-domain", settings.target_domain,
-         "--yes", *scoped], env)
+    reset_rc, _ = run([PY, "reset_target.py", "--confirm-domain", settings.target_domain,
+                       "--yes", *scoped], env)
+    if reset_rc != 0:
+        raise RuntimeError(f"target reset refused/failed (exit {reset_rc}); ledger is unchanged and migration was not launched")
 
     # Scoped to the users under test, never the whole table. On a live tenant
     # the unscoped DELETE threw away 1.27M audit rows -- the record of every

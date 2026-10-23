@@ -20,6 +20,7 @@ import {
 } from '@/api/controlPlane'
 import type { MailMode, TransferMode } from '@/api/controlPlane'
 import SourceGuardPanel from '@/components/SourceGuardPanel'
+import UserProfilesPanel from '@/components/UserProfilesPanel'
 import ReasonCodeDialog from '@/components/ReasonCodeDialog'
 import RunReports from '@/components/RunReports'
 import QuickVerification from '@/components/QuickVerification'
@@ -74,9 +75,8 @@ export const MigrationDetail: React.FC = () => {
      "Start a new migration" on the list page opens the setup wizard for a
      new tenant pair, which is a different thing entirely. */
   const [askFull, setAskFull] = useState(false)
-  // Split by default: the tool moves the mail that needs its links rewritten and
-  // Google's DMS moves the rest, which is most of a mailbox. See the dialog.
-  const [mailBy, setMailBy] = useState<MailMode>('split')
+  // DMS imports a mailbox; overlapping rewritten copies still need qualification.
+  const [mailBy, setMailBy] = useState<MailMode>('engine')
   const [moreOpen, setMoreOpen] = useState(false)
   // Start Google's DMS on its own (api_server._start_dms); on unless switched off.
   const [dmsAuto, setDmsAuto] = useState(true)
@@ -259,6 +259,7 @@ export const MigrationDetail: React.FC = () => {
               first thing anyone migrating a few users needs, and ?run=full (the Migrate...
               button on the Migrations list) lands here, highlighted. */}
           <SourceGuardPanel accountId={Number(accountId) || undefined} sourceDomain={d.sourceDomain} />
+          <UserProfilesPanel accountId={id} busy={d.writing ?? d.running} />
 
           <Paper variant="outlined" id="migrate-card" data-testid="migrate-card"
                  data-highlighted={wantCard ? 'true' : 'false'}
@@ -907,14 +908,8 @@ export const MigrationDetail: React.FC = () => {
               </Button>
             </Box>
             <Collapse in={moreOpen}>
-            {/* Mail was 349,560 of 593,816 items in the last real run -- 58.9% -- and
-                it is the only service behind a ceiling that cannot be raised (3
-                sustained writes/sec/account, which Google states is not
-                adjustable). Only a fortieth or so of it carries a Drive link,
-                and those are the messages that need THIS tool: Google moves the
-                bytes and never rewrites anything. So the default hands the tool
-                the mail with links and the DMS the rest. Order matters -- the
-                DMS must run after -- which is why this says so in words. */}
+            {/* DMS imports the mailbox rather than the engine's deferred-ID list.
+                Keep the tracked engine default until overlap is qualified. */}
             <Box sx={{ mt: 2 }}>
               <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 0.5 }}>
                 Who moves the mail?
@@ -934,14 +929,13 @@ export const MigrationDetail: React.FC = () => {
                   data-testid="mail-by-split"
                   label={
                     <Typography variant="body2">
-                      <strong>Split (recommended)</strong> — Drive first, for every
-                      user. Then this tool moves only the mail that carries a Drive
-                      link and rewrites those links to the copies on the target.
-                      Google&apos;s Data Migration Service then moves all the rest.
-                      It starts on its own after this run finishes cleanly, and
-                      only asks the source admin to approve a connection — nothing
-                      moves until they do. Until it has, most of the mail is not
-                      on the target, and the run will say so.
+                      <strong>Split (experimental)</strong> — Drive first, then this
+                      tool copies mail whose mapped Drive links change. Google&apos;s
+                      Data Migration Service imports the mailbox afterward, including
+                      mail the tool already copied. Completion requires checking
+                      destination content, labels and overlapping messages. Unresolved
+                      links block a clean handoff. The source admin must authorize
+                      the connection before Google imports mail.
                     </Typography>
                   } />
                 <FormControlLabel

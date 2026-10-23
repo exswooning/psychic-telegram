@@ -215,7 +215,7 @@ class TasksMigrator:
     def _patch_existing(self, src_id: str, target_id: str, task: dict,
                         tgt_list: str) -> None:
         """Carry a source-side edit onto the copy already made."""
-        body = {f: task[f] for f in TASK_FIELDS if task.get(f)}
+        body = {f: task[f] for f in TASK_FIELDS if f in task and task[f] is not None}
         if not body:
             self.stats["skipped"] += 1
             return
@@ -252,11 +252,10 @@ class TasksMigrator:
             self.stats["tasks"] += 1
             return None
 
-        body = {f: task[f] for f in TASK_FIELDS if task.get(f)}
-        if not body.get("title"):
-            # The API rejects a task with no title, and Tasks itself allows
-            # creating one. Give it something rather than dropping the row.
-            body["title"] = "(untitled)"
+        body = {f: task[f] for f in TASK_FIELDS if f in task and task[f] is not None}
+        # Preserve an empty source title rather than inventing visible text.
+        # A refusal is recorded as FAILED, never disguised as a faithful copy.
+        body.setdefault("title", "")
         kw = {"tasklist": tgt_list, "body": body}
         if parent:
             kw["parent"] = parent

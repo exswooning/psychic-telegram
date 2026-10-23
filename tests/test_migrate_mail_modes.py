@@ -113,18 +113,18 @@ class TestTheEndpoint:
         r, seen = _start(cp, monkeypatch, services=["all"], mail_mode="engine")
         assert "--ordered" not in seen["argv"]
 
-    def test_naming_no_mode_on_a_whole_tenant_run_moves_only_the_mail_with_links(self, cp, monkeypatch):
+    def test_naming_no_mode_on_a_whole_tenant_run_uses_the_engine(self, cp, monkeypatch):
         r, seen = _start(cp, monkeypatch, services=["all"])
         assert r.status_code == 200 and r.json()["ok"] is True, r.text
         assert "--ordered" in seen["argv"]
-        assert seen["env"]["MAIL_ONLY_WITH_LINKS"] == "true" and seen["env"]["REWRITE_DRIVE_LINKS"] == "true"
-        assert seen["then"] == ["repair", "dms"]  # repaired first, then the rest handed to the DMS
+        assert seen["env"] is None
+        assert "dms" not in seen["then"]
 
     def test_the_mode_that_was_decided_is_the_one_in_the_audit_record(self, cp, monkeypatch):
         _start(cp, monkeypatch, services=["all"])
         with cpdb.ro() as c:
             row = c.execute("SELECT params_json FROM operator_actions_log WHERE action='migrate.start' ORDER BY id DESC LIMIT 1").fetchone()
-        assert '"mail_mode": "split"' in row[0]
+        assert '"mail_mode": "engine"' in row[0]
 
     @pytest.mark.parametrize("body", [
         {"services": ["all"], "users": ["a@x.com"]},        # the DMS is never started for a few users

@@ -500,10 +500,11 @@ class Cycle:
         then a full migration. The next cycle includes them like everyone else."""
         from db import bulk_seed_identities
         import main as engine
-        import provision
         tgt = f"{src.split('@')[0]}@{self.settings.target_domain}".lower()
         try:
-            result = provision.ensure_users(self.auth.directory("target", writable=True), [tgt])
+            import user_profiles
+            result = user_profiles.sync_profiles(self.auth, self.db, self.settings,
+                [(src, tgt)], apply=True, create_missing=True, progress=log.info)
             if result.get("failed"):
                 raise RuntimeError(f"could not create {tgt}: {result['failed'][0]}")
             bulk_seed_identities(self.db, [(src, tgt)])

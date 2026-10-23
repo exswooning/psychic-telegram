@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 # ======================================================================
 # MIME constants
 # ======================================================================
-TRANSFER_MODES = ("download_upload", "server_side", "link_flip", "move")
+TRANSFER_MODES = ("download_upload", "server_side", "link_flip", "move", "adaptive")
 # The modes that go through a staging shared drive on the target. `move` moves the
 # file itself there (it leaves the source: no copy, no 750 GB a day, the same id,
 # revisions and comments), which needs the source admin's "Distributing content
@@ -54,9 +54,9 @@ FOLDER_MIME = "application/vnd.google-apps.folder"
 # skipped total, the migrations page -- must treat this one apart, or a split
 # run that never reached the DMS reports mail parity as perfect.
 DEFERRED_TO_DMS = "SKIPPED_NO_DRIVE_LINK"
-# The same mail once Google's import has reported itself complete: neither owed
-# (DEFERRED_TO_DMS) nor declined (SKIPPED_*). Written by dms_migrate the moment a
-# status read says "complete", so "N messages are waiting for the DMS" clears.
+# Deferred mail becomes delivered only after fresh destination content/label
+# checks with an exact mapped receipt. DMS completion counters alone never
+# establish per-item delivery.
 DELIVERED_BY_DMS = "DELIVERED_BY_DMS"
 # A share with a colleague whose TARGET account does not exist yet -- not in this
 # batch of users, or deleted. Owed, not declined: repair.reapply_owed_grants grants
@@ -257,7 +257,9 @@ def government_exact_copy(account_id) -> bool:
 def source_scopes(settings: "Settings") -> list[str]:
     """Scopes the source service account actually needs for this run."""
     scopes = list(SOURCE_SCOPES)
-    if settings.transfer_mode in STAGING_MODES:
+    if settings.transfer_mode in STAGING_MODES or (settings.transfer_mode == "adaptive"
+            and not settings.source_read_only
+            and (settings.source_domain.lower(), settings.target_domain.lower()) == ("s.sarafgloabalexim.com", "t.sarafgloabalexim.com")):
         # files.copy is a create call, so read-only will not do. This is the
         # trade the mode asks for, and it is why it is not the default.
         # link_flip additionally rewrites permissions on the source, and move
@@ -768,6 +770,15 @@ class Settings:
     # items of each service against both tenants -- every item of a real user would
     # cost more API calls than the migration did. It writes nothing to either tenant.
     verify_on_complete: bool = field(default_factory=lambda: _env_bool("VERIFY_ON_COMPLETE", True))
+    migration_checks_enabled: bool = field(default_factory=lambda: _env_bool("MIGRATION_CHECKS", True))
+    first_pass_acceptance: bool = field(default_factory=lambda: _env_bool("FIRST_PASS_ACCEPTANCE", True))
+    acceptance_repair_rounds: int = field(default_factory=lambda: min(2, max(0, int(os.getenv("ACCEPTANCE_REPAIR_ROUNDS", "1")))))
+    verification_cache_enabled: bool = field(default_factory=lambda: _env_bool("VERIFICATION_CACHE", True))
+    adaptive_sandbox_only: bool = field(default_factory=lambda: _env_bool("ADAPTIVE_SANDBOX_ONLY", True))
+    adaptive_require_native_copy: bool = field(default_factory=lambda: _env_bool("ADAPTIVE_REQUIRE_NATIVE_COPY", True))
+    adaptive_binary_server_threshold: int = field(default_factory=lambda: max(0, int(os.getenv("ADAPTIVE_BINARY_SERVER_THRESHOLD", "0"))))
+
+    auto_repair_on_verification: bool = field(default_factory=lambda: _env_bool("AUTO_REPAIR_ON_VERIFICATION", True))
     verify_sample_per_service: int = field(
         default_factory=lambda: max(1, int(os.environ.get("VERIFY_SAMPLE_PER_SERVICE") or 25)))
     # Same trigger and the same off-thread queue as verify_on_complete above, but an
@@ -951,6 +962,9 @@ class Settings:
     def __post_init__(self) -> None:
         if self.account_id is not None:
             self._load_account_tenant_config()
+        if self.transfer_mode == "adaptive" and self.adaptive_sandbox_only and (
+                self.source_domain.lower(), self.target_domain.lower()) != ("s.sarafgloabalexim.com", "t.sarafgloabalexim.com"):
+            raise ValueError("Adaptive transfer is restricted to the explicit s. to t. sandbox pair")
         # A government source is only ever READ, and Google enforces it: no Drive write
         # scope is asked for (server-side copy needs one), so every file goes by
         # download_upload whatever a launch asked for. Bitport's own guard

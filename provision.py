@@ -15,10 +15,10 @@ IdP and wants a gap in identity_map to fail loudly instead.
 
 Rules this module holds to:
 
-* **Only creates. Never updates, never deletes.** An address that already
-  exists is left exactly as it is and reported as skipped -- overwriting a
-  real account's name or password because a CSV disagreed with it is not a
-  recoverable mistake.
+* This low-level helper only creates. Migration callers supply source
+  profiles and require them; user_profiles reconciles supported metadata
+  on existing mapped targets with a fresh read-back. Sandbox generation
+  may still explicitly use generated names. Passwords are never updated.
 * **Only addresses already in `identity_map`.** The set is bounded by what
   the migration was told about, not by anything this module infers.
 * **`changePasswordAtNextLogin=False`.** This is not a convenience: a pending
@@ -67,12 +67,13 @@ def user_exists(directory, email: str) -> bool:
         directory.users().get(userKey=email, projection="basic").execute()
         return True
     except HttpError as exc:
-        if exc.resp.status in (403, 404):
+        if exc.resp.status == 404:
             return False
         raise
 
 
-def ensure_users(directory, emails: list[str], dry_run: bool = False) -> dict:
+def ensure_users(directory, emails: list[str], dry_run: bool = False, *,
+                 profiles: dict | None = None, require_profiles: bool = False) -> dict:
     """
     Create any of `emails` that do not exist yet.
 
@@ -82,6 +83,10 @@ def ensure_users(directory, emails: list[str], dry_run: bool = False) -> dict:
     result = {"created": [], "existing": [], "failed": []}
 
     for email in emails:
+        profile = (profiles or {}).get(email)
+        if require_profiles and (not profile or "name" not in profile):
+            result["failed"].append((email, "Source profile unavailable; refusing a generated name"))
+            continue
         try:
             if user_exists(directory, email):
                 result["existing"].append(email)
@@ -95,7 +100,7 @@ def ensure_users(directory, emails: list[str], dry_run: bool = False) -> dict:
             result["created"].append((email, "(dry run — not created)"))
             continue
 
-        given, family = _split_name(email)
+        given, family = _split_name(email) if profile is None else (None, None)
         password = generate_password()
         body = {
             "primaryEmail": email,
@@ -105,6 +110,10 @@ def ensure_users(directory, emails: list[str], dry_run: bool = False) -> dict:
             # domain-wide delegation for this account.
             "changePasswordAtNextLogin": False,
         }
+        if profile is not None:
+            from copy import deepcopy
+            from user_profiles import PROFILE_FIELDS
+            body.update({k: deepcopy(v) for k, v in profile.items() if k in PROFILE_FIELDS})
         try:
             directory.users().insert(body=body).execute()
             result["created"].append((email, password))
@@ -344,9 +353,13 @@ def report(result: dict, dry_run: bool = False) -> None:
                   "reaches these accounts through domain-wide delegation and "
                   "never needs them again.")
     if result["existing"]:
-        print(f"\nAlready existed, left untouched ({len(result['existing'])}):")
+        label = "Existing accounts (profile results below)" if "profiles" in result else "Already existed, left untouched"
+        print(f"\n{label} ({len(result['existing'])}):")
         for email in result["existing"]:
             print(f"    {email}")
+    for profile in result.get("profiles", []):
+        print(f"    profile {profile['source']} -> {profile['target']}: {profile['status']} "
+              f"({', '.join(profile['changedFields']) or 'no differences'})")
     if result["failed"]:
         print(f"\nFailed ({len(result['failed'])}):")
         for email, err in result["failed"]:

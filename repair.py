@@ -56,13 +56,14 @@ ORGANIZER_ROLE = "organizerOnNonTeamDriveNotSupported"
 # Google's own backend, briefly. "Authentication backend unavailable" behind
 # a 503 is the one thing in this list a retry actually fixes.
 BACKEND_5XX = "backendError"
+CONTACT_DUPLICATE_NAMES = "more than one person.names per source"
 
 # Whether re-running could change the outcome. The point of the split is
 # that "32 failures" and "1 worth retrying, 31 that cannot move" are very
 # different instructions, and only the second one is actionable.
 RETRYABLE_FAMILIES = {"acl_quota", "drive_scope_403", "auth_session_invalid",
                       "gmail_invalid_label", "transient_backend", "drive_stragglers",
-                      "shared_drives", "owed_shares"}
+                      "shared_drives", "owed_shares", "contacts_duplicate_names"}
 
 # A shared drive whose create failed and that still has no mapping -- the whole
 # drive (members and contents) is missing on the target. Tenant-level, so NOT
@@ -120,6 +121,13 @@ def survey(db) -> dict:
                                   (f"%{SESSION_INVALID}%",)),
         "acl_organizer_role": n("error_message LIKE ?", (f"%{ORGANIZER_ROLE}%",)),
         "transient_backend": n("error_message LIKE ?", (f"%{BACKEND_5XX}%",)),
+        # People rejects a contact with multiple name values after source
+        # metadata is stripped. The contact is guaranteed not to have been
+        # created, so this exact validation error is safe to retry after the
+        # write body is normalized.
+        "contacts_duplicate_names": n(
+            "item_type='contact' AND error_message LIKE ?",
+            (f"%{CONTACT_DUPLICATE_NAMES}%",)),
         # NOT the two patterns above: those are file-type failures too, and already
         # counted under their own, more specific family -- counting them again here
         # would inflate triage()'s "retryable" total by double-counting the same rows.
@@ -131,6 +139,258 @@ def survey(db) -> dict:
         # run). Nothing else counts it, and only a Drive walk over the file finishes it.
         "owed_shares": len(pending_share_users(db)),
     }
+
+
+def retry_failed_contact_names(auth, db, settings, apply: bool = False,
+                               users: set[str] | None = None) -> dict:
+    """Retry only contacts rejected for multiple names on one People source.
+
+    Google returned a permanent 400 before creating these contacts, so they
+    cannot already exist from the failed request. The normalized contact
+    writer keeps the preferred structured name and carries alternate names
+    into nicknames. Other contact failures remain untouched for review.
+    """
+    where_user = ""
+    params: list = [f"%{CONTACT_DUPLICATE_NAMES}%"]
+    if users:
+        marks = ",".join("?" for _ in users)
+        where_user = f" AND a.source_user IN ({marks})"
+        params.extend(sorted(users))
+    rows = db.conn.execute(
+        "SELECT a.source_user, a.item_id FROM audit_log a "
+        "WHERE a.status='FAILED' AND a.item_type='contact' "
+        "AND a.error_message LIKE ?" + where_user +
+        " AND NOT EXISTS (SELECT 1 FROM id_mapping m WHERE m.source_user=a.source_user "
+        "AND m.source_id=a.item_id AND m.type='contact') "
+        "ORDER BY a.source_user, a.item_id", tuple(params)).fetchall()
+    out = {"candidates": len(rows), "retried": 0, "repaired": 0,
+           "remaining": 0, "errors": []}
+    if not apply or not rows:
+        return out
+
+    targets = dict(db.conn.execute(
+        "SELECT source_email, target_email FROM identity_map").fetchall())
+    migrators = {}
+    group_maps = {}
+    import contacts_engine
+    for row in rows:
+        source_user, source_id = row["source_user"], row["item_id"]
+        target_user = targets.get(source_user)
+        if not target_user:
+            out["remaining"] += 1
+            out["errors"].append(f"{source_user}: no target account mapping")
+            continue
+        try:
+            migrator = migrators.get(source_user)
+            if migrator is None:
+                migrator = contacts_engine.ContactsMigrator(
+                    auth, db, settings, source_user, target_user)
+                migrators[source_user] = migrator
+                group_maps[source_user] = migrator._migrate_groups()
+            person = migrator._retry(lambda rid=source_id, m=migrator: m.src.people().get(
+                resourceName=rid, personFields=contacts_engine.PERSON_FIELDS).execute(),
+                label="repair.contacts.get")
+            migrator._migrate_contact(person, group_maps[source_user])
+            out["retried"] += 1
+            if db.get_target_id(source_user, source_id, "contact"):
+                out["repaired"] += 1
+            else:
+                out["remaining"] += 1
+        except Exception as exc:      # noqa: BLE001 - one failed contact must not stop the repair
+            out["remaining"] += 1
+            out["errors"].append(f"{source_user} {source_id}: {str(exc)[:160]}")
+    return out
+
+
+def repair_verified_missing_mail(auth, db, settings, report: dict, apply: bool = False) -> dict:
+    """Copy freshly inventoried, unmapped source messages to their mapped target.
+
+    Never run a mailbox-wide redo or change source permissions/settings. Drafts
+    remain explicit findings: replaying a draft create lacks safe deduplication.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    from domain_guard import require_not_source
+    from gmail_engine import GmailMigrator
+    from verify_sample import _stop_check
+
+    out = {"candidates": 0, "attempted": 0, "mapped": 0, "errors": []}
+    for user, services in (report.get("users") or {}).items():
+        ids = sorted({i["id"] for i in (services.get("gmail") or {}).get("notCopied", [])
+                      if (i.get("status") == "UNMAPPED_SOURCE" or "Missing Message-ID" in i.get("error", ""))
+                      and i.get("type") == "message" and i.get("id")})
+        if not ids:
+            continue
+        out["candidates"] += len(ids)
+        try:
+            target = db.resolve_identity(user)
+            if (user.rsplit("@", 1)[-1].lower() != settings.source_domain.lower()
+                    or not target or target.rsplit("@", 1)[-1].lower() != settings.target_domain.lower()):
+                raise ValueError("Repair identity does not match the configured source and target domains")
+            require_not_source(target.rsplit("@", 1)[-1], settings.source_domain)
+            if not getattr(settings, "source_read_only", False):
+                raise ValueError("Missing-mail recovery requires read-only source credentials")
+            if not apply or settings.dry_run:
+                continue
+            st = copy.copy(settings)
+            st.sample_limit = None
+            st.mail_only_with_links = False
+            st.redo_unrewritten_links = False
+            st.migrate_gmail_settings = False
+            gm = GmailMigrator(auth, db, st, user, target)
+            gm.recover_unmapped = True
+            gm.sync_labels()
+            workers = max(1, min(8, int(getattr(st, "mail_workers", 1) or 1)))
+            def one(mid):
+                _stop_check()
+                if not db.get_target_id(user, mid, "message"):
+                    gm._migrate_one_message({"id": mid})
+                return bool(db.get_target_id(user, mid, "message"))
+            # Bound submissions as well as concurrency; raw attachments stay
+            # inside workers, never queued for the entire mailbox.
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="mail-recovery") as pool:
+                for start in range(0, len(ids), workers * 2):
+                    _stop_check()
+                    for mapped in pool.map(one, ids[start:start + workers * 2]):
+                        out["attempted"] += 1
+                        out["mapped"] += int(mapped)
+            failed = gm.stats.get("failed", 0)
+            if failed:
+                out["errors"].append(f"{user}: {failed} messages could not be copied; inspect item audit records")
+        except Exception as exc:
+            out["errors"].append(f"{user}: {str(exc)[:300]}")
+    return out
+
+
+def repair_verified_gmail_labels(auth, db, settings, report: dict,
+                                 apply: bool = False) -> dict:
+    """Align labels on verified, mapped messages whose only difference is labels.
+
+    The message body and identity were already compared. This repairs the
+    narrow, reversible label association on those exact mapped messages and
+    preserves target-only labels that are not owned by this migration's label
+    map. SENT/DRAFT/CHAT are left to Gmail because the API does not permit
+    applying or removing them like ordinary labels.
+    """
+    from gmail_engine import GmailMigrator, SYSTEM_LABELS
+
+    out = {"candidates": 0, "inspected": 0, "changed": 0,
+           "labelsAdded": 0, "labelsRemoved": 0, "errors": []}
+    migrators = {}
+    immutable = {"SENT", "DRAFT", "CHAT"}
+    for source_user, services in (report.get("users") or {}).items():
+        gmail = services.get("gmail") or {}
+        for item in gmail.get("differences") or []:
+            diffs = item.get("diffs") or []
+            if not diffs or not all(
+                    d.startswith("labels missing on the target:")
+                    or d.startswith("labels added on the target:")
+                    or d == "unread state differs" for d in diffs):
+                continue
+            source_id, target_id = item.get("source"), item.get("target")
+            if not source_id or not target_id:
+                continue
+            out["candidates"] += 1
+            if db.get_target_id(source_user, source_id, "message") != target_id:
+                out["errors"].append(f"{source_user} {source_id}: verification mapping changed; skipped")
+                continue
+            if not apply:
+                continue
+            try:
+                gm = migrators.get(source_user)
+                if gm is None:
+                    target_user = db.resolve_identity(source_user)
+                    if not target_user:
+                        raise RuntimeError("no target account mapping")
+                    gm = GmailMigrator(auth, db, settings, source_user, target_user)
+                    gm.sync_labels()
+                    migrators[source_user] = gm
+                source = gm._retry(lambda: gm.src.users().messages().get(
+                    userId="me", id=source_id, format="metadata").execute(),
+                    label="repair.gmail.source-labels")
+                target = gm._retry(lambda: gm.tgt.users().messages().get(
+                    userId="me", id=target_id, format="metadata").execute(),
+                    label="repair.gmail.target-labels")
+                desired = set(gm._map_label_ids(source.get("labelIds") or []))
+                current = set(target.get("labelIds") or [])
+                user_labels = set(db.get_label_map(source_user).values())
+                manageable = (user_labels | (desired | current) & SYSTEM_LABELS) - immutable
+                add = sorted((desired - current) & manageable)
+                remove = sorted((current - desired) & manageable)
+                out["inspected"] += 1
+                if not add and not remove:
+                    continue
+                if settings.dry_run:
+                    continue
+                gm.limiter.acquire()
+                gm._retry(lambda ids=[target_id], a=add, r=remove:
+                          gm.tgt.users().messages().batchModify(
+                              userId="me", body={"ids": ids,
+                                                "addLabelIds": a,
+                                                "removeLabelIds": r}).execute(),
+                          label="repair.gmail.message-labels")
+                after = gm._retry(lambda: gm.tgt.users().messages().get(
+                    userId="me", id=target_id, format="metadata").execute(), label="repair.gmail.labels-readback")
+                fresh_source = gm._retry(lambda: gm.src.users().messages().get(
+                    userId="me", id=source_id, format="metadata").execute(), label="repair.gmail.source-labels-readback")
+                if (set(after.get("labelIds") or []) & manageable) != (desired & manageable):
+                    raise RuntimeError("Target labels did not match after repair")
+                if set(fresh_source.get("labelIds") or []) != set(source.get("labelIds") or []):
+                    raise RuntimeError("Source labels changed during repair; a fresh check is required")
+                from finding_repairs import record
+                record(db, source_user, "gmail-labels", source_id, "VERIFIED", {"target": target_id,
+                    "scope": "labels only; body verified by preceding full comparison"})
+                out["changed"] += 1
+                out["labelsAdded"] += len(add)
+                out["labelsRemoved"] += len(remove)
+            except Exception as exc:      # noqa: BLE001 - keep repairing other mapped messages
+                out["errors"].append(f"{source_user} {source_id}: {str(exc)[:160]}")
+    return out
+
+
+def repair_verified_native_links(auth, db, settings, report: dict, apply: bool = False) -> dict:
+    """Rewrite known migrated IDs inside exact mapped native TARGET documents.
+
+    Only a link-only verification finding is eligible. Content discrepancies,
+    ambiguous duplicates and missing files are not an invitation to overwrite a
+    document. Recheck the mapping, type and ownership role immediately before use.
+    """
+    from drive_engine import _NATIVE_KIND, _native_project_limiter
+    import link_rewrite
+    out = {"candidates": 0, "inspected": 0, "changed": 0, "requests": 0, "errors": []}
+    for user, services in (report.get("users") or {}).items():
+        for item in (services.get("drive") or {}).get("differences") or []:
+            diffs = item.get("diffs") or []
+            if not diffs or not all(d.startswith("links inside still point at the source (") for d in diffs):
+                continue
+            sid, tid = item.get("source"), item.get("target")
+            if not sid or not tid or sid == tid:
+                continue
+            out["candidates"] += 1
+            if db.get_target_id(user, sid, "file") != tid:
+                out["errors"].append(f"{user} {sid}: verification mapping changed; skipped")
+                continue
+            if not apply or settings.dry_run:
+                continue
+            try:
+                target_user = db.resolve_identity(user)
+                if not target_user:
+                    raise RuntimeError("no target account mapping")
+                import domain_guard
+                domain_guard.require_not_source(target_user.rsplit("@", 1)[-1],
+                    getattr(settings, "source_domain", user.rsplit("@", 1)[-1]))
+                source = auth.source_drive(user).files().get(fileId=sid, fields="id,mimeType", supportsAllDrives=True).execute()
+                target = auth.target_drive(target_user).files().get(fileId=tid, fields="id,mimeType,trashed", supportsAllDrives=True).execute()
+                kind = _NATIVE_KIND.get(source.get("mimeType"))
+                if not kind or target.get("trashed") or source.get("mimeType") != target.get("mimeType"):
+                    raise RuntimeError("native type changed or target is unavailable")
+                out["inspected"] += 1
+                count = link_rewrite.rewrite_native(kind, auth.api("target", kind, target_user), tid,
+                    db.target_for_source_id, pace=lambda op: _native_project_limiter(kind, op).acquire(), apply=True)
+                out["changed"] += int(count > 0)
+                out["requests"] += count
+            except Exception as exc:
+                out["errors"].append(f"{user} {sid}: {str(exc)[:160]}")
+    return out
 
 
 def triage(db) -> dict:
@@ -597,7 +857,7 @@ def retry_failed_shared_drives(auth, db, settings, apply: bool = False) -> int:
 
 
 def fix_modified_times(auth, db, settings, apply: bool = False,
-                       workers: int = 8) -> dict:
+                       workers: int = 8, users: set[str] | None = None) -> dict:
     """Put back the modifiedTime of every migrated Drive item whose copy carries
     another -- a drift no failure row records, so it has to be looked for.
 
@@ -620,7 +880,8 @@ def fix_modified_times(auth, db, settings, apply: bool = False,
     # stopped run's users are exactly the ones whose end-of-pass time check never ran.
     due = db.users_due_mtime_check()
     pairs = [(r["source_email"], r["target_email"]) for r in db.all_identities()
-             if r["entity_type"] == "user" and r["source_email"] in due]
+             if r["entity_type"] == "user" and
+             (r["source_email"] in users if users is not None else r["source_email"] in due)]
     out["users"] = len(pairs)
 
     def one(pair) -> dict:
@@ -806,6 +1067,12 @@ def run_all(db, auth, settings, apply: bool = False,
     if not out["survey"].get("total"):
         return out
 
+    try:
+        out["contacts_retried"] = retry_failed_contact_names(
+            auth, db, settings, apply=apply)
+    except Exception as exc:      # noqa: BLE001
+        out["errors"].append(f"contact retry: {str(exc)[:160]}")
+
     if out["survey"].get("acl_no_account"):
         try:
             stale = stale_grantee_failures(db, auth.directory("target"))
@@ -939,6 +1206,18 @@ def summarise(result: dict) -> str:
     if result.get("stranded_retried"):
         parts.append(f"{result['stranded_retried']:,} stranded item(s) "
                      f"re-imported")
+    contacts = result.get("contacts_retried") or {}
+    if contacts.get("repaired"):
+        parts.append(f"{contacts['repaired']:,}/{contacts.get('candidates', 0):,} "
+                     "rejected contact(s) repaired")
+    if contacts.get("remaining"):
+        parts.append(f"{contacts['remaining']:,} rejected contact(s) still need attention")
+    labels = result.get("verified_gmail_labels") or {}
+    if labels.get("changed"):
+        parts.append(f"Gmail label state aligned on {labels['changed']:,} verified message(s) "
+                     f"({labels.get('labelsAdded', 0):,} added, {labels.get('labelsRemoved', 0):,} removed)")
+    for e in labels.get("errors", []):
+        parts.append(f"Gmail label repair needs attention: {e}")
     if result.get("shared_drives_retried"):
         parts.append(f"{result['shared_drives_retried']:,} shared drive(s) re-created")
     if result.get("stragglers_retried"):

@@ -22,10 +22,11 @@ const WRONG: Array<[keyof NonNullable<OneToOneService['counts']>, string]> = [
 /** "drive: 15 checked · 14 identical · 1 not identical". Not "14/15", which read as one
  *  file missing when all 15 were there and one differed by a line break. */
 export const serviceSummary = (s: OneToOneService): string => {
-  if (!s.checked) return `${s.service}: nothing to compare`
+  const completion = s.completion === 'INCOMPLETE' ? ['check incomplete'] : []
+  if (!s.checked) return [`${s.service}: nothing to compare`, ...completion].join(' · ')
   const of = s.sampledOf && s.sampledOf > s.checked ? ` of ${s.sampledOf.toLocaleString()}` : ''
   const wrong = WRONG.filter(([k]) => (s.counts?.[k] ?? 0) > 0)
     .map(([k, what]) => `${(s.counts?.[k] ?? 0).toLocaleString()} ${what}`)
   const same = s.identical === s.checked && !wrong.length ? 'all identical' : `${s.identical.toLocaleString()} identical`
-  return [`${s.service}: ${s.checked.toLocaleString()} checked${of}`, same, ...wrong].join(' · ')
+  return [`${s.service}: ${s.checked.toLocaleString()} checked${of}`, same, ...wrong, ...completion].join(' · ')
 }

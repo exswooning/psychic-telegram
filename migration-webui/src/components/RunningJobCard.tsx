@@ -12,12 +12,12 @@
  */
 import React, { useEffect, useRef, useState } from 'react'
 import {
-  Box, Button, Card, CardContent, Chip, LinearProgress, Stack, Tooltip, Typography,
+  Alert, Box, Button, Card, CardContent, Chip, LinearProgress, Stack, Tooltip, Typography,
 } from '@mui/material'
 import {
   Bolt as RunningIcon, Grass as SeedIcon, RocketLaunch as MigrateIcon,
   Language as DomainIcon, Settings as SetupIcon,
-  DeleteSweep as ResetIcon, PersonAdd as ProvisionIcon,
+  DeleteSweep as ResetIcon, PersonAdd as ProvisionIcon, FactCheck as VerifyIcon,
 } from '@mui/icons-material'
 import type { JobKind, RunningJob } from '@/hooks/useRunningJobs'
 import { describeElapsed } from '@/hooks/useRunningJobs'
@@ -25,6 +25,7 @@ import { useProgressHistory } from '@/hooks/useProgressHistory'
 import ProgressSparkline from '@/components/ProgressSparkline'
 import DeviceHandoff from '@/components/DeviceHandoff'
 import { formatPct } from '@/utils/formatPct'
+import { jobFacts, jobProgressPct } from './RunningJobDetail.utils'
 
 const KIND: Record<JobKind, { label: string; icon: React.ReactElement;
                               color: 'success' | 'primary' | 'warning' | 'default' }> = {
@@ -33,6 +34,7 @@ const KIND: Record<JobKind, { label: string; icon: React.ReactElement;
   setup:     { label: 'Setup',     icon: <SetupIcon fontSize="small" />,     color: 'default' },
   reset:     { label: 'Reset',     icon: <ResetIcon fontSize="small" />,     color: 'warning' },
   provision: { label: 'Provision', icon: <ProvisionIcon fontSize="small" />, color: 'default' },
+  verify:    { label: 'Verify',    icon: <VerifyIcon fontSize="small" />,    color: 'primary' },
   other:     { label: 'Job',       icon: <RunningIcon fontSize="small" />,   color: 'default' },
 }
 
@@ -102,9 +104,11 @@ export const RunningJobCard: React.FC<{
 }> = ({ job, action, onOpen, finished }) => {
   const k = KIND[job.kind] ?? KIND.other
   const elapsed = job.elapsedSec ? describeElapsed(job.elapsedSec) : ''
+  const progressPct = jobProgressPct(job.label, job.pct, job.lines)
+  const warnings = job.lines?.length ? jobFacts(job.lines, job.elapsedSec).warnings : []
   // Only tracked for a job actually in flight -- a finished run's card
   // shows an outcome, not a trend line for work that has already stopped.
-  const history = useProgressHistory(job.key, finished ? null : job.pct)
+  const history = useProgressHistory(job.key, finished ? null : progressPct)
   return (
     <Card variant="outlined"
           onClick={onOpen}
@@ -141,12 +145,19 @@ export const RunningJobCard: React.FC<{
           </Typography>
         </Tooltip>
 
+        {!finished && warnings.length > 0 && (
+          <Alert severity="warning" variant="outlined" sx={{ mb: 1, py: 0 }}>
+            Google API rate limit reported ({warnings.length} response{warnings.length === 1 ? '' : 's'}).
+            Check the latest count before retrying.
+          </Alert>
+        )}
+
         {/* A determinate bar when the job reports a percentage, an
             indeterminate one when it does not -- rather than a 0% that
             reads as "stuck". A finished job gets neither: there is nothing
             in flight to represent. */}
-        {!finished && (typeof job.pct === 'number'
-          ? <LinearProgress variant="determinate" value={job.pct} />
+        {!finished && (typeof progressPct === 'number'
+          ? <LinearProgress variant="determinate" value={progressPct} />
           : <LinearProgress />)}
 
         {!finished && <ProgressSparkline samples={history} />}
@@ -169,10 +180,10 @@ export const RunningJobCard: React.FC<{
           <Typography variant="caption" color="text.secondary">
             {elapsed && !job.detail.includes(elapsed) ? elapsed : ''}
           </Typography>
-          {typeof job.pct === 'number' && (
+          {typeof progressPct === 'number' && (
             <Typography variant="caption" color="text.secondary"
                         sx={{ fontVariantNumeric: 'tabular-nums' }}>
-              {formatPct(job.pct)}
+              {formatPct(progressPct)}
             </Typography>
           )}
         </Stack>

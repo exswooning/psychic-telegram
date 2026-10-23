@@ -18,6 +18,8 @@ import {
   TextField,
 } from '@mui/material'
 
+import { fetchDomainGuardStatus } from '@/api/controlPlane'
+
 import { Mode, COPY, needsPassword } from './TenantActionDialog.utils'
 
 export const TenantActionDialog: React.FC<{
@@ -30,6 +32,7 @@ export const TenantActionDialog: React.FC<{
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [guard, setGuard] = useState<{ domain: string; reason: string } | null>(null)
 
   // Cleared when the dialog is pointed at something new. Without this a
   // domain typed for one tenant stays satisfied for the next one opened,
@@ -38,16 +41,34 @@ export const TenantActionDialog: React.FC<{
     setTyped(''); setPassword(''); setError('')
   }, [target?.domain, target?.mode])
 
+  useEffect(() => {
+    let active = true
+    setGuard(null)
+    if (!target || target.mode === 'repair') return
+    const domain = target.domain
+    fetchDomainGuardStatus(domain).then((status) => {
+      if (active) setGuard({ domain, reason: status.immutable
+        ? status.reason || 'This domain is permanently protected from deletion.' : '' })
+    }).catch(() => {
+      if (active) setGuard({ domain, reason: 'Cannot read domain protection. Deletion is blocked.' })
+    })
+    return () => { active = false }
+  }, [target?.domain, target?.mode])
+
   if (!target) return null
   const copy = COPY[target.mode]
   const matches = typed.trim().toLowerCase() === target.domain.toLowerCase()
   const wantsPassword = needsPassword(target.mode)
   const severe = target.mode === 'remove'
+  const guardReady = target.mode === 'repair' || guard?.domain === target.domain
+  const blocked = target.mode !== 'repair' && Boolean(guard?.reason)
 
   return (
     <Dialog open onClose={() => !busy && onCancel()} maxWidth="sm" fullWidth>
       <DialogTitle>{copy.title} — {target.domain}</DialogTitle>
       <DialogContent>
+        {!guardReady && <Alert severity="info" sx={{ mb: 2 }}>Checking domain protection…</Alert>}
+        {blocked && <Alert severity="error" sx={{ mb: 2 }}>{guard?.reason}</Alert>}
         <Alert severity={severe ? 'error' : 'warning'} sx={{ mb: 2 }}>
           {copy.warn}
         </Alert>
@@ -73,7 +94,7 @@ export const TenantActionDialog: React.FC<{
         <Button onClick={onCancel} disabled={busy}>Cancel</Button>
         <Button variant="contained" data-testid="confirm-act"
                 color={severe ? 'error' : 'warning'}
-                disabled={!matches || (wantsPassword && !password) || busy}
+                disabled={!guardReady || blocked || !matches || (wantsPassword && !password) || busy}
                 onClick={async () => {
                   setBusy(true); setError('')
                   try {

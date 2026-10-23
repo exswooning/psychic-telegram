@@ -111,6 +111,10 @@ def remove(side: str, domain: str, admin_email: str, admin_password: str,
         env["MIGRATION_DB"] = st.db_path
 
     if wipe_data:
+        import domain_guard
+        domain_guard.require_not_source(domain, st.source_domain)
+        if side == "source":
+            raise ValueError("Source domains can never be wiped.")
         # Everything, on either side (wipe_tenant.py). The seeder's own reset, which this
         # used to run, deletes only the seeded corpus -- a wiped target kept its contacts,
         # tasks, Chat spaces and shared drives, and the ledger still called them migrated.

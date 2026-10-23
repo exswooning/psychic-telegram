@@ -1536,7 +1536,8 @@ const QuickTenantSetup: React.FC<{
             that API can lag days behind on a low-usage tenant, so this asks
             Google directly instead.</>
           ) : (
-            <>Creates Workspace accounts on the target from the identity map.
+            <>Creates Workspace accounts on the target from the identity map and
+              reconciles supported profile fields from the source for existing users.
             No password needed — uses the service account key from setup.</>
           )
         }

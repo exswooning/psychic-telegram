@@ -1151,18 +1151,9 @@ class MigrationDB:
                  _json.dumps(payload, default=str)))
 
     def user_verifications(self) -> list[dict]:
-        """Every stored verification, one per (user, service)."""
-        import json as _json
-        out = []
-        for r in self.conn.execute("SELECT * FROM user_verification ORDER BY source_user, service"):
-            try:
-                payload = _json.loads(r["payload"])
-            except ValueError:
-                payload = {}
-            out.append({"user": r["source_user"], "service": r["service"], "verifiedAt": r["verified_at"],
-                        "verdict": r["verdict"], "checked": r["checked"], "identical": r["identical"],
-                        "sampledOf": r["sampled_of"], **payload})
-        return out
+        """Use the same coverage-aware parser as API and report rollups."""
+        return parse_user_verification_rows(self.conn.execute(
+            "SELECT * FROM user_verification ORDER BY source_user, service").fetchall())
 
     def one_to_one_summary(self) -> dict:
         """Every user rolled up to one verdict. See the module-level `verification_rollup`
@@ -1292,16 +1283,29 @@ class MigrationDB:
             (tenant,)).fetchone()
         return row["ceiling"] if row else None
 
-    def mark_dms_delivered(self) -> int:
-        """Mail left for the DMS, now that its import reports complete: delivered,
-        no longer owed. Returns how many rows changed."""
+    def mark_dms_delivered(self, verified_items=()) -> int:
+        """Only exact items freshly checked by reconciliation may become delivered.
+
+        No arguments is deliberately a no-op: a console completion status is
+        never a per-message delivery receipt. Mapping and receipt must agree.
+        """
         from config import DEFERRED_TO_DMS, DELIVERED_BY_DMS
+        if not verified_items:
+            return 0
+        changed = 0
         with self.write() as conn:
-            return conn.execute(
-                "UPDATE audit_log SET status=?, error_message=? WHERE status=? "
-                "AND item_type='message'",
-                (DELIVERED_BY_DMS, "moved by Google's Data Migration Service",
-                 DEFERRED_TO_DMS)).rowcount
+            if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='migration_item_receipts'").fetchone():
+                return 0
+            for user, sid, tid in set(verified_items):
+                changed += conn.execute(
+                    "UPDATE audit_log SET status=?,error_message=? WHERE source_user=? AND item_id=? "
+                    "AND status=? AND item_type='message' AND EXISTS (SELECT 1 FROM migration_item_receipts r "
+                    "JOIN id_mapping m ON m.source_user=r.source_user AND m.source_id=r.source_id "
+                    "AND m.target_id=r.target_id AND m.type='message' WHERE r.source_user=? "
+                    "AND r.source_id=? AND r.target_id=? AND r.service='gmail' AND r.status='VERIFIED')",
+                    (DELIVERED_BY_DMS, "DMS destination content and labels freshly checked", user, sid,
+                     DEFERRED_TO_DMS, user, sid, tid)).rowcount
+        return changed
 
     def claim(self, kind: str, key: str, owner: str) -> str:
         """Take the tenant-wide claim on (kind, key) for `owner` if nobody holds it;
@@ -1676,7 +1680,7 @@ def bulk_seed_identities(db: MigrationDB, pairs: Iterable[tuple[str, str]]) -> N
 
 # Worst verdict wins a user's rollup: one DIFFERENCES service means the user is not
 # clean, however many others came back IDENTICAL.
-_VERDICT_RANK = {"DIFFERENCES": 3, "INCOMPLETE": 2, "IDENTICAL": 1}
+_VERDICT_RANK = {"DIFFERENCES": 3, "INCOMPLETE": 2, "NOT_VERIFIED": 2, "IDENTICAL": 1}
 
 
 def parse_user_verification_rows(rows) -> list[dict]:
@@ -1691,8 +1695,15 @@ def parse_user_verification_rows(rows) -> list[dict]:
             payload = _json.loads(r["payload"])
         except ValueError:
             payload = {}
+        legacy = (payload.get("scopeVersion") or 0) < 2
+        if legacy:
+            payload["coverageComplete"] = False
+            payload["coverageNote"] = "Historical item checks; feature/access coverage was not recorded. Recheck required."
+        effective = r["verdict"]
+        if effective == "IDENTICAL" and payload.get("coverageComplete") is False:
+            effective = "INCOMPLETE"
         out.append({"user": r["source_user"], "service": r["service"], "verifiedAt": r["verified_at"],
-                    "verdict": r["verdict"], "checked": r["checked"], "identical": r["identical"],
+                    "verdict": effective, "itemVerdict": r["verdict"], "checked": r["checked"], "identical": r["identical"],
                     "sampledOf": r["sampled_of"], **payload})
     return out
 
@@ -1711,12 +1722,20 @@ def verification_rollup(users, verifications: list[dict]) -> dict:
     totals = {"IDENTICAL": 0, "DIFFERENCES": 0, "INCOMPLETE": 0, "NOT_VERIFIED": 0}
     out_users = []
     for u in users:
-        svcs = by_user.get(u["source_email"], [])
+        svcs = list(by_user.get(u["source_email"], []))
+        keys = u.keys() if hasattr(u, "keys") else []
+        expected = set(filter(None, (u["services_done"] or "").split(","))) if "services_done" in keys else set()
+        present = {row["service"] for row in svcs}
+        for missing in sorted(expected - present):
+            svcs.append({"user": u["source_email"], "service": missing, "verdict": "NOT_VERIFIED",
+                "verifiedAt": None, "checked": 0, "identical": 0, "sampledOf": None,
+                "coverageComplete": False, "coverageNote": "Migrated service has no saved verification result.",
+                "notes": ["Migrated service has no saved verification result."]})
         verdict = (max((x["verdict"] for x in svcs), key=lambda v: _VERDICT_RANK.get(v, 0))
                   if svcs else "NOT_VERIFIED")
         totals[verdict] = totals.get(verdict, 0) + 1
         out_users.append({"user": u["source_email"], "target": u["target_email"], "status": u["status"],
-                          "verdict": verdict, "verifiedAt": max((x["verifiedAt"] for x in svcs), default=None),
+                          "verdict": verdict, "verifiedAt": max((x["verifiedAt"] for x in svcs if x.get("verifiedAt")), default=None),
                           "services": svcs})
     return {"users": out_users, "totals": totals}
 

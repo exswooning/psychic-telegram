@@ -9,13 +9,14 @@ import { fetchJob, stopJob as stopSeedJob } from '@/api/client'
  *  Derived from the job's own name because that is the only thing every
  *  source here agrees on -- webui Jobs, the fleet, job_admission rows and
  *  full-setup all name themselves differently otherwise. */
-export type JobKind = 'seed' | 'migrate' | 'setup' | 'reset' | 'provision' | 'other'
+export type JobKind = 'seed' | 'migrate' | 'setup' | 'reset' | 'provision' | 'verify' | 'other'
 
 export function jobKind(name: string): JobKind {
   const n = (name || '').toLowerCase()
   if (n.includes('seed')) return 'seed'
   if (n.includes('reset') || n.includes('wipe')) return 'reset'
   if (n.includes('provision')) return 'provision'
+  if (n.includes('verify')) return 'verify'
   if (n.includes('setup')) return 'setup'
   if (n.includes('migrate') || n.includes('delta')) return 'migrate'
   return 'other'

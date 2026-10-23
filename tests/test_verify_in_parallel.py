@@ -15,8 +15,12 @@ class _FakeVerifier:
     peak = [0]
     lock = threading.Lock()
 
-    def __init__(self, auth, db, settings, u, t, retry=None, limit=None):
+    def __init__(self, auth, db, settings, u, t, retry=None, limit=None,
+                 on_api_attempt=None, on_progress=None):
         self.evidence = [{"service": "drive"}]
+
+    def _report_progress(self, *args, **kwargs):
+        pass
 
     def drive(self):
         with self.lock:

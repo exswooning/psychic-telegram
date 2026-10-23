@@ -19,6 +19,7 @@ import gmail_engine
 import tasks_engine
 import verify_sample as V
 from tests.conftest import SRC_USER, TGT_USER
+from tests.fakes import FakePeople
 
 MSG = (b"Message-ID: <m%d@tenanta.com>\r\nFrom: bob@tenanta.com\r\nTo: alice@tenanta.com\r\n"
        b"Date: Mon, 3 Jun 2019 10:00:00 +0000\r\nSubject: n%d\r\n\r\nbody %d\r\n")
@@ -205,6 +206,29 @@ class TestARealMigrationIsFoundIdentical:
         verify(migrated)
         assert snap() == before
 
+    def test_contacts_use_batch_reads_instead_of_one_request_per_contact(self, migrated):
+        source = migrated.auth.source_people(SRC_USER)
+        target = migrated.auth.target_people(TGT_USER)
+        source.reset_calls()
+        target.reset_calls()
+        result = verify(migrated, services=("contacts",))
+        assert result["verdict"] == "IDENTICAL"
+        assert source.call_count("people.getBatchGet") == 1
+        assert target.call_count("people.getBatchGet") == 1
+        assert source.call_count("people.get") == target.call_count("people.get") == 0
+
+
+class TestPeopleBatchReads:
+    def test_batch_size_respects_people_api_limit(self):
+        service = FakePeople("a@source.example", "source")
+        names = [service.add_contact(f"Contact {i}") for i in range(201)]
+        verifier = V.Verifier(None, None, None, "a@source.example", "a@target.example")
+        people, errors = verifier._people_batch(service, names)
+        assert len(people) == 201
+        assert errors == {}
+        assert service.call_count("people.getBatchGet") == 2
+        assert [len(call["resourceNames"]) for call in service.calls_to("people.getBatchGet")] == [200, 1]
+
 
 class TestEveryKindOfDamageIsFound:
     def _drive_target(self, m, name):
@@ -380,11 +404,19 @@ class TestACopyThatDidNothingIsNotVerified:
     def test_an_empty_migration_is_incomplete_not_identical(self, auth, db, settings, identity):
         r = V.run(auth, db, settings, [SRC_USER], V.ALL_SERVICES, progress=lambda *_: None)
         assert r["totals"]["checked"] == 0 and r["verdict"] == "INCOMPLETE"
-        assert "nothing was copied" in " ".join(r["reasons"])
+        assert "source was not confirmed empty" in " ".join(r["reasons"])
 
     def test_each_empty_service_says_so(self, auth, db, settings, identity):
         r = V.run(auth, db, settings, [SRC_USER], ("drive",), progress=lambda *_: None)
-        assert any("nothing was copied for this service" in n for n in r["users"][SRC_USER]["drive"]["notes"])
+        assert r["users"][SRC_USER]["drive"]["emptySource"] is True
+        assert r["verdict"] == "IDENTICAL", r["users"][SRC_USER]["drive"]["errors"]
+
+    def test_unmapped_nonempty_drive_is_explicitly_not_copied(self, auth, db, settings, identity):
+        auth.source_drive(SRC_USER).add_binary("not-copied.txt", data=b"source data")
+        r = V.run(auth, db, settings, [SRC_USER], ("drive",), progress=lambda *_: None)
+        assert not r["users"][SRC_USER]["drive"].get("emptySource")
+        assert r["verdict"] == "DIFFERENCES"
+        assert r["users"][SRC_USER]["drive"]["notCopied"][0]["status"] == "UNMAPPED_SOURCE"
 
     @pytest.mark.parametrize("svc", V.ALL_SERVICES)
     def test_a_service_that_failed_outright_is_reported_as_not_copied(self, auth, db, settings, identity, svc):
@@ -639,9 +671,12 @@ class TestTheCommandLineCanReadWhatItVerifies:
         import auth as auth_mod
         import config
         import db as db_mod
+        from types import SimpleNamespace
+        import main as migration_main
         seen = {}
+        monkeypatch.setattr(migration_main, "_install_signal_handlers", lambda: None)
         monkeypatch.setattr(auth_mod, "AuthManager", lambda settings: object())
-        monkeypatch.setattr(db_mod, "MigrationDB", lambda path: object())
+        monkeypatch.setattr(db_mod, "MigrationDB", lambda path: SimpleNamespace(close=lambda: None))
         monkeypatch.setattr(V, "run_and_save", lambda a, d, settings, users, services, **kw: (
             seen.update(settings=settings) or {"verdict": "IDENTICAL"}))
         assert V.main(list(argv)) == 0

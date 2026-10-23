@@ -115,6 +115,19 @@ class CalendarMigrator:
             label=label or "calendar",
         )(fn)()
 
+    def _all_pages(self, call):
+        token, seen, items = None, set(), []
+        while True:
+            self.limiter.acquire()
+            response = self._retry(lambda: call(token).execute())
+            items.extend(response.get("items", []))
+            token = response.get("nextPageToken")
+            if not token:
+                return items
+            if token in seen:
+                raise RuntimeError("Calendar inventory repeated a page token")
+            seen.add(token)
+
     # -- listing ----------------------------------------------------------------
     def _iter_events(self, updated_min: str | None, calendar_id: str = "primary"):
         token = None
@@ -320,6 +333,8 @@ class CalendarMigrator:
         self._migrate_calendar("primary", "primary",
                                updated_min if delta else None)
         self._copy_list_settings(None, "primary")
+        if self.settings.migrate_calendar_acls:
+            self._sync_calendar_acl("primary", "primary")
         if self.settings.migrate_secondary_calendars:
             self._migrate_secondary_calendars(updated_min if delta else None)
         return dict(self.stats)
@@ -334,9 +349,9 @@ class CalendarMigrator:
         original.
         """
         try:
-            entries = self._retry(lambda: self.src.calendarList().list(
-                minAccessRole="owner", showHidden=True,
-            ).execute()).get("items", [])
+            entries = self._all_pages(lambda token: self.src.calendarList().list(
+                minAccessRole="owner", showHidden=True, pageToken=token,
+            ))
         except (PermanentAPIError, RuntimeError) as exc:
             log.warning("[%s] could not list calendars: %s", self.source_user, exc)
             return
@@ -383,9 +398,12 @@ class CalendarMigrator:
         Drive ACLs. 'default' and 'domain' scopes are rewritten to the target
         domain; unmapped internal users are dropped rather than leaked."""
         try:
-            rules = self._retry(lambda: self.src.acl().list(
-                calendarId=src_cal_id
-            ).execute()).get("items", [])
+            rules = self._all_pages(lambda token: self.src.acl().list(
+                calendarId=src_cal_id, pageToken=token
+            ))
+            target_rules = self._all_pages(lambda token: self.tgt.acl().list(
+                calendarId=tgt_cal_id, pageToken=token
+            ))
         except OPTIONAL_PASS_ERRORS as exc:
             # Loud, not debug: the usual cause is that the source grant is
             # still calendar.readonly, which acl.list rejects outright. A
@@ -393,21 +411,24 @@ class CalendarMigrator:
             # simply had no sharing rules.
             log.warning(
                 "[%s] could not read sharing rules for %s -- calendar ACLs "
-                "NOT migrated for it. acl.list requires the full "
-                "'calendar' scope on the source tenant (calendar.readonly is "
-                "rejected). Error: %s",
+                "NOT migrated for it. Source delegation needs calendar.acls.readonly; "
+                "calendar.readonly alone does not cover ACL reads. Error: %s",
                 self.source_user, src_cal_id, exc,
             )
             return
 
+        existing = {(r.get("scope", {}).get("type"),
+                     r.get("scope", {}).get("value", "").lower()): r
+                    for r in target_rules}
         for rule in rules:
             scope = rule.get("scope") or {}
             stype, svalue = scope.get("type"), scope.get("value")
             if rule.get("role") == "owner":
                 continue
 
-            if stype == "user":
-                mapped = self.db.resolve_identity(svalue)
+            if stype in ("user", "group"):
+                mapped = (self.db.resolve_identity(svalue)
+                          or self.db.target_for_source_id((svalue or "").lower(), ("group",)))
                 if not mapped:
                     if svalue and svalue.split("@")[-1].lower() == \
                             self.settings.source_domain.lower():
@@ -416,7 +437,7 @@ class CalendarMigrator:
                             "SKIPPED_UNMAPPED_IDENTITY", f"no mapping for {svalue}")
                         continue
                     mapped = svalue
-                body = {"scope": {"type": "user", "value": mapped},
+                body = {"scope": {"type": stype, "value": mapped},
                        "role": rule["role"]}
             elif stype == "domain":
                 domain = svalue
@@ -432,9 +453,22 @@ class CalendarMigrator:
             if self.settings.dry_run:
                 continue
             try:
-                self._retry(lambda b=body: self.tgt.acl().insert(
-                    calendarId=tgt_cal_id, body=b, sendNotifications=False,
-                ).execute())
+                old = existing.get((body["scope"]["type"],
+                                    body["scope"].get("value", "").lower()))
+                if old and old.get("role") == body["role"]:
+                    continue
+                if old:
+                    if not old.get("etag"):
+                        raise RuntimeError("Calendar ACL version is unavailable")
+                    request = self.tgt.acl().patch(calendarId=tgt_cal_id,
+                        ruleId=old["id"], body={"role": body["role"]},
+                        sendNotifications=False)
+                    request.headers["If-Match"] = old["etag"]
+                    request.execute()
+                else:
+                    self._retry(lambda b=body: self.tgt.acl().insert(
+                        calendarId=tgt_cal_id, body=b, sendNotifications=False,
+                    ).execute())
                 self.stats["calendar_acls"] = self.stats.get("calendar_acls", 0) + 1
             except (PermanentAPIError, RuntimeError) as exc:
                 self.db.log_audit(self.source_user, f"{src_cal_id}:{svalue}",

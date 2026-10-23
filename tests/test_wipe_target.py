@@ -78,6 +78,8 @@ class TestOneFailureDoesNotStrandTheRest:
             d, ["a@t.com", "bad@t.com", "c@t.com"], dry_run=False)
         assert stats["deleted"] == 2
         assert stats["failed"] == 1
+        assert stats["deleted_users"] == ["a@t.com", "c@t.com"]
+        assert stats["failed_users"] == ["bad@t.com"]
         assert "bad@t.com" in stats["errors"][0]
 
     def test_a_dry_run_deletes_nothing(self):
@@ -133,3 +135,27 @@ class TestWhatTheLedgerForgets:
         db = self._ledger(tmp_path)
         wipe_target.invalidate_ledger(db, dry_run=True)
         assert db.conn.execute("SELECT COUNT(*) FROM user_verification").fetchone()[0] == 1
+
+    def test_partial_wipe_invalidates_only_the_deleted_users(self, tmp_path):
+        from db import MigrationDB, bulk_seed_identities
+
+        db = MigrationDB(str(tmp_path / "partial.db"))
+        bulk_seed_identities(db, [("a@s.com", "a@t.com"), ("b@s.com", "b@t.com")])
+        for source in ("a@s.com", "b@s.com"):
+            db.set_identity_status(source, "DONE")
+            db.record_mapping(source, f"{source}-file", f"{source}-target", "file")
+
+        source_users = wipe_target.source_users_for_deleted(db, ["a@t.com"], "target")
+        assert source_users == ["a@s.com"]
+        wipe_target.invalidate_ledger(db, dry_run=False, source_users=source_users)
+
+        owners = {row[0] for row in db.conn.execute(
+            "SELECT DISTINCT source_user FROM id_mapping")}
+        assert owners == {"b@s.com"}
+        status = {row["source_email"]: row["status"] for row in db.all_identities()}
+        assert status == {"a@s.com": "PENDING", "b@s.com": "DONE"}
+
+    def test_an_empty_partial_wipe_invalidates_nothing(self, tmp_path):
+        db = self._ledger(tmp_path)
+        wipe_target.invalidate_ledger(db, dry_run=False, source_users=[])
+        assert db.conn.execute("SELECT COUNT(*) FROM id_mapping").fetchone()[0] == 1

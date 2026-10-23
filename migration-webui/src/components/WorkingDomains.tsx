@@ -89,6 +89,7 @@ export const WorkingDomains: React.FC<{
                 <Button size="small" color="warning" variant="outlined"
                         startIcon={<WipeIcon />}
                         data-testid={`wipe-${t.side}`}
+                        disabled={t.side === 'source'}
                         onClick={() => ask(t, 'wipe')}>
                   Wipe data
                 </Button>
@@ -101,12 +102,14 @@ export const WorkingDomains: React.FC<{
                 <Button size="small" color="error" variant="outlined"
                         startIcon={<UsersIcon />}
                         data-testid={`delete-users-${t.side}`}
+                        disabled={t.side === 'source'}
                         onClick={() => ask(t, 'delete_users')}>
                   Delete users
                 </Button>
                 <Button size="small" color="error" variant="outlined"
                         startIcon={<RemoveIcon />}
                         data-testid={`remove-${t.side}`}
+                        disabled={t.side === 'source'}
                         onClick={() => ask(t, 'remove')}>
                   Remove setup
                 </Button>
